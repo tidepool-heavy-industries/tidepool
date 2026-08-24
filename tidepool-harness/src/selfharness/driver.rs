@@ -1185,12 +1185,22 @@ where
 /// compile.
 ///
 /// The per-verb signatures/examples are NOT hand-narrated here: they fold
-/// over [`typed_request_agent_decls`] via [`engine::available_effects_section`] — the
-/// same [`tidepool_mcp::EffectDecl::prompt_card`]/`description` single
-/// source the eval tool description is assembled from — so a row with a
-/// different effect set gets a correspondingly different cheatsheet, sent
-/// ONCE per loop in the system framing rather than re-narrated every hole.
-fn typed_request_agent_framing_suffix(fork_budget: u32, fork_subtree_cap: u32) -> String {
+/// over `decls` — the answerer's ACTUAL configured compiling row
+/// ([`Harness::cfg`]'s own `decls`, which is [`typed_request_agent_decls`]
+/// widened to [`typed_request_agent_decls_with_delegate`] on the delegating
+/// path) — via [`engine::available_effects_section`] — the same
+/// [`tidepool_mcp::EffectDecl::prompt_card`]/`description` single source the
+/// eval tool description is assembled from — so a row with a different
+/// effect set gets a correspondingly different cheatsheet, sent ONCE per
+/// loop in the system framing rather than re-narrated every hole. Passing
+/// the row explicitly (rather than re-deriving the plain roster in here)
+/// is what keeps this framing from omitting a delegating window's own
+/// widened row.
+fn typed_request_agent_framing_suffix(
+    decls: &[tidepool_mcp::EffectDecl],
+    fork_budget: u32,
+    fork_subtree_cap: u32,
+) -> String {
     format!(
         "---\n\
          You are the answering agent for a self-iterating harness loop. The system \
@@ -1274,7 +1284,7 @@ fn typed_request_agent_framing_suffix(fork_budget: u32, fork_subtree_cap: u32) -
          how you resolve the request.",
         TYPED_REQUEST_AGENT_MAX_ROUNDS,
         TYPED_REQUEST_AGENT_NUDGE_ROUNDS,
-        engine::available_effects_section(&typed_request_agent_decls()),
+        engine::available_effects_section(decls),
         fork_budget,
         fork_subtree_cap
     )
@@ -1934,20 +1944,45 @@ impl SelfHarnessDriver {
     /// same caller that pinned this turn), not a second copy of the same
     /// list threaded down separately.
     fn types_in_scope_hint(&self, node: NodeId, ty: &str, error: &str) -> Option<String> {
-        if !(error.contains("Not in scope") && error.contains(ty)) {
-            return None;
+        if error.contains("Not in scope") && error.contains(ty) {
+            let contract = self.agent.answer_contract(node);
+            let imported = match contract.as_ref().map(|c| c.imports.as_slice()) {
+                None | Some([]) => "no author modules are importable by this stack".to_string(),
+                Some(mods) => format!("this turn imports {}", mods.join(", ")),
+            };
+            return Some(format!(
+                "\n\nNOTE: `{ty}` is not in scope and {imported}. The answering stack \
+                 cannot import the module that defines `loop` (its `runLLMTurn` is not \
+                 in this effect row), so the harness author must move `{ty}` into a \
+                 separate module that `loop`'s module imports."
+            ));
         }
-        let contract = self.agent.answer_contract(node);
-        let imported = match contract.as_ref().map(|c| c.imports.as_slice()) {
-            None | Some([]) => "no author modules are importable by this stack".to_string(),
-            Some(mods) => format!("this turn imports {}", mods.join(", ")),
-        };
-        Some(format!(
-            "\n\nNOTE: `{ty}` is not in scope and {imported}. The answering stack \
-             cannot import the module that defines `loop` (its `runLLMTurn` is not \
-             in this effect row), so the harness author must move `{ty}` into a \
-             separate module that `loop`'s module imports."
-        ))
+        // `fork`/`forkAll` unresolved — same "not in scope" GHC shape as the
+        // type-name case above, but naming a VALUE (a plain identifier, not
+        // `ty`), so it needs its own check rather than folding into the
+        // `contains(ty)` branch above.
+        if Self::error_names_unimported_fork(error) {
+            return Some(
+                "\n\nNOTE: `fork`/`forkAll` come from `Tidepool.Fork` — add \
+                 `import Tidepool.Fork` to this block's imports."
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    /// Whether `error` — a GHC "not in scope" diagnostic — names `fork`/
+    /// `forkAll` as the missing identifier. Tokenized on non-alphanumerics so
+    /// this matches GHC's exact-name diagnostic (`Variable not in scope:
+    /// fork`, whatever quoting marks GHC wraps the name in) regardless of
+    /// case, without also firing on `forkSited`/`forkAllSited` (the internal
+    /// head-swap targets a model should never be naming directly).
+    fn error_names_unimported_fork(error: &str) -> bool {
+        let lower = error.to_ascii_lowercase();
+        lower.contains("not in scope")
+            && lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|tok| tok == "fork" || tok == "forkall")
     }
 
     /// Override the operator-input gate (default [`StdinGate`]). A web/GUI
@@ -2793,7 +2828,11 @@ impl SelfHarnessDriver {
         // `run_loop_fragment` to seed the per-loop answerer node.
         self.answerer_framing = Some(format!(
             "{prompt_before}\n\n{}",
-            typed_request_agent_framing_suffix(self.fork_budget_per_window, self.fork_subtree_cap)
+            typed_request_agent_framing_suffix(
+                &self.agent.cfg().decls,
+                self.fork_budget_per_window,
+                self.fork_subtree_cap
+            )
         ));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
@@ -6985,6 +7024,7 @@ mod tests {
     #[test]
     fn typed_request_agent_framing_suffix_names_every_verb_of_the_answerer_row() {
         let framing = super::typed_request_agent_framing_suffix(
+            &typed_request_agent_decls(),
             super::DEFAULT_FORK_BUDGET_PER_SESSION,
             super::DEFAULT_FORK_SUBTREE_CAP,
         );
@@ -7024,6 +7064,63 @@ mod tests {
             framing.contains("\n  ha <- async (fork @Plan"),
             "the composed example must keep its do-block indentation, got:\n{framing}"
         );
+    }
+
+    /// The framing folds whatever row it is HANDED, not a hardcoded plain
+    /// roster — passing the delegating row
+    /// ([`typed_request_agent_decls_with_delegate`], `Subagent`/`Worktree`
+    /// prepended) must surface those two effects' cards, which the plain
+    /// row never carries. This is what makes the delegating path's own
+    /// framing (built from `self.agent.cfg().decls` in
+    /// [`SelfHarnessDriver::run_one_loop_iteration`]) stop omitting Subagent
+    /// once that config is the delegating one.
+    #[test]
+    fn typed_request_agent_framing_suffix_reflects_the_passed_row_not_a_hardcoded_one() {
+        let plain = super::typed_request_agent_framing_suffix(
+            &typed_request_agent_decls(),
+            super::DEFAULT_FORK_BUDGET_PER_SESSION,
+            super::DEFAULT_FORK_SUBTREE_CAP,
+        );
+        assert!(
+            !plain.contains("**Subagent**") && !plain.contains("**Worktree**"),
+            "the plain row's framing must not mention Subagent/Worktree, got:\n{plain}"
+        );
+        let delegating = super::typed_request_agent_framing_suffix(
+            &super::typed_request_agent_decls_with_delegate(),
+            super::DEFAULT_FORK_BUDGET_PER_SESSION,
+            super::DEFAULT_FORK_SUBTREE_CAP,
+        );
+        assert!(
+            delegating.contains("**Subagent**") && delegating.contains("**Worktree**"),
+            "the delegating row's framing must name Subagent/Worktree since \
+             they are genuinely in its configured row, got:\n{delegating}"
+        );
+    }
+
+    /// A `Not in scope: fork`/`forkAll` GHC diagnostic — the exact shape a
+    /// model hits when it reaches for `fork`/`forkAll` without importing
+    /// `Tidepool.Fork` — must be recognized so the corrective-retry loop can
+    /// name the fix, and the internal head-swap targets `forkSited`/
+    /// `forkAllSited` must NOT trip the same check (a model should never be
+    /// naming those directly, and a false-positive hint there would be
+    /// confusing advice).
+    #[test]
+    fn error_names_unimported_fork_recognizes_fork_and_forkall_not_forksited() {
+        assert!(super::SelfHarnessDriver::error_names_unimported_fork(
+            "error: Variable not in scope: fork"
+        ));
+        assert!(super::SelfHarnessDriver::error_names_unimported_fork(
+            "error: Variable not in scope: forkAll :: [Text] -> M [a]"
+        ));
+        assert!(!super::SelfHarnessDriver::error_names_unimported_fork(
+            "error: Variable not in scope: forkSited"
+        ));
+        assert!(!super::SelfHarnessDriver::error_names_unimported_fork(
+            "error: Variable not in scope: forkAllSited"
+        ));
+        assert!(!super::SelfHarnessDriver::error_names_unimported_fork(
+            "error: Couldn't match expected type 'Int' with actual type 'Text'"
+        ));
     }
 
     /// The outer loop's own decl row (`outer_decls()` — `RunLLMTurn`/

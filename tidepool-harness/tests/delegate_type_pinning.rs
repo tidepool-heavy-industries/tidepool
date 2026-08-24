@@ -177,11 +177,12 @@ fn plain_finalize_still_compiles_under_the_wrap() {
 /// and compile the raw (non-`toJSON`'d) answerer module against it.
 ///
 /// `code_imports` is newline-separated MODULE NAMES spliced into the compiled
-/// turn module itself (`Fork`'s `fork`/`forkAll` are NOT in
-/// `extra_imports_for!`'s auto-import table — unlike `AskUser`'s
-/// `Tidepool.Form` — so a block reaching for `fork` must name
-/// `Tidepool.Fork` here explicitly, exactly as the model itself would in its
-/// own block's import lines). Kept separate from the contract's OWN
+/// turn module itself — `Fork`'s `fork`/`forkAll` are now IN
+/// `extra_imports_for!`'s auto-import table (poke-round finding 1 fix, same
+/// row-gating as `AskUser`'s `Tidepool.Form`), so a block reaching for bare
+/// `fork` needs no explicit `Tidepool.Fork` line here; `code_imports` remains
+/// for genuinely author-side modules a block names itself (`HarnessTypes`'s
+/// own sibling types, say). Kept separate from the contract's OWN
 /// `HarnessTypes` import (always the author module for `finalize_ty` here, so
 /// the GENERATED effects module's `Finalize <finalize_ty>` entry resolves)
 /// since the two serve different modules and mixing them into one
@@ -232,6 +233,16 @@ fn compile_delegating_answerer_turn(
 /// `Decision`, not the bare default `Void` (the contract-pin half of the
 /// bug: `template_answer_turn` never called `turn_target` with the contract
 /// at all before this fix).
+///
+/// `code` calls `fork` BARE — no `import Tidepool.Fork` in `code_imports` —
+/// which is the production shape: the collapsed companion's own blocks never
+/// name that import either, and the poke-round finding (2026-08-24) was
+/// exactly this: `fork`/`forkAll` are the surface verbs of `Tidepool.Fork`,
+/// which used to fall through `extra_imports_for!`'s empty default arm, so a
+/// production turn reaching for `fork` died on `Variable not in scope: fork`
+/// even though a hand-written test importing `Tidepool.Fork` explicitly (the
+/// shape this test used before the fix) passed. This test previously carried
+/// that explicit import; it is gone on purpose — its absence is the pin.
 #[test]
 fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_with_pinned_contract()
 {
@@ -243,12 +254,13 @@ fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_wit
                  rationale = renderDelegateError e, confidence = Low }); \
                  Right ok -> resume (Decision { action = \"observe\", \
                  rationale = delegateSummary ok, confidence = High }) } }";
-    let result = compile_delegating_answerer_turn(code, "HarnessTypes\nTidepool.Fork", "Decision");
+    let result = compile_delegating_answerer_turn(code, "HarnessTypes", "Decision");
     assert!(
         result.is_ok(),
-        "an answerer window combining fork and delegate must compile against \
-         the narrow delegating row with Finalize pinned to the hole's real \
-         contract type, got: {:?}",
+        "an answerer window combining BARE fork (no explicit Tidepool.Fork \
+         import) and delegate must compile against the narrow delegating row \
+         with Finalize pinned to the hole's real contract type — fork/forkAll \
+         must be auto-imported same as AskUser's Tidepool.Form, got: {:?}",
         result.err().map(full_diag)
     );
 }

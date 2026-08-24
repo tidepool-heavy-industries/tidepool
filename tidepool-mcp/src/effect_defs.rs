@@ -252,6 +252,16 @@ macro_rules! extra_imports_for {
     (AskUser) => {
         &["import Tidepool.Form"]
     };
+    // `Tidepool.Fork`'s `fork`/`forkAll`/`forkMap`/`forkCata` build on
+    // `Fork`'s own `forkSited`/`forkAllSited` (`Tidepool.Effects`), same
+    // row-gating as `AskUser`'s `Tidepool.Form` above. `Tidepool.Fork` does
+    // NOT export `M` (checked against its own export list), so this import
+    // is safe alongside the delegating path's `hiding (M)` patch
+    // (`delegate_aware_preamble`, `tidepool-harness/src/engine.rs`) — no
+    // name clash to hide.
+    (Fork) => {
+        &["import Tidepool.Fork"]
+    };
     // `renderSpawnError` is DEFINED in `haskell/lib/Tidepool/Agent/Spawn.hs`
     // rather than emitted into the generated module, because it calls
     // `renderWorktreeError` — authored library code in `Tidepool.Worktree`,
