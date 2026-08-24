@@ -453,6 +453,10 @@ effect of an unrelated change.
    calling convention to design)? This doc defaults to Rust-side surgery for
    the first migration and flags revisiting only if `State` schemas turn out
    to churn often.
+   **ANSWERED (operator, 2026-08-24): Rust-side JSON surgery** — "json
+   surgery is fine, idk how long-term State will be anyway vs some other
+   mechanism." The caveat is part of the answer: `State`'s own longevity is
+   uncertain, which argues further against bespoke migration machinery.
 2. **Should `LogReader`/`EventIter` be folded onto `jsonl::read_tail` as
    part of landing the version stamp**, closing the existing "one
    mechanism, one home" gap where the harness log's read side hand-rolls
@@ -461,6 +465,8 @@ effect of an unrelated change.
    design-only and doesn't decide implementation sequencing, but the version
    header's natural landing spot is inside a real `read_tail` call, so doing
    both in the same lane avoids touching this reader twice.
+   **DECIDED (root, 2026-08-24, per this doc's own lean; operator informed):
+   yes — fold it in the same lane that lands the stamp.**
 3. **Per-artifact-kind version counters (this doc's recommendation, mirroring
    how CBOR scopes its own version to one wire format) vs. one global
    persistence version** — the per-kind approach means six independent
@@ -468,6 +474,7 @@ effect of an unrelated change.
    harness log `Event`, worktree `RepositoryEvent`, handlers `kind`/`payload`,
    selfharness transcript `Event`) to maintain rather than one, and is worth
    the operator's explicit sign-off given the bookkeeping multiplies.
+   **ANSWERED (operator, 2026-08-24): per-kind counters, as recommended.**
 4. **Does the handlers journal need a version header per segment** (this
    doc's recommendation, since PRD 20 already treats each segment as
    independently readable/foldable — `resume.rs:11-22,47-51`) **or would a
@@ -477,3 +484,5 @@ effect of an unrelated change.
    `tidepool-harness::selfharness::resume`'s lease/fold machinery, which
    sits above `tidepool-handlers` in the dependency graph — a real
    cross-crate design choice, not a mechanical default.
+   **DECIDED (root, 2026-08-24, per this doc's recommendation; operator
+   informed): per-segment header — segments stay independently foldable.**

@@ -612,6 +612,10 @@ not design away.
    still the operator's intent, or has the harness's recent production
    mileage (the companion, the wave's own live-round trigger for #20
    steps 2-3) changed the calculus for unblocking it?
+   **ANSWERED (operator, 2026-08-24): decoupled — kernel first.** Build the
+   kernel against today's two frontends as they are; Phase 6 stays parked
+   and later becomes an ordinary client migration. §5.B is the operative
+   migration order.
 2. **tidepool-runtime module vs. new crate (§4)** — this doc recommends the
    former, against the wave brief's "perhaps in own crate" framing.
    Confirm or override.
@@ -631,9 +635,15 @@ not design away.
    this doc does not have enough context on the harness's operational
    history (has an orphaned hole ever actually been a problem in
    production?) to recommend a default.
+   **ANSWERED (operator, 2026-08-24): hook, no default.** The kernel exposes
+   abandonment liveness (hole age visible, optional callback); no reaper is
+   default-enabled — indefinite park remains the harness's policy, and a
+   future harness opts into a TTL explicitly.
 4. **Should `HarnessError::SessionMismatch`'s current `String`-flattening of
    `CheckoutError::WrongHole`'s structured `{session,attempted,parked}`
    data (§1.5) be fixed as part of the kernel migration, or is that a
    free-standing small fix worth doing independently right now?** Similar
    in spirit to §6.2's repl fix — small, decoupled, and arguably shouldn't
    wait on the rest of this design.
+   **DECIDED (root, 2026-08-24; operator informed): free-standing small fix,
+   done ahead of the kernel migration alongside §6.2's repl decode fix.**
