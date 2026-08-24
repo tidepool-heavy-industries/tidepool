@@ -2,17 +2,16 @@
 
 -- | Randomness: the canonical @System.Random@ vocabulary
 -- ('StdGen'\/'mkStdGen'\/'randomR'\/'randoms'\/'split'\/'newStdGen'\/'randomRIO'),
--- backed by a pure generator written directly against this module rather
--- than the @random@\/@splitmix@ packages themselves — those pull in
--- @Word64#@ primops (@plusWord64#@, @timesWord64#@) the JIT does not
--- implement. Plain @Word@ (machine-word, 64-bit) arithmetic compiles and
--- runs directly, so the generator below is the SplitMix64 algorithm
--- (Steele\/Vigna — the same one @random >= 1.2@ itself uses) written over
--- 'Data.Bits' on 'Word'.
---
--- 'newStdGen'\/'randomRIO' are the one effectful seam, built on 'Entropy'\'s
--- single verb (fresh OS-entropy seed material) — everything else here is
--- ordinary pure Haskell.
+-- backed by the real @random@\/@splitmix@ packages — 'StdGen', 'mkStdGen',
+-- and 'split' are straight re-exports, so 'StdGen' really is @splitmix@'s
+-- generator. 'randomR'\/'random' stay a thin local 'Random' class over the
+-- package's own 'System.Random.genWord64' primitive rather than re-exporting
+-- the package's 'Random' class wholesale: that class's generic, range-width-
+-- adaptive default methods reach @Word16#@ machinery the JIT does not
+-- implement, where 'genWord64' (an unconditional full-word draw) does not.
+-- 'newStdGen'\/'randomRIO' are the one effectful seam: rather than the
+-- packages' own global mutable generator, they seed a fresh 'StdGen' from
+-- 'Entropy'\'s single verb (fresh OS-entropy seed material).
 module Tidepool.Random
   ( StdGen
   , mkStdGen
@@ -24,43 +23,10 @@ module Tidepool.Random
   ) where
 
 import Prelude
-import Data.Bits (shiftR, xor)
+import Data.Bits (shiftR)
+import System.Random (StdGen, mkStdGen, split, genWord64)
 import Control.Monad.Freer (Eff, Member)
 import Tidepool.Effects (Entropy, entropySeed)
-
--- | Opaque pure generator state.
-newtype StdGen = StdGen Word
-
--- | Seed a generator deterministically: the same seed always replays the
--- same 'randomR'\/'random'\/'randoms'\/'split' sequence.
-mkStdGen :: Int -> StdGen
-mkStdGen seed = StdGen (fromIntegral seed)
-
--- Golden-ratio increment (SplitMix64) — odd, so the sequence of states
--- visits the full 64-bit period before repeating.
-goldenGamma :: Word
-goldenGamma = 0x9E3779B97F4A7C15
-
--- SplitMix64's finalizing bit-mixer (Murmur3-style avalanche): turns a
--- linearly-incrementing counter into output with no short-range structure.
-mix64 :: Word -> Word
-mix64 z0 =
-  let z1 = (z0 `xor` (z0 `shiftR` 30)) * 0xBF58476D1CE4E5B9
-      z2 = (z1 `xor` (z1 `shiftR` 27)) * 0x94D049BB133111EB
-  in z2 `xor` (z2 `shiftR` 31)
-
-nextWord :: StdGen -> (Word, StdGen)
-nextWord (StdGen s) =
-  let s' = s + goldenGamma
-  in (mix64 s', StdGen s')
-
--- | Two generators derived from one, independent of each other: advancing
--- one does not affect the other's sequence.
-split :: StdGen -> (StdGen, StdGen)
-split g =
-  let (w, g') = nextWord g
-      s2 = mix64 (w `xor` 0xBF58476D1CE4E5B9)
-  in (g', StdGen s2)
 
 -- | A type drawable from a 'StdGen'. 'randomR' draws within an inclusive
 -- range (bounds may be given in either order); 'random' draws from the
@@ -72,18 +38,17 @@ class Random a where
 instance Random Int where
   randomR (lo, hi) g =
     let (lo', hi') = if lo <= hi then (lo, hi) else (hi, lo)
-        (w, g') = nextWord g
+        (w, g') = genWord64 g
         range = fromIntegral hi' - fromIntegral lo' + 1 :: Word
-        v = lo' + fromIntegral (w `mod` range)
+        v = lo' + fromIntegral (fromIntegral w `mod` range :: Word)
     in (v, g')
-  random g = let (w, g') = nextWord g in (fromIntegral w, g')
+  random g = let (w, g') = genWord64 g in (fromIntegral w, g')
 
 instance Random Double where
   randomR (lo, hi) g =
     let (lo', hi') = if lo <= hi then (lo, hi) else (hi, lo)
-        (w, g') = nextWord g
-        -- Top 53 bits / 2^53: a uniform Double in [0, 1), the same technique
-        -- base's own `random` package uses.
+        (w, g') = genWord64 g
+        -- Top 53 bits / 2^53: a uniform Double in [0, 1).
         frac = fromIntegral (w `shiftR` 11) / 9007199254740992 :: Double
     in (lo' + frac * (hi' - lo'), g')
   random = randomR (0.0, 1.0)
