@@ -44,11 +44,13 @@ default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | pack
 # (scripts/ghc-slots.sh, shared across every worktree on the box) — the
 # box-wide ceiling is their PRODUCT, not either number alone (the 2026-08-08
 # load-92 incident reached 7+ concurrent extracts with every lane individually
-# compliant). 2 is a measured setting (2026-08-11 quiet-box A/B: cap=1 595s vs
-# cap=2 311s, 199/199 green both legs) — raise only with a fresh measurement
-# and a matching slot-count decision; the product is the budget.
+# compliant). 4 (operator, 2026-08-24): the old tighter cap was sized for the
+# massively-parallel-lane era; with runs now mostly sequential the per-run cap
+# carries the parallelism. The product is still the budget — a return to many
+# concurrent battery runs on one box means revisiting cap × slot count
+# together, not either alone.
 [test-groups.ghc-heavy]
-max-threads = 2
+max-threads = 4
 
 # Default-deny: everything is GHC-heavy unless it appears in the exemption
 # filter below, so a new crate/binary/rename lands in the capped group with
