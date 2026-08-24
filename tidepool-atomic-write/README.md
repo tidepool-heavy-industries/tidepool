@@ -46,5 +46,5 @@ argument to widen this one — see "Deliberately not here" above.
 
 The crate's own `src/lib.rs` module doc has the full six-caller history and
 the fsync-tier reasoning; there is no separate plan document for this crate
-specifically. `plans/compile-memo.md` is the one plan that documents a
-caller in detail (the compile cache).
+specifically. `tidepool-runtime/CLAUDE.md`'s compile-cache section documents
+a caller in detail (the compile cache).

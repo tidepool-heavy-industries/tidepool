@@ -270,7 +270,7 @@ adversarial suites) before the next starts.
 
 1. `ParkKind::Project { n_fields }` / `ParkKind::Render { field0_forced }` +
    matching `ParkedOutcome` completion products, returned INLINE like
-   `bound_root` (`plans/unpark/suspendable-materialization.md` §6.2 discipline).
+   `bound_root`.
 2. **The handle registry (pillar B, machine half):** `ValueHandle` minting
    over machine-side roots; scope-owned-borrow semantics;
    completed/finalized results exposed as handles (absorbing

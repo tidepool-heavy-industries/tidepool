@@ -14,15 +14,16 @@ map and locked decisions.
 ## Nested child runs on a suspended machine
 
 **This section describes the single-slot suspension path.** As of the
-one-session collapse (`plans/one-session.md`), the PARKED continuation
+one-session collapse, the PARKED continuation
 registry (below) is the primary suspension mechanism for the harness
 (resident-session) path — a suspended session there can carry many parked
 holes at once, resumed in any order, and a "child" run is just an ordinary
 fragment run over the parked frames (`JitEffectMachine::run_fragment_suspendable_parked`
 et al.). The single-slot mechanism this section documents remains the live
 path for the repl and one-shot eval paths; for the harness path it is legacy,
-and its deletion is gated on the parked path's production soak
-(`plans/one-session.md` Phase 6). The two paths never mix on one machine
+and its deletion is gated on the parked path's production soak — the
+repl/one-shot conversion + slot-deletion phase, deliberately parked behind a
+production-soak gate, not currently in flight. The two paths never mix on one machine
 (asserted both directions).
 
 A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host
@@ -135,9 +136,7 @@ does not pin; what it caps is what stays *traced* (and therefore what a
 collection must walk), not what stays *allocated*. This is deliberate and
 bounded — the tenured residue is at most the retired scope's own bindings, the
 same lifetime bound every persistent-binding-store binding already has — and it is written
-here, in the design doc (`plans/self-iterating-harness/21-c2-scope-trees.md`
-§2.2) and in PRD 21's deferred list so nobody re-derives it while hunting a
-leak.
+here so nobody re-derives it while hunting a leak.
 
 Two things that stay true because the slot cell outlives deregistration: an
 already-compiled fragment that `iconst`ed a `RootSlot::addr()` still `load`s

@@ -32,10 +32,10 @@ One module per effect under `src/handlers/`:
 - `src/handlers/time.rs` — `TimeReq`/`TimeHandler`
 - `src/handlers/meta.rs` — `MetaReq`/`MetaHandler` (debug path only)
 - `src/handlers/event.rs` — repository-event subscribe/drain/unsubscribe over
-  `tidepool_worktree::EventJournal` (PRD 19); not in the `base_effects!`
+  `tidepool_worktree::EventJournal`; not in the `base_effects!`
   default row
 - `src/handlers/worktree.rs` — `WorktreeReq`/`WorktreeHandler` over
-  `tidepool_worktree::create`/`registry`/`git` (PRD 19); also not in the
+  `tidepool_worktree::create`/`registry`/`git`; also not in the
   `base_effects!` default row — see `tidepool-worktree/CLAUDE.md`
 
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
@@ -126,8 +126,8 @@ comes back to the parent as a RESULT (`StepToolCall`), the parent's authored
 Haskell handler runs between two effect calls, and `agentResumeRaw` answers it.
 The Rust handler never runs a parent handler and never re-enters the JIT — it
 cannot (`EffectHandler::handle` has no machine handle). See
-`tidepool-agent/CLAUDE.md` for the seam and
-`plans/post-restart/agent-lanes/lane-codex-live-plan.md` §2 for why.
+`tidepool-agent/CLAUDE.md` for the seam and why the dispatch loop lives in
+Haskell instead.
 
 Two consequences that survive the cycle table unchanged:
 
@@ -135,7 +135,7 @@ Two consequences that survive the cycle table unchanged:
   not an authored-surface field. A model budget is granted to an operator, and
   the operator is who wires the handler; an authored call choosing its own tier
   would let any eval spend at any price. (A semantic tier vocabulary on the
-  authored surface is PRD 18 open decision 3, still open.)
+  authored surface is still an open decision.)
 - **The handler owning the backends is what bounds a parked child.** Cycle-scoped
   and not `Clone` (the `RepoEventHandler` precedent): it owns the cycle table
   and a flocked binding table. Dropping it kills the backend processes — which

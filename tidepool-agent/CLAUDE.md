@@ -1,4 +1,4 @@
-# tidepool-agent — typed headless subagents (PRD 18)
+# tidepool-agent — typed headless subagents
 
 **Charter.** Belongs: typed headless subagent spawning — the `AgentBackend`
 step seam, backend adapters (Codex), the cycle saga, model-policy
@@ -7,10 +7,8 @@ belong: the `Subagent` effect handler wiring (`tidepool-handlers`), worktree
 creation itself (`tidepool-worktree`).
 
 The ONLY crate in the workspace that knows a coding backend exists. See the
-repo-root `CLAUDE.md` for the project map, `tidepool-handlers/CLAUDE.md` for
-the effect-handler side, and
-`plans/self-iterating-harness/18-typed-subagent-spawning-prd.md` for the design
-authority.
+repo-root `CLAUDE.md` for the project map and `tidepool-handlers/CLAUDE.md`
+for the effect-handler side.
 
 ## The containment boundary
 
@@ -61,9 +59,8 @@ timeout, and the only thing bounding that is ownership — dropping the backend
 takes the child down.
 
 `run_turn_to_completion` and `CoupledSpawner::spawn_one_cycle` are COMBINATORS
-over the step surface, not second primitives. That is PRD 18's own rule for
-synchronous delegation, and it is why the no-tools path cannot drift from the
-tools path.
+over the step surface, not second primitives — the rule for synchronous
+delegation, and why the no-tools path cannot drift from the tools path.
 
 ## Concurrency: a shared substrate, N detachable sagas
 
@@ -233,10 +230,10 @@ because schema generation silently drops `#[experimental]`-gated fields.
 
 ## Config isolation is a first-class result
 
-No normal worker run may mutate the operator's `~/.codex` (PRD 18 acceptance
-criterion 11). The adapter runs against the operator's REAL Codex home on
-purpose — proving that is the point, not something to route around by copying
-credentials into an isolated `CODEX_HOME`, which PRD 18 forbids. The shape that
+No normal worker run may mutate the operator's `~/.codex`. The adapter runs
+against the operator's REAL Codex home on purpose — proving that is the
+point, not something to route around by copying credentials into an isolated
+`CODEX_HOME`, which is forbidden. The shape that
 avoids the documented project-trust write is `cwd` at TURN start and never at
 thread start; `ThreadStartWithDynamicTools` has no `cwd` field at all, so it is
 structural. `isolation::ConfigSnapshot` checks it per run, and a run that

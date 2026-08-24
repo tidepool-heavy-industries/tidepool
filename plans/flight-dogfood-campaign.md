@@ -101,9 +101,8 @@ Pick X/Y/areas fresh per run from the repo itself so answers are checkable.
 
 ## Ambitious-scope queue for the flight (root's own work, between rounds)
 
-- fork-subsumes-split step 2: atomic subtree depth/total-node budgets,
-  then raise MAX_FORK_DEPTH (the containment landed 2026-08-22 is parity,
-  not the goal).
+- Atomic subtree depth/total-node fork budgets, then raise MAX_FORK_DEPTH
+  (the containment landed 2026-08-22 is parity, not the goal).
 - dup-e #2: one green dispatcher with a delivery adapter (after the
   naming map lands).
 - Terminology stage 3 (freed regions) + stage 4 identifier renames.

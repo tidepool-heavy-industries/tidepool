@@ -115,7 +115,7 @@ tidepool/
 ├── tidepool-handlers/     ← Central effect-request handler arms (`<Eff>Req` matches)  [CLAUDE.md]
 ├── tidepool-repl/         ← GHCi-style resident-session MCP server  [CLAUDE.md]
 ├── tidepool-harness/      ← Resident harness: session-tree turn lifecycle, SessionRegistry checkout ownership, selfharness driver  [CLAUDE.md]
-├── tidepool-worktree/     ← Managed worktrees, durable registry, typed repository events (PRD 19)  [CLAUDE.md]
+├── tidepool-worktree/     ← Managed worktrees, durable registry, typed repository events  [CLAUDE.md]
 ├── tidepool-web/          ← Web operator GUI: AskUser form rendering + the operator gate  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)  [CLAUDE.md]
 ├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL  [CLAUDE.md]
@@ -176,7 +176,7 @@ in that directory):
   ownership (`checkout_run`/`run_checked_out` over `SessionRegistry`), the
   selfharness driver, hole cards.
 - `tidepool-worktree/CLAUDE.md` — managed worktrees, the durable registry,
-  the one `git` call site, and the rules PRD 19 draws around them.
+  the one `git` call site, and the boundary rules drawn around them.
 - `tidepool-web/CLAUDE.md` — operator GUI rendering and the AskUser form wire
   shape.
 
@@ -304,7 +304,8 @@ tempdir — so a second run of a GHC-heavy leg is much cheaper than the first
 (measured on three harness binaries: 99s cold, 47s warm). Two consequences:
 a COLD number needs the memo removed (`rm -rf $XDG_CACHE_HOME/tidepool`), and
 a test that measures compile COST must pin its own memo dir rather than
-inherit the shared one. See `plans/compile-memo.md`.
+inherit the shared one. See `tidepool-runtime/CLAUDE.md` for the memo's
+keying spec.
 
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.
 

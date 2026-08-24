@@ -23,9 +23,23 @@ server, assembled from the `*_decl()` functions here). The eval stdlib lives in
 
 Every effect has ONE definition. For a MIGRATED effect (Exec, Journal,
 Worktree) that definition is a schema entry in `tidepool-protocol/src/effects/`
-and every artifact below is GENERATED from it into `src/generated/` — see
-`plans/self-iterating-harness/22-p1-protocol-scaffold.md` §9 for how to add the
-next one. For the rest it is still a `<eff>_effect_def!` macro in
+and every artifact below is GENERATED from it into `src/generated/`. To add
+the next one: write `src/effects/<name>.rs` returning an `Effect` and list it
+in `effects::all()` (a sited verb needs an `extract` policy; `Effect::validate`
+catches structural mistakes); prove the schema's rendering matches the
+existing `<name>_effect_def!` macro field-for-field in
+`tidepool-mcp/tests/protocol_schema_equivalence.rs` before touching anything
+else (green there is the go-ahead, and nothing is deleted before it); run the
+generator and confirm every OTHER effect's Class A goldens are byte-unchanged
+(the non-regression half that makes an effect-at-a-time migration safe); flip
+— swap the macro invocation for the generated module, delete the
+`<name>_effect_def!` macro and its table arms, re-export the generated types
+from the effect's own module so public paths do not move; re-assert the
+goldens WITHOUT regenerating them (that is the byte-compatibility proof, and
+regenerating at this step destroys it); account for every diff from the macro
+expansion — an unexplained difference is a bug, not a nuance; then
+`cargo fmt --all -- --check` (generated `.rs` must be a rustfmt fixed point),
+`cargo nextest run`, and the batteries that touch the effect. For the rest it is still a `<eff>_effect_def!` macro in
 `src/effect_defs.rs` carrying the GADT constructors (Haskell type strings AND
 Rust bridge types), helper-verb text, and the handler/method wiring. Two
 projections consume it: `effect_decl_projection!` (defined in `effect_defs.rs`,
@@ -43,7 +57,8 @@ effs.` when the helper itself is `@`-applied or otherwise needs the tyvar
 named), never the closed `<verb> :: ... -> M T` shape — `M` is a
 per-compile-module alias, so a helper defined against it cannot typecheck
 under a narrower or differently-shaped row than the one the module happened
-to generate for (e.g. a local `type M` shadow, PRD 21 C5's `delegate_wrap`).
+to generate for (e.g. a local `type M` shadow, the recursive companion's
+`delegate_wrap`).
 Set `helpers_row_polymorphic true` on the definition — every effect in this
 codebase does. This is no longer merely a vocab-widening opt-in (extract-wave
 item 0b's original purpose): since stable-effects-core (below), it is what

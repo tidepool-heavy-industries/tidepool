@@ -1,9 +1,9 @@
 # Persistence versioning design (#21)
 
-Status: design only, no code. Written for operator review per
-`plans/harness-architecture-wave.md`'s design brief. Every claim below cites
-the file/symbol it rests on; the two places this doc genuinely doesn't know
-the answer are called out as open questions at the end, not decided quietly.
+Status: design only, no code. Written for operator review. Every claim below
+cites the file/symbol it rests on; the two places this doc genuinely doesn't
+know the answer are called out as open questions at the end, not decided
+quietly.
 
 ## Problem statement
 
@@ -11,17 +11,16 @@ Today the harness persistence wire — the log `Event` enum
 (`tidepool-harness/src/log/mod.rs:60-214`), `Checkpoint`
 (`tidepool-harness/src/selfharness/persistence.rs:148-196`), and the three
 sibling JSONL journals (worktree, handlers, selfharness transcript) — is
-frozen by social discipline, not by a mechanism. `plans/harness-architecture-wave.md`
-rule 4 states it plainly: "Wire bytes NEVER change until #21 lands: the log
-`Event` enum, `Checkpoint` struct, serde tags, journal kinds." The concrete
+frozen by social discipline, not by a mechanism: wire bytes must not change
+until this design lands (the log `Event` enum, `Checkpoint` struct, serde
+tags, journal kinds). The concrete
 cost of that freeze already shipped: commit `26080349`
 ("flatten(recursive-companion): lastRun :: Maybe RunSummary -> lastAnswer ::
 Maybe Text") deleted a one-field wrapper type inside the recursive-companion
 harness's own `State`, with "No migration/compat path — the operator has
 scheduled a fresh-checkpoint window at the next redeploy" (commit message).
 That rename could only ship because a checkpoint reset happened to already be
-scheduled (`plans/harness-architecture-wave.md` item 6d, "state-flatten
-lane"). The next such change won't have that luxury for free.
+scheduled alongside it. The next such change won't have that luxury for free.
 
 `tidepool-repr`'s CBOR wire format is the one place in the codebase that has
 actually solved a version of this problem — Section 1 surveys it. Sections
@@ -370,12 +369,12 @@ one migration function that turns it into the next version.
 
 - **`RunSummary → lastAnswer`** (`26080349`) — shipped only via checkpoint
   reset, explicitly because a redeploy window was already scheduled
-  (`plans/harness-architecture-wave.md` item 6d). With the `State`-blob
+  alongside it. With the `State`-blob
   migration hook from Section 3, this exact class of change (hoist a nested
   field, drop the wrapper) could ship as an ordinary Rust-side JSON-surgery
   migration with no reset.
-- **Any non-additive `Checkpoint` edit** — currently frozen outright by
-  `plans/harness-architecture-wave.md` rule 4. Once the envelope carries a
+- **Any non-additive `Checkpoint` edit** — currently frozen outright (see
+  Problem statement). Once the envelope carries a
   version and a migration ladder exists, a restructuring edit (e.g.
   reshaping `compaction: Option<String>` into a richer type, or finally
   retiring `pending_operator_input`'s deserialize-only legacy status —

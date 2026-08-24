@@ -5,7 +5,9 @@
 **Depends on:** [PRD 18](18-typed-subagent-spawning-prd.md),
 [PRD 19](19-managed-worktrees-events-prd.md),
 [one-session](../one-session.md),
-[companion-memory](../companion-memory.md)  
+the companion-memory architecture (agent-curated git store of markdown files;
+landed through Phase 2 — store bootstrap, curator wiring; Phase 3 recall/async
+spawn/digest work remains, friction-driven)  
 **Executable design target:**
 [dev-tree/Harness.hs](../../harness-dogfooding/dev-tree/Harness.hs)  
 **Prior art / migration input:** `../exomonad` (Classic + v2 node-mode) — the

@@ -1,7 +1,8 @@
 # recursive-companion
 
-An investigation companion collapsed around `fork` (fork-subsumes-split
-step 4, superseding the PRD 21 C3 layer-walk slice): one turn is **one
+An investigation companion collapsed around `fork` (superseding the earlier
+PRD 21 C3 layer-walk slice, which proposed splits for authored machinery to
+execute through a driver gate): one turn is **one
 top-level typed request**. The session it opens decomposes the operator's
 question by forking typed sub-answerers of its own — `async (fork @T
 "brief")`, recursively, each a full multi-round session — and the **driver**
@@ -9,7 +10,20 @@ services that tree: spawn-time depth/descendant budgets, operator-page node
 lifecycle, journal receipts. The fold is ordinary Haskell in the session's
 own block: the code after the `wait`s.
 
-Direction and locked decisions: [`plans/fork-subsumes-split.md`](../../plans/fork-subsumes-split.md).
+**Locked decisions.** (1) Fork inherits everything the old split mechanism
+had: fork children are first-class companion tree nodes (tree path/label
+from the brief, node-seeded/timeline/node-finalized/node-failed on the
+operator page, event tracking, budget accounting), through the same
+lifecycle spine branch children use — one child-spawning mechanism. (2)
+Gates are dropped, not ported: there is no driver gate interception at fork
+time; operator-approval policy is ordinary authored Haskell over the ask
+machinery (`plan <- askUser @ForkApproval …` before spawning) when a run
+wants one, per the Mechanism Index's "operator interaction … never a second
+channel" rule — the per-split consultation guarantee becomes a convention
+unless the authored loop hard-wires an ask, and budgets bound a model that
+never asks. (3) Budgets replace structural containment: recursive forking is
+bounded by driver budgets enforced at spawn (per-window fan-out, depth, and
+total-node caps) rather than by a fork-free child row or fixed depth.
 
 ## The shape
 
@@ -34,8 +48,7 @@ Direction and locked decisions: [`plans/fork-subsumes-split.md`](../../plans/for
 
 ## What the operator sees
 
-Fork children are first-class nodes on the operator page (fork-subsumes-split
-step 3): birth, seed brief, timeline, final typed value or failure — plus the
+Fork children are first-class nodes on the operator page: birth, seed brief, timeline, final typed value or failure — plus the
 loop-level turn-complete note carrying the root's answer between turns.
 
 ## Running it

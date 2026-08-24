@@ -225,7 +225,7 @@ surface here — it drifts. Module map:
   docs byte for byte). Reachable ONLY when `AskUser` is in the compiling row
   (it builds on `askUserRaw`), and auto-imported whenever it is.
 
-- `Agent/*` — PRD 18 surfaces (provisional): `Contract` (mode-
+- `Agent/*` — surfaces (provisional): `Contract` (mode-
   interpreted endpoint records compiled to declarations and dispatch),
   `Spawn` (typed `spawnAgent`/`spawnAgentWithTools`; compiles
   only in rows containing Subagent + Worktree, same row-gating as Form).
@@ -237,7 +237,7 @@ surface here — it drifts. Module map:
   turn on. The parent is never suspended while a handler runs; what is
   parked is the child's request, on the far side of the seam (the loop lives
   here because a `Tool`'s `handler :: input -> m output` is parent Haskell
-  that Rust cannot run — see `plans/post-restart/agent-lanes/lane-codex-live-plan.md` §2).
+  that Rust cannot run).
   Three things are answered as REFUSALS rather than dispatched, so the child
   always finishes its turn: a name absent from `declarations` (`dispatch`'s
   own fallthrough `error`s, which would abort the eval with the turn still

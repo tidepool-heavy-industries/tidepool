@@ -7,7 +7,7 @@ verbs — rebase, cherry-pick, conflict resolution (stays with coding agents
 using their native tools; the one exception is the `merge` primitive
 documented below), effect wiring (`tidepool-handlers`'s `WorktreeHandler`).
 
-The Rust substrate for [PRD 19](../plans/self-iterating-harness/19-managed-worktrees-events-prd.md).
+The Rust substrate for managed worktrees and typed repository events.
 Everything here is *git truth*: creating retained worktrees, recording them so a
 restart still finds them, snapshotting a dirty source without touching it,
 observing HEAD movement, journalling what was observed. No effects, no JIT, no
@@ -37,17 +37,16 @@ written against; changing one is a cross-cutting change, not a local edit.
 ## Rules that are not negotiable here
 
 **No general git workflow verbs.** No `rebase`, `cherry_pick`, conflict
-RESOLUTION, or branch promotion. PRD 19's boundary is creation, lookup,
+RESOLUTION, or branch promotion. This crate's boundary is creation, lookup,
 inspection, events, plus the one merge primitive below. That work belongs to
 coding agents using their native tools, and the runtime observes what the
 repository became. Adding a workflow verb beyond the one exception is a
 design regression, not a convenience.
 
-**The one narrow, deliberate exception: `merge.rs` (PRD 21 C5), exposed as a
+**The one narrow, deliberate exception: `merge.rs`, exposed as a
 `Worktree` verb.** The recursive companion's worktree-coordination fold —
 each node merges its children's worktrees into its own, in declared branch
-order (`plans/self-iterating-harness/21-recursive-companion-prd.md`,
-"Worktree coordination") — needs ONE typed primitive: merge a branch into a
+order — needs ONE typed primitive: merge a branch into a
 target worktree, abort-and-report on conflict, never leave a half-merged
 tree. `merge::merge_branch_into` is that primitive, through the same
 `GitCli` call site as everything else here, with

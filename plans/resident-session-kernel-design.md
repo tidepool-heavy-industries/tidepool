@@ -44,8 +44,10 @@ Independent of that fork, the registry/ownership layer is **already
 unified**: both crates instantiate the same `tidepool_runtime::session::
 registry::{SessionRegistry, Slot, Checkout}` (harness at `HoleId`, repl at
 `ContinuationId` via `SingleSlot`). The `#22` design is not "should we share
-a registry" — that shipped as the registry-capstone wave (`plans/
-registry-capstone.md`, landed 2026-08-22). It is "should we also share the
+a registry" — that landed already (2026-08-22), promoting the ownership
+layer into `tidepool_runtime::session::registry` as a new module under the
+existing session substrate, with `repl`'s `manager.rs` and harness's
+`registry.rs` reduced to thin type-alias clients. It is "should we also share the
 resume-dispatch shape, the hole-obligation typing, and the error taxonomy
 sitting on top of that registry" — which today are two independent,
 differently-evolved designs.
@@ -125,7 +127,7 @@ function's argument is**. That is a real, generalizable difference (§2).
 ### 1.2 Ownership
 
 Identical mechanism, different instantiation width — this axis is already
-solved by the registry-capstone wave, not open in #22:
+solved by the landed registry consolidation, not open in #22:
 
 - `tidepool_runtime::session::registry::{SessionRegistry<M,H>, Slot<M,H>,
   Checkout<'_,M,H>, CheckoutError<H>}` (`registry.rs`) is the one home. `Idle
@@ -237,8 +239,8 @@ reset` unconditionally folds abort into reset (`SessionManager::remove`,
 `abort_abandoned` (driving a real `abort_turn` through the machine, so the
 session comes back genuinely `Idle` with everything already accumulated
 intact), or removes a stale `Wedged` past `wedged_ttl`. `Wedged` itself is a
-first-class, terminal `Slot` variant visible to *every* future caller
-(registry-capstone's fix over the pre-promotion design, where only the
+first-class, terminal `Slot` variant visible to *every* future caller (the
+registry consolidation's fix over the pre-promotion design, where only the
 original caller's own stale handle ever saw "wedged").
 
 **harness** — richer *typed* error taxonomy, no time-based cleanup at all:
@@ -363,7 +365,7 @@ entry point" that both currently reimplement independently.
 
 ### 4.1 The precedent, weighed honestly
 
-The registry-capstone wave (`plans/registry-capstone.md`) already answered
+The landed registry consolidation already answered
 this *exact* question once, for the ownership layer: promote into
 `tidepool_runtime::session::registry` as a **new module** under the
 existing session substrate, not a new crate — `repl`'s `manager.rs` and
@@ -414,7 +416,7 @@ private visibility already reaches it.
 
 **Extend `tidepool_runtime::session` with a new module** (a name like
 `session::kernel` or `session::suspend` — bikeshed for the operator, not
-decided here), following the registry-capstone playbook exactly: the
+decided here), following the landed registry consolidation's playbook exactly: the
 module owns the generalized token/resume/error-taxonomy shape (§3.2);
 `tidepool-repl` and `tidepool-harness` become progressively thinner clients
 of it, the same relationship `manager.rs`/`registry.rs` already have to
@@ -440,8 +442,8 @@ This section is written twice — once per answer to **Open Question 1**
 1. Land Phase 6 as already scoped in `plans/one-session.md`: convert repl
    and one-shot eval onto the parked path (`Project`/`Render` park kinds
    already exist per Phase 0; the repl-side work is stowing `run_block`'s
-   item-loop state, per `plans/unpark/feasibility-map.md`'s own mechanical
-   assessment — that survey already found "no mechanism conflict"). Delete
+   item-loop state — a purely mechanical lift, per the prior unparking lane's
+   own assessment: no mechanism conflict). Delete
    the slot path (`suspended_continuation`, the four slot run/resume
    families) per Phase 6's own scope. Oracle: the repl test suite,
    byte-identical behavior, per Phase 6's stated gate.
@@ -535,11 +537,11 @@ would otherwise have to explain away.
 ### 6.3 Should #20 steps 2-3 land before or after kernel implementation?
 
 **Recommendation: after**, and only loosely coupled even then. Steps 2-3
-(`plans/harness-architecture-wave.md`'s "Held briefs") move the *Haskell
+(held pending an operator ping) move the *Haskell
 decl text* (`typed_request_agent_decls` et al.) onto the generated plane and
 add schema support for polymorphic verbs (`fork @T`, `runLLMTurn @T`) —
-this is model-facing prompt surface and genuinely novel design work (the
-wave doc's own words: "the reason the decls were hand-written originally").
+this is model-facing prompt surface and genuinely novel design work, the
+reason the decls were hand-written originally.
 None of it changes the *Rust-side* orchestration shape (`SuspensionRouting`,
 `ClassifiedSuspension`, the driver's match arms) that the kernel seam
 (§3.2) actually generalizes — step 1 already delivered everything the
