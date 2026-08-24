@@ -427,13 +427,16 @@ struct LiveTurnContext {
 /// both `Bind`/`BindDiscard`, which share its exact preamble/offset — only
 /// when the node has a value-plane bind context worth trying), and a compile
 /// FAILURE carries no verdict tag: `run_turn` returns before ever decoding
-/// which template applied. So a diagnostic is remapped against a candidate
-/// ONLY when its raw line falls inside THAT candidate's own (deterministically
-/// computed, from `block`) user-code window — tried EXPR first, then BIND.
-/// A diagnostic outside every candidate's window (or when there is no
-/// candidate at all) keeps its raw template-space span: picking the wrong
-/// candidate would silently shift every line number by a wrong constant,
-/// which is worse than not remapping.
+/// which template applied. A diagnostic is remapped against whichever
+/// candidate's own (deterministically computed, from `block`) user-code
+/// window its raw line falls inside — tried EXPR first, then BIND — or, when
+/// neither window contains it (the wrapper-origin case: the wrapper sits
+/// textually AFTER the user's code, so its line is never inside either
+/// window), against the first candidate that built at all, so it renders as
+/// wrapper FALLOUT rather than a raw template-coordinate dump (see
+/// [`pick_render_opts`]'s doc). Only when NEITHER candidate's marker is even
+/// found in its source (no candidate built) does a diagnostic keep its raw
+/// template-space span — there is nothing to remap against.
 fn render_compile_error(
     e: &tidepool_runtime::CompileError,
     block: &str,
@@ -468,6 +471,20 @@ fn render_compile_error(
 /// derived, never guessed. All diagnostics in one `CompileError::Diagnostics`
 /// batch come from the SAME compile, so one representative (anchor-file)
 /// diagnostic's raw line decides for the whole batch.
+///
+/// A candidate whose window CONTAINS the representative line is preferred
+/// (an ordinary, correctly-attributed diagnostic). When neither candidate's
+/// window contains it — which is exactly what happens for a WRAPPER-origin
+/// diagnostic, since the wrapper (`__anchor`/`paginateResult`/the render
+/// call) sits textually AFTER the user's own code in the turn template —
+/// this falls back to the first candidate that actually built (a non-empty
+/// window), rather than returning `None`. That fallback is safe: the
+/// diagnostic's line still lands OUTSIDE the chosen `user_lines` window, so
+/// `tidepool_runtime::diag::render_diagnostics`'s own fallout partition
+/// classifies it as wrapper fallout — never displayed as if it were the
+/// user's own code — instead of [`render_compile_error`] raw-dumping every
+/// diagnostic in template coordinates because no candidate was picked at all
+/// (poke-round finding 5, hole 2).
 fn pick_render_opts<'a>(
     diags: &[tidepool_runtime::diag::ExtractDiag],
     block: &str,
@@ -481,23 +498,42 @@ fn pick_render_opts<'a>(
             .then_some(span.start_line as usize)
     })?;
     let content_lines = engine::content_line_count(block);
-    for (source, marker) in [(expr_source, EXPR_MARKER), (bind_source, BIND_MARKER)] {
-        let Some((offset, (start, end))) = candidate_window(source, marker, content_lines) else {
-            continue;
-        };
-        if representative_line >= start && representative_line <= end {
-            return Some(tidepool_runtime::diag::RenderOpts {
-                anchor: TURN_ANCHOR,
-                label: TURN_LABEL,
-                user_lines: Some((start, end)),
-                line_offset: offset,
-                col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
-                source,
-            });
+    let opts_for = |source: &'a str, offset: usize, window: (usize, usize)| {
+        tidepool_runtime::diag::RenderOpts {
+            anchor: TURN_ANCHOR,
+            label: TURN_LABEL,
+            user_lines: Some(window),
+            line_offset: offset,
+            col_indent: 0,
+            // Turn compiles routinely import the session's own decl-plane
+            // library modules (`Tidepool/Session/Lib/G<n>.hs`); a warning
+            // anchored there is the same class of noise as a wrapper-origin
+            // error — it is not something a turn's own code edits — so drop
+            // every such warning unconditionally on this path.
+            drop_foreign_gen_warnings_except: Some(""),
+            source,
         }
+    };
+    let candidates: Vec<(&'a str, usize, (usize, usize))> =
+        [(expr_source, EXPR_MARKER), (bind_source, BIND_MARKER)]
+            .into_iter()
+            .filter_map(|(source, marker)| {
+                candidate_window(source, marker, content_lines)
+                    .map(|(offset, window)| (source, offset, window))
+            })
+            .collect();
+
+    if let Some(&(source, offset, window)) = candidates
+        .iter()
+        .find(|(_, _, (start, end))| representative_line >= *start && representative_line <= *end)
+    {
+        return Some(opts_for(source, offset, window));
     }
-    None
+
+    candidates
+        .into_iter()
+        .next()
+        .map(|(source, offset, window)| opts_for(source, offset, window))
 }
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
@@ -3784,12 +3820,16 @@ mod tests {
         assert!(out.contains("<turn>:1:"), "{out}");
     }
 
-    /// A diagnostic whose raw line falls in NEITHER candidate's window keeps
-    /// its raw template-space span — remapping against the wrong candidate
-    /// would silently shift the line by a wrong constant, which is worse
-    /// than not remapping at all.
+    /// A diagnostic whose raw line falls in NEITHER candidate's window — the
+    /// wrapper-origin shape, since the wrapper sits textually after the
+    /// user's own code — is treated as wrapper FALLOUT, never raw-dumped in
+    /// template coordinates: `pick_render_opts` falls back to the first
+    /// candidate's window, so `render_diagnostics`'s own fallout partition
+    /// classifies the diagnostic as outside the user's code and — since it's
+    /// the ONLY diagnostic in the batch — renders the synthetic all-wrapper
+    /// message (poke-round finding 5, hole 2).
     #[test]
-    fn render_compile_error_leaves_out_of_window_diagnostic_raw() {
+    fn render_compile_error_wrapper_origin_diagnostic_becomes_fallout_not_raw_dump() {
         let expr_source = fake_expr_source(0, 1);
         let bind_source = fake_bind_source(0, 1);
         let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
@@ -3799,8 +3839,65 @@ mod tests {
             "deep in generated scaffolding",
         )]);
         let out = render_compile_error(&err, "x", &expr_source, &bind_source);
-        assert!(out.contains("Expr.hs:9999:1"), "{out}");
-        assert!(!out.contains("<turn>"), "{out}");
+        assert!(!out.contains("Expr.hs:9999:1"), "{out}");
+        assert!(!out.contains("deep in generated scaffolding"), "{out}");
+        assert!(!out.contains("<turn>:"), "{out}");
+        assert!(
+            out.contains("arose in the harness's result-display wrapper"),
+            "expected the synthetic wrapper-fallout message: {out}"
+        );
+    }
+
+    /// A MIXED batch — a genuine user-code error plus a wrapper-origin
+    /// fallout diagnostic — keeps the user error verbatim (remapped to
+    /// `<turn>` coordinates) and summarizes the wrapper part via the
+    /// ordinary fallout footer, never the synthetic all-wrapper message
+    /// (reserved for a batch with no surviving in-window diagnostic at all).
+    #[test]
+    fn render_compile_error_mixed_batch_keeps_user_error_summarizes_wrapper() {
+        let expr_source = fake_expr_source(0, 2);
+        let bind_source = fake_bind_source(0, 2);
+        let user_err = diag("Expr.hs", 3, 1, "Variable not in scope: garbage");
+        let wrapper_err = diag("Expr.hs", 999, 1, "No instance for Show Foo");
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![user_err, wrapper_err]);
+        let block = "userExprLine0\nuserExprLine1";
+        let out = render_compile_error(&err, block, &expr_source, &bind_source);
+        assert!(out.contains("<turn>:1:"), "{out}");
+        assert!(out.contains("Variable not in scope"), "{out}");
+        assert!(!out.contains("No instance for Show Foo"), "{out}");
+        assert!(out.contains("further error(s) suppressed"), "{out}");
+        assert!(
+            !out.contains("arose in the harness's result-display wrapper"),
+            "{out}"
+        );
+    }
+
+    /// A WARNING anchored in a generated session decl-plane library module
+    /// (`Tidepool/Session/Lib/G<n>.hs`) is dropped unconditionally on this
+    /// path — `pick_render_opts` sets `drop_foreign_gen_warnings_except:
+    /// Some("")`, since such a warning is the same class of noise as a
+    /// wrapper-origin error (not something a turn's own code edits). A real
+    /// user-code error in the same batch survives untouched.
+    #[test]
+    fn render_compile_error_drops_foreign_session_lib_warnings() {
+        let expr_source = fake_expr_source(0, 1);
+        let bind_source = fake_bind_source(0, 1);
+        let user_err = diag("Expr.hs", 3, 1, "Variable not in scope: garbage");
+        let lib_warning = tidepool_runtime::diag::ExtractDiag {
+            span: Some(tidepool_runtime::diag::DiagSpan {
+                file: "Tidepool/Session/Lib/G7.hs".into(),
+                start_line: 3,
+                start_col: 1,
+                end_line: 3,
+                end_col: 5,
+            }),
+            severity: "warning".into(),
+            message: "Pattern match(es) are non-exhaustive".into(),
+        };
+        let err = tidepool_runtime::CompileError::Diagnostics(vec![user_err, lib_warning]);
+        let out = render_compile_error(&err, "garbage", &expr_source, &bind_source);
+        assert!(out.contains("Variable not in scope"), "{out}");
+        assert!(!out.contains("non-exhaustive"), "{out}");
     }
 
     /// A non-`Diagnostics` variant carries no GHC coordinates to remap —

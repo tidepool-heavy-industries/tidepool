@@ -110,9 +110,12 @@ pub struct RenderOpts<'a> {
     /// code within the anchor file. A diagnostic anchored in-file but OUTSIDE
     /// this range is wrapper-scaffold fallout: dropped, counted in one footer
     /// line, UNLESS dropping would leave zero survivors (never render "no
-    /// diagnostics" when there is at least one) — in which case keep
-    /// everything. `None` — no such partition (e.g. decl-candidate
-    /// validation, which never wraps user code in scaffold).
+    /// diagnostics" when there is at least one) — in which case the batch is
+    /// ALL wrapper-origin, and [`render_diagnostics`] renders one synthetic,
+    /// plain-language message instead of re-including the raw wrapper
+    /// diagnostics (see that function's doc). `None` — no such partition
+    /// (e.g. decl-candidate validation, which never wraps user code in
+    /// scaffold).
     pub user_lines: Option<(usize, usize)>,
     /// Subtract from a diagnostic's line before display (generated preamble
     /// length). A line already `<=` this offset (preamble region) is shown
@@ -137,7 +140,11 @@ pub struct RenderOpts<'a> {
 /// `{label}:{line}:{col}[-{end_col}]: {severity}:` header, the message body,
 /// and a gutter source excerpt when the span is single-line and the line
 /// exists in `opts.source`), joined by a blank line, with a wrapper-fallout
-/// footer appended when the `user_lines` partition dropped anything.
+/// footer appended when the `user_lines` partition dropped anything —
+/// UNLESS every surviving diagnostic was wrapper-origin fallout, in which
+/// case this renders one synthetic, plain-language message instead (there is
+/// no user-code diagnostic to show, and the raw wrapper errors name
+/// generated binders/lines the model never wrote).
 #[must_use]
 pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> String {
     // Foreign-gen-warning drop: no "never empty" guard — dropping a warning
@@ -147,8 +154,7 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
         .filter(|d| !is_dropped_foreign_gen_warning(d, opts.drop_foreign_gen_warnings_except))
         .collect();
 
-    // User-lines fallout partition: dropping is guarded against emptying the
-    // whole surviving set.
+    // User-lines fallout partition.
     let (kept, fallout_count) = match opts.user_lines {
         Some((start, end)) => {
             let mut kept = Vec::new();
@@ -160,15 +166,24 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
                     kept.push(*d);
                 }
             }
-            if kept.is_empty() && fallout > 0 {
-                // Guard: never drop everything. Keep the original (post-gen-drop) set.
-                (after_gen_drop.clone(), 0)
-            } else {
-                (kept, fallout)
-            }
+            (kept, fallout)
         }
         None => (after_gen_drop.clone(), 0),
     };
+
+    // Every surviving diagnostic is wrapper-origin fallout: there is nothing
+    // in the user's own code to show, so render one plain-language,
+    // actionable message instead of re-including the raw wrapper errors
+    // (which name generated binders/lines the model never wrote and cannot
+    // act on).
+    if kept.is_empty() && fallout_count > 0 {
+        return format!(
+            "{fallout_count} error(s) arose in the harness's result-display wrapper, not in \
+             your block's own code — this usually means the block's result type doesn't \
+             satisfy the wrapper (e.g. no Show/ToJSON instance, or an unresolved type at the \
+             result position)."
+        );
+    }
 
     let mut blocks: Vec<String> = kept.iter().map(|d| render_one(d, opts)).collect();
     if fallout_count > 0 {
@@ -583,8 +598,12 @@ mod tests {
         );
     }
 
+    /// A batch that is ENTIRELY wrapper-origin fallout (dropping it all would
+    /// leave zero survivors) renders one synthetic, plain-language message —
+    /// never the raw wrapper diagnostic (which names a generated binder/line
+    /// the model never wrote and cannot act on).
     #[test]
-    fn would_drop_everything_keeps_everything() {
+    fn all_wrapper_batch_renders_synthetic_message() {
         let source = "line1\n";
         let only_fallout = diag(
             "Expr.hs",
@@ -607,8 +626,36 @@ mod tests {
                 source,
             },
         );
-        assert!(got.contains("Overlapping instances"), "{got}");
-        assert!(!got.contains("suppressed"), "{got}");
+        assert!(!got.contains("Overlapping instances"), "{got}");
+        assert!(
+            got.contains("arose in the harness's result-display wrapper"),
+            "{got}"
+        );
+        assert!(got.contains("1 error(s)"), "{got}");
+    }
+
+    /// A multi-diagnostic ALL-wrapper batch counts every one of them in the
+    /// synthetic message, not just the first.
+    #[test]
+    fn all_wrapper_batch_counts_every_diagnostic() {
+        let source = "line1\n";
+        let a = diag("Expr.hs", 9, 5, 9, 5, "error", "Overlapping instances");
+        let b = diag("Expr.hs", 10, 1, 10, 1, "error", "No instance for ToJSON");
+        let got = render_diagnostics(
+            &[a, b],
+            &RenderOpts {
+                anchor: "Expr.hs",
+                label: "<item>",
+                user_lines: Some((2, 3)),
+                line_offset: 0,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: None,
+                source,
+            },
+        );
+        assert!(got.contains("2 error(s)"), "{got}");
+        assert!(!got.contains("Overlapping instances"), "{got}");
+        assert!(!got.contains("No instance for ToJSON"), "{got}");
     }
 
     #[test]
