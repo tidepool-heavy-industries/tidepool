@@ -17,12 +17,15 @@
 //! declaration REPL on its own.
 
 pub mod engine;
+pub mod kernel;
 pub mod persistent;
 pub mod registry;
 pub mod render;
 pub mod resident;
 pub mod supervisor;
 pub mod turn;
+
+pub use kernel::{Aged, SuspendableSession};
 
 pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
 

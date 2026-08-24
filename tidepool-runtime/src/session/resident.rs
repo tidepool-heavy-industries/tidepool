@@ -1890,6 +1890,44 @@ where
     }
 }
 
+/// The kernel's generalized suspension seam (`super::kernel::
+/// SuspendableSession`, #22 design doc §5.B step 2), implemented directly
+/// against this session's own [`Self::resume`]/[`Self::abort`] — the
+/// smallest possible diff, since this type is already exactly the shape the
+/// kernel generalizes (one obligation-carrying [`ResidentHole`] token, one
+/// resume/abort entry point per token). `Context = ()`: this session owns
+/// its captured-output buffer and handler stack as fields, so a call needs
+/// nothing extra beyond the hole and the answer.
+impl<H, O> super::kernel::SuspendableSession for ResidentSession<H, O>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    type Hole = ResidentHole;
+    type Answer = Value;
+    type Context = ();
+    type Outcome = ResidentOutcome;
+    type Error = ResidentError;
+
+    fn resume(
+        &mut self,
+        hole: Self::Hole,
+        answer: Self::Answer,
+        (): Self::Context,
+    ) -> Result<Self::Outcome, Self::Error> {
+        Self::resume(self, hole, answer)
+    }
+
+    fn abort(
+        &mut self,
+        hole: Self::Hole,
+        reason: String,
+        (): Self::Context,
+    ) -> Result<Self::Outcome, Self::Error> {
+        Self::abort(self, hole.cont_id(), reason)
+    }
+}
+
 /// The `Send` projection of a [`ParkedOutcome`] that crosses the eval-thread
 /// boundary: a bind's tenured `!Send` `RootSlot` is minted into a
 /// [`ValueHandle`] IN-THREAD (`realm`-owned) and the id crosses instead —
