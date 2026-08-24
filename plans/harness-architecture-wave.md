@@ -113,6 +113,27 @@ touching `tidepool-harness/src/selfharness/` at once.
    composition-root correctly left them per its boundary. Update to the
    facade-crate path (`-p tidepool --bin tidepool-selfharness`) once no
    lane holds the crate.
+6d. Operator decisions (2026-08-24 evening, while traveling; testing
+   resumes in their morning):
+   - **Companion poke round**: a native subagent is exercising the
+     RUNNING companion (old binary, terra dial, HTTP-only, never
+     kills/restarts anything) to gather baseline evidence; its report
+     lands in the session scratchpad as `companion-poke-report.md` and
+     its findings join the end-of-wave report.
+   - **state-flatten lane** (spawned): `lastRun :: Maybe RunSummary` →
+     `lastAnswer :: Maybe Text` in the recursive-companion, no
+     migration — the redeploy below resets the checkpoint.
+   - **Redeploy IS authorized for this wave**, after the end-of-wave
+     battery walk passes and state-flatten has folded: build the moved
+     binary (`cargo build --release -p tidepool --bin
+     tidepool-selfharness`), run `scripts/redeploy.sh`, fresh
+     checkpoint, dial left on default terra, companion parked at the
+     seed form for the operator's morning sol round. This supersedes
+     rule 5's redeploy freeze for exactly this one planned redeploy;
+     the never-touch-the-memory-store rule still holds.
+   - **#20 steps 2–3 trigger**: one successful LIVE companion round on
+     the step-1 (generated-decode) binary — i.e. after the morning
+     round succeeds, not merely after step 1 folds.
 7. End-of-wave gate, after steps 2–4 have folded: walk all
    `tidepool-harness` shard groups sequentially per
    `scripts/battery-shard.sh` (the wave touched the harness throughout),
