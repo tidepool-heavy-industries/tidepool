@@ -134,6 +134,27 @@ touching `tidepool-harness/src/selfharness/` at once.
    - **#20 steps 2–3 trigger**: one successful LIVE companion round on
      the step-1 (generated-decode) binary — i.e. after the morning
      round succeeds, not merely after step 1 folds.
+6e. Poke-findings fix wave (2026-08-24 night; investigation verified all
+   five findings LIVE AT TIP — evidence in the investigator's report,
+   summarized in task #27). In flight, spawned from `6efd79d5`:
+   - **fix-fork-decls** — auto-import Tidepool.Fork; framing folds the
+     real roster; not-in-scope corrective; companion prose fix.
+   - **fix-delegate-backend** — backend factory replaces the one-shot;
+     block_in_place + narrowed mutex in service_outer_subagent.
+   - **fix-fence** — engine.rs mid-line/trailing-tag fence extraction.
+   - **fix-diag** — wrapper-origin diagnostics: synthetic message +
+     pick_render_opts fallback.
+   Plus both design lanes (#21, #22, doc-only) running in parallel.
+   Driver co-tenancy is region-scoped per spec; on fold conflicts keep
+   both regions.
+   QUEUED after this wave folds: **round-visibility lane** (finding 4 +
+   finding 2's observability): OperatorGate gains a defaulted
+   round-progress method; driver's round dispatcher calls it on ALL
+   arms (including the currently-silent NoBlock); delegation events
+   reach the timeline; TimelineItem variants gain timestamps; web
+   renders rounds + delegations. Findings 1-2 fixes gate the redeploy
+   (#26); findings 3/5 ride along; finding 4 may land pre- or
+   post-redeploy on timing.
 7. End-of-wave gate, after steps 2–4 have folded: walk all
    `tidepool-harness` shard groups sequentially per
    `scripts/battery-shard.sh` (the wave touched the harness throughout),
