@@ -22,7 +22,7 @@
 //!
 //! ## What the parking contract obliges of this file
 //!
-//! `plans/post-restart/realm-lanes/continuation-parking-contract.md` is frozen
+//! `docs/continuation-parking-contract.md` is frozen
 //! and is consumed, not extended:
 //!
 //! - the handled prefix is DERIVED from [`Session::stack`] — the same value

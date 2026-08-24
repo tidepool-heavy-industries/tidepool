@@ -41,9 +41,7 @@ authoring/running these *are the roadmap* for the next harness helpers.
   the larger playground: the typed resident REPL, capability rows, executable
   harness self-design, and ephemeral non-serializable values such as closures
   and records of functions alongside durable state.
-- [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for the typed swarm**
-  (PRD 20 S1-L3; see
-  [`plans/self-iterating-harness/20-s1-l3-dev-tree-v2.md`](../plans/self-iterating-harness/20-s1-l3-dev-tree-v2.md)).
+- [`dev-tree/`](dev-tree/Harness.hs) — **forward dogfood for the typed swarm**.
   The tree is a monadic hylomorphism over `Tidepool.Swarm`'s `PlanF`: cognition
   enters at exactly two typed seams — a coalgebra that splits (the parent-first
   scaffold worker, then one child worktree per child plan seeded from the
@@ -61,9 +59,7 @@ authoring/running these *are the roadmap* for the next harness helpers.
   exactly that row. Node residency (resident select loops) is S1-L4; the seam
   where it lands is named at the `hyloM` call site and built nowhere.
 - [`recursive-companion/`](recursive-companion/README.md) — **an
-  investigation companion collapsed around `fork`**
-  ([PRD 21](../plans/self-iterating-harness/21-recursive-companion-prd.md),
-  superseding the earlier C3 layer-walk slice).
+  investigation companion collapsed around `fork`**.
   One turn is one top-level typed request: the session decomposes the
   operator's question by forking typed sub-answerers of its own, recursively
   (`async (fork @T "brief")`), each a full multi-round session, and the

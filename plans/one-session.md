@@ -86,7 +86,7 @@ Layer status:
   tested (`tests/realm_multi_continuation.rs`: parent+child parked
   simultaneously, both resume orders, 8 parks GC-interleaved resumed shuffled,
   all under `TIDEPOOL_GC_POISON`+`TIDEPOOL_HEAP_VERIFY`). Contract-frozen
-  (`plans/post-restart/realm-lanes/continuation-parking-contract.md`). Zero
+  (`docs/continuation-parking-contract.md`). Zero
   consumers above codegen. The SLOT path (`suspended_continuation` :654) is
   protected only by a TEMPORAL argument (no GC while suspended, L7 asserts) —
   not rooted. The two paths never mix ON ONE MACHINE (asserted both

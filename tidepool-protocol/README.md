@@ -55,10 +55,3 @@ guidance on the two paths).
 2. Extending what the schema can express (a new `HelperBody` shape, a new
    `HsType` variant): these are deliberate, reviewed additions — see the
    "no raw escape hatches" rule above before reaching for a shortcut.
-
-## Where the rationale lives
-
-`plans/self-iterating-harness/22-effect-protocol-prd.md` (the decision to
-build this) and `plans/self-iterating-harness/22-p1-protocol-scaffold.md`
-(the schema design, the golden protocol, and the step-by-step migration
-procedure) — read the PRD first, the scaffold doc for the how-to.

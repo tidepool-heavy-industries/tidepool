@@ -84,7 +84,7 @@ registered stowed root, `stowed_roots_count() == parked_count()` holds at
 quiescence (debug_asserted at every registry mutation), handled-prefix
 compatibility is exact equality enforced at entry, and the single-slot path
 above and the parked registry NEVER mix on one machine. Downstream consumers
-read `plans/post-restart/realm-lanes/continuation-parking-contract.md` —
+read `docs/continuation-parking-contract.md` —
 everything else in the registry is internal and free to churn.
 
 **`ValueHandle` + `close_realm`** (contract amendment, one-session Phase 0) are

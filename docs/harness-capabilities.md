@@ -199,8 +199,6 @@ The locked core, compressed:
   long-running repository coordinator (backlog, per-repo memory, autonomy
   policy). Stage 3: self-hosting.
 
-Full text: `plans/self-iterating-harness/20-exomonad-v3-prd.md`.
-
 ## How to collaborate well
 
 - **Locked decisions are final.** The Key Decisions Reference in the root
@@ -259,7 +257,5 @@ Full text: `plans/self-iterating-harness/20-exomonad-v3-prd.md`.
   logs.
 - `tidepool-agent/CLAUDE.md` — the agent backend seam, containment, test
   tiers. `tidepool-worktree/CLAUDE.md` — worktree rules.
-- `plans/self-iterating-harness/18-…`, `19-…`, `20-exomonad-v3-prd.md` — the
-  PRD line: typed subagents, worktrees/events, the swarm.
 - `harness-dogfooding/README.md` + `companion/`, `dev-tree/` — the living
   examples; read them before authoring a harness.

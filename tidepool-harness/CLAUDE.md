@@ -95,8 +95,7 @@ Module map:
 Every turn compile (`engine::compile_turn`/`compile_turns`, wrapping
 `tidepool_runtime::artifacts::compile_targets`) is memoized. There is no
 cache-free path, no bypass flag, and no second mechanism. The full keying
-spec, the correctness hazards it answers, and the safety argument for
-sharing one memo across test processes are in `plans/compile-memo.md`; what
+spec lives in `tidepool-runtime/CLAUDE.md`'s "Compile cache" section; what
 a reader here needs:
 
 - **The mechanism is `tidepool_runtime::cache`, not a fork of it.**
@@ -286,7 +285,7 @@ entries normally.
 never substituted into a resumed session, so a node that suspended after
 running handled effects, then restarted and resumed, RE-EXECUTES them live.
 
-## Scope trees — an agent session's names retire with its heap (PRD 21 C2 §1–3)
+## Scope trees — an agent session's names retire with its heap
 
 A node already carried a `RealmId`: the HEAP-side lifetime of its agent
 session (parked frames, outstanding `ValueHandle`s), exited by `close_realm`.
@@ -309,8 +308,8 @@ answers). `with_session`'s own runs reset to ROOT for the same reason.
 `session_decl_context` resolve the turn's decl-tip import module and its
 visible `Val.G<g>` set FROM THE NODE'S SCOPE (`session_import_module_in`,
 `current_val_modules_in`), and a decl turn appends to that scope's own tip
-(`define_scoped_in`). That is the whole of locked decision 4 on the real
-compile path: a child's tip module already re-exports its parent's chain, so
+(`define_scoped_in`). That is the whole of the decl-plane inheritance rule on
+the real compile path: a child's tip module already re-exports its parent's chain, so
 parent declarations are callable in every child; the visible-binding walk is
 upward-only with child frames shadowing parent ones, so a sibling's names are
 not even *nameable*; and nothing ever walks downward, so the parent gains
@@ -549,7 +548,7 @@ mid-chain in either) — never counted against `ASKUSER_MAX_REPROMPTS`, since
 nothing here waits on a human to spin.
 
 `ReadState` (`tidepool_mcp::readstate_decl`, answerer row only) is the
-agent-computes-over-its-own-state effect from `plans/companion-state-v2.md`:
+agent-computes-over-its-own-state effect:
 `getStateJson :: M Value` suspends on `ReadStateWith`, routed by constructor
 name into `SuspensionRouting::ReadState` and serviced note-style — the driver
 resumes IMMEDIATELY with the loop's current state JSON
@@ -773,8 +772,8 @@ unifies against the wider generated row.
 ### Recursive fork servicing — the pump, spawn-time budgets, the GUI lifecycle
 
 The answerer's own `fork`/`forkAll` (`Tidepool.Fork`, riding `Fork` in
-`typed_request_agent_decls`) is where fork-subsumes-split (`plans/fork-subsumes-split.md`)
-landed: the companion tree EMERGES from model-authored `async (fork @T
+`typed_request_agent_decls`) is where fork-subsumes-split landed: the
+companion tree EMERGES from model-authored `async (fork @T
 "brief")` calls rather than from authored split-proposal/gate machinery. A
 fork child is driven by `SelfHarnessDriver::drive_fork_child_agent_session`
 (`drain_answerer_fork`'s direct-chain call, `service_thread_ready`'s
@@ -802,8 +801,7 @@ operator-page treatment — birth, seed brief, timeline, final typed value or
 failure. Its tree label/path is DERIVED: base
 path from the parent's own registered label (or `"root"`), child segment
 `f<idx>-<ascii-slug-of-brief>` from a per-parent monotonic counter
-(`fork_child_seq`) assigned inside `drive_fork_child_agent_session` itself. See
-`plans/fork-subsumes-split.md`'s step 3 design note for the full scheme
+(`fork_child_seq`) assigned inside `drive_fork_child_agent_session` itself
 (guard reuse via widening `BranchAgentSessionGuard`, the `finalize_fork_data` exit).
 
 **What step 4 (the companion collapse) changed above this mechanism, not in
@@ -824,8 +822,7 @@ CONCURRENTLY up to `set_concurrency_cap`, re-sorted to DECLARATION order
 before assembly so completion order is never observable.
 
 **Every verb that opens an agent session at a BRANCH POSITION answers an
-`Either`** (PRD 21 locked decision 6,
-`plans/self-iterating-harness/21-c3-exit-verb.md`):
+`Either`:**
 `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
 `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`. The verb that
 does NOT open a branch position keeps its bare answer: `runLLMTurn @T`,

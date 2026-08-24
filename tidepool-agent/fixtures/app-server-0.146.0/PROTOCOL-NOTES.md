@@ -1,6 +1,5 @@
 # Protocol truth — app-server 0.146.0 / codex-codes 0.146.4
 
-PRD 18 phase 2 (`plans/post-restart/agent-lanes/dev-adapter-bringup.md`).
 Answered entirely offline: from this directory's committed JSON Schema, the
 pinned `codex-codes` 0.146.4 crate's generated types
 (`~/.cargo/registry/src/*/codex-codes-0.146.4/src/protocol_generated/`), and

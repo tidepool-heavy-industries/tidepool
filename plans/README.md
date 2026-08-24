@@ -53,18 +53,6 @@ Small still-open items whose originating plan doc has been retired:
   friction-driven — no fixed schedule. Phases 1–2 (outer-row `Subagent`
   servicing, store bootstrap, curator wiring) are landed.
 
-## Deferred
-
-- `self-iterating-harness/` and `post-restart/`: largely landed/superseded
-  PRD 18/19/20/21/22 design and implementation-wave history, cross-referenced
-  with each other and with `tidepool-harness/CLAUDE.md`. Retiring them
-  requires hoisting their still-load-bearing content into
-  `tidepool-harness/CLAUDE.md`, which a concurrent lane owns; deferred to
-  that lane's fold rather than guessed at here. The one file in this cluster
-  that is standing (not scaffolding): `post-restart/realm-lanes/
-  continuation-parking-contract.md`, a frozen contract downstream consumers
-  read directly — keep it wherever this cluster resettles.
-
 ## Reference
 
 - [Decision archive](decision-archive/README.md): the narrow exception to

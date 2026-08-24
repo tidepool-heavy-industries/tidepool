@@ -50,9 +50,9 @@ has migrated to the schema-driven scaffold yet
   `tidepool-protocol-gen` (the crate's `[[bin]]`) projects it into the macro
   DSL, wire mirrors, extractor verb tables, and harness classification lists
   that used to be hand-maintained separately. Edit the schema, regenerate,
-  and the golden byte-compatibility check catches drift. See
-  `plans/self-iterating-harness/22-p1-protocol-scaffold.md` for the schema
-  design and the migration procedure for moving the next effect over.
+  and the golden byte-compatibility check catches drift — see
+  `tidepool-protocol/README.md`'s "How to change it" section for the
+  migration procedure.
 - **Legacy (everything else):** still declared by hand in
   `tidepool-mcp/src/effect_defs.rs`. Each effect is one `<effect>_effect_def!`
   block; two projections generate the effect declaration builder and the
