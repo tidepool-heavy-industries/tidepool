@@ -1100,10 +1100,32 @@ pub fn available_effects_section(decls: &[tidepool_mcp::EffectDecl]) -> String {
 /// per-line parse the opener was consumed as part of the closer and the
 /// SECOND BLOCK SILENTLY VANISHED — the companion's first live packed
 /// `askUser` lost its ask block exactly this way (dogfood, 2026-08-14).
+///
+/// MID-LINE / TRAILING-TEXT OPENS (poke-round finding 3, 2026-08-24): an
+/// opening fence is recognized anywhere on a line, not just at column 0
+/// (`Here's the code: ```haskell`), and the language tag is a PREFIX-WORD
+/// match — `haskell`/`hs` as the tag's first whitespace-delimited word, with
+/// trailing chatter ignored (`` ```haskell (round 3) ``). Before this, either
+/// shape was invisible to extraction and produced the false corrective "your
+/// reply had no ```haskell block", burning a round even though the model DID
+/// write one. Only the NOT-YET-OPEN scan gained this leniency; a close (and
+/// the fused close-then-reopen arm above) still requires the fence at the
+/// trimmed line's start, unchanged.
+///
+/// ACCEPTED FALSE-POSITIVE TRADE: prose that mentions `` ```haskell `` inline
+/// (documenting the fence syntax itself, say) now reads as an opener too. If
+/// nothing after it ever closes, the existing "an unterminated final block
+/// still counts" rule captures the rest of the reply as if it were code. This
+/// mirrors the pre-existing risk a line-start opener with no close already
+/// carried; it is not made categorically worse, so it is accepted rather than
+/// guarded against — see the `mentions_fence_inline_without_closing` test.
 pub fn extract_haskell_blocks(reply: &str) -> Vec<String> {
     fn opens_haskell(s: &str) -> bool {
-        let lang = s.strip_prefix("```").map(|l| l.trim().to_ascii_lowercase());
-        matches!(lang.as_deref(), Some("haskell") | Some("hs"))
+        let Some(lang) = s.strip_prefix("```") else {
+            return false;
+        };
+        let word = lang.split_whitespace().next().unwrap_or("");
+        matches!(word.to_ascii_lowercase().as_str(), "haskell" | "hs")
     }
     fn close(blocks: &mut Vec<String>, body: &mut Option<String>) {
         if let Some(b) = body.take() {
@@ -1127,8 +1149,10 @@ pub fn extract_haskell_blocks(reply: &str) -> Vec<String> {
                 b.push_str(line);
                 b.push('\n');
             }
-        } else if opens_haskell(trimmed) {
-            body = Some(String::new());
+        } else if let Some(idx) = trimmed.find("```") {
+            if opens_haskell(&trimmed[idx..]) {
+                body = Some(String::new());
+            }
         }
     }
     // An unterminated final block still counts.
@@ -2887,6 +2911,62 @@ mod tests {
         assert_eq!(blocks, vec!["pure ()".to_string()]);
 
         assert!(extract_haskell_blocks("no code here at all").is_empty());
+    }
+
+    /// MID-LINE OPEN (poke-round finding 3): a fence that opens after leading
+    /// prose on the same line (`Here's the code: ```haskell`) is not
+    /// invisible to extraction — the old line-start-anchored scan missed it
+    /// entirely and produced the false "no ```haskell block" corrective.
+    #[test]
+    fn extract_haskell_blocks_handles_mid_line_open() {
+        let reply = "Here's the code: ```haskell\ndata X = X\n```\ndone.";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(blocks, vec!["data X = X".to_string()]);
+    }
+
+    /// TAG WITH TRAILING TEXT: `` ```haskell (round 3) `` still opens — the
+    /// tag is a prefix-word match, trailing chatter after `haskell`/`hs` is
+    /// ignored rather than making the whole tag fail to match "haskell".
+    #[test]
+    fn extract_haskell_blocks_handles_trailing_text_after_tag() {
+        let reply = "```haskell (round 3)\ndata Y = Y\n```";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(blocks, vec!["data Y = Y".to_string()]);
+    }
+
+    /// MID-LINE OPEN composes with the pre-existing FUSED close+reopen arm:
+    /// the first block opens after leading prose, then closes and reopens
+    /// the second block fused on one line (` ``````haskell `) exactly as the
+    /// line-start case already does.
+    #[test]
+    fn extract_haskell_blocks_handles_mid_line_open_then_fused_close() {
+        let reply = "Here's the plan: ```haskell\ndata X = X\n\
+                     ``````haskell\ndata Y = Y\n```";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(
+            blocks,
+            vec!["data X = X".to_string(), "data Y = Y".to_string()]
+        );
+    }
+
+    /// DOCUMENTED TRADE-OFF: prose that merely MENTIONS `` ```haskell ``
+    /// inline (no real code block intended) now reads as an opener too, same
+    /// as a line-start opener would. With no close anywhere after it, the
+    /// pre-existing "an unterminated final block still counts" rule captures
+    /// the rest of the reply as if it were code — a false positive, but not
+    /// a new category of risk (a line-start opener with no close already
+    /// behaved this way), so it is accepted rather than guarded against. See
+    /// the doc comment on `extract_haskell_blocks`.
+    #[test]
+    fn extract_haskell_blocks_mentions_fence_inline_without_closing() {
+        let reply = "Use ```haskell inline to open a block.\n\
+                     This explanation continues in prose form,\n\
+                     never closing.";
+        let blocks = extract_haskell_blocks(reply);
+        assert_eq!(
+            blocks,
+            vec!["This explanation continues in prose form,\nnever closing.".to_string()]
+        );
     }
 
     /// The sequence-failure payload names the failed block, lists what ran
