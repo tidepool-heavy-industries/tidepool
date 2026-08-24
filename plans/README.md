@@ -19,6 +19,12 @@ to plan files that stay in this directory but no longer describe active work.
   checkpoint + journal persistence mirroring repr's CBOR versioning;
   four open questions flagged for sign-off; no implementation until
   approved.
+- [Resident-session kernel design](resident-session-kernel-design.md):
+  design doc AWAITING OPERATOR REVIEW (2026-08-24) — unifying repl
+  ask/suspend with harness suspension routing; recommends a
+  tidepool-runtime module over a new crate (counter to the initial
+  own-crate lean — needs the operator's call), migration order
+  conditioned on one-session.md Phase 6; four open questions.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): autonomous
   fresh-session dogfood rounds driven by the root + native subagents while
   the operator is offline (~7h, 2026-08-22); robot-operator form answering,
