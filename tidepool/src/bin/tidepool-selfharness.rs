@@ -485,8 +485,14 @@ fn build_outer_handlers(
 /// repository = the memory store; registry/worktree/binding roots under the
 /// durable data dir (NOT the regenerable cache — worktree state must survive
 /// cache clears — and outside any git work tree, which the registry refuses).
-/// Backend: the live Codex adapter over the operator's own `~/.codex`
-/// credentials, at the default cheap-plumbing model policy.
+/// Backend: [`tidepool_agent::backend::codex::CodexBackendFactory`] mints a
+/// fresh live Codex adapter (operator's own `~/.codex` credentials) PER
+/// CYCLE, at the default cheap-plumbing model policy — `with_backends`, not
+/// `new`, so a second (or concurrent) delegate cycle gets its own backend
+/// instead of finding the one-shot instance already consumed (poke-round
+/// finding 2: production hands `SubagentHandler` a single backend wrapped in
+/// a one-shot factory, so every delegate after the first fails at
+/// `StageAllocating` with nothing allocated).
 fn build_subagent_handler(
     repo: &std::path::Path,
 ) -> Result<tidepool_handlers::SubagentHandler, Box<dyn std::error::Error>> {
@@ -502,13 +508,13 @@ fn build_subagent_handler(
     }
     let (registry_root, worktree_root) = shared_worktree_roots()?;
     let binding_root = xdg_data_root()?.join("tidepool/subagent/bindings");
-    let backend = tidepool_agent::backend::codex::CodexAgentBackend::new()?;
-    let handler = tidepool_handlers::SubagentHandler::new(
+    let backends = tidepool_agent::backend::codex::CodexBackendFactory::new();
+    let handler = tidepool_handlers::SubagentHandler::with_backends(
         registry_root,
         worktree_root,
         binding_root,
         repo.to_path_buf(),
-        Box::new(backend),
+        Box::new(backends),
     )?;
     Ok(handler)
 }

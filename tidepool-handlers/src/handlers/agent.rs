@@ -2912,6 +2912,94 @@ mod tests {
         }
     }
 
+    /// The N-cycle counterpart to `handler_one_shot_backend_refusal_names_the_wiring`:
+    /// wired with `with_backends` over a two-backend queue, a SECOND
+    /// sequential `subagent_spawn` on the same handler must succeed with its
+    /// OWN fresh backend, not fail the way the one-shot wiring does — the
+    /// exact production defect (poke-round finding 2) this lane fixes.
+    #[test]
+    fn handler_second_sequential_spawn_gets_a_fresh_backend() {
+        let fx = Fixture::new();
+        let created = Arc::new(AtomicUsize::new(0));
+        let mut queue: VecDeque<Box<dyn AgentBackend + Send>> = VecDeque::new();
+        queue.push_back(Box::new(MockBackend::completing(
+            CycleResultPayload::Structured(serde_json::json!({ "summary": "first" })),
+        )));
+        queue.push_back(Box::new(MockBackend::completing(
+            CycleResultPayload::Structured(serde_json::json!({ "summary": "second" })),
+        )));
+        let mut handler = fx.handler_with(Box::new(QueuedBackends {
+            queue,
+            created: Arc::clone(&created),
+        }));
+
+        let first = handler
+            .subagent_spawn(
+                new_worktree_spec("reviewer-1", "first cycle"),
+                JsonArg(sample_schema()),
+            )
+            .expect("the first cycle's mock backend completes");
+        assert_eq!(
+            first.outcome_payload,
+            AgCyclePayload::PayloadStructured(serde_json::json!({ "summary": "first" }))
+        );
+
+        let second = handler
+            .subagent_spawn(
+                new_worktree_spec("reviewer-2", "second cycle"),
+                JsonArg(sample_schema()),
+            )
+            .expect(
+                "a second cycle must get its OWN fresh backend from the factory, not fail \
+                 because the first cycle's backend was already consumed",
+            );
+        assert_eq!(
+            second.outcome_payload,
+            AgCyclePayload::PayloadStructured(serde_json::json!({ "summary": "second" }))
+        );
+
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            2,
+            "the factory is asked for a backend once per cycle, never reused across cycles"
+        );
+    }
+
+    /// Two concurrent async spawns each allocate their OWN backend from the
+    /// factory at SPAWN time, before either completes — a second (or third)
+    /// concurrent delegate must never wait on, or fail because of, a sibling
+    /// spawn's backend allocation.
+    #[test]
+    fn handler_concurrent_async_spawns_each_allocate_a_backend() {
+        let fx = Fixture::new();
+        let mut fleet = Fleet::new(2);
+        let started = Arc::clone(&fleet.started);
+        let created = Arc::clone(&fleet.created);
+        let mut handler = fx.handler_with(fleet.factory()).with_cycle_capacity(2);
+
+        let cycles: Vec<AgCycleId> = (0..2)
+            .map(|i| {
+                spawn_async(&mut handler, &format!("worker-{i}"))
+                    .expect("a spawn under the cap is admitted immediately")
+            })
+            .collect();
+
+        started.wait_for(2, "both cycle turns to start");
+        assert_eq!(
+            created.load(Ordering::SeqCst),
+            2,
+            "each concurrent spawn asked the factory for its own backend, before either \
+             cycle had a chance to complete"
+        );
+
+        for (who, control) in fleet.controls.iter().enumerate() {
+            control.release();
+            handler
+                .subagent_await(cycles[who])
+                .expect("a released cycle completes");
+        }
+    }
+
     // ==================================================================
     // Cycle hygiene: cancel during the connect window, backend drop at
     // settle, and opportunistic capacity settling.

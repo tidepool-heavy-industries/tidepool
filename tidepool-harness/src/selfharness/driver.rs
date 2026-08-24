@@ -1509,23 +1509,33 @@ pub struct SelfHarnessDriver {
     /// for an event logged before this field existed.
     ask_id_counter: AtomicU64,
     /// The driver-owned handler set for every outer-row effect that isn't
-    /// `RunLLMTurn`/`AskUser` (which have their own dedicated servicing
-    /// paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Subagent`/`Journal`.
+    /// `RunLLMTurn`/`AskUser`/`Subagent` (which have their own dedicated
+    /// servicing paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal`.
     /// Each is DRIVER-owned, never a handler stack on the outer session,
     /// whose handled prefix must stay empty on the shared machine (see
     /// [`outer_decls`]); a suspension against an unwired handler fails
     /// LOUDLY with the wiring instruction, never a hang. Wire one via
     /// [`Self::set_console_handler`]/[`Self::set_worktree_handler`]/
     /// [`Self::set_event_handler`]/[`Self::set_exec_handler`]/
-    /// [`Self::set_subagent_handler`]/[`Self::set_journal_handler`].
-    /// `Mutex`-wrapped so [`Self::service_outer_subagent`] — reached from a
-    /// concurrent `runLLMTurnBranchFanout` sibling's own `delegate` call via
-    /// [`Self::drain_note_holes`] — can dispatch through the shared
-    /// `SubagentHandler` from `&self`; two siblings delegating in the same
-    /// bulk window simply serialize on the dispatch call itself (the same
-    /// synchronous handler this driver has always called, never made to run
-    /// two dispatches at once).
+    /// [`Self::set_journal_handler`]. `Mutex`-wrapped for the same
+    /// `&self`-dispatch reason [`Self::subagent`] is — see that field's doc
+    /// for why `Subagent` is deliberately NOT one of these six.
     handlers: Mutex<OuterHandlers>,
+    /// The driver-owned `Subagent` handler — held in its OWN lock, separate
+    /// from [`Self::handlers`]. A `SubagentAwait`/coupled `SubagentSpawn`
+    /// dispatch can block [`Self::service_outer_subagent`] for a whole agent
+    /// cycle (~30–120s live, 64.8s observed): bundling it into
+    /// `Mutex<OuterHandlers>` would make that one long block also starve
+    /// every unrelated `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal`
+    /// suspension serviced concurrently on another turn, since all six would
+    /// wait on the SAME lock for entirely unrelated state. A dedicated lock
+    /// bounds the blast radius to Subagent alone. Two siblings delegating in
+    /// the same bulk window (`Self::drain_note_holes`'s concurrent
+    /// `runLLMTurnBranchFanout` case) still serialize on THIS lock — the same
+    /// synchronous handler this driver has always called, never made to run
+    /// two dispatches at once — that part is unchanged. Wire it via
+    /// [`Self::set_subagent_handler`].
+    subagent: Mutex<Option<tidepool_handlers::SubagentHandler>>,
     /// This boot's run-journal fold, waiting to be injected — set by
     /// [`Self::open_run_journal`], `None` when no journal was opened (or when
     /// only the append sink was wired via [`Self::set_journal_handler`]).
@@ -1591,7 +1601,6 @@ struct OuterHandlers {
     worktree: Option<tidepool_handlers::WorktreeHandler>,
     event: Option<tidepool_handlers::RepoEventHandler>,
     exec: Option<tidepool_handlers::ExecHandler>,
-    subagent: Option<tidepool_handlers::SubagentHandler>,
     journal: Option<tidepool_handlers::JournalHandler>,
 }
 
@@ -1860,6 +1869,7 @@ impl SelfHarnessDriver {
             gate: Arc::new(StdinGate),
             ask_id_counter: AtomicU64::new(0),
             handlers: Mutex::new(OuterHandlers::default()),
+            subagent: Mutex::new(None),
             resume: None,
             node_labels: Mutex::new(HashMap::new()),
             fork_child_seq: Mutex::new(HashMap::new()),
@@ -1999,7 +2009,7 @@ impl SelfHarnessDriver {
     /// registry/worktree/binding roots OUTSIDE any git work tree; back it
     /// with `MockBackend` in tests and `CodexAgentBackend` live.
     pub fn set_subagent_handler(&mut self, handler: tidepool_handlers::SubagentHandler) {
-        self.handlers.lock().subagent = Some(handler);
+        *self.subagent.lock() = Some(handler);
     }
 
     /// Wire the Console seam: the handler a `say`/`Print` suspension from the
@@ -5203,17 +5213,23 @@ impl SelfHarnessDriver {
     /// the dispatch (the outer row's handled prefix must stay empty on the
     /// shared machine; see [`outer_decls`]).
     ///
-    /// `block_in_place`: `CodexAgentBackend` owns its own runtime and
-    /// `block_on`s it — the same discipline every `OperatorGate` call uses.
-    /// A lane-1 coupled spawn blocks this loop turn for the agent's whole
-    /// cycle (~30–120s live), by design (`plans/companion-memory.md`).
+    /// Runs the actual dispatch under `tokio::task::block_in_place`
+    /// (`CodexAgentBackend` owns its own runtime and `block_on`s it — the
+    /// same discipline every `OperatorGate` call uses), so a lane-1 coupled
+    /// spawn blocking this loop turn for the agent's whole cycle (~30–120s
+    /// live, by design — `plans/companion-memory.md`) frees the tokio worker
+    /// rather than parking it. The lock held for that call is
+    /// [`Self::subagent`] alone, NOT [`Self::handlers`] — see that field's
+    /// doc for why: a long subagent cycle must never starve an unrelated
+    /// `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal` suspension serviced
+    /// concurrently on another turn.
     fn service_outer_subagent(
         &self,
         request: &Value,
         table: &DataConTable,
     ) -> Result<Value, DriverError> {
-        let mut handlers = self.handlers.lock();
-        let handler = handlers.subagent.as_mut().ok_or_else(|| {
+        let mut guard = self.subagent.lock();
+        let handler = guard.as_mut().ok_or_else(|| {
             DriverError::Session(
                 "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
                  subagent handler is configured — wire one with \
@@ -5223,8 +5239,9 @@ impl SelfHarnessDriver {
             )
         })?;
         let started = std::time::Instant::now();
-        let value = Self::dispatch_outer_effect(handler, request, table)
-            .map_err(|e| DriverError::Session(format!("subagent dispatch: {e}")))?;
+        let value =
+            tokio::task::block_in_place(|| Self::dispatch_outer_effect(handler, request, table))
+                .map_err(|e| DriverError::Session(format!("subagent dispatch: {e}")))?;
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
             "outer subagent suspension serviced"

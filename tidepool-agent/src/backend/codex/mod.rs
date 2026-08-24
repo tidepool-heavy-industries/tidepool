@@ -38,7 +38,8 @@ pub mod replay;
 pub mod transport;
 
 pub use driver::{
-    CodexAgentBackend, CHEAPEST_GPT56_PREFERENCE, CHEAP_PLUMBING_PREFERENCE, DEFAULT_TURN_TIMEOUT,
+    CodexAgentBackend, CodexBackendFactory, CHEAPEST_GPT56_PREFERENCE, CHEAP_PLUMBING_PREFERENCE,
+    DEFAULT_TURN_TIMEOUT,
 };
 pub use replay::{ReplayError, TranscriptTransport};
 pub use transport::Transport;
