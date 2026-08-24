@@ -1,5 +1,12 @@
 # tidepool-handlers — concrete effect handlers (per-effect modules)
 
+**Charter.** Belongs: the concrete Rust `<Eff>Req` handler implementations
+(Console/KV/Fs/Http/Exec/Llm/Git/Time/Meta/Event/Worktree/Subagent) and stack
+assembly (`build_base_stack`). Does NOT belong: effect/verb type definitions
+(`tidepool-mcp`'s `effect_defs.rs` / `tidepool-protocol`'s schema), the git
+primitives a `WorktreeHandler` call wraps (`tidepool-worktree`), the coding
+backend a `SubagentHandler` drives (`tidepool-agent`).
+
 The Rust side of every `<Eff>Req` — Console, KV, Fs, Http, Exec, Llm, Git,
 Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls_with_ask`
 assemble the fully-wired server. See root `CLAUDE.md` for the project map;

@@ -1,5 +1,12 @@
 # tidepool-worktree — managed worktrees, durable registry, typed repository events
 
+**Charter.** Belongs: creating/retaining worktrees, the durable registry,
+dirty-source snapshotting, HEAD-movement observation, the event journal, and
+the one `git` subprocess call site. Does NOT belong: general git workflow
+verbs — rebase, cherry-pick, conflict resolution (stays with coding agents
+using their native tools; the one exception is the `merge` primitive
+documented below), effect wiring (`tidepool-handlers`'s `WorktreeHandler`).
+
 The Rust substrate for [PRD 19](../plans/self-iterating-harness/19-managed-worktrees-events-prd.md).
 Everything here is *git truth*: creating retained worktrees, recording them so a
 restart still finds them, snapshotting a dirty source without touching it,

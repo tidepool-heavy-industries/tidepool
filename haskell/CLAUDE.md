@@ -1,5 +1,10 @@
 # haskell/ — Tidepool Haskell harness + stdlib
 
+**Charter.** Belongs: the GHC→Core extractor (`tidepool-extract`) and the
+eval stdlib (`lib/Tidepool/*`, auto-imported in the MCP server). Does NOT
+belong: Rust-side toolchain resolution/deploy handshake
+(`tidepool-runtime::toolchain`), CBOR reading (`tidepool-repr`).
+
 The GHC→Core extractor (`tidepool-extract`) and the eval stdlib
 (`lib/Tidepool/*`, auto-imported in the MCP server). See the repo-root
 `CLAUDE.md` for the project map and locked decisions.

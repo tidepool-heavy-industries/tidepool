@@ -1,5 +1,11 @@
 # tidepool-agent — typed headless subagents (PRD 18)
 
+**Charter.** Belongs: typed headless subagent spawning — the `AgentBackend`
+step seam, backend adapters (Codex), the cycle saga, model-policy
+allowlists. The ONLY crate that knows a coding backend exists. Does NOT
+belong: the `Subagent` effect handler wiring (`tidepool-handlers`), worktree
+creation itself (`tidepool-worktree`).
+
 The ONLY crate in the workspace that knows a coding backend exists. See the
 repo-root `CLAUDE.md` for the project map, `tidepool-handlers/CLAUDE.md` for
 the effect-handler side, and

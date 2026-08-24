@@ -1,5 +1,12 @@
 # tidepool-mcp — MCP server library (eval surface)
 
+**Charter.** Belongs: the one-shot `eval`/`resume`/`abort` MCP tool surface,
+the effect DEFINITIONS (`effect_defs.rs`/generated projections), preamble
+import assembly, and eval-authoring pattern documentation. Does NOT belong:
+concrete effect handler implementations (`tidepool-handlers`), path/cache
+resolution (`tidepool-runtime::paths`), the resident stateful session
+protocol (`tidepool-repl`).
+
 Serves the `eval`/`resume`/`abort` tools over an effect stack. The live API
 reference for eval authors is the **`eval` tool description** (emitted by the
 server, assembled from the `*_decl()` functions here). The eval stdlib lives in

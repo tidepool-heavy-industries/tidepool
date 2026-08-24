@@ -87,29 +87,31 @@ below — it stays here verbatim.
 
 ```
 tidepool/
-├── tidepool/              ← Facade crate + MCP server binary (`cargo install tidepool`); also the composition-root `tidepool-selfharness` binary (driver + gate + provider + memory store + web server)
+├── tidepool/              ← Facade crate + MCP server binary (`cargo install tidepool`); also the composition-root `tidepool-selfharness` binary (driver + gate + provider + memory store + web server)  [CLAUDE.md]
 ├── tidepool-repr/         ← Core IR types: CoreExpr, DataConTable, CBOR serial  [CLAUDE.md]
 ├── tidepool-eval/         ← Tree-walking interpreter (oracle): Value, Env, lazy eval  [CLAUDE.md]
-├── tidepool-heap/         ← Manual heap + copying GC for JIT runtime
-├── tidepool-bignum/       ← Native ghc-bignum shims (Integer arith without GMP)
-├── tidepool-optimize/     ← Optimization passes: beta, DCE, inline, case reduce
-├── tidepool-bridge/       ← FromCore/ToCore traits + derive macros
-├── tidepool-bridge-derive/← Proc-macro for bridge derives
-├── tidepool-bridge-effects/← Single-source bridged-record types shared by handlers + test mocks
-├── tidepool-macro/        ← Proc-macros embedding Haskell source as CBOR at build time (haskell_eval!/haskell_inline!)
-├── tidepool-extract-cmd/  ← The ONE `tidepool-extract` invocation builder: bin resolution, typed args, the spawn + spawn counter. std-only leaf (zero deps)
-├── tidepool-effect/       ← Effect handling: DispatchEffect, EffectHandler, HList
+├── tidepool-heap/         ← Manual heap + copying GC for JIT runtime  [CLAUDE.md]
+├── tidepool-bignum/       ← Native ghc-bignum shims (Integer arith without GMP)  [CLAUDE.md]
+├── tidepool-optimize/     ← Optimization passes: beta, DCE, inline, case reduce  [CLAUDE.md]
+├── tidepool-bridge/       ← FromCore/ToCore traits + derive macros  [CLAUDE.md]
+├── tidepool-bridge-derive/← Proc-macro for bridge derives  [CLAUDE.md]
+├── tidepool-bridge-effects/← Single-source bridged-record types shared by handlers + test mocks  [CLAUDE.md]
+├── tidepool-macro/        ← Proc-macros embedding Haskell source as CBOR at build time (haskell_eval!/haskell_inline!)  [CLAUDE.md]
+├── tidepool-extract-cmd/  ← The ONE `tidepool-extract` invocation builder: bin resolution, typed args, the spawn + spawn counter. std-only leaf (zero deps)  [CLAUDE.md]
+├── tidepool-atomic-write/ ← The one same-directory atomic write-then-rename helper  [CLAUDE.md]
+├── tidepool-effect/       ← Effect handling: DispatchEffect, EffectHandler, HList  [CLAUDE.md]
 ├── tidepool-agent/        ← Typed headless subagents: the backend seam + the Codex adapter (the ONLY place a coding backend is named)  [CLAUDE.md]
 ├── tidepool-codegen/      ← Cranelift JIT compiler + effect machine  [CLAUDE.md]
-├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, cache
+├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, cache  [CLAUDE.md]
 ├── tidepool-mcp/          ← MCP server library (generic over effect handlers)  [CLAUDE.md]
+├── tidepool-protocol/     ← The effect protocol as data: schema + generators, zero-dep leaf  [CLAUDE.md]
 ├── tidepool-handlers/     ← Central effect-request handler arms (`<Eff>Req` matches)  [CLAUDE.md]
 ├── tidepool-repl/         ← GHCi-style resident-session MCP server  [CLAUDE.md]
 ├── tidepool-harness/      ← Resident harness: session-tree turn lifecycle, SessionRegistry checkout ownership, selfharness driver  [CLAUDE.md]
 ├── tidepool-worktree/     ← Managed worktrees, durable registry, typed repository events (PRD 19)  [CLAUDE.md]
 ├── tidepool-web/          ← Web operator GUI: AskUser form rendering + the operator gate  [CLAUDE.md]
 ├── tidepool-testing/      ← Test utilities + property-based generators (internal)
-├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL
+├── examples/{guess,tide}/ ← Demos: number-guessing game, REPL  [CLAUDE.md]
 ├── harness-dogfooding/    ← Authored harnesses (companion, recursive-companion, dev-tree) run by the selfharness driver
 ├── haskell/               ← Haskell harness (tidepool-extract) + test suite + stdlib  [CLAUDE.md]
 │   └── lib/Tidepool/      ← Haskell stdlib (auto-imported in MCP)

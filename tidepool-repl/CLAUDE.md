@@ -1,5 +1,12 @@
 # tidepool-repl — GHCi-style stateful session server
 
+**Charter.** Belongs: the GHCi-style resident-session MCP surface
+(`session_run`/`session_resume`/`session_reset`), block-runner item
+classification, and the single-implicit-session policy layer. Does NOT
+belong: the suspension engine itself (`tidepool_runtime::session::
+PersistentSession`), effect handler implementations (`tidepool-handlers`),
+multi-node/multi-hole tree orchestration (`tidepool-harness`).
+
 A resident-JIT session surface. One session = one long-lived JIT machine whose
 value heap and module scope persist across calls — declarations and bindings
 accumulate turn over turn. See the repo-root `CLAUDE.md` for the project map;

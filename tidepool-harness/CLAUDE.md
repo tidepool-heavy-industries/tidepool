@@ -1,5 +1,13 @@
 # tidepool-harness — typed-yield session harness
 
+**Charter.** Belongs: the resident harness — session-tree turn lifecycle,
+`SessionRegistry` checkout ownership, hole/suspension classification, and the
+selfharness driver (self-iterating loop, fork/fanout, the `AskUser` operator
+gate routing). Does NOT belong: the JIT/effect machine itself
+(`tidepool-codegen`), the resident session suspension primitive
+(`tidepool_runtime::session`), concrete effect handlers (`tidepool-handlers`),
+operator GUI rendering (`tidepool-web`).
+
 A frontend over the eval substrate, peer to `tidepool-repl`. Both share ONE
 suspension engine: the threadless stow-as-data mechanism in
 `tidepool_runtime::session::PersistentSession`. Suspension here is threadless

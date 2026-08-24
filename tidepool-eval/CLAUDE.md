@@ -1,5 +1,11 @@
 # tidepool-eval — tree-walking interpreter (the JIT's oracle)
 
+**Charter.** Belongs: the lazy, big-step tree-walking interpreter over
+`CoreExpr` (`Value`, `Env`, `Heap`, thunk lifecycle) that exists solely to
+differentially oracle the JIT. Does NOT belong: JIT compilation or heap byte
+layout (`tidepool-codegen`), `CoreExpr`/`CoreFrame` type definitions
+(`tidepool-repr`).
+
 A lazy, big-step evaluator over `CoreExpr`. Its sole reason to exist is
 differential testing: it must agree with `tidepool-codegen`'s Cranelift JIT on
 every observable result, so JIT bugs surface as eval-vs-JIT mismatches instead

@@ -1,5 +1,12 @@
 # tidepool-codegen — Cranelift JIT compiler + effect machine
 
+**Charter.** Belongs: compiling `CoreExpr` to Cranelift-backed native state
+machines, the GC (heap layout consumer, frame walker, root accounting), and
+the effect machine at the JIT↔Rust boundary. Does NOT belong: the `CoreExpr`
+IR itself (`tidepool-repr`), the differential oracle interpreter
+(`tidepool-eval`), the high-level `compile_haskell`/caching API
+(`tidepool-runtime`).
+
 Compiles `CoreExpr` to Cranelift-backed state machines and drives the effect
 machine at the JIT↔Rust boundary. See the repo-root `CLAUDE.md` for the project
 map and locked decisions.

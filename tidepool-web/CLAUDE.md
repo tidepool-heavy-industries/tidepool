@@ -1,5 +1,11 @@
 # tidepool-web — the operator GUI for the self-iterating harness
 
+**Charter.** Belongs: the operator-facing web GUI (axum server, SSE stream,
+d3 tree view + legacy outline) implementing `OperatorGate`. Does NOT belong:
+harness/driver logic itself (`tidepool-harness`), the composition-root binary
+that wires this crate together with the driver, provider, and memory store
+(`tidepool/src/bin/tidepool-selfharness.rs`).
+
 Built on the **minimal node model**: N registered nodes in a tree
 (slash-separated `node_id` paths, convention = wire-carried branch labels),
 where each node is one lifecycle — a **seed** prompt in, an append-only

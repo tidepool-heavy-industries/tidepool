@@ -1,5 +1,11 @@
 # tidepool-repr — Core IR types + CBOR wire format
 
+**Charter.** Belongs: `CoreExpr`/`CoreFrame` IR types, `DataConTable`,
+free-variable analysis, and the CBOR wire format — the shared representation
+every downstream crate consumes. Does NOT belong: evaluation (`tidepool-eval`),
+JIT compilation or heap byte layout (`tidepool-codegen`), Cast/Tick/Type
+erasure (stays in the Haskell serializer, never ported to Rust).
+
 The shared IR and serialization boundary: everything downstream (`tidepool-eval`
 the oracle, `tidepool-optimize`, `tidepool-codegen` the JIT) consumes `CoreExpr`
 built here. **Read the repo-root `CLAUDE.md` Key Decisions Reference FIRST** —
