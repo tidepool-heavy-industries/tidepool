@@ -967,7 +967,7 @@ Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
   answerer/outer stacks have none, so effect activity shows as
   `HolePublished`/`HoleConsumed`, not `Effect` (see Replay).
 
-The production binary (`tidepool-web/src/bin/tidepool-selfharness.rs`) does
+The production binary (`tidepool/src/bin/tidepool-selfharness.rs`) does
 NOT reuse one fixed `log.jsonl`: `LogWriter` refuses to overwrite an existing
 run's log, so each boot mints its own `log-<epoch>.jsonl` sibling under
 `<cache>/selfharness/` — tail the NEWEST one, e.g.

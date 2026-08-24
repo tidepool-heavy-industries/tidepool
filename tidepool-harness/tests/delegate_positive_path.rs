@@ -12,7 +12,7 @@
 //! — a copied fixture would keep passing while the shipped harness rotted),
 //! booting `EngineConfig::from_decls(typed_request_agent_decls_with_delegate(), ..)
 //! .with_delegate_wrap()` for the answerer config — the same wiring
-//! `tidepool-web/src/bin/tidepool-selfharness.rs` selects live — so the
+//! `tidepool/src/bin/tidepool-selfharness.rs` selects live — so the
 //! root session compiles against the narrow delegating row.
 //!
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH

@@ -290,7 +290,7 @@ pub fn default_settings_path() -> PathBuf {
 /// stream. Sits alongside `checkpoint.json`/`transcript.jsonl` under the same
 /// dir.
 ///
-/// The production binary (`tidepool-web/src/bin/tidepool-selfharness.rs`)
+/// The production binary (`tidepool/src/bin/tidepool-selfharness.rs`)
 /// does NOT write to this exact path: `LogWriter` refuses to overwrite an
 /// existing run's log, so each boot mints its own `log-<epoch>.jsonl`
 /// sibling in this function's PARENT directory (only the directory comes
