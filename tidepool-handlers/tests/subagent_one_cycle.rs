@@ -38,9 +38,25 @@
 //! `CycleSpec` the saga actually hands the backend, without adding an
 //! accessor to `SubagentHandler` or `MockBackend` for it.
 //!
+//! ## One compile, five gates
+//!
+//! Every gate below drives `PROGRAM_SPAWN_AND_REPORT` — byte-identical
+//! Haskell source across all five — against a DIFFERENT backend/fixture. Per
+//! `plans/test-time-cut.md` §3/§6 item 1, `compile_gate1_and_program` compiles
+//! it ONCE (one `tidepool-extract` spawn) and hands the `CompiledProgram` back
+//! so `Session::from_compiled` can build four more independent machines from
+//! it — own fixture, own backend, own JIT run per gate, only the compile is
+//! shared. Because nextest runs one process per `#[test]` fn, sharing a
+//! compile across gates means the gates run inside ONE `#[test]` fn
+//! (`subagent_one_cycle_family`); each gate's body still runs to completion
+//! and is reported by name via `catch_unwind`, so one gate's assertion
+//! failure never hides whether the others still pass — the same visibility
+//! five separate `#[test]` fns gave, one spawn instead of five.
+//!
 //! Needs `TIDEPOOL_EXTRACT` (a built `tidepool-extract-bin`) + GHC on PATH;
 //! fails loudly otherwise via [`require_ghc`], never skips-as-pass.
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -59,7 +75,7 @@ use tidepool_effect::Response;
 use tidepool_eval::value::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
-use tidepool_repr::DataConTable;
+use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
     Binding, BindingState, BindingTable, GitCli, WorktreeId, WorktreeManager, WorktreeRegistry,
@@ -192,6 +208,14 @@ const HELPERS: &str = "data WorkerResult = Completed { summary :: Text, caveats 
                        \x20                 | Blocked { blocker :: Text, evidence :: [Text] }\n\
                        \x20 deriving (Show, Eq, Generic, FromJSON, JsonSchema)\n";
 
+/// Core + constructor table for a compiled program, shared across every gate
+/// that runs the SAME Haskell source — see the module doc's "One compile,
+/// five gates".
+struct CompiledProgram {
+    expr: CoreExpr,
+    table: DataConTable,
+}
+
 /// A compiled program plus the machine and handler stack driving it on the
 /// parked path — `repo_event_with_handler.rs`'s `Session`, minus ask/answer:
 /// no program here ever suspends, so a suspension is a hard failure rather
@@ -207,18 +231,28 @@ struct Session {
     handled_prefix: Vec<String>,
 }
 
+/// The decls/preamble/row shape derived from `Stack` — identical for any
+/// `SubagentHandler`, since `base_decls_with_ask` reads the row's EFFECT
+/// LIST (fixed by `Stack`'s type), not any handler's runtime state.
+fn stack_decls(stack: &Stack) -> (Vec<tidepool_mcp::EffectDecl>, u64, Vec<String>) {
+    let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(stack);
+    let handled_prefix: Vec<String> = decls[..ask_tag as usize]
+        .iter()
+        .map(|d| d.type_name.to_string())
+        .collect();
+    (decls, ask_tag, handled_prefix)
+}
+
 impl Session {
     /// Compile `code` (a bare statement sequence, wrapped in `do` by
     /// `wrap_do`) against a row containing `SubagentHandler`, and build a
-    /// session machine for it.
-    fn compile(code: &str, handler: SubagentHandler) -> Self {
+    /// session machine for it — ONE `tidepool-extract` spawn. Returns the
+    /// compiled program alongside so further gates driving the SAME `code`
+    /// can build their own machine via [`Session::from_compiled`] without a
+    /// second spawn.
+    fn compile(code: &str, handler: SubagentHandler) -> (Self, CompiledProgram) {
         let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
-
-        let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
-        let handled_prefix: Vec<String> = decls[..ask_tag as usize]
-            .iter()
-            .map(|d| d.type_name.to_string())
-            .collect();
+        let (decls, ask_tag, handled_prefix) = stack_decls(&stack);
 
         let preamble = tidepool_mcp::build_preamble(&decls, false);
         let row = tidepool_mcp::build_effect_stack_type(&decls);
@@ -244,6 +278,36 @@ impl Session {
         let mut table = compiled.table;
         table.populate_siblings_from_expr(&compiled.expr);
         let machine = JitEffectMachine::compile_session(&compiled.expr, &table, 1 << 20)
+            .expect("compile_session");
+
+        let program = CompiledProgram {
+            expr: compiled.expr,
+            table: table.clone(),
+        };
+        (
+            Self {
+                machine,
+                table,
+                stack,
+                captured: CapturedOutput::new(),
+                ask_tag,
+                handled_prefix,
+            },
+            program,
+        )
+    }
+
+    /// As [`Session::compile`], but reuses an already-compiled program — NO
+    /// new `tidepool-extract` spawn — for a gate whose Haskell source is
+    /// byte-identical to a prior gate's (own machine, own heap, own handler
+    /// stack throughout — only the compile is shared).
+    fn from_compiled(program: &CompiledProgram, handler: SubagentHandler) -> Self {
+        let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
+        let (_decls, ask_tag, handled_prefix) = stack_decls(&stack);
+
+        let mut table = program.table.clone();
+        table.populate_siblings_from_expr(&program.expr);
+        let machine = JitEffectMachine::compile_session(&program.expr, &table, 1 << 20)
             .expect("compile_session");
 
         Self {
@@ -425,205 +489,6 @@ case result of
   Left other -> error ("unexpected spawn error: " <> renderSpawnError other)
 "#;
 
-// ============================================================================
-// Gate 1 — the typed result round-trips through the real JIT
-// ============================================================================
-
-#[test]
-fn typed_result_round_trips_through_the_real_jit() {
-    require_ghc();
-    in_test_thread(|| {
-        let fx = Fixture::new();
-        let payload = serde_json::json!({
-            "tag": "Completed",
-            "summary": "done",
-            "caveats": ["a", "b"],
-        });
-        let backend = MockBackend::completing(CycleResultPayload::Structured(payload));
-        let handler = fx.handler(Box::new(backend));
-
-        let mut session = Session::compile(PROGRAM_SPAWN_AND_REPORT, handler);
-        let out = session.run();
-
-        assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
-        assert_eq!(out["summary"], "done");
-        assert_eq!(out["caveats"], serde_json::json!(["a", "b"]));
-        assert_eq!(
-            out["model"],
-            MockBackend::MODEL,
-            "the receipt must record the EXACT resolved model, never a tier name"
-        );
-        let worktree_str = out["worktree"].as_str().expect("worktree is a string");
-        assert!(!worktree_str.is_empty());
-        assert!(
-            !out["bindingRef"].as_str().unwrap().is_empty(),
-            "the binding ref is the string the binding was taken under"
-        );
-        assert!(
-            !out["thread"].as_str().unwrap().is_empty(),
-            "the backend thread id is the mock's own, echoed"
-        );
-        assert!(
-            !out["turn"].as_str().unwrap().is_empty(),
-            "the turn id is the backend's own, echoed"
-        );
-
-        let worktree_id = WorktreeId::from_raw(worktree_str);
-        let handler = session.into_subagent_handler();
-
-        // Success settles the binding Terminal — distinct from rollback's
-        // Released (finished vs stopped-waiting).
-        let history = fx.binding_history(&worktree_id);
-        let last = history
-            .last()
-            .expect("at least one binding row for the worktree that was bound");
-        assert_eq!(
-            last.state(),
-            BindingState::Terminal,
-            "a completed one-cycle agent settles Terminal, not Released or Active"
-        );
-        assert_eq!(last.agent().as_str(), out["bindingRef"].as_str().unwrap());
-
-        // The worktree the run actually got is retained and present on disk.
-        let found = handler
-            .spawner()
-            .manager()
-            .lookup(&worktree_id)
-            .expect("lookup the worktree the run reported")
-            .expect("the worktree must be registered");
-        assert!(
-            found.cwd().exists(),
-            "the worktree handle's cwd must exist on disk: {:?}",
-            found.cwd()
-        );
-    });
-}
-
-// ============================================================================
-// Gate 2 — a backend failure surfaces as a typed SpawnError, with rollback
-// proven from DISK state
-// ============================================================================
-
-#[test]
-fn backend_failure_surfaces_as_typed_spawn_error_and_rolls_back() {
-    require_ghc();
-    in_test_thread(|| {
-        let fx = Fixture::new();
-        let backend = MockBackend::failing(MockFailure::AtThreadStart(
-            AgentBackendError::BackendUnavailable {
-                detail: "codex app-server not running".to_string(),
-            },
-        ));
-        let handler = fx.handler(Box::new(backend));
-
-        let mut session = Session::compile(PROGRAM_SPAWN_AND_REPORT, handler);
-        let out = session.run();
-
-        assert_eq!(
-            out["case"], "backend_error",
-            "unexpected program branch: {out}"
-        );
-        assert_eq!(out["detail"], "codex app-server not running");
-
-        // Drop the WHOLE session — including the handler's flocked
-        // BindingTable — before reopening fresh state from disk. Reopening
-        // while the original table is still alive would refuse (single-owner
-        // enforcement), which is itself the point: the rollback must be true
-        // of DISK, not merely of the in-memory table that wrote it.
-        drop(session);
-
-        let manager = fx.reopen_manager();
-        let summaries = manager
-            .list()
-            .expect("list the registry after the whole session was dropped");
-        assert_eq!(
-            summaries.len(),
-            1,
-            "exactly one worktree was ever created in this fixture"
-        );
-        let worktree_id = summaries[0].receipt.worktree_id.clone();
-
-        let bindings = fx.reopen_bindings();
-        assert!(
-            bindings.current(&worktree_id).is_none(),
-            "no Active binding must remain after a rolled-back spawn"
-        );
-
-        let found = manager
-            .lookup(&worktree_id)
-            .expect("lookup must not fail: the worktree is retained, never deleted")
-            .expect("the worktree must still be registered");
-        assert!(
-            found.cwd().exists(),
-            "the worktree is RETAINED — rollback settles the binding, it never deletes: {:?}",
-            found.cwd()
-        );
-
-        let history = fx.binding_history(&worktree_id);
-        assert_eq!(
-            history.last().expect("at least one binding row").state(),
-            BindingState::Released,
-            "a post-Bound failure settles Released — unbound and rebindable, never left Active"
-        );
-    });
-}
-
-// ============================================================================
-// Gate 3 — a malformed structured payload is a typed decode failure, never a
-// success
-// ============================================================================
-
-#[test]
-fn malformed_payload_is_a_typed_decode_failure_never_a_success() {
-    require_ghc();
-    in_test_thread(|| {
-        let fx = Fixture::new();
-        // Missing `caveats` — the schema `spawnAgent` derived from
-        // `WorkerResult` requires it.
-        let payload = serde_json::json!({ "tag": "Completed", "summary": "done" });
-        let backend = MockBackend::completing(CycleResultPayload::Structured(payload));
-        let handler = fx.handler(Box::new(backend));
-
-        let mut session = Session::compile(PROGRAM_SPAWN_AND_REPORT, handler);
-        let out = session.run();
-
-        assert_eq!(out["case"], "malformed", "unexpected program branch: {out}");
-        assert_eq!(
-            out["message"], "key \"caveats\" not present",
-            "the plain vendored decode error, naming the missing field — there is no \
-             codec on this boundary and no path-carrying error machinery"
-        );
-    });
-}
-
-// ============================================================================
-// Gate 4 — an unstructured (non-JSON) terminal message is typed malformed too
-// ============================================================================
-
-#[test]
-fn unstructured_payload_is_typed_malformed() {
-    require_ghc();
-    in_test_thread(|| {
-        let fx = Fixture::new();
-        let backend =
-            MockBackend::completing(CycleResultPayload::Unstructured("prose".to_string()));
-        let handler = fx.handler(Box::new(backend));
-
-        let mut session = Session::compile(PROGRAM_SPAWN_AND_REPORT, handler);
-        let out = session.run();
-
-        assert_eq!(out["case"], "malformed", "unexpected program branch: {out}");
-        assert_eq!(
-            out["message"], "terminal message was not JSON: prose",
-            "Spawn.hs's PayloadUnstructured branch names the message verbatim"
-        );
-    });
-}
-
-// ============================================================================
-// Gate 5 — the schema that reaches the backend is the NAMED-FIELD shape
-// ============================================================================
-
 /// `jsonSchema (Proxy :: Proxy WorkerResult)`'s exact rendering — aeson's
 /// `TaggedObject` shape, which is what the `FromJSON` instance on the other
 /// side of this same payload actually reads. `oneOf` order follows
@@ -657,43 +522,264 @@ fn pinned_worker_result_schema() -> serde_json::Value {
     })
 }
 
+/// Run `body` (a gate) and collect its name into `failures` on panic, instead
+/// of aborting the whole family — so every gate below still runs and reports
+/// by name, the way five separate `#[test]` fns would.
+fn run_gate(name: &str, failures: &mut Vec<String>, body: impl FnOnce()) {
+    if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        let msg = e
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "panic (non-string payload)".to_string());
+        failures.push(format!("{name}: {msg}"));
+    }
+}
+
+// ============================================================================
+// Gates 1-5 — one compile (`PROGRAM_SPAWN_AND_REPORT`), five independent runs
+// ============================================================================
+
 #[test]
-fn schema_reaches_the_backend_named_field_shape() {
+fn subagent_one_cycle_family() {
     require_ghc();
     in_test_thread(|| {
-        let fx = Fixture::new();
+        let mut failures: Vec<String> = Vec::new();
+
+        // Gate 1 also performs the ONE compile every other gate reuses.
+        let fx1 = Fixture::new();
         let payload = serde_json::json!({
             "tag": "Completed",
             "summary": "done",
             "caveats": ["a", "b"],
         });
-        let log: Arc<Mutex<Vec<CycleSpec>>> = Arc::new(Mutex::new(Vec::new()));
-        let backend = RecordingBackend {
-            inner: MockBackend::completing(CycleResultPayload::Structured(payload)),
-            log: log.clone(),
-        };
-        let handler = fx.handler(Box::new(backend));
+        let backend = MockBackend::completing(CycleResultPayload::Structured(payload));
+        let handler = fx1.handler(Box::new(backend));
+        let (session1, program) = Session::compile(PROGRAM_SPAWN_AND_REPORT, handler);
 
-        let mut session = Session::compile(PROGRAM_SPAWN_AND_REPORT, handler);
-        let out = session.run();
-        assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+        run_gate(
+            "typed_result_round_trips_through_the_real_jit",
+            &mut failures,
+            move || {
+                let mut session1 = session1;
+                let out = session1.run();
 
-        let cycles = log.lock();
-        assert_eq!(
-            cycles.len(),
-            1,
-            "lane 1 is exactly one cycle: {:?}",
-            *cycles
+                assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+                assert_eq!(out["summary"], "done");
+                assert_eq!(out["caveats"], serde_json::json!(["a", "b"]));
+                assert_eq!(
+                    out["model"],
+                    MockBackend::MODEL,
+                    "the receipt must record the EXACT resolved model, never a tier name"
+                );
+                let worktree_str = out["worktree"].as_str().expect("worktree is a string");
+                assert!(!worktree_str.is_empty());
+                assert!(
+                    !out["bindingRef"].as_str().unwrap().is_empty(),
+                    "the binding ref is the string the binding was taken under"
+                );
+                assert!(
+                    !out["thread"].as_str().unwrap().is_empty(),
+                    "the backend thread id is the mock's own, echoed"
+                );
+                assert!(
+                    !out["turn"].as_str().unwrap().is_empty(),
+                    "the turn id is the backend's own, echoed"
+                );
+
+                let worktree_id = WorktreeId::from_raw(worktree_str);
+
+                // Success settles the binding Terminal — distinct from rollback's
+                // Released (finished vs stopped-waiting).
+                let history = fx1.binding_history(&worktree_id);
+                let last = history
+                    .last()
+                    .expect("at least one binding row for the worktree that was bound");
+                assert_eq!(
+                    last.state(),
+                    BindingState::Terminal,
+                    "a completed one-cycle agent settles Terminal, not Released or Active"
+                );
+                assert_eq!(last.agent().as_str(), out["bindingRef"].as_str().unwrap());
+
+                // The worktree the run actually got is retained and present on disk —
+                // read through the SAME still-open handler the run used (its
+                // BindingTable/registry flock is still held; a fresh reopen here
+                // would contend with it).
+                let handler = session1.into_subagent_handler();
+                let found = handler
+                    .spawner()
+                    .manager()
+                    .lookup(&worktree_id)
+                    .expect("lookup the worktree the run reported")
+                    .expect("the worktree must be registered");
+                assert!(
+                    found.cwd().exists(),
+                    "the worktree handle's cwd must exist on disk: {:?}",
+                    found.cwd()
+                );
+                // Release the flock before the fixture drops at the end of scope.
+                drop(handler);
+            },
         );
-        let schema = cycles[0]
-            .output_schema
-            .as_ref()
-            .expect("spawnAgent must derive an output_schema from WorkerResult, never None");
-        assert_eq!(
-            *schema,
-            pinned_worker_result_schema(),
-            "the schema reaching the backend must be the NAMED-FIELD shape the caller's \
-             own FromJSON reads — not a positional {{tag, fields:[..]}} shape"
+
+        // Gate 2 — a backend failure surfaces as a typed SpawnError, with
+        // rollback proven from DISK state.
+        run_gate(
+            "backend_failure_surfaces_as_typed_spawn_error_and_rolls_back",
+            &mut failures,
+            || {
+                let fx = Fixture::new();
+                let backend = MockBackend::failing(MockFailure::AtThreadStart(
+                    AgentBackendError::BackendUnavailable {
+                        detail: "codex app-server not running".to_string(),
+                    },
+                ));
+                let handler = fx.handler(Box::new(backend));
+
+                let mut session = Session::from_compiled(&program, handler);
+                let out = session.run();
+
+                assert_eq!(
+                    out["case"], "backend_error",
+                    "unexpected program branch: {out}"
+                );
+                assert_eq!(out["detail"], "codex app-server not running");
+
+                // Drop the WHOLE session — including the handler's flocked
+                // BindingTable — before reopening fresh state from disk.
+                drop(session);
+
+                let manager = fx.reopen_manager();
+                let summaries = manager
+                    .list()
+                    .expect("list the registry after the whole session was dropped");
+                assert_eq!(
+                    summaries.len(),
+                    1,
+                    "exactly one worktree was ever created in this fixture"
+                );
+                let worktree_id = summaries[0].receipt.worktree_id.clone();
+
+                let bindings = fx.reopen_bindings();
+                assert!(
+                    bindings.current(&worktree_id).is_none(),
+                    "no Active binding must remain after a rolled-back spawn"
+                );
+
+                let found = manager
+                    .lookup(&worktree_id)
+                    .expect("lookup must not fail: the worktree is retained, never deleted")
+                    .expect("the worktree must still be registered");
+                assert!(
+                    found.cwd().exists(),
+                    "the worktree is RETAINED — rollback settles the binding, it never deletes: {:?}",
+                    found.cwd()
+                );
+
+                let history = fx.binding_history(&worktree_id);
+                assert_eq!(
+                    history.last().expect("at least one binding row").state(),
+                    BindingState::Released,
+                    "a post-Bound failure settles Released — unbound and rebindable, never left Active"
+                );
+            },
+        );
+
+        // Gate 3 — a malformed structured payload is a typed decode failure,
+        // never a success.
+        run_gate(
+            "malformed_payload_is_a_typed_decode_failure_never_a_success",
+            &mut failures,
+            || {
+                let fx = Fixture::new();
+                // Missing `caveats` — the schema `spawnAgent` derived from
+                // `WorkerResult` requires it.
+                let payload = serde_json::json!({ "tag": "Completed", "summary": "done" });
+                let backend = MockBackend::completing(CycleResultPayload::Structured(payload));
+                let handler = fx.handler(Box::new(backend));
+
+                let mut session = Session::from_compiled(&program, handler);
+                let out = session.run();
+
+                assert_eq!(out["case"], "malformed", "unexpected program branch: {out}");
+                assert_eq!(
+                    out["message"], "key \"caveats\" not present",
+                    "the plain vendored decode error, naming the missing field — there is no \
+                     codec on this boundary and no path-carrying error machinery"
+                );
+            },
+        );
+
+        // Gate 4 — an unstructured (non-JSON) terminal message is typed
+        // malformed too.
+        run_gate(
+            "unstructured_payload_is_typed_malformed",
+            &mut failures,
+            || {
+                let fx = Fixture::new();
+                let backend =
+                    MockBackend::completing(CycleResultPayload::Unstructured("prose".to_string()));
+                let handler = fx.handler(Box::new(backend));
+
+                let mut session = Session::from_compiled(&program, handler);
+                let out = session.run();
+
+                assert_eq!(out["case"], "malformed", "unexpected program branch: {out}");
+                assert_eq!(
+                    out["message"], "terminal message was not JSON: prose",
+                    "Spawn.hs's PayloadUnstructured branch names the message verbatim"
+                );
+            },
+        );
+
+        // Gate 5 — the schema that reaches the backend is the NAMED-FIELD
+        // shape.
+        run_gate(
+            "schema_reaches_the_backend_named_field_shape",
+            &mut failures,
+            || {
+                let fx = Fixture::new();
+                let payload = serde_json::json!({
+                    "tag": "Completed",
+                    "summary": "done",
+                    "caveats": ["a", "b"],
+                });
+                let log: Arc<Mutex<Vec<CycleSpec>>> = Arc::new(Mutex::new(Vec::new()));
+                let backend = RecordingBackend {
+                    inner: MockBackend::completing(CycleResultPayload::Structured(payload)),
+                    log: log.clone(),
+                };
+                let handler = fx.handler(Box::new(backend));
+
+                let mut session = Session::from_compiled(&program, handler);
+                let out = session.run();
+                assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+
+                let cycles = log.lock();
+                assert_eq!(
+                    cycles.len(),
+                    1,
+                    "lane 1 is exactly one cycle: {:?}",
+                    *cycles
+                );
+                let schema = cycles[0].output_schema.as_ref().expect(
+                    "spawnAgent must derive an output_schema from WorkerResult, never None",
+                );
+                assert_eq!(
+                    *schema,
+                    pinned_worker_result_schema(),
+                    "the schema reaching the backend must be the NAMED-FIELD shape the caller's \
+                     own FromJSON reads — not a positional {{tag, fields:[..]}} shape"
+                );
+            },
+        );
+
+        assert!(
+            failures.is_empty(),
+            "{} gate(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
         );
     });
 }

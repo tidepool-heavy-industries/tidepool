@@ -35,9 +35,25 @@
 //! `SubagentHandler`, exactly as `subagent_one_cycle.rs`'s `RecordingBackend`
 //! mirrors `cycles`.
 //!
+//! ## One compile, six gates
+//!
+//! `PROGRAM_TOOLS` is byte-identical across every gate below except
+//! `a_tools_compile_error_returns_before_anything_is_spawned` (which uses
+//! `PROGRAM_BAD_TOOLS` — a genuinely different, deliberately non-compiling
+//! source, and stays its own standalone `#[test]`/spawn). Per
+//! `plans/test-time-cut.md` §3/§6 item 1, the first PROGRAM_TOOLS gate compiles
+//! it ONCE and hands the `CompiledProgram` to the rest via
+//! `Session::from_compiled` (own fixture, own backend, own JIT run per gate —
+//! only the compile is shared). Because nextest runs one process per `#[test]`
+//! fn, the six PROGRAM_TOOLS gates run inside ONE `#[test]` fn
+//! (`subagent_tool_loop_family`); each gate's body still runs to completion and
+//! is reported by name via `catch_unwind`, so one gate's assertion failure
+//! never hides whether the others still pass.
+//!
 //! Needs `TIDEPOOL_EXTRACT` (a built `tidepool-extract-bin`) + GHC on PATH;
 //! fails loudly otherwise via [`require_ghc`], never skips-as-pass.
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -56,7 +72,7 @@ use tidepool_effect::Response;
 use tidepool_eval::value::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
-use tidepool_repr::DataConTable;
+use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{GitCli, WorktreeManager, WorktreeRegistry};
 
@@ -247,6 +263,14 @@ badTools = BadTools
   }
 "#;
 
+/// Core + constructor table for a compiled program, shared across every gate
+/// that runs the SAME Haskell source — see the module doc's "One compile,
+/// six gates".
+struct CompiledProgram {
+    expr: CoreExpr,
+    table: DataConTable,
+}
+
 /// A compiled program plus the machine and handler stack driving it on the
 /// parked path — `subagent_one_cycle.rs`'s `Session`, plus an accessor for the
 /// console output a parent handler produced mid-loop.
@@ -261,18 +285,28 @@ struct Session {
     handled_prefix: Vec<String>,
 }
 
+/// The decls/preamble/row shape derived from `Stack` — identical for any
+/// `SubagentHandler`, since `base_decls_with_ask` reads the row's EFFECT
+/// LIST (fixed by `Stack`'s type), not any handler's runtime state.
+fn stack_decls(stack: &Stack) -> (Vec<EffectDecl>, u64, Vec<String>) {
+    let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(stack);
+    let handled_prefix: Vec<String> = decls[..ask_tag as usize]
+        .iter()
+        .map(|d| d.type_name.to_string())
+        .collect();
+    (decls, ask_tag, handled_prefix)
+}
+
 impl Session {
     /// Compile `code` (a bare statement sequence, wrapped in `do` by
     /// `wrap_do`) against a row containing `SubagentHandler`, and build a
-    /// session machine for it.
-    fn compile(code: &str, handler: SubagentHandler) -> Self {
+    /// session machine for it — ONE `tidepool-extract` spawn. Returns the
+    /// compiled program alongside so further gates driving the SAME `code`
+    /// can build their own machine via [`Session::from_compiled`] without a
+    /// second spawn.
+    fn compile(code: &str, handler: SubagentHandler) -> (Self, CompiledProgram) {
         let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
-
-        let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
-        let handled_prefix: Vec<String> = decls[..ask_tag as usize]
-            .iter()
-            .map(|d| d.type_name.to_string())
-            .collect();
+        let (decls, ask_tag, handled_prefix) = stack_decls(&stack);
 
         let preamble = tidepool_mcp::build_preamble(&decls, false);
         let row = tidepool_mcp::build_effect_stack_type(&decls);
@@ -298,6 +332,34 @@ impl Session {
         let mut table = compiled.table;
         table.populate_siblings_from_expr(&compiled.expr);
         let machine = JitEffectMachine::compile_session(&compiled.expr, &table, 1 << 20)
+            .expect("compile_session");
+
+        let program = CompiledProgram {
+            expr: compiled.expr,
+            table: table.clone(),
+        };
+        (
+            Self {
+                machine,
+                table,
+                stack,
+                captured: CapturedOutput::new(),
+                ask_tag,
+                handled_prefix,
+            },
+            program,
+        )
+    }
+
+    /// As [`Session::compile`], but reuses an already-compiled program — NO
+    /// new `tidepool-extract` spawn.
+    fn from_compiled(program: &CompiledProgram, handler: SubagentHandler) -> Self {
+        let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
+        let (_decls, ask_tag, handled_prefix) = stack_decls(&stack);
+
+        let mut table = program.table.clone();
+        table.populate_siblings_from_expr(&program.expr);
+        let machine = JitEffectMachine::compile_session(&program.expr, &table, 1 << 20)
             .expect("compile_session");
 
         Self {
@@ -437,7 +499,7 @@ impl Fixture {
 }
 
 /// Build the fixture + a scripted recording backend, and hand back the session
-/// and the log a gate asserts on.
+/// and the log a gate asserts on — compiling `program` fresh (its own spawn).
 fn session_with(script: Vec<MockStep>, program: &str) -> (Fixture, Session, BackendLog) {
     let fx = Fixture::new();
     let log = BackendLog::default();
@@ -446,7 +508,24 @@ fn session_with(script: Vec<MockStep>, program: &str) -> (Fixture, Session, Back
         log: log.clone(),
     };
     let handler = fx.handler(Box::new(backend));
-    let session = Session::compile(program, handler);
+    let (session, _program) = Session::compile(program, handler);
+    (fx, session, log)
+}
+
+/// As [`session_with`], but reuses an already-compiled program — NO new
+/// `tidepool-extract` spawn.
+fn session_from_compiled(
+    script: Vec<MockStep>,
+    program: &CompiledProgram,
+) -> (Fixture, Session, BackendLog) {
+    let fx = Fixture::new();
+    let log = BackendLog::default();
+    let backend = RecordingBackend {
+        inner: MockBackend::scripted(script),
+        log: log.clone(),
+    };
+    let handler = fx.handler(Box::new(backend));
+    let session = Session::from_compiled(program, handler);
     (fx, session, log)
 }
 
@@ -514,217 +593,292 @@ fn outcomes(log: &BackendLog) -> Vec<ToolOutcome> {
     log.replies().into_iter().map(|r| r.outcome).collect()
 }
 
+/// `jsonSchema (Proxy :: Proxy Question)` / `Proxy Progress` — the schema of
+/// the SAME generic encoding `compileTools`' dispatch decodes the argument
+/// with. Pinned so a drift in either half is a failure here rather than a
+/// mystery at the live leg.
+fn pinned_question_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "questionText": { "type": "string" } },
+        "required": ["questionText"]
+    })
+}
+
+fn pinned_progress_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "progressNote": { "type": "string" } },
+        "required": ["progressNote"]
+    })
+}
+
+/// Run `body` (a gate) and collect its name into `failures` on panic, instead
+/// of aborting the whole family — so every gate below still runs and reports
+/// by name, the way six separate `#[test]` fns would.
+fn run_gate(name: &str, failures: &mut Vec<String>, body: impl FnOnce()) {
+    if let Err(e) = std::panic::catch_unwind(AssertUnwindSafe(body)) {
+        let msg = e
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "panic (non-string payload)".to_string());
+        failures.push(format!("{name}: {msg}"));
+    }
+}
+
 // ============================================================================
-// Gate a — a Call handler's computed answer reaches the child, per round
+// Gates a-e, g — one compile (`PROGRAM_TOOLS`), six independent runs
 // ============================================================================
 
-/// The load-bearing gate: two rounds, and each reply the BACKEND received is
-/// what the parent's Haskell handler computed from THAT call's arguments. The
-/// two questions are chosen so the handler's own logic (`T.length > 5`) yields
-/// different answers, which is what makes "the handler ran on this argument"
-/// distinguishable from "some constant crossed the seam".
 #[test]
-fn call_answer_from_the_parent_handler_reaches_the_child() {
+fn subagent_tool_loop_family() {
     require_ghc();
     in_test_thread(|| {
-        let (_fx, mut session, log) = session_with(
-            vec![
+        let mut failures: Vec<String> = Vec::new();
+
+        // Gate a also performs the ONE compile every other PROGRAM_TOOLS gate
+        // reuses.
+        let fx_a = Fixture::new();
+        let log_a = BackendLog::default();
+        let backend_a = RecordingBackend {
+            inner: MockBackend::scripted(vec![
                 ask("should we ship this quarter?"),
                 ask("no"),
                 MockStep::Completes(completed_payload()),
-            ],
-            PROGRAM_TOOLS,
+            ]),
+            log: log_a.clone(),
+        };
+        let handler_a = fx_a.handler(Box::new(backend_a));
+        let (session_a, program) = Session::compile(PROGRAM_TOOLS, handler_a);
+
+        run_gate(
+            "call_answer_from_the_parent_handler_reaches_the_child",
+            &mut failures,
+            move || {
+                let mut session = session_a;
+                let out = session.run();
+                assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+                assert_eq!(out["summary"], "done");
+
+                assert_eq!(
+                    outcomes(&log_a),
+                    vec![
+                        ToolOutcome::Answered(serde_json::json!({
+                            "approved": true,
+                            "note": "seen: should we ship this quarter?",
+                        })),
+                        ToolOutcome::Answered(serde_json::json!({
+                            "approved": false,
+                            "note": "seen: no",
+                        })),
+                    ],
+                    "each reply must be what the parent's Haskell handler computed from that \
+                     call's own arguments"
+                );
+                assert_eq!(
+                    out["rounds"], 2,
+                    "the receipt counts the rounds the child actually took"
+                );
+            },
         );
 
-        let out = session.run();
-        assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
-        assert_eq!(out["summary"], "done");
+        // Gate b — a Notify endpoint dispatches, and answers with the unit
+        // encoding.
+        run_gate(
+            "notify_dispatches_and_answers_with_the_unit_encoding",
+            &mut failures,
+            || {
+                let (_fx, mut session, log) = session_from_compiled(
+                    vec![
+                        calls(
+                            "report_progress",
+                            serde_json::json!({ "progressNote": "halfway" }),
+                        ),
+                        MockStep::Completes(completed_payload()),
+                    ],
+                    &program,
+                );
 
-        assert_eq!(
-            outcomes(&log),
-            vec![
-                ToolOutcome::Answered(serde_json::json!({
-                    "approved": true,
-                    "note": "seen: should we ship this quarter?",
-                })),
-                ToolOutcome::Answered(serde_json::json!({
-                    "approved": false,
-                    "note": "seen: no",
-                })),
-            ],
-            "each reply must be what the parent's Haskell handler computed from that \
-             call's own arguments"
-        );
-        assert_eq!(
-            out["rounds"], 2,
-            "the receipt counts the rounds the child actually took"
-        );
-    });
-}
+                let out = session.run();
+                assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
 
-// ============================================================================
-// Gate b — a Notify endpoint dispatches, and answers with the unit encoding
-// ============================================================================
-
-/// A `Notify` is a `Tool m input ()`, so its answer is `toJSON ()` — JSON
-/// `null`. It is still ANSWERED: a fire-and-forget endpoint on the authored
-/// side is not a call left unanswered on the wire.
-#[test]
-fn notify_dispatches_and_answers_with_the_unit_encoding() {
-    require_ghc();
-    in_test_thread(|| {
-        let (_fx, mut session, log) = session_with(
-            vec![
-                calls(
-                    "report_progress",
-                    serde_json::json!({ "progressNote": "halfway" }),
-                ),
-                MockStep::Completes(completed_payload()),
-            ],
-            PROGRAM_TOOLS,
+                assert_eq!(
+                    outcomes(&log),
+                    vec![ToolOutcome::Answered(serde_json::Value::Null)],
+                    "a Notify's reply is the unit encoding, and it is an ANSWER, not a refusal"
+                );
+                assert!(
+                    session
+                        .console_lines()
+                        .contains(&"parent noted: halfway".to_string()),
+                    "the Notify handler's own effect must have run: {:?}",
+                    session.console_lines()
+                );
+            },
         );
 
-        let out = session.run();
-        assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+        // Gate c — a parent handler's REAL effect runs while the child is
+        // parked.
+        run_gate(
+            "parent_effect_runs_while_the_child_is_parked",
+            &mut failures,
+            || {
+                let (_fx, mut session, _log) = session_from_compiled(
+                    vec![
+                        ask("does the parent still have effects?"),
+                        MockStep::Completes(completed_payload()),
+                    ],
+                    &program,
+                );
 
-        assert_eq!(
-            outcomes(&log),
-            vec![ToolOutcome::Answered(serde_json::Value::Null)],
-            "a Notify's reply is the unit encoding, and it is an ANSWER, not a refusal"
+                let out = session.run();
+                assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+
+                assert_eq!(
+                    session.console_lines(),
+                    vec!["parent handled: does the parent still have effects?".to_string()],
+                    "the parent's own Console effect must have run mid-loop, with the child's \
+                 turn parked"
+                );
+            },
         );
+
+        // Gate d — an undeclared tool name is REFUSED, and the loop continues.
+        run_gate(
+            "undeclared_tool_is_refused_and_the_loop_continues",
+            &mut failures,
+            || {
+                let (_fx, mut session, log) = session_from_compiled(
+                    vec![
+                        calls("frobnicate", serde_json::json!({ "whatever": 1 })),
+                        ask("still alive?"),
+                        MockStep::Completes(completed_payload()),
+                    ],
+                    &program,
+                );
+
+                let out = session.run();
+                assert_eq!(
+                    out["case"], "completed",
+                    "the turn must finish normally after a refusal: {out}"
+                );
+
+                assert_eq!(
+                    outcomes(&log),
+                    vec![
+                        ToolOutcome::Refused("no such tool: frobnicate".to_string()),
+                        ToolOutcome::Answered(serde_json::json!({
+                            "approved": true,
+                            "note": "seen: still alive?",
+                        })),
+                    ],
+                    "an undeclared tool is refused (never dropped, never an abort) and the next \
+                     declared call still dispatches"
+                );
+            },
+        );
+
+        // Gate e — past the ToolRounds cap, calls are refused and the turn
+        // completes.
+        run_gate(
+            "past_the_round_cap_calls_are_refused_and_the_turn_still_completes",
+            &mut failures,
+            || {
+                let (_fx, mut session, log) = session_from_compiled(
+                    vec![
+                        ask("first, within budget"),
+                        ask("second, within budget"),
+                        ask("third, over budget"),
+                        MockStep::Completes(completed_payload()),
+                    ],
+                    &program,
+                );
+
+                let out = session.run();
+                assert_eq!(
+                    out["case"], "completed",
+                    "past the cap the child finishes its turn normally: {out}"
+                );
+
+                assert_eq!(
+                    outcomes(&log),
+                    vec![
+                        ToolOutcome::Answered(serde_json::json!({
+                            "approved": true,
+                            "note": "seen: first, within budget",
+                        })),
+                        ToolOutcome::Answered(serde_json::json!({
+                            "approved": true,
+                            "note": "seen: second, within budget",
+                        })),
+                        ToolOutcome::Refused("tool-call round cap reached (2)".to_string()),
+                    ],
+                    "the third call is refused with text naming the cap, not dispatched"
+                );
+                assert_eq!(
+                    session.console_lines().len(),
+                    2,
+                    "the refused round must not have run a handler: {:?}",
+                    session.console_lines()
+                );
+            },
+        );
+
+        // Gate g — the declarations reaching the backend are the compiled
+        // ones.
+        run_gate(
+            "declared_tools_reach_the_backend_with_wire_names_and_schemas",
+            &mut failures,
+            || {
+                let (_fx, mut session, log) =
+                    session_from_compiled(vec![MockStep::Completes(completed_payload())], &program);
+
+                let out = session.run();
+                assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
+
+                let started = log.started();
+                assert_eq!(started.len(), 1, "one thread per spawn: {started:?}");
+                let spec = &started[0];
+                assert!(spec.ephemeral, "a coupled spawn's thread is ephemeral");
+
+                let declared: Vec<(&str, &str, &serde_json::Value)> = spec
+                    .dynamic_tools
+                    .iter()
+                    .map(|d| (d.name.as_str(), d.description.as_str(), &d.input_schema))
+                    .collect();
+                assert_eq!(
+                    declared,
+                    vec![
+                        (
+                            "ask_parent",
+                            "Ask the resident to resolve a question.",
+                            &pinned_question_schema()
+                        ),
+                        (
+                            "report_progress",
+                            "Report progress to the resident.",
+                            &pinned_progress_schema()
+                        ),
+                    ],
+                    "the declarations must be the compiled snake_case names, the authored \
+                     descriptions, and the JsonSchema of each input type — in record-field order"
+                );
+
+                assert!(
+                    outcomes(&log).is_empty(),
+                    "a turn that made no calls answers none"
+                );
+            },
+        );
+
         assert!(
-            session
-                .console_lines()
-                .contains(&"parent noted: halfway".to_string()),
-            "the Notify handler's own effect must have run: {:?}",
-            session.console_lines()
-        );
-    });
-}
-
-// ============================================================================
-// Gate c — a parent handler's REAL effect runs while the child is parked
-// ============================================================================
-
-/// The claim the whole design rests on: the parent is not suspended while it
-/// serves a call, so an ordinary parent effect (`send (Print …)`) runs between
-/// `agentBeginRaw` and `agentResumeRaw`. Asserted from the CONSOLE handler's
-/// captured output — a different substrate than the reply assertions, so this
-/// cannot pass by the answer merely having been computed.
-#[test]
-fn parent_effect_runs_while_the_child_is_parked() {
-    require_ghc();
-    in_test_thread(|| {
-        let (_fx, mut session, _log) = session_with(
-            vec![
-                ask("does the parent still have effects?"),
-                MockStep::Completes(completed_payload()),
-            ],
-            PROGRAM_TOOLS,
-        );
-
-        let out = session.run();
-        assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
-
-        assert_eq!(
-            session.console_lines(),
-            vec!["parent handled: does the parent still have effects?".to_string()],
-            "the parent's own Console effect must have run mid-loop, with the child's \
-             turn parked"
-        );
-    });
-}
-
-// ============================================================================
-// Gate d — an undeclared tool name is REFUSED, and the loop continues
-// ============================================================================
-
-/// `dispatch`'s own fallthrough `error`s, which would abort the eval with the
-/// child's turn still parked — so the loop checks `dispatchNames` first. The
-/// gate proves both halves: the call is answered with a refusal naming the
-/// tool, AND the turn goes on to complete (a `Session::run` panic is what an
-/// aborted eval would look like here).
-#[test]
-fn undeclared_tool_is_refused_and_the_loop_continues() {
-    require_ghc();
-    in_test_thread(|| {
-        let (_fx, mut session, log) = session_with(
-            vec![
-                calls("frobnicate", serde_json::json!({ "whatever": 1 })),
-                ask("still alive?"),
-                MockStep::Completes(completed_payload()),
-            ],
-            PROGRAM_TOOLS,
-        );
-
-        let out = session.run();
-        assert_eq!(
-            out["case"], "completed",
-            "the turn must finish normally after a refusal: {out}"
-        );
-
-        assert_eq!(
-            outcomes(&log),
-            vec![
-                ToolOutcome::Refused("no such tool: frobnicate".to_string()),
-                ToolOutcome::Answered(serde_json::json!({
-                    "approved": true,
-                    "note": "seen: still alive?",
-                })),
-            ],
-            "an undeclared tool is refused (never dropped, never an abort) and the next \
-             declared call still dispatches"
-        );
-    });
-}
-
-// ============================================================================
-// Gate e — past the ToolRounds cap, calls are refused and the turn completes
-// ============================================================================
-
-/// The cap is POLICY: past it the parent stops DISPATCHING but keeps
-/// ANSWERING, so the child reads "that budget is gone" and finishes its turn
-/// instead of being interrupted. The refusal text names the cap.
-#[test]
-fn past_the_round_cap_calls_are_refused_and_the_turn_still_completes() {
-    require_ghc();
-    in_test_thread(|| {
-        let (_fx, mut session, log) = session_with(
-            vec![
-                ask("first, within budget"),
-                ask("second, within budget"),
-                ask("third, over budget"),
-                MockStep::Completes(completed_payload()),
-            ],
-            PROGRAM_TOOLS,
-        );
-
-        let out = session.run();
-        assert_eq!(
-            out["case"], "completed",
-            "past the cap the child finishes its turn normally: {out}"
-        );
-
-        assert_eq!(
-            outcomes(&log),
-            vec![
-                ToolOutcome::Answered(serde_json::json!({
-                    "approved": true,
-                    "note": "seen: first, within budget",
-                })),
-                ToolOutcome::Answered(serde_json::json!({
-                    "approved": true,
-                    "note": "seen: second, within budget",
-                })),
-                ToolOutcome::Refused("tool-call round cap reached (2)".to_string()),
-            ],
-            "the third call is refused with text naming the cap, not dispatched"
-        );
-        assert_eq!(
-            session.console_lines().len(),
-            2,
-            "the refused round must not have run a handler: {:?}",
-            session.console_lines()
+            failures.is_empty(),
+            "{} gate(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
         );
     });
 }
@@ -777,82 +931,6 @@ fn a_tools_compile_error_returns_before_anything_is_spawned() {
                 .expect("list the registry from disk")
                 .is_empty(),
             "no worktree may be allocated for a spawn that never began"
-        );
-    });
-}
-
-// ============================================================================
-// Gate g — the declarations reaching the backend are the compiled ones
-// ============================================================================
-
-/// `jsonSchema (Proxy :: Proxy Question)` / `Proxy Progress` — the schema of
-/// the SAME generic encoding `compileTools`' dispatch decodes the argument
-/// with. Pinned so a drift in either half is a failure here rather than a
-/// mystery at the live leg.
-fn pinned_question_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": { "questionText": { "type": "string" } },
-        "required": ["questionText"]
-    })
-}
-
-fn pinned_progress_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": { "progressNote": { "type": "string" } },
-        "required": ["progressNote"]
-    })
-}
-
-/// What the child is TOLD about is the same single `compileTools` traversal
-/// that answers it: snake_case wire names in record-field order, the authored
-/// descriptions, and each input's `JsonSchema`.
-#[test]
-fn declared_tools_reach_the_backend_with_wire_names_and_schemas() {
-    require_ghc();
-    in_test_thread(|| {
-        let (_fx, mut session, log) = session_with(
-            vec![MockStep::Completes(completed_payload())],
-            PROGRAM_TOOLS,
-        );
-
-        let out = session.run();
-        assert_eq!(out["case"], "completed", "unexpected program branch: {out}");
-
-        let started = log.started();
-        assert_eq!(started.len(), 1, "one thread per spawn: {started:?}");
-        let spec = &started[0];
-        assert!(spec.ephemeral, "a coupled spawn's thread is ephemeral");
-
-        let declared: Vec<(&str, &str, &serde_json::Value)> = spec
-            .dynamic_tools
-            .iter()
-            .map(|d| (d.name.as_str(), d.description.as_str(), &d.input_schema))
-            .collect();
-        assert_eq!(
-            declared,
-            vec![
-                (
-                    "ask_parent",
-                    "Ask the resident to resolve a question.",
-                    &pinned_question_schema()
-                ),
-                (
-                    "report_progress",
-                    "Report progress to the resident.",
-                    &pinned_progress_schema()
-                ),
-            ],
-            "the declarations must be the compiled snake_case names, the authored \
-             descriptions, and the JsonSchema of each input type — in record-field order"
-        );
-
-        assert!(
-            outcomes(&log).is_empty(),
-            "a turn that made no calls answers none"
         );
     });
 }

@@ -3,54 +3,32 @@
 //! These exercise T.splitOn, T.words, T.lines, and T.split — the qualified
 //! Data.Text versions, not the hand-rolled Prelude reimplementations.
 //!
-//! Tests use three preambles to bisect context-dependent failures:
-//! - `run`: minimal (Prelude + qualified T)
-//! - `run_freer`: Prelude + Freer + qualified T (no Library)
+//! Tests use several preambles to bisect context-dependent failures:
 //! - `run_mcp`: full MCP preamble (Freer + Library + extra imports)
+//! - `run_mcp_with_helpers`/`run_eff`/`run_full_mcp`: one-off bisection
+//!   preambles, each used by exactly one probe below
+//!
+//! # Family bundles vs standalone probes
+//!
+//! The three preambles used by MULTIPLE simple `T.splitOn`/`T.words`/
+//! `T.lines`/`T.split` checks (`run`: 9, `run_freer`: 3, `run_mcp`: 5) are
+//! folded into one family-bundle `#[test]` per preamble via the check-list
+//! idiom (`jit_surface.rs`'s pattern) — 17 former standalone probes now
+//! compile in 3 spawns instead of 17 (`plans/test-time-cut.md` §3/§6 item 1).
+//!
+//! Every other probe below stays STANDALONE:
+//!
+//!   - `helpers_t_spliton`/`eff_t_spliton`/`full_mcp_t_spliton` each use a
+//!     preamble no other probe shares — bundling would not save a spawn.
+//!   - the `collision_*`/`adversarial_*`/`freevar_*`/`args_*` probes pin a
+//!     DISTINCT MECHANISM (alpha-rename collisions in `resolveExternals`
+//!     across inlined GHC unfoldings, and a free-variable-capture bug) —
+//!     jit_surface.rs's class (d) exclusion. Each is a deliberately chosen,
+//!     individually-diagnostic repro; bundling them would still compile, but
+//!     would blur which specific combination regressed.
 
 use serde_json::json;
 use tidepool_testing::eval_harness::{user_lib_dir, EvalHarness};
-
-fn run(body: &str) -> serde_json::Value {
-    let src = format!(
-        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}}
-module Test where
-import Tidepool.Prelude hiding (error)
-import qualified Data.Text as T
-default (Int, Text)
-
-result :: _
-result = {body}
-"#
-    );
-    EvalHarness::new()
-        .with_stdlib()
-        .run_pure(&src, "result")
-        .expect("compile_and_run_pure failed")
-        .to_json()
-}
-
-/// Freer preamble: adds Control.Monad.Freer but NOT Library.
-/// If this fails but `run` passes, Freer import changes GHC optimization.
-fn run_freer(body: &str) -> serde_json::Value {
-    let src = format!(
-        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures #-}}
-module Test where
-import Tidepool.Prelude hiding (error)
-import qualified Data.Text as T
-import Control.Monad.Freer
-default (Int, Text)
-
-result :: _
-result = {body}
-"#
-    );
-    EvalHarness::new()
-        .with_stdlib()
-        .run_pure(&src, "result")
-        .expect("compile_and_run_pure (freer) failed")
-        .to_json()
-}
 
 /// MCP-like preamble: includes Control.Monad.Freer, Library, effect GADTs.
 /// Compiles as pure (no actual effect dispatch) but uses the same module
@@ -90,86 +68,83 @@ result = {body}
         .to_json()
 }
 
-// ========== Minimal preamble (pure, no Freer) ==========
+// ========== Minimal preamble family (pure, no Freer): 9 checks, 1 spawn ====
 
-#[test]
-fn t_spliton_comma() {
-    assert_eq!(run(r#"T.splitOn "," "a,b,c""#), json!(["a", "b", "c"]));
-}
+const MINIMAL_FAMILY_SRC: &str = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}
+module Test where
+import Tidepool.Prelude hiding (error)
+import qualified Data.Text as T
+default (Int, Text)
 
+check :: Text -> Bool -> [Text]
+check nm ok = if ok then [] else [nm]
+
+checks :: [Text]
+checks = concat
+  [ check "t_spliton_comma" (T.splitOn "," "a,b,c" == ["a", "b", "c"])
+  , check "t_spliton_slash" (T.splitOn "/" "foo/bar/baz" == ["foo", "bar", "baz"])
+  , check "t_spliton_no_match" (T.splitOn "," "hello" == ["hello"])
+  , check "t_spliton_empty_parts" (T.splitOn "," ",a,,b," == ["", "a", "", "b", ""])
+  , check "t_spliton_multi_char_sep" (T.splitOn "::" "a::b::c" == ["a", "b", "c"])
+  , check "t_words_simple" (T.words "hello world" == ["hello", "world"])
+  , check "t_words_multiple_spaces" (T.words "hello  world  foo" == ["hello", "world", "foo"])
+  , check "t_lines_simple" (T.lines "a\nb\nc" == ["a", "b", "c"])
+  , check "t_split_predicate" (T.split (== '/') "foo/bar/baz" == ["foo", "bar", "baz"])
+  ]
+"#;
+
+/// Absorbed: t_spliton_comma, t_spliton_slash, t_spliton_no_match,
+/// t_spliton_empty_parts, t_spliton_multi_char_sep, t_words_simple,
+/// t_words_multiple_spaces, t_lines_simple, t_split_predicate.
 #[test]
-fn t_spliton_slash() {
+fn minimal_preamble_spliton_family() {
+    let h = EvalHarness::new().with_stdlib();
+    let artifacts = h
+        .compile_many(MINIMAL_FAMILY_SRC, &["checks"])
+        .expect("compile minimal-preamble spliton family module");
+    let out = h.run_target_pure(&artifacts, "checks");
     assert_eq!(
-        run(r#"T.splitOn "/" "foo/bar/baz""#),
-        json!(["foo", "bar", "baz"])
+        out.json(),
+        json!([]),
+        "failed minimal-preamble T.splitOn/words/lines/split checks (see names): {}",
+        out.json()
     );
 }
 
-#[test]
-fn t_spliton_no_match() {
-    assert_eq!(run(r#"T.splitOn "," "hello""#), json!(["hello"]));
-}
+// ========== Freer preamble family (Freer, no Library): 3 checks, 1 spawn ==
 
+const FREER_FAMILY_SRC: &str = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, GADTs, PartialTypeSignatures #-}
+module Test where
+import Tidepool.Prelude hiding (error)
+import qualified Data.Text as T
+import Control.Monad.Freer
+default (Int, Text)
+
+check :: Text -> Bool -> [Text]
+check nm ok = if ok then [] else [nm]
+
+checks :: [Text]
+checks = concat
+  [ check "freer_t_spliton_comma" (T.splitOn "," "a,b,c" == ["a", "b", "c"])
+  , check "freer_t_words" (T.words "hello world" == ["hello", "world"])
+  , check "freer_t_lines" (T.lines "a\nb\nc" == ["a", "b", "c"])
+  ]
+"#;
+
+/// Absorbed: freer_t_spliton_comma, freer_t_words, freer_t_lines.
 #[test]
-fn t_spliton_empty_parts() {
+fn freer_preamble_spliton_family() {
+    let h = EvalHarness::new().with_stdlib();
+    let artifacts = h
+        .compile_many(FREER_FAMILY_SRC, &["checks"])
+        .expect("compile freer-preamble spliton family module");
+    let out = h.run_target_pure(&artifacts, "checks");
     assert_eq!(
-        run(r#"T.splitOn "," ",a,,b,""#),
-        json!(["", "a", "", "b", ""])
+        out.json(),
+        json!([]),
+        "failed freer-preamble T.splitOn/words/lines checks (see names): {}",
+        out.json()
     );
-}
-
-#[test]
-fn t_spliton_multi_char_sep() {
-    assert_eq!(run(r#"T.splitOn "::" "a::b::c""#), json!(["a", "b", "c"]));
-}
-
-#[test]
-fn t_words_simple() {
-    assert_eq!(run(r#"T.words "hello world""#), json!(["hello", "world"]));
-}
-
-#[test]
-fn t_words_multiple_spaces() {
-    assert_eq!(
-        run(r#"T.words "hello  world  foo""#),
-        json!(["hello", "world", "foo"])
-    );
-}
-
-#[test]
-fn t_lines_simple() {
-    assert_eq!(run(r#"T.lines "a\nb\nc""#), json!(["a", "b", "c"]));
-}
-
-#[test]
-fn t_split_predicate() {
-    assert_eq!(
-        run(r#"T.split (== '/') "foo/bar/baz""#),
-        json!(["foo", "bar", "baz"])
-    );
-}
-
-// ========== Freer preamble (Freer, no Library) ==========
-
-#[test]
-fn freer_t_spliton_comma() {
-    assert_eq!(
-        run_freer(r#"T.splitOn "," "a,b,c""#),
-        json!(["a", "b", "c"])
-    );
-}
-
-#[test]
-fn freer_t_words() {
-    assert_eq!(
-        run_freer(r#"T.words "hello world""#),
-        json!(["hello", "world"])
-    );
-}
-
-#[test]
-fn freer_t_lines() {
-    assert_eq!(run_freer(r#"T.lines "a\nb\nc""#), json!(["a", "b", "c"]));
 }
 
 // ========== Bisect: does adding T.lines-using helpers break T.splitOn? ==========
@@ -373,39 +348,58 @@ fn full_mcp_t_spliton() {
     panic!("unexpected result: {:?}", result);
 }
 
-// ========== MCP-like preamble (Freer + Library + everything) ==========
+// ========== MCP-like preamble family (Freer + Library + everything): 5 checks, 1 spawn ==========
 
-#[test]
-fn mcp_t_spliton_comma() {
-    assert_eq!(run_mcp(r#"T.splitOn "," "a,b,c""#), json!(["a", "b", "c"]));
-}
+const MCP_FAMILY_SRC: &str = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables #-}
+module Expr where
+import Tidepool.Prelude hiding (error)
+import qualified Data.Text as T
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import qualified Data.List as L
+import qualified Tidepool.TextFormat as TF
+import qualified Tidepool.Table as Tab
+import Control.Monad.Freer hiding (run)
+import Library
+import qualified Prelude as P
+default (Int, Text)
+error :: Text -> a
+error = P.error . T.unpack
 
+check :: Text -> Bool -> [Text]
+check nm ok = if ok then [] else [nm]
+
+checks :: [Text]
+checks = concat
+  [ check "mcp_t_spliton_comma" (T.splitOn "," "a,b,c" == ["a", "b", "c"])
+  , check "mcp_t_spliton_slash" (T.splitOn "/" "foo/bar/baz" == ["foo", "bar", "baz"])
+  , check "mcp_t_words" (T.words "hello world" == ["hello", "world"])
+  , check "mcp_t_lines" (T.lines "a\nb\nc" == ["a", "b", "c"])
+  , check "mcp_t_split" (T.split (== '/') "foo/bar/baz" == ["foo", "bar", "baz"])
+  ]
+"#;
+
+/// Absorbed: mcp_t_spliton_comma, mcp_t_spliton_slash, mcp_t_words,
+/// mcp_t_lines, mcp_t_split.
 #[test]
-fn mcp_t_spliton_slash() {
+fn mcp_preamble_spliton_family() {
+    let ulp = user_lib_dir();
+    if !ulp.join("Library.hs").exists() {
+        panic!("Skipping: .tidepool/lib/Library.hs not found");
+    }
+    let h = EvalHarness::new()
+        .with_stdlib()
+        .with_include(ulp)
+        .with_effects_module();
+    let artifacts = h
+        .compile_many(MCP_FAMILY_SRC, &["checks"])
+        .expect("compile mcp-preamble spliton family module");
+    let out = h.run_target_pure(&artifacts, "checks");
     assert_eq!(
-        run_mcp(r#"T.splitOn "/" "foo/bar/baz""#),
-        json!(["foo", "bar", "baz"])
-    );
-}
-
-#[test]
-fn mcp_t_words() {
-    assert_eq!(
-        run_mcp(r#"T.words "hello world""#),
-        json!(["hello", "world"])
-    );
-}
-
-#[test]
-fn mcp_t_lines() {
-    assert_eq!(run_mcp(r#"T.lines "a\nb\nc""#), json!(["a", "b", "c"]));
-}
-
-#[test]
-fn mcp_t_split() {
-    assert_eq!(
-        run_mcp(r#"T.split (== '/') "foo/bar/baz""#),
-        json!(["foo", "bar", "baz"])
+        out.json(),
+        json!([]),
+        "failed mcp-preamble T.splitOn/words/lines/split checks (see names): {}",
+        out.json()
     );
 }
 

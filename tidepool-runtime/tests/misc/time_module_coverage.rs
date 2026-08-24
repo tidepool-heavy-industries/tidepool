@@ -1,4 +1,6 @@
 //! Golden round-trip tests for Tidepool.Data.Time: parseISO8601 / formatISO8601.
+//! One family bundle, one `tidepool-extract` spawn (`compile_many` — see
+//! `plans/test-time-cut.md` §3).
 //!
 //! Covers:
 //!   - format→parse round-trip (epochMillis identity)
@@ -9,108 +11,55 @@
 //!   - TYPED failure on malformed input (`Left`, not silent corruption)
 //!
 //! `parseISO8601 :: Text -> Either Text UTCTime` — the parse is a Rust `chrono`
-//! primop (ParseISO8601); malformed input is a typed `Left`. The success bodies
-//! below unwrap with `either` (a `Left` surfaces as a distinctive sentinel that
-//! fails the golden assertion loudly).
+//! primop (ParseISO8601); malformed input is a typed `Left`.
 
 use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
 
-fn run(body: &str) -> serde_json::Value {
-    let src = format!(
-        r#"{{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}}
+const SRC: &str = r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, PartialTypeSignatures #-}
 module Test where
 import Tidepool.Prelude hiding (error)
 import qualified Data.Text as T
 default (Int, Text)
 
-result :: _
-result = {body}
-"#
-    );
-    EvalHarness::new()
-        .with_stdlib()
-        .run_pure(&src, "result")
-        .expect("compile_and_run_pure failed")
-        .to_json()
-}
+check :: Text -> Bool -> [Text]
+check nm ok = if ok then [] else [nm]
 
-// Golden: format→parse round-trip — modern timestamp (2024-02-29 leap day).
-// epochMillis (parseISO8601 (formatISO8601 t)) == epochMillis t
-#[test]
-fn test_format_then_parse_modern() {
-    assert_eq!(
-        run("either (const (-1)) epochMillis (parseISO8601 (formatISO8601 (UTCTime 1709164800000)))"),
-        json!(1709164800000i64)
-    );
-}
+checks :: [Text]
+checks = concat
+  [ check "format_then_parse_modern"
+      (either (const (-1)) epochMillis (parseISO8601 (formatISO8601 (UTCTime 1709164800000)))
+        == 1709164800000)
+  , check "parse_then_format_z"
+      (either id formatISO8601 (parseISO8601 "2024-02-29T00:00:00Z") == "2024-02-29T00:00:00Z")
+  , check "roundtrip_pre1970"
+      (either id formatISO8601 (parseISO8601 "1960-03-15T12:00:00Z") == "1960-03-15T12:00:00Z")
+  , check "pre1970_epoch_millis_negative"
+      (either (const (-1)) epochMillis (parseISO8601 "1960-03-15T12:00:00Z") == (-309182400000))
+  , check "parse_git_ci_negative_offset"
+      (either id formatISO8601 (parseISO8601 "2026-07-01T19:24:22-07:00")
+        == "2026-07-02T02:24:22Z")
+  , check "parse_git_ci_positive_offset"
+      (either id formatISO8601 (parseISO8601 "2024-01-15T10:30:00+05:30")
+        == "2024-01-15T05:00:00Z")
+  , check "epoch_zero_roundtrip"
+      (either (const (-1)) epochMillis (parseISO8601 (formatISO8601 (UTCTime 0))) == 0)
+  , check "malformed_input_is_left"
+      (either (const True) (const False) (parseISO8601 "not a timestamp"))
+  ]
+"#;
 
-// Golden: parse→format round-trip — Z-suffix form stays identical.
-// formatISO8601 (parseISO8601 s) == s
 #[test]
-fn test_parse_then_format_z() {
+fn time_module_coverage_family() {
+    let h = EvalHarness::new().with_stdlib();
+    let artifacts = h
+        .compile_many(SRC, &["checks"])
+        .expect("compile time_module_coverage family module");
+    let out = h.run_target_pure(&artifacts, "checks");
     assert_eq!(
-        run(r#"either id formatISO8601 (parseISO8601 "2024-02-29T00:00:00Z")"#),
-        json!("2024-02-29T00:00:00Z")
-    );
-}
-
-// Golden: pre-1970 date round-trip — negative epoch milliseconds.
-// 1960-03-15T12:00:00Z is ~10 years before Unix epoch.
-#[test]
-fn test_roundtrip_pre1970() {
-    assert_eq!(
-        run(r#"either id formatISO8601 (parseISO8601 "1960-03-15T12:00:00Z")"#),
-        json!("1960-03-15T12:00:00Z")
-    );
-}
-
-// Golden: epoch milliseconds for a pre-1970 timestamp are negative.
-#[test]
-fn test_pre1970_epoch_millis_negative() {
-    // 1960-03-15T12:00:00Z = -309182400000 ms
-    assert_eq!(
-        run(r#"either (const (-1)) epochMillis (parseISO8601 "1960-03-15T12:00:00Z")"#),
-        json!(-309182400000i64)
-    );
-}
-
-// Golden: git %cI format with negative UTC offset.
-// "2026-07-01T19:24:22-07:00" normalises to "2026-07-02T02:24:22Z" (UTC).
-#[test]
-fn test_parse_git_ci_negative_offset() {
-    assert_eq!(
-        run(r#"either id formatISO8601 (parseISO8601 "2026-07-01T19:24:22-07:00")"#),
-        json!("2026-07-02T02:24:22Z")
-    );
-}
-
-// Golden: git %cI format with positive UTC offset.
-// "2024-01-15T10:30:00+05:30" normalises to "2024-01-15T05:00:00Z" (IST→UTC).
-#[test]
-fn test_parse_git_ci_positive_offset() {
-    assert_eq!(
-        run(r#"either id formatISO8601 (parseISO8601 "2024-01-15T10:30:00+05:30")"#),
-        json!("2024-01-15T05:00:00Z")
-    );
-}
-
-// Golden: daysFromCivil is the exact inverse of civilFromDays.
-// formatISO8601 (UTCTime 0) == "1970-01-01T00:00:00Z"; parse gives back 0.
-#[test]
-fn test_epoch_zero_roundtrip() {
-    assert_eq!(
-        run("either (const (-1)) epochMillis (parseISO8601 (formatISO8601 (UTCTime 0)))"),
-        json!(0i64)
-    );
-}
-
-// Typed failure (the point of the Either surface): malformed input is a `Left`,
-// not a silently-corrupted timestamp. `isLeft` → True on garbage.
-#[test]
-fn test_malformed_input_is_left() {
-    assert_eq!(
-        run(r#"either (const True) (const False) (parseISO8601 "not a timestamp")"#),
-        json!(true)
+        out.json(),
+        json!([]),
+        "failed Tidepool.Data.Time checks (see names): {}",
+        out.json()
     );
 }

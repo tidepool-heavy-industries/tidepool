@@ -46,9 +46,12 @@
 
 use std::path::{Path, PathBuf};
 
+use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_repr::DataConTable;
 use tidepool_runtime::{
     compile_and_run, compile_and_run_pure, compile_and_run_with_nursery_size, compile_haskell,
-    CompileError, CompileResult, DispatchEffect, EvalResult, RuntimeError, Value, EVAL_STACK_SIZE,
+    compile_targets, CompileError, CompileResult, CompiledArtifacts, DispatchEffect, EvalResult,
+    RuntimeError, Value, DEFAULT_NURSERY_SIZE, EVAL_STACK_SIZE,
 };
 
 /// Repo root, derived from this crate's manifest dir (`<root>/tidepool-testing`).
@@ -252,6 +255,55 @@ impl Outcome {
     }
 }
 
+/// As [`Outcome`], but for one target of an [`EvalHarness::compile_many`]
+/// bundle, run via [`EvalHarness::run_target`]/[`run_target_owned`]. A
+/// pre-compiled target has no [`CompileResult`] of its own to hand
+/// `EvalResult::new` (crate-private in `tidepool-runtime`), so this wraps the
+/// raw `Value` + [`DataConTable`] pair the JIT run itself produces and
+/// renders JSON through the same public [`tidepool_runtime::value_to_json`]
+/// path `EvalResult::to_json` uses internally.
+pub struct TargetOutcome(Result<(Value, DataConTable), RuntimeError>);
+
+impl TargetOutcome {
+    /// Did evaluation succeed?
+    pub fn is_ok(&self) -> bool {
+        self.0.is_ok()
+    }
+
+    /// The runtime error, if evaluation failed.
+    pub fn err(&self) -> Option<&RuntimeError> {
+        self.0.as_ref().err()
+    }
+
+    fn result(&self) -> &(Value, DataConTable) {
+        self.0
+            .as_ref()
+            .unwrap_or_else(|e| panic!("expected successful eval, got error: {e}"))
+    }
+
+    /// Borrow the computed [`Value`] (panics on error).
+    pub fn value(&self) -> &Value {
+        &self.result().0
+    }
+
+    /// Render the result as JSON (panics on error).
+    pub fn json(&self) -> serde_json::Value {
+        let (value, table) = self.result();
+        tidepool_runtime::value_to_json(value, table, 0)
+    }
+
+    /// Consume and return the owned `(Value, DataConTable)` pair, panicking
+    /// with `ctx` + error.
+    pub fn expect(self, ctx: &str) -> (Value, DataConTable) {
+        self.0.unwrap_or_else(|e| panic!("{ctx}: {e}"))
+    }
+
+    /// The raw `Result` (escape hatch for tests asserting on specific errors).
+    pub fn into_result(self) -> Result<(Value, DataConTable), RuntimeError> {
+        self.0
+    }
+}
+
 /// Fluent builder for the Tidepool eval pipeline. Configure the include path and
 /// nursery, then call a terminal (`run` / `run_pure` / `compile`). Terminals run
 /// on an [`EVAL_STACK_SIZE`] thread.
@@ -318,6 +370,24 @@ impl EvalHarness {
         let includes = self.owned_includes();
         let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
         compile_haskell(source, target, &refs)
+    }
+
+    /// Compile MULTIPLE named top-level bindings sharing ONE module against
+    /// ONE `tidepool-extract` spawn ([`compile_targets`]'s N-in-one-spawn
+    /// mode — see `tidepool-runtime/CLAUDE.md`'s "Compile cache" section and
+    /// `plans/test-time-cut.md`'s §3: an extra target in the same spawn costs
+    /// ~2% more wall time, not another full GHC session). Run each target
+    /// independently afterward via [`run_target`](Self::run_target)/
+    /// [`run_target_owned`](Self::run_target_owned) — own handler instance,
+    /// own dispatch history per target, same isolation as N separate
+    /// `#[test]` fns, one spawn instead of N.
+    pub fn compile_many(
+        &self,
+        source: &str,
+        targets: &[&str],
+    ) -> Result<CompiledArtifacts, CompileError> {
+        let includes = self.owned_includes();
+        compile_targets(source, targets, &includes, None, |_, _, _| {})
     }
 
     /// Compile + run a PURE expression (no effects / handlers).
@@ -410,6 +480,126 @@ impl EvalHarness {
             (result, handlers)
         });
         (Outcome(result), handlers)
+    }
+
+    /// Run one target out of a [`compile_many`](Self::compile_many) bundle
+    /// against `handlers` (user context `()`) — own [`EVAL_STACK_SIZE`]
+    /// thread, own dispatch, no additional `tidepool-extract` spawn (the
+    /// target's Core was already produced by `compile_many`). Mirrors
+    /// [`run`](Self::run) but takes the pre-compiled [`CompiledArtifacts`]
+    /// and a target name instead of source.
+    pub fn run_target<H>(
+        &self,
+        artifacts: &CompiledArtifacts,
+        target: &str,
+        handlers: H,
+    ) -> TargetOutcome
+    where
+        H: DispatchEffect<()> + Send + 'static,
+    {
+        self.run_target_with(artifacts, target, handlers, ())
+    }
+
+    /// As [`run_target`](Self::run_target) but with an explicit user context `U`.
+    pub fn run_target_with<U, H>(
+        &self,
+        artifacts: &CompiledArtifacts,
+        target: &str,
+        handlers: H,
+        user: U,
+    ) -> TargetOutcome
+    where
+        U: Send + 'static,
+        H: DispatchEffect<U> + Send + 'static,
+    {
+        self.run_target_with_owned(artifacts, target, handlers, user)
+            .0
+    }
+
+    /// As [`run_target`](Self::run_target) but hands `handlers` back
+    /// alongside the [`TargetOutcome`] — for dispatchers whose post-eval
+    /// state (write counts, stored files, recorded calls) IS the assertion.
+    pub fn run_target_owned<H>(
+        &self,
+        artifacts: &CompiledArtifacts,
+        target: &str,
+        handlers: H,
+    ) -> (TargetOutcome, H)
+    where
+        H: DispatchEffect<()> + Send + 'static,
+    {
+        self.run_target_with_owned(artifacts, target, handlers, ())
+    }
+
+    /// As [`run_target_with`](Self::run_target_with) but hands `handlers`
+    /// back alongside the [`TargetOutcome`].
+    pub fn run_target_with_owned<U, H>(
+        &self,
+        artifacts: &CompiledArtifacts,
+        target: &str,
+        mut handlers: H,
+        user: U,
+    ) -> (TargetOutcome, H)
+    where
+        U: Send + 'static,
+        H: DispatchEffect<U> + Send + 'static,
+    {
+        let expr = artifacts
+            .targets
+            .get(target)
+            .unwrap_or_else(|| panic!("compile_many did not produce target {target:?}"))
+            .expr
+            .clone();
+        let mut table = artifacts.table.clone();
+        let has_io = artifacts.warnings.has_io;
+        let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
+        let (result, handlers) = with_eval_stack(move || {
+            let result: Result<(Value, DataConTable), RuntimeError> = (|| {
+                if has_io {
+                    return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
+                }
+                table.populate_siblings_from_expr(&expr);
+                let mut machine = JitEffectMachine::compile(&expr, &table, nursery)?;
+                let value = machine.run(&table, &mut handlers, &user)?;
+                Ok((value, table))
+            })();
+            (result, handlers)
+        });
+        (TargetOutcome(result), handlers)
+    }
+
+    /// Run one target out of a [`compile_many`](Self::compile_many) bundle as
+    /// a PURE (non-`Eff`) expression — the multi-target sibling of
+    /// [`run_pure`](Self::run_pure). Skips freer-simple effect dispatch
+    /// entirely (`JitEffectMachine::run_pure`, mirroring
+    /// `compile_and_run_pure`'s single-target path): a target compiled
+    /// through [`compile_many`]/`compile_targets` carries no freer-simple
+    /// `Val`/`Pure` wrapper for a plain (non-`Eff`) binding, so running it
+    /// through the effectful [`run_target`](Self::run_target) path fails with
+    /// "missing freer-simple constructor 'Val'" — this is the correct entry
+    /// point for a pure check-list/family-bundle target.
+    pub fn run_target_pure(&self, artifacts: &CompiledArtifacts, target: &str) -> TargetOutcome {
+        let expr = artifacts
+            .targets
+            .get(target)
+            .unwrap_or_else(|| panic!("compile_many did not produce target {target:?}"))
+            .expr
+            .clone();
+        let mut table = artifacts.table.clone();
+        let has_io = artifacts.warnings.has_io;
+        let nursery = self.nursery.unwrap_or(DEFAULT_NURSERY_SIZE);
+        let result = with_eval_stack(move || {
+            (|| {
+                if has_io {
+                    return Err(RuntimeError::Compile(CompileError::IOTypeDetected));
+                }
+                table.populate_siblings_from_expr(&expr);
+                let mut machine = JitEffectMachine::compile(&expr, &table, nursery)?;
+                let value = machine.run_pure()?;
+                Ok((value, table))
+            })()
+        });
+        TargetOutcome(result)
     }
 }
 
