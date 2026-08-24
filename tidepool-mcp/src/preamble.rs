@@ -795,6 +795,12 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
         desc.push_str(concat!(
             "\nTyped effects cover the common operations directly: `glob`/`grepGlob` (Fs) ",
             "for filesystem and structured text search; `run \"...\"` runs any shell command for the rest.\n",
+            "For a JSON FILE, `readGlob` + `eitherDecode` + optics (`key`/`_String`/`values`/`cosmos`) is ",
+            "the canonical query pattern \u{2014} decode each file to a `Value` and walk it with lenses; ",
+            "`grepGlob`'s per-LINE `Hit` model is a poor fit for single-line/minified JSON, where the ",
+            "whole file is one \"line\" (and now truncates as one oversized hit):\n",
+            "  do { rs <- readGlob \"data/*.json\"; pure [ v ^? key \"status\" . _String ",
+            "| r <- rs, Right t <- [r.contents], Right v <- [eitherDecode t] ] }\n",
             "Failure shape follows the verb's own signature, not one universal rule: most external ",
             "effects return `Either <EffectError> a` (bind the `Right`, match a specific `Left` to ",
             "recover); an absence query like `kvGet`/`fsMeta` returns `Maybe a` instead (no `Either` at ",

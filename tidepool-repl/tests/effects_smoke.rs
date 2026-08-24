@@ -46,6 +46,29 @@ async fn full_stack_effects_reachable_through_session() {
     let t = eval(&server, "kvGet \"wave-b\"").await;
     assert!(t.contains("42"), "KV get-after-set: {t}");
 
+    // Typed KV read (`Tidepool.Kv.kvGetAs`), same `@T` idiom as `askUser`/
+    // `fork`: present key decodes to `Right (Just a)`, absent key to
+    // `Right Nothing`, and a shape mismatch to a legible `Left` — never a
+    // crash. The untyped `kvGet` above is unaffected.
+    let t = eval(&server, "kvGetAs @Int \"wave-b\"").await;
+    assert!(
+        t.contains("Right") && t.contains("42"),
+        "kvGetAs present-key round-trip: {t}"
+    );
+    let t = eval(&server, "kvGetAs @Int \"wave-b-absent\"").await;
+    assert!(
+        // Right Nothing renders through the JSON envelope as {"Right":null},
+        // not the literal text "Nothing" (Maybe's ToJSON, not Show).
+        t.contains("Right") && t.contains("null"),
+        "kvGetAs absent-key: {t}"
+    );
+    let _ = eval(&server, "kvSet \"wave-b-str\" (toJSON (\"hello\" :: Text))").await;
+    let t = eval(&server, "kvGetAs @Int \"wave-b-str\"").await;
+    assert!(
+        t.contains("Left"),
+        "kvGetAs decode-failure should be a legible Left, not a crash: {t}"
+    );
+
     // Project `Library` is auto-imported (parity with eval): a `.tidepool/lib`
     // verb is in scope bare. `chunksOf` is a pure Schemes verb re-exported by
     // Library. (Regression for: REPL listed lib verbs in :vocab but couldn't

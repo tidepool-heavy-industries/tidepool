@@ -314,7 +314,7 @@ field names exist across record types.
 | Record | Fields | Access example |
 |--------|--------|----------------|
 | `Proc`        | `exitCode :: Int`, `stdout`, `stderr :: Text` | `Right p <- run cmd; p.stdout` |
-| `Hit`         | `path`, `text :: Text`, `line :: Int` | `h.path`, `h.line` |
+| `Hit`         | `path`, `text :: Text`, `line :: Int` | `h.path`, `h.line` — `text` truncates with a marker past ~300 chars (a single-line data file's whole content otherwise); query structured/JSON data with `readGlob` + optics instead of `grepGlob` |
 | `FileRead`    | `path :: Text`, `contents :: Either FsError Text` | `r.path`, `r.contents` |
 | `Commit`      | `sha`, `subject`, `author`, `date`, `files :: [Text]` | `Right c <- gitShow "HEAD"; c.sha`, `c.files` |
 | `StatusEntry` | `path`, `state :: Text` | `Right es <- gitStatus; map (.state) es` |

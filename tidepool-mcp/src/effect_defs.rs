@@ -264,6 +264,13 @@ macro_rules! extra_imports_for {
     (Entropy) => {
         &["import Tidepool.Random"]
     };
+    // `Tidepool.Kv`'s `kvGetAs` builds on `KV`'s own `kvGet` (`Tidepool.Effects`),
+    // same built-on-the-raw-substrate-verb shape as `Entropy`/`Tidepool.Random`
+    // above. `KV` is a BASE effect (always in `base_effects!`), so this import
+    // is unconditionally live, same reasoning as `Entropy`'s arm.
+    (KV) => {
+        &["import Tidepool.Kv"]
+    };
     // `Tidepool.Fork`'s `fork`/`forkAll`/`forkMap`/`forkCata` build on
     // `Fork`'s own `forkSited`/`forkAllSited` (`Tidepool.Effects`), same
     // row-gating as `AskUser`'s `Tidepool.Form` above. `Tidepool.Fork` does
@@ -1566,7 +1573,10 @@ macro_rules! kv_effect_def {
             description [
                 "Persistent key-value store. State survives across calls within one server session. ",
                 "Key convention: use slash-delimited namespaces (e.g. \"agent-42/foo\") to avoid ",
-                "cross-agent collision. kvClear/kvKeysP operate on prefix boundaries.",
+                "cross-agent collision. kvClear/kvKeysP operate on prefix boundaries. For a typed ",
+                "round-trip instead of hand-unwrapping the stored `Value`, use `kvGetAs @T key` ",
+                "(`Tidepool.Kv`) — decodes via `FromJSON`, `Right (Just x)`/`Right Nothing`/a legible ",
+                "`Left` on a decode mismatch, never a crash.",
             ],
             type_defs [],
             verbs [

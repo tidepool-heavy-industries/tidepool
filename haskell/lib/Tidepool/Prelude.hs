@@ -224,6 +224,14 @@ module Tidepool.Prelude
     -- * Prelude workhorses
   , sortOn, Down(..), swap
   , partitionEithers, rights, lefts, fromLeft, fromRight
+    -- * Statistics — canonical names from Haskell's `statistics` package
+    -- (Statistics.Sample spells mean/stdDev/variance this way), so a future
+    -- swap to the real package is name-compatible; see the Known Limits
+    -- section of haskell/CLAUDE.md for why it's not in use yet (Word64#
+    -- primops the JIT does not implement, same gap `Tidepool.Random` works
+    -- around). Total: every function returns 'Nothing' on an empty list
+    -- (or an out-of-range percentile) rather than throwing.
+  , mean, median, stdDev, variance, percentile
     -- * Shared record vocabulary (Tidepool.Records)
   , Proc(..), ok, Hit(..)
   , FileMeta(..), UpdateOutcome(..), UpdateOneOutcome(..), WriteOutcome(..)
@@ -1084,3 +1092,63 @@ insertWith f k v m = case Map.lookup k m of
   Just old -> let !combined = f v old in Map.insert k combined m
   Nothing  -> Map.insert k v m
 {-# INLINE insertWith #-}
+
+-- ---------------------------------------------------------------------------
+-- Statistics — canonical `statistics`-package names (Statistics.Sample),
+-- written directly against 'Double' rather than the real package (see the
+-- export-list comment above). Every function is TOTAL: 'Nothing' on an
+-- empty list instead of throwing.
+-- ---------------------------------------------------------------------------
+
+-- | Arithmetic mean. 'Nothing' on an empty list.
+mean :: [Double] -> Maybe Double
+mean [] = Nothing
+mean xs = Just (sum xs / genericLength xs)
+
+-- | Sample median: the middle element of the sorted list, or the average of
+-- the two middle elements when the length is even. 'Nothing' on an empty list.
+median :: [Double] -> Maybe Double
+median [] = Nothing
+median xs =
+  let sorted = sort xs
+      n = length sorted
+      mid = n `div` 2
+  in if odd n
+       then atMay sorted mid
+       else do
+         a <- atMay sorted (mid - 1)
+         b <- atMay sorted mid
+         pure ((a + b) / 2)
+
+-- | Sample variance (Bessel-corrected, divides by @n - 1@ — matches
+-- @Statistics.Sample.variance@). 'Nothing' when fewer than 2 values (the
+-- estimator is undefined for n < 2).
+variance :: [Double] -> Maybe Double
+variance xs
+  | length xs < 2 = Nothing
+  | otherwise =
+      let n = genericLength xs
+          m = sum xs / n
+      in Just (sum [ (x - m) * (x - m) | x <- xs ] / (n - 1))
+
+-- | Sample standard deviation: @sqrt . variance@. 'Nothing' when fewer than
+-- 2 values.
+stdDev :: [Double] -> Maybe Double
+stdDev xs = sqrt <$> variance xs
+
+-- | The @p@-th percentile (@p@ on a 0..100 scale, e.g. @percentile 95 xs@ is
+-- p95), by linear interpolation between the two nearest ranks in the sorted
+-- list. 'Nothing' on an empty list or a @p@ outside @[0, 100]@.
+percentile :: Double -> [Double] -> Maybe Double
+percentile p xs
+  | null xs = Nothing
+  | p < 0 || p > 100 = Nothing
+  | otherwise = do
+      let sorted = sort xs
+          rank = (p / 100) * fromIntegral (length sorted - 1)
+          lo = floor rank :: Int
+          hi = ceiling rank :: Int
+          frac = rank - fromIntegral lo
+      a <- atMay sorted lo
+      b <- atMay sorted hi
+      pure (a + frac * (b - a))

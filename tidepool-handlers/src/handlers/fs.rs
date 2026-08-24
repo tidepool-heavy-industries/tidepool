@@ -131,6 +131,33 @@ fn grep_regex_error(regex_str: &str, e: &regex::Error) -> FsError {
     FsError::FsBadRegex(msg)
 }
 
+/// A grep `Hit.text` is one matched LINE, not a bounded snippet — on an
+/// ordinary source file that's small, but a single-line data file (minified
+/// JSON, one record per line) makes the whole file one "line", which turns
+/// an ordinary grep into a multi-KB hit that trips pagination for no benefit
+/// (playground report 2026-08-24, Friction 2). Cap it here, at the source,
+/// with a marker that names the right tool instead of a bare "…truncated".
+const GREP_HIT_MAX_CHARS: usize = 300;
+
+/// Truncate an oversized grep hit line to [`GREP_HIT_MAX_CHARS`], appending a
+/// marker that names `readGlob` + `eitherDecode`/optics as the canonical way
+/// to query structured (JSON) data instead of line-based grep. Char-safe
+/// (counts/slices on `char`, not byte, boundaries) since `line` is already
+/// validated UTF-8 by the caller.
+fn truncate_hit_text(line: &str) -> String {
+    let total = line.chars().count();
+    if total <= GREP_HIT_MAX_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(GREP_HIT_MAX_CHARS).collect();
+    let remaining = total - GREP_HIT_MAX_CHARS;
+    format!(
+        "{head}… [truncated {remaining} more chars — this line looks like structured data \
+         crammed onto one line; query it with readGlob + eitherDecode + optics \
+         (key/_String/values/cosmos) instead of grepGlob]"
+    )
+}
+
 /// Expand a glob pattern relative to `root` with sandbox and component filtering.
 ///
 /// Used by [`FsHandler`] (glob/grep) for `**`-normalisation, sandbox check,
@@ -430,7 +457,7 @@ impl FsHandler {
                     results.push(Hit {
                         path: rel_path.clone(),
                         line: (i + 1) as i64,
-                        text: line.to_string(),
+                        text: truncate_hit_text(line),
                     });
                 }
             }
@@ -1041,6 +1068,60 @@ mod tests {
 
         assert_eq!(results.len(), 2005);
         assert!(results.iter().all(|h| h.path == "large.txt"));
+    }
+
+    /// A single-line data file (minified JSON, one record per line — the
+    /// exact shape a `renderJson`-written batch file takes) makes the whole
+    /// file one "line": the matched `Hit.text` is capped at
+    /// `GREP_HIT_MAX_CHARS`, with a marker naming `readGlob`/optics as the
+    /// tool for structured data — never the raw multi-KB line (playground
+    /// report 2026-08-24, Friction 2). `Hit.line`/`Hit.path` stay exact; only
+    /// `text` is capped.
+    #[test]
+    fn test_grep_truncates_oversized_hit_text() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("batch.json");
+        // One giant single-line JSON array — far past GREP_HIT_MAX_CHARS.
+        let mut content = String::from("[");
+        for i in 0..200 {
+            content.push_str(&format!(r#"{{"id":"req-{i:04}","status":"ok"}},"#));
+        }
+        content.push(']');
+        std::fs::write(&file_path, &content).unwrap();
+        assert!(content.chars().count() > GREP_HIT_MAX_CHARS);
+
+        let mut handler = FsHandler::new(root.clone());
+        let table = full_effect_test_table();
+        let captured = CapturedOutput::new();
+        let cx = EffectContext::with_user(&table, &captured);
+
+        let req = FsReq::FsGrep("req-0002".to_string(), "batch.json".to_string());
+        let res = response_value(handler.handle(req, &cx).unwrap(), &table);
+        let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
+        let results = decoded.unwrap();
+
+        assert_eq!(results.len(), 1);
+        let hit = &results[0];
+        assert_eq!(hit.path, "batch.json");
+        assert_eq!(hit.line, 1);
+        assert!(
+            hit.text.chars().count() < content.chars().count(),
+            "hit text should be shorter than the whole line: {}",
+            hit.text.len()
+        );
+        assert!(
+            hit.text.contains("readGlob") && hit.text.contains("optics"),
+            "truncation marker should name the readGlob+optics idiom: {}",
+            hit.text
+        );
+        assert!(
+            hit.text
+                .starts_with(&content.chars().take(GREP_HIT_MAX_CHARS).collect::<String>()),
+            "truncation should keep the original prefix intact: {}",
+            hit.text
+        );
     }
 
     #[test]
