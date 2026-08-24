@@ -638,6 +638,15 @@ impl TurnTemplate<'_> {
                 .find("default (Int")
                 .unwrap_or(self.preamble.len());
             out.push_str(&self.preamble[..insert_point]);
+            // 1-based line range the emitted `import ...` lines occupy —
+            // tagged with its own marker (mirrors the code marker below) so
+            // `tidepool_runtime::diag::extract_user_code_ranges` can classify
+            // a diagnostic anchored HERE (a bad import) as user-origin
+            // rather than wrapper-scaffold fallout: `imports` is a
+            // caller-authored param, textually far from `code`, but no less
+            // the caller's own text.
+            let imports_start_line = out.matches('\n').count() + 1;
+            let mut imports_line_count = 0usize;
             for imp in self
                 .imports
                 .lines()
@@ -645,6 +654,13 @@ impl TurnTemplate<'_> {
                 .filter(|l| !l.is_empty())
             {
                 out.push_str(&format!("import {}\n", imp));
+                imports_line_count += 1;
+            }
+            if imports_line_count > 0 {
+                out.push_str(&format!(
+                    "-- [user-imports-lines] {imports_start_line}:{}\n",
+                    imports_start_line + imports_line_count - 1
+                ));
             }
             out.push_str(&self.preamble[insert_point..]);
         } else {
@@ -655,10 +671,27 @@ impl TurnTemplate<'_> {
         out.push_str("-- [user]\n");
 
         if !self.helpers.is_empty() {
+            // Same idea as the imports marker above, for the `helpers` param
+            // — a diagnostic anchored in `helpers` (e.g. a partial function
+            // used inside a helper) is the caller's own text, not wrapper
+            // fallout, even though it precedes `code`'s own `[user-lines]`
+            // range.
+            let helpers_start_line = out.matches('\n').count() + 1;
             out.push_str(self.helpers);
             if !self.helpers.ends_with('\n') {
                 out.push('\n');
             }
+            let helpers_content_lines = if self.helpers.is_empty() {
+                1
+            } else if self.helpers.ends_with('\n') {
+                self.helpers.matches('\n').count()
+            } else {
+                self.helpers.matches('\n').count() + 1
+            };
+            out.push_str(&format!(
+                "-- [user-helpers-lines] {helpers_start_line}:{}\n",
+                helpers_start_line + helpers_content_lines - 1
+            ));
             out.push('\n');
         }
 
@@ -967,13 +1000,18 @@ pub(crate) fn format_error_with_source(
     // remap — use `error` verbatim.
     let body = match diagnostics {
         Some(diags) => {
-            let user_lines = tidepool_runtime::diag::extract_user_code_lines(source);
+            // Every region the caller actually authored: the primary `code`
+            // block AND (when present) `helpers`/`imports` — a diagnostic
+            // anchored in either of the latter two is the caller's own text,
+            // not wrapper fallout, even though both sit outside `code`'s own
+            // `[user-lines]` range.
+            let user_lines = tidepool_runtime::diag::extract_user_code_ranges(source);
             tidepool_runtime::diag::render_diagnostics(
                 diags,
                 &tidepool_runtime::diag::RenderOpts {
                     anchor: "Expr.hs",
                     label: "<expr>",
-                    user_lines,
+                    user_lines: user_lines.as_deref(),
                     line_offset: offset,
                     col_indent: 0,
                     drop_foreign_gen_warnings_except: None,
@@ -1734,6 +1772,64 @@ mod template_haskell_pin {
         assert_eq!(
             src,
             "module Expr where\ndefault (Int)\n-- [user]\n__user = let {\n __b =\npure 1\n } in __b  -- [user-lines] 6:6\n\nresult :: Eff '[Console] Value\nresult = do\n  _r <- __user\n  paginateResult 4096 (toJSON _r)\n",
+        );
+    }
+
+    /// `imports`/`helpers` each get their OWN `-- [user-*-lines]` marker,
+    /// alongside the primary `-- [user-lines]` code marker — the mechanism
+    /// `tidepool_runtime::diag::extract_user_code_ranges` reads to classify a
+    /// diagnostic anchored in either param as user-origin rather than
+    /// wrapper-scaffold fallout (see that function's doc, and the diag.rs
+    /// tests pinning the classification itself). Pinned here at the source
+    /// level: zero GHC cost, and it is what actually feeds the classifier.
+    #[test]
+    fn imports_and_helpers_each_get_their_own_marker() {
+        let src = TurnTemplate {
+            preamble: PRE,
+            effect_stack: STACK,
+            code: CODE,
+            imports: "Data.List (sort)\nqualified Data.Aeson as Aeson",
+            helpers: "double :: Int -> Int\ndouble x = x * 2",
+            ..Default::default()
+        }
+        .render();
+
+        // Every marker is present exactly once.
+        assert_eq!(src.matches("[user-imports-lines]").count(), 1, "{src}");
+        assert_eq!(src.matches("[user-helpers-lines]").count(), 1, "{src}");
+        assert_eq!(src.matches("[user-lines]").count(), 1, "{src}");
+
+        let ranges = tidepool_runtime::diag::extract_user_code_ranges(&src)
+            .expect("markers present, so ranges must resolve");
+        assert_eq!(ranges.len(), 3, "{ranges:?}");
+
+        // Each range's line span, indexed back into `src`, is exactly the
+        // caller's own text — not scaffold.
+        let lines: Vec<&str> = src.lines().collect();
+        let text_of = |(start, end): (usize, usize)| lines[start - 1..end].join("\n");
+        let ranges_by_start: std::collections::BTreeMap<usize, (usize, usize)> =
+            ranges.iter().map(|&r| (r.0, r)).collect();
+        let mut found_imports = false;
+        let mut found_helpers = false;
+        let mut found_code = false;
+        for &range in ranges_by_start.values() {
+            let text = text_of(range);
+            if text.contains("import Data.List (sort)") {
+                assert!(
+                    text.contains("import qualified Data.Aeson as Aeson"),
+                    "{text}"
+                );
+                found_imports = true;
+            } else if text.contains("double x = x * 2") {
+                assert!(text.contains("double :: Int -> Int"), "{text}");
+                found_helpers = true;
+            } else if text == CODE {
+                found_code = true;
+            }
+        }
+        assert!(
+            found_imports && found_helpers && found_code,
+            "{ranges:?}\n{src}"
         );
     }
 

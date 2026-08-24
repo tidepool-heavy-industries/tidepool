@@ -2934,7 +2934,7 @@ fn render_compile_fail_body(
                 &tidepool_runtime::diag::RenderOpts {
                     anchor: "Expr.hs",
                     label: "<item>",
-                    user_lines,
+                    user_lines: user_lines.as_ref().map(std::slice::from_ref),
                     line_offset,
                     col_indent,
                     drop_foreign_gen_warnings_except: None,

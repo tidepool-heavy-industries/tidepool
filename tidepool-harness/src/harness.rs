@@ -446,7 +446,22 @@ fn render_compile_error(
     let tidepool_runtime::CompileError::Diagnostics(diags) = e else {
         return e.to_string();
     };
-    if let Some(opts) = pick_render_opts(diags, block, expr_source, bind_source) {
+    if let Some((source, offset, ranges)) = pick_render_opts(diags, block, expr_source, bind_source)
+    {
+        let opts = tidepool_runtime::diag::RenderOpts {
+            anchor: TURN_ANCHOR,
+            label: TURN_LABEL,
+            user_lines: Some(&ranges),
+            line_offset: offset,
+            col_indent: 0,
+            // Turn compiles routinely import the session's own decl-plane
+            // library modules (`Tidepool/Session/Lib/G<n>.hs`); a warning
+            // anchored there is the same class of noise as a wrapper-origin
+            // error — it is not something a turn's own code edits — so drop
+            // every such warning unconditionally on this path.
+            drop_foreign_gen_warnings_except: Some(""),
+            source,
+        };
         let mut out = format!("GHC error ({} diagnostic(s)):\n", diags.len());
         out.push_str(&tidepool_runtime::diag::render_diagnostics(diags, &opts));
         return out;
@@ -465,8 +480,14 @@ fn render_compile_error(
     out
 }
 
-/// Pick which candidate template's [`tidepool_runtime::diag::RenderOpts`]
-/// (if any) a batch of diagnostics should be remapped against — see
+/// `(source, line_offset, user_lines)` — the module [`render_compile_error`]
+/// should render a diagnostic batch against and the `RenderOpts` fields
+/// derived from it: which candidate template applies, its `line_offset`, and
+/// every user-authored range within it (see [`pick_render_opts`]).
+type PickedRender<'a> = (&'a str, usize, Vec<(usize, usize)>);
+
+/// Pick which candidate template a batch of diagnostics should be remapped
+/// against, and every user-authored range within it — see
 /// [`render_compile_error`]'s doc for why this exists and why the choice is
 /// derived, never guessed. All diagnostics in one `CompileError::Diagnostics`
 /// batch come from the SAME compile, so one representative (anchor-file)
@@ -479,18 +500,32 @@ fn render_compile_error(
 /// call) sits textually AFTER the user's own code in the turn template —
 /// this falls back to the first candidate that actually built (a non-empty
 /// window), rather than returning `None`. That fallback is safe: the
-/// diagnostic's line still lands OUTSIDE the chosen `user_lines` window, so
+/// diagnostic's line still lands OUTSIDE every user-authored range, so
 /// `tidepool_runtime::diag::render_diagnostics`'s own fallout partition
 /// classifies it as wrapper fallout — never displayed as if it were the
 /// user's own code — instead of [`render_compile_error`] raw-dumping every
 /// diagnostic in template coordinates because no candidate was picked at all
 /// (poke-round finding 5, hole 2).
+///
+/// The returned `user_lines` prefers the REAL `-- [user-*-lines]` markers
+/// baked into the chosen `source` itself (via
+/// [`tidepool_runtime::diag::extract_user_code_ranges`]) over the single
+/// arithmetic window [`candidate_window`] computes: the markers are parsed
+/// straight out of the ACTUAL compiled text (and, for the EXPR candidate,
+/// additionally cover the `helpers`/`imports` params, which
+/// `candidate_window`'s single code-only window never did — the source of
+/// the helpers/imports-param masking bug this fixes), so they cannot drift
+/// from what GHC actually saw the way an independently-recomputed line count
+/// could. Falls back to the single arithmetic window only when `source`
+/// carries no markers at all (e.g. `session_bind_template`'s BIND source,
+/// which never calls `TurnTemplate::render` and so never emits any — see
+/// `BIND_MARKER`'s own doc; a synthetic/test source is the same shape).
 fn pick_render_opts<'a>(
     diags: &[tidepool_runtime::diag::ExtractDiag],
     block: &str,
     expr_source: &'a str,
     bind_source: &'a str,
-) -> Option<tidepool_runtime::diag::RenderOpts<'a>> {
+) -> Option<PickedRender<'a>> {
     let representative_line = diags.iter().find_map(|d| {
         let span = d.span.as_ref()?;
         span.file
@@ -498,21 +533,8 @@ fn pick_render_opts<'a>(
             .then_some(span.start_line as usize)
     })?;
     let content_lines = engine::content_line_count(block);
-    let opts_for = |source: &'a str, offset: usize, window: (usize, usize)| {
-        tidepool_runtime::diag::RenderOpts {
-            anchor: TURN_ANCHOR,
-            label: TURN_LABEL,
-            user_lines: Some(window),
-            line_offset: offset,
-            col_indent: 0,
-            // Turn compiles routinely import the session's own decl-plane
-            // library modules (`Tidepool/Session/Lib/G<n>.hs`); a warning
-            // anchored there is the same class of noise as a wrapper-origin
-            // error — it is not something a turn's own code edits — so drop
-            // every such warning unconditionally on this path.
-            drop_foreign_gen_warnings_except: Some(""),
-            source,
-        }
+    let ranges_for = |source: &'a str, window: (usize, usize)| {
+        tidepool_runtime::diag::extract_user_code_ranges(source).unwrap_or_else(|| vec![window])
     };
     let candidates: Vec<(&'a str, usize, (usize, usize))> =
         [(expr_source, EXPR_MARKER), (bind_source, BIND_MARKER)]
@@ -527,13 +549,13 @@ fn pick_render_opts<'a>(
         .iter()
         .find(|(_, _, (start, end))| representative_line >= *start && representative_line <= *end)
     {
-        return Some(opts_for(source, offset, window));
+        return Some((source, offset, ranges_for(source, window)));
     }
 
     candidates
         .into_iter()
         .next()
-        .map(|(source, offset, window)| opts_for(source, offset, window))
+        .map(|(source, offset, window)| (source, offset, ranges_for(source, window)))
 }
 
 /// The orchestrator. Cloneable-cheap? No — it owns the tree + sessions, so it
@@ -3827,9 +3849,12 @@ mod tests {
     /// candidate's window, so `render_diagnostics`'s own fallout partition
     /// classifies the diagnostic as outside the user's code and — since it's
     /// the ONLY diagnostic in the batch — renders the synthetic all-wrapper
-    /// message (poke-round finding 5, hole 2).
+    /// framing line PLUS the cleaned underlying diagnostic (poke-round
+    /// finding 5, hole 2 — and the follow-up: suppressing it outright left
+    /// the recipient with nothing to act on, see the all-wrapper tests in
+    /// `tidepool_runtime::diag`).
     #[test]
-    fn render_compile_error_wrapper_origin_diagnostic_becomes_fallout_not_raw_dump() {
+    fn render_compile_error_wrapper_origin_diagnostic_becomes_fallout_with_diagnostic_included() {
         let expr_source = fake_expr_source(0, 1);
         let bind_source = fake_bind_source(0, 1);
         let err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
@@ -3839,12 +3864,66 @@ mod tests {
             "deep in generated scaffolding",
         )]);
         let out = render_compile_error(&err, "x", &expr_source, &bind_source);
-        assert!(!out.contains("Expr.hs:9999:1"), "{out}");
-        assert!(!out.contains("deep in generated scaffolding"), "{out}");
+        // Never remapped to <turn> coordinates (it isn't the user's own
+        // code) — but the raw position and message ARE included now.
         assert!(!out.contains("<turn>:"), "{out}");
+        assert!(out.contains("Expr.hs:9999:1"), "{out}");
+        assert!(out.contains("deep in generated scaffolding"), "{out}");
         assert!(
             out.contains("arose in the harness's result-display wrapper"),
-            "expected the synthetic wrapper-fallout message: {out}"
+            "expected the synthetic wrapper-fallout framing line too: {out}"
+        );
+    }
+
+    /// The bug this closes: a `helpers`-param error (real example — a
+    /// deliberately-disabled partial function used INSIDE `helpers`) used to
+    /// be classified as wrapper-origin fallout, because `helpers` sits
+    /// OUTSIDE the single code-only `user_lines` window `pick_render_opts`
+    /// used to compute. With the real `-- [user-helpers-lines]` marker
+    /// `TurnTemplate::render` now emits (read via
+    /// `tidepool_runtime::diag::extract_user_code_ranges`), the SAME
+    /// diagnostic is kept and rendered, never folded into the all-wrapper
+    /// synthetic message.
+    #[test]
+    fn render_compile_error_keeps_helpers_and_imports_region_errors() {
+        // A synthetic EXPR source carrying the real marker shapes
+        // `TurnTemplate::render` emits: an imports marker, a helpers marker,
+        // then the ordinary EXPR_MARKER + code + `[user-lines]` marker.
+        let expr_source = format!(
+            "-- preamble\n\
+             import Data.Aeson as Aeson -- [user-imports-lines] 2:2\n\
+             -- [user]\n\
+             double x = x * 2 -- [user-helpers-lines] 4:4\n\
+             {EXPR_MARKER}userExprLine0\n }} in __b  -- [user-lines] 7:7\n"
+        );
+        let bind_source = fake_bind_source(0, 1);
+
+        // Helpers-region diagnostic.
+        let helpers_err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            4,
+            1,
+            "(!!) is partial — use atMay xs i :: Maybe a",
+        )]);
+        let out = render_compile_error(&helpers_err, "userExprLine0", &expr_source, &bind_source);
+        assert!(out.contains("(!!) is partial"), "{out}");
+        assert!(
+            !out.contains("arose in the harness's result-display wrapper"),
+            "a helpers-region error must never be classified as wrapper fallout: {out}"
+        );
+
+        // Imports-region diagnostic.
+        let imports_err = tidepool_runtime::CompileError::Diagnostics(vec![diag(
+            "Expr.hs",
+            2,
+            1,
+            "Could not find module `Data.Aeson'",
+        )]);
+        let out = render_compile_error(&imports_err, "userExprLine0", &expr_source, &bind_source);
+        assert!(out.contains("Could not find module"), "{out}");
+        assert!(
+            !out.contains("arose in the harness's result-display wrapper"),
+            "an imports-region error must never be classified as wrapper fallout: {out}"
         );
     }
 
