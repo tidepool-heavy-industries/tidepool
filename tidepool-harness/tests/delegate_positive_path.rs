@@ -111,7 +111,7 @@ fn state_json() -> Json {
     json!({
         "question": "SCENARIO: delegate from the root session.",
         "turnCount": 0,
-        "lastRun": Json::Null,
+        "lastAnswer": Json::Null,
     })
 }
 
@@ -228,19 +228,18 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
         .expect("one render -> loop -> thoughtHylo -> render cycle, delegation included");
 
     let state = outcome.state_json;
-    let last_run = state
-        .get("lastRun")
-        .filter(|v| !v.is_null())
-        .unwrap_or_else(|| panic!("the cycle recorded no lastRun: {state}"));
+    let last_answer = state
+        .get("lastAnswer")
+        .and_then(Json::as_str)
+        .unwrap_or_else(|| panic!("the cycle recorded no lastAnswer: {state}"));
 
     // The delegated subagent's OWN typed result (`delegateSummary`, decoded
     // through the real MockBackend saga) IS the answer the session finalized
     // — delegate results return inline, and the loop stores the root's typed
     // value as-is (fork-subsumes-split step 4).
     assert_eq!(
-        last_run.get("runAnswer").and_then(Json::as_str),
-        Some("found one file: README.md"),
-        "lastRun must carry the delegated result the session finalized on: {last_run}"
+        last_answer, "found one file: README.md",
+        "lastAnswer must carry the delegated result the session finalized on: {state}"
     );
 
     // The loop's own bookkeeping: a "turn" journal entry carrying the answer.
@@ -363,14 +362,13 @@ async fn direct_subagent_send_dispatches_within_the_answerer_row() {
         );
 
     let state = outcome.state_json;
-    let last_run = state
-        .get("lastRun")
-        .filter(|v| !v.is_null())
-        .unwrap_or_else(|| panic!("the cycle recorded no lastRun: {state}"));
+    let last_answer = state
+        .get("lastAnswer")
+        .and_then(Json::as_str)
+        .unwrap_or_else(|| panic!("the cycle recorded no lastAnswer: {state}"));
     assert_eq!(
-        last_run.get("runAnswer").and_then(Json::as_str),
-        Some("spawned ok"),
+        last_answer, "spawned ok",
         "the direct Subagent send must be serviced, and the session's own \
-         finalize must land as the turn's answer: {last_run}"
+         finalize must land as the turn's answer: {state}"
     );
 }

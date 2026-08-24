@@ -28,7 +28,6 @@
 module Harness
   ( -- * The locked entry points
     State (..)
-  , RunSummary (..)
   , initialState
   , render
   , loop
@@ -103,13 +102,13 @@ loop st = do
 {answer}
 
 Start the next turn when ready — optionally with steering.|]
-  pure st {turnCount = turn, lastRun = Just (RunSummary {runAnswer = answer})}
+  pure st {turnCount = turn, lastAnswer = Just answer}
   where
     turn = st.turnCount + 1
 
 -- | The honest opt-out ('Tidepool.Resume' module doc): this harness's
 -- 'record' calls exist for the durable transcript, not to replay prior
--- sessions on a resumed boot — a rerun re-derives 'lastRun' from
+-- sessions on a resumed boot — a rerun re-derives 'lastAnswer' from
 -- 'State' the same way a fresh run does, so there is nothing here for a
 -- fold of recorded steps to inject.  Declaring this (rather than leaving it
 -- absent) is what turns a journal-bearing crash recovery from a boot

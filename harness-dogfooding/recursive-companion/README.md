@@ -15,7 +15,7 @@ Direction and locked decisions: [`plans/fork-subsumes-split.md`](../../plans/for
 
 - **`loop`** (`Harness.hs`): seed question (`askUser @SeedQuestion`, once,
   operator-provided) → `runLLMTurn @Text (rootPrompt st)` → store the answer
-  verbatim in `State.lastRun`. Nothing recursive lives in the authored loop.
+  verbatim in `State.lastAnswer`. Nothing recursive lives in the authored loop.
 - **Every session's answer type is the `@Type` at its invocation site.**
   The root's is `Text` because `loop`'s own call site starts plain
   (author-evolvable); interior types are model-designed per `fork @T` — a

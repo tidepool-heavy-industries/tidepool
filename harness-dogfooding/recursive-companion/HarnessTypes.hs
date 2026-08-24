@@ -22,7 +22,6 @@
 module HarnessTypes
   ( -- * Checkpointed state
     State (..)
-  , RunSummary (..)
   , initialState
 
     -- * The seed gate ('Harness.loop'\'s opening ask)
@@ -54,21 +53,17 @@ import Tidepool.QQ (fmt)
 -- No caps live here (fork-subsumes-split step 4): depth and descendant
 -- budgets are the DRIVER's spawn-time enforcement, not companion
 -- configuration.
+--
+-- 'lastAnswer' is the root session's own typed answer, verbatim — never
+-- re-shaped (operator decision, 2026-08-23).  The tree of forked
+-- sub-sessions that produced it is the driver's territory (operator page,
+-- journal, budgets); nothing here re-renders it.
 data State = State
-  { question  :: Text
-  , turnCount :: Int
-  , lastRun   :: Maybe RunSummary
+  { question   :: Text
+  , turnCount  :: Int
+  , lastAnswer :: Maybe Text
   }
   deriving (Generic, ToJSON, FromJSON, Show)
-
--- | What 'render' shows about the last turn: the root session's own typed
--- answer, verbatim — never re-shaped (operator decision, 2026-08-23).  The
--- tree of forked sub-sessions that produced it is the driver's territory
--- (operator page, journal, budgets); nothing here re-renders it.
-data RunSummary = RunSummary
-  { runAnswer :: Text
-  }
-  deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | The question is deliberately EMPTY: seeding it is the OPERATOR's first
 -- act, not the author's — 'Harness.loop' opens by asking for it
@@ -76,7 +71,7 @@ data RunSummary = RunSummary
 -- runs (operator decision, 2026-08-19; a hardcoded question meant the first
 -- attended run spent real model turns on a question nobody chose).
 initialState :: State
-initialState = State {question = "", turnCount = 0, lastRun = Nothing}
+initialState = State {question = "", turnCount = 0, lastAnswer = Nothing}
 
 -- ---------------------------------------------------------------------------
 -- The two operator forms
@@ -112,7 +107,7 @@ data OperatorSteering = OperatorSteering
 -- doc for what it teaches and what it deliberately leaves to the driver's
 -- framing.
 render :: State -> Text
-render st = case st.lastRun of
+render st = case st.lastAnswer of
   Nothing ->
     [fmt|You are a recursive companion. Nothing has been answered yet.
 
@@ -135,10 +130,10 @@ thinking and the answer, never the bookkeeping.
         if T.strip st.question == ""
           then "(being seeded this turn — the request below carries it; treat the request's question as authoritative)" :: Text
           else st.question
-  Just r ->
+  Just answer ->
     [fmt|The previous turn's finalized answer, verbatim:
 
-{r.runAnswer}
+{answer}
 
 Question: {st.question}
 Turns completed: {show st.turnCount}

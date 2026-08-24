@@ -15,7 +15,7 @@
 //!   the seeded question checkpoints with the completed turn;
 //! - the collapsed turn: root request → session forks → typed child answers
 //!   land on the right handles → the root's OWN `finalize @Text` value is
-//!   stored AS-IS in `lastRun.runAnswer` (never re-shaped) and journaled
+//!   stored AS-IS in `lastAnswer` (never re-shaped) and journaled
 //!   under kind `"turn"`.
 //!
 //! The ReplayProvider queue is itself a behavior pin: the fork scenario's
@@ -171,7 +171,7 @@ fn build_driver(
 
 /// A seeded turn: the root session forks two typed sub-answerers, waits
 /// both, and finalizes the combination — which lands AS-IS in
-/// `lastRun.runAnswer` and in the `"turn"` journal entry.
+/// `lastAnswer` and in the `"turn"` journal entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seeded_turn_forks_and_stores_the_roots_typed_answer_as_is() {
     support::require_extract();
@@ -198,7 +198,7 @@ async fn seeded_turn_forks_and_stores_the_roots_typed_answer_as_is() {
             json!({
                 "question": "SCENARIO: combine the alpha and beta facts.",
                 "turnCount": 0,
-                "lastRun": Json::Null,
+                "lastAnswer": Json::Null,
             }),
             None,
             source.fingerprint.clone(),
@@ -224,15 +224,14 @@ async fn seeded_turn_forks_and_stores_the_roots_typed_answer_as_is() {
         Some(1),
         "one turn completed: {state}"
     );
-    let last_run = state
-        .get("lastRun")
-        .filter(|v| !v.is_null())
-        .unwrap_or_else(|| panic!("the cycle recorded no lastRun: {state}"));
+    let last_answer = state
+        .get("lastAnswer")
+        .and_then(Json::as_str)
+        .unwrap_or_else(|| panic!("the cycle recorded no lastAnswer: {state}"));
     assert_eq!(
-        last_run.get("runAnswer").and_then(Json::as_str),
-        Some("ALPHA | BETA"),
+        last_answer, "ALPHA | BETA",
         "the root's own typed value, stored as-is — a swapped fork delivery \
-         or any re-shaping fails here: {last_run}"
+         or any re-shaping fails here: {state}"
     );
 
     let journal = tidepool_handlers::load_journal(&journal_path).expect("journal loads");
@@ -283,13 +282,9 @@ async fn fresh_boot_seeds_the_question_through_the_operator_gate() {
         "seeding recurses straight into turn 1 (never parks the operator on \
          a confirm-what-you-just-did gate): {state}"
     );
-    let last_run = state
-        .get("lastRun")
-        .filter(|v| !v.is_null())
-        .unwrap_or_else(|| panic!("the first turn recorded no lastRun: {state}"));
-    assert_eq!(
-        last_run.get("runAnswer").and_then(Json::as_str),
-        Some("SKY IS BLUE"),
-        "{last_run}"
-    );
+    let last_answer = state
+        .get("lastAnswer")
+        .and_then(Json::as_str)
+        .unwrap_or_else(|| panic!("the first turn recorded no lastAnswer: {state}"));
+    assert_eq!(last_answer, "SKY IS BLUE", "{state}");
 }
