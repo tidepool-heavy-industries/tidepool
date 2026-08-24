@@ -11,6 +11,7 @@
 pub mod effect_trace;
 pub mod engine;
 pub mod forcing;
+mod generated;
 pub mod harness;
 pub mod log;
 pub mod provider;

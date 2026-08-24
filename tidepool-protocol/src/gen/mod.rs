@@ -13,6 +13,7 @@
 pub mod adapter_rs;
 pub mod decl_rs;
 pub mod handler_rs;
+pub mod harness_req_rs;
 pub mod wire_rs;
 
 use crate::schema::Effect;
@@ -118,6 +119,42 @@ pub fn snake_case(name: &str) -> String {
 #[must_use]
 pub fn module_name(e: &Effect) -> String {
     snake_case(e.name)
+}
+
+/// Render one `    Ctor(field, …),` enum-variant line, wrapping onto its own
+/// block the way rustfmt does once it would. Shared by [`handler_rs`] (the
+/// dispatchable `<Eff>Req` enums) and [`harness_req_rs`] (the decode-only
+/// suspension request enums) — both emit the identical "one variant per GADT
+/// constructor" enum shape, just into different crates for different
+/// purposes, so the rendering is the one shared piece.
+///
+/// The wrap condition is `fields.join(", ").chars().count() > 60` — NOT the
+/// naive "does the whole `    Ctor(...),` line exceed the 100-column
+/// `max_width`". rustfmt treats a tuple-variant's parenthesized field list as
+/// CALL-LIKE syntax, governed by the separate `fn_call_width` heuristic
+/// (`use_small_heuristics = Default`'s 60, i.e. 60% of `max_width`), applied
+/// to the field list ALONE — the constructor name and indent are irrelevant
+/// to the decision. Empirically probed against a real `rustfmt` invocation
+/// (60 chars of joined fields stays single-line, 61 wraps) rather than
+/// guessed: this crate's generated output must already be a fixed point of
+/// `cargo fmt`, and a wrong threshold here is exactly the kind of
+/// generator/format-gate fight that guarantee exists to prevent.
+#[must_use]
+pub fn render_variant(ctor: &str, fields: &[String]) -> String {
+    if fields.is_empty() {
+        return format!("    {ctor},\n");
+    }
+    let joined = fields.join(", ");
+    if joined.chars().count() <= 60 {
+        format!("    {ctor}({joined}),\n")
+    } else {
+        let mut out = format!("    {ctor}(\n");
+        for f in fields {
+            out.push_str(&format!("        {f},\n"));
+        }
+        out.push_str("    ),\n");
+        out
+    }
 }
 
 /// The shared `mod`-index body for a directory of generated effect modules.

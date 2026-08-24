@@ -8,9 +8,18 @@
 //!
 //! Adding one: see `plans/self-iterating-harness/22-p1-protocol-scaffold.md` §9.
 
+pub mod ask;
+pub mod ask_user;
+pub mod console;
 pub mod event;
 pub mod exec;
+pub mod finalize;
+pub mod fork;
+pub mod green;
 pub mod journal;
+pub mod read_state;
+pub mod run_llm_turn;
+pub mod subagent;
 pub mod worktree;
 
 use crate::schema::Effect;
@@ -38,4 +47,34 @@ pub fn all() -> Vec<Effect> {
 #[must_use]
 pub fn all_described() -> Vec<Effect> {
     all()
+}
+
+/// The suspension-decode roster: every effect `tidepool-harness`'s
+/// `classify_hole` needs constructor names + payload shapes for, generated as
+/// decode-only request enums into `tidepool-harness/src/generated/` (PRD 22
+/// step 1 — see `plans/self-iterating-harness/22-effect-protocol-prd.md`).
+///
+/// Deliberately DISJOINT from [`all`]/[`all_described`]: these nine effects'
+/// Haskell decls stay hand-carried in `tidepool-mcp/src/effect_defs.rs` for
+/// now (steps 2-3, held behind an operator ping — see each module's doc), so
+/// none of them flip through [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/
+/// [`crate::gen::handler_rs`]/[`crate::gen::adapter_rs`], only through
+/// [`crate::gen::harness_req_rs`]. The four already-migrated outer effects
+/// (`Worktree`/`RepoEvent`/`Exec`/`Journal`) are NOT repeated here — their
+/// request enums already exist, generated into `tidepool-handlers`, and
+/// `tidepool-harness` (a dependent of that crate already) reuses them
+/// directly rather than duplicating a second generated copy.
+#[must_use]
+pub fn suspension_roster() -> Vec<Effect> {
+    vec![
+        run_llm_turn::run_llm_turn(),
+        fork::fork(),
+        finalize::finalize(),
+        ask_user::ask_user(),
+        read_state::read_state(),
+        subagent::subagent(),
+        green::green(),
+        console::console(),
+        ask::ask(),
+    ]
 }

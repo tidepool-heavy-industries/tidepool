@@ -870,6 +870,8 @@ pub enum HandlingClass {
     Subagent,
     /// Dispatched into a driver-owned outer-row handler.
     OuterDispatch(OuterEffect),
+    /// Routed to the driver's green-thread (`Tidepool.Async`) scheduler.
+    Green,
 }
 
 /// Which driver-owned handler an [`HandlingClass::OuterDispatch`] verb reaches.

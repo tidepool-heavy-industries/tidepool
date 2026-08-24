@@ -33,7 +33,10 @@ fn main() -> ExitCode {
     let mut stale = Vec::new();
     let mut wrote = 0usize;
 
-    for f in tidepool_protocol::generated_files() {
+    let files = tidepool_protocol::generated_files()
+        .into_iter()
+        .chain(tidepool_protocol::harness_generated_files());
+    for f in files {
         let path = root.join(&f.path);
         let current = std::fs::read_to_string(&path).ok();
         if current.as_deref() == Some(f.contents.as_str()) {

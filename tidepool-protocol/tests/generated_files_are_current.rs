@@ -52,6 +52,55 @@ fn generated_files_are_current() {
     );
 }
 
+/// As [`generated_files_are_current`], for the suspension-decode roster
+/// ([`tidepool_protocol::effects::suspension_roster`]) — the decode-only
+/// request enums `tidepool-harness`'s `classify_hole` consumes. A separate
+/// test, not a shared loop over both file sets: the two rosters are
+/// deliberately disjoint (see `effects::suspension_roster`'s doc), and a
+/// failure here should never be confused with a decl-side staleness.
+#[test]
+fn harness_generated_files_are_current() {
+    let regen = std::env::var_os("TIDEPOOL_REGEN_PROTOCOL").is_some();
+    let root = workspace_root();
+    let mut stale = Vec::new();
+
+    for f in tidepool_protocol::harness_generated_files() {
+        let path = root.join(&f.path);
+        let current = std::fs::read_to_string(&path).ok();
+        if current.as_deref() == Some(f.contents.as_str()) {
+            continue;
+        }
+        if regen {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, &f.contents).unwrap();
+            continue;
+        }
+        stale.push(f.path.clone());
+    }
+
+    assert!(
+        stale.is_empty(),
+        "these committed harness decode files are stale vs the schema:\n  {}\n\
+         regenerate with `cargo run -p tidepool-protocol --bin tidepool-protocol-gen` \
+         (or `TIDEPOOL_REGEN_PROTOCOL=1 cargo test -p tidepool-protocol`)",
+        stale.join("\n  ")
+    );
+}
+
+/// The suspension-decode roster must be internally consistent too — same
+/// discipline as [`every_migrated_effect_validates`], over the disjoint
+/// roster.
+#[test]
+fn every_suspension_roster_effect_validates() {
+    for e in tidepool_protocol::effects::suspension_roster() {
+        if let Err(problems) = e.validate() {
+            panic!("{} is invalid:\n  {}", e.name, problems.join("\n  "));
+        }
+    }
+}
+
 /// The schema must be internally consistent before it generates anything —
 /// a verb tagged with an error ADT the effect does not declare, a helper
 /// wrapping a constructor that does not exist, an arity mismatch between a

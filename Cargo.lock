@@ -4063,6 +4063,7 @@ dependencies = [
  "tidepool-agent",
  "tidepool-atomic-write",
  "tidepool-bridge",
+ "tidepool-bridge-derive",
  "tidepool-bridge-effects",
  "tidepool-codegen",
  "tidepool-effect",

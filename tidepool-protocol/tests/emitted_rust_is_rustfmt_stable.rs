@@ -91,6 +91,38 @@ fn every_emitted_rust_file_is_a_rustfmt_fixed_point() {
     );
 }
 
+/// As [`every_emitted_rust_file_is_a_rustfmt_fixed_point`], for the
+/// suspension-decode roster ([`tidepool_protocol::effects::suspension_roster`])
+/// — a separate sweep because [`tidepool_protocol::harness_generated_files`]
+/// is a disjoint file set from [`tidepool_protocol::gen::all_files`] (see that
+/// function's doc), not covered by the sweep above.
+#[test]
+fn every_harness_decode_file_is_a_rustfmt_fixed_point() {
+    let files = tidepool_protocol::harness_generated_files();
+
+    assert!(
+        files.len() >= 9,
+        "expected at least one file per suspension-roster effect plus the mod index, got {}: {:?}",
+        files.len(),
+        files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
+
+    let mut drifted = Vec::new();
+    for f in &files {
+        let formatted = rustfmt(&f.contents);
+        if formatted != f.contents {
+            drifted.push(f.path.clone());
+        }
+    }
+
+    assert!(
+        drifted.is_empty(),
+        "these emitted harness decode files are NOT rustfmt fixed points:\n  {}\n\
+         Fix the EMITTER (gen::harness_req_rs), not the file.",
+        drifted.join("\n  ")
+    );
+}
+
 /// The Worktree wire and adapter modules specifically, named rather than left to
 /// the sweep above.
 ///

@@ -65,3 +65,26 @@ pub fn generated_files() -> Vec<GeneratedFile> {
     }
     all_files(&effects)
 }
+
+/// Every generated file for the suspension-decode roster
+/// ([`effects::suspension_roster`]) — the decode-only request enums
+/// `tidepool-harness`'s `classify_hole` consumes. Separate from
+/// [`generated_files`] because this roster is disjoint from [`effects::all`]
+/// (see that function's doc): a decl-side change to one migrated effect must
+/// never regenerate an unrelated harness decode file, and vice versa.
+///
+/// # Panics
+/// Panics when a roster effect fails [`schema::Effect::validate`], same
+/// discipline as [`generated_files`].
+#[must_use]
+pub fn harness_generated_files() -> Vec<GeneratedFile> {
+    let effects = effects::suspension_roster();
+    for e in &effects {
+        if let Err(problems) = e.validate() {
+            panic!("schema is invalid:\n  {}", problems.join("\n  "));
+        }
+    }
+    let mut out: Vec<GeneratedFile> = effects.iter().map(gen::harness_req_rs::file).collect();
+    out.push(gen::harness_req_rs::module_index(&effects));
+    out
+}
