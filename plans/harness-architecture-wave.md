@@ -105,6 +105,14 @@ touching `tidepool-harness/src/selfharness/` at once.
    inside tidepool-harness (`selfharness/driver.rs` effect-list prose,
    `tests/agent_stack_scoping.rs`) — lsp-nuke correctly left them per its
    boundary. Delete the mentions once no lane holds the crate.
+   DONE 2026-08-24 (`55f750a4`).
+6c. Straggler after suspension-schema folds (root, inline): three stale
+   mentions of the selfharness binary's OLD home (tidepool-web) inside
+   tidepool-harness — `persistence.rs` doc comment, the crate's
+   `CLAUDE.md`, `tests/delegate_positive_path.rs` doc comment —
+   composition-root correctly left them per its boundary. Update to the
+   facade-crate path (`-p tidepool --bin tidepool-selfharness`) once no
+   lane holds the crate.
 7. End-of-wave gate, after steps 2–4 have folded: walk all
    `tidepool-harness` shard groups sequentially per
    `scripts/battery-shard.sh` (the wave touched the harness throughout),
