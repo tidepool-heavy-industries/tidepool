@@ -658,7 +658,25 @@ unavailable here. Concretely, for each of the four consumer crates named in
 
 ---
 
-## Open questions (for the operator, not decided here)
+## Decisions (operator, 2026-08-24)
+
+1. **Sequencing: promote first, WITH the identity parameter reserved.**
+   §4.3 step 1 carries one additional constraint: the checkout API grows a
+   frontend-identity parameter now (threaded, unused by admission logic
+   yet) so the mount wave widens no registry signatures a second time.
+2. **Mounting model (when mount work starts): Option 3 composed with
+   Option 1 at TURN granularity.** Scope-per-frontend for isolation (§2.4's
+   own finding that it is load-bearing regardless), leases acquired per
+   TURN via `admit_checkout` — no frontend monopolizes across turns.
+   Upgrade to Option 2's FIFO dispatcher only on observed starvation.
+3. **Frontend identity: a typed `FrontendId` newtype owned by
+   `tidepool-session`**, with boundary constructors from harness `NodeId`
+   and MCP connection ids. The suspension-routing key (I4) extends with
+   this one typed field.
+4. **Crate name: `tidepool-session`** (as recommended; the two rejections
+   stand).
+
+## Open questions (retired — answered above)
 
 1. **Does multi-mount (§2) land as part of this promotion, or strictly
    after it (§4.3 point 4's assumption)?** This doc assumes "after" —

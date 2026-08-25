@@ -36,11 +36,9 @@
 # live, reuse) a per-run tidepool-extract compile daemon and export the
 # socket for the whole nextest invocation below, amortizing the ~5s
 # GHC-boot-plus-stdlib-typecheck tax every extract spawn otherwise pays.
-# OFF BY DEFAULT — set TIDEPOOL_EXTRACT_DAEMON=1 to opt in (a real
-# correctness bug is open in the daemon itself, see the design doc's Phase 1
-# status; the default flips once it's fixed and green). TIDEPOOL_EXTRACT_NO_DAEMON=1
-# is reserved as the explicit kill switch for the post-flip world (a no-op
-# today, since off is already the default). When enabled, the daemon is
+# ON BY DEFAULT (2026-08-24, post spawnSpec-memo fix — design doc Phase 1
+# status has the A/B receipts). TIDEPOOL_EXTRACT_NO_DAEMON=1
+# is the explicit kill switch. When running, the daemon is
 # always torn down (by its exact recorded pid, escalating to SIGKILL after a
 # 10s grace period if it doesn't exit on TERM) on script exit, including
 # SIGINT/SIGTERM — see lib-extract.sh's
@@ -72,7 +70,7 @@ resolve_tidepool_extract
 # Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
 # 1): amortizes the ~5s GHC-boot-plus-stdlib-typecheck tax every
 # tidepool-extract spawn otherwise pays, across every compile in this run.
-# Off by default — opt in: TIDEPOOL_EXTRACT_DAEMON=1. Outer-wrapper respect:
+# On by default (kill switch: TIDEPOOL_EXTRACT_NO_DAEMON=1). Outer-wrapper respect:
 # reuses an already-live $TIDEPOOL_EXTRACT_DAEMON_SOCKET instead of starting
 # a second one (see lib-extract.sh's start_battery_daemon doc). The trap is
 # installed BEFORE start_battery_daemon runs so a signal mid-boot still

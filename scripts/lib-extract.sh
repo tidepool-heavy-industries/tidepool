@@ -172,16 +172,13 @@ _battery_daemon_stamp_path() {
 # TIDEPOOL_EXTRACT_DAEMON_SOCKET for the caller's whole nextest invocation.
 # Must run after resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
 #
-# OFF BY DEFAULT for now (plans/compile-daemon-design.md's Phase 1 status:
-# a real correctness bug is open in the daemon itself — reported, not fixed
-# here, haskell/src is out of scope for this lane). Opt in with
-# TIDEPOOL_EXTRACT_DAEMON=1 to exercise it deliberately. Once the bug is
-# fixed and the daemon leg goes green, the default flips (parent-owned,
-# a one-line change here: swap which of the two checks below is the
-# default-skip). TIDEPOOL_EXTRACT_NO_DAEMON=1 is reserved as the explicit
-# kill switch for that post-flip world — a no-op today (the default is
-# already off), checked first and unconditional either way so it's already
-# live and won't need its own follow-up change.
+# ON BY DEFAULT (2026-08-24): the phase-1 blocker (warm-daemon spawnSpec
+# memo poison) was fixed by content-validating memo hits against GHC's own
+# ms_hs_hash (lookupValidMemo, GhcPipeline.hs), and the handlers A/B went
+# 197/197 on both legs — daemon leg 45s vs 71s direct-spawn, cold isolated
+# caches. TIDEPOOL_EXTRACT_NO_DAEMON=1 is the kill switch (checked first,
+# unconditional). Measurements + history: plans/compile-daemon-design.md
+# Phase 1 status.
 #
 # Outer-wrapper respect: if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set
 # and looks alive, reuse it and leave BATTERY_DAEMON_OWNED=0 — a chain
@@ -212,10 +209,10 @@ start_battery_daemon() {
     return 0
   fi
 
-  if [ "${TIDEPOOL_EXTRACT_DAEMON:-0}" != "1" ]; then
-    echo "==> resident compile daemon is opt-in for now (set TIDEPOOL_EXTRACT_DAEMON=1 to enable) — a correctness bug is open, see plans/compile-daemon-design.md's Phase 1 status; direct spawn per request" >&2
-    return 0
-  fi
+  # Default ON (flipped 2026-08-24 after the spawnSpec memo-poison fix —
+  # lookupValidMemo content-validation — took the handlers A/B to 197/197
+  # both legs; see plans/compile-daemon-design.md's Phase 1 status).
+  # TIDEPOOL_EXTRACT_NO_DAEMON=1 above is the kill switch.
 
   BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
   local sock="$BATTERY_DAEMON_SOCKET_DIR/extract.sock"
