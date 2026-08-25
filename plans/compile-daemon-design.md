@@ -833,3 +833,116 @@ fact the design doc did not have in hand at write time.
    the provisional rotation defaults (§ Decisions item 3, N=256 requests /
    2048MB ceiling) as conservative, not tight — 40 requests reached under
    35% of the RSS ceiling.
+
+---
+
+## Phase 1 status (battery wiring)
+
+**Scripts wiring: done and verified robust, off by default.**
+`scripts/battery.sh` and `scripts/battery-shard.sh` can start (or, per
+outer-wrapper respect, reuse) a per-run daemon on a per-run tempdir socket
+via shared helpers in `scripts/lib-extract.sh`
+(`start_battery_daemon`/`teardown_battery_daemon`), export
+`$TIDEPOOL_EXTRACT_DAEMON_SOCKET` for the whole nextest invocation, and
+tear the daemon down by its exact recorded pid on every exit path. See the
+two scripts' headers for the user-facing summary.
+
+**Default is OFF, inverted from this doc's original Phase 1 wording**
+(operator ruling, 2026-08-24, in response to the correctness blocker
+below): silent wrong results are never landable, so `TIDEPOOL_EXTRACT_DAEMON=1`
+is required to opt in for now — unset, battery runs are byte-identical to
+before this lane. `TIDEPOOL_EXTRACT_NO_DAEMON=1` is reserved as the
+explicit kill switch for once the default flips to on (a no-op today, since
+off is already the default) — kept now, rather than introduced at flip
+time, so the flip itself is the one-line change described below and
+nothing else needs to move. **The default flips to on only after the
+spawnSpec poison bug (below) is fixed and the daemon leg of the A/B goes
+green** — a one-line change in `lib-extract.sh`'s `start_battery_daemon`
+(swap which of the `TIDEPOOL_EXTRACT_NO_DAEMON`/`TIDEPOOL_EXTRACT_DAEMON`
+checks is the default-skip), owned by whoever lands that fix, not by this
+lane.
+
+**Teardown-hygiene finding and fix.** Verifying the SIGINT path (a signal
+sent directly to the script's own pid, as distinct from a terminal Ctrl-C
+hitting the whole foreground process group) surfaced two things, both
+closed within this lane's scope:
+
+1. A signal delivered directly to a script's pid is not delivered to a
+   synchronous foreground command — bash defers trap execution until that
+   command completes on its own (reproduced directly: a `trap ... INT` on a
+   plain foreground `sleep 20`, signaled 1s in, did not fire until the
+   sleep's own 20s elapsed). Fix: `cargo nextest run` now runs backgrounded
+   (`&`) with the script blocking on `wait "$nextest_pid"` — a signal
+   arriving during `wait` interrupts it immediately and the trap fires
+   promptly, verified end-to-end (signal-to-full-teardown well under a
+   second in the common case).
+2. **The daemon binary can catch SIGTERM without exiting promptly while
+   idle-blocked in its own accept() loop.** Observed directly: `kill -TERM`
+   on a daemon idling between requests left it alive and unresponsive for
+   15+ seconds (`SigCgt` in `/proc/<pid>/status` confirms SIGTERM is in its
+   caught-signal mask, so the signal is delivered and caught, just not
+   acted on promptly — consistent with GHC's RTS deferring signal handling
+   to the next safe point, which an idle blocking `accept()` may not reach
+   for a while). A plain TERM+`wait` teardown can therefore hang
+   indefinitely, taking the whole calling script with it. Fix (scripts-only,
+   still "exact recorded pid, never pattern-kill"): `teardown_battery_daemon`
+   now gives TERM a 10s grace period, polling `kill -0` on the same pid,
+   then escalates to `kill -KILL` on that same pid if it hasn't exited —
+   SIGKILL cannot be caught or deferred, so the bound is a hard guarantee.
+   Re-verified after the fix: SIGINT to the script's pid while a request is
+   idle → daemon torn down (via the KILL escalation) and socket tempdir
+   removed within ~10s, zero leftover processes. This RTS-signal-latency
+   behavior is a daemon-binary characteristic (`haskell/src`, out of this
+   lane's `ALLOWED PATHS`) — operator confirmed (2026-08-24) it goes into
+   the spawnSpec fix lane's scope alongside the correctness bug below; the
+   TERM→KILL escalation here is the right containment on the scripts side
+   meanwhile, kept regardless of what that lane does.
+
+**Correctness blocker — NOT closed, reported to the parent rather than
+worked around.** The phase-1 acceptance protocol (`scripts/battery.sh -p
+tidepool-handlers`, daemon vs. `TIDEPOOL_EXTRACT_NO_DAEMON=1`) surfaced a
+reproducible daemon correctness bug, isolated from every other variable:
+
+- Both legs run against the identical built `tidepool-extract-bin` and,
+  critically, each against its OWN brand-fresh, never-before-used
+  `$TIDEPOOL_COMPILE_CACHE_DIR` (an earlier pass through this same
+  comparison, using the ambient shared `~/.cache/tidepool`, produced
+  identical failures on BOTH legs — traced to a pre-existing poisoned
+  cache entry from unrelated activity on the shared box being replayed by
+  the compile memo before ever reaching `ExtractCmd::run()`/the daemon;
+  that shared-cache entry is a separate, informational finding — operator
+  confirmed (2026-08-24) it predates this lane and `scripts/redeploy.sh`'s
+  cache clear resolves it, no action needed here — and not the cause of
+  the daemon-specific failures below).
+- **No daemon** (`TIDEPOOL_EXTRACT_NO_DAEMON=1`, isolated cache): 197/197
+  tests pass, 70.9s wall — matches the no-daemon consolidated-battery
+  chain's own handlers-shard baseline (72s) closely.
+- **Daemon** (isolated cache): 187/197 pass, 52.5s wall (genuinely faster
+  when correct) — but 10 tests fail deterministically, every one touching
+  the Subagent+Worktree+Spawn effect row
+  (`tidepool-handlers::repo_event_with_handler` ×7,
+  `::subagent_tool_loop` ×2, `::subagent_one_cycle` ×1), all with the same
+  signature: `unresolved external Tidepool.Effects.Core.spawnSpec — the
+  extract replaced it with a poison sentinel`. `tidepool-extract-cmd/tests/
+  daemon_integration.rs` does not exercise this effect row today, which is
+  consistent with this regression surviving Phase 0's own test suite.
+- This is a real bug in the already-landed Phase 0 daemon
+  (`haskell/src/Tidepool/GhcPipeline.hs`'s resident-compile / memo-tiering
+  path — §7 deviation 2 above describes the general shape of this class of
+  bug, a meta.cbor/tiering divergence between the daemon's memo-aware path
+  and a direct spawn; this looks like a further instance the existing fix
+  doesn't cover for the Subagent/Spawn compiling row specifically) — out of
+  this lane's `ALLOWED PATHS` (`haskell/src`) to fix. Reported to the
+  parent via `notify_parent` rather than worked around or silently
+  defaulted around.
+- **Ruling (operator, 2026-08-24):** silent wrong results are never
+  landable, so landing with the daemon on by default was rejected outright.
+  Holding the branch would waste verified-robust wiring, so that was
+  rejected too. Landed instead with the default inverted (above) and the
+  DONE CRITERION amended: the A/B methodology being written up (done), the
+  no-daemon leg being green (done), and the daemon leg's failure being
+  root-caused to a named, reproducible bug with a repro (done) together
+  satisfy phase 1 for the scripts-wiring lane — the "daemon leg green"
+  criterion itself moves to whichever lane fixes the spawnSpec bug in
+  `haskell/src`, gated on this doc's Decisions-adjacent one-line default
+  flip once that lane's own A/B goes green.

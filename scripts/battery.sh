@@ -30,6 +30,24 @@
 # run for ~68min if un-ignored. Scope with `-E`, e.g.:
 #   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery.sh -p tidepool-codegen \
 #     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
+#
+# Resident compile daemon (plans/compile-daemon-design.md, phase 1): this
+# script can start (or, if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set and
+# live, reuse) a per-run tidepool-extract compile daemon and export the
+# socket for the whole nextest invocation below, amortizing the ~5s
+# GHC-boot-plus-stdlib-typecheck tax every extract spawn otherwise pays.
+# OFF BY DEFAULT — set TIDEPOOL_EXTRACT_DAEMON=1 to opt in (a real
+# correctness bug is open in the daemon itself, see the design doc's Phase 1
+# status; the default flips once it's fixed and green). TIDEPOOL_EXTRACT_NO_DAEMON=1
+# is reserved as the explicit kill switch for the post-flip world (a no-op
+# today, since off is already the default). When enabled, the daemon is
+# always torn down (by its exact recorded pid, escalating to SIGKILL after a
+# 10s grace period if it doesn't exit on TERM) on script exit, including
+# SIGINT/SIGTERM — see lib-extract.sh's
+# start_battery_daemon/teardown_battery_daemon. A daemon crash or
+# unavailability mid-run needs no handling here: ExtractCmd::run() already
+# falls back to a direct spawn per request in that case
+# (tidepool-extract-cmd/CLAUDE.md).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -51,6 +69,42 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
 resolve_tidepool_extract
 
+# Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
+# 1): amortizes the ~5s GHC-boot-plus-stdlib-typecheck tax every
+# tidepool-extract spawn otherwise pays, across every compile in this run.
+# Off by default — opt in: TIDEPOOL_EXTRACT_DAEMON=1. Outer-wrapper respect:
+# reuses an already-live $TIDEPOOL_EXTRACT_DAEMON_SOCKET instead of starting
+# a second one (see lib-extract.sh's start_battery_daemon doc). The trap is
+# installed BEFORE start_battery_daemon runs so a signal mid-boot still
+# tears the daemon down; nextest_pid starts empty since on_signal may fire
+# before it's set. (start_battery_daemon is always called — it's a no-op
+# when the daemon isn't enabled.)
+nextest_pid=""
+tmp_log="$(mktemp)"
+cleanup_exit() {
+  rm -f "$tmp_log"
+  teardown_battery_daemon
+}
+trap cleanup_exit EXIT
+# A signal sent directly to this script's pid (as opposed to a terminal
+# Ctrl-C, which hits the whole foreground process group including nextest)
+# is not delivered to a synchronous foreground command — bash defers trap
+# execution until that command finishes on its own. Running nextest in the
+# background and blocking on `wait` (below) makes the signal interrupt that
+# wait immediately, so this fires promptly either way.
+on_signal() {
+  echo "==> signal received — stopping nextest and tearing down the compile daemon" >&2
+  # Waits for nextest to actually exit (escalating to KILL after a grace
+  # period if needed) before this function returns — never exit while
+  # nextest or its own child tidepool-extract compiles might still be
+  # alive, which would let the ghc-slots.sh wrapper release its semaphore
+  # slot early (the exact hazard that semaphore exists to prevent).
+  [ -n "$nextest_pid" ] && _terminate_and_wait "$nextest_pid" "nextest"
+  exit 130
+}
+trap on_signal INT TERM
+start_battery_daemon
+
 # --ignore-default-filter: the full battery runs EVERY crate, including the
 # GHC-extract-heavy ones that .config/nextest.toml's default-filter skips for
 # quick inner-loop `cargo nextest run`. Same profile, so slow-timeout + the
@@ -59,8 +113,6 @@ resolve_tidepool_extract
 # `exec` here would replace this shell before any check could run — same
 # zero-tests-as-a-pass trap scripts/battery-shard.sh closes; see that script's
 # comment for the reasoning. Capture the run instead of masking it behind exec.
-tmp_log="$(mktemp)"
-trap 'rm -f "$tmp_log"' EXIT
 set +e
 # No hardcoded --workspace: the root manifest is VIRTUAL, so a bare
 # invocation already defaults to every member (script cd's to repo root
@@ -68,7 +120,13 @@ set +e
 # `-p <crate>`, silently building and listing the whole workspace when
 # the caller asked for one crate (found live: `-p tidepool-mcp` ran 3612
 # tests, not 175). Passing "$@" bare lets `-p` actually scope.
-cargo nextest run --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2)
+#
+# Backgrounded + waited (rather than run directly in the foreground) so a
+# signal sent to this script's own pid interrupts promptly — see on_signal
+# above.
+cargo nextest run --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2) &
+nextest_pid=$!
+wait "$nextest_pid"
 run_status=$?
 set -e
 
