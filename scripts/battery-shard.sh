@@ -62,12 +62,15 @@
 #   -E 'binary(text_bind) or binary(stub_fetch) or binary(session_acceptance) or binary(repro_decl_library_import) or binary(value_binding_acceptance) or binary(repro_t_multiline_sig) or binary(name_shadowing)'
 #
 # Resident compile daemon (plans/compile-daemon-design.md, phase 1): same
-# per-run daemon scripts/battery.sh starts — see its header for the full
-# rationale. This script starts one (or reuses an outer wrapper's, e.g. when
-# chained across the sub-shard groups above) via the shared
-# lib-extract.sh helpers, exports the socket for the nextest invocation
-# below, and tears it down (by exact pid) on exit, including
-# SIGINT/SIGTERM. TIDEPOOL_EXTRACT_NO_DAEMON=1 disables it.
+# per-run daemon scripts/battery.sh can start — see its header for the full
+# rationale. OFF BY DEFAULT (a real correctness bug is open in the daemon
+# itself; opt in with TIDEPOOL_EXTRACT_DAEMON=1). When enabled, this script
+# starts one (or reuses an outer wrapper's, e.g. when chained across the
+# sub-shard groups above) via the shared lib-extract.sh helpers, exports the
+# socket for the nextest invocation below, and tears it down (by exact pid,
+# escalating to SIGKILL after a 10s grace period) on exit, including
+# SIGINT/SIGTERM. TIDEPOOL_EXTRACT_NO_DAEMON=1 is the reserved kill switch
+# for once the default flips.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -96,7 +99,7 @@ resolve_tidepool_extract
 # Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
 # 1) — see scripts/battery.sh's matching comment for the full rationale;
 # this mirrors it via the shared lib-extract.sh helpers rather than
-# duplicating the logic. Opt-out: TIDEPOOL_EXTRACT_NO_DAEMON=1.
+# duplicating the logic. Off by default — opt in: TIDEPOOL_EXTRACT_DAEMON=1.
 # Outer-wrapper respect: when battery-shard.sh runs as one leg of a chain
 # (scripts/battery-shard.sh's own header documents the multi-shard sequence
 # for tidepool-harness/runtime/repl), a daemon already started by an earlier

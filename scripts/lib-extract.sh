@@ -167,14 +167,24 @@ _battery_daemon_stamp_path() {
 # TIDEPOOL_EXTRACT_DAEMON_SOCKET for the caller's whole nextest invocation.
 # Must run after resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
 #
-# Kill switch: TIDEPOOL_EXTRACT_NO_DAEMON=1 skips this entirely — direct
-# spawn per request, today's behavior.
+# OFF BY DEFAULT for now (plans/compile-daemon-design.md's Phase 1 status:
+# a real correctness bug is open in the daemon itself — reported, not fixed
+# here, haskell/src is out of scope for this lane). Opt in with
+# TIDEPOOL_EXTRACT_DAEMON=1 to exercise it deliberately. Once the bug is
+# fixed and the daemon leg goes green, the default flips (parent-owned,
+# a one-line change here: swap which of the two checks below is the
+# default-skip). TIDEPOOL_EXTRACT_NO_DAEMON=1 is reserved as the explicit
+# kill switch for that post-flip world — a no-op today (the default is
+# already off), checked first and unconditional either way so it's already
+# live and won't need its own follow-up change.
 #
 # Outer-wrapper respect: if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set
 # and looks alive, reuse it and leave BATTERY_DAEMON_OWNED=0 — a chain
 # invocation (e.g. battery-shard.sh runs launched back-to-back by another
 # script that already started a daemon) must not start, or later tear down,
-# a second one.
+# a second one. Checked before the opt-in gate below: reusing an inherited,
+# already-running daemon is always correct regardless of whether this
+# particular invocation's own env re-states the opt-in.
 #
 # The daemon crashing or being unreachable mid-run needs no handling here:
 # ExtractCmd::run() (the ONE tidepool-extract invocation builder,
@@ -194,6 +204,11 @@ start_battery_daemon() {
 
   if [ -n "${TIDEPOOL_EXTRACT_DAEMON_SOCKET:-}" ] && _battery_daemon_socket_alive "$TIDEPOOL_EXTRACT_DAEMON_SOCKET"; then
     echo "==> reusing already-running compile daemon at $TIDEPOOL_EXTRACT_DAEMON_SOCKET (outer wrapper owns its lifecycle)" >&2
+    return 0
+  fi
+
+  if [ "${TIDEPOOL_EXTRACT_DAEMON:-0}" != "1" ]; then
+    echo "==> resident compile daemon is opt-in for now (set TIDEPOOL_EXTRACT_DAEMON=1 to enable) — a correctness bug is open, see plans/compile-daemon-design.md's Phase 1 status; direct spawn per request" >&2
     return 0
   fi
 

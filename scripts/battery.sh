@@ -32,13 +32,18 @@
 #     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
 #
 # Resident compile daemon (plans/compile-daemon-design.md, phase 1): this
-# script starts (or, if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set and
-# live, reuses) a per-run tidepool-extract compile daemon and exports the
+# script can start (or, if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set and
+# live, reuse) a per-run tidepool-extract compile daemon and export the
 # socket for the whole nextest invocation below, amortizing the ~5s
 # GHC-boot-plus-stdlib-typecheck tax every extract spawn otherwise pays.
-# TIDEPOOL_EXTRACT_NO_DAEMON=1 disables this (today's direct-spawn-per-request
-# behavior). The daemon is always torn down (by its exact recorded pid) on
-# script exit, including SIGINT/SIGTERM — see lib-extract.sh's
+# OFF BY DEFAULT — set TIDEPOOL_EXTRACT_DAEMON=1 to opt in (a real
+# correctness bug is open in the daemon itself, see the design doc's Phase 1
+# status; the default flips once it's fixed and green). TIDEPOOL_EXTRACT_NO_DAEMON=1
+# is reserved as the explicit kill switch for the post-flip world (a no-op
+# today, since off is already the default). When enabled, the daemon is
+# always torn down (by its exact recorded pid, escalating to SIGKILL after a
+# 10s grace period if it doesn't exit on TERM) on script exit, including
+# SIGINT/SIGTERM — see lib-extract.sh's
 # start_battery_daemon/teardown_battery_daemon. A daemon crash or
 # unavailability mid-run needs no handling here: ExtractCmd::run() already
 # falls back to a direct spawn per request in that case
@@ -67,11 +72,13 @@ resolve_tidepool_extract
 # Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
 # 1): amortizes the ~5s GHC-boot-plus-stdlib-typecheck tax every
 # tidepool-extract spawn otherwise pays, across every compile in this run.
-# Opt-out: TIDEPOOL_EXTRACT_NO_DAEMON=1. Outer-wrapper respect: reuses an
-# already-live $TIDEPOOL_EXTRACT_DAEMON_SOCKET instead of starting a second
-# one (see lib-extract.sh's start_battery_daemon doc). The trap is installed
-# BEFORE start_battery_daemon runs so a signal mid-boot still tears the
-# daemon down; nextest_pid starts empty since on_signal may fire before it's set.
+# Off by default — opt in: TIDEPOOL_EXTRACT_DAEMON=1. Outer-wrapper respect:
+# reuses an already-live $TIDEPOOL_EXTRACT_DAEMON_SOCKET instead of starting
+# a second one (see lib-extract.sh's start_battery_daemon doc). The trap is
+# installed BEFORE start_battery_daemon runs so a signal mid-boot still
+# tears the daemon down; nextest_pid starts empty since on_signal may fire
+# before it's set. (start_battery_daemon is always called — it's a no-op
+# when the daemon isn't enabled.)
 nextest_pid=""
 tmp_log="$(mktemp)"
 cleanup_exit() {

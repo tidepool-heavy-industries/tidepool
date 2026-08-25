@@ -838,14 +838,29 @@ fact the design doc did not have in hand at write time.
 
 ## Phase 1 status (battery wiring)
 
-**Scripts wiring: done and verified robust.** `scripts/battery.sh` and
-`scripts/battery-shard.sh` start (or, per outer-wrapper respect, reuse) a
-per-run daemon on a per-run tempdir socket via shared helpers in
-`scripts/lib-extract.sh` (`start_battery_daemon`/`teardown_battery_daemon`),
-export `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` for the whole nextest invocation,
-and tear the daemon down by its exact recorded pid on every exit path.
-`TIDEPOOL_EXTRACT_NO_DAEMON=1` is the kill switch. See the two scripts'
-headers for the user-facing summary.
+**Scripts wiring: done and verified robust, off by default.**
+`scripts/battery.sh` and `scripts/battery-shard.sh` can start (or, per
+outer-wrapper respect, reuse) a per-run daemon on a per-run tempdir socket
+via shared helpers in `scripts/lib-extract.sh`
+(`start_battery_daemon`/`teardown_battery_daemon`), export
+`$TIDEPOOL_EXTRACT_DAEMON_SOCKET` for the whole nextest invocation, and
+tear the daemon down by its exact recorded pid on every exit path. See the
+two scripts' headers for the user-facing summary.
+
+**Default is OFF, inverted from this doc's original Phase 1 wording**
+(operator ruling, 2026-08-24, in response to the correctness blocker
+below): silent wrong results are never landable, so `TIDEPOOL_EXTRACT_DAEMON=1`
+is required to opt in for now — unset, battery runs are byte-identical to
+before this lane. `TIDEPOOL_EXTRACT_NO_DAEMON=1` is reserved as the
+explicit kill switch for once the default flips to on (a no-op today, since
+off is already the default) — kept now, rather than introduced at flip
+time, so the flip itself is the one-line change described below and
+nothing else needs to move. **The default flips to on only after the
+spawnSpec poison bug (below) is fixed and the daemon leg of the A/B goes
+green** — a one-line change in `lib-extract.sh`'s `start_battery_daemon`
+(swap which of the `TIDEPOOL_EXTRACT_NO_DAEMON`/`TIDEPOOL_EXTRACT_DAEMON`
+checks is the default-skip), owned by whoever lands that fix, not by this
+lane.
 
 **Teardown-hygiene finding and fix.** Verifying the SIGINT path (a signal
 sent directly to the script's own pid, as distinct from a terminal Ctrl-C
@@ -878,8 +893,10 @@ closed within this lane's scope:
    idle → daemon torn down (via the KILL escalation) and socket tempdir
    removed within ~10s, zero leftover processes. This RTS-signal-latency
    behavior is a daemon-binary characteristic (`haskell/src`, out of this
-   lane's `ALLOWED PATHS`) worth a heads-up to whoever owns that code, not
-   something fixed here.
+   lane's `ALLOWED PATHS`) — operator confirmed (2026-08-24) it goes into
+   the spawnSpec fix lane's scope alongside the correctness bug below; the
+   TERM→KILL escalation here is the right containment on the scripts side
+   meanwhile, kept regardless of what that lane does.
 
 **Correctness blocker — NOT closed, reported to the parent rather than
 worked around.** The phase-1 acceptance protocol (`scripts/battery.sh -p
@@ -893,8 +910,10 @@ reproducible daemon correctness bug, isolated from every other variable:
   identical failures on BOTH legs — traced to a pre-existing poisoned
   cache entry from unrelated activity on the shared box being replayed by
   the compile memo before ever reaching `ExtractCmd::run()`/the daemon;
-  that shared-cache entry is a separate, informational finding, not this
-  lane's to fix, and not the cause of the daemon-specific failures below).
+  that shared-cache entry is a separate, informational finding — operator
+  confirmed (2026-08-24) it predates this lane and `scripts/redeploy.sh`'s
+  cache clear resolves it, no action needed here — and not the cause of
+  the daemon-specific failures below).
 - **No daemon** (`TIDEPOOL_EXTRACT_NO_DAEMON=1`, isolated cache): 197/197
   tests pass, 70.9s wall — matches the no-daemon consolidated-battery
   chain's own handlers-shard baseline (72s) closely.
@@ -916,10 +935,14 @@ reproducible daemon correctness bug, isolated from every other variable:
   this lane's `ALLOWED PATHS` (`haskell/src`) to fix. Reported to the
   parent via `notify_parent` rather than worked around or silently
   defaulted around.
-- **Consequence for DONE CRITERIA:** "A/B acceptance green both ways" is
-  NOT met — the daemon leg is red. The scripts wiring itself (start, kill
-  switch, outer-wrapper respect, teardown-hygiene on both normal exit and
-  signals) is done and verified; whether to land with the daemon on by
-  default despite this correctness bug, default the kill switch on
-  pending a Haskell-side fix, or hold the branch, is a decision escalated
-  to the parent, not made unilaterally here.
+- **Ruling (operator, 2026-08-24):** silent wrong results are never
+  landable, so landing with the daemon on by default was rejected outright.
+  Holding the branch would waste verified-robust wiring, so that was
+  rejected too. Landed instead with the default inverted (above) and the
+  DONE CRITERION amended: the A/B methodology being written up (done), the
+  no-daemon leg being green (done), and the daemon leg's failure being
+  root-caused to a named, reproducible bug with a repro (done) together
+  satisfy phase 1 for the scripts-wiring lane — the "daemon leg green"
+  criterion itself moves to whichever lane fixes the spawnSpec bug in
+  `haskell/src`, gated on this doc's Decisions-adjacent one-line default
+  flip once that lane's own A/B goes green.
