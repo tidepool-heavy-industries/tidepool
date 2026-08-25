@@ -63,6 +63,20 @@ proposePrompt requestedGoal b grounding = [fmt|
   they run harness-side with full tooling, so cargo/cabal/test commands are
   allowed where they fit a 600-second budget); an explicit nodeOnFailure.
 
+  PATHS ARE VERIFIED, NOT INHERITED: the goal text may be stale relative to
+  this tree. Every path you put in a boundary or check must appear in the
+  grounding's tracked-file list (or be a directory prefix of entries that
+  do). Where the goal names a path the grounding contradicts, follow the
+  tree and say so in that node's task. Prefer directory prefixes over exact
+  files in boundaries — files move; directories survive refactors.
+
+  CHECK DESIGN: a check verifies the DELIVERABLE, not the diff's text.
+  Prefer build/test commands (cargo check -p, cargo nextest run -p, a
+  targeted test) over source greps; a grep-shaped check must be specific
+  enough not to match unrelated code or its own definition, and negative
+  greps ("the old pattern is gone") are a last resort — they break on any
+  unrelated occurrence of the pattern.
+
   SURFACING DECISIONS: this is a multi-round session. If the goal leaves a
   genuine architectural fork only the operator should close, surface it
   BEFORE finalizing: declare a small record in a haskell block —

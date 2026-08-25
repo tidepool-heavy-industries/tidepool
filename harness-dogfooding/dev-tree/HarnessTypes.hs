@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -614,15 +615,26 @@ agent summaries are not.|]
             <> map ("  escalation: " <>) summary.runEscalations
             <> map ("  retained worktree: " <>) summary.retainedWorktrees
 
+-- | The approval-time rendering.  Checks and boundaries are SHOWN, not just
+-- names and tasks: the fold ladder enforces exactly these, so approving a
+-- plan without seeing them is approving blind (run 24: a stale-path check
+-- rode an approved plan into two worker frictions).
 renderPlan :: Int -> DevPlan -> Text
 renderPlan depth p =
-  indent <> "- " <> nodeName p <> ": " <> nodeTask p <> policy <> split <> children
+  indent <> "- " <> nodeName p <> ": " <> nodeTask p <> policy <> split
+    <> detail "checks" (nodeChecks p)
+    <> detail "boundary" (nodeBoundary p)
+    <> detail "tolerated" (nodeTolerated p)
+    <> children
   where
     indent = T.replicate depth "  "
     policy = [fmt| (on failure: {show (nodeOnFailure p)})|]
     split = case nodeSplit p of
       Nothing -> "" :: Text
       Just s -> [fmt| (micro-split on the fly, max {s.splitMaxTasks} tasks)|]
+    detail label = \case
+      [] -> "" :: Text
+      xs -> "\n" <> indent <> "    " <> label <> ": " <> T.intercalate " | " xs
     children = case childPlans p of
       [] -> ""
       xs -> "\n" <> T.intercalate "\n" (map (renderPlan (depth + 1)) xs)
