@@ -1745,6 +1745,48 @@ escalationsOf o = case o of
 -- Prompts — the one place typed orchestration becomes prose
 -- ---------------------------------------------------------------------------
 
+-- | The Git trust boundary shared by workers that edit the assigned worktree.
+sandboxGitContract :: Text
+sandboxGitContract = [fmt|
+  Your sandbox's git directory is read-only: do NOT run `git commit` (or `git add`,
+  or any other git write — they will fail). Leave your changes uncommitted; the
+  orchestrator snapshots and commits them itself once your turn ends.
+|]
+
+-- | The checks and compilation boundary shared by orchestrated workers.
+--
+-- The check lines are already rendered by the caller because node checks and
+-- microtask checks come from different sources.
+orchestratorChecksContract :: Text -> Text
+orchestratorChecksContract renderedCheckLines = [fmt|
+  The orchestrator runs these checks itself, in this worktree, after your turn,
+  at whatever commit it leaves HEAD on — they are the record, not your summary
+  of them. It also owns every compilation gate: your shell has no ghc, so do not
+  attempt direct Haskell typechecking — leave that to the orchestrator:
+{renderedCheckLines}
+|]
+
+-- | The product-boundary contract, including the tolerated hygiene tier.
+boundaryContract :: DevPlan -> Text
+boundaryContract p = [fmt|
+  Your diff must stay inside these paths (empty means unrestricted); the
+  orchestrator diffs your branch against its seed and refuses a fold that
+  strays:
+{boundaryLines p}
+|]
+
+-- | The WorkerResult finishing contract, with a role-specific summary brief.
+workerResultContract :: Text -> Text
+workerResultContract whatToDescribe = [fmt|
+  Finish your turn with a WorkerResult: a one-paragraph workSummary {whatToDescribe},
+  an evidence list (commands run, checks passed, files edited — never a commit sha,
+  since you did not and cannot commit), and readyForIntegration. Include obstacles:
+  what went wrong along the way IN ORDER, even failures you later
+  recovered from. Include frictionNotes: anything about this brief, sandbox, or
+  checks that made the task harder than it should be, or a tweak you'd request —
+  honest, both empty if nothing stood out.
+|]
+
 workerPrompt :: DevPlan -> Text
 workerPrompt p = [fmt|
   You are the implementation worker for leaf node {nodeName p}.
@@ -1753,27 +1795,16 @@ workerPrompt p = [fmt|
 
   Task: {nodeTask p}
 
-  Your orchestrator will run these checks itself, in this worktree, at whatever
-  commit you leave HEAD on — they are the record, not your summary of them.
-  It also owns every compilation gate: your shell has no ghc, so do not
-  attempt direct Haskell typechecking — leave that to the orchestrator:
-{checkLines p}
+{orchestratorChecksContract (checkLines p)}
 
-  Your diff must stay inside these paths (empty means unrestricted); the
-  orchestrator diffs your branch against its seed and refuses a fold that
-  strays:
-{boundaryLines p}
+{boundaryContract p}
 
   Inspect the repository before editing. Keep your branch buildable and leave
-  coherent progress in the working tree. Your sandbox's git directory is
-  read-only: do NOT run `git commit` (or `git add`, or any other git write —
-  they will fail). Leave your changes uncommitted; the orchestrator snapshots
-  and commits them itself once your turn ends.
+  coherent progress in the working tree.
 
-  Finish your turn with a WorkerResult: a one-paragraph workSummary describing
-  WHAT you changed, an evidence list (commands run, checks passed, files
-  edited — never a commit sha, since you did not and cannot commit), and
-  readyForIntegration. Include obstacles: what went wrong along the way IN ORDER, even failures you later recovered from. Include frictionNotes: anything about this brief, sandbox, or checks that made the task harder than it should be, or a tweak you'd request — honest, both empty if nothing stood out.
+{sandboxGitContract}
+
+{workerResultContract "describing WHAT you changed"}
 |]
 
 reconPrompt :: DevPlan -> SplitSpec -> Text
@@ -1839,23 +1870,13 @@ microPrompt p m = [fmt|
 
   YOUR microtask, the only thing to do this cycle: {m.microInstruction}
 
-  The orchestrator runs these checks in this worktree right after your turn —
-  they are the record, not your summary of them. It also owns every
-  compilation gate: your shell has no ghc, so do not attempt direct Haskell
-  typechecking — leave that to the orchestrator:
-{microCheckLines}
+{orchestratorChecksContract microCheckLines}
 
-  Your sandbox's git directory is read-only: do NOT run `git commit` (or
-  `git add`, or any other git write — they will fail). Leave your changes
-  uncommitted; the orchestrator snapshots and commits them itself.
+{boundaryContract p}
 
-  Finish your turn with a WorkerResult: a one-paragraph workSummary of WHAT
-  you changed, an evidence list (commands run, files edited — never a commit
-  sha, since you did not and cannot commit), and readyForIntegration. Include
-  obstacles: what went wrong along the way IN ORDER, even failures you later
-  recovered from. Include frictionNotes: anything about this brief, sandbox,
-  or checks that made the task harder than it should be, or a tweak you'd
-  request — honest, both empty if nothing stood out.
+{sandboxGitContract}
+
+{workerResultContract "of WHAT you changed"}
 |]
   where
     microCheckLines = bulletLines m.microChecks
@@ -1863,11 +1884,8 @@ microPrompt p m = [fmt|
 scaffoldPrompt :: DevPlan -> [DevPlan] -> Text
 scaffoldPrompt p kids = [fmt|
   You are the SCAFFOLD worker for node {nodeName p}. What you leave in the
-  working tree is the seam every child below you will be seeded from. Your
-  sandbox's git directory is read-only: do NOT run `git commit` (or `git add`,
-  or any other git write — they will fail). Leave your changes uncommitted;
-  the orchestrator snapshots and commits them once your turn ends, and only
-  then creates the child worktrees.
+  working tree is the seam every child below you will be seeded from. The
+  orchestrator snapshots your work before it creates the child worktrees.
 
   Task: {nodeTask p}
 
@@ -1876,11 +1894,13 @@ scaffoldPrompt p kids = [fmt|
   they will need; do not implement their work:
 {childLines}
 
-  The orchestrator runs these checks in this worktree afterwards:
-{checkLines p}
+{boundaryContract p}
 
-  Finish your turn with a WorkerResult describing WHAT you left in the working
-  tree — never a commit sha, since you did not and cannot commit. Include obstacles: what went wrong along the way IN ORDER, even failures you later recovered from. Include frictionNotes: anything about this brief, sandbox, or checks that made the task harder than it should be, or a tweak you'd request — honest, both empty if nothing stood out.
+{orchestratorChecksContract (checkLines p)}
+
+{sandboxGitContract}
+
+{workerResultContract "describing WHAT you left in the working tree"}
 |]
   where
     childLines =
@@ -1902,21 +1922,21 @@ integrationPrompt p acc checks = [fmt|
 
   Inspect every child diff and its test evidence, finish the integration with
   your native Git tools, resolve remaining conflicts by understanding both
-  implementations, and run the combined checks. Your sandbox's git directory
-  is read-only: do NOT run `git commit` (or any other git write — it will
-  fail). Leave the integrated result in the working tree; the orchestrator
-  snapshots and commits it once your turn ends. Never discard a child's work
+  implementations, and run the combined checks. Never discard a child's work
   merely to make the merge easy.
 
-  The orchestrator re-runs the checks itself after your cycle, at whatever
-  commit it leaves HEAD on once it has snapshotted your work.
+{boundaryContract p}
 
-  Finish your turn with a WorkerResult describing what you merged and what you
-  ran — never a commit sha, since you did not and cannot commit. Include obstacles: what went wrong along the way IN ORDER, even failures you later recovered from. Include frictionNotes: anything about this brief, sandbox, or checks that made the task harder than it should be, or a tweak you'd request — honest, both empty if nothing stood out.
+{sandboxGitContract}
+
+{orchestratorChecksContract integrationCheckLines}
+
+{workerResultContract "describing what you merged and what you ran"}
 |]
   where
     escLines = bulletLines acc.accEsc
     failLines = bulletLines [c.checkCommand <> " (exit " <> show c.checkExit <> ")" | c <- checks, checkFailed c]
+    integrationCheckLines = bulletLines [c.checkCommand <> " (exit " <> show c.checkExit <> ")" | c <- checks]
 
 resolutionPrompt :: NodeSeed -> Text -> Maybe Text -> Text
 resolutionPrompt s onto amendment = [fmt|
@@ -1930,6 +1950,11 @@ resolutionPrompt s onto amendment = [fmt|
   and this branch's own commits are not negotiable either. Resolve by
   understanding both, not by taking one side wholesale.
 {amendmentBlock}
+
+{boundaryContract s.seedPlan}
+
+{orchestratorChecksContract (checkLines s.seedPlan)}
+
   Finish your turn with a ResolutionResult: whether you resolved it, what you
   did, and the paths that conflicted.
 |]
