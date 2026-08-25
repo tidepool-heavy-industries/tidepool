@@ -81,6 +81,10 @@ pub struct WorktreeReceipt {
     pub snapshot_ref: Option<GitRef>,
     pub origin: WorktreeOrigin,
     /// Absolute path of the source repository this tree was created from.
+    /// Always a repository root, never a worktree checkout — for a
+    /// from-worktree spec this is the resolved underlying repository
+    /// (chained through the parent's own `source_repository`), not the
+    /// parent worktree's `cwd`.
     pub source_repository: PathBuf,
     /// Unix epoch milliseconds.
     pub created_at_ms: i64,

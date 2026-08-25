@@ -153,6 +153,52 @@ fn clean_creation_from_another_managed_worktree() {
     }
 }
 
+/// Regression for the from-worktree provenance bug: a worktree created from
+/// another managed worktree must record `source_repository` as the resolved
+/// underlying repository root, never the parent worktree's checkout path —
+/// including through a chain of from-worktree creations. A wrong value here
+/// sends downstream consumers (e.g. the sandbox writable-root derivation)
+/// down `<checkout>/.git`, which is a gitdir link file, not a directory.
+#[test]
+fn from_worktree_creation_records_the_repository_root_not_the_parent_checkout() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("a.txt", "one", "first")
+        .expect("commit");
+
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+
+    let a = manager
+        .create(&WorktreeSpec::from_current_repository("a"))
+        .expect("create a");
+    assert_eq!(a.receipt().source_repository, repo.path());
+
+    let b = manager
+        .create(&WorktreeSpec::from_worktree(a.id().clone(), "b"))
+        .expect("create b from a");
+    assert_eq!(
+        b.receipt().source_repository,
+        repo.path(),
+        "b must record the repository root, not a's checkout path {}",
+        a.cwd().display()
+    );
+    assert_ne!(b.receipt().source_repository, a.cwd());
+
+    // Chained: c from b must resolve the same repository root, not b's
+    // checkout path either.
+    let c = manager
+        .create(&WorktreeSpec::from_worktree(b.id().clone(), "c"))
+        .expect("create c from b");
+    assert_eq!(
+        c.receipt().source_repository,
+        repo.path(),
+        "c must record the repository root through the chain, not b's checkout path {}",
+        b.cwd().display()
+    );
+    assert_ne!(c.receipt().source_repository, b.cwd());
+}
+
 #[test]
 fn dirty_source_refuses_by_default() {
     let repo = TestRepo::init().expect("init");

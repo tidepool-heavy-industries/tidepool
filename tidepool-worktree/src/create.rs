@@ -210,7 +210,7 @@ impl WorktreeManager {
             source_head: resolved.seed.clone(),
             snapshot_ref: resolved.snapshot_ref.clone(),
             origin: resolved.origin.clone(),
-            source_repository: resolved.git_repository.clone(),
+            source_repository: resolved.source_repository.clone(),
             created_at_ms: now_ms(),
             status: WorktreeRecordStatus::Provisional,
         };
@@ -251,6 +251,7 @@ impl WorktreeManager {
                     snapshot_ref,
                     origin: WorktreeOrigin::CurrentRepository,
                     git_repository: self.source_repository.clone(),
+                    source_repository: self.source_repository.clone(),
                 })
             }
             WorktreeSource::Ref(r) => {
@@ -264,6 +265,7 @@ impl WorktreeManager {
                     snapshot_ref: None,
                     origin: WorktreeOrigin::Ref(r.clone()),
                     git_repository: self.source_repository.clone(),
+                    source_repository: self.source_repository.clone(),
                 })
             }
             WorktreeSource::Worktree(wid) => {
@@ -271,6 +273,11 @@ impl WorktreeManager {
                     .lookup(wid)?
                     .ok_or_else(|| WorktreeError::WorktreeNotRegistered(wid.clone()))?;
                 let cwd = handle.cwd().to_path_buf();
+                // The parent's OWN recorded `source_repository` is already the
+                // resolved repository root (by induction, since every branch
+                // here records a root, never a checkout) — chain through it
+                // rather than recording this parent worktree's checkout path.
+                let source_repository = handle.receipt().source_repository.clone();
                 let (seed, snapshot_ref) =
                     self.resolve_dirty_or_clean(&cwd, spec.dirty_policy, id)?;
                 Ok(ResolvedSeed {
@@ -278,6 +285,7 @@ impl WorktreeManager {
                     snapshot_ref,
                     origin: WorktreeOrigin::Worktree(wid.clone()),
                     git_repository: cwd,
+                    source_repository,
                 })
             }
         }
@@ -363,5 +371,14 @@ struct ResolvedSeed {
     seed: GitOid,
     snapshot_ref: Option<GitRef>,
     origin: WorktreeOrigin,
+    /// Where to invoke `git` to materialize this worktree — the parent
+    /// worktree's checkout for a from-worktree spec (dirty/HEAD state is
+    /// particular to that checkout), the repository root otherwise. NOT what
+    /// gets recorded as [`WorktreeReceipt::source_repository`]; see that
+    /// field for why the two diverge.
     git_repository: PathBuf,
+    /// The resolved underlying repository root to record as
+    /// [`WorktreeReceipt::source_repository`] — always a repository root,
+    /// never a worktree checkout, even when [`Self::git_repository`] is one.
+    source_repository: PathBuf,
 }
