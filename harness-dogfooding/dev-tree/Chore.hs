@@ -23,35 +23,31 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Make missing record fields (and their runtime-bottom kin) a COMPILE error in the extract pipeline, so config-class Haskell fails loud at compile instead of exploding mid-run."
+choreGoal = "Rung 3: the harness proposes its own plan from a goal — propose mode, typed DevPlan via runLLMTurn, operator approval form, journaled proposal, resume-safe."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "fatal-missing-fields"
+    { nodeName = "chore-proposer"
     , nodeTask =
-        "A live run just crashed at runtime on a Chore.hs record construction missing a field — GHC warned, the pipeline surfaced only errors, and laziness deferred the explosion mid-run. Fix at the mechanism: (1) In haskell/src/Tidepool/GhcPipeline.hs, promote missing-fields AND incomplete-patterns AND incomplete-uni-patterns to FATAL warnings in the DynFlags every pipeline variant compiles user/harness code with (the GHC API: wopt_set for the WarningFlag plus wopt_set_fatal / adding to fatal warning flags — find the exact idiom in the GHC 9.12 API; the file already customizes general flags like Opt_FullLaziness, follow that style and comment WHY: config-class modules must fail loud at compile, per the runtime missing-field crash of 2026-08-25). Make sure the promotion applies to harness/session/eval compiles uniformly and does NOT reject the stdlib itself (if any stdlib module currently has an incomplete pattern, fix that module too — it is a latent bug by this policy). (2) Add a Fidelity regression group in the extract-fidelity-test suite (haskell/test — follow the existing Fidelity.* group structure and cabal stanza wiring if a new module needs listing in haskell/tidepool-extract.cabal): a module with a missing record field must FAIL the pipeline with a diagnostic naming the field, red-then-green style. (3) In tidepool-harness/tests/dogfood_harness_typecheck.rs, add a force-probe line to the dev-tree probe's extra_decls: a binding that deep-forces the chore values (e.g. __choreForce :: Int; __choreForce = length (show chorePlan) + length (show choreBudget)) so a runtime-bottom in chore VALUES is caught at pin time even for bottoms fatal warnings cannot see. NOTE: worker-typecheck.sh does NOT apply to extract-internal sources (they need the ghc package; the orchestrator gates those with cabal) — use it only for the Rust-side probe file edits if any .hs is touched elsewhere."
+        "Implement PROPOSE MODE for dev-tree, per the feasibility map in the plan (all seams verified by exploration; cite deviations in evidence). (1) HarnessTypes.hs: add `data ChoreMode = Authored { authoredPlan :: DevPlan } | ProposeFromGoal` (record-syntax payload rule for checkpointed sums) and `data PlanApproval = PlanApproval { planApproved :: Bool, revisionNote :: Text }` (flat — GForm rejects lists/recursion, so approval is approve/reject-with-note over a prose rendering, never an editable plan form); export both. (2) Chore.hs: export `choreMode :: ChoreMode` (ship it as ProposeFromGoal with a goal-only chore text: goal = build a tiny CLI stopwatch/timer utility in the scratch repo — checks python3 -m unittest class; keep chorePlan as a one-line placeholder DevPlan the propose path replaces, documented as such); Harness.hs initialState consumes choreMode (Authored p -> plan = p; ProposeFromGoal -> plan = placeholder). (3) The propose seam, in the resumeLoop path BETWEEN the phase guard and rootTree (ORDERING IS LOAD-BEARING: rootTree resolves the retained root worktree by the plan's nodeName, so the effective plan must exist first, and a resumed run must reuse the journaled proposal instead of re-proposing a differently-named root, which would orphan the retained tree): when mode is ProposeFromGoal — look up a journaled proposal first (new ProposeEvent kind in DevTreeJournal.hs carrying the DevPlan payload, SplitEvent as the precedent, decode included); if none, `proposed <- runLLMTurn @DevPlan (proposePrompt goal budget)` with a new Prompts.hs proposePrompt instructing: a DevPlan tree within the budget's depth/width (pre-validate the proposal against budget maxDepth and gateWiderThan BEFORE presenting approval, auto-reject-and-re-propose once on violation), real orchestrator-runnable nodeChecks, tight nodeBoundary per node, kebab-case names; then `say (renderPlan 0 proposed)` and `askUser @PlanApproval` — approved -> journal the ProposeEvent and proceed with the proposal as the plan for THIS run (also write it into the returned State's plan field so render shows the real plan); rejected with a note -> ONE bounded re-propose with the note appended, then a second rejection -> blocked with the note. (4) Pin coverage: extend dogfood_harness_typecheck.rs's dev-tree probe extra_decls with `__proposeDecision :: ReplanDecision -> DevPlan -> DevPlan; __proposeDecision = amendPlan`-style naming of any new pure decision function you introduce, and a `__planApprovalProbe :: PlanApproval` value forcing the new types — follow the existing probe style. Use scripts/worker-typecheck.sh on every edited .hs file before finishing (Prompts/HarnessTypes/Chore/DevTreeJournal/Harness/Unfold compile with the dev-tree include set). This is ONE worker task, deliberately unsplit — report honestly in obstacles if the scope was too large for one cycle."
     , nodeChecks =
-        [ "grep -qE 'MissingFields|missing-fields' haskell/src/Tidepool/GhcPipeline.hs"
-        , "grep -qE 'IncompletePatterns|incomplete-patterns' haskell/src/Tidepool/GhcPipeline.hs"
-        , "grep -q '__choreForce' tidepool-harness/tests/dogfood_harness_typecheck.rs"
+        [ "grep -q 'ChoreMode' harness-dogfooding/dev-tree/HarnessTypes.hs"
+        , "grep -q 'PlanApproval' harness-dogfooding/dev-tree/HarnessTypes.hs"
+        , "grep -q 'ProposeFromGoal' harness-dogfooding/dev-tree/Chore.hs"
+        , "grep -qE 'ProposeKind|propose' harness-dogfooding/dev-tree/DevTreeJournal.hs"
+        , "grep -q 'proposePrompt' harness-dogfooding/dev-tree/Prompts.hs"
+        , "grep -q 'PlanApproval' tidepool-harness/tests/dogfood_harness_typecheck.rs"
         ]
-    , nodeBoundary =
-        ["haskell/src/Tidepool/GhcPipeline.hs", "haskell/test", "haskell/lib", "haskell/tidepool-extract.cabal", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
+    , nodeBoundary = ["harness-dogfooding/dev-tree", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
     , nodeTolerated = []
-    , nodeOnFailure = AskOperator
-    , nodeSplit =
-        Just
-          SplitSpec
-            { splitHints =
-                "Split into 2-3 sequential microtasks: the DynFlags promotion + any stdlib incomplete-pattern fixes it flushes out first, then the Fidelity red-then-green regression, then the Rust force-probe + self-consistency sweep. The orchestrator gates compilation (cabal build for extract internals) after the fold."
-            , splitMaxTasks = 3
-            }
+    , nodeOnFailure = Retry
+    , nodeSplit = Nothing
     , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 6, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 4, gateWiderThan = 4}
 
 -- | Clean-tree protocol (operator, 2026-08-25): the chore config is
 -- COMMITTED before launch, so runs fork from a real commit and fold back
