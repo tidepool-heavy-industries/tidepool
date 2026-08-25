@@ -14,7 +14,7 @@
 -- compiles clean, and only breaks crash recovery, in production, during an
 -- actual crash.
 --
--- This module is the one layer up: the seven kinds dev-tree actually
+-- This module is the one layer up: the eight kinds dev-tree actually
 -- journals, as a Haskell sum, with exactly one function that turns a value
 -- of it into a @record@ call ('recordEvent') and exactly one that turns a
 -- folded @(kind, key, payload)@ triple back into one ('decodeEvent'). Every
@@ -63,11 +63,12 @@ import Tidepool.Resume (ResumeEntry (..), ResumeFold, lookupResumeEntry, resumeO
 newtype JournalKey = JournalKey Text
   deriving (Show, Eq, Ord)
 
--- | The seven kinds dev-tree actually journals, and nothing else. Every kind
+-- | The eight kinds dev-tree actually journals, and nothing else. Every kind
 -- STRING lives in 'kindText' alone; everywhere else in this file, and
 -- everywhere in "Harness", a kind is one of these four-ish constructors.
 data JournalKind
   = SplitKind
+  | ProposeKind
   | OutcomeKind
   | ReplanKind
   | RebaseKind
@@ -78,6 +79,7 @@ data JournalKind
 
 kindText :: JournalKind -> Text
 kindText SplitKind = "split"
+kindText ProposeKind = "propose"
 kindText OutcomeKind = "outcome"
 kindText ReplanKind = "replan"
 kindText RebaseKind = "rebase"
@@ -90,7 +92,11 @@ kindText MicroCompleteKind = "micro-complete"
 -- and 'decodeEvent' are what make that pairing, and the wire's
 -- @kind@\/@key@\/@payload@ triple, agree by construction.
 data JournalEvent
-  = -- | The coalgebra's split decision. Journaled TWICE under the same key
+  = ProposeEvent
+      { evKey         :: JournalKey
+      , evProposePlan :: DevPlan
+      }
+  | -- | The coalgebra's split decision. Journaled TWICE under the same key
     -- (see "Harness"'s @emitSplit@) — once before children are allocated
     -- ('evChildTrees' @=@ 'Nothing', which is why "children" appears on the
     -- wire but "childTrees" does not) and once after ('evChildTrees' @=@
@@ -148,6 +154,7 @@ data JournalEvent
 
 kindOf :: JournalEvent -> JournalKind
 kindOf SplitEvent {} = SplitKind
+kindOf ProposeEvent {} = ProposeKind
 kindOf OutcomeEvent {} = OutcomeKind
 kindOf ReplanEvent {} = ReplanKind
 kindOf RebaseEvent {} = RebaseKind
@@ -162,6 +169,7 @@ keyOf ev = case ev.evKey of JournalKey k -> k
 -- so a round-trip test can call it directly, without performing the
 -- 'Harness' effect.
 payloadOf :: JournalEvent -> Value
+payloadOf ProposeEvent {evProposePlan = p} = toJSON p
 payloadOf SplitEvent {evSplitPlan = p, evScaffoldHead = h, evChildTrees = childTrees} =
   object
     ( [ "node" .= nodeName p
@@ -206,6 +214,7 @@ recordEvent ev = record (kindText (kindOf ev)) (keyOf ev) (payloadOf ev)
 -- a wrong skip"), now enforced at one call site instead of scattered ones.
 decodeEvent :: Text -> Text -> Value -> Maybe JournalEvent
 decodeEvent kind k payload
+  | kind == kindText ProposeKind = ProposeEvent (JournalKey k) <$> decodeJson payload
   | kind == kindText SplitKind = decodeSplitEvent k payload
   | kind == kindText OutcomeKind = OutcomeEvent (JournalKey k) <$> decodeOutcomeValue k payload
   | kind == kindText ReplanKind = ReplanEvent (JournalKey k) <$> decodeJson payload

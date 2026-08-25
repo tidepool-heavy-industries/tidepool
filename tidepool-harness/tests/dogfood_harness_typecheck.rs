@@ -163,6 +163,10 @@ fn dev_tree_typechecks() {
             "__resumeDecision = resumePlanFor\n",
             "__amendmentNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool\n",
             "__amendmentNewest = amendmentIsNewest\n",
+            "__proposeDecision :: Budget -> DevPlan -> Maybe Text\n",
+            "__proposeDecision = proposalViolation\n",
+            "__planApprovalProbe :: PlanApproval\n",
+            "__planApprovalProbe = PlanApproval { planApproved = True, revisionNote = \"approved\" }\n",
             // Deep-force the chore VALUES: a missing record field in Chore.hs
             // is a runtime bottom laziness would otherwise defer to mid-run
             // (live crash 2026-08-25) — Show forces every field at pin time.

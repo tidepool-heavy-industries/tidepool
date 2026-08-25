@@ -65,23 +65,29 @@ module Harness
   , resumePlanFor
   , amendmentIsNewest
   , amendPlan
+  , proposalViolation
     -- * Agent-cycle budget (pure — exercised directly by the overspend pin)
   , NodeSeed (..)
   , requiredCycles
   , childAllowance
   ) where
 
-import Chore (choreBudget, choreGoal, chorePlan, choreSnapshotDirtySource)
+import Chore (choreBudget, choreGoal, choreMode, chorePlan, choreSnapshotDirtySource)
 import DevTreeJournal
   ( JournalEvent (..)
+  , JournalKey (..)
   , JournalKind (..)
   , eventsOfKind
+  , lookupEvent
+  , recordEvent
   )
 import HarnessTypes
 import Tidepool.Effects
   ( WorktreeHandle (..)
+  , say
   )
-import Tidepool.Harness (Harness)
+import Tidepool.Form (askUser)
+import Tidepool.Harness (Harness, runLLMTurn)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 import Tidepool.Resume
@@ -91,6 +97,7 @@ import Tidepool.Resume
   )
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
+import Prompts (proposePrompt)
 import Micro (NodeSeed (..))
 import Fold
 import Resume
@@ -131,7 +138,9 @@ initialState :: State
 initialState =
   State
     { goal = choreGoal
-    , plan = chorePlan
+    , plan = case choreMode of
+        Authored {authoredPlan = p} -> p
+        ProposeFromGoal -> chorePlan
     , phase = Ready
     , cycleCount = 0
     , snapshotDirtySource = choreSnapshotDirtySource
@@ -162,16 +171,21 @@ loop = resumeLoop emptyResume
 resumeLoop :: ResumeFold -> State -> Harness State
 resumeLoop fold st
   | phase st /= Ready = pure st
-  | otherwise =
-      rootTree fold st >>= \case
+  | otherwise = do
+      effectivePlan fold st >>= \case
         Left why -> pure (blocked st why)
+        Right proposedPlan -> runEffective st {plan = proposedPlan}
+  where
+    runEffective effective =
+      rootTree fold effective >>= \case
+        Left why -> pure (blocked effective why)
         Right rootHandle -> do
           let seed =
                 NodeSeed
-                  { seedPlan = plan st
+                  { seedPlan = plan effective
                   , seedTree = rootHandle
                   , seedDepth = 0
-                  , seedCycles = (budget st).maxAgentCycles
+                  , seedCycles = (budget effective).maxAgentCycles
                   , seedAdopted = Nothing
                   }
           -- SEAM (residency).  `hyloM`'s recursive step is
@@ -198,7 +212,7 @@ resumeLoop fold st
           -- re-budgeted: the operator approved that layer and those cycles
           -- were already spent, in a process that is gone.  Refusing finished
           -- work on a budget would discard it.
-          let b = budget st
+          let b = budget effective
               coalg =
                 resumed
                   ResumeHooks
@@ -218,11 +232,58 @@ resumeLoop fold st
           outcome <- Swarm.hyloM alg coalg seed
           summary <- summarize fold outcome
           pure
-            st
+            effective
               { phase = Completed
-              , cycleCount = cycleCount st + 1
+              , cycleCount = cycleCount effective + 1
               , lastRun = Just summary
               }
+
+proposalJournalKey :: Text
+proposalJournalKey = "root-plan"
+
+-- | Resolve the plan before root worktree lookup. A recorded proposal always
+-- wins on resume, preserving the root name that retained work is keyed by.
+effectivePlan :: ResumeFold -> State -> Harness (Either Text DevPlan)
+effectivePlan fold st = case choreMode of
+  Authored {authoredPlan = p} -> pure (Right p)
+  ProposeFromGoal -> case lookupEvent ProposeKind proposalJournalKey fold of
+    Just (_, ProposeEvent {evProposePlan = p}) -> pure (Right p)
+    _ -> proposeAttempt 1 Nothing
+  where
+    proposeAttempt attempt priorNote = do
+      let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
+      proposed <- runLLMTurn @DevPlan (proposePrompt st.goal st.budget <> revision)
+      case proposalViolation st.budget proposed of
+        Just why
+          | attempt == 1 -> proposeAttempt 2 (Just why)
+          | otherwise -> pure (Left ("Proposed plan remained outside the budget: " <> why))
+        Nothing -> do
+          say (renderPlan 0 proposed)
+          approval <- askUser @PlanApproval
+          if approval.planApproved
+            then do
+              recordEvent ProposeEvent {evKey = JournalKey proposalJournalKey, evProposePlan = proposed}
+              pure (Right proposed)
+            else
+              if attempt == 1
+                then proposeAttempt 2 (Just approval.revisionNote)
+                else pure (Left ("Plan proposal rejected: " <> approval.revisionNote))
+
+-- | The first structural budget breach, if any. Root depth is zero.
+proposalViolation :: Budget -> DevPlan -> Maybe Text
+proposalViolation b = go 0
+  where
+    go :: Int -> DevPlan -> Maybe Text
+    go depth p
+      | depth > b.maxDepth = Just [fmt|node {p.nodeName} is at depth {depth}, above maxDepth {b.maxDepth}|]
+      | length p.childPlans > b.gateWiderThan =
+          Just [fmt|node {p.nodeName} has {length p.childPlans} children, above gateWiderThan {b.gateWiderThan}|]
+      | otherwise = firstJust (map (go (depth + 1)) p.childPlans)
+
+    firstJust :: [Maybe Text] -> Maybe Text
+    firstJust [] = Nothing
+    firstJust (Nothing : xs) = firstJust xs
+    firstJust (found : _) = found
 
 blocked :: State -> Text -> State
 blocked st reason =
