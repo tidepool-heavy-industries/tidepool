@@ -152,7 +152,7 @@ fn dev_tree_typechecks() {
     typecheck(
         "harness-dogfooding/dev-tree",
         outer_row_decls(),
-        "import Tidepool.Resume (ResumeFold, emptyResume)\n",
+        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\n",
         concat!(
             "__resumeProbe :: M Text\n",
             "__resumeProbe = do { st <- resumeLoop emptyResume initialState; pure (render st) }\n",
@@ -160,6 +160,11 @@ fn dev_tree_typechecks() {
             "__resumeDecision = resumePlanFor\n",
             "__amendmentNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool\n",
             "__amendmentNewest = amendmentIsNewest\n",
+            // Deep-force the chore VALUES: a missing record field in Chore.hs
+            // is a runtime bottom laziness would otherwise defer to mid-run
+            // (live crash 2026-08-25) — Show forces every field at pin time.
+            "__choreForce :: Int\n",
+            "__choreForce = length (show chorePlan) + length (show choreBudget)\n",
         ),
     );
 }
