@@ -16,6 +16,7 @@ import qualified Fidelity.TurnBatch as TurnBatch
 import qualified Fidelity.TurnBatchJsonBugs as TurnBatchJsonBugs
 import qualified Fidelity.ClosureTier as ClosureTier
 import qualified Fidelity.TopoRecovery as TopoRecovery
+import qualified Fidelity.DaemonCodec as DaemonCodec
 
 import Control.Monad (forM_)
 import System.Exit (exitFailure, exitSuccess)
@@ -30,6 +31,7 @@ groups =
   , ("turn-batch plan.json parser bugs (numbers, control chars, surrogate pairs)", TurnBatchJsonBugs.checks)
   , ("closure-tier classification (higher-kinded arrow instantiation)", ClosureTier.checks)
   , ("GHC diagnostic-recovery topological order (Known Limits cascade)", TopoRecovery.checks)
+  , ("resident compile daemon: frame codec round-trip (compile-daemon-design.md)", DaemonCodec.checks)
   ]
 
 main :: IO ()

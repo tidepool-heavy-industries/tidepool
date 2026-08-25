@@ -5,6 +5,8 @@ module Tidepool.GhcPipeline
   , splitTupleType
     -- * Batch turns (plans/post-restart/batch-turns-feasibility.md §8)
   , BatchItem(..), BatchItemResult(..), runBatchPipeline
+    -- * Resident session (plans/compile-daemon-design.md, Phase 0)
+  , withResidentPipeline
   ) where
 
 import GHC
@@ -52,7 +54,7 @@ import GHC.Types.Var (setVarName)
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.List (nub, sortOn)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Environment (lookupEnv)
@@ -63,7 +65,7 @@ import Control.Monad (forM, when)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Session
   ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule
-  , scaffoldTargetName, scaffoldOutputBase, evalUserBinder )
+  , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming )
@@ -518,7 +520,40 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
               pure (mf, r)
         pure (map fst pairs, map snd pairs, Nothing)
       OptimizeCoreReachable -> do
-        fs <- forM summaries compileFront
+        -- Memo consultation (resident-session addition, plans/compile-daemon-design.md
+        -- §7 deviation record): with 'mMemoRef' 'Nothing' (every EXISTING
+        -- caller — only 'runBatchPipeline' ever passes 'Just', and it never
+        -- selects this tier), 'cached' is always 'Nothing' below, so every
+        -- module takes the SAME 'compileFront'-then-'compileBack' path this
+        -- branch has always taken — this generalization is behavior-
+        -- preserving for every pre-existing caller BY CONSTRUCTION, not by
+        -- re-review. The resident daemon is the only caller that ever
+        -- passes 'Just' here.
+        --
+        -- A memo HIT reuses a module's cached front (needed for the
+        -- reachability walk below, since it carries 'mfDesugared') without
+        -- redoing parse/typecheck/desugar. A hit's cached RESULT is reused
+        -- outright if the module turns out reachable this cycle — safe even
+        -- though the cached entry was core2core'd (optimized) in whatever
+        -- EARLIER cycle populated it: a module OUTSIDE the reachable
+        -- closure contributes nothing to the wire regardless of whether its
+        -- Core was ever optimized (see the un-memoized comment below this
+        -- tier has always carried), so reusing a MORE-optimized cached
+        -- version for a module this cycle finds non-reachable would still
+        -- be safe — but it can't even arise: a NON-reachable module is
+        -- never core2core'd, so the memo is never asked to serve one where
+        -- reachability differs from what produced the entry.
+        pairs <- forM summaries $ \modSum -> do
+          let mn = ms_mod_name modSum
+          cached <- case mMemoRef of
+            Nothing  -> pure Nothing
+            Just ref -> liftIO (Map.lookup mn <$> readIORef ref)
+          case cached of
+            Just entry -> pure (gmeFront entry, Just (gmeResult entry))
+            Nothing    -> do
+              mf <- compileFront modSum
+              pure (mf, Nothing)
+        let fs = map fst pairs
         -- Reachable-module rule (written down before implementation, per
         -- spec): a home module is REACHABLE from the target iff it IS the
         -- target, or its DESUGARED Core is transitively referenced — via a
@@ -556,9 +591,25 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
             reachableMods = case forceValidationOnly of
               Just m  -> Set.delete (mkModuleName m) reachableMods0
               Nothing -> reachableMods0
-        rs <- fmap concat $ forM fs $ \f ->
+        rs <- fmap concat $ forM pairs $ \(f, mCachedResult) ->
           if ms_mod_name (mfSummary f) `Set.member` reachableMods
-            then (:[]) . snd <$> compileBack f
+            then case mCachedResult of
+              -- Memo hit AND reachable: the cached RESULT (already
+              -- core2core'd by whatever cycle inserted it) is exactly what
+              -- a fresh 'compileBack' would recompute — reuse it, skipping
+              -- the optimizer pass entirely.
+              Just r -> pure [r]
+              Nothing -> do
+                (simplified, r) <- compileBack f
+                case mMemoRef of
+                  Just ref -> liftIO (modifyIORef' ref
+                    (Map.insert (ms_mod_name (mfSummary f)) (GutsMemoEntry f simplified r)))
+                  Nothing  -> pure ()
+                pure [r]
+            -- Not reachable: never core2core'd this cycle (matches every
+            -- pre-existing caller byte for byte) and never inserted into
+            -- the memo — a module a LATER cycle finds reachable must still
+            -- get a real 'compileBack', never a validation-only stand-in.
             else pure []
         pure (fs, rs, Just reachableMods)
     totalTcMs   <- liftIO (readIORef tcMsRef)
@@ -728,6 +779,122 @@ runBatchPipeline includes items onItem = do
       case attempt of
         Left e   -> pure (n, Just e)
         Right () -> go cache memoRef timing (n + 1) rest
+
+-- ---------------------------------------------------------------------------
+-- Resident session (plans/compile-daemon-design.md, Phase 0): the daemon's
+-- own generalization of 'runBatchPipeline''s loop — ONE 'runGhc' boot, ONE
+-- 'setSessionDynFlags', serving individual compile REQUESTS one at a time
+-- instead of a pre-built @[BatchItem]@ list. Transport-blind: this module
+-- knows nothing about sockets or frames (Tidepool.DaemonServer owns that) —
+-- it hands the caller a plain IO closure shaped exactly like
+-- 'runPipelineSession', so app/Main.hs's existing dispatch can substitute it
+-- in with no other change to its own call sites.
+-- ---------------------------------------------------------------------------
+
+-- | Boot ONE GHC session (session 'DynFlags' set once, from @baseIncludes@ —
+-- the stdlib root), and hand the caller back a 'runPipelineSession'-shaped IO
+-- closure that reuses this session's warm 'ModIfaceCache' + per-module
+-- 'GutsMemo' across every call, for as long as @useCompiler@'s action runs.
+--
+-- Isolation (design doc §2.3): the returned closure's own target/session
+-- module is compiled fresh on every call, and its guts never survive in the
+-- shared memo afterward — see 'sanitizeMemo'. The shared memo therefore only
+-- ever accumulates entries for the fixed, cross-request-invariant stdlib/
+-- preamble tree (whatever a call's own import closure touches; warmed
+-- lazily, "on first use" rather than an explicit up-front sweep — the design
+-- doc's own "once at boot or on first use" allowance, §2.3).
+--
+-- @extraIncludes@ on each call (the request's own @--include@ dirs) apply
+-- PER CYCLE, not just at boot: patched directly onto the live session's
+-- 'DynFlags' via 'hscUpdateFlags' (NOT 'setSessionDynFlags', which re-runs
+-- unit-state initialization — far too expensive to pay every request, and
+-- exactly the cost this design exists to amortize away).
+withResidentPipeline
+  :: [FilePath]
+  -> ((Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult) -> IO a)
+  -> IO a
+withResidentPipeline baseIncludes useCompiler = do
+  timing <- readTimingEnabled
+  (libdir, startupMs) <- timeSection getLibdir
+  emitPhase timing "startup" startupMs
+  runGhc (Just libdir) $ do
+    dflags <- getSessionDynFlags
+    dflags' <- liftIO (withBuildProductsFromEnv (extractionDynFlags dflags baseIncludes))
+    _ <- setSessionDynFlags dflags'
+    cache   <- liftIO newIfaceCache
+    memoRef <- liftIO (newIORef Map.empty)
+    let baseImportPaths = importPaths dflags'
+    reifyGhc $ \session ->
+      useCompiler $ \mscope path extraIncludes ->
+        reflectGhc
+          (residentCompileOne cache memoRef baseImportPaths timing mscope path extraIncludes)
+          session
+
+-- | One resident-session compile cycle, against the ALREADY-OPEN session
+-- 'withResidentPipeline' booted. Patches @importPaths@ for THIS cycle only
+-- (see 'withResidentPipeline'), compiles with the shared 'ModIfaceCache' +
+-- 'GutsMemo', then sanitizes the memo before returning (see 'sanitizeMemo').
+-- Passes 'Just' its own freshly-captured start time for @mSummaryT0@ — like a
+-- lone spawn's 'runCompile', not like a batch cycle — so each daemon-served
+-- request still gets the same default-on per-compile summary a direct spawn
+-- would emit.
+--
+-- Variant: the SAME choice 'runPipelineSession' itself makes —
+-- 'sessionVariant' for an active scope, 'normalVariant' otherwise — so a
+-- daemon-served request always selects the identical TIER a direct spawn of
+-- the same argv would have, which 'OptimizeCoreReachable'-vs-
+-- 'OptimizeEveryModule' proved is NOT an interchangeable choice: the two
+-- tiers can compile a validation-only (non-reachable) dependency module
+-- into differently-shaped Core (raw desugared vs. fully core2core'd), and
+-- 'writeClosedTargets''s metadata merge walks that Core, so swapping tiers
+-- silently changed @meta.cbor@'s byte content — empirically caught by this
+-- lane's own integration test before this comment was written (an earlier
+-- version of this function forced 'sessionVariant' unconditionally, on the
+-- mistaken assumption that a non-reachable module's Core is thrown away
+-- identically either way; the metadata WALK is not, even though the final
+-- wire-emitted bindings are). See 'runCompileCycle''s @OptimizeCoreReachable@
+-- arm below for the memo integration that makes THIS gate — matching a
+-- direct spawn's tier exactly — still get the warm-cache win for a plain,
+-- non-session request: both tiers now consult @mMemoRef@, so either choice
+-- here reuses the shared stdlib memo. Recorded as an implementation-forced
+-- deviation from an earlier draft in plans/compile-daemon-design.md §7.
+residentCompileOne
+  :: ModIfaceCache -> IORef GutsMemo -> [FilePath]
+  -> Bool -> Maybe SessionScope -> FilePath -> [FilePath] -> Ghc PipelineResult
+residentCompileOne cache memoRef baseImportPaths timing mscope path extraIncludes = do
+  sessionT0 <- monotonicTime
+  hsc0 <- getSession
+  setSession (hscUpdateFlags
+    (\df -> df { importPaths = nub (baseImportPaths ++ extraIncludes) }) hsc0)
+  let variant = case mscope of
+        Just scope | isSessionScopeActive scope -> sessionVariant scope path
+        _                                        -> normalVariant path
+      targetModName' = mkModuleName (capitalize (takeBaseName path))
+  result <- runCompileCycle (Just cache) (Just memoRef) timing (Just sessionT0) variant path
+  liftIO (sanitizeMemo targetModName' memoRef)
+  pure result
+
+-- | Strip every request-scoped entry from the shared 'GutsMemo' after a
+-- resident cycle: the cycle's own target module (@targetModName@) and any
+-- @Tidepool.Session.*@ module ('parseSessionModule' recognizes both @Val@
+-- and @Lib@ kinds — the ONE existing session-module-name recognizer, reused
+-- rather than a second hand-rolled prefix check).
+--
+-- Deliberately NOT a literal @mMemoRef = Nothing@ for the whole cycle, which
+-- a first reading of design doc §2.3's wording might suggest: that would
+-- also disable READS of the already-warmed STDLIB entries the whole
+-- mechanism exists to serve, defeating the daemon's purpose (every module in
+-- 'cpSummaries' — stdlib deps included — would compile fresh every cycle).
+-- Stripping request-scoped names post-hoc keeps the read-side win (stdlib
+-- entries persist and keep accumulating across requests) while upholding the
+-- actual invariant §2.2 states: a request-spanning memo must never let one
+-- request's @__result@/@Val.G\<g\>@ guts reach another request's compile of
+-- the same name. Recorded as an implementation-forced deviation from the
+-- design doc's literal wording in plans/compile-daemon-design.md §7.
+sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
+sanitizeMemo targetModName' memoRef =
+  modifyIORef' memoRef $ Map.filterWithKey $ \mn _ ->
+    mn /= targetModName' && isNothing (parseSessionModule (moduleNameString mn))
 
 -- | A 'GHC.Utils.Logger.LogAction' hook that records every @SevWarning@
 -- diagnostic whose source span is @targetPath@ (the file being extracted,

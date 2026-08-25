@@ -2,7 +2,7 @@ module Main where
 
 import System.Environment (getArgs, setEnv)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
@@ -14,7 +14,7 @@ import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import System.Exit (exitFailure)
+import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
 import GHC.Types.SourceError (SourceError)
@@ -43,7 +43,9 @@ import Tidepool.Binders
 import Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
   , stripMonadHead, isClosureType, renderType, splitTupleType
-  , BatchItem(..), BatchItemResult(..), runBatchPipeline )
+  , BatchItem(..), BatchItemResult(..), runBatchPipeline
+  , withResidentPipeline )
+import qualified Tidepool.DaemonServer as DaemonServer
 import Tidepool.DiagJson (Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson, renderDiag)
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.Json (jsonString)
@@ -65,13 +67,35 @@ main :: IO ()
 main = do
   hSetEncoding stdout utf8
   rawArgs <- getArgs
+  case parseDaemonArgs rawArgs of
+    Just (Left err) -> hPutStrLn stderr err >> exitWith (ExitFailure 2)
+    Just (Right da) -> runDaemonMode da
+    Nothing         -> runOneInvocation runPipelineSession rawArgs >>= exitWith
+
+-- | One invocation's worth of work: parse argv, seed the build-products-dir
+-- env (per 'argBuildProductsDir'), splice the harness-compilation-profile
+-- pragma when requested, then 'dispatch'. This is exactly what @main@ did
+-- directly before the daemon existed — split out so both the CLI entry
+-- point (@compiler = 'runPipelineSession'@, byte-identical to historical
+-- behaviour) and a daemon-served request ('runDaemonMode', @compiler@ =
+-- 'withResidentPipeline'\'s resident closure) run through the SAME
+-- argv-to-diagnostics logic, with 'System.Exit.exitWith' turned into a
+-- returned 'ExitCode' rather than a real process exit.
+runOneInvocation
+  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
+  -> [String] -> IO ExitCode
+runOneInvocation compiler rawArgs = do
   let parsedArgs = parseArgs rawArgs
   -- Set BEFORE any GhcPipeline call, which is what actually reads it (see
   -- 'Tidepool.GhcPipeline.withBuildProductsFromEnv') — see 'argBuildProductsDir'.
+  -- Under the daemon this env var was already read once at RESIDENT SESSION
+  -- BOOT (see 'runDaemonMode'), so a later request's own flag has no further
+  -- effect — the same "process-wide setting" framing 'argBuildProductsDir'
+  -- already documents, just pinned earlier under a resident session.
   case argBuildProductsDir parsedArgs of
     Just dir -> setEnv "TIDEPOOL_BUILD_PRODUCTS_DIR" dir
     Nothing  -> pure ()
-  -- Read once at process entry (see Tidepool.Timing) and thread down;
+  -- Read once per invocation (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there and tidepool-harness/src/timing.rs.
   timing <- readTimingEnabled
@@ -83,6 +107,15 @@ main = do
   args <- if argHarnessProfile parsedArgs
             then spliceHarnessProfilePragma parsedArgs
             else pure parsedArgs
+  dispatch compiler timing args
+
+-- | The mode-dispatch case @main@ used to run directly, unchanged in shape —
+-- split out purely so 'runOneInvocation' can call it for both the CLI entry
+-- point and a daemon request.
+dispatch
+  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
+  -> Bool -> Args -> IO ExitCode
+dispatch compiler timing args =
   case () of
     -- Turn-batch mode (plans/post-restart/batch-turns-feasibility.md §8): N
     -- item compiles in one GHC session. No positional file at all (the plan
@@ -91,8 +124,9 @@ main = do
     _ | isJust (argTurnBatch args) -> runTurnBatchMode args
     _ -> case argFiles args of
       [] -> do
-        hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--build-products-dir <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] [--turn-batch <plan.json> --batch-out <dir>] <file.hs> ..."
+        hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--build-products-dir <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] [--turn-batch <plan.json> --batch-out <dir>] [--daemon --socket <path> [--rotate-after N] [--rss-ceiling-mb M] [--watch-stamp <path>]] <file.hs> ..."
         putStrLn (renderDiagsJson [])
+        pure ExitSuccess
       (file : _)
         -- Block classify lane: every positional file is one item, classified
         -- in ONE GHC session boot. Checked before '--turn' since it reads the
@@ -101,7 +135,7 @@ main = do
         -- Turn mode (one-spawn-per-turn protocol): classify + splice + compile
         -- + rich-result emission, in one process. Checked before 'isSessionMode'
         -- since a bind/expr turn also carries --session-root/--inject-val.
-        | argTurn args                        -> runTurnMode args file
+        | argTurn args                        -> runTurnMode compiler args file
         -- Explicit multi-target mode (--targets a,b) ALWAYS wins over
         -- 'isSessionMode', whether or not session flags are ALSO present —
         -- checked before it since 'processSessionFile' below has no
@@ -114,14 +148,60 @@ main = do
         -- 'scopeFromArgs'), so this still resolves the injected module for a
         -- multi-target compile; a plain multi-target caller with no session
         -- flags is byte-identical to before (`scope = Nothing` there).
-        | not (null (argTargets args))        -> timePhase timing "total" (processFile timing args file)
+        | not (null (argTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
         -- Session mode (Wave 3b): bind/reference turn with iface injection +
         -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
         -- file is processed (matching the two guards above) — one invocation,
         -- one stdout report, per the module doc.
-        | isSessionMode args                  -> processSessionFile args file
+        | isSessionMode args                  -> processSessionFile compiler args file
         -- Normal one-shot extraction (byte-identical to historical behaviour).
-        | otherwise                           -> timePhase timing "total" (processFile timing args file)
+        | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
+
+-- | Daemon-mode entry (@--daemon --socket <path> ...@): boot ONE resident
+-- GHC session ('withResidentPipeline') and hand 'Tidepool.DaemonServer' a
+-- request handler that reuses 'runOneInvocation' against it — the ONLY thing
+-- this function does beyond flag dispatch. Per the design's boundary:
+-- DaemonServer owns the accept loop, rotation, RSS backstop and stamp
+-- watch; Main.hs never grows a serving loop of its own.
+runDaemonMode :: DaemonArgs -> IO ()
+runDaemonMode da =
+  withResidentPipeline [] $ \compiler ->
+    DaemonServer.runDaemon
+      DaemonServer.DaemonConfig
+        { DaemonServer.dcSocketPath        = daSocket da
+        , DaemonServer.dcRotateAfter       = daRotateAfter da
+        , DaemonServer.dcRssCeilingMb      = daRssCeilingMb da
+        , DaemonServer.dcWatchStamp        = daWatchStamp da
+        , DaemonServer.dcRequestTimeoutSec = 30
+        }
+      (\cwd argv -> setCurrentDirectory cwd >> runOneInvocation compiler argv)
+
+-- | Parsed @--daemon@ flags (@app/Main.hs@'s ONLY daemon-mode responsibility
+-- — see the module boundary note on 'runDaemonMode').
+data DaemonArgs = DaemonArgs
+  { daSocket       :: FilePath
+  , daRotateAfter  :: Maybe Int
+  , daRssCeilingMb :: Maybe Int
+  , daWatchStamp   :: Maybe FilePath
+  }
+
+-- | 'Nothing' when @--daemon@ is absent from argv at all — every existing
+-- caller, test, and CI job, byte-identical to before this flag existed.
+-- 'Just' parses the rest of the daemon flag grammar; 'Left' is a usage
+-- error (a missing @--socket@, or an unrecognized daemon-mode flag).
+parseDaemonArgs :: [String] -> Maybe (Either String DaemonArgs)
+parseDaemonArgs args
+  | "--daemon" `elem` args = Just (go (filter (/= "--daemon") args) Nothing Nothing Nothing Nothing)
+  | otherwise = Nothing
+  where
+    go [] msock rot rss watch = case msock of
+      Just sock -> Right (DaemonArgs sock rot rss watch)
+      Nothing   -> Left "--daemon: --socket <path> is required"
+    go ("--socket" : v : rest) _ rot rss watch = go rest (Just v) rot rss watch
+    go ("--rotate-after" : v : rest) msock _ rss watch = go rest msock (Just (read v)) rss watch
+    go ("--rss-ceiling-mb" : v : rest) msock rot _ watch = go rest msock rot (Just (read v)) watch
+    go ("--watch-stamp" : v : rest) msock rot rss _ = go rest msock rot rss (Just v)
+    go (x : _) _ _ _ _ = Left ("--daemon: unrecognized flag " ++ x)
 
 -- | Rewrites the FIRST target file (`argFiles`'s head) to a scratch copy
 -- with 'harnessProfilePragmaLine' prepended — the harness compilation
@@ -193,7 +273,7 @@ harnessProfilePragmaLine =
 -- on parse-only lanes (e.g. 'runClassifyMode') where no live GHC session
 -- exists to ever throw a 'SourceError' — 'fromException' can only take the
 -- 'Nothing' branch there.
-reportDiags :: Either SomeException () -> IO ()
+reportDiags :: Either SomeException () -> IO ExitCode
 reportDiags (Left e) = do
   let diags = case fromException e of
         Just (se :: SourceError) -> diagsFromSourceError se
@@ -204,8 +284,8 @@ reportDiags (Left e) = do
   case fromException e of
     Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
     Nothing -> hPutStrLn stderr $ "Error: " ++ show e
-  exitFailure
-reportDiags (Right ()) = putStrLn (renderDiagsJson [])
+  pure (ExitFailure 1)
+reportDiags (Right ()) = putStrLn (renderDiagsJson []) >> pure ExitSuccess
 
 -- | A session-aware turn: any of the @--session-*@ flags are present. Reference
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
@@ -326,8 +406,10 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
 
-processFile :: Bool -> Args -> FilePath -> IO ()
-processFile timing args path = do
+processFile
+  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
+  -> Bool -> Args -> FilePath -> IO ExitCode
+processFile compiler timing args path = do
   let mOutDir = argOutDir args
       mTarget = argTarget args
   hPutStrLn stderr $ "Processing: " ++ path
@@ -343,7 +425,7 @@ processFile timing args path = do
     -- at all: `main`'s dispatch sends a BARE `--session-root` to
     -- `processSessionFile` instead, which has no `--targets` handling.
     let scope = if isSessionMode args then Just (scopeFromArgs args) else Nothing
-    result <- runPipelineSession scope path (argIncludes args)
+    result <- compiler scope path (argIncludes args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -886,8 +968,10 @@ runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts tar
 -- earlier bindings resolve), emit the JIT-able Core for @__result@, and — on a
 -- bind turn — capture the bound value's type, write the thin session iface, and
 -- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
-processSessionFile :: Args -> FilePath -> IO ()
-processSessionFile args path = do
+processSessionFile
+  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
+  -> Args -> FilePath -> IO ExitCode
+processSessionFile compiler args path = do
   -- The self-iterating harness's fused outer render/loop compile never
   -- reaches this session-mode path even though it now DOES carry
   -- --session-root/--inject-val (its stable-val injection,
@@ -907,7 +991,7 @@ processSessionFile args path = do
       -- written to stays named @result.cbor@ regardless.
       targetName = fromMaybe scaffoldTargetName (argTarget args)
   res <- try $ do
-    result <- runPipelineSession (Just scope) path (argIncludes args)
+    result <- compiler (Just scope) path (argIncludes args)
     let binds  = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -947,8 +1031,10 @@ processSessionFile args path = do
 -- 'mkBoundBinders', no thin-iface write): it runs for effect and discards,
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
-runTurnMode :: Args -> FilePath -> IO ()
-runTurnMode args path = do
+runTurnMode
+  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
+  -> Args -> FilePath -> IO ExitCode
+runTurnMode compiler args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   res <- timePhase timing "total" $ try $ do
@@ -1003,7 +1089,7 @@ runTurnMode args path = do
           Nothing -> error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         (spliced, _modName, modulePath) <- spliceInto tmplFile
         let scope = scopeFromArgs args
-        result <- runPipelineSession (Just scope) modulePath (argIncludes args)
+        result <- compiler (Just scope) modulePath (argIncludes args)
         let binds       = prBinds result
             tycons      = prTyCons result
             hscEnv      = prHscEnv result
@@ -1038,7 +1124,7 @@ runTurnMode args path = do
 -- block into decl runs before compiling any item and so needs every verdict
 -- up front — one spawn for the whole block instead of one classify spawn per
 -- item.
-runClassifyMode :: Bool -> Args -> IO ()
+runClassifyMode :: Bool -> Args -> IO ExitCode
 runClassifyMode timing args =
   -- No live GHC session exists on this parse-only lane, so the caught
   -- exception below always takes 'reportDiags''s 'Nothing' branch (never a
@@ -1437,7 +1523,7 @@ renderBatchReportJson diags items =
 -- any item failed (§8.1 ruling 1); every failure mode (bad args, malformed
 -- plan.json, a missing template, a compile failure, a write failure) reports
 -- through the SAME §8 JSON document on stdout.
-runTurnBatchMode :: Args -> IO ()
+runTurnBatchMode :: Args -> IO ExitCode
 runTurnBatchMode args = do
   timing <- readTimingEnabled
   attempt <- timePhase timing "total" $ try $ do
@@ -1467,14 +1553,15 @@ runTurnBatchMode args = do
     Left (e :: SomeException) -> do
       putStrLn (renderBatchReportJson (diagOf e) [])
       hPutStrLn stderr ("Error: " ++ show e)
-      exitFailure
-    Right (statuses0, _nDone, Nothing) ->
+      pure (ExitFailure 1)
+    Right (statuses0, _nDone, Nothing) -> do
       putStrLn (renderBatchReportJson [] statuses0)
+      pure ExitSuccess
     Right (statuses0, nDone, Just e) -> do
       let diags = diagOf e
       putStrLn (renderBatchReportJson diags (statuses0 ++ [(nDone, ItemFailed diags)]))
       hPutStrLn stderr ("Error: " ++ show e)
-      exitFailure
+      pure (ExitFailure 1)
   where
     diagOf e = case fromException e of
       Just (se :: SourceError) -> diagsFromSourceError se

@@ -171,6 +171,72 @@ Env-gated, OFF by default. For the JIT-runtime / effect-machine / cache knobs se
 | `TIDEPOOL_TEST_DROP_DC=<module-qualified-name>` | D1 mutation-test fault injection: `recordDC` silently skips recording exactly the one constructor whose qualified name matches | Proving the D1 hard-fail metadata-subset defense (`Main.assertMetaCoversEmitted`) actually fires — never set outside `extract-fidelity-test` |
 | `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY=<module-name>` | E6 mis-tiering fault injection: the `OptimizeCoreReachable` tier (`normalVariant`) forcibly denies `core2core` (the -O2/exposed-unfoldings pass) to the one named home module, regardless of what the real Core-reachability closure (`GhcPipeline.reachableModuleClosure`) found | Proving E6's tier detects a module the target actually needs being wrongly denied optimized Core — never set outside a deliberate detection-power test |
 
+## Resident compile daemon (Phase 0, `--daemon`)
+
+`tidepool-extract-bin --daemon --socket <path> [--rotate-after N]
+[--rss-ceiling-mb M] [--watch-stamp <path>]` runs the SAME binary as a
+long-lived process serving compile requests over a UNIX domain socket
+instead of exiting after one compile — plans/compile-daemon-design.md is the
+design (read its Decisions section first; §7 records every point where the
+implementation deviated from the doc's literal wording, with the reasoning).
+Opt-in only: unset `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` (every existing caller)
+is byte-identical to today, both in behavior and — per this lane's own
+integration test — in the exact CBOR/diagnostics bytes produced.
+
+**Module boundary.** `Tidepool.DaemonServer` owns ALL transport (socket
+bind/accept, the length-prefixed frame codec, stdout/stderr capture,
+request-count rotation, the RSS-ceiling backstop, the toolchain-stamp watch,
+every clean-exit path) and knows nothing about GHC. `Tidepool.GhcPipeline`
+gains `withResidentPipeline` — boot one `runGhc` session once, hand back a
+`runPipelineSession`-shaped IO closure that reuses the warm `ModIfaceCache` +
+per-module `GutsMemo` across calls — and knows nothing about sockets.
+`app/Main.hs`'s `--daemon` handling is exactly two things: parse the daemon
+flags, and build a `DaemonServer.RequestHandler` closure that wraps its own
+existing argv dispatch (`runOneInvocation`/`dispatch` — the SAME functions
+the CLI entry point calls, just parameterized over which compiler closure to
+use) so a daemon-served request runs the identical code a spawned process
+would, with `exitWith` turned into a returned `ExitCode`.
+
+**The env/cwd contract.** The daemon's own process environment (
+`$TIDEPOOL_GHC_LIBDIR`, `TIDEPOOL_DUMP_CLOSED`/`TIDEPOOL_VARID_AUDIT`/etc.
+from the Diagnostics table above, `$TIDEPOOL_BUILD_PRODUCTS_DIR`) is fixed
+once at daemon boot — a per-request `--build-products-dir` flag over the
+wire is a no-op under the daemon (the resident session's `DynFlags` are
+already set; see `withResidentPipeline`'s haddock). `argv` on the wire is
+the CLIENT's own argv, exactly what it would have spawned with — including
+its OWN `--include`, which the resident API applies PER CYCLE (patched onto
+the live session's `importPaths` via `hscUpdateFlags`, not
+`setSessionDynFlags`, which is too expensive to pay every request). The
+request also carries the client's `cwd`; the daemon's single worker
+`setCurrentDirectory`s to it before each cycle (safe — one worker,
+serialized), so relative-path semantics match a spawned process exactly.
+
+**Isolation.** The shared `GutsMemo` is populated by whatever a request's
+own import closure touches (warmed lazily, not swept up front) but every
+cycle's OWN target/session module names — and any `Tidepool.Session.*` name
+— are stripped from the shared memo immediately after that cycle
+(`GhcPipeline.sanitizeMemo`), so a later request compiling the same
+`ModuleName` (`__result`, `Tidepool.Session.Val.G1`, ...) never observes a
+stale entry. See design §2.2/§2.3 and §7's deviation note for why this is a
+post-hoc filter rather than the doc's literal `mMemoRef = Nothing` per
+request — that literal reading would also have disabled reads of the
+already-warmed stdlib entries, defeating the daemon's purpose.
+
+**New dependency.** `tidepool-extract-internal` (the `src/` library) now
+depends on the `network` Hackage package (resolved the same way `QuickCheck`
+already is — pinned index-state, not the with-packages nix GHC closure) for
+`DaemonServer`'s UNIX-domain-socket transport. `tidepool-extract-cmd`
+(the Rust client) stays a std-only, zero-dependency leaf — see its own
+CLAUDE.md.
+
+**Testing.** `Tidepool.DaemonServer`'s frame codec is pinned in
+`extract-fidelity-test`'s `Fidelity.DaemonCodec` group (pure, no extract
+compile). The transport-equivalence, isolation, relative-cwd, and rotation
+checks live on the Rust side —
+`tidepool-extract-cmd/tests/daemon_integration.rs` — since that is where the
+client (and the real `ExtractCmd::run()` gating) lives; see that crate's
+CLAUDE.md.
+
 ## Eval stdlib (`lib/Tidepool/`)
 
 MCP users get `import Tidepool.Prelude hiding (error)` auto-imported; more modules

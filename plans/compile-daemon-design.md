@@ -723,3 +723,107 @@ begin with.
    `{exit_code, stdout, stderr}` response with trivially-correct codecs on
    both sides. Everything else in §5.3 — UDS, one request/response per
    connection, EOF-as-crash-signal, paths-not-content — stands unchanged.
+
+---
+
+## §7. Implementation deviations (Phase 0, recorded per the doc-history rule)
+
+Every point below is a place the shipped code diverges from this document's
+literal wording, discovered while building against the real pipeline rather
+than re-derivable from the design alone. Each is forced by a correctness
+fact the design doc did not have in hand at write time.
+
+1. **The shared `GutsMemo` isolation mechanism is a post-cycle SANITIZE, not
+   a literal `mMemoRef = Nothing` per request** (§2.3's "The daemon calls
+   `runCompileCycle` with `mMemoRef = Nothing` for the per-request portion
+   of the compile"). Passing `Nothing` for a resident cycle disables BOTH
+   reads and writes for EVERY module in that cycle's `runCompileCycle`
+   call — including the already-warmed STDLIB entries the whole mechanism
+   exists to serve, which would defeat the daemon's purpose entirely
+   (confirmed empirically: request 2's `typecheck_ms` did not drop under
+   the literal reading). The shipped mechanism instead passes `Just` a
+   SHARED memo ref for every cycle, and strips exactly the cycle's own
+   target-module name plus any `Tidepool.Session.*` name from it
+   immediately after the cycle returns
+   (`Tidepool.GhcPipeline.sanitizeMemo`). This upholds the actual invariant
+   §2.2 states (one request's `__result`/`Val.G<g>` guts must never reach
+   another request's compile of the same name) while keeping the read-side
+   win the design's own performance case depends on. `parseSessionModule`
+   (the existing session-module-name recognizer) is reused rather than a
+   second hand-rolled prefix check.
+
+2. **The `OptimizeCoreReachable` tier (`normalVariant` — every plain,
+   non-session `--target` compile) is now ALSO memo-aware**, not left
+   memo-blind as an earlier implementation draft assumed. The initial
+   approach routed every resident request through `sessionVariant`
+   (`OptimizeEveryModule`) unconditionally, on the reasoning that a
+   non-reachable module's Core is "thrown away either way" so the tier
+   choice couldn't affect wire output. That reasoning covers the FINAL
+   emitted bindings but not `meta.cbor`: `writeClosedTargets`'s metadata
+   merge walks `cmReachBinds`/DataCon usage over whichever Core a module
+   actually got (raw desugared under `OptimizeCoreReachable`'s
+   non-reachable branch vs. fully `core2core`'d under
+   `OptimizeEveryModule`), and this lane's own integration test
+   (`daemon_integration`'s check (a)) caught a real `meta.cbor` byte
+   divergence between the two tiers on the SAME fixture before this was
+   corrected. The fix: `residentCompileOne` selects the SAME variant a
+   direct spawn of the same argv would (`runPipelineSession`'s own
+   `isSessionScopeActive` gate, unchanged), and `runCompileCycle`'s
+   `OptimizeCoreReachable` arm was extended to consult `mMemoRef` the same
+   way `OptimizeEveryModule` always has — a memo hit reuses a module's
+   cached front (for the reachability walk) and, if reachable this cycle,
+   its cached `core2core`'d result; a miss compiles fresh and, if
+   reachable, inserts into the memo. This is provably behavior-preserving
+   for every PRE-EXISTING caller: every one of them passes `mMemoRef =
+   Nothing`, under which the new code takes the exact same
+   `compileFront`-then-`compileBack` path the old code always did (verified
+   against `extract-fidelity-test`, `session-c-test`, and
+   `varid-mechanism-test`, all still green). The new behavior — memo
+   consultation — activates only when `mMemoRef = Just`, a combination only
+   the resident daemon ever produces.
+
+3. **`tidepool-extract-internal` (the Haskell library) gained the `network`
+   Hackage dependency** for `DaemonServer`'s UNIX-domain-socket transport.
+   `unix` (already in the with-packages GHC closure) does not expose socket
+   syscalls; `network` is the standard, well-tested way to do this in
+   Haskell and resolves the same way `QuickCheck`/`cborg`/`half` already do
+   (pinned `index-state`, not the ambient nix GHC package DB) — this is an
+   existing, established pattern in this codebase, not a new one.
+   `tidepool-extract-cmd`'s std-only, zero-dependency charter (the crate
+   this design's own §5.1/anti-patterns actually protect) is unaffected —
+   the daemon CLIENT adds nothing.
+
+4. **Rotation, the RSS ceiling, and the toolchain-stamp watch are checked
+   once after EVERY served request, not on a separate background tick**
+   (§4.3/§3 both describe a periodic timer, distinct from per-compile
+   checks). Both checks are cheap file reads (`/proc/self/status`'s
+   `VmRSS` line; a byte-compare against the boot-time stamp bytes) rather
+   than the toolchain module's own blake3 fingerprint recompute the design
+   was specifically avoiding making per-compile — so checking them
+   per-request costs nothing observable and avoids a second thread/timer
+   with its own shutdown-race surface. The tradeoff is a slightly less
+   prompt reaction to an external change (bounded by "how long until the
+   NEXT request arrives" rather than a fixed tick interval) — acceptable
+   for Phase 0's opt-in, explicitly-started daemons; worth revisiting only
+   if a production deployment shows requests arriving too infrequently for
+   this bound to matter.
+
+5. **Spike measurement (design §6/§7's own migration-order mandate — "first
+   measurement here, before anything else proceeds").** ~30 requests
+   (20 distinct one-shot compiles + 10 session bind/reference pairs)
+   against one resident daemon: request 1 (first-ever, paying the stdlib's
+   first typecheck) took 718ms; warm one-shot requests thereafter averaged
+   ~196ms (min 166ms, max 286ms); warm session-reference requests averaged
+   ~255ms. Daemon RSS grew from ~290MB (boot) to ~439MB after the first few
+   distinct one-shot compiles, to ~540MB by request 10, then grew slowly
+   and non-linearly to ~681MB by request 40 (roughly +375MB total over 40
+   requests, clearly decelerating rather than unbounded — most growth
+   happened touching NEW stdlib modules for the first time, not from
+   request count alone). This is well inside a single spawn's already-
+   measured ~600-800MB floor (§1), validating §6's core projection: the
+   fixed ~5.3s GHC-boot-plus-stdlib-typecheck tax collapses to
+   low-hundreds-of-milliseconds once warm, for both session-scoped and
+   plain one-shot requests, at a bounded (not runaway) memory cost. Sizes
+   the provisional rotation defaults (§ Decisions item 3, N=256 requests /
+   2048MB ceiling) as conservative, not tight — 40 requests reached under
+   35% of the RSS ceiling.

@@ -15,6 +15,7 @@ library tidepool-extract-internal
   exposed-modules:
     Tidepool.Binders
     Tidepool.CborEncode
+    Tidepool.DaemonServer
     Tidepool.DiagJson
     Tidepool.ExtractUtil
     Tidepool.FatIface
@@ -40,7 +41,8 @@ library tidepool-extract-internal
     lens,
     errors,
     witherable,
-    safe
+    safe,
+    network
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall
@@ -264,6 +266,7 @@ test-suite extract-fidelity-test
     Fidelity.TurnBatchJsonBugs
     Fidelity.ClosureTier
     Fidelity.TopoRecovery
+    Fidelity.DaemonCodec
   build-depends:
     tidepool-extract-internal,
     base         >= 4.20 && < 5,
