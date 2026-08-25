@@ -245,7 +245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // always wired (Console has no external state; Worktree/RepoEvent/Exec
     // are scoped to TIDEPOOL_SOURCE_REPO, defaulting to the repo this process
     // runs in), unlike the optional Subagent boundary below.
-    let source_repo = match std::env::var_os("TIDEPOOL_SOURCE_REPO") {
+    let source_repo_env = std::env::var_os("TIDEPOOL_SOURCE_REPO");
+    let source_repo = match &source_repo_env {
         Some(p) => PathBuf::from(p),
         None => std::env::current_dir()?,
     };
@@ -312,26 +313,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     driver.set_listen_server(listen_server);
 
-    // The subagent boundary: delegation targets the companion's MEMORY
-    // store ONLY (operator decision, 2026-08-23) — the standalone git repo
-    // of one-fact-per-file markdown — never
-    // the source repository. Standard durable-data location, auto-seeded
-    // fresh when absent, so delegation works with no launcher or env
-    // ceremony; TIDEPOOL_MEMORY_REPO overrides the path.
-    let subagent_repo = std::env::var_os("TIDEPOOL_MEMORY_REPO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            xdg_data_root()
-                .map(|d| d.join("tidepool/companion-memory"))
-                .unwrap_or_else(|_| PathBuf::from(".tidepool-companion-memory"))
-        });
-    ensure_memory_store(&subagent_repo)?;
-    let handler = build_subagent_handler(&subagent_repo)?;
+    // The subagent boundary: TWO modes, chosen by whether TIDEPOOL_SOURCE_REPO
+    // is explicitly set. Set → delegation targets that SAME repository (a
+    // dev-repo swarm run's coding workers spawn/commit in the tree the outer
+    // effect boundary already operates on), at a real coding-tier model
+    // policy. Unset → delegation targets the companion's MEMORY store, the
+    // standalone git repo of one-fact-per-file markdown, at the handler's
+    // default cheap-plumbing policy — byte-for-byte today's wiring, so the
+    // companion's daily runs are unaffected. TIDEPOOL_MEMORY_REPO only
+    // applies in the unset (companion-memory) mode.
+    let source_repo_mode = source_repo_env.is_some();
+    let subagent_repo = if source_repo_mode {
+        source_repo.clone()
+    } else {
+        std::env::var_os("TIDEPOOL_MEMORY_REPO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                xdg_data_root()
+                    .map(|d| d.join("tidepool/companion-memory"))
+                    .unwrap_or_else(|_| PathBuf::from(".tidepool-companion-memory"))
+            })
+    };
+    // Seeding is companion-memory-store scaffolding (AGENTS.md curation
+    // rules, empty digest) — never appropriate for a real source repository,
+    // which the outer effect boundary already requires to exist as a git
+    // work tree.
+    if !source_repo_mode {
+        ensure_memory_store(&subagent_repo)?;
+    }
+    let mut handler = build_subagent_handler(&subagent_repo)?;
+    let subagent_mode = if source_repo_mode {
+        "source-repo"
+    } else {
+        "companion-memory"
+    };
+    if source_repo_mode {
+        // The default `ModelPolicy::CheapPlumbing` + `ReasoningEffort::Low`
+        // ("prefer gpt-5.4-mini") is not a plausible tier for a coding
+        // worker; `CheapestGpt56` is the strongest allowlisted tier that
+        // exists today (pinned to `gpt-5.6-luna`, never the cheaper
+        // `gpt-5.4-mini` `CheapPlumbing` would resolve to).
+        handler = handler.with_model_policy(
+            tidepool_agent::ModelPolicy::CheapestGpt56,
+            tidepool_agent::ReasoningEffort::High,
+        );
+    }
     driver.set_subagent_handler(handler);
     tracing::info!(
         target: "tidepool_web",
         repo = %subagent_repo.display(),
-        "subagent boundary wired (memory store; Codex backend, operator credentials)"
+        mode = subagent_mode,
+        "subagent boundary wired ({}: Codex backend, operator credentials)",
+        subagent_mode
     );
 
     driver.run_loop(&source, auto).await?;
@@ -500,18 +533,21 @@ fn build_outer_handlers(
     ))
 }
 
-/// Build the memory curator's [`tidepool_handlers::SubagentHandler`]: source
-/// repository = the memory store; registry/worktree/binding roots under the
-/// durable data dir (NOT the regenerable cache — worktree state must survive
-/// cache clears — and outside any git work tree, which the registry refuses).
+/// Build the [`tidepool_handlers::SubagentHandler`]: `repo` is whatever the
+/// caller resolved as the delegation target (the companion memory store, or
+/// — in source-repo mode — the same repository the outer effect boundary
+/// operates on); registry/worktree/binding roots under the durable data dir
+/// (NOT the regenerable cache — worktree state must survive cache clears —
+/// and outside any git work tree, which the registry refuses).
 /// Backend: [`tidepool_agent::backend::codex::CodexBackendFactory`] mints a
 /// fresh live Codex adapter (operator's own `~/.codex` credentials) PER
-/// CYCLE, at the default cheap-plumbing model policy — `with_backends`, not
-/// `new`, so a second (or concurrent) delegate cycle gets its own backend
-/// instead of finding the one-shot instance already consumed (poke-round
-/// finding 2: production hands `SubagentHandler` a single backend wrapped in
-/// a one-shot factory, so every delegate after the first fails at
-/// `StageAllocating` with nothing allocated).
+/// CYCLE, at the default cheap-plumbing model policy unless the caller
+/// overrides it via `with_model_policy` — `with_backends`, not `new`, so a
+/// second (or concurrent) delegate cycle gets its own backend instead of
+/// finding the one-shot instance already consumed (poke-round finding 2:
+/// production hands `SubagentHandler` a single backend wrapped in a one-shot
+/// factory, so every delegate after the first fails at `StageAllocating`
+/// with nothing allocated).
 fn build_subagent_handler(
     repo: &std::path::Path,
 ) -> Result<tidepool_handlers::SubagentHandler, Box<dyn std::error::Error>> {
