@@ -836,7 +836,21 @@ microLeaf seed spec = do
             | not (null dropped)
             ]
       say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
+      let acceptedMicrotaskNames = map (.microName) toRun
+      recordEvent
+        MicroSplitEvent
+          { evKey = JournalKey (branchOf tree)
+          , evMicrotaskNames = acceptedMicrotaskNames
+          }
       (microRun, microSnapshotFailure) <- runMicrotasks tree p toRun
+      if microRun.microtasksComplete
+        then
+          recordEvent
+            MicroCompleteEvent
+              { evKey = JournalKey (branchOf tree)
+              , evMicrotaskNames = acceptedMicrotaskNames
+              }
+        else pure ()
       after <- worktreeHead tree
       checks <- runChecks tree p
       let wr =
@@ -1122,6 +1136,10 @@ onChildFailure tree p s o rest acc = case nodeOnFailure p of
               True
               checks
               (snapshotFailureMaybe retryName snapshot)
+          -- Match the normal 'stampFold' path: persist the raw receipt before
+          -- applying the ladder, so a later resume sees this retry as the
+          -- latest outcome rather than resurrecting the original failure.
+          journalOutcome retried
           let judged = foldLadder retried
           case judged of
             Done {} ->
@@ -1638,13 +1656,14 @@ resumed fold inner
 -- namespaces do not collide (a branch carries the worktree id), so consulting
 -- both is unambiguous and costs the write side nothing.
 resumePlanFor :: ResumeFold -> Text -> DevPlan -> ResumePlan
-resumePlanFor fold branch p
-  | amendmentIsNewest (seqOf replanEntry) (seqOf splitEntry) (seqOf outcomeEntry)
-  , Just (_, ReplanEvent {evDecision = d}) <- replanEntry =
-      ResumeAmend d (amendPlan d (maybe p (.splitPlan) recordedSplit))
-  | Just (_, OutcomeEvent {evOutcome = o}) <- outcomeEntry = ResumeSkip o
-  | Just sp <- recordedSplit = ResumeReplay sp
-  | otherwise = ResumeFresh
+resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEntry of
+  Just (_, OutcomeEvent {evOutcome = o}) -> ResumeSkip o
+  Just (_, SplitEvent {}) -> case recordedSplit of
+    Just sp -> ResumeReplay sp
+    Nothing -> ResumeFresh
+  Just (_, ReplanEvent {evDecision = d}) ->
+    ResumeAmend d (amendPlan d (maybe p (.splitPlan) recordedSplit))
+  Nothing -> ResumeFresh
   where
     splitEntry = lookupEvent SplitKind branch fold
     replanEntry = lookupEvent ReplanKind branch fold
@@ -1652,7 +1671,13 @@ resumePlanFor fold branch p
       lookupEvent OutcomeKind branch fold
         `orElse` lookupEvent OutcomeKind (nodeName p) fold
     recordedSplit = splitEntry >>= (splitRecordOf . snd)
-    seqOf = fmap fst
+
+    newestEntry replan split outcome = foldr newest Nothing (catMaybes [replan, split, outcome])
+
+    newest candidate Nothing = Just candidate
+    newest candidate@(candidateSeq, _) current@(Just (currentSeq, _))
+      | candidateSeq > currentSeq = Just candidate
+      | otherwise = current
 
 -- | Rebuild the higher-level 'SplitRecord' 'resumePlanFor' and 'replaySplit'
 -- consume from a decoded 'SplitEvent'. An absent second-append ('Nothing')
@@ -1751,7 +1776,7 @@ integrationComplete fold seed sp
 recordedDone :: ResumeFold -> Text -> Text -> Bool
 recordedDone fold branch node =
   case lookupEvent OutcomeKind branch fold `orElse` lookupEvent OutcomeKind node fold of
-    Just (_, OutcomeEvent {evOutcome = o}) -> outcomeIsDone o
+    Just (_, OutcomeEvent {evOutcome = o}) -> outcomeIsDone (foldLadder o)
     _ -> False
 
 -- | Nothing is recorded for this branch — but its worktree need not be empty.
@@ -1779,15 +1804,34 @@ adoptOrUnfold fold inner seed = do
   case changed of
     Nothing -> inner seed
     Just hc -> do
-      vo <- verifyOrphan fold hc
-      let o = adopt vo
-      if null (childPlans seed.seedPlan)
-        then pure (Swarm.PlanF (adoptedWork seed o) [])
-        else case foldLadder o of
-          Done {} -> inner seed {seedAdopted = Just hc.hcFound}
-          rejected -> pure (Swarm.PlanF (adoptedWork seed rejected) [])
+      if hasMicroSplit seed.seedPlan && not (microSequenceComplete fold (branchOf seed.seedTree))
+        then inner seed
+        else do
+          vo <- verifyOrphan fold hc
+          let o = adopt vo
+          if null (childPlans seed.seedPlan)
+            then pure (Swarm.PlanF (adoptedWork seed o) [])
+            else case foldLadder o of
+              Done {} -> inner seed {seedAdopted = Just hc.hcFound}
+              rejected -> pure (Swarm.PlanF (adoptedWork seed rejected) [])
   where
     baseline = renderGitOid seed.seedTree.handleReceipt.sourceHead
+
+hasMicroSplit :: DevPlan -> Bool
+hasMicroSplit p = isJust p.nodeSplit
+
+-- | A micro-split orphan is adoptable only when the journal contains both
+-- the accepted names and a matching completion record.  The completion event
+-- repeats the names so a stale completion from a different accepted plan
+-- cannot authorize adoption of this worktree.
+microSequenceComplete :: ResumeFold -> Text -> Bool
+microSequenceComplete fold branch = case (acceptedEntry, completeEntry) of
+  (Just (_, MicroSplitEvent {evMicrotaskNames = accepted}), Just (_, MicroCompleteEvent {evMicrotaskNames = completed})) ->
+    accepted == completed
+  _ -> False
+  where
+    acceptedEntry = lookupEvent MicroSplitKind branch fold
+    completeEntry = lookupEvent MicroCompleteKind branch fold
 
 -- ---------------------------------------------------------------------------
 -- The worktree-adoption typestate

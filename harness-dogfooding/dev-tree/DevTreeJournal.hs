@@ -14,7 +14,7 @@
 -- compiles clean, and only breaks crash recovery, in production, during an
 -- actual crash.
 --
--- This module is the one layer up: the five kinds dev-tree actually
+-- This module is the one layer up: the seven kinds dev-tree actually
 -- journals, as a Haskell sum, with exactly one function that turns a value
 -- of it into a @record@ call ('recordEvent') and exactly one that turns a
 -- folded @(kind, key, payload)@ triple back into one ('decodeEvent'). Every
@@ -63,7 +63,7 @@ import Tidepool.Resume (ResumeEntry (..), ResumeFold, lookupResumeEntry, resumeO
 newtype JournalKey = JournalKey Text
   deriving (Show, Eq, Ord)
 
--- | The five kinds dev-tree actually journals, and nothing else. Every kind
+-- | The seven kinds dev-tree actually journals, and nothing else. Every kind
 -- STRING lives in 'kindText' alone; everywhere else in this file, and
 -- everywhere in "Harness", a kind is one of these four-ish constructors.
 data JournalKind
@@ -72,6 +72,8 @@ data JournalKind
   | ReplanKind
   | RebaseKind
   | EscalationKind
+  | MicroSplitKind
+  | MicroCompleteKind
   deriving (Show, Eq)
 
 kindText :: JournalKind -> Text
@@ -80,6 +82,8 @@ kindText OutcomeKind = "outcome"
 kindText ReplanKind = "replan"
 kindText RebaseKind = "rebase"
 kindText EscalationKind = "escalation"
+kindText MicroSplitKind = "micro-split"
+kindText MicroCompleteKind = "micro-complete"
 
 -- | One durable fact dev-tree records. Every constructor carries the key it
 -- is filed under ('evKey') alongside its own typed payload — 'recordEvent'
@@ -125,6 +129,21 @@ data JournalEvent
       , evEscNode   :: Text
       , evEscDetail :: Text
       }
+  | -- | The accepted microtask names for a node's one sequential micro-run.
+    -- This is recorded before the first microtask starts, so its absence or
+    -- presence without a matching 'MicroCompleteEvent' proves the sequence
+    -- was not safely completed before a crash.
+    MicroSplitEvent
+      { evKey             :: JournalKey
+      , evMicrotaskNames  :: [Text]
+      }
+  | -- | The accepted microtask sequence reached 'microtasksComplete'. The
+    -- names are repeated deliberately: adoption can require that completion
+    -- belongs to the exact accepted plan recorded immediately before it.
+    MicroCompleteEvent
+      { evKey             :: JournalKey
+      , evMicrotaskNames  :: [Text]
+      }
   deriving (Show, Eq)
 
 kindOf :: JournalEvent -> JournalKind
@@ -133,6 +152,8 @@ kindOf OutcomeEvent {} = OutcomeKind
 kindOf ReplanEvent {} = ReplanKind
 kindOf RebaseEvent {} = RebaseKind
 kindOf EscalationEvent {} = EscalationKind
+kindOf MicroSplitEvent {} = MicroSplitKind
+kindOf MicroCompleteEvent {} = MicroCompleteKind
 
 keyOf :: JournalEvent -> Text
 keyOf ev = case ev.evKey of JournalKey k -> k
@@ -164,6 +185,11 @@ payloadOf ReplanEvent {evDecision = d} = toJSON d
 payloadOf RebaseEvent {evNote = n} = toJSON n
 payloadOf EscalationEvent {evEscNode = n, evEscDetail = why} =
   object ["node" .= n, "detail" .= why]
+payloadOf MicroSplitEvent {evMicrotaskNames = names} = microtaskPayload names
+payloadOf MicroCompleteEvent {evMicrotaskNames = names} = microtaskPayload names
+
+microtaskPayload :: [Text] -> Value
+microtaskPayload names = object ["microtasks" .= names]
 
 -- | The ONE boundary onto "Tidepool.Journal"'s generic @record@. Every
 -- 'JournalEvent' this module can construct records at exactly the kind
@@ -191,7 +217,12 @@ decodeEvent kind k payload
             (fromMaybe k (payload ^? key "node" . _String))
             (fromMaybe "escalated" (payload ^? key "detail" . _String))
         )
+  | kind == kindText MicroSplitKind = MicroSplitEvent (JournalKey k) <$> decodeMicrotaskNames payload
+  | kind == kindText MicroCompleteKind = MicroCompleteEvent (JournalKey k) <$> decodeMicrotaskNames payload
   | otherwise = Nothing
+
+decodeMicrotaskNames :: Value -> Maybe [Text]
+decodeMicrotaskNames v = v ^? key "microtasks" >>= decodeJson
 
 decodeSplitEvent :: Text -> Value -> Maybe JournalEvent
 decodeSplitEvent k v = do

@@ -278,6 +278,17 @@ const RESUME_DECISION_SOURCE: &str = concat!(
     "      expected = ResumeReplay SplitRecord { splitNode = \"leaf\", splitScaffoldHead = \"scaffold0\", splitPlan = splitPlan, splitChildTrees = [] }\n",
     "  in verify \"recorded-split-replays-not-rederived\" (resumePlanFor fold leafBranch leafPlan == expected)\n",
     "\n",
+    "-- An outcome recorded BEFORE a newer split is stale: the split is the\n",
+    "-- newest word and must replay rather than skip the branch.\n",
+    "caseStaleOutcomeNewerSplitReplays :: Text\n",
+    "caseStaleOutcomeNewerSplitReplays =\n",
+    "  let splitPlan = leafPlan { childPlans = [leafPlan { nodeName = \"child\" }] }\n",
+    "      splitPayload = splitPayloadFor \"leaf\" splitPlan \"scaffold-stale-outcome\"\n",
+    "      receipt = mkReceipt \"leaf\" leafBranch\n",
+    "      fold = mkFold [mkEntry 1 \"outcome\" leafBranch (toJSON receipt), mkEntry 3 \"split\" leafBranch splitPayload]\n",
+    "      expected = ResumeReplay SplitRecord { splitNode = \"leaf\", splitScaffoldHead = \"scaffold-stale-outcome\", splitPlan = splitPlan, splitChildTrees = [] }\n",
+    "  in verify \"stale-outcome-newer-split-replays\" (resumePlanFor fold leafBranch leafPlan == expected)\n",
+    "\n",
     "-- A replan NEWER than the split it amends drives the re-unfold.\n",
     "caseReplanNewerAmends :: Text\n",
     "caseReplanNewerAmends =\n",
@@ -319,7 +330,8 @@ const RESUME_DECISION_SOURCE: &str = concat!(
     "      fold = mkFold [mkEntry 1 \"outcome\" otherBranch (toJSON (mkReceipt \"other\" otherBranch))]\n",
     "  in verify \"unrelated-branch-entries-do-not-skip\" (resumePlanFor fold leafBranch leafPlan == ResumeFresh)\n",
     "\n",
-    "-- amendmentIsNewest, directly: the precedence rule every case above rests on.\n",
+    "-- amendmentIsNewest, directly: the same sequence rule exposed as its\n",
+    "-- retained pure helper, including the outcome comparison.\n",
     "caseAmendmentIsNewest :: [Text]\n",
     "caseAmendmentIsNewest =\n",
     "  [ verify \"amendmentIsNewest-no-replan-is-false\" (amendmentIsNewest Nothing (Just 5) (Just 3) == False)\n",
@@ -330,7 +342,7 @@ const RESUME_DECISION_SOURCE: &str = concat!(
     "  ]\n",
     "\n",
     "__resumeDecisionReport :: Text\n",
-    "__resumeDecisionReport = T.intercalate \"\\n\" ( [ caseRecordedOutcome, caseRecordedSplitReplays, caseReplanNewerAmends, caseReplanOlderIgnored, caseEmptyFoldIsResumedFalse, caseEmptyFoldDecidesFresh, caseUnrelatedBranchIsFresh ] <> caseAmendmentIsNewest )\n",
+    "__resumeDecisionReport = T.intercalate \"\\n\" ( [ caseRecordedOutcome, caseRecordedSplitReplays, caseStaleOutcomeNewerSplitReplays, caseReplanNewerAmends, caseReplanOlderIgnored, caseEmptyFoldIsResumedFalse, caseEmptyFoldDecidesFresh, caseUnrelatedBranchIsFresh ] <> caseAmendmentIsNewest )\n",
 );
 
 /// dev-tree's resume decisions, EXECUTED — not merely compiled.
@@ -338,13 +350,15 @@ const RESUME_DECISION_SOURCE: &str = concat!(
 /// `dev_tree_typechecks` above proves this module still compiles against
 /// today's effect surface, including `resumeLoop` and the pure resume
 /// decisions at their exact declared signatures — but it never calls them, so
-/// a wrong PRECEDENCE (e.g. an older replan winning, or a recorded split
+/// a wrong PRECEDENCE (e.g. an older replan winning, a stale outcome beating
+/// a newer split, or a recorded split
 /// being silently re-derived instead of replayed) would compile clean and
 /// only surface as corrupted state in a real crash-resume run. This is the
 /// next rung: it builds `ResumeFold` values by hand — a recorded outcome, a
-/// recorded split with no outcome, a replan newer than its split, a replan
-/// older than its split, the empty fold, and entries recorded under an
-/// unrelated branch — runs `resumePlanFor`/`amendmentIsNewest` over them on
+/// recorded split with no outcome, a stale outcome followed by a newer split,
+/// a replan newer than its split, a replan older than its split, the empty
+/// fold, and entries recorded under an unrelated branch — runs
+/// `resumePlanFor`/`amendmentIsNewest` over them on
 /// the real JIT with no agent and no git anywhere in the path, and asserts
 /// what comes back against the decision table read directly out of
 /// `Harness.hs`.
@@ -367,8 +381,8 @@ fn dev_tree_resume_decisions_execute() {
     );
     assert_eq!(
         lines.len(),
-        12,
-        "expected 12 resume-decision checks, got:\n{report}"
+        13,
+        "expected 13 resume-decision checks, got:\n{report}"
     );
 }
 
@@ -465,7 +479,8 @@ fn dev_tree_child_allowance_never_overspends_parent_cap() {
 }
 
 /// The journal vocabulary round-trip pin (dev-tree's own durable
-/// `split`/`outcome`/`replan`/`rebase`/`escalation` schema, typed by
+/// `split`/`outcome`/`replan`/`rebase`/`escalation`/`micro-split`/
+/// `micro-complete` schema, typed by
 /// `DevTreeJournal`).
 ///
 /// Every case below asserts TWO things about one `JournalEvent`: (1)
@@ -522,6 +537,30 @@ const JOURNAL_ROUND_TRIP_SOURCE: &str = concat!(
     "\n",
     "caseSplitRoundTripSecondAppend :: Text\n",
     "caseSplitRoundTripSecondAppend = verify \"split-round-trips-second-append\" (decodeEvent \"split\" \"dev-tree/parent\" (payloadOf splitEv2) == Just splitEv2)\n",
+    "\n",
+    "microtaskNames :: [Text]\n",
+    "microtaskNames = [\"one\", \"two\"]\n",
+    "\n",
+    "microSplitEv :: JournalEvent\n",
+    "microSplitEv = MicroSplitEvent (JournalKey \"dev-tree/leaf\") microtaskNames\n",
+    "\n",
+    "expectedMicroSplitPayload :: Value\n",
+    "expectedMicroSplitPayload = object [\"microtasks\" .= microtaskNames]\n",
+    "\n",
+    "caseMicroSplitPayload :: Text\n",
+    "caseMicroSplitPayload = verify \"micro-split-payload-records-accepted-names\" (payloadOf microSplitEv == expectedMicroSplitPayload)\n",
+    "\n",
+    "caseMicroSplitRoundTrips :: Text\n",
+    "caseMicroSplitRoundTrips = verify \"micro-split-round-trips\" (decodeEvent \"micro-split\" \"dev-tree/leaf\" (payloadOf microSplitEv) == Just microSplitEv)\n",
+    "\n",
+    "microCompleteEv :: JournalEvent\n",
+    "microCompleteEv = MicroCompleteEvent (JournalKey \"dev-tree/leaf\") microtaskNames\n",
+    "\n",
+    "caseMicroCompletePayload :: Text\n",
+    "caseMicroCompletePayload = verify \"micro-complete-payload-records-accepted-names\" (payloadOf microCompleteEv == expectedMicroSplitPayload)\n",
+    "\n",
+    "caseMicroCompleteRoundTrips :: Text\n",
+    "caseMicroCompleteRoundTrips = verify \"micro-complete-round-trips\" (decodeEvent \"micro-complete\" \"dev-tree/leaf\" (payloadOf microCompleteEv) == Just microCompleteEv)\n",
     "\n",
     "mkReceipt :: FoldReceipt\n",
     "mkReceipt = FoldReceipt { receiptNode = \"leaf\", receiptBranch = \"dev-tree/leaf\", receiptSeedHead = \"seed0000\", receiptHead = \"head1111\", receiptHeadMoved = True, receiptChecks = [CheckResult \"cargo check\" 0 \"\"], receiptRebases = [], receiptOutside = [], receiptCycles = 1, receiptAgentRan = True, receiptReviewed = False, receiptSummary = \"done\", receiptEvidence = [] }\n",
@@ -635,6 +674,8 @@ const JOURNAL_ROUND_TRIP_SOURCE: &str = concat!(
     "__journalRoundTripReport = T.intercalate \"\\n\"\n",
     "  [ caseSplitPayloadFirstAppend, caseSplitRoundTripFirstAppend\n",
     "  , caseSplitPayloadSecondAppend, caseSplitRoundTripSecondAppend\n",
+    "  , caseMicroSplitPayload, caseMicroSplitRoundTrips\n",
+    "  , caseMicroCompletePayload, caseMicroCompleteRoundTrips\n",
     "  , caseOutcomeDonePayloadIsBareReceipt, caseOutcomeDoneRoundTrips\n",
     "  , caseOutcomeFailedWithReceiptPayload, caseOutcomeFailedWithReceiptRoundTrips\n",
     "  , caseOutcomeFailedNoReceiptPayload, caseOutcomeFailedNoReceiptRoundTrips\n",
@@ -670,7 +711,7 @@ fn dev_tree_journal_event_round_trips() {
     );
     assert_eq!(
         lines.len(),
-        20,
-        "expected 20 journal round-trip checks, got:\n{report}"
+        24,
+        "expected 24 journal round-trip checks, got:\n{report}"
     );
 }
