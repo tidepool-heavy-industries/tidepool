@@ -364,6 +364,19 @@ JSON boundary — see the module doc at the top of `jit_surface.rs`).
 
 ## Known Limits / Gotchas
 
+**Read this list as COMPLETE, not as samples of a larger danger.** The
+frontend is real GHC and extraction is post-typecheck, so there is no
+mechanism for a language construct GHC accepts to fail here on language
+grounds — operator/if/composed expressions in quasiquote holes, custom
+typeclasses, GADT dispatch, multi-param classes with fundeps, foldM,
+newtype-deriving arithmetic, record-dot sections, and their relatives all
+compile and run (probed 12/12, 2026-08-25). Caution is legitimate only at
+the named seams below and in the bridge/schema seams documented at their
+own homes (WHNF-only `Value` at the bridge; sums at a spawn/schema root).
+Write the idiomatic version first; if something new fails, it is a
+substrate bug to report or a limit to add HERE with its mechanism — never
+a reason for diffuse conservatism.
+
 **A failing generated module reports its own diagnostic, not a downstream
 cascade — recovery order is topological.** `GhcPipeline.hs`'s diagnostic-
 recovery pass (`normalVariant`'s `cpSummaries`) redoes each module's own
