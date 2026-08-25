@@ -17,9 +17,6 @@ charter / glossary and the plan file is deleted (git is the archive).
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
   merged, turn-count top-5 lane in flight; nextest setup-scripts pilot
   DEFERRED pending compile-daemon phase 1 (still experimental upstream).
-- [Session test review](session-test-review.md): read-only catalog of
-  ~285 session-compile-driving tests feeding the turn-count cuts;
-  retires with them.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): live process doc
   for autonomous fresh-session dogfood rounds driven by the root + native
   subagents while the operator is offline; robot-operator form answering,
@@ -33,6 +30,11 @@ Small still-open items whose originating plan doc has been retired:
   runs collapsed on one resident session. Phase 6 (repl/one-shot conversion +
   slot deletion) stays deliberately parked behind a production-soak gate, not
   currently in flight.
+- Beyond the landed top-5 turn cuts, ~215 further prunable session-turns
+  were cataloged per-test (git: plans/session-test-review.md, retired
+  2026-08-24). Largely mooted if the compile daemon serves battery
+  compiles (a warm request is ~196ms vs ~5.3s); revisit only if session
+  legs still dominate post-daemon-phase-1 measurements.
 - `:t` (a type-answer turn classification arm) remains unbuilt; the interim
   mitigation (signatures folded into the answerer prompt) covers the
   near-term need. Revisit at the next spawn that wants it.
