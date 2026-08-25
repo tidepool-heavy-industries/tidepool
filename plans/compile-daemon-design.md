@@ -1067,3 +1067,95 @@ own fresh `$TIDEPOOL_COMPILE_CACHE_DIR`): **no daemon** 197/197, 65.0s wall;
 **daemon** 197/197, 51.5s wall. Same result, same margin, different
 harness — the fix holds under both the manual daemon start and the landed
 scripts wiring.
+
+## Shim/Orchestrate memo divergence (daemon-shim-identity-fix lane)
+
+**Root cause — one step past the spawnSpec fix above.** `lookupValidMemo`'s
+`ms_hs_hash` self-check (§7 deviation 1, extended by the spawnrow-fix lane)
+is necessary but not sufficient: it proves a candidate module's OWN source
+text is unchanged, but not that its COMPILED MEANING is unchanged, because a
+module can import a fixed-name/varying-content sibling without mentioning
+the varying part in its own text at all. `Tidepool.Orchestrate`
+(`tidepool-mcp::orchestrate_module_source`) is exactly this shape: its
+source is a pure function of the effect ROSTER alone (`paginateTrunc :: Int
+-> Value -> M Value`, spelling only the bare `M` alias), so two requests
+sharing a roster produce BYTE-IDENTICAL `Orchestrate.hs` text — but `M` is
+`Tidepool.Effects`'s own per-window `type M = Eff row`, and `Orchestrate` is
+co-generated into the SAME content-addressed staging dir as the shim
+(`ensure_effects_shim_module`/`write_shim_module`) without being co-hashed
+at the single-module level. A pinned `Finalize <T>` row changes `Tidepool.
+Effects`'s content (and therefore its `ms_hs_hash`) every window, but leaves
+`Orchestrate`'s own hash untouched — so `lookupValidMemo` correctly forces
+`Tidepool.Effects` to recompile fresh, and just as correctly (by the
+self-hash rule alone) reuses `Orchestrate`'s stale `GutsMemoEntry`, frozen
+against whichever `Finalize <T>` was live when THAT entry was inserted.
+Reproduced directly: `fork_child_answer_type_declared_as_decl_plane_data_
+resolves` (`tidepool-harness/tests/fork_child_decl_plane_type.rs`) — a
+session turn pinning `Finalize Int`, followed by a fork child's answerer
+round pinning `Finalize KyotoResult` through the SAME warm daemon — failed
+under the daemon only, with the child's `render+loop` turn erroring
+`Couldn't match type 'Int' with 'KyotoResult' / Expected: Int -> Value -> M
+Value / Actual: Int -> Value -> M Value` at `paginateResult = paginateTrunc`
+(the frozen `Orchestrate` export's `M` vs. the target's own fresh `M`); PASSED
+under `TIDEPOOL_EXTRACT_NO_DAEMON=1`, same binary, same sources, same
+content-addressed compile cache. A sibling `_alias_resolves` variant (a type
+SYNONYM pin) passed even under the daemon — a synonym pin structurally
+unifies away a nominal collision, which is why the failure needs a real
+`data`-backed answer type to surface at all, and confirms the defect is
+about a FROZEN type expansion, not a data-representation mismatch.
+
+**Fix — extend memo validity to the module's direct dependency closure,
+not just its own hash.** `runCompileCycle` now tracks, per cycle
+(`validThisCycleRef`, reset every `runCompileCycle` call — never persisted
+across requests), whether each module visited so far was served from a
+valid memo hit or freshly recompiled. A memo hit is trusted only when the
+candidate's own hash matches AND every one of its DIRECT home-module
+imports (`ms_textual_imps`, filtered to modules present in this cycle's own
+`summaries`) was ALSO a hit this cycle — never a name-based exclusion for
+`Tidepool.Orchestrate` specifically. Modules are visited in the topological
+order `cpSummaries` already returns (dependencies before dependents), so a
+dependency's own verdict is always recorded before a dependent's is
+checked, and the invalidation propagates transitively through any depth of
+fixed-name/varying-content chain (shim → orchestrate → anything else that
+imports orchestrate) with no module named in the mechanism itself. A module
+with no home-package imports (the overwhelming majority — leaf stdlib
+files) is unaffected: its `directHomeDeps` list is empty, so the new gate is
+vacuously satisfied and the existing self-hash check alone decides, exactly
+as before.
+
+**Regression coverage.** `tidepool-extract-cmd/tests/daemon_integration.rs`
+gained check (g), `check_g_shim_dependent_module_warm_second_request`, run
+against the SAME warm daemon as checks (a)-(f): a fixed-name shim module
+(`Tidepool.Shim`, a `type Pinned = Int`/`= Bool` pin mirroring `Tidepool.
+Effects`'s `type M`) and a BYTE-IDENTICAL fixed-name dependent
+(`Tidepool.Companion`, mirroring `Tidepool.Orchestrate`) are compiled
+through two session-bound reference turns (needed to select `sessionVariant`'s
+`OptimizeEveryModule` tier, the tier the real bug reproduces under — a plain
+`--target` compile resolves the dependent from `load'`'s own ambient HPT and
+does not exercise this hazard) sharing one warm daemon. Confirmed red
+against the pre-fix `GhcPipeline.hs` (reverted via a local patch, rebuilt,
+rerun): the second request's `result.cbor` silently diverged from a direct-spawn
+baseline of the same fixture (this minimal repro's failure mode is a silent
+wrong-Core divergence rather than a hard GHC diagnostic — the field type
+alone, unlike the real bug's `Finalize <T>` row, does not force a
+compile-time unification failure); green after reapplying the fix, with
+byte-identical `result.cbor`/diagnostics against the direct-spawn baseline.
+
+**Acceptance.** `scripts/battery.sh -p tidepool-extract-cmd` (includes check
+(g)): 23/23 passed. `scripts/battery.sh -p tidepool-harness -E
+'binary(fork_child_decl_plane_type) or binary(finalize_type_pinning) or
+binary(delegate_type_pinning) or binary(answerer_async_fork)'`: 35/35
+passed, including the real repro test green under the daemon. Perf sanity
+(`TIDEPOOL_COMPILE_CACHE_DIR` fresh per leg, `scripts/battery.sh -p
+tidepool-handlers`): **no daemon** (`TIDEPOOL_EXTRACT_NO_DAEMON=1`) 184/197
+passed, 28.7s wall; **daemon** (default-on) 184/197 passed, 18.9s wall —
+same pass/fail split on both legs (still clearly faster warm), no
+regression toward the spawn-leg number. The 13 failures on BOTH legs are a
+single, PRE-EXISTING, unrelated defect — `haskell/lib/Tidepool/Form/
+Schema.hs:32` unconditionally imports `Llm`/`llmRaw` from `Tidepool.Effects`
+without gating on the effect actually being in the row (only `AskUser`
+gates the module's own import per `tidepool-mcp/CLAUDE.md`'s Form section),
+so any row with `AskUser` but not `Llm` fails to compile — reproduced
+identically under a direct spawn with zero daemon involvement, confirming it
+predates and is unrelated to this fix. `haskell/lib` is outside this lane's
+`ALLOWED PATHS`; reported to the parent rather than fixed here.

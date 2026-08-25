@@ -204,6 +204,7 @@ fn daemon_integration() {
     check_c_isolation_across_session_roots(&bin, &dir, &lib, &socket);
     check_d_relative_target_and_distinct_cwd(&bin, &dir, &lib, &socket);
     check_f_spawn_row_warm_second_request(&bin, &dir, &lib, &socket);
+    check_g_shim_dependent_module_warm_second_request(&bin, &dir, &lib, &socket);
     check_a_byte_identical_transport(&bin, &dir, &lib, &socket);
 
     drop(daemon);
@@ -525,6 +526,203 @@ fn check_f_spawn_row_warm_second_request(bin: &Path, dir: &Path, lib: &Path, soc
         daemon_cbor, direct_cbor,
         "result.cbor must be byte-identical — spawnSpec (40+2=42) must be the ACTUAL binding \
          resolved from this request's own include dir, not a stale narrow-vocabulary memo entry"
+    );
+}
+
+/// (g) A module whose OWN source text is BYTE-IDENTICAL across two
+/// requests (mirroring `Tidepool.Orchestrate`, which spells only the bare
+/// `M` alias and never mentions a pinned `Finalize <T>` literally) but
+/// whose compiled MEANING depends on a fixed-name/varying-content sibling
+/// it imports (mirroring the per-window `Tidepool.Effects` shim, whose own
+/// `type M = Eff row` is exactly this shape) — daemon-shim-identity-fix's
+/// own regression, one step past what check (f) covers. Check (f)'s stale
+/// module ITSELF changed content across requests, so its own `ms_hs_hash`
+/// correctly forced a fresh compile; THIS check's stale module
+/// (`Tidepool.Companion`) never changes, so a memo hit validated by
+/// self-hash ALONE would wrongly reuse request A's compile —
+/// `companionVal`'s type frozen to request A's own `Tidepool.Shim.Pinned`
+/// expansion (`Pinned = Int`) — against request B's own target module,
+/// which declares its OWN local binding at ITS OWN fresh `Pinned`
+/// expansion (`Pinned = Bool`) and assigns `companionVal` to it. This is
+/// structurally the exact shape of the real bug: `Tidepool.Orchestrate`'s
+/// `paginateTrunc :: Int -> Value -> M Value` (`M` a type SYNONYM, exactly
+/// like `Pinned` here) got frozen against a stale `Finalize Int` row while
+/// the target's own `paginateResult :: Int -> Value -> M Value` used a
+/// fresh `Finalize KyotoResult` row — `paginateResult = paginateTrunc`
+/// failed with `Couldn't match type 'Int' with 'KyotoResult' / Expected:
+/// Int -> Value -> M Value / Actual: Int -> Value -> M Value`, the exact
+/// signature this lane's own bisection observed.
+///
+/// Routed through a SESSION-BOUND reference turn (mirroring check (c)'s
+/// bind/reference pattern), not a plain `--target` compile: the real
+/// repro's failing compile is a session-scoped turn
+/// (`isSessionScopeActive`), which selects `sessionVariant`'s
+/// `OptimizeEveryModule` tier — the tier that compiles every non-deferred
+/// home module (including `Tidepool.Companion`/`Tidepool.Orchestrate`,
+/// neither the target nor a `Val`-importer) through THIS module's own
+/// per-module loop rather than leaving it to `load'` alone. A plain
+/// `normalVariant`/`OptimizeCoreReachable` compile does not reproduce this —
+/// its target's own fresh typecheck resolves `Tidepool.Companion` from the
+/// ambient, already-correctly-recompiled-by-`load'` HPT, so only the
+/// session tier's own extra per-module pass exercises the
+/// stale-memo-front hazard this fixture pins.
+fn check_g_shim_dependent_module_warm_second_request(
+    bin: &Path,
+    dir: &Path,
+    lib: &Path,
+    socket: &Path,
+) {
+    let a_inc = dir.join("g-pin-a");
+    let b_inc = dir.join("g-pin-b");
+    fs::create_dir_all(a_inc.join("Tidepool")).unwrap();
+    fs::create_dir_all(b_inc.join("Tidepool")).unwrap();
+
+    // The per-window "shim": fixed module NAME, a type SYNONYM (mirroring
+    // `Tidepool.Effects`'s own `type M = Eff row`) whose RHS is pinned
+    // differently per request.
+    fs::write(
+        a_inc.join("Tidepool/Shim.hs"),
+        "module Tidepool.Shim (Pinned) where\ntype Pinned = Int\n",
+    )
+    .unwrap();
+    fs::write(
+        b_inc.join("Tidepool/Shim.hs"),
+        "module Tidepool.Shim (Pinned) where\ntype Pinned = Bool\n",
+    )
+    .unwrap();
+
+    // The dependent module: BYTE-IDENTICAL in both include dirs (mirroring
+    // `Tidepool.Orchestrate`'s own source never mentioning the pin) —
+    // `companionVal`'s type is frozen to whatever `Pinned` expanded to AT
+    // THIS MODULE'S OWN compile time, only resolving to a different
+    // expansion because it lives alongside a different `Tidepool/Shim.hs`
+    // in each content-addressed dir.
+    let companion_src =
+        "module Tidepool.Companion (companionVal) where\nimport Tidepool.Shim\ncompanionVal :: Pinned\ncompanionVal = undefined\n";
+    fs::write(a_inc.join("Tidepool/Companion.hs"), companion_src).unwrap();
+    fs::write(b_inc.join("Tidepool/Companion.hs"), companion_src).unwrap();
+
+    // A trivial session bind per side — `isSessionScopeActive` requires a
+    // non-empty `ssValIfaces`, which is what actually routes the later
+    // reference turn through `sessionVariant` (see the doc comment above).
+    let bind = |label: &str| -> PathBuf {
+        let root = dir.join(format!("g-session-{label}"));
+        fs::create_dir_all(&root).unwrap();
+        let bind_file = write_fixture(
+            dir,
+            &format!("GBind{label}.hs"),
+            &format!("module GBind{label} where\nimport Tidepool.Prelude\n__result :: Int\n__result = 0\n"),
+        );
+        let mut bind_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+        bind_cmd
+            .input(&bind_file)
+            .output_dir(dir.join(format!("out-g-{label}-bind")))
+            .session_bind()
+            .bind_name("x")
+            .bind_gen(1)
+            .session_root(&root)
+            .emit_bound_binders(dir.join(format!("g-bb-{label}.json")))
+            .include(lib);
+        let out = run_via_env_socket(&bind_cmd, socket);
+        assert!(
+            out.status.success(),
+            "session bind ({label}) should succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        root
+    };
+    let root_a = bind("A");
+    let root_b = bind("B");
+
+    write_fixture(
+        dir,
+        "GPinA.hs",
+        "module GPinA where\nimport Tidepool.Session.Val.G1 (x)\nimport Tidepool.Prelude\nimport Tidepool.Shim\nimport Tidepool.Companion\n__result :: Int\n__result = x\n",
+    );
+    write_fixture(
+        dir,
+        "GPinB.hs",
+        "module GPinB where\nimport Tidepool.Session.Val.G1 (x)\nimport Tidepool.Prelude\nimport Tidepool.Shim\nimport Tidepool.Companion\nmine :: Pinned\nmine = companionVal\n__result :: Int\n__result = (if mine then 1 else 0) + x\n",
+    );
+
+    // Request A: warms the shared memo's `Tidepool.Companion` entry against
+    // dir A's own `Pinned` expansion (`= Int`) — just by IMPORTING it, same
+    // as the real shim/orchestrate pair: downsweep compiles every imported
+    // home module regardless of whether the target actually uses its
+    // exports.
+    let mut a_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    a_cmd
+        .input(dir.join("GPinA.hs"))
+        .output_dir(dir.join("out-g-a-ref"))
+        .session_root(&root_a)
+        .inject_val("Tidepool.Session.Val.G1")
+        .include(lib)
+        .include(&a_inc);
+    let a_out = run_via_env_socket(&a_cmd, socket);
+    assert!(
+        a_out.status.success(),
+        "request A (Pinned = Int) should succeed: {}",
+        String::from_utf8_lossy(&a_out.stderr)
+    );
+
+    // Request B, through the SAME warm daemon: `Tidepool.Companion`'s own
+    // source is byte-identical to request A's, so a self-hash-only memo
+    // check would wrongly reuse request A's compile — `companionVal`'s type
+    // would stay frozen to request A's `Pinned = Int` instead of request
+    // B's own `Pinned = Bool`, exactly like the real bug's
+    // `paginateResult = paginateTrunc` freezing a stale `Finalize Int` row.
+    // The byte-comparison assertions below (not necessarily a hard GHC
+    // diagnostic — confirmed empirically red pre-fix via a silent
+    // daemon-vs-direct-spawn CBOR divergence rather than a compile error
+    // here) are the actual oracle; a GHC-level "Couldn't match type" is
+    // rejected too, when it does surface.
+    let mut b_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    b_cmd
+        .input(dir.join("GPinB.hs"))
+        .output_dir(dir.join("out-g-b-daemon"))
+        .session_root(&root_b)
+        .inject_val("Tidepool.Session.Val.G1")
+        .include(lib)
+        .include(&b_inc);
+    let b_daemon_out = run_via_env_socket(&b_cmd, socket);
+
+    let daemon_stderr = String::from_utf8_lossy(&b_daemon_out.stderr);
+    assert!(
+        b_daemon_out.status.success(),
+        "request B (Pinned = Bool), through the warm daemon, must compile: {daemon_stderr}"
+    );
+    assert!(
+        !daemon_stderr.contains("Couldn't match type"),
+        "must not be a type mismatch between request A's frozen Pinned expansion and request B's own: {daemon_stderr}"
+    );
+
+    // Baseline: a direct spawn of the SAME request-B fixture never touches
+    // the daemon's shared memo at all.
+    let mut b_direct_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    b_direct_cmd
+        .input(dir.join("GPinB.hs"))
+        .output_dir(dir.join("out-g-b-direct"))
+        .session_root(&root_b)
+        .inject_val("Tidepool.Session.Val.G1")
+        .include(lib)
+        .include(&b_inc);
+    let b_direct_out = run_direct(&b_direct_cmd);
+    assert!(
+        b_direct_out.status.success(),
+        "direct spawn baseline should succeed: {}",
+        String::from_utf8_lossy(&b_direct_out.stderr)
+    );
+
+    assert_eq!(
+        b_daemon_out.stdout, b_direct_out.stdout,
+        "diagnostics JSON must match between the warm-daemon-served request B and a direct spawn"
+    );
+    let daemon_cbor = fs::read(dir.join("out-g-b-daemon/result.cbor")).unwrap();
+    let direct_cbor = fs::read(dir.join("out-g-b-direct/result.cbor")).unwrap();
+    assert_eq!(
+        daemon_cbor, direct_cbor,
+        "result.cbor must be byte-identical — request B's own Pinned/companionVal must be what \
+         actually compiles, not a stale request-A Tidepool.Companion memo entry"
     );
 }
 

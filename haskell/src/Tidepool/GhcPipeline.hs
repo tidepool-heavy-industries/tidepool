@@ -515,15 +515,49 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- existing 'Map.insert'. Costs nothing when content is unchanged (the
     -- overwhelmingly common case — same vocabulary, same hash, hit as
     -- before).
+    -- Dependency-closure memo validity (daemon-shim-identity-fix, one step
+    -- past the 'ms_hs_hash' self-check above): a module whose OWN source
+    -- text is byte-identical across two independent requests
+    -- (@Tidepool.Orchestrate@, which spells only the bare @M@ alias and
+    -- never mentions a pinned @Finalize \<T\>@ literally) can still have a
+    -- request-VARYING compiled MEANING when it imports a fixed-name/
+    -- varying-content sibling (the per-window @Tidepool.Effects@ shim,
+    -- co-generated into the SAME content-addressed staging dir but not
+    -- co-hashed at the single-module level, tidepool-mcp/CLAUDE.md's
+    -- "Stable-effects-core" section). A self-hash match is necessary but
+    -- not sufficient — the compiled TcGblEnv/Core also nominally reference
+    -- whatever THAT module's own home-module imports resolved to, so a memo
+    -- hit is trusted only when every direct home import ALSO validated
+    -- (hit, not freshly recompiled) THIS cycle. Modules are visited in
+    -- dependency order ('cpSummaries' always returns a topological sort —
+    -- see 'normalVariant'/'sessionVariant'), so an import's own verdict is
+    -- already recorded in 'validThisCycleRef' by the time a dependent
+    -- module is checked — this generalizes to any depth/shape of
+    -- fixed-name/varying-content chain; no module is named here.
+    let cycleModNames = Set.fromList (map ms_mod_name summaries)
+        directHomeDeps modSum =
+          [ mn | (_, lmn) <- ms_textual_imps modSum
+               , let mn = unLoc lmn
+               , mn `Set.member` cycleModNames ]
+    validThisCycleRef <- liftIO (newIORef (Map.empty :: Map.Map ModuleName Bool))
+    let depsValidSoFar modSum = liftIO $ do
+          validMap <- readIORef validThisCycleRef
+          pure (all (\d -> Map.findWithDefault False d validMap) (directHomeDeps modSum))
+        recordValidity modSum isValid =
+          liftIO (modifyIORef' validThisCycleRef (Map.insert (ms_mod_name modSum) isValid))
     let lookupValidMemo modSum = case mMemoRef of
           Nothing  -> pure Nothing
-          Just ref -> liftIO $ do
-            m <- readIORef ref
-            pure $ do
-              entry <- Map.lookup (ms_mod_name modSum) m
-              if ms_hs_hash (mfSummary (gmeFront entry)) == ms_hs_hash modSum
-                then Just entry
-                else Nothing
+          Just ref -> do
+            depsOk <- depsValidSoFar modSum
+            if not depsOk
+              then pure Nothing
+              else liftIO $ do
+                m <- readIORef ref
+                pure $ do
+                  entry <- Map.lookup (ms_mod_name modSum) m
+                  if ms_hs_hash (mfSummary (gmeFront entry)) == ms_hs_hash modSum
+                    then Just entry
+                    else Nothing
     (fronts, results, mReachable) <- case cpTier plan of
       OptimizeEveryModule -> do
         pairs <- forM summaries $ \modSum -> do
@@ -539,9 +573,11 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
             -- closes) it cheaply re-registers the already-computed iface
             -- into the HPT that 'load'' just wiped.
             Just entry -> do
+              recordValidity modSum True
               cpAfterModule plan modSum (mfTcGblEnv (gmeFront entry)) (mfHscEnv (gmeFront entry)) (gmeSimplified entry)
               pure (gmeFront entry, gmeResult entry)
             Nothing -> do
+              recordValidity modSum False
               mf <- compileFront modSum
               (simplified, r) <- compileBack mf
               case mMemoRef of
@@ -576,8 +612,11 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
         pairs <- forM summaries $ \modSum -> do
           cached <- lookupValidMemo modSum
           case cached of
-            Just entry -> pure (gmeFront entry, Just (gmeResult entry))
+            Just entry -> do
+              recordValidity modSum True
+              pure (gmeFront entry, Just (gmeResult entry))
             Nothing    -> do
+              recordValidity modSum False
               mf <- compileFront modSum
               pure (mf, Nothing)
         let fs = map fst pairs
