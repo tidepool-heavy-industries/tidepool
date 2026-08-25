@@ -341,7 +341,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !source_repo_mode {
         ensure_memory_store(&subagent_repo)?;
     }
-    let mut handler = build_subagent_handler(&subagent_repo)?;
+    // The codex turn/start deadline is a hard cap on CYCLE duration (the
+    // response arrives at turn completion), and a real-repo coding cycle
+    // legitimately runs past the 300s default — observed live 2026-08-25:
+    // two source-repo cycles declared "backend unavailable: turn/start
+    // timed out after 300s" while their workers were still mid-edit.
+    // Memory-store cycles keep the default so a genuinely hung backend
+    // still fails fast.
+    let turn_timeout = if source_repo_mode {
+        std::time::Duration::from_secs(900)
+    } else {
+        tidepool_agent::backend::codex::DEFAULT_TURN_TIMEOUT
+    };
+    let mut handler = build_subagent_handler(&subagent_repo, turn_timeout)?;
     let subagent_mode = if source_repo_mode {
         "source-repo"
     } else {
@@ -560,6 +572,7 @@ fn build_outer_handlers(
 /// with nothing allocated).
 fn build_subagent_handler(
     repo: &std::path::Path,
+    turn_timeout: std::time::Duration,
 ) -> Result<tidepool_handlers::SubagentHandler, Box<dyn std::error::Error>> {
     if !repo.join(".git").exists() {
         // Unreachable from main (ensure_memory_store runs first); kept as a
@@ -573,7 +586,8 @@ fn build_subagent_handler(
     }
     let (registry_root, worktree_root) = shared_worktree_roots()?;
     let binding_root = xdg_data_root()?.join("tidepool/subagent/bindings");
-    let backends = tidepool_agent::backend::codex::CodexBackendFactory::new();
+    let backends =
+        tidepool_agent::backend::codex::CodexBackendFactory::new().with_turn_timeout(turn_timeout);
     let handler = tidepool_handlers::SubagentHandler::with_backends(
         registry_root,
         worktree_root,
