@@ -1059,3 +1059,11 @@ nothing from the calling script:
   wall (nextest summary) — including all 10 previously-failing
   `repo_event_with_handler`/`subagent_tool_loop`/`subagent_one_cycle`
   cases, and faster than the no-daemon leg.
+
+Re-confirmed after rebasing onto the daemon-phase1 scripts wiring, this time
+through the actual spec-named invocation (`scripts/battery.sh -p
+tidepool-handlers` with `TIDEPOOL_EXTRACT_DAEMON=1` vs. unset, each on its
+own fresh `$TIDEPOOL_COMPILE_CACHE_DIR`): **no daemon** 197/197, 65.0s wall;
+**daemon** 197/197, 51.5s wall. Same result, same margin, different
+harness — the fix holds under both the manual daemon start and the landed
+scripts wiring.
