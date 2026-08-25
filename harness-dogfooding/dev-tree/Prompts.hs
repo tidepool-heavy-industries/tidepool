@@ -317,6 +317,15 @@ replanPrompt p child why = [fmt|
   instead), abandonSubtree (true when no instruction would help), and a short
   rationale. The amendment is journaled either way — a resumed run reads it
   rather than re-asking you.
+
+  If the failure looks MIS-SIZED rather than mis-instructed — the task names
+  several distinct components and the worker stalled on scope judgment — set
+  amendedSubtree to a replacement DevPlan instead: the failed node re-enters
+  as that structure (its root name is forced back to the failed node's own,
+  so name it freely). Give each child a concrete deliverable, its own checks,
+  and boundary paths within the failed node's boundary; depth and width are
+  still bounded by the run's budget. Use Nothing when a rephrased
+  instruction is enough — a subtree costs one worktree per child.
 |]
 
 checkLines :: DevPlan -> Text

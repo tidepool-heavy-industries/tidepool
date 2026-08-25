@@ -314,6 +314,14 @@ data ReplanDecision = ReplanDecision
   { amendedInstruction :: Text
   , abandonSubtree     :: Bool
   , rationale          :: Text
+  , -- | Replan-as-decompose: a replacement subtree when the failure verdict
+    -- is "mis-sized", not "mis-instructed" — the failed node is re-entered
+    -- as this structure instead of as a rephrased leaf.  Its root's
+    -- 'nodeName' is forced back to the failed node's own name on
+    -- consumption ('Resume.amendPlan'), because retained worktrees rebind
+    -- by name.  'Maybe' so journaled decisions from before this field
+    -- decode as 'Nothing'.
+    amendedSubtree     :: Maybe DevPlan
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 

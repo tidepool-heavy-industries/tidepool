@@ -265,11 +265,16 @@ amendmentIsNewest replanSeq splitSeq outcomeSeq = case replanSeq of
   where
     absent = fromMaybe (-1)
 
--- | Apply a journaled amendment to a node's task, preserving its structure.
+-- | Apply a journaled amendment to a node's plan.  A replacement subtree
+-- (replan-as-decompose) wins over a rephrased instruction; either way the
+-- node's own name survives, because retained worktrees rebind by name and a
+-- renamed root would orphan the tree the failed attempt left behind.
 amendPlan :: ReplanDecision -> DevPlan -> DevPlan
-amendPlan d p
-  | T.null (T.strip d.amendedInstruction) = p
-  | otherwise = p {nodeTask = d.amendedInstruction}
+amendPlan d p = case d.amendedSubtree of
+  Just sub -> sub {nodeName = nodeName p}
+  Nothing
+    | T.null (T.strip d.amendedInstruction) -> p
+    | otherwise -> p {nodeTask = d.amendedInstruction}
 
 -- | A split that already happened: replay its recorded plan and child trees.
 replaySplit

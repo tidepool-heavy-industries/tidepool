@@ -329,7 +329,11 @@ onChildFailure tree p s o rest acc = case nodeOnFailure p of
     pure $
       if decision.abandonSubtree
         then acc {accAbandon = Just (why <> " — replan abandoned"), accEsc = acc.accEsc <> [why]}
-        else acc {accEsc = acc.accEsc <> [[fmt|{why} — replanned: {decision.amendedInstruction}|]]}
+        else case decision.amendedSubtree of
+          Just sub ->
+            acc {accEsc = acc.accEsc <> [[fmt|{why} — replanned as a restructured subtree ({length (childPlans sub)} children); re-entry consumes it|]]}
+          Nothing ->
+            acc {accEsc = acc.accEsc <> [[fmt|{why} — replanned: {decision.amendedInstruction}|]]}
   AskOperator ->
     askUser @Triage >>= \t -> case t.triageAction of
       TriageAbandon -> pure acc {accAbandon = Just (why <> " — operator abandoned"), accEsc = acc.accEsc <> [why]}
@@ -542,7 +546,12 @@ applyPolicy p s why = case nodeOnFailure p of
     recordEvent (ReplanEvent (JournalKey (branchOf s.seedTree)) decision)
     if decision.abandonSubtree
       then pure (PolicyAbandoned [fmt|{why} — replan abandoned: {decision.rationale}|] 0)
-      else retryOnce decision.amendedInstruction
+      else case decision.amendedSubtree of
+        -- A restructured subtree cannot be consumed by a flat in-turn retry
+        -- (retryOnce spawns ONE worker with instruction text); it is
+        -- journaled above, and re-entry through resume unfolds it.
+        Just _ -> pure (PolicyEscalated [fmt|{why} — replanned as a restructured subtree; re-entry consumes it|] 0)
+        Nothing -> retryOnce decision.amendedInstruction
   AskOperator ->
     askUser @Triage >>= \t -> case t.triageAction of
       TriageRetry -> retryOnce t.triageNote
