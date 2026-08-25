@@ -65,8 +65,7 @@ pub const CHEAP_PLUMBING_PREFERENCE: [&str; 2] = ["gpt-5.4-mini", "gpt-5.6-luna"
 pub const CHEAPEST_GPT56_PREFERENCE: [&str; 1] = ["gpt-5.6-luna"];
 
 /// [`ModelPolicy::StrongestGpt56`]'s allowlist, strongest first.
-pub const STRONGEST_GPT56_PREFERENCE: [&str; 3] =
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+pub const STRONGEST_GPT56_PREFERENCE: [&str; 3] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
 /// The allowlist a policy resolves against, in preference order.
 pub(crate) fn preference_for(policy: ModelPolicy) -> &'static [&'static str] {

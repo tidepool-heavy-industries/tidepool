@@ -161,6 +161,10 @@ fn dev_tree_typechecks() {
             "__resumeProbe = do { st <- resumeLoop emptyResume initialState; pure (render st) }\n",
             "__resumeDecision :: ResumeFold -> Text -> DevPlan -> ResumePlan\n",
             "__resumeDecision = resumePlanFor\n",
+            // The replan-rescue rule (run 24b): a journaled Failed interior
+            // outcome must not shadow a descendant branch's pending amendment.
+            "__amendRescue :: ResumeFold -> DevPlan -> Bool\n",
+            "__amendRescue = descendantAmendPending\n",
             "__amendmentNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool\n",
             "__amendmentNewest = amendmentIsNewest\n",
             "__proposeDecision :: Budget -> DevPlan -> Maybe Text\n",

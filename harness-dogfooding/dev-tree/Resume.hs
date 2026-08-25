@@ -20,6 +20,7 @@ module Resume
   , ResumeHooks (..)
   , resumed
   , resumePlanFor
+  , descendantAmendPending
   , newestEntry
   , amendmentIsNewest
   , amendPlan
@@ -164,9 +165,20 @@ resumed hooks fold inner
         | otherwise -> inner seed {seedPlan = amended}
 
 -- | The fold's verdict for one branch.  Pure: no effects, git, or I/O.
+--
+-- A recorded interior 'Failed' outcome is terminal on resume EXCEPT when a
+-- descendant branch still holds an unconsumed amendment (its own newest
+-- entry is a 'ReplanEvent').  The fold journals the child's replan BEFORE
+-- the parent's outcome, so the comparison must be per-descendant-branch
+-- newest-wins, never replan-seq-vs-this-outcome-seq (run 24b: the root's
+-- Failed outcome shadowed the panel child's pending amendment and the
+-- resumed turn did nothing).
 resumePlanFor :: ResumeFold -> Text -> DevPlan -> ResumePlan
 resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEntry of
-  Just (_, OutcomeEvent {evOutcome = o}) -> ResumeSkip o
+  Just (_, OutcomeEvent {evOutcome = o})
+    | not (outcomeIsDone o) && descendantAmendPending fold recordedPlan ->
+        maybe ResumeFresh ResumeReplay recordedSplit
+    | otherwise -> ResumeSkip o
   Just (_, SplitEvent {}) -> case recordedSplit of
     Just sp -> ResumeReplay sp
     Nothing -> ResumeFresh
@@ -183,6 +195,29 @@ resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEnt
       lookupEvent OutcomeKind branch fold
         `orElse` lookupEvent OutcomeKind (nodeName p) fold
     recordedSplit = splitEntry >>= (splitRecordOf . snd)
+    recordedPlan = maybe p (.splitPlan) recordedSplit
+
+-- | Does any descendant branch's own resume verdict come out 'ResumeAmend'?
+-- Walks the recorded plan tree (a journaled split plan carries its whole
+-- subtree), resolving each child's branch through the fold's recorded
+-- child-tree tables and falling back to the node name — the same keying
+-- 'resumePlanFor' itself accepts.
+descendantAmendPending :: ResumeFold -> DevPlan -> Bool
+descendantAmendPending fold p = any pending (childPlans p)
+  where
+    pending k = case resumePlanFor fold (branchFor k) k of
+      ResumeAmend {} -> True
+      _ -> descendantAmendPending fold k
+    branchFor k =
+      fromMaybe
+        (nodeName k)
+        ( listToMaybe
+            [ b
+            | (_, _, SplitEvent {evChildTrees = Just ts}) <- eventsOfKind SplitKind fold
+            , (n, b) <- ts
+            , n == nodeName k
+            ]
+        )
 
 -- | Select the highest-sequence journal entry from the three resume namespaces.
 newestEntry
