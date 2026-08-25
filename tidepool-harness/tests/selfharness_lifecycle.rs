@@ -342,10 +342,24 @@ async fn poisoned_driver_refuses_entry_points() {
     let original_extract = std::env::var("TIDEPOOL_EXTRACT").ok();
     let (_poison_dir, poison_path) = support::poisoned_extract_bin();
     std::env::set_var("TIDEPOOL_EXTRACT", &poison_path);
+    // A live per-run compile daemon (battery default since 2026-08-24) would
+    // serve this compile from the HEALTHY binary it was spawned from,
+    // bypassing the poisoned $TIDEPOOL_EXTRACT entirely — ExtractCmd routes
+    // through $TIDEPOOL_EXTRACT_DAEMON_SOCKET whenever it is set (the
+    // TIDEPOOL_EXTRACT_NO_DAEMON switch only gates daemon STARTUP in the
+    // battery scripts, the client never reads it), so the poison window must
+    // clear the socket to confine itself to the direct-spawn path the
+    // assertion is about.
+    let original_daemon_socket = std::env::var("TIDEPOOL_EXTRACT_DAEMON_SOCKET").ok();
+    std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
     let recovery = driver.run_one_loop_iteration(&harness_source, None).await;
     match original_extract {
         Some(v) => std::env::set_var("TIDEPOOL_EXTRACT", v),
         None => std::env::remove_var("TIDEPOOL_EXTRACT"),
+    }
+    match original_daemon_socket {
+        Some(v) => std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", v),
+        None => std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET"),
     }
     assert!(
         recovery.is_err(),
