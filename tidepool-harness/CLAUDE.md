@@ -874,7 +874,7 @@ Gate: `tests/outer_fanout.rs`.
 Pre-collapse, the outer `render`/`loop` session and each loop's answerer
 Agent were separate resident sessions, and a finalized answer crossed between
 them by BRIDGING to a JSON-shaped `Value` — a closure could not survive that
-crossing. The one-session collapse (`plans/one-session.md`) removes the
+crossing. The one-session collapse (landed 2026-08-12) removes the
 boundary: the outer session is the tree's one node-less, registry-owned
 session (`SelfHarnessDriver::bootstrap` calls `Harness::adopt_session`, which
 is `NodeTree::adopt_session` — the driver holds only the `SessionId`), and

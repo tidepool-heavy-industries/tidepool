@@ -11,7 +11,7 @@ contract that ships.
 
 ## Amendment 2026-08-12 (one-session plan, Phase 0) — additive
 
-The one-session consumer (`plans/one-session.md`) extended the API. Everything
+The one-session consumer (landed 2026-08-12) extended the API. Everything
 below in §1-§4 remains true; these are additions:
 
 - **`ParkKind` covers all four materialization policies** — `Project {
