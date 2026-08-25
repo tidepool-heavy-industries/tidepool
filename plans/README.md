@@ -21,6 +21,13 @@ charter / glossary and the plan file is deleted (git is the archive).
   for autonomous fresh-session dogfood rounds driven by the root + native
   subagents while the operator is offline; robot-operator form answering,
   per-round analysis reports, scenario battery.
+- [Session crate design](session-crate-design.md): design-only, awaiting
+  operator picks (crate name, mounting model, multi-mount sequencing).
+  Proposes promoting `tidepool-runtime/src/session/*` into its own
+  `tidepool-session` crate, with multi-frontend session mounting as a
+  first-class design input; plans to retire
+  [resident-session-kernel-design.md](resident-session-kernel-design.md)
+  once the promotion lands.
 
 ## Carried-forward one-liners
 
