@@ -8,10 +8,10 @@
 -- so swapping a chore is an edit here, never a change to the harness's own
 -- logic.
 --
--- The shipped chore is dev-tree EDITING ITS OWN SOURCE: a micro-split leaf
--- against the dev checkout that teaches the harness's boundary vocabulary a
--- second tier (product paths vs tolerated paths) — the #1 false-red source
--- across the live runs, chosen from the observation-driven leverage list.
+-- The shipped chore is THE RESTRUCTURE: dev-tree becomes a real
+-- multi-module Haskell project (operator directive: serious,
+-- well-structured, fluent Haskell — module boundaries where the section
+-- headers already are), executed by dev-tree on its own source.
 module Chore
   ( choreGoal
   , chorePlan
@@ -23,19 +23,24 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Make resume tell the truth: newest journal event wins, adopted work is re-judged by the ladder, partial micro-sequences are never adopted as complete, and a retried child updates the journal."
+choreGoal = "Restructure dev-tree from one ~2100-line Harness.hs into a well-factored multi-module Haskell project with fluent idioms, keeping behavior and the public API identical."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "resume-soundness"
+    { nodeName = "restructure"
     , nodeTask =
-        "Fix four verified resume-soundness holes, staying inside harness-dogfooding/dev-tree/ plus tidepool-harness/tests/dogfood_harness_typecheck.rs. (1) NEWEST EVENT WINS: resumePlanFor's precedence is currently 'amendment if newest, else any outcome beats any split' — a stale outcome (seq 1) beats a newer split (seq 3) once the amendment guard fails. Rewrite the precedence to genuinely order by journal sequence number across all three kinds: whichever of outcome/split/replan is NEWEST for the branch decides (outcome → ResumeSkip, split → ResumeReplay, replan → ResumeAmend under the existing abandon/amend semantics); keep the pure signature so the Rust probe still calls it, and update amendmentIsNewest's role accordingly (it may dissolve into the new ordering — keep the export if the Rust probe names it, adapting the probe in dogfood_harness_typecheck.rs where its embedded Haskell fixtures exercise these decisions, and EXTEND those fixtures with the stale-outcome-vs-newer-split scenario so the pin test proves the fix). (2) LADDER BEFORE TRUST: recordedDone currently trusts a journaled outcome's raw constructor, but outcomes are journaled BEFORE foldLadder judges them — re-apply foldLadder (it is pure) to the journaled outcome inside recordedDone/integrationComplete so a pre-ladder Done that the ladder would fail (NoHeadMove, boundary, checks) never counts as completed for parent adoption. (3) NEVER ADOPT A PARTIAL MICRO-SEQUENCE: journal the accepted micro plan when a micro-split leaf starts running (a new journal event kind in DevTreeJournal.hs following the existing JournalEvent/JournalKind pattern — record the accepted microtask names), and in adoptOrUnfold refuse to adopt orphaned work for a plan with nodeSplit set unless the journal shows the micro sequence COMPLETED (a second event when runMicrotasks finishes with microtasksComplete, or fold the completeness into the outcome event) — an incomplete or unjournaled micro sequence re-runs through the ordinary coalgebra instead of being adopted. (4) RETRIED OUTCOMES UPDATE THE JOURNAL: retryLeaf currently merges a successful retry without re-journaling, so the journal's last word stays the original Failed; journal the retried outcome (same recordEvent path stampFold uses) so a later resume skips the child instead of resurrecting its failure. Style contract: records over positional accumulator threading, named where-helpers over inline lambda chains, follow existing haddock density. FINAL MICROTASK must be a self-consistency sweep: re-grep every symbol whose signature you changed at every call site, and verify quasiquote balance in every edited .hs file (count of '[fmt|' equals count of '|]')."
+        ("Split harness-dogfooding/dev-tree/Harness.hs into sibling modules along its existing section headers, keeping ALL behavior semantically identical and Harness.hs's module export list byte-compatible (Harness becomes the facade: it keeps loop/resumeLoop/initialState plus re-exports everything it exports today, because tidepool-harness/tests/dogfood_harness_typecheck.rs's embedded probes import Harness and name those exports — that file is in-boundary ONLY for a change a re-export genuinely cannot satisfy). Target modules (indicative; adjust if the dependency graph argues otherwise, and say so in evidence): Prompts.hs (the fragment grammar + per-role prompt templates), Micro.hs (microLeaf/runMicrotasks/MicroAcc + recon machinery), Resume.hs (the resume section: ResumePlan/SplitRecord/resumePlanFor/newestEntry/adoptOrUnfold/verifyOrphan typestates/retainWorktree), Fold.hs (integrate/stampFold/foldLadder/leafFold/interiorFold/foldChildren/cascade/escalate/applyPolicy/retry/mergeChild/finishFold), Unfold.hs (decompose/emitSplit/policy slots/allocateChildren), and a small Workers.hs for the shared execution seam (runWorker/snapshotWork/gitIn/runCheckCmd/runChecks/boundaryViolations) that both Fold and Micro import — shared helpers get ONE home, never copies. Runtime-only types (NodeSeed/NodeWork/FoldAcc/MicroAcc) move with their consumers. Every module gets a haddock header in the file's existing style stating its charter. Fluent idioms where they genuinely improve the code: when/unless over if-then-else-pure-unit, foldM/traverse where a manual loop is a disguised fold, catMaybes/mapMaybe chains, records over positional threading — but NO semantic changes riding along. Also ADD one new prompt fragment to Prompts.hs, haskellIdiomContract :: Text, included by the worker and microtask briefs for Haskell-editing work: it states the positive idiom expectations (records over positional argument threading; when/unless; name your where-helpers; operator expressions and if-then-else are fine inside fmt" <> "| holes; custom typeclasses and GADTs compile here — write the idiomatic version first) — mirroring how the git contract fragment is stated. Every microtask must leave the tree in an importable state (no module referencing a symbol that has not moved yet).")
     , nodeChecks =
-        [ "grep -q 'MicroSplit\\|MicroKind\\|micro' harness-dogfooding/dev-tree/DevTreeJournal.hs"
-        , "grep -q 'foldLadder' harness-dogfooding/dev-tree/Harness.hs"
-        , "bash -c 'test $(grep -o \"[[]fmt|\" harness-dogfooding/dev-tree/Harness.hs | wc -l) -eq $(grep -o \"|[]]\" harness-dogfooding/dev-tree/Harness.hs | wc -l)'"
-        , "grep -q 'nodeSplit' harness-dogfooding/dev-tree/Harness.hs"
+        [ "test -s harness-dogfooding/dev-tree/Prompts.hs"
+        , "test -s harness-dogfooding/dev-tree/Micro.hs"
+        , "test -s harness-dogfooding/dev-tree/Resume.hs"
+        , "test -s harness-dogfooding/dev-tree/Fold.hs"
+        , "test -s harness-dogfooding/dev-tree/Unfold.hs"
+        , "grep -q 'haskellIdiomContract' harness-dogfooding/dev-tree/Prompts.hs"
+        , "grep -q 'resumePlanFor' harness-dogfooding/dev-tree/Harness.hs"
+        , "bash -c 'for f in harness-dogfooding/dev-tree/*.hs; do a=$(grep -o \"\\[fmt" <> "|" <> "\" $f | wc -l); b=$(grep -o \"|\\]\" $f | wc -l); test $a -eq $b || exit 1; done'"
+        , "bash -c 'test $(wc -l < harness-dogfooding/dev-tree/Harness.hs) -lt 700'"
         ]
     , nodeBoundary =
         ["harness-dogfooding/dev-tree", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
@@ -45,14 +50,14 @@ chorePlan =
         Just
           SplitSpec
             { splitHints =
-                "Split into 3-5 sequential microtasks: the journal vocabulary first (new event kind + writes at micro-plan acceptance and completion), then resumePlanFor's sequence-ordered precedence with the Rust probe fixtures extended in the same cycle, then ladder-before-trust in recordedDone plus retry re-journaling, and ALWAYS a final self-consistency sweep micro (re-grep changed signatures at all call sites; verify [fmt| / |] balance in edited files). Records over positional threading. Grep-class checks per micro; compilation is the orchestrator's post-fold gate."
+                "Sequential carve-outs, one module per microtask, dependency-leaves first so the tree is importable after every cycle: (1) Prompts.hs + the new haskellIdiomContract fragment wired into the briefs; (2) Workers.hs (shared execution seam) with Harness re-exporting; (3) Micro.hs; (4) Resume.hs; (5) Fold.hs + Unfold.hs together (they share the integrate/decompose seam) and Harness.hs reduced to facade + loop/resumeLoop/initialState + re-exports. The FINAL act of microtask 5 doubles as the self-consistency sweep: re-grep every moved symbol's import/export at every use site and verify quasiquote balance in every file. Do not attempt Haskell compilation — the orchestrator gates it after the fold."
             , splitMaxTasks = 5
             }
     , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 8, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 10, gateWiderThan = 4}
 
 -- | The chore edit itself rides as uncommitted state in the dev tree.
 choreSnapshotDirtySource :: Bool
