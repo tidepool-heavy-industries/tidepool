@@ -36,7 +36,7 @@ use tidepool_harness::{
     load_harness_source, typed_request_agent_decls, typed_request_agent_decls_with_delegate, Event,
     Harness, JsonlObserver, LogObserver, Observer, SelfHarnessDriver,
 };
-use tidepool_worktree::{EventJournal, GitCli, WorktreeMonitor};
+use tidepool_worktree::{EventJournal, GitCli, WorktreeMonitor, WorktreeRegistry};
 
 /// Dispatches every driver [`Event`] to each of several observers — lets the
 /// bin wire both stderr logging and the durable transcript without
@@ -516,14 +516,24 @@ fn build_outer_handlers(
 > {
     let (registry_root, worktree_root) = shared_worktree_roots()?;
     let worktree_handler = WorktreeHandler::new(
-        registry_root,
+        registry_root.clone(),
         worktree_root.clone(),
         source_repo.to_path_buf(),
     )?;
     let journal_path = xdg_data_root()?.join("tidepool/repo-events.jsonl");
     let journal = EventJournal::open(&journal_path)?;
     let monitor = WorktreeMonitor::new(GitCli::new(), journal);
-    let event_handler = RepoEventHandler::new(monitor, EventConfig::default());
+    // A worktree the Worktree effect created belongs to the durable registry
+    // the moment `create` returns, but this process's `WorktreeMonitor` has
+    // no in-memory baseline for it until something registers one — without
+    // this, the very first `WatchCommit`/`WatchHead` reconcile pass over a
+    // runtime-created worktree fails the whole turn with
+    // `EventSourceFailed "no managed worktree registered with id ..."`. Same
+    // registry root `WorktreeHandler` above records into, so an id minted
+    // through one resolves through the other.
+    let event_registry = WorktreeRegistry::open(&registry_root)?;
+    let event_handler =
+        RepoEventHandler::with_registry(monitor, event_registry, EventConfig::default());
     let exec_handler = ExecHandler::new(worktree_root);
     Ok((
         ConsoleHandler,

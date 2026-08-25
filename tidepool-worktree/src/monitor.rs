@@ -201,6 +201,14 @@ impl WorktreeMonitor {
         Ok(())
     }
 
+    /// Whether [`Self::register`] has already established a baseline for
+    /// `worktree`. Cheap (no I/O, no git) — an `observe`-time caller uses this
+    /// to decide whether a lazy registration is needed before `reconcile`,
+    /// without disturbing `reconcile`'s own `WorktreeNotRegistered` contract.
+    pub fn is_registered(&self, worktree: &WorktreeId) -> bool {
+        self.baselines.contains_key(worktree)
+    }
+
     fn last_observed(&self, worktree: &WorktreeId) -> (Option<GitOid>, Option<BranchName>) {
         let entries = self.journal.since(0);
         entries

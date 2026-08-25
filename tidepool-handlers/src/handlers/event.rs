@@ -507,16 +507,39 @@ pub trait ObservationSource: Send {
 /// baseline here would silently override the durable one and lose exactly the
 /// between-loop-iteration movement the journal exists to preserve.
 ///
-/// It carries NO other state: the monitor is the only thing it holds. The
-/// `EventId` on each observation is the one the monitor minted and journalled
-/// under, so `Observed.eventId` correlates with its journal row.
+/// It carries NO other state beyond an optional read handle onto the durable
+/// worktree registry, used only to resolve an id `register` was never called
+/// for (see [`Self::with_registry`]). The `EventId` on each observation is
+/// the one the monitor minted and journalled under, so `Observed.eventId`
+/// correlates with its journal row.
 pub struct MonitorObservations {
     monitor: tidepool_worktree::WorktreeMonitor,
+    /// The durable id→path authority a runtime-created worktree was recorded
+    /// in. `None` for callers (tests, the acceptance harness) that only ever
+    /// watch worktrees they registered by hand.
+    registry: Option<tidepool_worktree::WorktreeRegistry>,
 }
 
 impl MonitorObservations {
     pub fn new(monitor: tidepool_worktree::WorktreeMonitor) -> Self {
-        Self { monitor }
+        Self {
+            monitor,
+            registry: None,
+        }
+    }
+
+    /// Same as [`Self::new`], but `observe` may also resolve an id it has no
+    /// baseline for by looking it up in `registry` — see the module-level
+    /// note on [`ObservationSource for MonitorObservations`](struct.MonitorObservations.html)'s
+    /// `observe` impl for the lazy-registration mechanism this enables.
+    pub fn with_registry(
+        monitor: tidepool_worktree::WorktreeMonitor,
+        registry: tidepool_worktree::WorktreeRegistry,
+    ) -> Self {
+        Self {
+            monitor,
+            registry: Some(registry),
+        }
     }
 
     /// Start watching `worktree` at `path`, and record that `observe` may
@@ -545,6 +568,27 @@ impl ObservationSource for MonitorObservations {
         let mut out = Vec::new();
         for wire_id in worktrees {
             let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
+            // A worktree the durable registry records but this process never
+            // called `register` for (a `Worktree` create in a PRIOR loop
+            // iteration, or by another process) has no baseline yet. Resolve
+            // it lazily from the registry — the id->path authority — and
+            // register it now, so the first sight at observe time reports
+            // nothing retroactively (matching `register`'s own "first pass
+            // belongs to the first drain" contract) rather than failing the
+            // whole turn. An id the registry also does not know falls through
+            // unchanged to `reconcile`'s typed `WorktreeNotRegistered`.
+            if !self.monitor.is_registered(&domain_id) {
+                if let Some(registry) = &self.registry {
+                    if let Some(receipt) = registry
+                        .get(&domain_id)
+                        .map_err(worktree_error_to_event_error)?
+                    {
+                        self.monitor
+                            .register(domain_id.clone(), receipt.cwd)
+                            .map_err(worktree_error_to_event_error)?;
+                    }
+                }
+            }
             // An unregistered id is now a TYPED failure from the monitor
             // itself, mapped like every other monitor error — the ids reaching
             // here come from author-supplied `Watch` values, so this is a case
@@ -718,6 +762,20 @@ impl RepoEventHandler {
     /// [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor).
     pub fn new(monitor: tidepool_worktree::WorktreeMonitor, config: EventConfig) -> Self {
         Self::with_source(Box::new(MonitorObservations::new(monitor)), config)
+    }
+
+    /// Same production wiring as [`Self::new`], plus the durable worktree
+    /// registry a runtime-created worktree was recorded in — see
+    /// [`MonitorObservations::with_registry`].
+    pub fn with_registry(
+        monitor: tidepool_worktree::WorktreeMonitor,
+        registry: tidepool_worktree::WorktreeRegistry,
+        config: EventConfig,
+    ) -> Self {
+        Self::with_source(
+            Box::new(MonitorObservations::with_registry(monitor, registry)),
+            config,
+        )
     }
 
     /// Any other observation source. [`MonitorObservations`] is the real
@@ -1478,6 +1536,86 @@ mod tests {
             reg.watched_worktrees(),
             vec![wt("a")],
             "WatchMailbox names no worktree, same as WatchDeadline"
+        );
+    }
+
+    // ── lazy registration from the durable worktree registry ──
+
+    fn registry_and_monitor_over_temp_dirs() -> (
+        tidepool_worktree::WorktreeRegistry,
+        tidepool_worktree::WorktreeMonitor,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let registry_dir = tempfile::tempdir().unwrap();
+        let registry = tidepool_worktree::WorktreeRegistry::open(registry_dir.path()).unwrap();
+        let journal_dir = tempfile::tempdir().unwrap();
+        let journal =
+            tidepool_worktree::EventJournal::open(journal_dir.path().join("events.jsonl")).unwrap();
+        let monitor =
+            tidepool_worktree::WorktreeMonitor::new(tidepool_worktree::GitCli::new(), journal);
+        (registry, monitor, registry_dir, journal_dir)
+    }
+
+    #[test]
+    fn a_watch_on_a_registry_recorded_worktree_succeeds_with_no_manual_register() {
+        // Reproduces the live dev-tree failure: a worktree the Worktree effect
+        // created and durably registered, watched by RepoEvent, with NO
+        // `MonitorObservations::register` call anywhere in this test — the
+        // monitor must resolve the baseline lazily from the registry instead
+        // of failing the whole turn with `WorktreeNotRegistered`.
+        let repo = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repo.writer().commit_file("a.txt", "hello", "init").unwrap();
+        let cwd = repo.path().to_path_buf();
+
+        let (registry, monitor, _registry_dir, _journal_dir) =
+            registry_and_monitor_over_temp_dirs();
+        let worktree_id = tidepool_worktree::WorktreeId::from_raw("wt-lazy");
+        registry
+            .put(&tidepool_worktree::WorktreeReceipt {
+                worktree_id: worktree_id.clone(),
+                cwd: cwd.clone(),
+                branch: tidepool_worktree::BranchName::from_raw("main"),
+                source_head: tidepool_worktree::GitOid::from_raw("deadbeef"),
+                snapshot_ref: None,
+                origin: tidepool_worktree::WorktreeOrigin::CurrentRepository,
+                source_repository: cwd,
+                created_at_ms: 0,
+                status: tidepool_worktree::WorktreeRecordStatus::Finalized,
+            })
+            .unwrap();
+
+        let mut h = RepoEventHandler::with_registry(monitor, registry, EventConfig::default());
+        let wire_id = WtWorktreeId {
+            raw: worktree_id.as_str().to_string(),
+        };
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wire_id)])
+            .unwrap();
+        assert_eq!(
+            h.repo_event_drain(sub).unwrap(),
+            vec![],
+            "first sight at observe time reports nothing retroactively, \
+             same as an explicit register"
+        );
+    }
+
+    #[test]
+    fn an_id_unknown_to_both_the_monitor_and_the_registry_still_fails_typed() {
+        let (registry, monitor, _registry_dir, _journal_dir) =
+            registry_and_monitor_over_temp_dirs();
+        let mut h = RepoEventHandler::with_registry(monitor, registry, EventConfig::default());
+
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("wt-does-not-exist"))])
+            .unwrap();
+        assert!(
+            matches!(
+                h.repo_event_drain(sub),
+                Err(EventError::EventSourceFailed(_))
+            ),
+            "an id the registry also does not know must still fail the \
+             existing typed path, unchanged"
         );
     }
 }
