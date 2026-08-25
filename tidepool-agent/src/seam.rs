@@ -182,6 +182,14 @@ pub enum ModelPolicy {
     /// the cheaper `gpt-5.4-mini` — a specific budget grant names this exact
     /// tier, and cheaper is not the same as granted.
     CheapestGpt56,
+    /// The strongest gpt-5.6 tier available: prefer `gpt-5.6-sol`, else
+    /// `gpt-5.6-terra`, else `gpt-5.6-luna`.
+    ///
+    /// The coding-worker grant (operator, 2026-08-25): iteration quality on
+    /// real-repo chores is worth the tier — worker cycles are where the
+    /// engineering happens, and a stronger worker saves operator-side
+    /// recovery cycles.
+    StrongestGpt56,
 }
 
 /// What one thread is created with. Frozen for the thread's lifetime — dynamic

@@ -365,9 +365,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // worker; `CheapestGpt56` is the strongest allowlisted tier that
         // exists today (pinned to `gpt-5.6-luna`, never the cheaper
         // `gpt-5.4-mini` `CheapPlumbing` would resolve to).
+        // Sol at LOW effort (operator, 2026-08-25): the tier buys the
+        // quality; high reasoning effort on top is overkill for
+        // worker-cycle-sized tasks.
         handler = handler.with_model_policy(
-            tidepool_agent::ModelPolicy::CheapestGpt56,
-            tidepool_agent::ReasoningEffort::High,
+            tidepool_agent::ModelPolicy::StrongestGpt56,
+            tidepool_agent::ReasoningEffort::Low,
         );
     }
     driver.set_subagent_handler(handler);
