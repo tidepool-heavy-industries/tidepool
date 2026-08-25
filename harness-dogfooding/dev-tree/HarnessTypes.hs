@@ -19,6 +19,7 @@ module HarnessTypes
   ( State (..)
   , Phase (..)
   , Budget (..)
+  , ChoreMode (..)
   , DevPlan (..)
   , OnFailure (..)
   , SplitSpec (..)
@@ -33,6 +34,7 @@ module HarnessTypes
   , Triage (..)
   , TriageAction (..)
   , LayerApproval (..)
+  , PlanApproval (..)
   , Outcome (..)
   , Failure (..)
   , FailureKind (..)
@@ -42,6 +44,7 @@ module HarnessTypes
   , RebaseTier (..)
   , RunSummary (..)
   , render
+  , renderPlan
   , outcomeNodeName
   , outcomeTrailOf
   , outcomeIsDone
@@ -101,6 +104,14 @@ data Budget = Budget
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
+-- | Whether the chore supplies its tree or asks the harness to propose one.
+-- The payload constructor uses record syntax because this sum can influence
+-- checkpointed state.
+data ChoreMode
+  = Authored {authoredPlan :: DevPlan}
+  | ProposeFromGoal
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
 -- ---------------------------------------------------------------------------
 -- The authored plan
 -- ---------------------------------------------------------------------------
@@ -132,7 +143,7 @@ data DevPlan = DevPlan
     nodeSplit     :: Maybe SplitSpec
   , childPlans    :: [DevPlan]
   }
-  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
 -- ---------------------------------------------------------------------------
 -- On-the-fly micro-decomposition (intra-node)
@@ -301,6 +312,14 @@ data TriageAction = TriageRetry | TriageSkip | TriageAbandon
 data LayerApproval = LayerApproval
   { layerApproved :: Bool
   , approvalNote  :: Text
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | Flat operator response to a prose rendering of a proposed plan. Recursive
+-- plans are deliberately never exposed as editable form fields.
+data PlanApproval = PlanApproval
+  { planApproved :: Bool
+  , revisionNote :: Text
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 

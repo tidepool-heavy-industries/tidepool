@@ -15,6 +15,7 @@ module Prompts
   , boundaryContract
   , workerResultContract
   , workerPrompt
+  , proposePrompt
   , reconPrompt
   , microPlanPrompt
   , microPrompt
@@ -32,6 +33,19 @@ import HarnessTypes
 import Tidepool.Prelude
 import Tidepool.QQ (fmt)
 import Workers (checkFailed)
+
+proposePrompt :: Text -> Budget -> Text
+proposePrompt requestedGoal b = [fmt|
+  Propose a typed DevPlan tree for this software goal:
+  {requestedGoal}
+
+  The root is depth 0. Keep the tree at or below depth {b.maxDepth}, and give
+  every node at most {b.gateWiderThan} direct children. Use unique kebab-case
+  nodeName values. Give every node a tight nodeBoundary, concrete
+  orchestrator-runnable shell commands in nodeChecks (exit 0 means success),
+  a self-contained nodeTask, an explicit nodeOnFailure policy, and only useful
+  children. Respect the total allowance of {b.maxAgentCycles} agent cycles.
+|]
 
 -- | The Git trust boundary shared by workers that edit the assigned worktree.
 sandboxGitContract :: Text
