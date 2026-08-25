@@ -1754,7 +1754,9 @@ workerPrompt p = [fmt|
   Task: {nodeTask p}
 
   Your orchestrator will run these checks itself, in this worktree, at whatever
-  commit you leave HEAD on — they are the record, not your summary of them:
+  commit you leave HEAD on — they are the record, not your summary of them.
+  It also owns every compilation gate: your shell has no ghc, so do not
+  attempt direct Haskell typechecking — leave that to the orchestrator:
 {checkLines p}
 
   Your diff must stay inside these paths (empty means unrestricted); the
@@ -1838,7 +1840,9 @@ microPrompt p m = [fmt|
   YOUR microtask, the only thing to do this cycle: {m.microInstruction}
 
   The orchestrator runs these checks in this worktree right after your turn —
-  they are the record, not your summary of them:
+  they are the record, not your summary of them. It also owns every
+  compilation gate: your shell has no ghc, so do not attempt direct Haskell
+  typechecking — leave that to the orchestrator:
 {microCheckLines}
 
   Your sandbox's git directory is read-only: do NOT run `git commit` (or

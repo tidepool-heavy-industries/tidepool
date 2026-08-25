@@ -23,36 +23,25 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Teach dev-tree a two-tier boundary: product paths that must contain the diff, and tolerated paths a worker may touch without failing the fold."
+choreGoal = "Probe the worker sandbox environment through the real app-server spawn path and commit the findings as a file."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "two-tier-boundary"
+    { nodeName = "env-probe"
     , nodeTask =
-        "Give dev-tree's boundary vocabulary a second tier, staying inside harness-dogfooding/dev-tree/ plus the one Rust fixture file. Today DevPlan.nodeBoundary is an exact-or-directory-prefix allowlist and every path outside it is a fold-failing violation — four live runs failed on benign hygiene files (README.md, __pycache__, .gitignore). Add `nodeTolerated :: [Text]` to DevPlan in HarnessTypes.hs (same prefix semantics, haddock explaining: paths a node MAY touch without failing, reported as info, never product paths). In Harness.hs, boundaryViolations gains the tolerated list: a diff path inside nodeBoundary is inside; a path inside nodeTolerated is TOLERATED — excluded from the violation list but returned separately so the fold receipt can carry each as a 'tolerated: <path>' evidence line (wire that into finishFold's receiptEvidence). An empty nodeTolerated is byte-for-byte today's behavior. Update every DevPlan construction site: this repo's harness-dogfooding/dev-tree/Chore.hs record literals, and the six embedded Haskell fixture literals in tidepool-harness/tests/dogfood_harness_typecheck.rs (add nodeTolerated = [] to each, mirroring how nodeSplit = Nothing was added there). Mention the tolerated tier in the worker prompt templates' boundary paragraph (one sentence). Follow existing haddock and naming style throughout."
-    , nodeChecks =
-        [ "grep -q 'nodeTolerated' harness-dogfooding/dev-tree/HarnessTypes.hs"
-        , "grep -q 'nodeTolerated' harness-dogfooding/dev-tree/Harness.hs"
-        , "grep -q 'nodeTolerated' tidepool-harness/tests/dogfood_harness_typecheck.rs"
-        ]
-    , nodeBoundary =
-        ["harness-dogfooding/dev-tree", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
+        "Create PROBE.md in the repository root containing, verbatim and clearly labeled, the output of each of these commands run in your shell: `which ghc || echo ghc-not-found`, `ghc --numeric-version || echo no-ghc`, `echo $PATH`, `which cabal || echo cabal-not-found`, `env | grep -E \\\"TIDEPOOL|RUSTC\\\" || echo no-tidepool-vars`. Do not interpret or summarize — paste the raw output. Change no other file."
+    , nodeChecks = ["test -s PROBE.md", "grep -q PATH PROBE.md"]
+    , nodeBoundary = ["PROBE.md"]
     , nodeTolerated = []
-    , nodeOnFailure = AskOperator
-    , nodeSplit =
-        Just
-          SplitSpec
-            { splitHints =
-                "Split into 2-3 sequential microtasks: the type + every construction site first (Haskell record literals and the Rust fixture literals together, so nothing is ever mid-broken), then the boundaryViolations/finishFold mechanics, then the prompt-template sentence. Cheap grep-class checks per microtask; GHC compilation is the orchestrator's own gate, do not attempt it here."
-            , splitMaxTasks = 3
-            }
+    , nodeOnFailure = Retry
+    , nodeSplit = Nothing
     , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 6, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 2, gateWiderThan = 4}
 
 -- | The chore edit itself rides as uncommitted state in the dev tree.
 choreSnapshotDirtySource :: Bool
-choreSnapshotDirtySource = True
+choreSnapshotDirtySource = False
