@@ -155,7 +155,7 @@ fn dev_tree_typechecks() {
     typecheck(
         "harness-dogfooding/dev-tree",
         outer_row_decls(),
-        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\nimport qualified Data.Text as T\n",
+        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\nimport HarnessTypes (Budget (..), PlanApproval (..))\nimport qualified Data.Text as T\n",
         concat!(
             "__resumeProbe :: M Text\n",
             "__resumeProbe = do { st <- resumeLoop emptyResume initialState; pure (render st) }\n",

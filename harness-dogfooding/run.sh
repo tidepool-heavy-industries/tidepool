@@ -48,7 +48,11 @@ echo "==> dogfood cache: $XDG_CACHE_HOME/tidepool/selfharness"
 # independently. Pass both through; empty RUSTC_WRAPPER disables the
 # config-file wrapper.
 export RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
-export TIDEPOOL_AGENT_ENV_PASSTHROUGH="${TIDEPOOL_AGENT_ENV_PASSTHROUGH:-RUSTC_WRAPPER,TIDEPOOL_EXTRACT}"
+# The raw extract binary locates GHC via PATH, which worker shells rebuild
+# (login PATH) — hand them the libdir directly so worker-typecheck.sh works
+# in-sandbox (worker friction, run 23).
+export TIDEPOOL_GHC_LIBDIR="${TIDEPOOL_GHC_LIBDIR:-$("$GHC/ghc" --print-libdir 2>/dev/null || true)}"
+export TIDEPOOL_AGENT_ENV_PASSTHROUGH="${TIDEPOOL_AGENT_ENV_PASSTHROUGH:-RUSTC_WRAPPER,TIDEPOOL_EXTRACT,TIDEPOOL_GHC_LIBDIR}"
 # Companion memory store (plans/companion-memory.md): resolved and
 # auto-seeded by the binary itself (default
 # ~/.local/share/tidepool/companion-memory; TIDEPOOL_MEMORY_REPO overrides).
