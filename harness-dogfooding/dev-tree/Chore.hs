@@ -23,42 +23,57 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Restructure dev-tree from one ~2100-line Harness.hs into a well-factored multi-module Haskell project with fluent idioms, keeping behavior and the public API identical."
+choreGoal = "Give sandboxed workers real in-cycle Haskell typechecking: a repo script that drives tidepool-extract with the right includes, and a --connect client mode so a worker-started in-sandbox daemon makes repeat checks warm."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "restructure"
-    , nodeTask =
-        ("Split harness-dogfooding/dev-tree/Harness.hs into sibling modules along its existing section headers, keeping ALL behavior semantically identical and Harness.hs's module export list byte-compatible (Harness becomes the facade: it keeps loop/resumeLoop/initialState plus re-exports everything it exports today, because tidepool-harness/tests/dogfood_harness_typecheck.rs's embedded probes import Harness and name those exports — that file is in-boundary ONLY for a change a re-export genuinely cannot satisfy). Target modules (indicative; adjust if the dependency graph argues otherwise, and say so in evidence): Prompts.hs (the fragment grammar + per-role prompt templates), Micro.hs (microLeaf/runMicrotasks/MicroAcc + recon machinery), Resume.hs (the resume section: ResumePlan/SplitRecord/resumePlanFor/newestEntry/adoptOrUnfold/verifyOrphan typestates/retainWorktree), Fold.hs (integrate/stampFold/foldLadder/leafFold/interiorFold/foldChildren/cascade/escalate/applyPolicy/retry/mergeChild/finishFold), Unfold.hs (decompose/emitSplit/policy slots/allocateChildren), and a small Workers.hs for the shared execution seam (runWorker/snapshotWork/gitIn/runCheckCmd/runChecks/boundaryViolations) that both Fold and Micro import — shared helpers get ONE home, never copies. Runtime-only types (NodeSeed/NodeWork/FoldAcc/MicroAcc) move with their consumers. Every module gets a haddock header in the file's existing style stating its charter. Fluent idioms where they genuinely improve the code: when/unless over if-then-else-pure-unit, foldM/traverse where a manual loop is a disguised fold, catMaybes/mapMaybe chains, records over positional threading — but NO semantic changes riding along. Also ADD one new prompt fragment to Prompts.hs, haskellIdiomContract :: Text, included by the worker and microtask briefs for Haskell-editing work: it states the positive idiom expectations (records over positional argument threading; when/unless; name your where-helpers; operator expressions and if-then-else are fine inside fmt" <> "| holes; custom typeclasses and GADTs compile here — write the idiomatic version first) — mirroring how the git contract fragment is stated. Every microtask must leave the tree in an importable state (no module referencing a symbol that has not moved yet).")
+    { nodeName = "worker-compile-service"
+    , nodeTask = ""
     , nodeChecks =
-        [ "test -s harness-dogfooding/dev-tree/Prompts.hs"
-        , "test -s harness-dogfooding/dev-tree/Micro.hs"
-        , "test -s harness-dogfooding/dev-tree/Resume.hs"
-        , "test -s harness-dogfooding/dev-tree/Fold.hs"
-        , "test -s harness-dogfooding/dev-tree/Unfold.hs"
-        , "grep -q 'haskellIdiomContract' harness-dogfooding/dev-tree/Prompts.hs"
-        , "grep -q 'resumePlanFor' harness-dogfooding/dev-tree/Harness.hs"
-        , "bash -c 'for f in harness-dogfooding/dev-tree/*.hs; do a=$(grep -o \"\\[fmt" <> "|" <> "\" $f | wc -l); b=$(grep -o \"|\\]\" $f | wc -l); test $a -eq $b || exit 1; done'"
-        , "bash -c 'test $(wc -l < harness-dogfooding/dev-tree/Harness.hs) -lt 700'"
+        [ "test -x scripts/worker-typecheck.sh"
+        , "grep -q 'connect' haskell/app/Main.hs"
         ]
-    , nodeBoundary =
-        ["harness-dogfooding/dev-tree", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
+    , nodeBoundary = ["scripts/worker-typecheck.sh", "haskell/app/Main.hs", "haskell/src/Tidepool/DaemonServer.hs", "harness-dogfooding/dev-tree/Prompts.hs"]
     , nodeTolerated = []
     , nodeOnFailure = AskOperator
-    , nodeSplit =
-        Just
-          SplitSpec
-            { splitHints =
-                "Sequential carve-outs, one module per microtask, dependency-leaves first so the tree is importable after every cycle: (1) Prompts.hs + the new haskellIdiomContract fragment wired into the briefs; (2) Workers.hs (shared execution seam) with Harness re-exporting; (3) Micro.hs; (4) Resume.hs; (5) Fold.hs + Unfold.hs together (they share the integrate/decompose seam) and Harness.hs reduced to facade + loop/resumeLoop/initialState + re-exports. The FINAL act of microtask 5 doubles as the self-consistency sweep: re-grep every moved symbol's import/export at every use site and verify quasiquote balance in every file. Do not attempt Haskell compilation — the orchestrator gates it after the fold."
-            , splitMaxTasks = 5
+    , nodeSplit = Nothing
+    , childPlans =
+        [ DevPlan
+            { nodeName = "typecheck-script"
+            , nodeTask =
+                "Create scripts/worker-typecheck.sh (executable): a self-contained script a SANDBOXED codex worker runs to typecheck Haskell edits in-cycle. Contract: `scripts/worker-typecheck.sh FILE.hs [-- extra extract args]` resolves the extract binary ($TIDEPOOL_EXTRACT, hard error with a plain message if unset/unreadable), builds the include set — always the repo's haskell/lib, plus the file's own directory, plus (when the file's imports mention Tidepool.Effects) the NEWEST generated effects-module directory discoverable under the ambient cache (the content-addressed dirs the Rust engine mints; search ${XDG_CACHE_HOME:-$HOME/.cache}/tidepool*/ for dirs containing Tidepool/Effects.hs, newest mtime wins, say clearly when none is found) — and invokes the extract with --all-closed --target-module-only and an --output-dir under /tmp, forwarding diagnostics verbatim and exiting with the extract's code. Honor TIDEPOOL_EXTRACT_DAEMON_SOCKET if the extract grows daemon routing later, but do not depend on it. Keep it plain POSIX-ish bash matching scripts/ house style (set -euo pipefail, comments explaining WHY). Also add one sentence to the orchestratorChecksContract fragment in harness-dogfooding/dev-tree/Prompts.hs: workers editing Haskell SHOULD run scripts/worker-typecheck.sh on each edited file before finishing (replacing the your-shell-has-no-ghc sentence's do-not-attempt framing with do-it-via-the-script)."
+            , nodeChecks =
+                [ "test -x scripts/worker-typecheck.sh"
+                , "bash -n scripts/worker-typecheck.sh"
+                , "grep -q 'worker-typecheck' harness-dogfooding/dev-tree/Prompts.hs"
+                ]
+            , nodeBoundary = ["scripts/worker-typecheck.sh", "harness-dogfooding/dev-tree/Prompts.hs"]
+            , nodeOnFailure = Retry
+            , nodeSplit = Nothing
+            , childPlans = []
             }
-    , childPlans = []
+        , DevPlan
+            { nodeName = "connect-shim"
+            , nodeTask =
+                "Add a daemon CLIENT mode to the extract binary: `tidepool-extract --connect <socket> <normal argv...>` sends (current working directory, the remaining argv) to a running compile daemon over its UNIX socket using the exact frame codec the daemon already speaks (haskell/src/Tidepool/DaemonServer.hs — encodeRequest/decodeResponse and the framing recvRequest expects), streams the response's stdout/stderr to the local stdout/stderr, and exits with the returned exit code. Home: haskell/app/Main.hs beside parseDaemonArgs, following its parser style (a --connect anywhere in argv splits client mode; everything after the socket path is the request argv, passed through verbatim). Export any needed codec helpers from Tidepool.DaemonServer rather than duplicating framing — one codec, one home. Connection failure is a hard, plainly-worded error (no silent fallback: the CALLER decides fallback). This enables a worker to start its OWN in-sandbox daemon ($TIDEPOOL_EXTRACT --daemon --socket .tidepool/extract.sock &) and get warm repeat checks; no server-side changes should be needed and none are in scope beyond exporting codec helpers."
+            , nodeChecks =
+                [ "grep -q 'connect' haskell/app/Main.hs"
+                , "grep -qE 'encodeRequest|sendRequest' haskell/app/Main.hs"
+                ]
+            , nodeBoundary = ["haskell/app/Main.hs", "haskell/src/Tidepool/DaemonServer.hs"]
+            , nodeOnFailure = Retry
+            , nodeSplit = Nothing
+            , childPlans = []
+            }
+        ]
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 10, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 2, maxAgentCycles = 8, gateWiderThan = 4}
 
--- | The chore edit itself rides as uncommitted state in the dev tree.
+-- | Clean-tree protocol (operator, 2026-08-25): the chore config is
+-- COMMITTED before launch, so runs fork from a real commit and fold back
+-- by ordinary git merge.
 choreSnapshotDirtySource :: Bool
-choreSnapshotDirtySource = True
+choreSnapshotDirtySource = False
