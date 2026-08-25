@@ -15,7 +15,7 @@
 use crate::hs::HsType;
 use crate::schema::{
     Arg, Effect, ErrorAdt, ErrorField, ErrorVariant, HandlingClass, Helper, HelperBody,
-    OuterEffect, RustBinding, Verb,
+    OuterEffect, Polymorphism, RustBinding, Verb,
 };
 
 /// `Proc` — the bridged result record. Its Haskell declaration is NOT generated
@@ -160,5 +160,7 @@ pub fn exec() -> Effect {
                 body: HelperBody::Pointfree,
             },
         ],
+        polymorphism: Polymorphism::None,
+        dispatched: true,
     }
 }

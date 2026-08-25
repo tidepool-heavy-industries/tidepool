@@ -10,7 +10,7 @@
 //! [`crate::effects::suspension_roster`].
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
 /// The `Ask` suspension, decode-only.
 #[must_use]
@@ -51,5 +51,14 @@ pub fn ask() -> Effect {
             extract: None,
         }],
         helpers: Vec::new(),
+        polymorphism: Polymorphism::None,
+        // No real `tidepool-handlers` handler (harness/server machinery
+        // services it directly — see the module doc), but its real helper
+        // surface (`ask`/`isOpt`/`innerSchema`/`schemaToValue`, real Haskell
+        // logic, not thin `send` wrappers) is not yet representable by
+        // `HelperBody`'s reviewed shapes; deferred alongside Fork/RunLlmTurn/
+        // Finalize/Green rather than flipped with a wrong or raw-hatch
+        // rendering.
+        dispatched: false,
     }
 }

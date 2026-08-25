@@ -37,8 +37,8 @@
 use crate::hs::HsType;
 use crate::schema::{
     AdapterKind, Arg, DomainMap, Effect, ErrorAdt, ErrorField, ErrorVariant, HandlingClass, Helper,
-    HelperBody, IdentityPayload, JsonInstance, OuterEffect, RecordField, RustBinding, SumVariant,
-    TypeDef, TypeShape, Validation, Verb, WireDerives,
+    HelperBody, IdentityPayload, JsonInstance, OuterEffect, Polymorphism, RecordField, RustBinding,
+    SumVariant, TypeDef, TypeShape, Validation, Verb, WireDerives,
 };
 use crate::types::WireDerive::{
     Clone as DClone, Copy as DCopy, Debug as DDebug, Default as DDefault, Eq as DEq,
@@ -139,6 +139,8 @@ pub fn worktree() -> Effect {
         errors: Some(errors()),
         verbs: verbs(),
         helpers: helpers(),
+        polymorphism: Polymorphism::None,
+        dispatched: true,
     }
 }
 

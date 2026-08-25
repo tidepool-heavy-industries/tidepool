@@ -67,28 +67,38 @@ pub fn header(prefix: &str, what: &str) -> String {
 
 /// Every file generated for `effects`, in a stable order.
 ///
-/// The wire and adapter files are emitted only for an effect that actually has
-/// something to put in them — a `type_defs` vocabulary, and a `DomainMap` on at
-/// least one entry. That is not a special case for one effect: Exec and Journal
-/// have empty `type_defs`, so they get no wire module and no adapter module, and
-/// an empty generated file would be worse than none.
+/// `decl_rs` runs unconditionally for every effect — it is pure Haskell decl
+/// data, needed regardless of whether a real handler exists. `handler_rs`/
+/// `wire_rs`/`adapter_rs` are gated on [`Effect::dispatched`] first: they emit
+/// dispatch glue for a real `tidepool-handlers::EffectHandler`, which a
+/// suspending effect (`dispatched: false` — `AskUser`/`ReadState` today) does
+/// not have, so generating them would reference a handler struct that will
+/// never exist. Among DISPATCHED effects, the wire and adapter files are
+/// further emitted only for one that actually has something to put in them —
+/// a `type_defs` vocabulary, and a `DomainMap` on at least one entry. That is
+/// not a special case for one effect: Exec and Journal have empty
+/// `type_defs`, so they get no wire module and no adapter module, and an
+/// empty generated file would be worse than none.
 #[must_use]
 pub fn all_files(effects: &[Effect]) -> Vec<GeneratedFile> {
     let mut out = Vec::new();
     for e in effects {
         out.push(decl_rs::file(e));
-        out.push(handler_rs::file(e));
-        if wire_rs::has_wire_types(e) {
-            out.push(wire_rs::file(e));
-        }
-        if adapter_rs::has_adapters(e) {
-            out.push(adapter_rs::file(e));
+        if e.dispatched {
+            out.push(handler_rs::file(e));
+            if wire_rs::has_wire_types(e) {
+                out.push(wire_rs::file(e));
+            }
+            if adapter_rs::has_adapters(e) {
+                out.push(adapter_rs::file(e));
+            }
         }
     }
     out.push(decl_rs::module_index(effects));
-    out.push(handler_rs::module_index(effects));
-    if effects.iter().any(wire_rs::has_wire_types) {
-        out.push(wire_rs::module_index(effects));
+    let dispatched: Vec<Effect> = effects.iter().filter(|e| e.dispatched).cloned().collect();
+    out.push(handler_rs::module_index(&dispatched));
+    if dispatched.iter().any(wire_rs::has_wire_types) {
+        out.push(wire_rs::module_index(&dispatched));
     }
     out
 }

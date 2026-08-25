@@ -21,7 +21,7 @@
 //! [`crate::effects::all`] — see [`crate::effects::suspension_roster`].
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
 /// The `RunLLMTurn` suspension, decode-only.
 #[must_use]
@@ -61,11 +61,20 @@ pub fn run_llm_turn() -> Effect {
                     rust: RustBinding::CoreValue,
                 },
             ],
-            ret: HsType::Unit,
+            ret: HsType::Value,
             errors: None,
             handling: HandlingClass::RunLlmTurn,
             extract: None,
         }],
         helpers: Vec::new(),
+        // Same shape as Fork: the constructor returns concrete `Value`, and
+        // the `runLLMTurn @T`/`runLLMTurnFork @T`/`runLLMTurnFanout @T`
+        // polymorphism lives entirely in the `*Sited` substrate helpers'
+        // `unsafeCoerce`-marshaling signatures, not this GADT — see
+        // `fork.rs`'s matching comment.
+        polymorphism: Polymorphism::None,
+        // No real `tidepool-handlers` handler (see the module doc); deferred
+        // for the same helper-representability reason as Fork.
+        dispatched: false,
     }
 }

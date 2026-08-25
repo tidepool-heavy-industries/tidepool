@@ -253,12 +253,8 @@ crate::entropy_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// AskUser (self-iterating-harness Wave 2, answerer-only).
-crate::askuser_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// ReadState (companion State v2, answerer-only): the driver-serviced read of
-// the loop's durable state.
-crate::readstate_effect_def!(crate::effect_defs::effect_decl_projection);
+// AskUser / ReadState: MIGRATED — `askuser_decl()`/`readstate_decl()` come
+// from `src/generated/`, not a macro here.
 
 // RunLLMTurn (self-iterating-harness WS-B, split out of Ask).
 crate::runllmturn_effect_def!(crate::effect_defs::effect_decl_projection);

@@ -249,9 +249,11 @@ macro_rules! extra_imports_for {
     (Git) => {
         &["import qualified Tidepool.Git as Git"]
     };
-    (AskUser) => {
-        &["import Tidepool.Form"]
-    };
+    // AskUser was migrated to the `tidepool-protocol` schema; its
+    // `extra_imports` (`import Tidepool.Form`) is schema data now, emitted
+    // straight into its generated decl. See
+    // `tidepool-protocol/src/effects/ask_user.rs`.
+    //
     // `Tidepool.Random`'s `mkStdGen`/`randomR`/`randoms`/`split` (pure) and
     // `newStdGen`/`randomRIO` (built on `entropySeed`) — same
     // built-on-the-raw-substrate-verb shape as `AskUser`/`Tidepool.Form`.
@@ -946,147 +948,16 @@ macro_rules! ask_effect_def {
     };
 }
 
-/// AskUser effect — single definition.
-///
-/// A distinct effect, decl-side only, living ALONGSIDE `Ask` (NOT a rename —
-/// `ask_decl` stays load-bearing for `standard_decls()`/`llm_decl`). Presents
-/// a typed form to a HUMAN OPERATOR and
-/// BLOCKS until they submit — distinct from `Ask`, which suspends to the
-/// CALLING LLM AGENT. Answerer-only: it rides in
-/// `tidepool-harness::selfharness::driver::answerer_decls` (`[AskUser,
-/// Finalize]`), not in `standard_decls()`. No `tidepool-handlers` handler —
-/// harness-serviced only (same convention as `ask_effect_def!`/
-/// `runllmturn_effect_def!`/`finalize_effect_def!`'s own doc comments); only
-/// [`effect_decl_projection!`] consumes this definition, so the
-/// `handler`/`req`/`method` slots name types that are never generated.
-///
-/// The typed surface a caller writes is `askUser @T` (`Tidepool.Form`, which
-/// derives the form from `T`'s own `Generic` representation); `askUserRaw ::
-/// Value -> M Value` here is the raw escape hatch it is built on — the ONE
-/// frozen cross-agent contract name this definition exists to provide.
-///
-/// `NoteWith` is a SECOND constructor riding this same GADT (not a new effect
-/// / union tag): a display-only channel for the answerer to post narration
-/// ("here's what I'm asking and why") to the operator GUI's accumulating
-/// feed, distinct from `AskUserWith`'s blocking form. It does NOT block — the
-/// harness driver services it by posting the text and resuming immediately
-/// with `()`, never presenting anything to the operator gate's
-/// `present_form`. `noteRaw :: Text -> M ()` is the raw escape hatch;
-/// `Tidepool.Form.note` is the surface an answerer turn actually calls.
-#[macro_export]
-macro_rules! askuser_effect_def {
-    ($project:path) => {
-        $project! {
-            effect AskUser,
-            handler AskUserHandler,
-            req AskUserReq,
-            decl_fn askuser_decl,
-            prompt_card [
-                "`choose :: [(Text, a)] -> M a` — labeled decision from (label, value) pairs; ",
-                "ALWAYS prefer it for a decision, the label is the only text the operator sees. ",
-                "`chooseMany :: [(Text, a)] -> M [a]` — pick a subset.\n",
-                "`askUser @T :: M T` — form derived from `T`'s own shape: a record's fields ",
-                "become named inputs, a SUM's constructors become the choices (nullary ",
-                "constructors are direct options; a payload constructor is a selectable branch ",
-                "with its fields), or a primitive (`Text`/`Int`/`Bool`); a bad submission ",
-                "re-prompts internally, no `Either` to unwrap: `d <- askUser @Deploy`, ",
-                "`k <- askUser @NextStep` then `case k of ...` to sequence follow-ups. A type ",
-                "you define for this needs `deriving (Generic, FromJSON)`. Prefer RECORD syntax ",
-                "for a sum's payload constructors — `Other { detail :: Text }` shows the ",
-                "operator a real label, where `Other Text` only shows a generic `Contents` ",
-                "field; a constructor with SEVERAL positional fields is rejected outright (no ",
-                "names to key each input by), so record syntax is required once there is more ",
-                "than one field.\n",
-                "`note \"...\" :: M ()` — non-blocking narration to the operator's feed; call it ",
-                "BEFORE presenting a form to explain what you're about to ask and why (it never ",
-                "costs a turn).",
-            ],
-            helpers_row_polymorphic true,
-            description [
-                "Present a typed form to a HUMAN OPERATOR and block until they submit. ",
-                "`askUser @T` presents a human form and returns `T`. Define `T` using ordinary ",
-                "records and constructors, derive `Generic` and `FromJSON` for it and any ",
-                "nested custom types, and end fields in `Text`, `Int`, `Double`, or `Bool`. ",
-                "Constructors are choices, record fields are named inputs, and `Maybe a` is ",
-                "optional; a bad submission re-prompts internally, so there is no `Either` to ",
-                "unwrap. The type IS the form — there is no second description of the shape to ",
-                "drift from the answer type, and the submission is ordinary JSON read back by ",
-                "that same generic `FromJSON`:\n",
-                "  data Env = Development | Staging | Production deriving (Generic, FromJSON)\n",
-                "  data Deploy = Deploy { service :: Text, env :: Env, replicas :: Int, note :: Maybe Text } deriving (Generic, FromJSON)\n",
-                "  d <- askUser @Deploy   -- then read fields with record-dot: d.service, d.env\n",
-                "For alternatives that ",
-                "exist only as runtime values, `choose :: [(Text, a)] -> M a` and ",
-                "`chooseMany :: [(Text, a)] -> M [a]` take (label, value) pairs. ",
-                "`askUserRaw :: Value -> M Value` is the raw escape hatch these are ",
-                "built on, carrying the form spec as JSON directly. `note :: Text -> M ()` ",
-                "posts markdown-ish text to the operator's feed WITHOUT blocking — use it to ",
-                "explain what you are about to ask and why, before presenting a form.",
-            ],
-            type_defs [],
-            verbs [
-                { ctor AskUserWith, method ask_user_with,
-                  args { spec: "Value" as tidepool_eval::value::Value },
-                  ret "Value" },
-                { ctor NoteWith, method note_with,
-                  args { text: "Text" as String },
-                  ret "()" },
-            ],
-            helpers [
-                { raw ["askUserRaw :: forall effs. Member AskUser effs => Value -> Eff effs Value",
-                       "askUserRaw spec = send (AskUserWith spec)"] },
-                { raw ["noteRaw :: forall effs. Member AskUser effs => Text -> Eff effs ()",
-                       "noteRaw text = send (NoteWith text)"] },
-            ],
-        }
-    };
-}
+// AskUser effect: MIGRATED to the `tidepool-protocol` schema (#20 steps 2-3).
+// `askuser_decl()` now comes from `tidepool-mcp/src/generated/ask_user.rs`;
+// see `tidepool-protocol/src/effects/ask_user.rs` for the single-source
+// definition.
 
-/// ReadState effect — single definition. Decl-only (no `tidepool-handlers`
-/// handler, same convention as `askuser_effect_def!`): the self-iterating
-/// harness DRIVER services it — classify by constructor name, resume
-/// IMMEDIATELY with the loop's durable state as JSON (`note`'s service
-/// shape: no operator, no model round). This is what lets the agent compute
-/// over its own state — filtering, archive search, counting — instead of
-/// reading only `render`'s prose projection.
-#[macro_export]
-macro_rules! readstate_effect_def {
-    ($project:path) => {
-        $project! {
-            effect ReadState,
-            handler ReadStateHandler,
-            req ReadStateReq,
-            decl_fn readstate_decl,
-            prompt_card [
-                "`getStateJson :: M Value` — the loop's durable state as JSON, ",
-                "immediately (no operator, no model round), as of this loop iteration's ",
-                "START (this iteration's answer and any operator message being ingested ",
-                "are not in it yet). Query it with optics, e.g. ",
-                "`v ^? key \"question\" . _String`; the shape is whatever the harness's ",
-                "State type declares.",
-            ],
-            helpers_row_polymorphic true,
-            description [
-                "Read the loop's durable state — the same value your system instructions ",
-                "render a SELECTION of — as JSON, immediately. `getStateJson :: M Value` ",
-                "returns the state as of this loop iteration's start; the current ",
-                "iteration's answer (and any operator message being ingested this ",
-                "iteration) are not yet in it. Use optics for ad-hoc queries and compute ",
-                "over it with ordinary Haskell.",
-            ],
-            type_defs [],
-            verbs [
-                { ctor ReadStateWith, method read_state_with,
-                  args { },
-                  ret "Value" },
-            ],
-            helpers [
-                { raw ["getStateJson :: forall effs. Member ReadState effs => Eff effs Value",
-                       "getStateJson = send ReadStateWith"] },
-            ],
-        }
-    };
-}
+// ReadState effect: MIGRATED to the `tidepool-protocol` schema (#20 steps
+// 2-3). `readstate_decl()` now comes from
+// `tidepool-mcp/src/generated/read_state.rs`; see
+// `tidepool-protocol/src/effects/read_state.rs` for the single-source
+// definition.
 
 /// RunLLMTurn effect — single definition.
 ///
@@ -1422,8 +1293,9 @@ macro_rules! finalize_effect_def {
 /// a fork never rides a `runLLMTurn` payload key.
 ///
 /// Decl-side only (harness-serviced, no `tidepool-handlers` handler — same
-/// convention as `runllmturn_effect_def!`/`finalize_effect_def!`/
-/// `askuser_effect_def!`); only [`effect_decl_projection!`] consumes this
+/// convention as `runllmturn_effect_def!`/`finalize_effect_def!`, and as
+/// `AskUser`'s own now-migrated schema entry, `tidepool-protocol/src/effects/
+/// ask_user.rs`); only [`effect_decl_projection!`] consumes this
 /// definition, so the `handler`/`req`/`method` slots name types that are never
 /// generated.
 ///
