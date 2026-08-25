@@ -116,6 +116,10 @@ data DevPlan = DevPlan
   , nodeTask      :: Text
   , nodeChecks    :: [Text]
   , nodeBoundary  :: [Text]
+  , -- | Exact-or-directory-prefix paths a node MAY touch without failing the
+    -- boundary check.  They are reported as informational evidence and are
+    -- never product paths.
+    nodeTolerated :: [Text]
   , nodeOnFailure :: OnFailure
   , -- | When set on a LEAF, the node's task is micro-decomposed on the fly
     -- (see 'SplitSpec') instead of being handed to one worker whole.  The

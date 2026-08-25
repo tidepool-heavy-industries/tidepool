@@ -8,10 +8,10 @@
 -- so swapping a chore is an edit here, never a change to the harness's own
 -- logic.
 --
--- The shipped chore is the SCALE-UP tidepool-on-tidepool run: a multi-child
--- tree against the dev checkout — an empty-task root (scaffold skipped
--- structurally), one direct leaf, one micro-split leaf, folded by the
--- integration merge. Both tasks close loops this morning's runs opened.
+-- The shipped chore is dev-tree EDITING ITS OWN SOURCE: a micro-split leaf
+-- against the dev checkout that teaches the harness's boundary vocabulary a
+-- second tier (product paths vs tolerated paths) — the #1 false-red source
+-- across the live runs, chosen from the observation-driven leverage list.
 module Chore
   ( choreGoal
   , chorePlan
@@ -23,56 +23,35 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Harden dev-tree's event-failure story end to end: adopt the new non-fatal Tidepool.Event Try surface in the harness, and make the codex adapter's turn-deadline errors say what actually happened."
+choreGoal = "Teach dev-tree a two-tier boundary: product paths that must contain the diff, and tolerated paths a worker may touch without failing the fold."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "event-hardening"
-    , nodeTask = ""
+    { nodeName = "two-tier-boundary"
+    , nodeTask =
+        "Give dev-tree's boundary vocabulary a second tier, staying inside harness-dogfooding/dev-tree/ plus the one Rust fixture file. Today DevPlan.nodeBoundary is an exact-or-directory-prefix allowlist and every path outside it is a fold-failing violation — four live runs failed on benign hygiene files (README.md, __pycache__, .gitignore). Add `nodeTolerated :: [Text]` to DevPlan in HarnessTypes.hs (same prefix semantics, haddock explaining: paths a node MAY touch without failing, reported as info, never product paths). In Harness.hs, boundaryViolations gains the tolerated list: a diff path inside nodeBoundary is inside; a path inside nodeTolerated is TOLERATED — excluded from the violation list but returned separately so the fold receipt can carry each as a 'tolerated: <path>' evidence line (wire that into finishFold's receiptEvidence). An empty nodeTolerated is byte-for-byte today's behavior. Update every DevPlan construction site: this repo's harness-dogfooding/dev-tree/Chore.hs record literals, and the six embedded Haskell fixture literals in tidepool-harness/tests/dogfood_harness_typecheck.rs (add nodeTolerated = [] to each, mirroring how nodeSplit = Nothing was added there). Mention the tolerated tier in the worker prompt templates' boundary paragraph (one sentence). Follow existing haddock and naming style throughout."
     , nodeChecks =
-        [ "grep -q 'withHandlerTry' harness-dogfooding/dev-tree/Harness.hs"
-        , "grep -rq 'deadline' tidepool-agent/src/backend/codex/"
+        [ "grep -q 'nodeTolerated' harness-dogfooding/dev-tree/HarnessTypes.hs"
+        , "grep -q 'nodeTolerated' harness-dogfooding/dev-tree/Harness.hs"
+        , "grep -q 'nodeTolerated' tidepool-harness/tests/dogfood_harness_typecheck.rs"
         ]
-    , nodeBoundary = ["harness-dogfooding/dev-tree/Harness.hs", "tidepool-agent"]
+    , nodeBoundary =
+        ["harness-dogfooding/dev-tree", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
+    , nodeTolerated = []
     , nodeOnFailure = AskOperator
-    , nodeSplit = Nothing
-    , childPlans =
-        [ DevPlan
-            { nodeName = "adopt-try"
-            , nodeTask =
-                "In harness-dogfooding/dev-tree/Harness.hs ONLY: migrate runWorker's event observation from the throwing `withHandler (headChanged tree) (noteHeadMove name)` to the new non-fatal `withHandlerTry` from Tidepool.Event, so an EventError can no longer abort the harness loop. Semantics: the handler now receives `Either EventError (Observed HeadChangeReceipt)` — on Right, behave exactly as noteHeadMove does today; on Left, `say` a short note that head-move observation failed (include the rendered error) and continue. If withHandlerTry itself returns Left (subscribe failed, so the body never ran), fall back to running the same spawnAgent call WITHOUT any handler, after saying that observation is degraded — the worker cycle must still happen. Keep the function's public shape and everything else in the file byte-identical; follow the file's haddock and naming style."
-            , nodeChecks =
-                [ "grep -q 'withHandlerTry' harness-dogfooding/dev-tree/Harness.hs"
-                ]
-            , nodeBoundary = ["harness-dogfooding/dev-tree/Harness.hs"]
-            , nodeOnFailure = Retry
-            , nodeSplit = Nothing
-            , childPlans = []
+    , nodeSplit =
+        Just
+          SplitSpec
+            { splitHints =
+                "Split into 2-3 sequential microtasks: the type + every construction site first (Haskell record literals and the Rust fixture literals together, so nothing is ever mid-broken), then the boundaryViolations/finishFold mechanics, then the prompt-template sentence. Cheap grep-class checks per microtask; GHC compilation is the orchestrator's own gate, do not attempt it here."
+            , splitMaxTasks = 3
             }
-        , DevPlan
-            { nodeName = "timeout-attribution"
-            , nodeTask =
-                "In the tidepool-agent crate: the codex adapter's per-cycle deadline currently surfaces as a request timeout that reads as backend unavailability (SessionError's `request {method} timed out after {timeout:?}` from src/backend/codex/process.rs, produced by `pump` when a whole TURN exceeds the driver's turn_timeout — see DEFAULT_TURN_TIMEOUT in driver.rs). Observed live: a worker mid-edit was reported as 'backend unavailable: request turn/start timed out'. Make the error attribution truthful: a turn-deadline expiry must be distinguishable from a request-level/protocol timeout, and its rendered message must say the turn exceeded its deadline (naming the configured duration) and that the worker may still have been running — not that the backend was unavailable. Keep the existing variant semantics for genuine request timeouts. Add or extend a unit test pinning the new message/variant. Stay inside tidepool-agent; follow existing error-type style in process.rs."
-            , nodeChecks =
-                [ "grep -rq 'deadline' tidepool-agent/src/backend/codex/"
-                ]
-            , nodeBoundary = ["tidepool-agent"]
-            , nodeOnFailure = Retry
-            , nodeSplit =
-                Just
-                  SplitSpec
-                    { splitHints =
-                        "Split into 2-3 sequential microtasks: first locate and reshape the error path (variant + rendering), then the unit test. Each microtask gets one or two cheap structural shell checks (grep class); cargo builds in this worktree are cold and slow, so prefer grep/test -s checks and leave compilation to the orchestrator's own gate."
-                    , splitMaxTasks = 3
-                    }
-            , childPlans = []
-            }
-        ]
+    , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 2, maxAgentCycles = 10, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 6, gateWiderThan = 4}
 
 -- | The chore edit itself rides as uncommitted state in the dev tree.
 choreSnapshotDirtySource :: Bool

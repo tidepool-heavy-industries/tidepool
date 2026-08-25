@@ -1117,7 +1117,7 @@ finishFold
   -> [CheckResult]
   -> Harness Outcome
 finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
-  outside <- boundaryViolations tree (nodeBoundary p)
+  (outside, tolerated) <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
   pure
     ( Done
         name
@@ -1135,7 +1135,12 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
           , receiptAgentRan = agentRan
           , receiptReviewed = False
           , receiptSummary = wr.workSummary
-          , receiptEvidence = wr.evidence <> map ("obstacle: " <>) wr.obstacles <> map ("friction: " <>) wr.frictionNotes <> escalations
+          , receiptEvidence =
+              wr.evidence
+                <> map ("obstacle: " <>) wr.obstacles
+                <> map ("friction: " <>) wr.frictionNotes
+                <> escalations
+                <> map ("tolerated: " <>) tolerated
           }
     )
   where
@@ -1160,18 +1165,25 @@ checkFailed c = c.checkExit /= 0
 
 -- | The boundary is data on the plan and is checked against what git actually
 -- shows, exact-or-directory-prefix.  An empty boundary means unrestricted.
-boundaryViolations :: WorktreeHandle -> [Text] -> Harness [Text]
-boundaryViolations _ [] = pure []
-boundaryViolations tree prefixes =
+-- Paths outside the product boundary but inside the tolerated tier are
+-- returned separately as informational evidence rather than violations.
+boundaryViolations :: WorktreeHandle -> [Text] -> [Text] -> Harness ([Text], [Text])
+boundaryViolations _ [] _ = pure ([], [])
+boundaryViolations tree prefixes tolerated =
   gitIn tree [fmt|diff --name-only {seedHead}..HEAD|] >>= \case
     -- A boundary check that could not RUN is a failing boundary check, never
     -- a clean one: reporting [] here would silently convert "git is broken in
     -- this worktree" into "this node stayed inside its boundary".
-    Left e -> pure [[fmt|<boundary check could not run: {e}>|]]
-    Right pr -> pure (filter (not . inside) (filter (not . T.null) (T.lines pr.stdout)))
+    Left e -> pure ([[fmt|<boundary check could not run: {e}>|]], [])
+    Right pr -> pure (classify (filter (not . T.null) (T.lines pr.stdout)))
   where
     seedHead = renderGitOid tree.handleReceipt.sourceHead
-    inside f = any (\pre -> f == pre || (pre <> "/") `T.isPrefixOf` f) prefixes
+    inside f prefixes' = any (\pre -> f == pre || (pre <> "/") `T.isPrefixOf` f) prefixes'
+    classify = foldr classifyPath ([], [])
+    classifyPath f (outside, toleratedPaths)
+      | inside f prefixes = (outside, toleratedPaths)
+      | inside f tolerated = (outside, f : toleratedPaths)
+      | otherwise = (f : outside, toleratedPaths)
 
 -- ---------------------------------------------------------------------------
 -- Agents and git, both through their own seam
@@ -1603,7 +1615,7 @@ newtype VerifiedOrphan = VerifiedOrphan Outcome
 verifyOrphan :: ResumeFold -> HeadChanged -> Harness VerifiedOrphan
 verifyOrphan fold hc = do
   checks <- runChecks tree p
-  outside <- boundaryViolations tree (nodeBoundary p)
+  (outside, tolerated) <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
   pure
     ( VerifiedOrphan
         ( Done
@@ -1630,6 +1642,7 @@ verifyOrphan fold hc = do
               , receiptEvidence =
                   [fmt|orphaned commits {hc.hcBaseline}..{renderGitOid hc.hcFound}, verified by this orchestrator at that sha|]
                     : priorEscalationsFor fold branch
+                    <> map ("tolerated: " <>) tolerated
               }
         )
     )
@@ -1940,7 +1953,10 @@ checkLines :: DevPlan -> Text
 checkLines p = bulletLines (nodeChecks p)
 
 boundaryLines :: DevPlan -> Text
-boundaryLines p = bulletLines (nodeBoundary p)
+boundaryLines p =
+  bulletLines (nodeBoundary p)
+    <> "\n  Tolerated paths may be touched as hygiene and are reported informationally, but they are not product paths:\n"
+    <> bulletLines (nodeTolerated p)
 
 bulletLines :: [Text] -> Text
 bulletLines [] = "  (none)"
