@@ -99,7 +99,7 @@ pub fn node_panel(view: &NodeView) -> Markup {
     let (status_class, status_label) = status(view);
     html! {
         div id=(format!("panel-{}", view.node_id)) data-rev=(view.rev) data-path=(view.node_id)
-            class=(format!("node-panel {status_class}")) {
+            class=(format!("node-section node-panel {status_class}")) {
             header class="node-head" {
                 button type="button" class="node-toggle" data-toggle=(view.node_id)
                     aria-label="collapse" { "▾" }
