@@ -21,6 +21,10 @@ module HarnessTypes
   , Budget (..)
   , DevPlan (..)
   , OnFailure (..)
+  , SplitSpec (..)
+  , RepoSurvey (..)
+  , Microtask (..)
+  , MicroPlan (..)
   , WorkerResult (..)
   , ResolutionResult (..)
   , ReplanDecision (..)
@@ -113,7 +117,77 @@ data DevPlan = DevPlan
   , nodeChecks    :: [Text]
   , nodeBoundary  :: [Text]
   , nodeOnFailure :: OnFailure
+  , -- | When set on a LEAF, the node's task is micro-decomposed on the fly
+    -- (see 'SplitSpec') instead of being handed to one worker whole.  The
+    -- MACRO tree stays authored data; this is the one place decomposition is
+    -- delegated to a model, and it never creates worktrees or branches —
+    -- everything happens inside this node's own worktree.  Ignored on an
+    -- interior node.
+    nodeSplit     :: Maybe SplitSpec
   , childPlans    :: [DevPlan]
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- ---------------------------------------------------------------------------
+-- On-the-fly micro-decomposition (intra-node)
+--
+-- The authored tree names lanes; a 'SplitSpec' lets ONE lane's task be split
+-- into small sequential codex cycles by a model at run time.  Three steps,
+-- three types: a read-only recon agent maps the repo ('RepoSurvey'), the
+-- harness model turns task + survey into typed 'Microtask's ('MicroPlan'),
+-- and deterministic code runs them in order — snapshot-committing and
+-- check-running between cycles exactly as it does for whole workers.  The
+-- rubric each microtask is held to ('microChecks') is authored BY the
+-- planner but RUN by the orchestrator: ad-hoc in origin, code-owned in
+-- enforcement.
+-- ---------------------------------------------------------------------------
+
+-- | Authored guidance for the on-the-fly split — what the chore is allowed
+-- to say about HOW a node's task should be cut up.
+data SplitSpec = SplitSpec
+  { -- | Rubric hints handed to the planner verbatim: sizing, ordering,
+    -- style, no-gos.
+    splitHints    :: Text
+  , -- | Hard cap on planned microtasks.  The effective cap is the smaller of
+    -- this and the node's remaining agent-cycle allowance; anything the
+    -- planner proposes past it is dropped LOUDLY (it rides in the receipt's
+    -- evidence, never silently).
+    splitMaxTasks :: Int
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | What the read-only recon agent reports back before any planning happens.
+-- This type IS the recon cycle's @outputSchema@ (hence 'JsonSchema'), the
+-- same way 'WorkerResult' is a worker's.  Deliberately FLAT: prose fields a
+-- planning turn reads, not structure code acts on.
+data RepoSurvey = RepoSurvey
+  { -- | The repo's shape: layout, languages, build/test entry points.
+    surveyLayout  :: Text
+  , -- | Paths most relevant to the node's task, best first.
+    relevantFiles :: [Text]
+  , -- | Hazards a planner should route around (fragile files, missing
+    -- tooling, surprising conventions).
+    surveyRisks   :: [Text]
+  }
+  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+
+-- | One small delegated codex task — the unit the planner emits.  Its
+-- checks are commands the ORCHESTRATOR runs in the worktree after the
+-- cycle, same trust rung as 'DevPlan''s @nodeChecks@: the planner authors
+-- the rubric, code applies it.
+data Microtask = Microtask
+  { microName        :: Text
+  , microInstruction :: Text
+  , microChecks      :: [Text]
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | The planning turn's whole answer ('Harness.microLeaf' asks for it with
+-- @runLLMTurn \@MicroPlan@).  Tasks run in LIST ORDER, sequentially, in the
+-- node's one worktree — earlier tasks lay foundations later ones build on.
+data MicroPlan = MicroPlan
+  { microtasks     :: [Microtask]
+  , microRationale :: Text
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
@@ -145,6 +219,19 @@ data WorkerResult = WorkerResult
   { workSummary         :: Text
   , evidence            :: [Text]
   , readyForIntegration :: Bool
+  , -- | What went wrong along the way, in order, INCLUDING failures the
+    -- worker later recovered from — the part of the story that vanishes
+    -- when only the final state is reported.  Empty for a clean run.
+    obstacles           :: [Text]
+  , -- | Self-reported harness friction: anything about the brief, tooling,
+    -- sandbox, or checks that made THIS task harder than it should have
+    -- been, or a tweak the worker would request.  Empty when nothing stood
+    -- out.
+    --
+    -- Both fields are ADVISORY ONLY — the optimization loop reads them to
+    -- evolve the surface; no policy or ladder rung ever acts on them
+    -- (receipts stay code-owned, prose stays prose).
+    frictionNotes       :: [Text]
   }
   deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
 
@@ -433,10 +520,13 @@ agent summaries are not.|]
 
 renderPlan :: Int -> DevPlan -> Text
 renderPlan depth p =
-  indent <> "- " <> nodeName p <> ": " <> nodeTask p <> policy <> children
+  indent <> "- " <> nodeName p <> ": " <> nodeTask p <> policy <> split <> children
   where
     indent = T.replicate depth "  "
     policy = [fmt| (on failure: {show (nodeOnFailure p)})|]
+    split = case nodeSplit p of
+      Nothing -> "" :: Text
+      Just s -> [fmt| (micro-split on the fly, max {s.splitMaxTasks} tasks)|]
     children = case childPlans p of
       [] -> ""
       xs -> "\n" <> T.intercalate "\n" (map (renderPlan (depth + 1)) xs)

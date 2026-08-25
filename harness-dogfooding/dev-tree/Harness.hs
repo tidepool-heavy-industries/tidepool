@@ -383,6 +383,14 @@ decompose seed
       -- Re-running the scaffold worker over it would be exactly the blind redo
       -- the journal exists to prevent.
       Just adopted -> emitSplit seed Nothing adopted
+      -- An interior node with an EMPTY task has nothing to scaffold: the plan
+      -- is fully authored, its children seed straight from the parent's
+      -- current HEAD, and NO worker runs at all.  This is the structural form
+      -- of a "make no changes" brief — which two live runs showed a scaffold
+      -- worker cannot be trusted to follow (it invented README.md, then
+      -- FIELD_GUIDE.md, tripping its own boundary each time).
+      Nothing | T.null (T.strip (nodeTask p)) ->
+        worktreeHead seed.seedTree >>= emitSplit seed Nothing
       Nothing ->
         runWorker seed.seedTree name (scaffoldPrompt p kids) >>= \case
           Left err ->
@@ -682,15 +690,22 @@ foldLadder o = case o of
   where
     failing r = filter checkFailed r.receiptChecks
 
--- | A leaf: one implementation worker, then the ladder.
+-- | A leaf: one implementation worker (or an on-the-fly micro-split when the
+-- plan asks for one), then the ladder.
+leafFold :: NodeSeed -> Harness Outcome
+leafFold seed = case seed.seedPlan.nodeSplit of
+  Nothing -> directLeaf seed
+  Just spec -> microLeaf seed spec
+
+-- | The ordinary leaf: one worker cycle, whole task.
 --
 -- Rung 1 is the HEAD read either side of the cycle — a worker that claims
 -- completion without committing is caught here and never reaches rung 2.  The
 -- 'withHandler' scope is observation of the same fact as it happens; the pair
 -- of 'worktreeHead' reads is what closes the gap a subscription
 -- deliberately will not (no replay, loop-iteration-scoped lifetime).
-leafFold :: NodeSeed -> Harness Outcome
-leafFold seed = do
+directLeaf :: NodeSeed -> Harness Outcome
+directLeaf seed = do
   before <- worktreeHead tree
   runWorker tree name (workerPrompt p) >>= \case
     Left err ->
@@ -703,6 +718,98 @@ leafFold seed = do
     tree = seed.seedTree
     p = seed.seedPlan
     name = nodeName p
+
+-- | A leaf with a 'SplitSpec': recon → plan → sequential microtask cycles,
+-- all inside this node's ONE worktree.  The macro tree stays authored data;
+-- this is the single seam where a model decides decomposition, and its
+-- decision is enforced by the same code-owned machinery as everything else:
+-- 'runWorker' snapshot-commits each cycle, the orchestrator runs each
+-- microtask's own checks (planner-authored rubric, code-applied), and the
+-- node's checks + fold ladder judge the whole at the end.
+--
+-- Cognition is split on the usual line: a READ-ONLY codex recon harvests the
+-- repo into a typed 'RepoSurvey', the harness model turns task + survey into
+-- a typed 'MicroPlan', and deterministic code routes from there.
+--
+-- Resume granularity is the NODE, deliberately: the micro-plan is not
+-- journaled, so a crash mid-sequence resumes through the ordinary
+-- adopt-and-verify path over whatever snapshot commits the sequence left.
+-- Journaling per-microtask progress is a later increment on this same seam.
+microLeaf :: NodeSeed -> SplitSpec -> Harness Outcome
+microLeaf seed spec = do
+  before <- worktreeHead tree
+  recon <-
+    spawnAgent @RepoSurvey
+      (spawnSpecIn (worktreeId tree) (name <> "-recon") (reconPrompt p spec))
+  case recon of
+    Left err ->
+      pure (failedOutcome name (Failure SpawnDenied [fmt|{name} recon: {renderSpawnError err}|] []) Nothing)
+    Right (_, survey) -> do
+      microPlan <- runLLMTurn @MicroPlan (microPlanPrompt p spec survey)
+      let planned = microPlan.microtasks
+          -- One cycle is already spent on recon; the rest of this subtree's
+          -- allowance bounds the sequence, under the authored cap.
+          cap = min spec.splitMaxTasks (max 0 (seed.seedCycles - 1))
+          (toRun, dropped) = splitAt cap planned
+          droppedNames = T.intercalate ", " (map (.microName) dropped)
+          droppedNote =
+            [ [fmt|micro-split: {length dropped} planned microtasks past the cap ({cap}) were not run: {droppedNames}|]
+            | not (null dropped)
+            ]
+      say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
+      (ranEvidence, microEsc, microObstacles, microFrictions, spent) <- runMicrotasks tree p toRun
+      after <- worktreeHead tree
+      checks <- runChecks tree p
+      let wr =
+            WorkerResult
+              { workSummary =
+                  [fmt|Micro-split leaf: {spent} of {length toRun} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
+              , evidence = [fmt|recon survey: {survey.surveyLayout}|] : ranEvidence <> droppedNote
+              , readyForIntegration = null microEsc
+              , obstacles = microObstacles
+              , frictionNotes = microFrictions
+              }
+      finishFold seed wr (before, after) [] microEsc (1 + spent) True checks
+  where
+    tree = seed.seedTree
+    p = seed.seedPlan
+    name = nodeName p
+
+-- | Run accepted microtasks in LIST order.  A microtask whose own checks fail
+-- STOPS the sequence — later tasks were planned against a foundation that did
+-- not hold — and everything unrun is said so, as data.  Returns (evidence
+-- lines, escalations, per-micro obstacles, per-micro friction notes, agent
+-- cycles actually spent).
+runMicrotasks :: WorktreeHandle -> DevPlan -> [Microtask] -> Harness ([Text], [Text], [Text], [Text], Int)
+runMicrotasks tree p = go 0 [] [] [] []
+  where
+    go spent ev esc ob fr [] = pure (reverse ev, reverse esc, reverse ob, reverse fr, spent)
+    go spent ev esc ob fr (m : rest) =
+      runWorker tree (nodeName p <> "-" <> m.microName) (microPrompt p m) >>= \case
+        Left err ->
+          stop spent ev ([fmt|{m.microName}: spawn failed — {renderSpawnError err}|] : esc) ob fr rest
+        Right wr -> do
+          results <- traverse (runCheckCmd tree) m.microChecks
+          let failedChecks = filter checkFailed results
+              passedCount = length results - length failedChecks
+              spent' = spent + 1
+              line = [fmt|{m.microName}: {wr.workSummary} ({passedCount}/{length results} micro checks passed)|]
+              tag t = m.microName <> ": " <> t
+              ob' = map tag wr.obstacles <> ob
+              fr' = map tag wr.frictionNotes <> fr
+          if null failedChecks
+            then go spent' (line : ev) esc ob' fr' rest
+            else do
+              let failedNames = T.intercalate ", " (map (.checkCommand) failedChecks)
+              stop spent' (line : ev) ([fmt|{m.microName}: micro checks failed — {failedNames}|] : esc) ob' fr' rest
+    stop spent ev esc ob fr rest =
+      pure
+        ( reverse ev
+        , reverse ([[fmt|{length rest} remaining microtasks not run (sequence stopped)|] | not (null rest)] <> esc)
+        , reverse ob
+        , reverse fr
+        , spent
+        )
 
 -- | An interior node: the eager rebase cascade, the merges, then the ladder.
 --
@@ -1028,7 +1135,7 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
           , receiptAgentRan = agentRan
           , receiptReviewed = False
           , receiptSummary = wr.workSummary
-          , receiptEvidence = wr.evidence <> escalations
+          , receiptEvidence = wr.evidence <> map ("obstacle: " <>) wr.obstacles <> map ("friction: " <>) wr.frictionNotes <> escalations
           }
     )
   where
@@ -1037,12 +1144,16 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
     name = nodeName p
 
 runChecks :: WorktreeHandle -> DevPlan -> Harness [CheckResult]
-runChecks tree p = traverse one (nodeChecks p)
-  where
-    one cmd =
-      runIn tree.handleReceipt.cwd cmd >>= \case
-        Left e -> pure (CheckResult cmd 127 (renderExecError e))
-        Right pr -> pure (CheckResult cmd pr.exitCode (firstLine pr.stderr))
+runChecks tree p = traverse (runCheckCmd tree) (nodeChecks p)
+
+-- | One orchestrator-run check command — shared by node checks and
+-- planner-authored micro checks, so the two can never diverge in how a
+-- check that could not run is reported (exit 127 + the typed ExecError).
+runCheckCmd :: WorktreeHandle -> Text -> Harness CheckResult
+runCheckCmd tree cmd =
+  runIn tree.handleReceipt.cwd cmd >>= \case
+    Left e -> pure (CheckResult cmd 127 (renderExecError e))
+    Right pr -> pure (CheckResult cmd pr.exitCode (firstLine pr.stderr))
 
 checkFailed :: CheckResult -> Bool
 checkFailed c = c.checkExit /= 0
@@ -1085,7 +1196,11 @@ runWorker tree name prompt = do
     withHandler (headChanged tree) (noteHeadMove name) $
       spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
   case result of
-    Right _ -> snapshotWork tree name
+    Right wr -> do
+      snapshotWork tree name
+      -- Surface self-reported friction immediately (note feed + log); it
+      -- also rides the receipt via 'finishFold'.  Advisory only.
+      traverse_ (\f -> say [fmt|{name} friction: {f}|]) wr.frictionNotes
     Left _ -> pure ()
   pure result
 
@@ -1146,6 +1261,8 @@ mechanicalResult acc =
         [fmt|Mechanical fold: {acc.accMerged} child branches merged with no conflicts, {length acc.accNotes} rebase steps, 0 agent cycles.|]
     , evidence = map renderNote acc.accNotes
     , readyForIntegration = True
+    , obstacles = []
+    , frictionNotes = []
     }
   where
     renderNote n = [fmt|{n.rebaseBranch} onto {n.rebaseOnto}: {show n.rebaseTier}|]
@@ -1632,8 +1749,90 @@ workerPrompt p = [fmt|
   Finish your turn with a WorkerResult: a one-paragraph workSummary describing
   WHAT you changed, an evidence list (commands run, checks passed, files
   edited — never a commit sha, since you did not and cannot commit), and
-  readyForIntegration.
+  readyForIntegration. Include obstacles: what went wrong along the way IN ORDER, even failures you later recovered from. Include frictionNotes: anything about this brief, sandbox, or checks that made the task harder than it should be, or a tweak you'd request — honest, both empty if nothing stood out.
 |]
+
+reconPrompt :: DevPlan -> SplitSpec -> Text
+reconPrompt p spec = [fmt|
+  You are a READ-ONLY recon worker. Do not edit, create, or delete any file,
+  and do not run any command that writes — you are here to look, not touch.
+
+  A planner is about to split this task into small sequential subtasks, and
+  your survey is the only view of the repository it will have:
+
+  Task being planned: {nodeTask p}
+  Planning hints: {spec.splitHints}
+
+  Explore the repository with your native read and shell tools. Finish your
+  turn with a RepoSurvey: surveyLayout (the repo's shape — layout, languages,
+  build and test entry points, in a paragraph), relevantFiles (paths most
+  relevant to the task, best first), and surveyRisks (hazards a planner
+  should route around: fragile files, missing tooling, surprising
+  conventions).
+|]
+
+microPlanPrompt :: DevPlan -> SplitSpec -> RepoSurvey -> Text
+microPlanPrompt p spec survey = [fmt|
+  Split ONE development task into small sequential microtasks. Each microtask
+  becomes one short coding-agent cycle in the SAME worktree, run in list
+  order — earlier tasks lay foundations later ones build on. This is
+  intra-task decomposition: no branches, no new worktrees, one lane.
+
+  Task: {nodeTask p}
+
+  Authored hints for how to cut it up: {spec.splitHints}
+  Hard cap: at most {spec.splitMaxTasks} microtasks.
+
+  A read-only recon agent surveyed the repository for you:
+  Layout: {survey.surveyLayout}
+  Relevant files:
+{fileLines}
+  Risks:
+{riskLines}
+
+  The node's own final acceptance checks (run by the orchestrator after the
+  whole sequence — your plan must make these pass):
+{checkLines p}
+
+  Answer with a MicroPlan: microtasks (each with a short kebab-case
+  microName, a self-contained microInstruction a coding agent can act on
+  without seeing this conversation, and microChecks — one or two cheap shell
+  commands, run by the orchestrator in the worktree after that cycle, that
+  verify THAT microtask landed; exit 0 means pass) and a one-paragraph
+  microRationale for the cut you chose.
+|]
+  where
+    fileLines = bulletLines survey.relevantFiles
+    riskLines = bulletLines survey.surveyRisks
+
+microPrompt :: DevPlan -> Microtask -> Text
+microPrompt p m = [fmt|
+  You are one microtask worker in a planned sequence, all working the same
+  worktree toward one goal. Earlier microtasks' output is already committed
+  in this worktree; later ones build on what you leave.
+
+  Overall task (context only — do NOT do all of it): {nodeTask p}
+
+  YOUR microtask, the only thing to do this cycle: {m.microInstruction}
+
+  The orchestrator runs these checks in this worktree right after your turn —
+  they are the record, not your summary of them:
+{microCheckLines}
+
+  Your sandbox's git directory is read-only: do NOT run `git commit` (or
+  `git add`, or any other git write — they will fail). Leave your changes
+  uncommitted; the orchestrator snapshots and commits them itself.
+
+  Finish your turn with a WorkerResult: a one-paragraph workSummary of WHAT
+  you changed, an evidence list (commands run, files edited — never a commit
+  sha, since you did not and cannot commit), and readyForIntegration. Include
+  obstacles: what went wrong along the way IN ORDER, even failures you later
+  recovered from. Include frictionNotes: anything about this brief, sandbox,
+  or checks that made the task harder than it should be, or a tweak you'd
+  request — honest, both empty if nothing stood out.
+|]
+  where
+    microCheckLines = bulletLines m.microChecks
 
 scaffoldPrompt :: DevPlan -> [DevPlan] -> Text
 scaffoldPrompt p kids = [fmt|
@@ -1655,7 +1854,7 @@ scaffoldPrompt p kids = [fmt|
 {checkLines p}
 
   Finish your turn with a WorkerResult describing WHAT you left in the working
-  tree — never a commit sha, since you did not and cannot commit.
+  tree — never a commit sha, since you did not and cannot commit. Include obstacles: what went wrong along the way IN ORDER, even failures you later recovered from. Include frictionNotes: anything about this brief, sandbox, or checks that made the task harder than it should be, or a tweak you'd request — honest, both empty if nothing stood out.
 |]
   where
     childLines =
@@ -1687,7 +1886,7 @@ integrationPrompt p acc checks = [fmt|
   commit it leaves HEAD on once it has snapshotted your work.
 
   Finish your turn with a WorkerResult describing what you merged and what you
-  ran — never a commit sha, since you did not and cannot commit.
+  ran — never a commit sha, since you did not and cannot commit. Include obstacles: what went wrong along the way IN ORDER, even failures you later recovered from. Include frictionNotes: anything about this brief, sandbox, or checks that made the task harder than it should be, or a tweak you'd request — honest, both empty if nothing stood out.
 |]
   where
     escLines = bulletLines acc.accEsc

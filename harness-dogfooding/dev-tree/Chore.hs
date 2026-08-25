@@ -8,8 +8,11 @@
 -- so swapping a chore is an edit here, never a change to the harness's own
 -- logic.
 --
--- The shipped chore is a TOY: a single leaf, in prep for dev-tree's
--- first-ever live attended run against a throwaway scratch repo.
+-- The shipped chore is TIDEPOOL-ON-TIDEPOOL: dev-tree fixing a real bug in
+-- its own stdlib — the bug dev-tree's first live run discovered
+-- (Tidepool.Event's helpers liftEither every EventError, so any event
+-- failure is process-fatal instead of data the failure policy reads).
+-- Point TIDEPOOL_SOURCE_REPO at the tidepool dev checkout to run it.
 module Chore
   ( choreGoal
   , chorePlan
@@ -21,38 +24,29 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Assemble a small tide-pool field guide: a haiku and a facts file."
+choreGoal = "Give Tidepool.Event a non-fatal error surface: Try variants that return EventError as data instead of throwing out of the harness loop."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "field-guide"
-    , nodeTask = "The plan is already fully specified: two children will produce HAIKU.md and FACTS.md. Make NO changes of any kind — do not create or modify any file. Simply confirm the plan is ready."
-    , nodeChecks = ["test -s HAIKU.md", "test -s FACTS.md"]
-    , nodeBoundary = ["HAIKU.md", "FACTS.md", "README.md"]
-    , nodeOnFailure = AskOperator
-    , childPlans =
-        [ DevPlan
-            { nodeName = "haiku"
-            , nodeTask = "Create HAIKU.md containing a short haiku about tide pools."
-            , nodeChecks = ["test -s HAIKU.md"]
-            , nodeBoundary = ["HAIKU.md"]
-            , nodeOnFailure = Retry
-            , childPlans = []
-            }
-        , DevPlan
-            { nodeName = "facts"
-            , nodeTask = "Create FACTS.md listing three true facts about tide pools, one per line."
-            , nodeChecks = ["test -s FACTS.md"]
-            , nodeBoundary = ["FACTS.md"]
-            , nodeOnFailure = Retry
-            , childPlans = []
-            }
+    { nodeName = "event-try-surface"
+    , nodeTask =
+        "In haskell/lib/Tidepool/Event.hs ONLY, add two non-fatal variants alongside the existing throwing helpers (which must stay byte-for-byte unchanged): `withHandlerTry :: Event a -> (Either EventError a -> M ()) -> M b -> M (Either EventError b)` and `nextEventTry :: Event a -> M (Either EventError (Observed a))`. Semantics: a subscribe failure returns Left immediately and the body/wait never runs; a drain failure mid-body and an unsubscribe failure at exit are delivered to the HANDLER as Left values (the body's result stays total, so the caller's policy decides — nothing is ever thrown). For nextEventTry, any failure is the returned Left. Follow the file's existing style exactly (haddock density, naming, the runInTry precedent from Tidepool.Shell for the -Try suffix). Export both from the module head next to their throwing siblings. Do not modify any other file, and do not change any existing function."
+    , nodeChecks =
+        [ "grep -q 'withHandlerTry ::' haskell/lib/Tidepool/Event.hs"
+        , "grep -q 'nextEventTry ::' haskell/lib/Tidepool/Event.hs"
+        , "grep -q 'withHandlerTry' haskell/lib/Tidepool/Event.hs && grep -A40 'module Tidepool.Event' haskell/lib/Tidepool/Event.hs | grep -q 'withHandlerTry'"
         ]
+    , nodeBoundary = ["haskell/lib/Tidepool/Event.hs"]
+    , nodeOnFailure = AskOperator
+    , nodeSplit = Nothing
+    , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 2, maxAgentCycles = 6, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 2, gateWiderThan = 4}
 
+-- | The dev tree carries in-flight (uncommitted) morning surface work; the
+-- run snapshots it rather than requiring a clean source.
 choreSnapshotDirtySource :: Bool
-choreSnapshotDirtySource = False
+choreSnapshotDirtySource = True
