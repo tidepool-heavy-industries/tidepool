@@ -27,7 +27,7 @@ chorePlan :: DevPlan
 chorePlan =
   DevPlan
     { nodeName = "field-guide"
-    , nodeTask = "Coordinate two children producing HAIKU.md and FACTS.md."
+    , nodeTask = "Coordinate two children producing HAIKU.md and FACTS.md. Do not create those files yourself — your children own them."
     , nodeChecks = ["test -s HAIKU.md", "test -s FACTS.md"]
     , nodeBoundary = ["HAIKU.md", "FACTS.md"]
     , nodeOnFailure = AskOperator
