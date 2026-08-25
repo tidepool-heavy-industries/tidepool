@@ -7,6 +7,7 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 pub enum JournalReq {
     RecordStep(String, String, crate::effect_glue::JsonArg),
+    TraceStep(String, String, crate::effect_glue::JsonArg),
 }
 
 impl tidepool_mcp::DescribeEffect for JournalHandler {
@@ -25,6 +26,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         match req {
             JournalReq::RecordStep(kind, key, payload) => self.record_step(cx, kind, key, payload),
+            JournalReq::TraceStep(stage, key, payload) => self.trace_step(cx, stage, key, payload),
         }
     }
 }

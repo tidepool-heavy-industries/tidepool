@@ -700,6 +700,87 @@ impl JournalHandler {
             .map_err(|e| EffectError::Handler(e.to_string()))?;
         cx.respond(())
     }
+
+    /// The run's sibling TRACE stream path, derived from this handler's own
+    /// journal segment: same directory, `journal-` filename prefix swapped
+    /// for `trace-` (fallback: a `.trace.jsonl` suffix on the same stem).
+    /// Per-process by construction — the journal segment is exclusively
+    /// claimed, so the derived trace path inherits single-writer safety
+    /// without a second claim protocol.
+    fn trace_path(&self) -> PathBuf {
+        let name = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("journal.jsonl");
+        let trace_name = if let Some(rest) = name.strip_prefix("journal-") {
+            format!("trace-{rest}")
+        } else {
+            format!("{name}.trace.jsonl")
+        };
+        self.path.with_file_name(trace_name)
+    }
+
+    /// Append one observability entry to the trace stream — decision
+    /// narration and telemetry, never read back by resume. Envelope:
+    /// a `{"version": 1}` header on a fresh file, then one
+    /// `{ts, seq, stage, key, payload}` line per call — `ts` is
+    /// milliseconds since the Unix epoch, stamped HERE so every consumer's
+    /// lines merge into one timeline; `seq` reuses the journal's composed
+    /// scheme for provenance. Payload shape is deliberately free to evolve;
+    /// the envelope is the durable part. Same durability discipline as the
+    /// journal (locked open+write+fsync): a trace the process lied about
+    /// writing would be observability that vanishes exactly when it matters
+    /// (a crash), which is when it is read.
+    pub(crate) fn trace_step(
+        &mut self,
+        cx: &EffectContext<'_, CapturedOutput>,
+        stage: String,
+        key: String,
+        payload: crate::effect_glue::JsonArg,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        self.append_trace(stage, key, payload.0)
+            .map_err(|e| EffectError::Handler(e.to_string()))?;
+        cx.respond(())
+    }
+
+    fn append_trace(
+        &self,
+        stage: String,
+        key: String,
+        payload: serde_json::Value,
+    ) -> Result<(), JournalAppendError> {
+        self.ensure_parent_dir()?;
+        let path = self.trace_path();
+        let _guard = self.lock.lock();
+        let is_fresh = std::fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true);
+        if is_fresh {
+            let header = serde_json::json!({"version": 1}).to_string();
+            jsonl::append_new_line(&path, &header, SyncPolicy::Data).map_err(|source| {
+                JournalAppendError::Write {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        }
+        let local = self.local_seq.fetch_add(1, Ordering::SeqCst);
+        let seq = compose_journal_seq(self.segment_ordinal, local);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let line = serde_json::json!({
+            "ts": ts,
+            "seq": seq,
+            "stage": stage,
+            "key": key,
+            "payload": payload,
+        })
+        .to_string();
+        jsonl::append_new_line(&path, &line, SyncPolicy::Data).map_err(|source| {
+            JournalAppendError::Write { path, source }
+        })
+    }
 }
 
 /// Why a journal `append` failed to durably record an entry — the operation
@@ -1217,6 +1298,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The trace stream: sibling file derived from the segment name, version
+    /// header first, then ts-stamped envelope lines whose payload is free.
+    #[test]
+    fn trace_lands_in_sibling_stream_with_ts_envelope() {
+        let dir = tmp_dir("trace");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("journal-run1.0.jsonl");
+        let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
+            .expect("fresh segment header stamp succeeds");
+        h.append_trace(
+            "resume-verdict".into(),
+            "branch/a".into(),
+            serde_json::json!({"verdict": "skip-done"}),
+        )
+        .unwrap();
+        h.append_trace("park".into(), "loop".into(), serde_json::json!({"why": "completed"}))
+            .unwrap();
+
+        let trace_path = dir.join("trace-run1.0.jsonl");
+        assert!(trace_path.exists(), "trace derives journal- -> trace- name");
+        let contents = std::fs::read_to_string(&trace_path).unwrap();
+        let lines: Vec<serde_json::Value> = contents
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines[0], serde_json::json!({"version": 1}));
+        assert_eq!(lines.len(), 3);
+        for entry in &lines[1..] {
+            assert!(entry["ts"].as_u64().unwrap() > 0, "every line is ts-stamped");
+            assert!(entry.get("seq").is_some());
+            assert!(entry.get("stage").is_some());
+        }
+        assert_eq!(lines[1]["stage"], "resume-verdict");
+        assert_eq!(lines[1]["payload"]["verdict"], "skip-done");
+        assert_eq!(lines[2]["key"], "loop");
+
+        // The journal segment itself holds only its own header — trace never
+        // leaks into the resume substrate.
+        let journal_entries = load_journal(&path).unwrap();
+        assert!(journal_entries.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

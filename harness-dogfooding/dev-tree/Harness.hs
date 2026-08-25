@@ -87,7 +87,9 @@ import Tidepool.Effects
   ( WorktreeHandle (..)
   , say
   )
+import Tidepool.Aeson (object, (.=))
 import Tidepool.Form (askUser)
+import Tidepool.Journal (trace)
 import Tidepool.Shell (runInTry)
 import Tidepool.Harness (Harness, runLLMTurn)
 import Tidepool.Prelude hiding (render)
@@ -188,9 +190,24 @@ resumeLoop fold st
   , Just branch <- rootBranchOf fold (nodeName (plan st))
   , rescuePending foldLadder fold branch (plan st)
   , fromMaybe 0 (rescueCount st) < 1 = do
-      say "Re-entering completed run: the journal holds a pending amendment for a failed subtree."
+      trace "rescue-reenter" (nodeName (plan st)) (object ["rescueCount" .= (fromMaybe 0 (rescueCount st) + 1)])
       enter st {rescueCount = Just (fromMaybe 0 (rescueCount st) + 1)}
-  | otherwise = pure st
+  -- ANY turn that changes nothing says WHY, as data — a silent no-op cost
+  -- run 24 three relaunches.
+  | otherwise = do
+      trace
+        "park"
+        "loop"
+        ( object
+            [ "phase" .= show (phase st)
+            , "rescueCount" .= fromMaybe 0 (rescueCount st)
+            , "rescuePending"
+                .= case rootBranchOf fold (nodeName (plan st)) of
+                  Just b -> rescuePending foldLadder fold b (plan st)
+                  Nothing -> False
+            ]
+        )
+      pure st
   where
     enter entrySt =
       effectivePlan fold entrySt >>= \case

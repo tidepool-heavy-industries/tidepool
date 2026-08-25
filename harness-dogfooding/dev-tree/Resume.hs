@@ -25,6 +25,7 @@ module Resume
   , newestEntry
   , amendmentIsNewest
   , amendPlan
+  , verdictTag
   , splitRecordOf
   , adoptOrUnfold
   , replaySplit
@@ -52,7 +53,9 @@ import DevTreeJournal
   )
 import HarnessTypes
 import Micro (NodeSeed (..))
+import Tidepool.Aeson (object, (.=))
 import Tidepool.Effects (WorktreeHandle (..))
+import Tidepool.Journal (trace)
 import Tidepool.Harness (Harness)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
@@ -145,7 +148,17 @@ resumed hooks fold inner
   | not (isResumed fold) = inner
   | otherwise = go
   where
-    go seed = case resumePlanFor hooks.resumeFoldLadder fold (branchOf seed.seedTree) seed.seedPlan of
+    go seed = do
+      let branch = branchOf seed.seedTree
+          verdict = resumePlanFor hooks.resumeFoldLadder fold branch seed.seedPlan
+      -- Decision narration is DATA on the trace stream, not prose: run 24
+      -- burned three relaunches because a skipping resume said nothing.
+      trace
+        "resume-verdict"
+        branch
+        (object ["node" .= nodeName seed.seedPlan, "verdict" .= verdictTag hooks.resumeFoldLadder verdict])
+      dispatch seed verdict
+    dispatch seed = \case
       ResumeSkip o -> pure (Swarm.PlanF (replayedWork seed o) [])
       ResumeReplay sp -> replaySplit hooks fold seed sp
       ResumeFresh -> adoptOrUnfold hooks fold inner seed
@@ -204,6 +217,17 @@ resumePlanFor ladder fold branch p = case newestEntry replanEntry splitEntry out
         `orElse` lookupEvent OutcomeKind (nodeName p) fold
     recordedSplit = splitEntry >>= (splitRecordOf . snd)
     recordedPlan = maybe p (.splitPlan) recordedSplit
+
+-- | The trace-stream tag for one resume verdict.  A skip is tagged by its
+-- LADDERED doneness — the raw journaled outcome under-reports (bare-receipt
+-- wire), and a trace that repeated the wire's optimism would mislead the
+-- exact investigation it exists to serve.
+verdictTag :: (Outcome -> Outcome) -> ResumePlan -> Text
+verdictTag ladder = \case
+  ResumeSkip o -> if outcomeIsDone (ladder o) then "skip-done" else "skip-failed"
+  ResumeReplay {} -> "replay"
+  ResumeFresh -> "fresh"
+  ResumeAmend d _ -> if d.abandonSubtree then "amend-abandon" else "amend"
 
 -- | Should a COMPLETED run re-enter?  True exactly when the fold's verdict
 -- for the root is rescue-shaped: a pending (non-abandoning) amendment, or

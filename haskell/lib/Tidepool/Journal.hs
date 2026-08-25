@@ -31,6 +31,7 @@
 -- durability for the appearance of progress.
 module Tidepool.Journal
   ( record
+  , trace
   ) where
 
-import Tidepool.Effects (record)
+import Tidepool.Effects (record, trace)

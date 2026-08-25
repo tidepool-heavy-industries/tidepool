@@ -5,10 +5,11 @@
 pub fn journal_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Journal",
-        description: "Durable append-only run journal: a resident harness records completed steps as it happens, mid-loop, so progress survives a crash and resume can fold the journal instead of redoing finished work. `record kind key payload` appends ONE entry — `kind` and `key` are caller-chosen labels (e.g. a step kind and the branch or task it concerns), `payload` is an opaque JSON value. Every append is flushed immediately; the journal is append-only forever — there is no rewrite or compaction verb.",
+        description: "Durable append-only run journal: a resident harness records completed steps as it happens, mid-loop, so progress survives a crash and resume can fold the journal instead of redoing finished work. `record kind key payload` appends ONE entry — `kind` and `key` are caller-chosen labels (e.g. a step kind and the branch or task it concerns), `payload` is an opaque JSON value. Every append is flushed immediately; the journal is append-only forever — there is no rewrite or compaction verb. `trace stage key payload` appends ONE observability entry to the run's sibling TRACE stream instead: never folded into resume, timestamped at the handler, for decision narration and telemetry a reader merges into one timeline by ts.",
         prompt_card: None,
         constructors: &[
             "RecordStep :: Text -> Text -> Value -> Journal ()",
+            "TraceStep :: Text -> Text -> Value -> Journal ()",
         ],
         type_defs: &[],
         extra_imports: &[
@@ -16,6 +17,7 @@ pub fn journal_decl() -> crate::EffectDecl {
         ],
         helpers: &[
             "-- | Append one durable journal entry. `kind` and `key` are\n-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n-- immediately; append-only — never rewritten or compacted.\nrecord :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\nrecord kind key payload = send (RecordStep kind key payload)",
+            "-- | Append one observability entry to the run's sibling TRACE stream: decision narration and telemetry, never folded into resume. `stage` names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); `key` is the branch or unit it concerns; `payload` is an opaque JSON value whose shape may evolve freely. The handler stamps a timestamp on every line, so trace and journal merge into one timeline.\ntrace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\ntrace stage key payload = send (TraceStep stage key payload)",
         ],
         type_params: &[],
         default_row_args: &[],
