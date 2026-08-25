@@ -66,6 +66,7 @@ module Harness
   , amendmentIsNewest
   , amendPlan
   , proposalViolation
+  , sprintOverlap
     -- * Agent-cycle budget (pure — exercised directly by the overspend pin)
   , NodeSeed (..)
   , requiredCycles
@@ -98,6 +99,8 @@ import Tidepool.Resume
   )
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
+import Tidepool.Async (mapConcurrently)
+import qualified Data.Text as T
 import Prompts (proposePrompt)
 import Micro (NodeSeed (..))
 import Fold
@@ -142,6 +145,7 @@ initialState =
     , plan = case choreMode of
         Authored {authoredPlan = p} -> p
         ProposeFromGoal -> chorePlan
+        SprintBacklog {} -> chorePlan
     , phase = Ready
     , cycleCount = 0
     , snapshotDirtySource = choreSnapshotDirtySource
@@ -230,7 +234,11 @@ resumeLoop fold st
                          (Swarm.budgeted cycleRefusal decompose))
                   )
               alg = Swarm.receipted stampFold integrate
-          outcome <- Swarm.hyloM alg coalg seed
+          -- Siblings execute CONCURRENTLY (sprint items, multi-leaf chores).
+          -- Safe because nothing in the coalgebra/algebra reads completion
+          -- order (the SEAM note above); plan-order reassembly is
+          -- hyloConcurrentM's own contract.
+          outcome <- Swarm.hyloConcurrentM mapConcurrently alg coalg seed
           summary <- summarize fold outcome
           pure
             effective
@@ -252,7 +260,68 @@ effectivePlan fold st = case choreMode of
     _ -> do
       grounding <- groundingPack
       proposeAttempt grounding 1 Nothing
+  SprintBacklog {sprintItems = items} -> case lookupEvent ProposeKind proposalJournalKey fold of
+    Just (_, ProposeEvent {evProposePlan = p}) -> pure (Right p)
+    _ -> do
+      grounding <- groundingPack
+      sprintAttempt items grounding 1 Nothing
   where
+    -- A sprint is a task-SET made to parallelize: one subtree per backlog
+    -- item, planned independently (or taken from an authored override),
+    -- composed under an integration-only root.  Disjoint item boundaries are
+    -- validated in code before the operator ever sees the approval form.
+    sprintAttempt items grounding attempt priorNote = do
+      let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
+      subtrees <- traverse (resolveItem grounding revision) items
+      let composed = sprintRoot subtrees
+      case proposalViolation st.budget composed `orMaybe` sprintOverlap subtrees of
+        Just why
+          | attempt == (1 :: Int) -> sprintAttempt items grounding 2 (Just why)
+          | otherwise -> pure (Left ("Sprint proposal remained invalid: " <> why))
+        Nothing -> do
+          say (renderPlan 0 composed)
+          approval <- askUser @PlanApproval
+          if approval.planApproved
+            then do
+              recordEvent ProposeEvent {evKey = JournalKey proposalJournalKey, evProposePlan = composed}
+              pure (Right composed)
+            else
+              if attempt == 1
+                then sprintAttempt items grounding 2 (Just approval.revisionNote)
+                else pure (Left ("Sprint proposal rejected: " <> approval.revisionNote))
+
+    resolveItem grounding revision item = case item.itemPlan of
+      Just p -> pure p
+      Nothing ->
+        runLLMTurn @DevPlan
+          (proposePrompt (sprintItemGoal item) st.budget {maxAgentCycles = item.itemCycles} grounding <> revision)
+
+    sprintItemGoal item =
+      [fmt|{item.itemGoal}
+
+  This item is ONE SUBTREE of a sprint whose items run CONCURRENTLY in
+  sibling worktrees.  Its boundary paths must not overlap any other sprint
+  item's — prefer tight directory prefixes over broad ones.  Cycle allowance
+  for this entire item: {item.itemCycles}.|]
+
+    -- Integration-only root: no direct edits, no checks of its own — every
+    -- verdict comes from the item subtrees' own receipts.  Replan keeps the
+    -- isolate-and-report contract: a failed item journals its amendment and
+    -- the fold continues folding its siblings.
+    sprintRoot subtrees =
+      DevPlan
+        { nodeName = "sprint"
+        , nodeTask = "Integration-only sprint root: fold each item subtree into this worktree; make no direct edits at this node."
+        , nodeChecks = []
+        , nodeBoundary = concatMap (.nodeBoundary) subtrees
+        , nodeTolerated = concatMap (.nodeTolerated) subtrees
+        , nodeOnFailure = Replan
+        , nodeSplit = Nothing
+        , childPlans = subtrees
+        }
+
+    orMaybe (Just a) _ = Just a
+    orMaybe Nothing b = b
     proposeAttempt grounding attempt priorNote = do
       let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
       proposed <- runLLMTurn @DevPlan (proposePrompt st.goal st.budget grounding <> revision)
@@ -287,6 +356,26 @@ proposalViolation b = go 0
     firstJust [] = Nothing
     firstJust (Nothing : xs) = firstJust xs
     firstJust (found : _) = found
+
+-- | The first cross-item boundary overlap in a sprint, if any.  Two boundary
+-- entries overlap when equal or when one is a directory prefix of the other
+-- — overlapping items would race in concurrent sibling worktrees.
+sprintOverlap :: [DevPlan] -> Maybe Text
+sprintOverlap subtrees =
+  listToMaybe
+    [ [fmt|sprint items {a.nodeName} and {b.nodeName} overlap on boundary paths {x} and {y}|]
+    | (a, b) <- pairs subtrees
+    , x <- a.nodeBoundary
+    , y <- b.nodeBoundary
+    , pathsOverlap x y
+    ]
+  where
+    pairs (a : rest) = [(a, b) | b <- rest] <> pairs rest
+    pairs [] = []
+    pathsOverlap x y =
+      let nx = T.dropWhileEnd (== '/') x
+          ny = T.dropWhileEnd (== '/') y
+       in nx == ny || (nx <> "/") `T.isPrefixOf` ny || (ny <> "/") `T.isPrefixOf` nx
 
 -- | Deterministic repository grounding for the propose turn: the proposer is
 -- a runLLMTurn session with no repo access of its own, so CODE assembles what

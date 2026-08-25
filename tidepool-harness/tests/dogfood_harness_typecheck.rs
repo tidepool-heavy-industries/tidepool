@@ -169,6 +169,9 @@ fn dev_tree_typechecks() {
             "__amendmentNewest = amendmentIsNewest\n",
             "__proposeDecision :: Budget -> DevPlan -> Maybe Text\n",
             "__proposeDecision = proposalViolation\n",
+            // Sprint mode: disjoint-item validation is pure and pinned.
+            "__sprintDisjoint :: [DevPlan] -> Maybe Text\n",
+            "__sprintDisjoint = sprintOverlap\n",
             "__planApprovalProbe :: PlanApproval\n",
             "__planApprovalProbe = PlanApproval { planApproved = True, revisionNote = \"approved\" }\n",
             // Deep-force the chore VALUES: a missing record field in Chore.hs

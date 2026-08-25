@@ -20,6 +20,7 @@ module HarnessTypes
   , Phase (..)
   , Budget (..)
   , ChoreMode (..)
+  , SprintItem (..)
   , DevPlan (..)
   , OnFailure (..)
   , SplitSpec (..)
@@ -110,6 +111,19 @@ data Budget = Budget
 data ChoreMode
   = Authored {authoredPlan :: DevPlan}
   | ProposeFromGoal
+  | SprintBacklog {sprintItems :: [SprintItem]}
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | One backlog item in a sprint run: a goal the planner turns into its own
+-- subtree (or an authored override taken verbatim), sized by a cycle
+-- allowance.  A sprint's items are designed to PARALLELIZE — disjoint
+-- boundaries are validated before approval, and siblings execute
+-- concurrently.
+data SprintItem = SprintItem
+  { itemGoal   :: Text
+  , itemPlan   :: Maybe DevPlan
+  , itemCycles :: Int
+  }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- ---------------------------------------------------------------------------
