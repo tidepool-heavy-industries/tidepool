@@ -11,10 +11,11 @@ use std::sync::atomic::Ordering;
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
-use tidepool_runtime::session::ResidentOutcome;
+use tidepool_runtime::session::{ResidentHole, ResidentOutcome};
 
 use super::contract::{outer_decls, outer_template};
 use super::corrective::typed_request_agent_framing_suffix;
+use super::fork::drive_concurrent;
 use super::green::{
     GreenChain, GreenDelivery, GreenHoleServiced, GreenReady, GreenThread, GreenThreadState,
     ServicedSuspension,
@@ -1190,6 +1191,105 @@ impl SelfHarnessDriver {
         // the sweep below needs.
         let outcome_result: Result<(Value, DataConTable), DriverError> = async {
             loop {
+            // Batch-and-drive every ready item CONCURRENTLY, but ONLY once
+            // EVERY item currently in `ready` is SUBAGENT-routed — mirroring
+            // `service_green_round`'s Fork drain (green.rs), generalized to
+            // `Subagent` per `CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md`'s
+            // smallest driver change. `ready` here carries BOTH the primary
+            // `loop` chain's own suspensions and every green thread's (this
+            // loop's own `SuspensionRouting::Green` arm below feeds thread
+            // resumes back into this SAME queue).
+            //
+            // Unlike Fork's spawn (a pure JIT step, never itself a driver
+            // suspension), `spawnAsync`/`awaitAgent` — `spawnAgent`'s own
+            // two-suspension shape (`haskell/lib/Tidepool/Agent/Spawn.hs`) —
+            // ARE driver suspensions: a sibling thread's own `async
+            // (spawnAgent ...)` needs its OWN `SuspensionRouting::Green`
+            // pass (spawning the thread, running it to its first suspension)
+            // before ITS `Subagent` request even exists. Firing a batch as
+            // soon as ANY one `Subagent` item is ready — before a sibling's
+            // still-pending `Green` spawn has had a chance to run — would
+            // batch a batch of ONE (this thread's own `spawnAsync`, or worse
+            // its slow `awaitAgent`) while the sibling's `spawnAsync` sits
+            // unprocessed behind it, reproducing the exact one-at-a-time bug
+            // this generalization exists to fix. Gating on "everything ready
+            // is `Subagent`" defers batching until every sibling's own
+            // fast/synchronous `Green` spawn step has already run via the
+            // ordinary single-item path below (each such step is
+            // JIT-fast and never blocks, so servicing it individually costs
+            // nothing) — at that point every sibling that COULD be ready is,
+            // including a slow `awaitAgent` sitting alongside a sibling's
+            // freshly-arrived `spawnAsync`, which is exactly the pairing
+            // that must run CONCURRENTLY for the two cycles' background
+            // threads to actually overlap.
+            let ready_for_subagent_batch = !ready.is_empty()
+                && ready.iter().all(|item| {
+                    matches!(
+                        &item.outcome,
+                        ResidentOutcome::Suspended { request, .. }
+                            if matches!(
+                                engine::classify_hole(request, &compiled.table, &compiled.asks),
+                                Ok(c) if matches!(c.routing, SuspensionRouting::Subagent)
+                            )
+                    )
+                });
+            if ready_for_subagent_batch {
+                let mut subagent_batch: Vec<(GreenChain, String, Value)> =
+                    Vec::with_capacity(ready.len());
+                for item in ready.drain(..) {
+                    match item.outcome {
+                        ResidentOutcome::Suspended { hole, request, .. } => {
+                            subagent_batch.push((item.chain, hole.cont_id().to_string(), request));
+                        }
+                        ResidentOutcome::Completed { .. } => {
+                            unreachable!("ready_for_subagent_batch checked Suspended above")
+                        }
+                    }
+                }
+                let this = &*self;
+                let table = &compiled.table;
+                let batch_ref = &subagent_batch;
+                let cap = self.concurrency_cap;
+                #[allow(clippy::type_complexity)]
+                let results: Vec<(usize, Result<Value, DriverError>)> =
+                    drive_concurrent(cap, subagent_batch.len(), |idx| {
+                        let (_, _, request) = &batch_ref[idx];
+                        async move {
+                            this.service_outer_subagent(request, table, FormSource::OuterLoop)
+                                .await
+                        }
+                    })
+                    .await;
+                let mut first_err: Option<DriverError> = None;
+                for (chain, hole, value) in subagent_batch
+                    .into_iter()
+                    .zip(results.into_iter().map(|(_, r)| r))
+                    .filter_map(|((chain, hole, _), r)| match r {
+                        Ok(v) => Some((chain, hole, v)),
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                            None
+                        }
+                    })
+                {
+                    let sid = self.outer_sid()?;
+                    let next = self
+                        .agent
+                        .with_session(sid, |s| s.resume(ResidentHole::plain(hole), value))
+                        .map_err(|e| DriverError::Session(e.to_string()))?
+                        .map_err(|e| {
+                            DriverError::Session(format!("subagent resume failed: {e}"))
+                        })?;
+                    ready.push_back(GreenReady { chain, outcome: next });
+                }
+                if let Some(e) = first_err {
+                    break Err(e);
+                }
+                continue;
+            }
+
             let Some(GreenReady { chain, outcome }) = ready.pop_front() else {
                 break Err(DriverError::Session(
                     "green scheduler starved: no ready work and the outer loop never completed \
@@ -1275,17 +1375,21 @@ impl SelfHarnessDriver {
                                 outcome: next,
                             })
                         }
-                        // The AUTHORED loop called a Subagent verb
-                        // (`spawnAgent`/`spawnAgentRaw`) — dispatch the
-                        // ORIGINAL request into the driver-owned handler
-                        // (suspension-serviced; the outer handled prefix
-                        // stays empty) and resume with its typed response.
+                        // Reached whenever `ready` is a MIX of Subagent- and
+                        // other-routed items (the batch gate at the top of
+                        // this loop fires only once EVERY ready item is
+                        // Subagent-routed — see that gate's own doc for why):
+                        // this single suspension is serviced individually,
+                        // same shape as before generalization. A `spawnAsync`
+                        // popped here is fine either way — it never blocks
+                        // meaningfully long — and once every sibling's own
+                        // `Green` spawn step has run, any remaining
+                        // (including slow `awaitAgent`) requests converge on
+                        // the batch gate above instead of this arm.
                         SuspensionRouting::Subagent => {
-                            let value = self.service_outer_subagent(
-                                &request,
-                                &compiled.table,
-                                FormSource::OuterLoop,
-                            )?;
+                            let value = self
+                                .service_outer_subagent(&request, &compiled.table, FormSource::OuterLoop)
+                                .await?;
                             let sid = self.outer_sid()?;
                             let next = self
                                 .agent

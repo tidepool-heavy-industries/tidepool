@@ -606,13 +606,24 @@ pub struct SelfHarnessDriver {
     /// every unrelated `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal`
     /// suspension serviced concurrently on another turn, since all six would
     /// wait on the SAME lock for entirely unrelated state. A dedicated lock
-    /// bounds the blast radius to Subagent alone. Two siblings delegating in
-    /// the same bulk window (`Self::drain_note_holes`'s concurrent
+    /// bounds the blast radius to Subagent alone. `Arc`-wrapped so
+    /// [`Self::service_outer_subagent`] can clone the handle into a
+    /// `tokio::task::spawn_blocking` closure (`spawn_blocking` needs a
+    /// `'static` closure; a plain `&Mutex` borrowed from `&self` cannot
+    /// cross that boundary) — see that method's doc for why the dispatch
+    /// itself still serializes on this ONE lock (the handler's own
+    /// `SubagentSpawn`/`SubagentAwait` methods take `&mut self` for their
+    /// full synchronous duration; `tidepool-handlers`/`tidepool-agent` are
+    /// out of this crate's reach), and
+    /// `CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md`'s addendum for why that still
+    /// yields real overlap for `spawnAgent`'s two-suspension
+    /// (`spawnAsync`/`awaitAgent`) shape. Two siblings delegating in the
+    /// same bulk window (`Self::drain_note_holes`'s concurrent
     /// `runLLMTurnBranchFanout` case) still serialize on THIS lock — the same
     /// synchronous handler this driver has always called, never made to run
     /// two dispatches at once — that part is unchanged. Wire it via
     /// [`Self::set_subagent_handler`].
-    subagent: Mutex<Option<tidepool_handlers::SubagentHandler>>,
+    subagent: Arc<Mutex<Option<tidepool_handlers::SubagentHandler>>>,
     /// This boot's run-journal fold, waiting to be injected — set by
     /// [`Self::open_run_journal`], `None` when no journal was opened (or when
     /// only the append sink was wired via [`Self::set_journal_handler`]).
@@ -817,7 +828,7 @@ impl SelfHarnessDriver {
             gate: Arc::new(StdinGate),
             ask_id_counter: AtomicU64::new(0),
             handlers: Mutex::new(OuterHandlers::default()),
-            subagent: Mutex::new(None),
+            subagent: Arc::new(Mutex::new(None)),
             resume: None,
             node_labels: Mutex::new(HashMap::new()),
             fork_child_seq: Mutex::new(HashMap::new()),

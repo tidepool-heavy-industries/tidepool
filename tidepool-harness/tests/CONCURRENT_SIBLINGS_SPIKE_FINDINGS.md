@@ -129,3 +129,68 @@ No changes to `haskell/lib/Tidepool/Swarm.hs` (`hyloM` untouched, no additive
 combinator added), no new property tests, no new GHC-heavy integration test.
 Per the spec: "if it structurally cannot, STOP and submit a findings report
 ... instead of forcing a broken combinator through."
+
+## Addendum (driver-concurrent-subagent lane): the smallest change, implemented
+
+The three-part change this doc named above is now implemented, in the two
+files it named (`lifecycle.rs`'s `run_loop_fragment_inner`, `green.rs`'s
+`service_green_round`/`service_thread_ready`), plus `delegate.rs`'s
+`service_outer_subagent` (now `async`, dispatching via
+`tokio::task::spawn_blocking` instead of `tokio::task::block_in_place` — the
+composability fix part 3 asked for) and `mod.rs` (`Self::subagent` is now
+`Arc<Mutex<Option<SubagentHandler>>>` so the dispatch closure can clone a
+`'static` handle into `spawn_blocking`).
+
+**The Sync/Send story, checked honestly (this doc's own ask).** `SubagentHandler`'s
+`SubagentSpawn`/`SubagentAwait` methods take `&mut self` for their FULL
+synchronous duration (`tidepool_agent::spawn::CoupledSpawner::spawn_one_cycle`'s
+own signature is `&mut self` end to end, even though its BODY only touches
+`&self.substrate` — an `Arc<Mutex<SpawnSubstrate>>` `tidepool-agent/CLAUDE.md`
+already documents as safe for N concurrent cycles). Since the driver holds
+exactly ONE `SubagentHandler` instance behind ONE lock, two dispatches that
+BOTH need the full `SubagentSpawn`/`SubagentAwait` call cannot literally
+overlap at the Rust type level — narrowing that requires a `tidepool-agent`/
+`tidepool-handlers` signature change, out of this lane's ALLOWED PATHS. This
+is NOT papered over: it is the literal reason `service_outer_subagent`'s own
+doc comment states plainly that dispatch "still serializes on ONE lock."
+
+**Real overlap is achieved anyway, because `spawnAgent` is not one call.**
+`haskell/lib/Tidepool/Agent/Spawn.hs`: `spawnAgent spec = spawnAsync spec >>=
+either (pure . Left) awaitAgent` — two SEPARATE suspensions, not the
+single blocking `SubagentSpawn` this doc's original text described.
+`SubagentSpawnAsync` (`tidepool-handlers/src/handlers/agent.rs`'s
+`subagent_spawn_async`) touches `&mut self` only BRIEFLY (admit the cycle,
+mint a backend, `std::thread::spawn` the actual agent conversation onto a
+DETACHED thread carrying its own substrate handle) before releasing the
+lock — the slow work runs OUTSIDE the handler's exclusive borrow entirely.
+Batching N siblings' `spawnAsync` calls concurrently lets each kick off its
+own background cycle thread in quick succession; each sibling's LATER
+`awaitAgent` still queues on the one lock, but by then its own background
+work has typically already been running for as long as its sibling's, so the
+batch's total wall time approaches `max` of the cycles rather than their
+`sum`. Pinned by `tidepool-harness/tests/outer_subagent.rs`'s
+`outer_loop_two_concurrent_spawn_agent_calls_overlap_in_wall_time`
+(`DelayingBackend` + `max_concurrent()`, the same receipt
+`answerer_async_fork.rs` uses for Fork).
+
+**One real difference from Fork's own drain trigger, worth recording.** Fork's
+`async (fork …)` spawn step is pure-JIT (never itself a driver suspension), so
+by the time a straight-line block's own `wait` genuinely blocks, every
+`fork` it already issued is guaranteed to be sitting fully parked in `ready`
+— draining exactly then is correct. `spawnAsync` is NOT pure-JIT (it is a
+real `Subagent` suspension needing driver dispatch), so a sibling's own
+`async (spawnAgent …)` needs ITS OWN `Green` spawn step serviced first before
+its `Subagent` request even exists. `green.rs`'s `service_green_round`
+already has the right trigger for this for free (it re-drives one node's own
+continuation via `GreenDelivery::Node` until IT genuinely blocks, so every
+sibling spawn along the way is serviced before the block-and-drain point is
+ever reached) — but `lifecycle.rs`'s `run_loop_fragment_inner` has no
+equivalent per-chain sub-loop; it pops one flat FIFO queue mixing every
+chain together. Draining as soon as ANY `Subagent` item was ready (this
+lane's first attempt) fired batches of one, reproducing the very bug this
+change exists to fix. The fix that shipped: gate the outer loop's batch-drain
+on "EVERY item currently in `ready` is `Subagent`-routed" — deferring the
+batch until every sibling's own fast/synchronous `Green` spawn step has
+already run through the ordinary single-item path (each such step is
+JIT-fast and never blocks, so servicing it individually costs nothing) — see
+that gate's own doc comment in `lifecycle.rs` for the full trace.

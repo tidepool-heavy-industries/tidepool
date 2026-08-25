@@ -4,6 +4,8 @@
 //! decode-dispatch-convert plumbing), distinct from the answerer-plane
 //! servicing in `suspension`/`fork`/`green`.
 
+use std::sync::Arc;
+
 use tidepool_bridge::ToCore;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
@@ -56,16 +58,47 @@ impl SelfHarnessDriver {
     /// the dispatch (the outer row's handled prefix must stay empty on the
     /// shared machine; see [`outer_decls`]).
     ///
-    /// Runs the actual dispatch under `tokio::task::block_in_place`
-    /// (`CodexAgentBackend` owns its own runtime and `block_on`s it — the
-    /// same discipline every `OperatorGate` call uses), so a lane-1 coupled
-    /// spawn blocking this loop turn for the agent's whole cycle (~30–120s
-    /// live, by design) frees the tokio worker
-    /// rather than parking it. The lock held for that call is
-    /// [`Self::subagent`] alone, NOT [`Self::handlers`] — see that field's
-    /// doc for why: a long subagent cycle must never starve an unrelated
-    /// `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal` suspension serviced
-    /// concurrently on another turn.
+    /// Runs the actual dispatch on the tokio BLOCKING thread pool via
+    /// `tokio::task::spawn_blocking`, not `tokio::task::block_in_place`:
+    /// `block_in_place` runs the closure SYNCHRONOUSLY, inline in this
+    /// task's own poll — it frees the calling WORKER THREAD for other
+    /// tokio TASKS, but it does not yield, so a caller batching several
+    /// ready `Subagent` items through [`super::fork::drive_concurrent`]'s
+    /// `buffer_unordered` would never even START a second item's dispatch
+    /// until the first fully returns (the whole point of batching is lost —
+    /// see `CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md`). `spawn_blocking` hands
+    /// the call to a real OS thread and returns a future that yields
+    /// immediately, so sibling items in the same batch begin their own
+    /// dispatch (and [`Self::subagent`] lock acquisition) concurrently.
+    ///
+    /// **This still serializes on [`Self::subagent`]'s ONE lock for the
+    /// duration of whichever `SubagentReq` variant the caller issued** — a
+    /// `SubagentSpawn`/`SubagentAwait` call holds `&mut SubagentHandler` (and
+    /// therefore this lock) for as long as `tidepool_agent::spawn::CoupledSpawner`
+    /// takes to reach a terminal, because `CoupledSpawner::spawn_one_cycle`'s
+    /// signature requires `&mut self` end to end even though its BODY only
+    /// touches `&self.substrate` (an `Arc<Mutex<SpawnSubstrate>>` already
+    /// documented as safe for N concurrent cycles — `tidepool-agent/CLAUDE.md`'s
+    /// "Concurrency: a shared substrate, N detachable sagas"). Narrowing that
+    /// signature to `&self` would let two `SubagentSpawn` calls genuinely run
+    /// concurrently through one handler instance, but `tidepool-agent`/
+    /// `tidepool-handlers` are outside this crate's ALLOWED PATHS, so this
+    /// dispatch cannot do that itself — see the findings addendum this spec
+    /// asked for. **Real overlap is still achieved for `spawnAgent`'s actual
+    /// shape** (`haskell/lib/Tidepool/Agent/Spawn.hs`: `spawnAgent spec =
+    /// spawnAsync spec >>= either (pure . Left) awaitAgent`): `SubagentSpawnAsync`
+    /// only briefly touches `&mut self` (admit the cycle, mint a backend,
+    /// `std::thread::spawn` the actual agent conversation onto a DETACHED
+    /// thread carrying its own substrate handle, `tidepool-handlers/src/handlers/agent.rs`'s
+    /// `subagent_spawn_async`) before releasing this lock — so N siblings'
+    /// `spawnAsync` calls, batched here, each kick off their own background
+    /// thread in quick succession, and those threads run their (slow) real
+    /// work fully in parallel. Each sibling's LATER `SubagentAwait` call
+    /// still queues on this lock, but by the time it runs its own background
+    /// thread has typically already finished (having run concurrently with
+    /// its siblings' since `spawnAsync`), so the queued `recv()` returns
+    /// near-instantly — the batch's total wall time approaches
+    /// `max` of the siblings' cycles rather than their `sum`.
     ///
     /// `source` identifies who raised this delegation — the AUTHORED outer
     /// loop itself ([`FormSource::OuterLoop`]) or a labeled node's own
@@ -78,7 +111,7 @@ impl SelfHarnessDriver {
     /// [`DelegationPhase::Settled`]/[`DelegationPhase::Failed`] — including
     /// the "no subagent handler configured" refusal, which used to be
     /// completely silent (no `Event`, no gate call, no `tracing` line).
-    pub(crate) fn service_outer_subagent(
+    pub(crate) async fn service_outer_subagent(
         &self,
         request: &Value,
         table: &DataConTable,
@@ -89,25 +122,35 @@ impl SelfHarnessDriver {
             brief: rendered_result_snippet(&request.to_string()),
         });
         let started = std::time::Instant::now();
-        let mut guard = self.subagent.lock();
-        let handler = match guard.as_mut() {
-            Some(handler) => handler,
-            None => {
-                let reason =
-                    "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
-                     subagent handler is configured — wire one with \
-                     SelfHarnessDriver::set_subagent_handler (the tidepool-selfharness binary \
-                     does this when TIDEPOOL_MEMORY_REPO is set)"
-                        .to_string();
-                gate.delegation_progress(&DelegationPhase::Failed {
-                    reason: reason.clone(),
-                    duration: started.elapsed(),
-                });
-                return Err(DriverError::Session(reason));
-            }
-        };
-        let dispatched =
-            tokio::task::block_in_place(|| Self::dispatch_outer_effect(handler, request, table));
+        if self.subagent.lock().is_none() {
+            let reason =
+                "the authored loop called a Subagent verb (spawnAgent/spawnAgentRaw) but no \
+                 subagent handler is configured — wire one with \
+                 SelfHarnessDriver::set_subagent_handler (the tidepool-selfharness binary \
+                 does this when TIDEPOOL_MEMORY_REPO is set)"
+                    .to_string();
+            gate.delegation_progress(&DelegationPhase::Failed {
+                reason: reason.clone(),
+                duration: started.elapsed(),
+            });
+            return Err(DriverError::Session(reason));
+        }
+        let subagent = Arc::clone(&self.subagent);
+        let owned_request = request.clone();
+        let owned_table = table.clone();
+        let dispatched = tokio::task::spawn_blocking(move || {
+            let mut guard = subagent.lock();
+            #[allow(
+                clippy::expect_used,
+                reason = "checked wired immediately above; set_subagent_handler never unwires"
+            )]
+            let handler = guard
+                .as_mut()
+                .expect("checked wired immediately above — set_subagent_handler never unwires");
+            Self::dispatch_outer_effect(handler, &owned_request, &owned_table)
+        })
+        .await
+        .map_err(|e| DriverError::Session(format!("subagent dispatch task panicked: {e}")))?;
         let elapsed = started.elapsed();
         match dispatched {
             Ok(value) => {

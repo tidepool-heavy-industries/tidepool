@@ -407,11 +407,9 @@ impl SelfHarnessDriver {
                                 "node {node:?} has no pending Subagent hole to service"
                             ))
                         })?;
-                    let value = self.service_outer_subagent(
-                        &request,
-                        &table,
-                        FormSource::Answerer { node },
-                    )?;
+                    let value = self
+                        .service_outer_subagent(&request, &table, FormSource::Answerer { node })
+                        .await?;
                     retry_on_turn_in_flight_async(|| {
                         self.agent
                             .resume_with_value(node, &pending_suspension, value.clone())

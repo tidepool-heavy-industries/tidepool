@@ -890,10 +890,18 @@ impl SelfHarnessDriver {
             // OWN `fork` suspension by the time the node blocks (spawning a
             // thread is a synchronous JIT step, no model call involved), so
             // every fork this wait could possibly be blocked on is already
-            // sitting in `ready`. Everything else keeps the single-item
-            // path below — cheap, immediate resumes with nothing to gain
-            // from batching.
+            // sitting in `ready`. SUBAGENT-routed ready items get the SAME
+            // treatment (`Self::drive_subagent_ready_batch`), generalizing
+            // the pattern per `CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md`: N
+            // sibling threads that each call `spawnAgent` (a real
+            // suspension, not a JIT-only step — `Subagent` is not a
+            // JIT-handled effect here) reach their OWN `Subagent` suspension
+            // at the same logical moment their fork'd threads are spawned,
+            // so whatever is ready now is everything this round could
+            // batch. Everything else keeps the single-item path below —
+            // cheap, immediate resumes with nothing to gain from batching.
             let mut fork_batch: Vec<(GreenReady, ClassifiedSuspension)> = Vec::new();
+            let mut subagent_batch: Vec<(GreenChain, String, Value)> = Vec::new();
             let mut rest: VecDeque<GreenReady> = VecDeque::with_capacity(green.ready.len());
             for item in green.ready.drain(..) {
                 let classified = match &item.outcome {
@@ -905,6 +913,23 @@ impl SelfHarnessDriver {
                 match classified {
                     Some(c) if matches!(c.routing, SuspensionRouting::Fork { .. }) => {
                         fork_batch.push((item, c));
+                    }
+                    Some(c) if matches!(c.routing, SuspensionRouting::Subagent) => {
+                        let chain = item.chain;
+                        match item.outcome {
+                            // Normalized to a raw `cont_id`, same as every
+                            // other thread-chain resume on this plane
+                            // (`drive_fork_ready_batch`'s own `Admitted.hole`
+                            // does the same) — a thread frame's resume is
+                            // always PLAIN, regardless of which `ResidentHole`
+                            // variant the suspension originally carried.
+                            ResidentOutcome::Suspended { hole, request, .. } => {
+                                subagent_batch.push((chain, hole.cont_id().to_string(), request));
+                            }
+                            ResidentOutcome::Completed { .. } => {
+                                unreachable!("classified as Suspended above")
+                            }
+                        }
                     }
                     // A classify failure here is not lost: the item goes to
                     // `rest` and `service_thread_ready` below re-classifies
@@ -938,6 +963,11 @@ impl SelfHarnessDriver {
                         return Ok(GreenRoundExit::ForkChildFailed { msg });
                     }
                 }
+            }
+            if !subagent_batch.is_empty() {
+                self.drive_subagent_ready_batch(node, subagent_batch, &table, green)
+                    .await?;
+                continue;
             }
             // One thread step, then loop (the join re-check observes any
             // settle).
@@ -1149,17 +1179,89 @@ impl SelfHarnessDriver {
         Ok(ThreadServiced::Continue)
     }
 
+    /// Drive every SUBAGENT-routed thread-chain ready item in `batch`
+    /// CONCURRENTLY, up to [`Self::concurrency_cap`] at once, via
+    /// [`drive_concurrent`] and [`Self::service_outer_subagent`] — the SAME
+    /// generalization [`Self::drive_fork_ready_batch`] already gets, applied
+    /// to `Subagent` per `CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md`'s smallest
+    /// driver change. Unlike Fork there is no spawn-time budget to admit
+    /// against — every ready `Subagent` item is driven — and no per-child
+    /// branch position to fold a failure into: a dispatch failure (an
+    /// unwired handler, the handler erroring) is driver/mechanism-level,
+    /// same as the single-item path this replaces, so the FIRST one found
+    /// hard-fails the round via `Err` after every OTHER admitted item has
+    /// still been driven to completion and resumed (`drive_concurrent` never
+    /// short-circuits, so a sibling that already got its answer keeps it).
+    ///
+    /// Real wall-clock overlap for this batch comes from
+    /// [`Self::service_outer_subagent`]'s own doc, not from anything here:
+    /// this fn only removes the OLD one-item-at-a-time scheduling that kept
+    /// a sibling's already-ready `Subagent` request from even being LOOKED
+    /// AT while another sibling's `SubagentAwait` blocked.
+    pub(crate) async fn drive_subagent_ready_batch(
+        &self,
+        node: NodeId,
+        batch: Vec<(GreenChain, String, Value)>,
+        table: &DataConTable,
+        green: &mut ModelRoundGreenThreadScheduler,
+    ) -> Result<(), DriverError> {
+        let sid = self.outer_sid()?;
+        let batch_ref = &batch;
+        let cap = self.concurrency_cap;
+        #[allow(clippy::type_complexity)]
+        let results: Vec<(usize, Result<Value, DriverError>)> =
+            drive_concurrent(cap, batch.len(), |idx| {
+                let (_, _, request) = &batch_ref[idx];
+                async move {
+                    self.service_outer_subagent(request, table, FormSource::Answerer { node })
+                        .await
+                }
+            })
+            .await;
+
+        let mut first_err: Option<DriverError> = None;
+        for (chain, hole, value) in batch
+            .into_iter()
+            .zip(results.into_iter().map(|(_, r)| r))
+            .filter_map(|((chain, hole, _), r)| match r {
+                Ok(v) => Some((chain, hole, v)),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    None
+                }
+            })
+        {
+            let next = self
+                .agent
+                .with_session_retrying(node, sid, |s| s.resume(ResidentHole::plain(hole), value))
+                .await
+                .map_err(|e| DriverError::Session(e.to_string()))?
+                .map_err(|e| DriverError::Session(format!("async subagent resume failed: {e}")))?;
+            green.ready.push_back(GreenReady {
+                chain,
+                outcome: next,
+            });
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Service one popped THREAD-chain ready item that is NOT fork-routed
-    /// (`service_green_round` drains and batches every fork-routed item via
-    /// [`Self::drive_fork_ready_batch`] before ever popping one for this
-    /// dispatcher): classify it against the round's compile artifacts (read
-    /// off the node's pending record — every chain of a round shares one
-    /// compile) and dispatch. Green suspensions go through the SHARED
-    /// [`Self::service_green_hole`] (raw resumes are correct for thread
-    /// frames); `note`/`getStateJson`/`delegate` get their immediate
-    /// service, raw-resumed. `askUser` and `finalize` inside a thread are
-    /// refused loudly — operator forms and the window's answer belong on the
-    /// main chain.
+    /// nor subagent-routed (`service_green_round` drains and batches every
+    /// fork-routed item via [`Self::drive_fork_ready_batch`] and every
+    /// subagent-routed item via [`Self::drive_subagent_ready_batch`] before
+    /// ever popping one for this dispatcher): classify it against the
+    /// round's compile artifacts (read off the node's pending record —
+    /// every chain of a round shares one compile) and dispatch. Green
+    /// suspensions go through the SHARED [`Self::service_green_hole`] (raw
+    /// resumes are correct for thread frames); `note`/`getStateJson`/
+    /// `delegate` get their immediate service, raw-resumed. `askUser` and
+    /// `finalize` inside a thread are refused loudly — operator forms and
+    /// the window's answer belong on the main chain.
     pub(crate) async fn service_thread_ready(
         &self,
         node: NodeId,
@@ -1257,25 +1359,16 @@ impl SelfHarnessDriver {
                 });
                 Ok(ThreadServiced::Continue)
             }
-            SuspensionRouting::Subagent => {
-                let value =
-                    self.service_outer_subagent(&request, &table, FormSource::Answerer { node })?;
-                let next = self
-                    .agent
-                    .with_session_retrying(node, sid, |s| {
-                        s.resume(ResidentHole::plain(hole.cont_id()), value)
-                    })
-                    .await
-                    .map_err(|e| DriverError::Session(e.to_string()))?
-                    .map_err(|e| {
-                        DriverError::Session(format!("thread subagent resume failed: {e}"))
-                    })?;
-                green.ready.push_back(GreenReady {
-                    chain,
-                    outcome: next,
-                });
-                Ok(ThreadServiced::Continue)
-            }
+            // Unreachable by construction, same reasoning as the `Fork` arm
+            // above: `service_green_round` drains and batches every
+            // SUBAGENT-routed ready item (`Self::drive_subagent_ready_batch`)
+            // BEFORE ever popping one for this per-item dispatcher.
+            SuspensionRouting::Subagent => Err(DriverError::Session(
+                "answerer green scheduler: a Subagent-routed ready item reached the \
+                 per-item dispatcher — service_green_round must drain and batch these \
+                 via drive_subagent_ready_batch before popping (scheduler bug)"
+                    .into(),
+            )),
             SuspensionRouting::Finalize { .. } => Ok(ThreadServiced::Misuse(
                 "a green thread called `finalize` — the session's answer belongs on the \
                  main chain: `wait` your threads, then finalize from the top level"
