@@ -59,8 +59,9 @@ orchestratorChecksContract :: Text -> Text
 orchestratorChecksContract renderedCheckLines = [fmt|
   The orchestrator runs these checks itself, in this worktree, after your turn,
   at whatever commit it leaves HEAD on — they are the record, not your summary
-  of them. It also owns every compilation gate: your shell has no ghc, so do not
-  attempt direct Haskell typechecking — leave that to the orchestrator:
+  of them. It also owns every compilation gate: your shell has no ghc, so workers
+  editing Haskell SHOULD run scripts/worker-typecheck.sh on each edited file
+  before finishing; leave direct compilation to the orchestrator:
 {renderedCheckLines}
 |]
 
