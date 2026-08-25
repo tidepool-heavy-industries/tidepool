@@ -122,11 +122,13 @@ module Tidepool.Event
 
     -- * Registration
   , withHandler
+  , withHandlerTry
   , pumpEff
   , drainSubscription
 
     -- * Blocking wait
   , nextEvent
+  , nextEventTry
   , awaitFirst
   , awaitSubscriptionRaw
 
@@ -152,6 +154,7 @@ import Control.Monad.Freer.Internal (Eff (..), qApp, tsingleton)
 import Tidepool.Async.Types (Async, asyncThreadId)
 import Tidepool.Effects
   ( CommitReceipt (..)
+  , EventError
   , EventId
   , HeadChangeKind (..)
   , HeadChangeReceipt (..)
@@ -257,6 +260,31 @@ withHandler ev handler body = do
   send (RepoEventUnsubscribe sub) >>= liftEither
   pure r
 
+-- | Like 'withHandler', but returns a subscription failure and delivers later
+-- drain or unsubscribe failures to the handler as 'Left' values. The body
+-- result remains available as @Right@ so the caller chooses the policy.
+withHandlerTry :: Event a -> (Either EventError a -> M ()) -> M b -> M (Either EventError b)
+withHandlerTry ev handler body = do
+  subscribed <- send (RepoEventSubscribe ev.eventWatches)
+  case subscribed of
+    Left err -> pure (Left err)
+    Right sub -> do
+      r <- pumpEff (drainSubscriptionTry ev handler sub) body
+      drainSubscriptionTry ev handler sub
+      unsubscribed <- send (RepoEventUnsubscribe sub)
+      case unsubscribed of
+        Left err -> handler (Left err)
+        Right () -> pure ()
+      pure (Right r)
+
+drainSubscriptionTry :: Event a -> (Either EventError a -> M ()) -> SubscriptionId -> M ()
+drainSubscriptionTry ev handler sub = do
+  batch <- send (RepoEventDrain sub)
+  case batch of
+    Left err -> handler (Left err)
+    Right observations ->
+      mapM_ (\o -> case ev.eventProject o of { Just a -> handler (Right a); Nothing -> pure () }) observations
+
 eventIdOf :: RepositoryEvent -> EventId
 eventIdOf (ObservedCommit eid _) = eid
 eventIdOf (ObservedHeadChange eid _) = eid
@@ -287,6 +315,31 @@ nextEvent ev = do
   r <- awaitFirst ev sub
   send (RepoEventUnsubscribe sub) >>= liftEither
   pure r
+
+-- | Like 'nextEvent', but returns subscription, await, or unsubscription
+-- failures as data instead of throwing them.
+nextEventTry :: Event a -> M (Either EventError (Observed a))
+nextEventTry ev = do
+  subscribed <- send (RepoEventSubscribe ev.eventWatches)
+  case subscribed of
+    Left err -> pure (Left err)
+    Right sub -> do
+      r <- awaitFirstTry ev sub
+      unsubscribed <- send (RepoEventUnsubscribe sub)
+      case r of
+        Left err -> pure (Left err)
+        Right observed -> case unsubscribed of
+          Left err -> pure (Left err)
+          Right () -> pure (Right observed)
+
+awaitFirstTry :: Event a -> SubscriptionId -> M (Either EventError (Observed a))
+awaitFirstTry ev sub = do
+  batch <- awaitSubscriptionRaw sub (-1)
+  case batch of
+    Left err -> pure (Left err)
+    Right observations -> case firstMatch ev observations of
+      Just observed -> pure (Right observed)
+      Nothing -> awaitFirstTry ev sub
 
 awaitFirst :: Event a -> SubscriptionId -> M (Observed a)
 awaitFirst ev sub = do
