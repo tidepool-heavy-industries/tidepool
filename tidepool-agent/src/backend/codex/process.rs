@@ -66,6 +66,10 @@ pub enum SessionError {
     Spawn(#[source] codex_codes::Error),
     #[error("request {method} timed out after {timeout:?}")]
     Timeout { method: String, timeout: Duration },
+    #[error(
+        "turn exceeded its configured deadline of {timeout:?}; worker may still have been running"
+    )]
+    TurnDeadlineExceeded { timeout: Duration },
     #[error("app-server closed the connection before responding to {method}")]
     Closed { method: String },
     #[error("app-server returned a JSON-RPC error for {method}: ({code}) {message}")]
@@ -646,17 +650,16 @@ impl<T: Transport> Session<T> {
 
     /// Read frames until the turn parks or completes.
     ///
-    /// The `timeout` bounds THIS segment only, not the whole turn: a parent
-    /// thinking for ten minutes between two pumps is not a hung backend, and
-    /// charging its time against a backend liveness budget would kill
-    /// healthy turns.
+    /// The `timeout` is the configured deadline for the turn pump, distinct
+    /// from [`REQUEST_TIMEOUT`]'s per-request/protocol timeout. If it expires,
+    /// the worker may still be running in the app-server, so preserve that
+    /// attribution rather than reporting the backend as unavailable. A parent
+    /// thinking between two pumps is outside this wait and does not consume
+    /// the deadline.
     async fn pump(&mut self, timeout: Duration) -> Result<TurnStop, SessionError> {
         tokio::time::timeout(timeout, self.pump_inner())
             .await
-            .map_err(|_| SessionError::Timeout {
-                method: codex_codes::methods::TURN_START.to_string(),
-                timeout,
-            })?
+            .map_err(|_| SessionError::TurnDeadlineExceeded { timeout })?
     }
 
     async fn pump_inner(&mut self) -> Result<TurnStop, SessionError> {
@@ -1045,6 +1048,60 @@ mod tests {
         async fn shutdown(self) -> Result<(), codex_codes::Error> {
             Ok(())
         }
+    }
+
+    struct PendingTransport;
+
+    impl Transport for PendingTransport {
+        async fn next_line(&mut self) -> Result<Option<String>, codex_codes::Error> {
+            std::future::pending().await
+        }
+        async fn send(&mut self, _frame: &Value) -> Result<(), codex_codes::Error> {
+            Ok(())
+        }
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        async fn shutdown(self) -> Result<(), codex_codes::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_deadline_from_the_pump_is_not_a_request_timeout() {
+        let mut session = Session::over(PendingTransport);
+        let timeout = Duration::from_millis(1);
+
+        let error = session
+            .pump(timeout)
+            .await
+            .expect_err("a pending turn must hit its configured deadline");
+
+        assert!(matches!(
+            error,
+            SessionError::TurnDeadlineExceeded { timeout: observed } if observed == timeout
+        ));
+        let detail = error.to_string();
+        assert!(
+            detail.contains("turn exceeded its configured deadline"),
+            "{detail}"
+        );
+        assert!(detail.contains("1ms"), "{detail}");
+        assert!(
+            detail.contains("worker may still have been running"),
+            "{detail}"
+        );
+        assert!(!detail.contains("request"), "{detail}");
+    }
+
+    #[test]
+    fn a_request_timeout_retains_request_level_attribution() {
+        let error = SessionError::Timeout {
+            method: "turn/start".to_string(),
+            timeout: Duration::from_secs(1),
+        };
+
+        assert_eq!(error.to_string(), "request turn/start timed out after 1s");
     }
 
     #[test]

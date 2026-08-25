@@ -827,11 +827,13 @@ pub(crate) fn project_activity(turn: &Turn) -> Vec<AgentActivity> {
 /// Project a transport/protocol failure into the seam's causes.
 ///
 /// The split is mine-vs-theirs: a dead or unreachable process is
-/// `BackendUnavailable` (every agent it hosted is lost); anything the server
-/// understood well enough to refuse, or that this crate could not encode or
-/// decode, is `ProtocolRejected` (a Tidepool bug or a version skew). Detail
-/// strings are the source error's own `Display`, verbatim — a reworded error
-/// is one more thing to keep in sync with the wire.
+/// `BackendUnavailable` (every agent it hosted is lost); a turn that exceeded
+/// its configured deadline is a worker runtime failure, even though the
+/// worker may still have been running; anything the server understood well
+/// enough to refuse, or that this crate could not encode or decode, is
+/// `ProtocolRejected` (a Tidepool bug or a version skew). Detail strings are
+/// the source error's own `Display`, verbatim — a reworded error is one more
+/// thing to keep in sync with the wire.
 pub(crate) fn map_session_error(error: SessionError) -> AgentBackendError {
     let detail = error.to_string();
     match error {
@@ -841,6 +843,7 @@ pub(crate) fn map_session_error(error: SessionError) -> AgentBackendError {
         | SessionError::OrphanedProcess { .. }
         | SessionError::CodexBinInvalid { .. }
         | SessionError::Transport(_) => AgentBackendError::BackendUnavailable { detail },
+        SessionError::TurnDeadlineExceeded { .. } => AgentBackendError::RunFailed { detail },
         SessionError::Rpc { .. }
         | SessionError::Decode { .. }
         | SessionError::Encode { .. }
@@ -1246,6 +1249,22 @@ mod tests {
                 "detail must be the source error's own words, verbatim"
             );
         }
+    }
+
+    #[test]
+    fn turn_deadline_is_a_run_failure_and_preserves_its_attribution() {
+        let error = SessionError::TurnDeadlineExceeded {
+            timeout: Duration::from_secs(30),
+        };
+        let detail = error.to_string();
+        assert!(detail.contains("turn exceeded its configured deadline"));
+        assert!(detail.contains("30s"));
+        assert!(detail.contains("worker may still have been running"));
+
+        assert_eq!(
+            map_session_error(error),
+            AgentBackendError::RunFailed { detail }
+        );
     }
 
     #[test]
