@@ -49,9 +49,10 @@ members _ v          = pure v
 -- | Access the nth element of a JSON array.
 nth :: Int -> Traversal' Value Value
 nth i f (Array a)
-  | i >= 0 && i < length a =
-      let (before, x:after) = splitAt i a
-      in (\v' -> Array (before ++ [v'] ++ after)) <$> f x
+  | i >= 0 && i < length a = case splitAt i a of
+      (before, x:after) ->
+        (\v' -> Array (before ++ [v'] ++ after)) <$> f x
+      (_, []) -> pure (Array a)
 nth _ _ v = pure v
 
 -- | Traverse all values in a JSON array.

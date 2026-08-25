@@ -31,6 +31,12 @@ import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset
+  , WarningFlag
+      ( Opt_WarnMissingFields
+      , Opt_WarnIncompletePatterns
+      , Opt_WarnIncompleteUniPatterns
+      )
+  , wopt_set, wopt_set_fatal
   , packageFlags, PackageFlag(..), PackageArg(..), ModRenaming(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
@@ -1473,6 +1479,11 @@ externalVarModules known = go
 --     "(Some bindings suppressed …)" stub) the relevant-bindings list.
 canonicalizeDFlags :: DynFlags -> DynFlags
 canonicalizeDFlags dflags =
+  -- Config-class code must fail during compilation: a missing record field
+  -- became a lazy runtime crash on 2026-08-25 instead of failing loud here.
+  promoteConfigSafetyWarning Opt_WarnMissingFields $
+  promoteConfigSafetyWarning Opt_WarnIncompletePatterns $
+  promoteConfigSafetyWarning Opt_WarnIncompleteUniPatterns $
   -- Trim machine-channel noise: typed-hole "Valid hole fits include …" lists
   -- are enormous (dozens of candidates) and useless to an LLM caller; the
   -- "Perhaps you meant …" similar-name hints are a separate mechanism and stay.
@@ -1498,6 +1509,10 @@ canonicalizeDFlags dflags =
         , maxRelevantBinds = Just 0
         }) Opt_FullLaziness) Opt_CprAnal)
         Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
+
+promoteConfigSafetyWarning :: WarningFlag -> DynFlags -> DynFlags
+promoteConfigSafetyWarning warning =
+  (`wopt_set_fatal` warning) . (`wopt_set` warning)
 
 -- | #313 fix: disambiguate top-level simplifier floats across modules.
 --
