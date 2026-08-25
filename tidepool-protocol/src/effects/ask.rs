@@ -8,6 +8,37 @@
 //! Hand-carried Haskell decl: `tidepool-mcp/src/effect_defs.rs`'s `AskWith`
 //! verb. NOT in [`crate::effects::all`] — see
 //! [`crate::effects::suspension_roster`].
+//!
+//! **Why this effect stays hand-carried while Fork/Finalize/RunLLMTurn/Green
+//! (the rest of #20's deferred five) all flipped.** Those four shared one
+//! representable shape — OPAQUE call-forwarding to a `*Sited` sibling,
+//! `unsafeCoerce`-marshaling a `send` result — which
+//! [`crate::schema::HelperBody::OpaqueForward`]/`OpaqueSited` now express as
+//! reviewed, bounded data. `Ask`'s own helpers are a DIFFERENT kind of thing
+//! entirely: `ask` builds its payload by calling `schemaToValue` (not a bare
+//! `send (Ctor …)`), and `isOpt`/`innerSchema`/`schemaToValue` are ordinary
+//! multi-equation pure Haskell functions recursing over the `Schema` sum —
+//! no verb, no `send`, no site id, no OPAQUE pragma. They are exactly the
+//! case `crate::schema::Helper`'s own doc names: "a helper that is neither
+//! [a verb-wrapper] [nor a projection] is not representable, and stays
+//! hand-written OUTSIDE the contract until its lane makes it a deliberate
+//! schema feature." Modeling arbitrary pattern-matching function bodies as
+//! schema data would mean a general-purpose "Haskell expression as data"
+//! mechanism — not a bounded extension sized to a handful of real uses, and
+//! exactly the raw-hatch-by-another-name this schema's no-raw-hatch rule
+//! exists to refuse.
+//!
+//! **This is the concrete motivating case for the parked #24 one-home rule**
+//! (stdlib-vs-generator ownership, `plans/README.md`'s carried-forward
+//! list): `isOpt`/`innerSchema`/`schemaToValue` are STDLIB-shaped code (pure
+//! functions over a schema type), not DECL-shaped code (a thin verb
+//! surface) — the likely #24 resolution is that helpers like these migrate
+//! to `haskell/lib` (imported via the preamble, the same relocation
+//! Worktree's/RepoEvent's own non-representable helpers already took — see
+//! `worktree.rs`/`event.rs`'s module docs) and this effect's decl block
+//! shrinks to `ask`'s own thin verb wrapper, rather than the generator ever
+//! learning to express arbitrary function bodies. Not decided or started
+//! here — #24 is still parked, this module is just its waiting example.
 
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};

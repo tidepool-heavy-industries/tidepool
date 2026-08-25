@@ -685,6 +685,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "awaitSubscriptionRaw",
             ctor: Some("RepoEventAwait"),
+            substrate: false,
             doc: &[
                 "Block until `sub` has queued at least one observation, or",
                 "`timeoutMs` elapses (negative blocks with no deadline). An elapsed",
@@ -696,6 +697,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "mailboxNew",
             ctor: Some("MailboxNew"),
+            substrate: false,
             doc: &[
                 "Mint a fresh mailbox: an event source only the caller (and whoever",
                 "it hands the id to) can send into.",
@@ -705,6 +707,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "mailboxSend",
             ctor: Some("MailboxSend"),
+            substrate: false,
             doc: &[
                 "Send never blocks: append and return. A burst of sends sharing",
                 "`key` coalesces to the LAST payload.",
@@ -714,6 +717,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "mailboxDrop",
             ctor: Some("MailboxDrop"),
+            substrate: false,
             doc: &[
                 "Drop a mailbox. A later send against it is",
                 "`Left (EventUnknownMailbox _)`.",

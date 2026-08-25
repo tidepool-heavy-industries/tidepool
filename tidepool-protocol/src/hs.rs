@@ -47,6 +47,13 @@ pub enum HsType {
     Either(Box<HsType>, Box<HsType>),
     /// `(A, B, …)`.
     Tuple(Vec<HsType>),
+    /// `A -> B` — a function type. Used ONLY by `Green`'s `AsyncSpawnWith`
+    /// GADT constructor field (`Int -> M ()`, the async thread body) — the
+    /// sole function-typed field in this whole closed language; see
+    /// `tidepool-protocol/src/effects/green.rs`'s
+    /// `HelperBody::AsyncSpawnBody` doc for why it is forced concrete rather
+    /// than row-polymorphic.
+    Fn(Box<HsType>, Box<HsType>),
 }
 
 impl HsType {
@@ -68,7 +75,18 @@ impl HsType {
         HsType::Either(Box::new(err), Box::new(ok))
     }
 
-    /// Bare rendering. Use in arrow-argument position and at the top level.
+    /// `A -> B`.
+    #[must_use]
+    pub fn func(arg: HsType, ret: HsType) -> Self {
+        HsType::Fn(Box::new(arg), Box::new(ret))
+    }
+
+    /// Bare rendering. Use in arrow-argument position and at the top level —
+    /// EXCEPT for an argument that is itself [`HsType::Fn`], which still
+    /// needs parenthesizing there (`->` is right-associative, so an
+    /// unparenthesized function-typed argument reassociates into a longer
+    /// curried chain instead of one higher-order argument) — see
+    /// [`render_signature`], the one caller with a function-typed argument.
     #[must_use]
     pub fn render(&self) -> String {
         match self {
@@ -87,6 +105,7 @@ impl HsType {
                 let inner: Vec<String> = ts.iter().map(HsType::render).collect();
                 format!("({})", inner.join(", "))
             }
+            HsType::Fn(a, b) => format!("{} -> {}", a.render_arrow_left(), b.render()),
         }
     }
 
@@ -99,7 +118,20 @@ impl HsType {
     #[must_use]
     pub fn render_app_arg(&self) -> String {
         match self {
-            HsType::Maybe(_) | HsType::Either(_, _) => format!("({})", self.render()),
+            HsType::Maybe(_) | HsType::Either(_, _) | HsType::Fn(_, _) => {
+                format!("({})", self.render())
+            }
+            _ => self.render(),
+        }
+    }
+
+    /// Rendering for the LEFT side of an outer `->`: parenthesized exactly
+    /// when `self` is itself [`HsType::Fn`] (`(A -> B) -> C`, never `A -> B
+    /// -> C`, which would parse as `A -> (B -> C)`). Every other shape is
+    /// already unambiguous there, same as [`Self::render`].
+    fn render_arrow_left(&self) -> String {
+        match self {
+            HsType::Fn(_, _) => format!("({})", self.render()),
             _ => self.render(),
         }
     }
@@ -107,14 +139,16 @@ impl HsType {
 
 /// Render a curried Haskell signature: `A -> B -> <head> <result>`.
 ///
-/// `args` are rendered bare (arrow-argument position); `result` is rendered as
-/// a type-application argument, because it is applied to `head` (`Exec`, or the
+/// `args` are rendered bare (arrow-argument position) — EXCEPT a function-typed
+/// argument, which still needs parenthesizing there (see
+/// [`HsType::render_arrow_left`]'s doc); `result` is rendered as a
+/// type-application argument, because it is applied to `head` (`Exec`, or the
 /// `M` alias in a helper signature).
 #[must_use]
 pub fn render_signature(args: &[HsType], head: &str, result: &HsType) -> String {
     let mut out = String::new();
     for a in args {
-        out.push_str(&a.render());
+        out.push_str(&a.render_arrow_left());
         out.push_str(" -> ");
     }
     out.push_str(head);
@@ -131,14 +165,59 @@ pub fn render_signature(args: &[HsType], head: &str, result: &HsType) -> String 
 /// its own to write against — `M` is a per-agent-session shim concept).
 #[must_use]
 pub fn render_member_signature(args: &[HsType], effect: &str, result: &HsType) -> String {
-    let mut out = format!("forall effs. Member {effect} effs => ");
+    render_member_signature_with(&[], args, effect, result)
+}
+
+/// [`render_member_signature`], generalized for an OPAQUE substrate helper
+/// whose `Member` row entry is a PARAMETERIZED effect head (`Finalize v`,
+/// needing `Member (Finalize v) effs`, not `Member Finalize v effs`) and/or
+/// which forall's its own extra type variables ahead of `effs` (`finalize ::
+/// forall v a effs. …` — `v` doubles as the head's own applied parameter,
+/// `a` is free).
+///
+/// `effect_head` is parenthesized in the `Member` clause exactly when it is
+/// an application (contains a space) — the same rule
+/// [`HsType::render_app_arg`] applies to a real `HsType`, spelled out here
+/// because the head is a plain rendered string (`Effect::head()`), not an
+/// `HsType`.
+#[must_use]
+pub fn render_member_signature_with(
+    extra_tyvars: &[&str],
+    args: &[HsType],
+    effect_head: &str,
+    result: &HsType,
+) -> String {
+    let mut out = String::from("forall ");
+    for tv in extra_tyvars {
+        out.push_str(tv);
+        out.push(' ');
+    }
+    out.push_str("effs. Member ");
+    out.push_str(&paren_if_applied(effect_head));
+    out.push_str(" effs => ");
     for a in args {
-        out.push_str(&a.render());
+        out.push_str(&a.render_arrow_left());
         out.push_str(" -> ");
     }
     out.push_str("Eff effs ");
     out.push_str(&result.render_app_arg());
     out
+}
+
+/// Parenthesize a rendered effect head exactly when it is an application
+/// (`Finalize v`) rather than a single atom (`RunLLMTurn`) — correct in
+/// `Member` position, the same rule [`HsType::render_app_arg`] applies to a
+/// real type, spelled out for a plain string because [`Effect::head`]
+/// renders one, not an [`HsType`].
+///
+/// [`Effect::head`]: crate::schema::Effect::head
+#[must_use]
+fn paren_if_applied(head: &str) -> String {
+    if head.contains(' ') {
+        format!("({head})")
+    } else {
+        head.to_string()
+    }
 }
 
 #[cfg(test)]

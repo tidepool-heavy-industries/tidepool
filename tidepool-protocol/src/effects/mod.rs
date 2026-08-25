@@ -24,16 +24,16 @@ use crate::schema::Effect;
 
 /// Every effect whose contract this crate owns AND generates files for.
 ///
-/// `AskUser`/`ReadState` sit alongside the four dispatched base effects here
-/// even though they have no `tidepool-handlers` `EffectHandler`
-/// (`Effect::dispatched` is `false` for both) — `decl_rs` still owns their
-/// Haskell decl text; `crate::gen::all_files` reads `dispatched` to skip
-/// `handler_rs`/`wire_rs`/`adapter_rs` for them rather than emitting glue for
-/// a handler that does not exist. They are ALSO listed in
-/// [`suspension_roster`] (a different generator, `harness_req_rs`, needs
-/// their decode-only request enum) — being in both lists is expected, not a
-/// duplication: two generators reading the same effect data for two disjoint
-/// purposes.
+/// `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green` sit alongside
+/// the four dispatched base effects here even though they have no
+/// `tidepool-handlers` `EffectHandler` (`Effect::dispatched` is `false` for
+/// all six) — `decl_rs` still owns their Haskell decl text; `crate::gen::
+/// all_files` reads `dispatched` to skip `handler_rs`/`wire_rs`/`adapter_rs`
+/// for them rather than emitting glue for a handler that does not exist.
+/// They are ALSO listed in [`suspension_roster`] (a different generator,
+/// `harness_req_rs`, needs their decode-only request enum) — being in both
+/// lists is expected, not a duplication: two generators reading the same
+/// effect data for two disjoint purposes.
 #[must_use]
 pub fn all() -> Vec<Effect> {
     vec![
@@ -43,6 +43,10 @@ pub fn all() -> Vec<Effect> {
         event::event(),
         ask_user::ask_user(),
         read_state::read_state(),
+        run_llm_turn::run_llm_turn(),
+        fork::fork(),
+        finalize::finalize(),
+        green::green(),
     ]
 }
 
@@ -64,22 +68,26 @@ pub fn all_described() -> Vec<Effect> {
 /// `classify_hole` needs constructor names + payload shapes for, generated as
 /// decode-only request enums into `tidepool-harness/src/generated/`.
 ///
-/// #20 steps 2-3: `AskUser`/`ReadState`'s Haskell decl text has fully flipped
-/// onto [`crate::gen::decl_rs`] (see [`all`]'s doc) — they stay listed here
-/// too because `harness_req_rs` (this generator) and `decl_rs` are disjoint
-/// GENERATORS reading the same effect data for disjoint purposes, not because
-/// the effects themselves are unmigrated. `Ask`/`RunLlmTurn`/`Finalize`/
-/// `Fork`/`Green`'s decl text remains hand-carried in
-/// `tidepool-mcp/src/effect_defs.rs`: their GADT/verb shape is fully
-/// schema-described (including `Finalize`'s real invocation-site
-/// [`crate::schema::Polymorphism::ArgBound`]), but their surface HELPER text
-/// (OPAQUE pragmas, `Member`-polymorphic `*Sited` delegation, `unsafeCoerce`
-/// marshaling) is not yet representable by [`crate::schema::HelperBody`]'s
-/// reviewed shapes — see each module's own doc. `Console`/`Subagent` stay
-/// hand-carried for an unrelated reason: their macro ALSO feeds a real
+/// #20 steps 2-3: `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`'s
+/// Haskell decl text has fully flipped onto [`crate::gen::decl_rs`] (see
+/// [`all`]'s doc) — they stay listed here too because `harness_req_rs` (this
+/// generator) and `decl_rs` are disjoint GENERATORS reading the same effect
+/// data for disjoint purposes, not because the effects themselves are
+/// unmigrated. `Ask`'s decl text remains hand-carried in
+/// `tidepool-mcp/src/effect_defs.rs`: its GADT/verb shape is fully
+/// schema-described, but its surface helpers (`ask`, `isOpt`, `innerSchema`,
+/// `schemaToValue`) are ordinary pure Haskell functions over the `Schema`
+/// sum — not OPAQUE, not `*Sited`, wrapping no verb — so [`HelperBody`]'s
+/// reviewed shapes (including the OPAQUE+Sited family that unblocked the
+/// other five) cannot express them, and representing arbitrary
+/// pattern-matching function bodies as schema data would be a new
+/// general-purpose mechanism, not a bounded extension — see [`ask`]'s own
+/// module doc and this schema's `Helper` doc ("a helper that is neither of
+/// those… stays hand-written OUTSIDE the contract"). `Console`/`Subagent`
+/// stay hand-carried for an unrelated reason: their macro ALSO feeds a real
 /// `tidepool-handlers` `EffectHandler` projection, so flipping either would
 /// need `tidepool-handlers` edits, out of this migration's scope (see each
-/// module's `dispatched` doc). None of these five flip through
+/// module's `dispatched` doc). `Ask`/`Console`/`Subagent` do not flip through
 /// [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/[`crate::gen::handler_rs`]/
 /// [`crate::gen::adapter_rs`], only through [`crate::gen::harness_req_rs`].
 /// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/
@@ -87,6 +95,8 @@ pub fn all_described() -> Vec<Effect> {
 /// generated into `tidepool-handlers`, and `tidepool-harness` (a dependent of
 /// that crate already) reuses them directly rather than duplicating a second
 /// generated copy.
+///
+/// [`HelperBody`]: crate::schema::HelperBody
 #[must_use]
 pub fn suspension_roster() -> Vec<Effect> {
     vec![

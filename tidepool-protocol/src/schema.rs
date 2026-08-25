@@ -9,11 +9,28 @@
 //! answering them: a verb missing a handling-class annotation fails
 //! generation, not runtime — but no phase-1 generator reads them yet.
 
-use crate::hs::{render_signature, HsType};
+use crate::hs::{render_member_signature_with, render_signature, HsType};
 pub use crate::types::{
     AdapterKind, DomainMap, IdentityPayload, JsonInstance, RecordField, SumVariant, TypeDef,
     TypeShape, Validation, WireDerive, WireDerives,
 };
+
+/// The sentinel a substrate helper's rendered text carries as its first
+/// line — verbatim what `tidepool-mcp`'s `describe::helper_is_substrate`
+/// checks for, and what `effect_defs.rs`'s `helper_text!` macro's `raw
+/// substrate […]` arm emits via its own `substrate_marker!()` macro.
+///
+/// Two literal copies of this exact string necessarily exist: this one
+/// (plain Rust, used by [`Helper::render`] below) and `substrate_marker!()`
+/// in `tidepool-mcp` (a `macro_rules!` literal, spliced into other macros'
+/// `concat!` calls, which require a literal token — a `const` path cannot
+/// stand in for one, so that macro cannot simply reference this constant).
+/// This is a structural consequence of the `concat!` constraint, not a
+/// maintenance choice: `tidepool-mcp/tests/effect_roster_sentinel.rs`'s
+/// `substrate_marker_matches_the_schema_constant` cross-checks the two
+/// literals stay byte-identical, converting the "must stay in sync" comment
+/// into an enforced invariant.
+pub const SUBSTRATE_MARKER: &str = "-- @substrate-helper@";
 
 // ---------------------------------------------------------------------------
 // Effect
@@ -278,6 +295,44 @@ impl Effect {
         Ok(cur)
     }
 
+    /// Look up a sum type's variant ctors — the derivation behind
+    /// [`HelperBody::VariantRender`] and [`HelperBody::IntDecode`]. Checks
+    /// this effect's `type_defs` first, then its `errors` ADT (an ADT that
+    /// rides `errors` rather than `type_defs` — see `run_llm_turn.rs`'s
+    /// `InvocationExit` — is a sum too; [`ErrorAdt`] just names its fields
+    /// differently). Owned, not borrowed: the `errors` case synthesizes
+    /// [`SumVariant`]s on the fly, so there is nothing to hand back a
+    /// reference to.
+    ///
+    /// # Errors
+    /// Returns a message naming the problem: `name` is not declared by this
+    /// effect, or it is declared but is not a sum.
+    pub fn sum_variants(&self, name: &str) -> Result<Vec<SumVariant>, String> {
+        if let Some(td) = self.type_def(name) {
+            return match &td.shape {
+                TypeShape::Sum { variants } => Ok(variants.clone()),
+                _ => Err(format!("{}: `{name}` is not a sum type", self.name)),
+            };
+        }
+        if let Some(adt) = &self.errors {
+            if adt.name == name {
+                return Ok(adt
+                    .variants
+                    .iter()
+                    .map(|v| SumVariant {
+                        ctor: v.ctor,
+                        fields: v.fields.iter().map(|f| f.ty.clone()).collect(),
+                        doc: &[],
+                    })
+                    .collect());
+            }
+        }
+        Err(format!(
+            "{}: `{name}` is not a type_defs entry (or the errors ADT) of this effect",
+            self.name
+        ))
+    }
+
     /// Every rendered `type_defs` entry, in emission order: every shape
     /// declaration in schema order, then every `ToJSON` instance in schema
     /// order, then the derived error ADT.
@@ -503,9 +558,70 @@ impl Effect {
                 }
                 continue;
             }
+            // The other pure shape: also wraps no verb, so it renders a
+            // locally-declared sum instead of any `send`.
+            if let HelperBody::VariantRender {
+                type_name,
+                prefixes,
+                ..
+            } = &h.body
+            {
+                if h.ctor.is_some() {
+                    errs.push(format!(
+                        "{}: helper {} is a pure variant-render but names a verb; \
+                         it wraps none",
+                        self.name, h.name
+                    ));
+                }
+                match self.sum_variants(type_name) {
+                    Ok(variants) => {
+                        if prefixes.len() != variants.len() {
+                            errs.push(format!(
+                                "{}: helper {} has {} prefix(es) but `{type_name}` has {} \
+                                 variant(s)",
+                                self.name,
+                                h.name,
+                                prefixes.len(),
+                                variants.len()
+                            ));
+                        }
+                        for v in variants {
+                            if !matches!(v.fields.as_slice(), [HsType::Text]) {
+                                errs.push(format!(
+                                    "{}: helper {} renders `{type_name}`, whose variant \
+                                     `{}` does not carry exactly one Text field",
+                                    self.name, h.name, v.ctor
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => errs.push(format!("{}: helper {}: {e}", self.name, h.name)),
+                }
+                continue;
+            }
+            // A call-forwarding stub also wraps no verb — its own `params`
+            // carry every type this shape needs.
+            if let HelperBody::OpaqueForward { target, .. } = &h.body {
+                if h.ctor.is_some() {
+                    errs.push(format!(
+                        "{}: helper {} is an OPAQUE forward but names a verb; \
+                         it calls a sibling helper instead",
+                        self.name, h.name
+                    ));
+                }
+                if !self.helpers.iter().any(|h2| h2.name == *target) {
+                    errs.push(format!(
+                        "{}: helper {} forwards to `{target}`, which is not a helper \
+                         of this effect",
+                        self.name, h.name
+                    ));
+                }
+                continue;
+            }
             let Some(ctor) = h.ctor else {
                 errs.push(format!(
-                    "{}: helper {} names no verb, but only a pure projection may",
+                    "{}: helper {} names no verb, but only a pure projection, \
+                     variant-render, or OPAQUE forward may",
                     self.name, h.name
                 ));
                 continue;
@@ -540,6 +656,95 @@ impl Effect {
                     params.len(),
                     v.ctor
                 )),
+                HelperBody::OpaqueSited {
+                    site_param,
+                    params,
+                    ctor_args,
+                    ..
+                } => {
+                    if ctor_args.len() != arity {
+                        errs.push(format!(
+                            "{}: helper {} builds {} constructor argument(s) but {} takes \
+                             {arity}",
+                            self.name,
+                            h.name,
+                            ctor_args.len(),
+                            v.ctor
+                        ));
+                    }
+                    let known: Vec<&str> =
+                        params.iter().map(|a| a.name).chain([*site_param]).collect();
+                    for a in ctor_args {
+                        let referenced = match a {
+                            SitedCtorArg::Param(p) | SitedCtorArg::IntercalateNewline(p) => {
+                                vec![*p]
+                            }
+                            SitedCtorArg::Object(fields) => fields
+                                .iter()
+                                .filter_map(|(_, v)| match v {
+                                    ObjectValue::Param(p) => Some(*p),
+                                    _ => None,
+                                })
+                                .collect(),
+                            SitedCtorArg::Site => Vec::new(),
+                        };
+                        for p in referenced {
+                            if !known.contains(&p) {
+                                errs.push(format!(
+                                    "{}: helper {} references `{p}`, which is not a \
+                                     declared parameter or the site id",
+                                    self.name, h.name
+                                ));
+                            }
+                        }
+                    }
+                }
+                HelperBody::IntDecode {
+                    params,
+                    cases,
+                    default,
+                    result_type,
+                } => {
+                    if params.len() != arity {
+                        errs.push(format!(
+                            "{}: helper {} passes {} parameter(s) but {} takes {arity}",
+                            self.name,
+                            h.name,
+                            params.len(),
+                            v.ctor
+                        ));
+                    }
+                    match self.sum_variants(result_type) {
+                        Ok(variants) => {
+                            for (_, target) in *cases {
+                                if !variants.iter().any(|sv| sv.ctor == *target) {
+                                    errs.push(format!(
+                                        "{}: helper {} decodes to `{target}`, which is not \
+                                         a variant of `{result_type}`",
+                                        self.name, h.name
+                                    ));
+                                }
+                            }
+                            if !variants.iter().any(|sv| sv.ctor == *default) {
+                                errs.push(format!(
+                                    "{}: helper {} defaults to `{default}`, which is not a \
+                                     variant of `{result_type}`",
+                                    self.name, h.name
+                                ));
+                            }
+                        }
+                        Err(e) => errs.push(format!("{}: helper {}: {e}", self.name, h.name)),
+                    }
+                }
+                HelperBody::AsyncSpawnBody { done_ctor, .. } => {
+                    if self.verb(done_ctor).is_none() {
+                        errs.push(format!(
+                            "{}: helper {} completes via `{done_ctor}`, which is not a verb \
+                             of this effect",
+                            self.name, h.name
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -660,12 +865,36 @@ fn named_types(ty: &HsType) -> Vec<&'static str> {
     match ty {
         HsType::Named(n) => vec![n],
         HsType::List(t) | HsType::Maybe(t) => named_types(t),
-        HsType::Either(a, b) => {
+        HsType::Either(a, b) | HsType::Fn(a, b) => {
             let mut v = named_types(a);
             v.extend(named_types(b));
             v
         }
         HsType::Tuple(ts) => ts.iter().flat_map(named_types).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every [`HsType::Var`] appearing anywhere inside `ty`.
+///
+/// Ordinary Hindley-Milner-polymorphic helpers (`Green`'s `asyncResult ::
+/// forall a effs. Member Green effs => Int -> Eff effs a`) have a free type
+/// variable in their `ret`/args that is NOT one of the effect's own applied
+/// `type_params` — [`Helper::render`]'s shared thin-wrapper path uses this to
+/// widen the `forall` beyond `effs`, the same way a hand-written signature
+/// would name `a` explicitly. Every already-migrated effect before `Green`
+/// happened to have only monomorphic verbs, so this returns `[]` for them —
+/// widening the forall is a no-op, not a behavior change.
+fn free_type_vars(ty: &HsType) -> Vec<&'static str> {
+    match ty {
+        HsType::Var(v) => vec![v],
+        HsType::List(t) | HsType::Maybe(t) => free_type_vars(t),
+        HsType::Either(a, b) | HsType::Fn(a, b) => {
+            let mut v = free_type_vars(a);
+            v.extend(free_type_vars(b));
+            v
+        }
+        HsType::Tuple(ts) => ts.iter().flat_map(free_type_vars).collect(),
         _ => Vec::new(),
     }
 }
@@ -795,6 +1024,14 @@ pub struct Helper {
     /// `runArgv` needed the raw escape hatch under the old grammar, and is the
     /// one-line affordance that retires it.
     pub doc: &'static [&'static str],
+    /// Is this an implementation-detail helper (extract-layer plumbing: a
+    /// `*Sited` call-site-id wrapper, a raw thread primitive) that a model
+    /// should not call directly? Emits [`SUBSTRATE_MARKER`] as the rendered
+    /// text's own first line — `tidepool-mcp`'s derived model-facing index
+    /// excludes any helper text carrying it, same mechanism as the
+    /// hand-written registry's `raw substrate […]` form. `false` for every
+    /// ordinary public helper.
+    pub substrate: bool,
     /// The wrapper's shape.
     pub body: HelperBody,
 }
@@ -867,6 +1104,159 @@ pub enum HelperBody {
         /// failure instead of a GHC error.
         fields: &'static [&'static str],
     },
+    /// `{-# OPAQUE v #-}` / `v :: forall <tyvars,>effs. Member (<head>) effs
+    /// => … -> Eff effs <ret>` / `v params = <target> 0 params` — a
+    /// call-forwarding stub whose real work happens in `target`, a sibling
+    /// [`HelperBody::OpaqueSited`] helper the extractor head-swaps THIS
+    /// binding's call sites to, substituting a fresh per-call-site literal
+    /// `Int` for the `0` here (`Translate.hs`, matched by name). OPAQUE keeps
+    /// the binding un-inlined and un-w/w'd so the by-name match survives
+    /// `-O2`. The declared `params`/`ret` are independent of the underlying
+    /// verb's own wire shape — see [`HelperBody::OpaqueSited`]'s doc for why.
+    ///
+    /// Four real uses: `finalize`/`runLLMTurn`/`runLLMTurnFork`/
+    /// `runLLMTurnFanout`, each forwarding to its own `*Sited` sibling.
+    OpaqueForward {
+        /// Type variables forall'd ahead of `effs`, beyond the effect's own
+        /// applied head parameters (`["a"]`, or `["v", "a"]` for `finalize`,
+        /// whose `v` is ALSO the head's own applied parameter — see
+        /// [`Polymorphism::ArgBound`]).
+        tyvars: &'static [&'static str],
+        /// Surface parameters, in order.
+        params: Vec<Arg>,
+        /// The `*Sited` sibling helper this forwards to, called with a
+        /// literal site id of `0`.
+        target: &'static str,
+        /// The DECLARED result type — independent of any verb, because an
+        /// OPAQUE forwarding stub never actually runs as declared.
+        ret: HsType,
+    },
+    /// `{-# OPAQUE v #-}` / `v :: forall <tyvars,>effs. Member (<head>) effs
+    /// => Int -> … -> Eff effs <ret>` / `v sid params = [unsafeCoerce <$>
+    /// ]send (<Ctor> <ctor_args…>)` — the executing half of the OPAQUE+Sited
+    /// delegation pattern: `forkSited`/`forkAllSited`/`runLLMTurnSited`/
+    /// `runLLMTurnForkSited`/`runLLMTurnFanoutSited`/`finalizeSited`.
+    ///
+    /// The declared `params`/`ret` are independent of the wrapped verb's own
+    /// GADT field types (which stay `Value`/`CoreValue` — see the verb's own
+    /// `RustBinding`): the extractor only checks the CALLER's answer type is
+    /// monomorphic (`Translate.hs`'s `checkRunLLMTurnType`) before resuming
+    /// with a value the caller validated against that exact type, so
+    /// `unsafeCoerce` here is a same-representation relabeling, not a
+    /// genuine type change — see `run_llm_turn.rs`'s module doc.
+    ///
+    /// Five real `unsafeCoerce` uses (`coerce: true`); `finalizeSited` is the
+    /// sixth, sharing this OPAQUE+Sited shape with `coerce: false` because
+    /// its value crosses at its own native representation (`v` itself, never
+    /// `Value`) the whole way — see `finalize.rs`'s module doc.
+    OpaqueSited {
+        /// Type variables forall'd ahead of `effs`, beyond the effect's own
+        /// applied head parameters.
+        tyvars: &'static [&'static str],
+        /// The site-id parameter's name (conventionally `"sid"`).
+        site_param: &'static str,
+        /// Surface value parameters, in order, after the site id.
+        params: Vec<Arg>,
+        /// How each of the wrapped verb's constructor arguments is actually
+        /// built from `site_param`/`params` — [`Effect::validate`] checks
+        /// this has the same length as the verb's own `args`.
+        ctor_args: Vec<SitedCtorArg>,
+        /// Does the `send` result get `unsafeCoerce`'d?
+        coerce: bool,
+        /// The DECLARED result type — independent of the verb's own `ret`.
+        ret: HsType,
+    },
+    /// `v (Ctor1 d) = "<prefix1>" <> d` / `v (Ctor2 d) = "<prefix2>" <> d` /
+    /// … — render a locally-declared closed sum by prefixing each variant's
+    /// sole `Text` field. No verb, no `send`, no effect: a pure display
+    /// function, the same "wraps nothing" family as [`HelperBody::Projection`].
+    ///
+    /// One real use: `renderInvocationExit` (`run_llm_turn.rs`), displaying
+    /// the typed exit a forked child's abnormal ending folds as.
+    VariantRender {
+        /// The Haskell name of the `type_defs` entry to render — must be a
+        /// [`TypeShape::Sum`] this effect declares, every variant carrying
+        /// exactly one `Text` field.
+        type_name: &'static str,
+        /// The pattern variable each equation binds its variant's field to.
+        binder: &'static str,
+        /// One prefix per variant, in the type's own declaration order.
+        prefixes: Vec<&'static str>,
+    },
+    /// `v params = decode <$> send (Ctor params) where decode <lit> = <Ctor>`
+    /// … `decode _ = <default>` — decode a verb's raw `Int` result into a
+    /// locally-declared closed enum by literal-int case, with a fallback
+    /// variant. One real use: `asyncStatus` (`green.rs`), decoding
+    /// `AsyncStatusWith`'s wire `Int` into `AsyncStatus`.
+    IntDecode {
+        /// Surface value parameters, in order — forwarded to the verb
+        /// verbatim (the decode happens only on the RESULT).
+        params: &'static [&'static str],
+        /// `(wire int literal, target variant ctor)` pairs, checked in
+        /// `where`-clause order.
+        cases: &'static [(i64, &'static str)],
+        /// The fallback variant when no case matches.
+        default: &'static str,
+        /// The Haskell name of the `type_defs` entry `decode` returns — must
+        /// be a [`TypeShape::Sum`] this effect declares, covering every
+        /// `cases` target and `default`.
+        result_type: &'static str,
+    },
+    /// `v param = send (Ctor 0 (\_ -> param >>= \result_param -> send
+    /// (<done_ctor> 0 result_param)))` — spawn a green thread whose body's
+    /// last act suspends carrying its own result, the return trip crossing
+    /// by the same field the spawn's body crossed out by.
+    ///
+    /// Fixed to the concrete `M`, never `Eff effs` — the ONE case in this
+    /// migration where an effect's `helpers_row_polymorphic: true` does not
+    /// apply to one of its own helpers, forced by the wire shape rather than
+    /// a body dependency: the wrapped verb's own constructor field type is
+    /// `Int -> M ()` (see the verb's own `body` arg, bound
+    /// [`RustBinding::CoreValue`]), so the lambda passed to it must have
+    /// that exact type, which forces this helper's own `body :: M a`. One
+    /// real use: `asyncSpawn` (`green.rs`).
+    AsyncSpawnBody {
+        /// The parameter naming the thread body (conventionally `"body"`).
+        param: &'static str,
+        /// The parameter naming the completed value inside the body's own
+        /// continuation (conventionally `"v"`).
+        result_param: &'static str,
+        /// The sibling verb constructor a completing thread suspends with
+        /// (`"AsyncDoneWith"`).
+        done_ctor: &'static str,
+    },
+}
+
+/// One argument passed to an underlying GADT constructor by an
+/// [`HelperBody::OpaqueSited`] helper — built only from the helper's own
+/// site-id and value parameters, never arbitrary computation.
+#[derive(Clone, Debug)]
+pub enum SitedCtorArg {
+    /// The site-id parameter itself, bare.
+    Site,
+    /// A value parameter, bare.
+    Param(&'static str),
+    /// `intercalate "\n" <param>` — `runLLMTurnFanoutSited`'s own first
+    /// argument.
+    IntercalateNewline(&'static str),
+    /// `object [k .= v, …]` — the JSON payload `RunLLMTurn`'s three `*Sited`
+    /// helpers embed their site id (and, for the fork/fanout siblings, extra
+    /// classification flags) into, since `RunLLMTurnWith`'s wire shape has
+    /// no dedicated site field of its own (unlike `Fork`'s/`Finalize`'s).
+    Object(&'static [(&'static str, ObjectValue)]),
+}
+
+/// One value inside a [`SitedCtorArg::Object`] payload.
+#[derive(Clone, Copy, Debug)]
+pub enum ObjectValue {
+    /// The site-id parameter.
+    Site,
+    /// A literal `True`.
+    True,
+    /// `length <param>`.
+    LengthOf(&'static str),
+    /// A value parameter, bare.
+    Param(&'static str),
 }
 
 impl Helper {
@@ -878,6 +1268,10 @@ impl Helper {
     #[must_use]
     pub fn render(&self, eff: &Effect) -> String {
         let mut out = String::new();
+        if self.substrate {
+            out.push_str(SUBSTRATE_MARKER);
+            out.push('\n');
+        }
         for (i, line) in self.doc.iter().enumerate() {
             out.push_str(if i == 0 { "-- | " } else { "-- " });
             out.push_str(line);
@@ -909,12 +1303,136 @@ impl Helper {
             ));
             return out;
         }
+        // The pure display shape: also wraps no verb.
+        if let HelperBody::VariantRender {
+            type_name,
+            binder,
+            prefixes,
+        } = &self.body
+        {
+            let variants = eff
+                .sum_variants(type_name)
+                .unwrap_or_else(|e| panic!("{e}"));
+            out.push_str(&format!("{} :: {type_name} -> Text\n", self.name));
+            for (i, v) in variants.iter().enumerate() {
+                out.push_str(&format!(
+                    "{} ({} {binder}) = {:?} <> {binder}",
+                    self.name, v.ctor, prefixes[i]
+                ));
+                if i + 1 != variants.len() {
+                    out.push('\n');
+                }
+            }
+            return out;
+        }
+        // The two OPAQUE call-forwarding shapes: neither wraps a verb the
+        // ordinary `send` way, so both render fully here rather than falling
+        // into the ctor-derived path below.
+        if let HelperBody::OpaqueForward {
+            tyvars,
+            params,
+            target,
+            ret,
+        } = &self.body
+        {
+            let args: Vec<HsType> = params.iter().map(|a| a.ty.clone()).collect();
+            let sig = render_member_signature_with(tyvars, &args, &eff.head(), ret);
+            out.push_str(&format!("{{-# OPAQUE {} #-}}\n", self.name));
+            out.push_str(&format!("{} :: {}\n{}", self.name, sig, self.name));
+            for p in params {
+                out.push(' ');
+                out.push_str(p.name);
+            }
+            out.push_str(&format!(" = {target} 0"));
+            for p in params {
+                out.push(' ');
+                out.push_str(p.name);
+            }
+            return out;
+        }
         let ctor = self
             .ctor
             .unwrap_or_else(|| panic!("{}: helper {} declares no verb", eff.name, self.name));
         let verb = eff
             .verb(ctor)
             .unwrap_or_else(|| panic!("{}: helper {} wraps unknown {ctor}", eff.name, self.name));
+        // The three shapes whose declared type is independent of the verb's
+        // own wire shape, or whose body is not a bare `send`/`send .`/`send
+        // (…)` — each renders fully here and returns.
+        if let HelperBody::OpaqueSited {
+            tyvars,
+            site_param,
+            params,
+            ctor_args,
+            coerce,
+            ret,
+        } = &self.body
+        {
+            let args: Vec<HsType> = std::iter::once(HsType::Int)
+                .chain(params.iter().map(|a| a.ty.clone()))
+                .collect();
+            let sig = render_member_signature_with(tyvars, &args, &eff.head(), ret);
+            out.push_str(&format!("{{-# OPAQUE {} #-}}\n", self.name));
+            out.push_str(&format!("{} :: {}\n{}", self.name, sig, self.name));
+            out.push(' ');
+            out.push_str(site_param);
+            for p in params {
+                out.push(' ');
+                out.push_str(p.name);
+            }
+            out.push_str(" = ");
+            if *coerce {
+                out.push_str("unsafeCoerce <$> ");
+            }
+            out.push_str(&format!("send ({ctor}"));
+            for a in ctor_args {
+                out.push(' ');
+                out.push_str(&render_sited_ctor_arg(a, site_param));
+            }
+            out.push(')');
+            return out;
+        }
+        if let HelperBody::IntDecode {
+            params,
+            cases,
+            default,
+            result_type,
+        } = &self.body
+        {
+            let args: Vec<HsType> = verb.args.iter().map(|a| a.ty.clone()).collect();
+            let ret = HsType::Named(result_type);
+            let sig = render_member_signature_with(&[], &args, &eff.head(), &ret);
+            out.push_str(&format!("{} :: {}\n{}", self.name, sig, self.name));
+            for p in *params {
+                out.push(' ');
+                out.push_str(p);
+            }
+            out.push_str(" = decode <$> send (");
+            out.push_str(ctor);
+            for p in *params {
+                out.push(' ');
+                out.push_str(p);
+            }
+            out.push_str(")\n  where\n");
+            for (lit, target) in *cases {
+                out.push_str(&format!("    decode {lit} = {target}\n"));
+            }
+            out.push_str(&format!("    decode _ = {default}"));
+            return out;
+        }
+        if let HelperBody::AsyncSpawnBody {
+            param,
+            result_param,
+            done_ctor,
+        } = &self.body
+        {
+            out.push_str(&format!(
+                "{} :: M a -> M Int\n{} {param} = send ({ctor} 0 (\\_ -> {param} >>= \
+                 \\{result_param} -> send ({done_ctor} 0 {result_param})))",
+                self.name, self.name
+            ));
+            return out;
+        }
         let args: Vec<HsType> = verb.args.iter().map(|a| a.ty.clone()).collect();
         // `liftEither` consumes the `Either`, so the helper's result is the
         // verb's SUCCESS type. Every other shape forwards the verb's result as
@@ -924,7 +1442,24 @@ impl Helper {
             _ => verb.result_type(),
         };
         let sig = if eff.helpers_row_polymorphic {
-            crate::hs::render_member_signature(&args, eff.name, &result)
+            // Free type variables beyond `effs` (ordinary Hindley-Milner
+            // polymorphism, e.g. `Green`'s `asyncResult`) must be forall'd
+            // explicitly, or GHC rejects the signature as referencing an
+            // out-of-scope type variable — see `free_type_vars`'s own doc.
+            let mut extra: Vec<&'static str> = Vec::new();
+            for a in &args {
+                for v in free_type_vars(a) {
+                    if !extra.contains(&v) {
+                        extra.push(v);
+                    }
+                }
+            }
+            for v in free_type_vars(&result) {
+                if !extra.contains(&v) {
+                    extra.push(v);
+                }
+            }
+            render_member_signature_with(&extra, &args, eff.name, &result)
         } else {
             render_signature(&args, "M", &result)
         };
@@ -954,9 +1489,42 @@ impl Helper {
                 out.push(')');
             }
             // Returned above, before the verb lookup.
-            HelperBody::Projection { .. } => unreachable!(),
+            HelperBody::Projection { .. }
+            | HelperBody::OpaqueForward { .. }
+            | HelperBody::OpaqueSited { .. }
+            | HelperBody::VariantRender { .. }
+            | HelperBody::IntDecode { .. }
+            | HelperBody::AsyncSpawnBody { .. } => unreachable!(),
         }
         out
+    }
+}
+
+/// Render one [`SitedCtorArg`] as it appears inside a `send (Ctor …)`
+/// application.
+fn render_sited_ctor_arg(a: &SitedCtorArg, site_param: &str) -> String {
+    match a {
+        SitedCtorArg::Site => site_param.to_string(),
+        SitedCtorArg::Param(p) => (*p).to_string(),
+        SitedCtorArg::IntercalateNewline(p) => format!("(intercalate \"\\n\" {p})"),
+        SitedCtorArg::Object(fields) => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("\"{k}\" .= {}", render_object_value(v, site_param)))
+                .collect();
+            format!("(object [{}])", parts.join(", "))
+        }
+    }
+}
+
+/// Render one [`ObjectValue`] as it appears inside a `send (Ctor …)`
+/// application's `object […]` payload.
+fn render_object_value(v: &ObjectValue, site_param: &str) -> String {
+    match v {
+        ObjectValue::Site => site_param.to_string(),
+        ObjectValue::True => "True".to_string(),
+        ObjectValue::LengthOf(p) => format!("length {p}"),
+        ObjectValue::Param(p) => (*p).to_string(),
     }
 }
 

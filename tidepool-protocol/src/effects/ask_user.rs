@@ -119,12 +119,14 @@ pub fn ask_user() -> Effect {
             Helper {
                 name: "askUserRaw",
                 ctor: Some("AskUserWith"),
+                substrate: false,
                 doc: &[],
                 body: HelperBody::Applied(&["spec"]),
             },
             Helper {
                 name: "noteRaw",
                 ctor: Some("NoteWith"),
+                substrate: false,
                 doc: &[],
                 body: HelperBody::Applied(&["text"]),
             },

@@ -456,7 +456,7 @@ fn require_arg_site(
 // at the servicing site's own generated `<Eff>Req: FromCore`, never here).
 #[allow(dead_code)]
 enum RosterRequest {
-    RunLLMTurn(crate::generated::run_llm_turn::RunLLMTurnReq),
+    RunLLMTurn(crate::generated::run_l_l_m_turn::RunLLMTurnReq),
     Fork(crate::generated::fork::ForkReq),
     Finalize(crate::generated::finalize::FinalizeReq),
     AskUser(crate::generated::ask_user::AskUserReq),
@@ -502,7 +502,7 @@ fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest,
     }
     try_member!(
         RosterRequest::RunLLMTurn,
-        crate::generated::run_llm_turn::RunLLMTurnReq
+        crate::generated::run_l_l_m_turn::RunLLMTurnReq
     );
     try_member!(RosterRequest::Fork, crate::generated::fork::ForkReq);
     try_member!(
@@ -594,7 +594,9 @@ pub fn classify_hole(
     table: &DataConTable,
     asks: &AsksSidecar,
 ) -> Result<ClassifiedSuspension, ClassifyError> {
-    use crate::generated::{ask_user, console, finalize, fork, read_state, run_llm_turn};
+    use crate::generated::{
+        ask_user, console, finalize, fork, read_state, run_l_l_m_turn as run_llm_turn,
+    };
     use tidepool_runtime::generated::ask;
 
     let hole = match decode_roster(request, table)? {

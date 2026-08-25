@@ -253,17 +253,9 @@ crate::entropy_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::meta_effect_def!(crate::effect_defs::effect_decl_projection);
 crate::ask_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// AskUser / ReadState: MIGRATED — `askuser_decl()`/`readstate_decl()` come
-// from `src/generated/`, not a macro here.
-
-// RunLLMTurn (self-iterating-harness WS-B, split out of Ask).
-crate::runllmturn_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Finalize (self-iterating-harness WS-B).
-crate::finalize_effect_def!(crate::effect_defs::effect_decl_projection);
-
-// Fork (answerer parallel-delegation surface).
-crate::fork_effect_def!(crate::effect_defs::effect_decl_projection);
+// AskUser / ReadState / RunLLMTurn / Finalize / Fork: MIGRATED —
+// `askuser_decl()`/`readstate_decl()`/`runllmturn_decl()`/`finalize_decl()`/
+// `fork_decl()` come from `src/generated/`, not a macro here.
 
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 
@@ -271,10 +263,10 @@ crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 // `build_base_stack`'s row, so a caller wanting managed worktrees, repository events, coupled
 // agent+worktree spawn, the run journal, or green threads builds its own row
 // containing them (lane L4's acceptance harness does, for Worktree/RepoEvent).
-// Worktree/RepoEvent/Journal are MIGRATED — `worktree_decl()`/`event_decl()`/
-// `journal_decl()` come from `src/generated/`, not a macro here. Subagent
-// additionally requires Worktree in the same row (its types reference
+// Worktree/RepoEvent/Journal/Green are MIGRATED —
+// `worktree_decl()`/`event_decl()`/`journal_decl()`/`green_decl()` come from
+// `src/generated/`, not a macro here. Subagent additionally requires
+// Worktree in the same row (its types reference
 // WorktreeSpec/WorktreeHandle/WorktreeError). Green must sit LAST in
 // `outer_decls()` so `RunLLMTurn` keeps index 0.
 crate::subagent_effect_def!(crate::effect_defs::effect_decl_projection);
-crate::green_effect_def!(crate::effect_defs::effect_decl_projection);

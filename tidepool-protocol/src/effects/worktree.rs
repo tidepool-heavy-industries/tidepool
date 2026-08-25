@@ -855,6 +855,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "createWorktree",
             ctor: Some("WorktreeCreate"),
+            substrate: false,
             doc: &[
                 "Create a managed worktree. `Left (SourceDirty summary)` when the",
                 "source is dirty and the spec did not opt in; case-match the error",
@@ -865,6 +866,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "lookupWorktree",
             ctor: Some("WorktreeLookup"),
+            substrate: false,
             doc: &[
                 "Look a retained worktree up by durable id. Survives restart:",
                 "resolution reads on-disk registry state, not process memory.",
@@ -875,6 +877,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "listWorktrees",
             ctor: Some("WorktreeList"),
+            substrate: false,
             doc: &[
                 "Every registered worktree, present or lost. A lost tree is listed",
                 "with `present = False` rather than failing the whole listing.",
@@ -884,6 +887,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "worktreeId",
             ctor: None,
+            substrate: false,
             doc: &[
                 "The durable identity of a managed worktree. Pure: the handle",
                 "already carries its receipt, so this reads no git state.",
@@ -901,6 +905,7 @@ fn helpers() -> Vec<Helper> {
         Helper {
             name: "mergeBranchInto",
             ctor: Some("WorktreeMergeInto"),
+            substrate: false,
             doc: &[
                 "Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`",
                 "— never a fast-forward, so a landed merge always carries a genuine merge",

@@ -339,6 +339,7 @@ fn the_helper_ctor_pairing_is_enforced_in_both_directions() {
         name: "worktreeId",
         ctor: Some("WorktreeLookup"),
         doc: &[],
+        substrate: false,
         body: HelperBody::Projection {
             binder: "h",
             arg: HsType::Named("WorktreeHandle"),
@@ -358,14 +359,17 @@ fn the_helper_ctor_pairing_is_enforced_in_both_directions() {
         name: "createWorktree",
         ctor: None,
         doc: &[],
+        substrate: false,
         body: HelperBody::Pointfree,
     }];
     let errs = eff
         .validate()
         .expect_err("a send-wrapper must name the verb it wraps");
     assert!(
-        errs.iter()
-            .any(|e| e.contains("names no verb, but only a pure projection may")),
+        errs.iter().any(|e| e.contains(
+            "names no verb, but only a \
+             pure projection, variant-render, or OPAQUE forward may"
+        )),
         "got: {errs:?}"
     );
 }
