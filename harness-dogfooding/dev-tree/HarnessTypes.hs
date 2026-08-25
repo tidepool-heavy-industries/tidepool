@@ -143,7 +143,10 @@ data DevPlan = DevPlan
     nodeSplit     :: Maybe SplitSpec
   , childPlans    :: [DevPlan]
   }
-  deriving (Generic, ToJSON, FromJSON, JsonSchema, Show, Eq)
+  -- No JsonSchema on purpose: runLLMTurn answers cross IN-HEAP through the
+  -- Finalize-pinned row (no JSON Schema anywhere in that path), and the
+  -- generic schema derivation cannot express this type's recursion anyway.
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- ---------------------------------------------------------------------------
 -- On-the-fly micro-decomposition (intra-node)
