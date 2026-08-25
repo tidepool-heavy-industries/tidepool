@@ -1,7 +1,7 @@
-//! `Tidepool.Node` capability mailboxes (PRD 20 S1-L4 wave 2) — was BLOCKED
-//! on the tenure-then-resume GC family; that bug is now FIXED (see
-//! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc). Trying
-//! to un-ignore surfaced a SEPARATE-LOOKING, previously unreachable bug (the
+//! `Tidepool.Node` capability mailboxes. Un-ignoring after the
+//! tenure-then-resume GC family fix (see
+//! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc) surfaced
+//! a SEPARATE-LOOKING, previously unreachable bug (the
 //! burst scenario's coalesce times out) — see the test's own doc for why
 //! that is real but not yet proven independent. Still `#[ignore]`d, now for
 //! that new reason.

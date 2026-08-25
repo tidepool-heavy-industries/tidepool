@@ -7,7 +7,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | The NESTED-`async` reproducer fixture (PRD 20 S1-L4, chartered gap).
+-- | The NESTED-`async` reproducer fixture.
 --
 -- Deliberately standalone rather than folded into `OuterEffectsHarness`:
 -- this is a CRASH-CLASS fixture, and the root `CLAUDE.md` test discipline

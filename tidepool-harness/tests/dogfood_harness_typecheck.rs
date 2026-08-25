@@ -130,8 +130,8 @@ fn outer_row_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// turns this from "the file names only landed API" into "this compiles
 /// against what the driver actually serves".
 ///
-/// dev-tree also declares the OPT-IN second entry point (PRD 20 S1-L5's
-/// `resumeLoop :: ResumeFold -> State -> Harness State`), so the probe names
+/// dev-tree also declares the OPT-IN second entry point
+/// (`resumeLoop :: ResumeFold -> State -> Harness State`), so the probe names
 /// both entries: a fresh boot compiles `loop`, a boot with a folded journal
 /// compiles `resumeLoop`, and the driver picks between them. Naming
 /// `resumeLoop` at its exact declared signature is what makes a drift in
@@ -164,16 +164,14 @@ fn dev_tree_typechecks() {
     );
 }
 
-/// recursive-companion (PRD 21 lane C3) is the third dogfood harness, and it
+/// recursive-companion is the third dogfood harness, and it
 /// compiles against the SAME full outer row dev-tree does — it declares no new
 /// effect and asks for no row widening, using only `RunLLMTurn`, `AskUser`,
 /// `Console` and `Journal` out of it.
 ///
-/// Collapsed around `fork` (fork-subsumes-split step 4): the tree machinery
-/// this probe used to pin (`layerFromProposal`/`applyGate`/`mergePlan`/node
-/// paths) is deleted, not moved — the tree now emerges from a session's own
-/// forks, serviced and budgeted by the driver. What is left to pin is the
-/// locked entry-point contract itself, at exact signatures: the probe body
+/// The tree emerges from a session's own forks, serviced and budgeted by the
+/// driver — there is no tree-building machinery here to pin. What is left to
+/// pin is the locked entry-point contract itself, at exact signatures: the probe body
 /// already drives `loop initialState`/`render`, and the `extra_decls` pin
 /// `resumeLoop` (the opt-in resume entry the driver's structural scan
 /// selects) and `rootPrompt` (the one per-turn request, exported for

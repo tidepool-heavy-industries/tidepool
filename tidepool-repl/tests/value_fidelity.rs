@@ -1,4 +1,4 @@
-//! Wave 3b hardening — DIMENSION E: value-plane fidelity.
+//! DIMENSION E: value-plane fidelity.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
 //! (session_run — the harness `def`/`eval`/`cmd`
@@ -14,11 +14,6 @@
 //!
 //! Each test panics loudly when the session-aware extract is unavailable, and
 //! The session auto-opens on the first `session_run`; teardown is implicit.
-//!
-//! Regression gate: these tests guard the now-fixed kind=4 TypeMetadata force bug
-//! (fixed in GhcPipeline.runSessionPipeline — see text_bind.rs header for the
-//! root cause). All tests assert SUCCESS; inline regression-witness comments mark
-//! the turns that previously fired the kind=4 crash.
 
 mod common;
 use common::*;
@@ -34,10 +29,6 @@ async fn text_first_class_bind_and_reference() {
     require_extract();
     let repl = Repl::new();
 
-    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Previously
-    // materializing a Text result fired "forced type metadata (should be dead code)"
-    // even with a valid bound `s`; the fix in GhcPipeline.runSessionPipeline
-    // resolved it. Now asserts success.
     let out = repl
         .run(&[
             "s <- pure (T.pack \"hi\")",
@@ -55,32 +46,19 @@ async fn text_first_class_bind_and_reference() {
     assert!(text.contains("HI"), "T.toUpper s: expected HI, got: {text}");
 }
 
-/// CASE 2 — THE KEY DIAGNOSTIC: a Tier-0 Text bind under a DIFFERENT name while
-/// a prior (Int) binding is live. NO rebind of the same name.
+/// CASE 2 — a Tier-0 Text bind under a DIFFERENT name while a prior (Int)
+/// binding is live must succeed. NO rebind of the same name.
 ///
 /// open; `x <- pure (1 :: Int)`; `y <- pure (T.pack "hi")`; `T.length y` => 2.
 ///
-/// We have a CONFIRMED bug where rebinding to Text crashes with
-/// `kind=4 TypeMetadata` in Tier-0 deep_force. This isolates WHETHER the crash
-/// needs the same name:
-///   - If THIS crashes → bug is GENERAL: "Tier-0 Text bind crashes whenever ANY
-///     prior binding is live (even a different name)".
-///   - If THIS passes → the crash is specific to rebinding the SAME name.
-///
-/// VERDICT (this run): THIS CRASHES. `y <- pure (T.pack "hi")` with the Int `x`
-/// live dies at BIND time with `kind=4 (TypeMetadata) msg="hi"` →
-/// "bind runtime error: ... forced type metadata (should be dead code)".
-/// Corroborated by `text_first_class_bind_and_reference`, where binding a Text as
-/// the FIRST/ONLY binding (no prior) does NOT crash. ⇒ The bug is GENERAL: a
-/// Tier-0 Text bind crashes whenever ANY prior binding is live (even a DIFFERENT
-/// name). It is NOT rebind-same-name-specific. Root-cause hypothesis: with a
-/// prior binding live, the bind turn injects that binding's `Val.G<g>` module and
-/// seeds its slot into the `ExternalEnv` (session.rs `run_bind` ~L321/L365); the
-/// subsequent `deep_force` (forced=true, session.rs ~L368/L375
-/// `run_fragment_and_bind`) traverses the Text spine and reaches a TypeMetadata
-/// node it treats as dead code → kind=4 yield. The shallow-Int prior binding
-/// itself forces fine, so the defect is in deep_force of the Text payload under a
-/// multi-module-inject context, not in the prior value.
+/// A Tier-0 Text bind must succeed whenever ANY prior binding is live (even a
+/// DIFFERENT name), not only as the first/only binding — corroborated by
+/// `text_first_class_bind_and_reference`, which binds Text with no prior
+/// binding at all. With a prior binding live, the bind turn injects that
+/// binding's `Val.G<g>` module and seeds its slot into the `ExternalEnv`
+/// (session.rs `run_bind` ~L321/L365); the subsequent `deep_force`
+/// (forced=true, session.rs ~L368/L375 `run_fragment_and_bind`) must traverse
+/// the Text spine without a false TypeMetadata yield.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_bind_with_prior_live_binding_diagnostic() {
     require_extract();
@@ -90,12 +68,7 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
         .await
         .expect_ok("bind x :: Int");
 
-    // The diagnostic bind. If the bug is general (prior-binding-present), this is
-    // where `kind=4 TypeMetadata` / "forced type metadata (should be dead code)"
-    // surfaces.
     let bind = repl.eval("y <- pure (T.pack \"hi\")").await;
-    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). A Tier-0
-    // Text bind with a prior live binding used to fire here; now asserts success.
     bind.expect_ok("bind y :: Text with prior Int live (KEY DIAGNOSTIC)");
 
     let out = repl.eval("T.length y").await;
@@ -182,8 +155,6 @@ async fn nested_recursive_adt_bind_and_sum() {
     .await
     .expect_ok("def Tree + bind t (nested Tree)");
 
-    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Spine
-    // traversal of a deep bound ADT used to fire here; now asserts success.
     let out = repl
         .run(&[
             "sumT t = case t of { Leaf n -> n; Node a b -> sumT a + sumT b }",
@@ -247,8 +218,6 @@ async fn structured_json_value_bind_and_read() {
     require_extract();
     let repl = Repl::new();
 
-    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Reading
-    // back a bound JSON `Value` used to fire here; now asserts success.
     let out = repl
         .run(&[
             "v <- pure (object [(\"a\", toJSON (1 :: Int)), (\"b\", toJSON (2 :: Int))])",
@@ -294,9 +263,6 @@ async fn list_bind_survives_gc() {
         fold.text
     );
 
-    // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Forcing
-    // the bound list spine used to fire here even though the result is an Int;
-    // now asserts success.
     let len = repl.eval("pure (length xs)").await;
     assert!(
         len.expect_ok("length xs after GC").contains("1000"),

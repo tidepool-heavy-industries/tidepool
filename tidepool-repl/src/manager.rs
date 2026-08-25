@@ -167,9 +167,8 @@ impl SessionManager {
 
     /// A busy-guard label for the current entry, or `None` if no session is
     /// installed — `run_command`'s "session is X; resume/reset first"
-    /// rejection reads this. Mirrors the pre-promotion `SessionState::
-    /// busy_label`, now a thin read of the registry's own [`Slot::label`]
-    /// (tidepool_runtime::session::registry::Slot::label).
+    /// rejection reads this. A thin read of the registry's own
+    /// [`Slot::label`] (tidepool_runtime::session::registry::Slot::label).
     pub fn busy_label(&self) -> Option<String> {
         self.slot.label()
     }

@@ -21,9 +21,8 @@
 //! The prior compaction summary and the loop-iteration count are NOT
 //! spliced into Haskell at all: `driver::SelfHarnessDriver::render_framing`
 //! calls the author's `render :: State -> Text` with only the state, then
-//! composes those runtime facts onto its `Text` result in Rust (see
-//! `plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
-//! context is the runtime's job").
+//! composes those runtime facts onto its `Text` result in Rust — runtime
+//! context is the runtime's job, not the authored `render`'s.
 //!
 //! # Why `__selfHarnessState`, not `state`, and `Loaded.` qualification
 //!
@@ -134,7 +133,7 @@ pub fn state_in(state_json: Option<&Json>) -> String {
 /// The ONE stable, never-rotating session `Val` module the fused outer
 /// render/loop compile ([`crate::selfharness::driver::SelfHarnessDriver::compile_loop_entry`])
 /// injects turn-invariant harness context through, instead of splicing the
-/// state/operator-msg JSON as a source literal (`plans/turn-latency-state-injection.md`).
+/// state/operator-msg JSON as a source literal.
 ///
 /// Reserves `Generation(0)` of the ordinary `Tidepool.Session.Val.G<g>`
 /// scheme — no new Haskell-side module-name shape needed. This is safe
@@ -165,8 +164,8 @@ pub const HARNESS_CTX_BINDING: &str = "__harnessCtx";
 /// exactly that shape: `"null"`/`"\"...\""`).
 ///
 /// Deliberately its OWN tiny compile, and deliberately never itself
-/// memo-cacheable (`tidepool_runtime::cache::invocation_key`'s hazard (b) in
-/// `plans/compile-memo.md`: fresh literal content every call) — the ONE
+/// memo-cacheable (`tidepool_runtime::cache::invocation_key` treats fresh
+/// literal content every call as a cache-hazard shape) — the ONE
 /// import (`Data.Text`) keeps it orders of magnitude cheaper than the fused
 /// outer module it unblocks from the memo.
 ///
@@ -232,8 +231,8 @@ pub fn operator_msg_in_via_ctx() -> String {
     )
 }
 
-/// Inbound sibling of [`state_in`] for the boot-time run-journal FOLD (PRD 20
-/// S1-L5): splice `__selfHarnessResume :: Resume.ResumeFold`, decoded via
+/// Inbound sibling of [`state_in`] for the boot-time run-journal FOLD:
+/// splice `__selfHarnessResume :: Resume.ResumeFold`, decoded via
 /// `Aeson.eitherDecode` against `Tidepool.Resume`'s hand-written `FromJSON`.
 /// The driver splices this ONLY when it has a non-empty fold, and pairs it with
 /// the wider `Loaded.resumeLoop __selfHarnessResume __selfHarnessState` entry —

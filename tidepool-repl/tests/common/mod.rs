@@ -71,7 +71,7 @@ pub fn build_server_full(
 
 /// As [`build_server_full`], with an explicit nursery size override (`None` ⇒
 /// the session's default/unbounded nursery — no forced organic GC). Used by
-/// the wave-2 multi-turn acceptance suite, which isn't exercising GC stress
+/// the multi-turn acceptance suite, which isn't exercising GC stress
 /// and wants the default nursery instead of the 2 MiB hardening size.
 pub fn build_server_with_nursery(
     nursery_size: Option<usize>,

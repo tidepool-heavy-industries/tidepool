@@ -6,9 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | Minimal standalone repro for the JIT row-changing @reinterpret@ gap
--- named in PRD 21 C5's second amendment
--- (@plans/self-iterating-harness/21-c5-delegate-effect-survey.md@): a
+-- | Minimal standalone repro for a JIT row-changing @reinterpret@ gap: a
 -- private, row-changing effect 'Ping', reinterpreted with freer-simple's
 -- @reinterpret@ (built on @replaceRelay@ / @Data.OpenUnion@'s
 -- @decomp@\/@weaken@) onto a real Rust-serviced effect (@AskUser@'s

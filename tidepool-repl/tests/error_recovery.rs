@@ -1,4 +1,4 @@
-//! Wave-3b hardening — DIMENSION: error paths & recovery.
+//! DIMENSION: error paths & recovery.
 //!
 //! THE INVARIANT: every failing turn must return a CLEAN MCP error
 //! (`is_error == true`) AND leave the session USABLE — a following good turn
@@ -8,7 +8,7 @@
 //! through the shared harness (`common::*`), multi-turn: trigger the failure →
 //! assert graceful error → run a known-good turn → assert the session survived.
 //!
-//! Requires the Wave-3b session-aware `tidepool-extract` (`TIDEPOOL_EXTRACT` +
+//! Requires a session-aware `tidepool-extract` (`TIDEPOOL_EXTRACT` +
 //! with-packages GHC libdir); panics loudly otherwise. stderr noise like
 //! `Could not find module …Val.G…` is expected and ignored.
 
@@ -193,17 +193,11 @@ async fn failed_bind_leaves_no_state() {
 
 /// REGRESSION — dropping a session WITHOUT explicit teardown must NOT hang.
 ///
-/// History: the repl used to own a resident worker THREAD, and its handle's
-/// `Drop` joined that thread before dropping the command sender — so the
-/// worker, parked in `rx.recv()` (which returns `Err` only once EVERY sender
-/// drops), never woke and teardown deadlocked forever. ANY session never torn
-/// down (a crashed/abandoned MCP client, a panicking turn) would wedge the
-/// process on shutdown.
-///
-/// The parked-thread mechanism is gone (`plans/unpark/`): a session is plain
-/// owned data in a manager slot, so dropping it joins nothing. This test is now
-/// the standing guard that teardown stays join-free — a future "just wait for
-/// the in-flight turn" in a `Drop` would reintroduce exactly this hang.
+/// A session is plain owned data in a manager slot, so dropping it joins
+/// nothing. This test is the standing guard that teardown stays join-free —
+/// a future "just wait for the in-flight turn" in a `Drop` would reintroduce
+/// a hang for ANY session never torn down (a crashed/abandoned MCP client, a
+/// panicking turn).
 ///
 /// A hang can't be asserted directly, so the proof is that this test simply
 /// COMPLETES under the suite's run timeout: we open a session, run one good

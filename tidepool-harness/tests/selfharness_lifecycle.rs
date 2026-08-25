@@ -128,8 +128,8 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
 /// completing.
 ///
 /// MERGED with the ghost-node hazard check below (formerly the standalone
-/// `retired_answerer_nodes_are_terminal_across_cycles`, session-test-review
-/// quick win #4): both drive the IDENTICAL `FlakyProvider(fail_first=1)`-
+/// `retired_answerer_nodes_are_terminal_across_cycles`, merged to save a
+/// redundant compile): both drive the IDENTICAL `FlakyProvider(fail_first=1)`-
 /// then-recover, 2-cycle shape and differed only in which assertion they
 /// made — lifecycle state here, tree-node terminality below. One execution,
 /// two assertion blocks; saves the second compiling cycle.

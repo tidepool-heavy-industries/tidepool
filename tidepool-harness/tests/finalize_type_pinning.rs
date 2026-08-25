@@ -315,7 +315,7 @@ fn author_module_edit_between_compiles_is_picked_up_by_the_second() {
 // ---------------------------------------------------------------------------
 // finalize-template-pin: the answerer prompt prescribes a `finalize` shape
 // that must actually compile against a pinned row with NO annotation the
-// model has to discover. See `plans/post-restart/dev/finalize-template-pin.md`.
+// model has to discover.
 //
 // `_r <- __user; paginateResult 4096 (toJSON _r)` is the shared eval template
 // (`tidepool-mcp/src/eval_prep.rs`); `finalize`'s free result tyvar `a`

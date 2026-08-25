@@ -51,8 +51,7 @@
 //! tested:
 //!
 //!   (a) SANCTIONED-RED — currently fails by design, must keep failing
-//!       individually, never inside a green bundle (see
-//!       `plans/post-restart/gate-runbook.md`'s never-green list). No probe
+//!       individually, never inside a green bundle. No probe
 //!       is in this class today: both former members —
 //!       `qq_fmt_brace_inside_hole_non_string_expr_still_works` (fixed by
 //!       giving `Tidepool.QQ.HsMeta.Translate.toExp` a `let`-in-hole case)
@@ -891,8 +890,8 @@ fn works_filepath_family() {
 /// (aeson `FromJSON Float` routes through `parseRealFloat` —
 /// https://hackage.haskell.org/package/aeson/docs/src/Data.Aeson.Types.FromJSON.html).
 ///
-/// Formerly SANCTIONED-RED (`plans/post-restart/gate-runbook.md`): the
-/// extract translator had no `decodeFloat_Int#` 2-result split — any Core
+/// Formerly SANCTIONED-RED: the extract translator had no
+/// `decodeFloat_Int#` 2-result split — any Core
 /// invoking it hit `splitUnaryMultiReturnPrimOp`'s generic-fallback loud
 /// failure. Fixed structurally mirroring the already-working
 /// `decodeDouble_Int64#`/`DecodeDoubleMantissa`/`DecodeDoubleExponent` path
@@ -1367,8 +1366,8 @@ target = (Foo "red").color ++ (Bar "blue").color
     );
 }
 
-/// `Tidepool.Swarm`'s `PlanF`/`hyloM` (PRD 20, "The hylo core") — the swarm
-/// engine's recursion-scheme core surviving derivation and extraction on the
+/// `Tidepool.Swarm`'s `PlanF`/`hyloM` ("the hylo core") — the swarm engine's
+/// recursion-scheme core surviving derivation and extraction on the
 /// JIT. Standalone per exclusion class (d) DISTINCT-MECHANISM: this pins
 /// whether GHC-derived `Functor`/`Foldable`/`Traversable` dictionaries for a
 /// user-defined recursive-shaped data type, plus a higher-order recursive
@@ -1674,8 +1673,8 @@ fn works_fmt_runtime_helpers_pinned() {
 /// hole's own closing `}` is only recognized at bracket depth 0, so the
 /// nested `{ y = 1 }`'s `}` decrements depth instead of ending the hole.
 ///
-/// Formerly SANCTIONED-RED (`plans/post-restart/gate-runbook.md`):
-/// `Tidepool.QQ.HsMeta.Translate.toExp` had no case for `HsLet`, so any
+/// Formerly SANCTIONED-RED: `Tidepool.QQ.HsMeta.Translate.toExp` had no case
+/// for `HsLet`, so any
 /// hole containing `let ... in ...` hit the catch-all `todo`/`noTH` at
 /// compile time. Fixed by giving `toExp` an `HsLet` case backed by a new
 /// `toDecs`/`toDec` (translating the two binding shapes an ordinary `let`

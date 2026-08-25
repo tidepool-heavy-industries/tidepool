@@ -47,7 +47,7 @@ pub fn unique_temp_log_path(label: &str) -> std::path::PathBuf {
 /// Isolate this test process's MUTABLE cache state, while SHARING the
 /// content-addressed compile memo with every other test process.
 ///
-/// Two jobs, deliberately split (`plans/compile-memo.md`):
+/// Two jobs, deliberately split:
 ///
 /// - **Mutable state is per-test.** `XDG_CACHE_HOME` points at a fresh temp
 ///   directory, so a `SelfHarnessDriver`'s checkpoint/transcript/log writes

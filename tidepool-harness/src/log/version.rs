@@ -1,6 +1,6 @@
-//! Version stamp for the harness log wire contract (kind 3 of
-//! `plans/persistence-versioning-design.md`'s six persistence-versioning
-//! kinds). One counter governs both [`super::LogHeader`]'s own shape and
+//! Version stamp for the harness log wire contract, one of the durable
+//! artifact kinds `tidepool_repr::version_ladder` covers (see that crate's
+//! CLAUDE.md for the mechanism). One counter governs both [`super::LogHeader`]'s own shape and
 //! every [`super::EventRecord`] line in the file — the header is the file's
 //! one declaration of "every event below is at this version."
 //!
@@ -19,8 +19,7 @@ use tidepool_repr::version_ladder::{set_version, Migration, MigrationError};
 pub const CURRENT: u32 = 1;
 /// The oldest version this build still loads. `0` — an unstamped log
 /// written before this scheme existed — stays accepted so an existing
-/// operator's `log-*.jsonl` keeps loading; see `persistence-versioning-design.md`
-/// §6 for when this is ever raised.
+/// operator's `log-*.jsonl` keeps loading.
 pub const FLOOR: u32 = 0;
 
 fn header_v0_to_v1(v: Value) -> Result<Value, MigrationError> {

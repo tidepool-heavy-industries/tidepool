@@ -254,9 +254,8 @@ fn torn_final_line_reads_cleanly_to_last_whole_event() {
 /// An unstamped log (written before this scheme existed — no `"version"`
 /// key on the header line at all) must still load, reading as version `0`
 /// and migrating through the identity `0 -> 1` step — the entire point of
-/// the persistence-versioning design (`plans/persistence-versioning-design.md`
-/// §6/constraints): an existing operator log is never bricked by landing
-/// the stamp.
+/// the unstamped-file convention (`tidepool_repr::version_ladder`): an
+/// existing operator log is never bricked by landing the stamp.
 #[test]
 fn unstamped_legacy_header_still_loads_as_version_zero() {
     let dir = tempfile::tempdir().unwrap();

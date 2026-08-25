@@ -1,9 +1,8 @@
-//! The self-iterating harness (`plans/self-iterating-harness/`): the outer
+//! The self-iterating harness: the outer
 //! `render`/`loop` driver over the `Harness`/`Agent` monad split. The Agent
 //! node that answers a `runLLMTurn` hole IS a [`crate::harness::Harness`]
 //! node — attached to the shared outer session as a per-loop realm rather
-//! than owning a session of its own (the one-session collapse; see
-//! `driver`'s module doc).
+//! than owning a session of its own; see `driver`'s module doc.
 //!
 //! # Modules
 //!
@@ -25,7 +24,7 @@
 //! - [`persistence`] — local-file checkpoint (state + compaction + harness-
 //!   source fingerprint, one generation-tagged record) persist/restore +
 //!   transcript-jsonl [`Observer`] impl + the durable-log path helpers.
-//! - [`resume`] — the READ half of the durable run journal (PRD 20 S1-L5): the
+//! - [`resume`] — the READ half of the durable run journal: the
 //!   run lease (identity that outlives a process), the per-process journal
 //!   SEGMENTS a run id owns, and the boot-time `(kind, key)` fold across all
 //!   of them the driver injects through `resumeLoop`.

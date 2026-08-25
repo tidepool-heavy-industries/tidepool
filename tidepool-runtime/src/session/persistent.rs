@@ -12,11 +12,10 @@
 //! the parked lane below, one continuation of many) as DATA — the eval thread
 //! exits, and a fresh thread re-enters to resume. No OS thread is parked per
 //! suspended session — neither in the harness (a TREE of many
-//! simultaneously-suspended nodes cannot pin N+1 threads) nor in the repl (see
-//! `plans/unpark/feasibility-map.md`).
+//! simultaneously-suspended nodes cannot pin N+1 threads) nor in the repl.
 //!
-//! There are TWO suspend mechanisms, one per lane (one-session plan; do not
-//! conflate them — a machine never mixes both, asserted both directions):
+//! There are TWO suspend mechanisms, one per lane (do not conflate them — a
+//! machine never mixes both, asserted both directions):
 //!
 //! - **The SLOT path — implemented in this file.** [`JitEffectMachine`] is
 //!   `Send` precisely because it is stowed-XOR-running: the whole machine
@@ -24,7 +23,8 @@
 //!   re-enters it. This is the pair-per-policy family below. It remains the
 //!   live mechanism for the repl and one-shot eval lanes; on the harness lane
 //!   it is legacy, superseded by the parked path, and its deletion is gated
-//!   on the parked path's production soak (`plans/one-session.md` Phase 6).
+//!   on the parked path's production soak (Phase 6: repl/one-shot conversion
+//!   + slot deletion, not currently in flight).
 //! - **The PARKED path — `super::resident::ResidentSession`.** A machine's
 //!   continuation REGISTRY holds many independently parked frames at once,
 //!   each a registered GC root, resumable by identity in any order. This is
@@ -94,7 +94,7 @@ pub struct PersistentSession {
     /// `Val.G<g>` so its `stableVarId` is collision-free and a rebind shadows
     /// without clobbering the prior root.
     val_gen: Generation,
-    /// THE scope tree (PRD 21 lane C2) — one per session, shared by BOTH
+    /// THE scope tree — one per session, shared by BOTH
     /// planes. The value plane hangs [`BindingTable`] frames off these ids and
     /// the decl plane keys its per-scope tips off the SAME ids, which is why
     /// neither owns a tree of its own: two trees would be two answers to "is
@@ -165,8 +165,8 @@ impl PersistentSession {
     /// Set the value-binding generation (a consumer advances it when a bind
     /// materializes at a freshly-minted `Val.G<g>`).
     pub fn set_val_gen(&mut self, g: Generation) {
-        // MONOTONIC MAX, not assignment: with any-order resume (one-session
-        // plan), two in-flight bind turns can materialize out of mint order —
+        // MONOTONIC MAX, not assignment: with any-order resume, two in-flight
+        // bind turns can materialize out of mint order —
         // gen 7 completing before gen 6. A plain assignment would REWIND the
         // counter on the late gen-6 materialization, and the next mint would
         // re-issue 7, colliding with the live Val.G7. Generations are only
@@ -765,7 +765,7 @@ impl PersistentSession {
     ///
     /// Removing this was attempted and reverted: it requires
     /// `unsafe impl Send for RootSlot`, a standalone soundness claim on a raw
-    /// pointer rather than a refactor (`plans/unpark/` §6.2).
+    /// pointer rather than a refactor.
     pub fn take_bound_root(&mut self) -> Option<RootSlot> {
         self.machine.as_mut().and_then(|m| m.take_last_bound_root())
     }
@@ -912,7 +912,7 @@ impl PersistentSession {
         }
     }
 
-    // -- scopes (PRD 21 lane C2) -------------------------------------------
+    // -- scopes --------------------------------------------------------------
 
     /// Mint a fresh child scope of `parent`. `None` if `parent` is not live
     /// (never minted, or already retired) — a scope is never born under a dead
@@ -923,9 +923,9 @@ impl PersistentSession {
     /// the only place that knows a scope's parent, and `SessionLib` keys its
     /// tips by [`ScopeId`] without owning the tree. Seeding the child from its
     /// parent's tip HERE is what makes "children read parent declarations"
-    /// (locked decision 4) true at the moment of minting rather than at first
-    /// use — the difference matters exactly when a sibling pushes a turn in
-    /// between, which would otherwise leak into this scope.
+    /// true at the moment of minting rather than at first use — the
+    /// difference matters exactly when a sibling pushes a turn in between,
+    /// which would otherwise leak into this scope.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
         let child = self.scopes.mint_child(parent)?;
         if let Some(lib) = self.lib.as_mut() {

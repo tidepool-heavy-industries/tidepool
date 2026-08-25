@@ -27,7 +27,6 @@
 //!   per-item tails a suspension re-enters through.
 //! - [`manager`] — the single-session ownership slot (`Idle | Running |
 //!   Suspended`) with atomic checkout/restore.
-//! - [`state`] — the caller-facing `SessionState` lifecycle + suspension payload.
 //! - [`server`] — the MCP `ServerHandler`, the three session tools, and the bindings resource.
 //! - [`introspect`] — `:i` source-scan resolution for stdlib/preamble types.
 //! - [`truncate`] — Rust-side result truncation + the `:stub <n>` fetch lane.

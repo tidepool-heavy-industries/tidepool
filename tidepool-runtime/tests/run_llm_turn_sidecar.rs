@@ -11,8 +11,8 @@
 //! the loop's single static site fires 3x with the SAME id every time.
 //!
 //! Negative: a polymorphic site fails extract (exact error text asserted).
-//! A function-typed site is no longer categorically rejected (one-session
-//! plan Phase 3e): a PURE function-typed answer (e.g. `Int -> Int`) now
+//! A function-typed site is no longer categorically rejected: a PURE
+//! function-typed answer (e.g. `Int -> Int`) now
 //! compiles past `checkRunLLMTurnType`, and only an answer type that itself
 //! mentions the `Eff` tycon (`M`/`Eff`) — e.g. `Int -> M Int` — is rejected,
 //! since the row `M` expands to is still per-compile (stable-effects-core:

@@ -351,7 +351,7 @@ pub fn insert_preamble_imports(preamble: &str, imports: &str) -> String {
 /// (already placement-normalized via [`place_turn_stmt`], or a literal
 /// `{{TURN_STMT}}` marker for a caller building a [`TurnTemplate`]), and the
 /// ` ; pure <tail> }` closer — optionally wrapped in `runDelegate( ... )` at
-/// the result position (PRD 21 C5's delegate-scoped turn shape).
+/// the result position for a delegate-scoped turn.
 ///
 /// This is the ONE mechanism behind every BIND/BINDDISCARD/MULTIBIND session
 /// wrapper in both `tidepool-repl` (`wrap_bind_source`/

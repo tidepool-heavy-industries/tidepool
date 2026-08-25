@@ -1,4 +1,4 @@
-//! Wave B smoke test: the FULL effect suite (`build_base_stack`) is reachable
+//! Smoke test: the FULL effect suite (`build_base_stack`) is reachable
 //! through the repl's `session_run`, composed over persistent session state.
 //!
 //! Exercises the always-available effects — Exec (`run`), Fs (`writeFile`/

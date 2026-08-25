@@ -59,7 +59,7 @@ pub struct HarnessSource {
     /// content).
     pub module_name: String,
     /// Whether the harness declares the OPT-IN resume entry point
-    /// `resumeLoop :: ResumeFold -> State -> Harness State` (PRD 20 S1-L5).
+    /// `resumeLoop :: ResumeFold -> State -> Harness State`.
     ///
     /// The universal entry (`loop :: State -> Harness State`) is unchanged and
     /// every harness keeps it; this flag only tells the driver whether the

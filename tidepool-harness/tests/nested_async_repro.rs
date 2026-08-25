@@ -1,5 +1,5 @@
-//! THE (formerly) FAILING HALF of the nested-`async` reproducer (PRD 20
-//! S1-L4) — was `#[ignore]`d and fully documented as NOT a sanctioned red,
+//! THE (formerly) FAILING HALF of the nested-`async` reproducer —
+//! was `#[ignore]`d and fully documented as NOT a sanctioned red,
 //! now un-ignored as the fix's acceptance test. Its control — the passing
 //! structural half — is
 //! `tidepool-runtime/tests/green_thread_representation.rs`'s

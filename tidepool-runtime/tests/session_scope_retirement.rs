@@ -1,12 +1,12 @@
-//! SCOPE RETIREMENT ACCOUNTING (PRD 21 lane C2,
-//! `plans/self-iterating-harness/21-c2-scope-trees.md` §§2–3) — retiring a
-//! scope releases its mounts' GC roots FOR REAL, witnessed by the fourth
-//! counted root class rather than asserted about.
+//! SCOPE RETIREMENT ACCOUNTING — retiring a scope releases its mounts' GC
+//! roots FOR REAL, witnessed by the fourth counted root class rather than
+//! asserted about.
 //!
-//! The claim C1 could not make: a mounted root lived until the session machine
-//! dropped, because `release_handle` deliberately does not deregister the
-//! underlying persistent root and nothing downstream ever gave that ownership
-//! back. This suite pins the closure of that leak, and pins it as COUNTS:
+//! The claim the mount seam alone could not make: a mounted root lived until
+//! the session machine dropped, because `release_handle` deliberately does
+//! not deregister the underlying persistent root and nothing downstream ever
+//! gave that ownership back. This suite pins the closure of that leak, and
+//! pins it as COUNTS:
 //!
 //! - `persistent_roots_count()` (class 4, the GC root ledger) drops by exactly
 //!   the receipt's `roots_released` — never "some" roots, never zero-with-a-

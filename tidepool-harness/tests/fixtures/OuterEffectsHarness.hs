@@ -29,8 +29,8 @@
 -- of an unrelated packed-`Text`-literal JIT construction path this lane does
 -- not own.
 --
--- PRD 20 S1-L4 wave 2 widens this bundle with 'Tidepool.Event.waitEvent'
--- (a select over {thread completion, deadline}), which also exercises the
+-- This bundle also carries 'Tidepool.Event.waitEvent'
+-- (a select over {thread completion, deadline}), which exercises the
 -- driver's NON-BLOCKING @RepoEventAwait@ servicing.
 --
 -- The @Tidepool.Node@ scenarios (@forkNode@\/@sendUp@\/@received@) are
@@ -70,7 +70,7 @@ import Tidepool.Effects
   , say
   )
 -- `Observed`/`Tick`/`after`/`headChanged`/`nextEvent`/`withHandler`/`(<|>)` are
--- DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not the generated
+-- DEFINITIONS in `Tidepool.Event`, not the generated
 -- `Tidepool.Effects` module — this fixture is spliced as a plain `--include`d
 -- module rather than compiled as an ordinary turn, so it needs the explicit
 -- import below like any other symbol this module uses (same reason the
@@ -181,7 +181,7 @@ loop st = do
       -- results come back in ORIGINAL list order regardless.
       mapResults <- mapConcurrently mapWork [3, 1, 2]
 
-      -- `waitEvent` (PRD 20 S1-L4 wave 2): a select over {thread completion,
+      -- `waitEvent`: a select over {thread completion,
       -- deadline} that takes the completion branch (a generous deadline
       -- against an already-fast thread), then reads the typed result with
       -- one immediate `wait` — proving `waitEvent` composes into `nextEvent`

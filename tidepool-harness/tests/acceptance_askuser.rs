@@ -1,6 +1,5 @@
-//! Acceptance coverage: the answerer `askUser @T` operator-form round-trip
-//! (`plans/self-iterating-harness/14-generic-derived-askuser-prd.md`, delivery
-//! step 5), driven through the production entry point
+//! Acceptance coverage: the answerer `askUser @T` operator-form round-trip,
+//! driven through the production entry point
 //! (`SelfHarnessDriver::run_one_loop_iteration`) against the reference harness module
 //! (`examples/harness/Harness.hs`).
 //!

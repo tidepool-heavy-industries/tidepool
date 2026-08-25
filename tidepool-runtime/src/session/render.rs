@@ -10,7 +10,7 @@
 //! turn>)` — and re-exports it plus this turn's items. `parent` is `g - 1` for
 //! a flat (ROOT-only) session, but need not be — a sibling turn's parent can
 //! be any earlier generation, which is what turns the flat generation chain
-//! into a tree of independent, mutually invisible branches (PRD 21 lane C2).
+//! into a tree of independent, mutually invisible branches.
 //! That selective re-export is what lets a redefined `data` type coexist with
 //! its older shape without GHC's conflicting-export error: the two `Foo`s
 //! live in distinct gen-versioned modules and only the newest is in scope
@@ -1345,7 +1345,7 @@ mod tests {
         assert_eq!(before, after, "retracting an absent name is a no-op fold");
     }
 
-    // --- Scope trees (PRD 21 lane C2): `parent` as a tree edge, not a position ---
+    // --- Scope trees: `parent` as a tree edge, not a position ---
 
     #[test]
     fn root_only_chain_has_parent_equal_to_g_minus_1() {

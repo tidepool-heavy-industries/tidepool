@@ -1,6 +1,5 @@
 //! Differential pin for the build-products dir (module-granular GHC
-//! recompilation avoidance across `tidepool-extract` spawns — spike-verified
-//! 2026-08-20, `plans/turn-latency-state-injection.md`): a COLD compile
+//! recompilation avoidance across `tidepool-extract` spawns): a COLD compile
 //! (empty/no build-products dir) and a WARM compile (same source, same
 //! extract binary, same include content, but GHC's own `checkOldIface` gets
 //! to skip the unchanged `Tidepool.Prelude` closure via a pre-populated
@@ -12,8 +11,8 @@
 //! of every NESTED, non-top-level `Id`) — closed by
 //! `Tidepool.Translate.stabilizeLocalUniques` (nested Ids) together with
 //! `GhcPipeline.hs`'s `externalizeInternalTops` ordinal-based disambiguator
-//! (internal top-level floats). See both functions' doc comments and
-//! `plans/turn-latency-state-injection.md` for the full history.
+//! (internal top-level floats). See both functions' doc comments for the
+//! full history.
 
 use serial_test::serial;
 use std::env;

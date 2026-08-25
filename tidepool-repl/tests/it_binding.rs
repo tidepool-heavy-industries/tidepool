@@ -1,7 +1,7 @@
 //! GHCi-style `it` binding + fold-forward large-value handling — DIMENSION.
 //!
 //! Drives the REAL `tidepool-repl` MCP entry point (`session_run`) over real
-//! turns (the standing rule), per `plans/haskell-interface-polish.md` item #3:
+//! turns (the standing rule):
 //! a bare final EXPRESSION binds its value to `it` (rebinding every such
 //! turn, GHCi parity); a trailing bind (`x <- e` / `_ <- e`) does NOT bind
 //! `it`; a result over `truncate::HUGE_CEILING` collapses to a header

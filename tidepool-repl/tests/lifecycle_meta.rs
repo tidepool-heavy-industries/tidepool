@@ -1,4 +1,4 @@
-//! Wave-3b hardening — DIMENSION: lifecycle & meta-commands.
+//! DIMENSION: lifecycle & meta-commands.
 //!
 //! THE CONTRACT under test: the session lifecycle (auto-open on first
 //! `session_run`, `session_reset` for a fresh machine) and the meta-command
@@ -13,7 +13,7 @@
 //!     and malformed commands fail gracefully (clean error, never a panic).
 //!
 //! Each test drives the REAL `tidepool-repl` MCP entry point (`dispatch_tool`)
-//! through the shared harness (`common::*`), multi-turn. Requires the Wave-3b
+//! through the shared harness (`common::*`), multi-turn. Requires a
 //! session-aware `tidepool-extract` (`TIDEPOOL_EXTRACT` + with-packages GHC
 //! libdir); panics loudly otherwise. stderr noise like `Could not find module
 //! …Val.G…` is expected and ignored.
@@ -239,7 +239,7 @@ async fn bindings_shape() {
 // ---------------------------------------------------------------------------
 // Case 6 — `:t` / `:i` are IMPLEMENTED: `:t` reports an expression's inferred
 // type (via the throwaway-bind → type_display path); `:i` reports a bound
-// name's type/tier. (Formerly Wave-4 stubs.)
+// name's type/tier.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn type_and_info_are_implemented() {

@@ -1,5 +1,4 @@
-//! Item 0's live-shaped receipt (`plans/post-restart/extract-wave/boot/00-spec.md`):
-//! not "it should have dropped" but a test that drives the self-iterating
+//! A live-shaped receipt: not "it should have dropped" but a test that drives the self-iterating
 //! harness from launch to the FIRST model call and asserts how many
 //! `tidepool-extract` compiles were paid before that call, against a single
 //! named constant a later dev flips when the fix lands. Own binary, own
@@ -14,8 +13,7 @@
 //!
 //! The counter sees EVERY `tidepool-extract` spawn in the process, not just
 //! this crate's: it lives in `tidepool_extract_cmd`, which owns the one
-//! builder every site goes through (`plans/post-restart/extract-manifest.md`,
-//! D-B — before that, spawns through `tidepool_runtime` were invisible here).
+//! builder every site goes through.
 //! The constant below is unaffected, because the other sites are not on the
 //! pre-model path: the ONE pre-model compile below funnels through
 //! [`tidepool_harness::engine::compile_turns`]
@@ -27,10 +25,9 @@
 //! `tidepool_runtime::session::turn.rs`'s `run_turn`/`classify_block`/
 //! `compile_session_turn` (reached only via `Harness::run_block`, i.e. only
 //! AFTER a model turn produces a Haskell block to run — never before the
-//! first model call). The two eager boot seeds (`Harness::new`'s and
-//! `SelfHarnessDriver::bootstrap`'s trivial ConTags-seeding compiles) are
-//! ALREADY GONE (lazy boot, extract-wave item 0 steps 1-3); wave-3's
-//! render+loop fusion removes the remaining split:
+//! first model call). Boot is lazy: `Harness::new` and
+//! `SelfHarnessDriver::bootstrap` no longer pay trivial ConTags-seeding
+//! compiles, and render+loop emission is fused into one extract invocation:
 //!
 //! 1. `SelfHarnessDriver::run_one_loop_iteration` →
 //!    `SelfHarnessDriver::compile_loop_entry` (driver.rs) — ONE
@@ -69,47 +66,27 @@ use tidepool_harness::{
     load_harness_source, typed_request_agent_decls, Harness, LogObserver, SelfHarnessDriver,
 };
 
-/// The D7 live-dogfood measurement (2026-08-08, clean cache,
-/// `plans/post-restart/extract-wave.md`): a clean-cache self-harness launch
-/// originally paid FOUR `tidepool-extract` compiles before the first model
-/// call — two trivial boot seeds (the outer session's, `driver.rs::bootstrap`,
-/// and the answerer `Harness`'s own, `harness.rs::Harness::new`) purely to
-/// seed ConTags, plus `compile_outer` of the render framing and
-/// `compile_outer` of the loop body.
+/// A clean-cache self-harness launch pays exactly **2** `tidepool-extract`
+/// compiles before the first model call:
 ///
-/// Item 0's target end-state (`plans/post-restart/extract-wave/boot/00-spec.md`)
-/// is exactly **1**: delete both boot seeds, and fuse render+loop emission
-/// into one extract invocation. Both steps have now landed.
+/// 1. `SelfHarnessDriver::refresh_harness_ctx`'s small `--session-bind` spawn
+///    (compiling a tiny `(Text, Text)` tuple literal, `Data.Text`-only) that
+///    injects the stable val — deliberately never memo-cacheable (fresh
+///    literal content each time), paid every cycle.
+/// 2. `SelfHarnessDriver::compile_loop_entry`'s fused compile of the pre-loop
+///    render and this cycle's loop body as two entries of ONE module in ONE
+///    `tidepool-extract` spawn.
 ///
-/// Harness turn compiles are memoized as of `plans/compile-memo.md`, so
-/// "clean cache" is now enforced by the test (`support::isolate_compile_memo`)
-/// rather than assumed of the ambient environment — a warm memo pays 0 spawns,
-/// which would be a receipt about cache state, not about the boot path.
+/// That second compile is BYTE-IDENTICAL turn to turn once the stable-val
+/// injection precedes it, so every cycle after the first is a memo HIT for it
+/// (dominant, ~6-minute spawn) — see `tests/state_injection_memo_hit.rs`,
+/// which pins that win directly. The one small extra spawn on cycle 1 is the
+/// accepted cost.
 ///
-/// MEASURED 2026-08-09 on the centralized tip (this suite, clean cache): 2 —
-/// both boot seeds gone (item 0 steps 1-3, boot-lazy), leaving exactly the
-/// two `compile_outer` invocations (render framing + loop body) that wave 3's
-/// render+loop fusion targeted.
-///
-/// MEASURED 2026-08-11 on this branch (this suite, clean cache): **1** —
-/// `SelfHarnessDriver::compile_loop_entry` (driver.rs) now compiles the
-/// pre-loop render and this cycle's loop body as two entries of ONE module in
-/// ONE `tidepool-extract` spawn (wave-3 render+loop fusion,
-/// `plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md`
-/// §2). Item 0's target end-state is reached.
-///
-/// MEASURED 2026-08-22 on this branch (this suite, clean cache): **2** —
-/// `plans/turn-latency-state-injection.md`'s stable-val injection adds ONE
-/// small `SelfHarnessDriver::refresh_harness_ctx` `--session-bind` spawn
-/// (compiling a tiny `(Text, Text)` tuple literal, `Data.Text`-only) BEFORE
-/// the fused render+loop compile, every cycle — deliberately never itself
-/// memo-cacheable (fresh literal content each time; hazard (b) in
-/// `plans/compile-memo.md`). This IS a regression by this test's own metric
-/// (one more pre-model spawn), and it is the intended tradeoff: the fused
-/// render+loop compile it unblocks is now byte-identical turn to turn, so
-/// EVERY cycle after the first is a memo HIT for that (dominant, ~6-minute)
-/// spawn — see `tests/state_injection_memo_hit.rs`, which pins that win
-/// directly. A single extra cheap spawn on cycle 1 is the accepted cost.
+/// Harness turn compiles are memoized, so "clean cache" is enforced by the
+/// test (`support::isolate_compile_memo`) rather than assumed of the ambient
+/// environment — a warm memo pays 0 spawns, which would be a receipt about
+/// cache state, not about the boot path.
 pub const PRE_MODEL_EXTRACT_COMPILES: u64 = 2;
 
 fn repo_root() -> PathBuf {
@@ -183,7 +160,7 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
     support::require_extract();
 
     // This receipt is about the BOOT PATH, not about cache state. Harness turn
-    // compiles are memoized (`plans/compile-memo.md`), so against the shared
+    // compiles are memoized, so against the shared
     // test memo this counts 0 spawns on a warm run and
     // `PRE_MODEL_EXTRACT_COMPILES` on a cold one. The constant's own doc says
     // "clean cache"; this enforces it instead of assuming it.
@@ -239,9 +216,9 @@ async fn boot_pays_pre_model_extract_compiles_matching_baseline() {
 
     assert_eq!(
         snapshot, PRE_MODEL_EXTRACT_COMPILES,
-        "pre-model extract-spawn count changed: observed {snapshot}, expected {PRE_MODEL_EXTRACT_COMPILES} \
-         (plans/post-restart/extract-wave/boot/00-spec.md). A LOWER observed count than expected is the \
-         wave's win condition — if that's what you see, update PRE_MODEL_EXTRACT_COMPILES in this file to \
+        "pre-model extract-spawn count changed: observed {snapshot}, expected {PRE_MODEL_EXTRACT_COMPILES}. \
+         A LOWER observed count than expected is an improvement \
+         — if that's what you see, update PRE_MODEL_EXTRACT_COMPILES in this file to \
          match and nothing else. A HIGHER count is a regression: something now pays an extra compile before \
          the first model call."
     );

@@ -1,5 +1,4 @@
-//! FEASIBILITY SPIKE (not a regression gate — see the boundary note in the
-//! module doc below once the verdict lands): can a self-iterating-harness
+//! FEASIBILITY SPIKE (not a regression gate): can a self-iterating-harness
 //! answerer `finalize @(State -> State)` a FUNCTION value that crosses
 //! in-heap into the OUTER loop's suspended continuation and is APPLIED
 //! there — `loop st = do { f <- runLLMTurn @(State -> State) ...; pure (f
@@ -32,96 +31,26 @@
 //! process rather than raise a clean `Result` — see `tests/battery.sh`'s
 //! tier rules on when a standalone compile is warranted.
 //!
-//! # Verdict: FEASIBLE — LANDED (one-session collapse, Phase 3)
+//! # Verdict: FEASIBLE — LANDED (the one-session collapse)
 //!
-//! This test now PASSES and is the STANDING ACCEPTANCE for function-valued
+//! This test PASSES and is the STANDING ACCEPTANCE for function-valued
 //! answers: the answerer's `finalize @(State -> State)` closure is born in
 //! the loop's own heap (the answerer runs as a realm on the shared outer
 //! session), taken as a `ValueHandle`, DELIVERED into the loop's parked
 //! continuation via `resume_handle` (no bridge, no sentinel), and applied
-//! by the loop's compiled `f st` — composing across cycles. The sections
-//! below record the ORIGINAL spike diagnosis (against the pre-collapse
-//! architecture) as history: every seam it names has since landed (extract
-//! gate lifted for pure arrows; same-heap delivery via the continuation
-//! registry + handle API).
+//! by the loop's compiled `f st` — composing across cycles.
 //!
-//! # Historical spike diagnosis (superseded): NOT FEASIBLE AS-IS
-//!
-//! Blocked much earlier than the finalize/resume crossing this spike set out
-//! to probe — at `tidepool-extract` COMPILE time, on the very first fused
-//! `render`+`loop` compile of the OUTER session
-//! (`SelfHarnessDriver::compile_loop_entry`), before any answerer turn ever
-//! runs. `loop`'s own `runLLMTurn @(State -> State)` call site failed to
-//! compile at all, with:
-//!
-//! ```text
-//! Error: function-typed answers not supported in R0 (site in loop): State -> State
-//! ```
-//!
-//! **This specific gate is GONE (one-session plan Phase 3e).**
-//! `checkRunLLMTurnType` (`haskell/src/Tidepool/Translate.hs`) no longer
-//! rejects every function arrow — it admits a PURE function-typed answer
-//! like `State -> State` and rejects only an answer type that itself
-//! mentions the `Eff` tycon (`typeMentionsEffectMonad`, narrowed further by
-//! stable-effects-core: it no longer also rejects every tycon the generated
-//! effects module declares, since those now live in the STABLE
-//! `Tidepool.Effects.Core` module), with a different error text ("effectful
-//! function answers not supported (the row varies per compile): ...").
-//! `loop`'s `runLLMTurn @(State -> State)` site is exactly the class of type
-//! this now admits, so the specific verbatim error and reasoning quoted above
-//! no longer describe current behavior.
-//!
-//! (HISTORICAL, since resolved:) at the time of the original spike, the
-//! extract gate was only the FIRST seam — the "further, UNREACHED concern"
-//! below (no closure-aware finalize branch, no cross-session closure
-//! application) was the deeper one. BOTH have since landed: the collapse
-//! put the answerer and loop on ONE machine, `take_finalized_handle_keep_open`
-//! is the closure-aware branch (deep sentinel scan — nested closures
-//! included), and `resume_handle` delivers on the shared heap. This test is
-//! UN-IGNORED and passing; see the Verdict section above.
-//!
-//! **(HISTORICAL) A further, UNREACHED concern, as noted at spike time:** even
-//! setting the (now-lifted) extract gate aside, the driver's OWN finalize-value
-//! extraction path (`Harness::take_finalized_value_keep_open` ->
-//! `take_finalized_value_core`, `harness.rs`) unconditionally reads
-//! `fields[1]` of the `FinalizeWith(site, value)` request as "the finalized
-//! value" — correct for plain data, but for a closure that field is
-//! `CLOSURE_SENTINEL` (a synthetic `Con(u64::MAX, [])` the TOLERANT suspend
-//! bridge substitutes for the real, live closure — `heap_bridge.rs`'s
-//! `heap_to_value_forcing_tolerant`; see `acceptance_finalize.rs`'s module
-//! doc). The driver has no closure-aware branch there: it would hand that
-//! SENTINEL straight to `ResidentSession::resume` on the OUTER session
-//! (`driver.rs::run_loop_fragment_inner`), which is a DIFFERENT
-//! `ResidentSession` (its own heap/JITModule) than the one that produced the
-//! closure — there is no existing mechanism, anywhere in this codebase, that
-//! applies a closure live in one session's heap against a value from a
-//! DIFFERENT session's heap (the only closure-application mechanism that
-//! exists, `ResidentSession::apply_finalized`, runs same-session only, and
-//! even that has its own known gap — `acceptance_finalize.rs`'s ignored
-//! `finalize_closure_full_round_trip`). At the time this spike was written
-//! the test never reached that path (the since-lifted extract gate stopped
-//! it first), so this paragraph was, and remains, informed prediction from
-//! reading the code rather than an observed result. (Since resolved: the
-//! one-session collapse removed the cross-session boundary entirely, and
-//! this test now exercises the delivery path end to end, green.)
-//!
-//! Seams from the spec's checklist (as observed AT THE TIME, against the
-//! now-superseded extract gate — not re-verified against current behavior):
-//! 1. ROW SPLICE SYNTAX — NOT hit. `EngineConfig::turn_target`'s
-//!    `tidepool_mcp::RowArgs::at("Finalize", [ty])` already parenthesizes a
-//!    compound answer type correctly (`acceptance_finalize.rs`'s
-//!    `finalize_accepts_function_typed_site_where_runllmturn_rejects_it` /
-//!    `finalize_closure_crosses_by_reference` already exercise `Finalize
-//!    (Int -> Int)` through the identical `set_answer_contract` path). Not
-//!    reached at the time — the failure was on the OUTER `runLLMTurn` site,
-//!    which uses no `Finalize`-row splice at all.
-//! 2. TRANSCRIPT RENDER — not reached at the time; no answerer turn ever ran.
-//! 3. DEEP-FORCE OF CLOSURES — not reached at the time.
-//! 4. JITMODULE LIFETIME — not reached at the time.
-//! 5. asks.json TYPE RENDER — the closest match at the time, but stronger
-//!    than anticipated: not a type-STRING mismatch, but `tidepool-extract`
-//!    refusing to translate the `runLLMTurn` site at all — the gate that
-//!    fired is the one described above, now lifted for pure arrows.
+//! `checkRunLLMTurnType` (`haskell/src/Tidepool/Translate.hs`) admits a PURE
+//! function-typed answer like `State -> State` and rejects only an answer
+//! type that itself mentions the `Eff` tycon (`typeMentionsEffectMonad`,
+//! narrowed further by stable-effects-core: it does not also reject every
+//! tycon the generated effects module declares, since those live in the
+//! STABLE `Tidepool.Effects.Core` module), with error text "effectful
+//! function answers not supported (the row varies per compile): ...".
+//! `take_finalized_handle_keep_open` is the closure-aware branch of
+//! `Harness`'s finalize-value extraction path (deep sentinel scan — nested
+//! closures included), and `resume_handle` delivers the closure on the
+//! shared heap that produced it.
 
 mod support;
 
@@ -366,7 +295,7 @@ async fn fn_finalize_crosses_two_cycles_and_composes() {
     );
 }
 
-/// The companion-memory answer contract (`plans/companion-memory.md`): the
+/// The companion-memory answer contract: the
 /// finalized answer is `Turn { directives :: [Directive], edit :: State ->
 /// State }` — a PURE-DATA LIST beside a closure in one product. The deep
 /// sentinel scan must route the whole record through handle delivery, and

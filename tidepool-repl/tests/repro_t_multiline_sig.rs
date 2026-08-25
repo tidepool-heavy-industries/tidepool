@@ -70,12 +70,12 @@ fn bindings_only(s: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// Friction 2 (round-2 test-user report): `:t` on an M-returning expression
-/// used to crash — the probe bind's captured type (`Int -> M Int`) mentions
-/// the effect row, and the cross-row bind guard in `Main.mkBoundBinders`
-/// (`typeMentionsEffectMonad`) rejected it exactly as it would a REAL
-/// session bind, even though a `:t` probe is read-and-discarded and never
-/// crosses into a later turn's compile. `:t` must be exempt by construction
+/// `:t` on an M-returning expression must not crash: the probe bind's
+/// captured type (`Int -> M Int`) mentions the effect row, which the
+/// cross-row bind guard in `Main.mkBoundBinders` (`typeMentionsEffectMonad`)
+/// would otherwise reject exactly as it would a REAL session bind, even
+/// though a `:t` probe is read-and-discarded and never crosses into a later
+/// turn's compile. `:t` must be exempt by construction
 /// (`SessionBind::probe_only`), for ANY well-typed expression, and must
 /// mutate nothing — `:bindings` lists the same names before and after.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -27,7 +27,7 @@
 //! session slot when idle/suspended, moved onto the eval thread for the
 //! duration of a turn.
 //!
-//! # Fragment × suspend — the PARKED path (one-session plan, Phase 1)
+//! # Fragment × suspend — the PARKED path
 //!
 //! Each turn is compiled into the live machine as a fragment
 //! ([`JitEffectMachine::add_function`]) and driven through
@@ -324,7 +324,7 @@ enum HoleSeed {
 /// The suspend-and-completion shape mirrors [`super::TurnOutcome`], but a
 /// resident turn is driven by direct `run_*` calls (not the oneshot engine), so
 /// this is a distinct, smaller enum: no `Paused`/`TimedOut` (timeout-yield is
-/// permanently excluded from the stowable resident path — a locked decision),
+/// permanently excluded from the stowable resident path, by design),
 /// and completion carries the bridged result value.
 // `Completed`'s `EvalResult` is the large variant; like the engine's
 // `SuspendableRun`, this is a transient boundary carrier destructured
@@ -449,7 +449,7 @@ pub struct ResidentSession<H, O> {
     parked: Vec<(String, ContinuationId)>,
     /// The realm every park this session initiates is owned by. `RealmId(0)`
     /// until [`ResidentSession::set_realm`] — per-node realms arrive with the
-    /// collapse (one-session plan, Phase 3).
+    /// one-session collapse.
     realm: RealmId,
     /// The scope tree node every turn this session runs is compiled and bound
     /// in ([`ScopeId::ROOT`] until [`ResidentSession::set_scope`]). The realm
@@ -644,19 +644,19 @@ where
         self.parked.is_empty()
     }
 
-    /// Scope every subsequent park under `realm` (one-session plan: the
+    /// Scope every subsequent park under `realm`: the
     /// driver assigns per-answerer-node realms; scope exit is the machine's
-    /// `close_realm`).
+    /// `close_realm`.
     pub fn set_realm(&mut self, realm: RealmId) {
         self.realm = realm;
     }
 
-    /// Compile and bind every subsequent turn in `scope` (PRD 21 lane C2): the
+    /// Compile and bind every subsequent turn in `scope`: the
     /// turn imports `scope`'s decl tip and the `Val.G<g>` modules VISIBLE from
     /// it, and a value-plane bind lands in `scope`'s own frame. The harness
     /// applies a node's scope here at the same site it applies its realm, so a
     /// node without one keeps compiling and binding at [`ScopeId::ROOT`] —
-    /// exactly its pre-C2 behavior.
+    /// exactly its behavior before scope trees existed.
     ///
     /// Rejects a dead `scope` (never minted, or already retired) with a typed
     /// [`ResidentError`] and leaves [`Self::current_scope`] UNCHANGED — a
@@ -676,7 +676,7 @@ where
         self.scope
     }
 
-    /// SCOPE EXIT for `realm` (one-session plan, pillar A): close the realm
+    /// SCOPE EXIT for `realm` (pillar A): close the realm
     /// on the machine (frames dropped, roots deregistered, handles released)
     /// and RECONCILE this session's parked-hole list against the machine's
     /// surviving frame ids — the machine is the ground truth, so holes whose
@@ -714,7 +714,7 @@ where
     /// the frame's OWN realm: mint the handle owned by `realm` instead (a
     /// green thread's `AsyncDoneWith` payload, owned by the SESSION's realm
     /// so a waiter's handle survives the thread's own realm later closing —
-    /// PRD 20 S1-L4, `ResidentSession::run_forked`'s doc). Same
+    /// see `ResidentSession::run_forked`'s doc). Same
     /// frame-stays-parked semantics; `None` under the same conditions.
     /// Returns a [`RootCustody`] token, exactly as [`Self::finalized_handle`]
     /// does: minting under a different realm changes WHO owns the root, never
@@ -775,7 +775,7 @@ where
 
     /// Redirect an ALREADY-MINTED value-plane binding for `name` to resolve
     /// through `custody`'s tenured payload instead of whatever it was bound
-    /// to before — the mount seam (PRD 21 lane C1): "a handle installed under
+    /// to before — the mount seam: "a handle installed under
     /// a name in a window's declaration scope", the closure-tenure-then-handle
     /// delivery path (pillar B) pointed the OTHER direction.
     ///
@@ -985,8 +985,7 @@ where
     }
 
     /// The CURRENT value-plane binding names (newest gen per name) — what a
-    /// machine rotation would lose (one-session plan, Phase 4: enumerated,
-    /// legible loss, never silent).
+    /// machine rotation would lose (enumerated, legible loss, never silent).
     pub fn binding_names(&self) -> Vec<String> {
         self.core
             .bindings()
@@ -995,7 +994,7 @@ where
             .collect()
     }
 
-    // -- scopes (PRD 21 lane C2) -------------------------------------------
+    // -- scopes --------------------------------------------------------------
 
     /// Mint a fresh child scope of `parent` ([`ScopeId::ROOT`] for a top-level
     /// invocation scope). `None` if `parent` is not live.
@@ -1468,8 +1467,7 @@ where
     }
 
     /// Run a handle-rooted BODY as a NEW suspension-capable top-level run under
-    /// `realm` — the green-thread fork entry (PRD 20 S1-L4,
-    /// `plans/self-iterating-harness/20-s1l4-green-threads.md`).
+    /// `realm` — the green-thread fork entry.
     ///
     /// This is a THIRD entry beside [`Self::run_child`]/[`Self::run_child_pure`],
     /// not a change to either: their refusal of a suspending child

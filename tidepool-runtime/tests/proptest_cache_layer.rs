@@ -1,7 +1,7 @@
-//! S5 cache-layer property suite for `tidepool-runtime/src/cache.rs`.
+//! S5 cache-layer property suite for `tidepool-toolchain/src/cache.rs`.
 //!
-//! TESTABILITY NOTE (finding F8): `mod cache` is private and `cache_key` /
-//! `cache_load` / `cache_store` are `pub(crate)`, so an integration test cannot
+//! TESTABILITY NOTE: `cache_key` / `cache_load` / `cache_store` are
+//! `pub(crate)` to that crate, so an integration test cannot
 //! call the primitives directly. This suite therefore drives the cache layer
 //! *behaviorally* through the public `compile_haskell` API:
 //!

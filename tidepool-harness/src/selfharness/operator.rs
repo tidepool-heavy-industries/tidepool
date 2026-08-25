@@ -81,7 +81,7 @@ pub trait OperatorGate: Send + Sync {
     fn post_turn_source(&self, _source: &str) {}
 
     /// Resolve (registering it if needed) a gate scoped to one labeled
-    /// window — PRD 21 C5's per-node operator GUI: a `runLLMTurnBranchLabeled`
+    /// window — the per-node operator GUI: a `runLLMTurnBranchLabeled`
     /// child's asks/notes route here instead of the default gate when this
     /// returns `Some`. `label` is the caller-chosen Text carried on the wire
     /// (never parsed out of a prompt). Default `None`, so every existing

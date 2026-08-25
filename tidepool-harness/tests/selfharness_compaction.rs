@@ -1,6 +1,5 @@
 //! Acceptance coverage for the self-iterating harness driver's
-//! runtime-owned MID-LOOP, IN-PLACE compaction (`plans/self-iterating-harness/
-//! 02-runtime.md` Compaction):
+//! runtime-owned MID-LOOP, IN-PLACE compaction:
 //!
 //! Compaction is ONE ordinary turn on the EXISTING answerer session (which
 //! already holds the full context): the driver pushes a "summarize everything

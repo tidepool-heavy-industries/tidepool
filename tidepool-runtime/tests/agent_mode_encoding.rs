@@ -1,4 +1,4 @@
-//! PRD 18 gate 1(a): the Servant-style mode encoding
+//! The Servant-style mode encoding
 //! (`Tidepool.Agent.Contract`, `mode :- Call/Notify`, `compileTools`) proven
 //! through the REAL extract/JIT pipeline — not just a typecheck.
 //!
@@ -16,9 +16,7 @@
 //!
 //! The `compile_fail_*` tests are TYPE-LEVEL diagnostics (source-level
 //! `TypeError`s, or in one case GHC's own instance-resolution error);
-//! `compiletools_time_*` are runtime `ToolCompileError` values — see
-//! `plans/post-restart/agent-lanes/receipt-mode-encoding.md` for why the
-//! split falls where it does.
+//! `compiletools_time_*` are runtime `ToolCompileError` values.
 //!
 //! Requires a worktree extract binary (`cabal build tidepool-extract-bin`,
 //! then `TIDEPOOL_EXTRACT` pointed at it, or run inside `nix develop`). Panics

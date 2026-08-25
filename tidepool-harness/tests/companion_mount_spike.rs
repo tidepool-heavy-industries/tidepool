@@ -1,4 +1,4 @@
-//! PRD 21 lane C1 — THE mount spike: prove a function-bearing value
+//! THE mount spike: prove a function-bearing value
 //! finalized by one model window (P) can be MOUNTED into a later window (C)
 //! as a named invocation-local binding and called directly, across P's own
 //! retirement and across C's own mid-sequence suspension (the GC window a
@@ -26,8 +26,8 @@
 //!    plumbing — no new GHC-facing mechanism.
 //! 3. The runtime redirects that binding's root to point at P's real handle
 //!    ([`ResidentSession::mount_handle`]) — the mount seam itself: "a handle
-//!    installed under a name in a window's declaration scope" (PRD 21's
-//!    substrate-mapping sketch), the closure-tenure-then-handle path pointed
+//!    installed under a name in a window's declaration scope",
+//!    the closure-tenure-then-handle path pointed
 //!    the OTHER direction. P then retires (`terminate_node`) — its realm
 //!    closes, but the handle was already transferred OUT before that, so the
 //!    mount survives P's death.

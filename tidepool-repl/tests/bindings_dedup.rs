@@ -1,6 +1,6 @@
 //! Pure unit test for the `:bindings` dedup property, demoted out of
-//! `shadow_rebind.rs`'s `bindings_after_rebind_lists_once` (session-test-review
-//! quick win #3): the JSON view's "list a rebound name once" guarantee comes
+//! `shadow_rebind.rs`'s `bindings_after_rebind_lists_once`: the JSON view's
+//! "list a rebound name once" guarantee comes
 //! straight from `BindingTable::iter_current()` deduping by name over its
 //! in-memory `current` map — no session, no compile, needed to prove it.
 
@@ -31,7 +31,7 @@ fn entry(name: &str, gen: u64, raw_id: u64) -> BindingEntry {
 
 /// After a rebind (same name, newer gen, fresh id), `iter_current()` lists the
 /// name exactly ONCE — the newest gen, not both. Mirrors the property
-/// `shadow_rebind.rs`'s `bindings_after_rebind_lists_once` used to prove via a
+/// `shadow_rebind.rs`'s `bindings_after_rebind_lists_once` proved via a
 /// live 3-turn session; this is the pure-Rust layer `:bindings` actually reads.
 #[test]
 fn iter_current_lists_a_rebound_name_exactly_once() {

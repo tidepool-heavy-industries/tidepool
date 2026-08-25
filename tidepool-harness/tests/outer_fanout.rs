@@ -2,14 +2,14 @@
 //! `SelfHarnessDriver::service_outer_fanout`. Two contracts share one
 //! fixture:
 //!
-//! - **PRD 20 S1-L4** ("concurrent cognition windows"): children are driven
+//! - **Concurrent cognition windows**: children are driven
 //!   CONCURRENTLY — up to [`SelfHarnessDriver::set_concurrency_cap`] at once,
 //!   each in its own freshly-minted answerer realm on the shared outer
 //!   machine — rather than one at a time, and completion order never reaches
 //!   the observable result.
-//! - **PRD 21 locked decision 6**: a child window's abnormal exit folds as
-//!   DATA at its own branch position (`Left InvocationExit`) instead of
-//!   aborting the outer turn and erasing its siblings' finished answers.
+//! - **A child window's abnormal exit folds as DATA** at its own branch
+//!   position (`Left InvocationExit`) instead of aborting the outer turn and
+//!   erasing its siblings' finished answers.
 //!
 //! ONE fixture (`fixtures/ConcurrentFanoutHarness.hs`, a fan of nine
 //! prompts), ONE compile shape shared across every test below
@@ -243,7 +243,7 @@ fn uuid_ish() -> u64 {
     COUNTER.fetch_add(1, Ordering::SeqCst)
 }
 
-/// PRD 20 S1-L4's core contract: TWO (of the fixture's nine) fanout
+/// The core contract: TWO (of the fixture's nine) fanout
 /// children are serviced CONCURRENTLY, and completing in either order
 /// yields an IDENTICAL final result — declaration order, never completion
 /// order, decides the assembled `[Int]`. Proven by forcing each order in
@@ -339,7 +339,7 @@ async fn outer_fanout_respects_concurrency_cap() {
     );
 }
 
-/// PRD 21 locked decision 6, the whole reason `runLLMTurnFork`/
+/// A child window's abnormal exit folding as data is the whole reason `runLLMTurnFork`/
 /// `runLLMTurnFanout` answer an `Either`: ONE child's window exhausts its
 /// rounds while its eight siblings finalize normally. The outer turn must
 /// still COMPLETE, every sibling's answer must arrive, and the failed child

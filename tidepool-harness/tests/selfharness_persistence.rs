@@ -1,18 +1,17 @@
 //! Durability across a restart, in the two things a killed run leaves behind:
-//! the ONE generation-tagged CHECKPOINT, and — since PRD 20 S1-L5 — the run
-//! LEASE plus its append-only JOURNAL.
+//! the ONE generation-tagged CHECKPOINT, and the run LEASE plus its
+//! append-only JOURNAL.
 //!
 //! Checkpoint half: a completed cycle commits its own state and its own
 //! compaction summary together, at the end of
 //! `SelfHarnessDriver::run_one_loop_iteration`'s success path, so a restart always
 //! reads a state and a summary from the SAME generation.
 //!
-//! Lease/journal half (wave 2b/3, `plans/self-iterating-harness/
-//! 20-s1-l5-resume.md`): a run that ends ABNORMALLY does not retire its lease,
+//! Lease/journal half: a run that ends ABNORMALLY does not retire its lease,
 //! so the next boot resumes it and does only the delta; a run that ends
 //! normally does retire, so the next boot mints a fresh run. A resumed
 //! process always owns its OWN freshly-allocated journal SEGMENT — never one
-//! a prior process wrote to (wave 3) — which is what makes a kill mid-append
+//! a prior process wrote to — which is what makes a kill mid-append
 //! (a torn final line) survivable across arbitrarily many further boots
 //! rather than one.
 //!
@@ -604,8 +603,7 @@ async fn ask_ids_strictly_increase_across_a_restart() {
 /// off, rather than starting over from `initialState`, AND resuming the
 /// loop-iteration count at the right number rather than resetting to 0 (the
 /// iteration count lives in the checkpoint ENVELOPE, never in `State`
-/// itself — `plans/self-iterating-harness/15-generic-surface-wave.md`,
-/// "Runtime context is the runtime's job"). A third cycle (no restart in
+/// itself — runtime context is the runtime's job). A third cycle (no restart in
 /// between) asserts generation keeps increasing within one process too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_cycles_restore_state_and_summary_from_the_same_generation() {
@@ -1187,11 +1185,10 @@ async fn state_decode_failure_retries_once_from_fresh_state_instead_of_killing_r
 }
 
 // ============================================================================
-// PRD 20 S1-L5 wave 2b — the run lease and its journal under ABNORMAL
-// termination
+// The run lease and its journal under ABNORMAL termination
 //
-// Wave 1's acceptance (`tests/outer_effects.rs::
-// resume_boot_fold_fresh_then_resumed_appends_only_the_delta`) proves ENTRY
+// `tests/outer_effects.rs::
+// resume_boot_fold_fresh_then_resumed_appends_only_the_delta` proves ENTRY
 // SELECTION over a clean journal: a fresh boot compiles `loop`, a boot with a
 // non-empty fold compiles `resumeLoop` and appends only the delta, and a
 // non-empty fold against a harness with no `resumeLoop` is refused. It gets its

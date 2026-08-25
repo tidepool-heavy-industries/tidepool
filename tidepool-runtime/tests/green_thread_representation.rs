@@ -1,6 +1,5 @@
-//! PRD 20 S1-L4 Wave 1 acceptance — THE REPRESENTATION-PINNING TEST
-//! (`plans/self-iterating-harness/20-s1l4-green-threads.md`): **two green
-//! threads blocked on two DIFFERENT effects have BOTH holes pending in the
+//! THE REPRESENTATION-PINNING TEST: **two green threads blocked on two
+//! DIFFERENT effects have BOTH holes pending in the
 //! session's multi-hole registry SIMULTANEOUSLY, and resuming them in
 //! EITHER order produces identical results.**
 //!
@@ -45,7 +44,7 @@ const NODE_ID: DataConId = DataConId(5);
 /// The scratch "spawn wrapper" Con: `SpawnWrap dummy closure` — field 1 is
 /// the thread body closure, the sentinel-tenure mechanism's load-bearing
 /// field position (any constructor identity works; it keys on POSITION and
-/// closure-ness, never the name — PRD 20 S1-L4's scaffold doc).
+/// closure-ness, never the name).
 const WRAP_ID: DataConId = DataConId(6);
 /// A thread body's own completion wrapper: `ThreadResult answer`.
 const RESULT_ID: DataConId = DataConId(7);
@@ -332,7 +331,7 @@ fn two_green_threads_pend_simultaneously_and_resume_order_is_free() {
 // ─── Nested fork — what is sound, and what the open bug is NOT ──────────
 //
 // A green thread whose body itself forks another thread. Not an edge case:
-// PRD 20's node residency IS this shape ("an interior node is a green thread
+// node residency IS this shape ("an interior node is a green thread
 // whose body, after forking children, is a select loop"), so `forkNode` on an
 // interior node depends on it.
 //

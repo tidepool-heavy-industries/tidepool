@@ -37,14 +37,12 @@ use crate::harness::AnswerContract;
 /// emission is row-membership-gated, so Worktree must be IN the row, not just
 /// in vocab.
 ///
-/// S1-L1 (`plans/self-iterating-harness/20-exomonad-v3-prd.md`) widens this
-/// with `Console`/`RepoEvent`/`Exec`: an authored `loop` can now `say`,
+/// This row also carries `Console`/`RepoEvent`/`Exec`: an authored `loop` can `say`,
 /// drive managed worktrees AND observe their repository events, and run
 /// shell commands — every one of them suspension-serviced by
 /// [`SelfHarnessDriver::service_outer_effect`], exactly like `Subagent`.
 ///
-/// The run-journal lane (PRD 20 S1-L5/S1-L1 wiring) widens it once more with
-/// `Journal`: an authored `loop` can now `record` a durable progress step,
+/// The row also carries `Journal`: an authored `loop` can `record` a durable progress step,
 /// serviced the same suspension way through
 /// [`SelfHarnessDriver::service_outer_effect`]/[`SelfHarnessDriver::set_journal_handler`].
 /// `Journal` is deliberately absent from `tidepool-handlers`'
@@ -52,7 +50,7 @@ use crate::harness::AnswerContract;
 /// `Subagent`) — which journal file a run appends to, and folding it at
 /// boot, is a driver/binary wiring concern, not a base-stack default.
 ///
-/// The READ half is wired now (S1-L5 wave 1): [`SelfHarnessDriver::open_run_journal`]
+/// The READ half is wired: [`SelfHarnessDriver::open_run_journal`]
 /// loads and folds a run's journal at boot and the first cycle after boot
 /// injects it through the harness's `resumeLoop`. `record` is untouched by
 /// that and stays WRITE-ONLY on the authored surface — nothing in this row
@@ -62,11 +60,9 @@ use crate::harness::AnswerContract;
 /// compile's import list (its `EffectDecl::extra_imports`), which is what puts
 /// `Resume.ResumeFold` in scope for the `__selfHarnessResume` splice.
 ///
-/// The green-threads lane (PRD 20 S1-L4,
-/// `plans/self-iterating-harness/20-s1l4-green-threads.md`) widens it once
-/// more with `Green`, placed LAST so `RunLLMTurn` keeps index 0. Under the
+/// The row also carries `Green`, placed LAST so `RunLLMTurn` keeps index 0. Under the
 /// registry representation (threads park as new continuations in the
-/// session's multi-hole registry, PRD 20 lines 255-267), `Green` is NOT
+/// session's multi-hole registry), `Green` is NOT
 /// serviced through [`SelfHarnessDriver::service_outer_effect`]'s mechanical
 /// decode-dispatch-convert shape the way `Console`/`Worktree`/`RepoEvent`/
 /// `Exec`/`Journal` are: an `async` suspension needs the spawned thread
@@ -193,7 +189,7 @@ pub fn typed_request_agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
 }
 
 /// [`typed_request_agent_decls`] with `Subagent` and `Worktree` PREPENDED, in that
-/// order (PRD 21 C5) — the row a recursive-companion branch-node window
+/// order — the row a recursive-companion branch-node window
 /// compiles against when paired with
 /// [`crate::engine::EngineConfig::with_delegate_wrap`]. Both reused
 /// verbatim (no new Rust registry row); prepended, not appended, and in

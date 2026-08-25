@@ -1,9 +1,10 @@
 //! Implements `tidepool_runtime::session::SuspendableSession` for this
 //! crate's slot-path [`Session`] (#22 design doc §5.B step 3) — a
 //! THROWAWAY adapter: it exists only to let repl consume the kernel's
-//! error taxonomy and admission-hook shape ahead of Phase 6
-//! (`plans/one-session.md`), and is deleted the moment Phase 6 converts
-//! repl onto `tidepool_runtime::session::ResidentSession` directly (at
+//! error taxonomy and admission-hook shape ahead of Phase 6 (repl/one-shot
+//! conversion + slot deletion, parked behind a production-soak gate), and
+//! is deleted the moment Phase 6 converts repl onto
+//! `tidepool_runtime::session::ResidentSession` directly (at
 //! which point repl uses the exact same trait impl the harness already
 //! does — see `tidepool-runtime/src/session/resident.rs`'s own impl — no
 //! adapter needed).

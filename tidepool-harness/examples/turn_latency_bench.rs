@@ -4,15 +4,12 @@
 //! median/p90/total latency plus per-turn wall clock and the unattributed
 //! residual (turn wall minus the sum of attributed stages).
 //!
-//! MEASUREMENT ONLY — see
-//! `plans/self-iterating-harness/11-extract-timing-contract.md` for the
-//! documented invocation (both the DEBUG build, which matches production's
-//! `target/debug/tidepool-selfharness`, and the `--release` comparison) and
-//! what the four scenarios below are for.
+//! MEASUREMENT ONLY. Run both the DEBUG build (matches production's
+//! `target/debug/tidepool-selfharness`) and `--release` and compare; see the
+//! four scenarios below for what each measures.
 //!
 //! Run with (needs `TIDEPOOL_EXTRACT` + a with-packages GHC on `PATH`, and
-//! `flock /tmp/tidepool-ghc.lock` around the run — see the contract doc for
-//! the exact env):
+//! `flock /tmp/tidepool-ghc.lock` around the run):
 //!   `cargo build --example turn_latency_bench -p tidepool-harness`
 //!   `flock /tmp/tidepool-ghc.lock ./target/debug/examples/turn_latency_bench`
 

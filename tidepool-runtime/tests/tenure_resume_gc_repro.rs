@@ -1,5 +1,5 @@
 //! Injected-collection reproducers for the tenure-then-resume rooting gap
-//! (PRD 20 S1-L4; see `tidepool-runtime/tests/nested_async_repro.rs`'s
+//! (see `tidepool-harness/tests/nested_async_repro.rs`'s
 //! module doc for the full mechanism writeup, and
 //! `tidepool-harness/tests/fixtures/MinimalWatchListHarness.hs` for the
 //! smallest known GHC-driven reproducer).

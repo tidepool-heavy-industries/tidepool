@@ -1,4 +1,4 @@
-//! Lifecycle state-machine regression suite (the `SessionState` refactor).
+//! Lifecycle state-machine regression suite.
 //!
 //! These guard the concurrency bug class the smeared lifecycle allowed, all
 //! through the real `dispatch_tool` entry point:

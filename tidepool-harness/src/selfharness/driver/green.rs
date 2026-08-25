@@ -1,4 +1,4 @@
-//! The green-thread scheduler (PRD 20 S1-L4): thread table, waiter map,
+//! The green-thread scheduler: thread table, waiter map,
 //! and FIFO ready queue backing `Tidepool.Async`'s `fork`-composed
 //! `async`/`wait` idiom, scoped to one `run_loop_fragment_inner` call
 //! (structured concurrency — nothing survives past the `loop` fragment that
@@ -19,7 +19,7 @@ use crate::harness::{HarnessError, Session, OUTER_REALM};
 use crate::selfharness::observer::FormSource;
 use crate::tree::{FanBadge, HoleId, NodeId};
 
-// --- Green threads (PRD 20 S1-L4) ---------------------------------------
+// --- Green threads --------------------------------------------------------
 //
 // The scheduler is entirely LOCAL to one `run_loop_fragment_inner` call —
 // every thread a loop spawns is structured-concurrency-scoped to that one
@@ -75,9 +75,8 @@ pub(crate) enum GreenResult {
 /// and serviced — the scheduler's FIFO ready queue. `chain` is threaded
 /// through unchanged so a later `AsyncDoneWith`/wake can attribute correctly;
 /// order is the driver's business only — the representation-pinning
-/// contract (`plans/self-iterating-harness/20-s1l4-green-threads.md`) is
-/// that resuming ready work in EITHER order produces identical results, so
-/// this queue just picks one (FIFO).
+/// contract is that resuming ready work in EITHER order produces identical
+/// results, so this queue just picks one (FIFO).
 pub(crate) struct GreenReady {
     pub(crate) chain: GreenChain,
     pub(crate) outcome: ResidentOutcome,
@@ -373,7 +372,7 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// Service one `Tidepool.Async` suspension (PRD 20 S1-L4): decode which
+    /// Service one `Tidepool.Async` suspension: decode which
     /// of the six `Async*With` verbs `request` is by CONSTRUCTOR NAME (never
     /// in [`engine::classify_hole`] — the payload may carry a live closure,
     /// see [`SuspensionRouting::Green`]'s doc) and act, mutating the scheduler's
@@ -476,8 +475,8 @@ impl SelfHarnessDriver {
                     .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(DriverError::Session)?;
-                // Spawner-continues-first (the ready queue's own choice, per
-                // this lane's scaffold doc) — resume the spawner immediately
+                // Spawner-continues-first (the ready queue's own choice) —
+                // resume the spawner immediately
                 // with the fresh id, then start the thread; either push lands
                 // on `ready` so both eventually run regardless.
                 //
@@ -601,7 +600,7 @@ impl SelfHarnessDriver {
                     });
                     // Wake any `WatchAsync tid` subscriber exactly once — the
                     // `Tidepool.Event.waitEvent`/`Tidepool.Event` completion
-                    // watch (PRD 20 S1-L4 wave 2). `records_result` above
+                    // watch. `records_result` above
                     // already established this is a genuine Running→Settled
                     // transition, so this always fires exactly once per
                     // settle. No-op if `RepoEvent` was never wired —

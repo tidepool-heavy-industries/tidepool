@@ -1,17 +1,10 @@
-//! Wave 3b hardening — DIMENSION: shadowing & generations.
+//! DIMENSION: shadowing & generations.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
 //! (session_run — the harness `def`/`eval`/`cmd`
 //! helpers are thin 1-item `session_run` wrappers) over multiple turns.
 //! Focus: what happens when a NAME is rebound (value or function) or a TYPE is
 //! redefined across generations.
-//!
-//! THE KEY HYPOTHESIS (case 1): `Session::live_val_modules()` collects EVERY
-//! still-live `Val.G<g>` module (binding_table.rs `live_modules()` iterates the
-//! append-only `live` map, which retains shadowed old gens), and
-//! `session_imports()` both injects AND `import`s all of them. After rebinding
-//! `x`, both `Tidepool.Session.Val.G1` (exports `x`) and `…Val.G2` (exports `x`)
-//! are imported unqualified → GHC ambiguous-occurrence error at the reference.
 //!
 //! Each test panics loudly when the session-aware extract is unavailable.
 
@@ -22,14 +15,11 @@ use common::*;
 ///
 /// Sequence: `x <- pure (1 :: Int)` ; `x <- pure (2 :: Int)` ; `x + 1`.
 /// EXPECT: 3 (newest binding wins).
-/// SUSPECTED BUG: both Val.G1 and Val.G2 export `x`, imported unqualified →
-/// ambiguous occurrence compile error at `x + 1`.
 ///
-/// FIXED (was BUG #1): session.rs now imports only the CURRENT gen per name
-/// (`current_val_modules` via `iter_current`) while still INJECTING every live
-/// gen (`live_val_modules`), so the reference resolves `x` unambiguously to the
-/// newest binding. Previously this failed with GHC-87543 "Ambiguous occurrence
-/// `x' — either Val.G1.x or Val.G2.x". Now PASSES with newest-wins => 3.
+/// session.rs imports only the CURRENT gen per name (`current_val_modules`
+/// via `iter_current`) while still INJECTING every live gen
+/// (`live_val_modules`), so the reference resolves `x` unambiguously to the
+/// newest binding.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_value_name_newest_wins() {
     require_extract();
@@ -90,11 +80,8 @@ async fn self_referential_rebind_reads_prior() {
 /// CASE 2 — Rebind a name at a DIFFERENT type; newest type must win.
 ///
 /// `x <- pure (1 :: Int)` ; `x <- pure (T.pack "hi")` ; `T.length x` => 2.
-/// Fixed by BUG-2 (commit caf3f4b: resolve home-library functions in session
-/// extract). Previously crashed with kind=4 TypeMetadata "forced type metadata
-/// (should be dead code)" — the trigger was a Tier-0 Text bind while ANY prior
-/// binding was live. BUG-2 fixed the home-library function resolution that
-/// caused the TypeMetadata forcing. Covered by text_bind.rs green suite.
+/// Covered by text_bind.rs's regression suite (Tier-0 Text bind while any
+/// prior binding is live).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rebind_value_different_type() {
     require_extract();
@@ -248,8 +235,8 @@ async fn redefine_type_old_binding_orphaned_gracefully() {
 
 /// CASE 5 — Rebinding a name across 2 turns compiles cleanly.
 ///
-/// The `:bindings`-lists-it-once assertion this test used to make here moved
-/// to `bindings_dedup.rs::iter_current_lists_a_rebound_name_exactly_once` — a
+/// The `:bindings`-lists-it-once property lives in
+/// `bindings_dedup.rs::iter_current_lists_a_rebound_name_exactly_once` — a
 /// pure Rust unit test over `BindingTable` (no session, no compile), since
 /// `iter_current()`'s keyed-by-name dedup doesn't need a live session to
 /// prove. These 2 turns stay: they're what PRODUCE the rebind state the pure

@@ -86,7 +86,7 @@ impl SelfHarnessDriver {
 
         // An in-context window has NO branch position and no siblings — its
         // failure IS this turn's failure, which is why `runLLMTurn @T` keeps
-        // a bare answer (PRD 21 decision 6's asymmetry, stated at the verb
+        // a bare answer (the asymmetry is stated at the verb
         // declaration). So a typed exit from the shared round loop collapses
         // back into a hard failure HERE, unchanged from before the exit
         // plumbing existed.
@@ -388,7 +388,7 @@ impl SelfHarnessDriver {
                     retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, state.clone()))
                         .await?;
                 }
-                // PRD 21 C5: a branch-node window's own `delegate` call
+                // A branch-node window's own `delegate` call
                 // lowers to a real `Subagent` send (`Tidepool.Agent.Delegate.
                 // runDelegate`) — same suspension, same driver-owned
                 // handler, as the AUTHORED outer loop's `spawnAgent`

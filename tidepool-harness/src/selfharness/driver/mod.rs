@@ -4,7 +4,7 @@
 //! Agent node, reusing `run_to_hole_or_done`) to a `finalize` and delivering
 //! the result back in-heap to resume `loop`.
 //!
-//! ONE SESSION (the one-session collapse, `plans/one-session.md`): the outer
+//! ONE SESSION: the outer
 //! session and every loop's answerer node share the SAME resident machine,
 //! not two separate sessions bridged by value. The outer session is
 //! node-less and registry-owned ([`Harness::adopt_session`]); each answerer
@@ -47,7 +47,7 @@
 //! conversion); see [`Self::drive_agent_session_to_finalize`]'s doc for why they
 //! are not `spawn_blocking`'d.
 //!
-//! # Boot fold and entry selection (PRD 20 S1-L5)
+//! # Boot fold and entry selection
 //!
 //! A run's durable journal is READ here, and only here: `record`
 //! (`Tidepool.Journal`) stays write-only on the authored surface.
@@ -314,7 +314,7 @@ const DEFAULT_FORK_BUDGET_PER_SESSION: u32 = 32;
 
 /// Default cap on how many `RunLLMTurn` fanout/fork children
 /// ([`SelfHarnessDriver::service_outer_fanout`]) may be concurrently
-/// mid-window (PRD 20 S1-L4 — "concurrent cognition windows") — each in its
+/// mid-window (concurrent cognition windows) — each in its
 /// own freshly-minted answerer realm on the shared outer machine. Only
 /// machine occupancy serializes past this point (a window spends most of
 /// its wall time in provider inference, off-machine, with nothing checked
@@ -423,7 +423,7 @@ fn turn_outcome_tag(o: &TurnOutcome) -> &'static str {
 /// (`TIDEPOOL_MACHINE_FRAGMENT_CEILING` overrides): each answerer round
 /// compiles ~1 fragment, so this is hundreds of loops of headroom while
 /// still bounding the never-reclaimed executable memory. Tuned from
-/// [`Event::MachineStats`] evidence, per the plan's locked decision.
+/// [`Event::MachineStats`] evidence.
 const DEFAULT_FRAGMENT_CEILING: u64 = 4096;
 
 pub struct SelfHarnessDriver {
@@ -438,8 +438,7 @@ pub struct SelfHarnessDriver {
     /// [`Self::answerer`]'s realm.
     iteration_realm: AtomicU64,
     /// The living session values the LAST machine rotation lost — surfaced
-    /// once in the next render (legible loss, one-session plan Phase 4),
-    /// then cleared.
+    /// once in the next render as a legible-loss note, then cleared.
     last_rotation_losses: Option<Vec<String>>,
     /// The operator's between-loops message — the optional "steering" field
     /// of [`Self::between_loops_gate`]'s form — threaded into the NEXT
@@ -532,8 +531,8 @@ pub struct SelfHarnessDriver {
     max_fork_depth: u32,
     fork_subtree_cap: u32,
     /// The concurrency cap for concurrently-serviced fanout/fork
-    /// `RunLLMTurn` windows (PRD 20 S1-L4,
-    /// [`Self::service_outer_fanout`]) — default [`DEFAULT_CONCURRENCY_CAP`]
+    /// `RunLLMTurn` windows
+    /// ([`Self::service_outer_fanout`]) — default [`DEFAULT_CONCURRENCY_CAP`]
     /// (8). Only machine occupancy serializes turns past this point; this
     /// bounds how many children may be mid-window (a provider call in
     /// flight, or contending for the shared machine) at once. Configurable
@@ -563,8 +562,7 @@ pub struct SelfHarnessDriver {
     /// restart rule, see [`Self::run_loop`]'s doc).
     last_checkpoint: Option<persistence::Checkpoint>,
     /// The number of loop cycles completed so far — a runtime fact, NOT part
-    /// of the authored `State` (`plans/self-iterating-harness/
-    /// 15-generic-surface-wave.md`, "Runtime context is the runtime's job").
+    /// of the authored `State` (runtime context is the runtime's own job).
     /// `0` before any cycle has completed. Incremented once per successful
     /// [`Self::run_one_loop_iteration`], right after that cycle's `loop` completes;
     /// fed into [`Self::render_framing`]'s composed loop-metadata line and
@@ -626,7 +624,7 @@ pub struct SelfHarnessDriver {
     /// — and having exactly one moment it can be consumed is what makes the
     /// injection trivially idempotent.
     resume: Option<PendingResume>,
-    /// PRD 21 C5 GUI lane: which per-node operator-gate label a
+    /// Which per-node operator-gate label a
     /// `runLLMTurnBranchLabeled`/`runLLMTurnBranchFanout` child window
     /// carries — populated right when that window's `NodeId` is minted and
     /// removed once it finishes (success, exit, or closure — every path), at
@@ -643,7 +641,7 @@ pub struct SelfHarnessDriver {
     /// would need `&mut self` at exactly the point several siblings are
     /// running at once.
     node_labels: Mutex<HashMap<NodeId, String>>,
-    /// Fork-subsumes-split step 3 (seam map §7.1): the next `idx` to assign
+    /// The next `idx` to assign
     /// a fork child of a given PARENT, for that child's derived GUI label
     /// (`f<idx>-<slug>` — see [`Self::drive_fork_child_agent_session`]'s doc).
     /// Assigned INSIDE `drive_fork_child_agent_session` rather than threaded in

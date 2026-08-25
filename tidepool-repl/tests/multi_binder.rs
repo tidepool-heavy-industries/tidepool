@@ -1,4 +1,4 @@
-//! Wave-3b hardening — DIMENSION: multi-binder / pattern binds.
+//! DIMENSION: multi-binder / pattern binds.
 //!
 //! Drives the REAL `tidepool-repl` MCP entry point over real turns (per the
 //! standing rule — no bespoke wiring) and probes what happens when a single

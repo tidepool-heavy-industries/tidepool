@@ -7,14 +7,14 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | The @Tidepool.Node@ capability-mailbox fixture (PRD 20 S1-L4 wave 2).
+-- | The @Tidepool.Node@ capability-mailbox fixture.
 --
 -- Standalone rather than folded into 'OuterEffectsHarness', for the same
 -- reason 'NestedAsyncHarness' is: these scenarios currently hit the
 -- tenure-then-resume GC family and are CRASH-CLASS, and the root @CLAUDE.md@
 -- discipline keeps crash-class fixtures out of family bundles because a
 -- bundled crash destroys its siblings\' diagnosis. Bundled, these would take
--- S1-L1\'s outer-row assertions and wave 1\'s whole green-thread acceptance
+-- the outer-row assertions and the whole green-thread acceptance
 -- down with them.
 --
 -- ONE LEVEL ONLY: no node body here forks a node of its own. The GC failure
@@ -32,8 +32,8 @@ import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Async (wait)
 import Tidepool.Effects (say)
--- `Observed`/`after`/`nextEvent`/`(<|>)` are DEFINITIONS in `Tidepool.Event`
--- (PRD 22 lane 4), not the generated `Tidepool.Effects` module — this fixture
+-- `Observed`/`after`/`nextEvent`/`(<|>)` are DEFINITIONS in `Tidepool.Event`,
+-- not the generated `Tidepool.Effects` module — this fixture
 -- is spliced rather than compiled as an ordinary turn, so it needs the
 -- explicit import below like any other symbol this module uses.
 import Tidepool.Event (Observed (..), after, nextEvent, (<|>))

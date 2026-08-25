@@ -1,11 +1,10 @@
-//! PRD 21 C5 — end-to-end acceptance for the delegation surface's POSITIVE
+//! End-to-end acceptance for the delegation surface's POSITIVE
 //! path: the root session calls `delegate`, the driver's `SubagentHandler`
 //! runs a real saga against a `MockBackend` (a real temporary git repo, a
 //! real worktree/binding table — see `outer_subagent.rs`'s module doc for
 //! why that tier is "real saga, no model, no tokens"), the typed
 //! `DelegateResult` decodes, and the session finalizes on what it found —
-//! the result returns INLINE (fork-subsumes-split step 4 collapsed the
-//! Haskell fold that used to read delegation results back separately).
+//! the result returns INLINE.
 //!
 //! Drives the SHIPPED `harness-dogfooding/recursive-companion/` harness
 //! (same precedent as `companion_collapsed_slice.rs`/`dogfood_harness_typecheck.rs`
@@ -118,22 +117,10 @@ fn state_json() -> Json {
 /// Calling `delegate` for real — which lowers via
 /// `Tidepool.Agent.Delegate.runDelegate`'s `reinterpret2` onto a
 /// `send (SubagentSpawnAsync ...)` performed FROM WITHIN the reinterpretation
-/// handler — used to reach the driver as an UNCLASSIFIED suspension
-/// (`SuspensionRouting::Ask { payload: Null }`, `classify_hole`'s `con_name` lookup
-/// missing `SubagentSpawnAsync`'s own constructor name), not
-/// `SuspensionRouting::Subagent`. FIXED (`jit-reinterpret-rowchange` lane): the
-/// root cause was a `tidepool-codegen` JIT bug, isolated with a minimal
-/// standalone repro (`tests/reinterpret_rowchange_repro.rs`, no
-/// Subagent/Worktree involved) and documented in
-/// `plans/self-iterating-harness/21-c5-delegate-effect-survey.md`'s third
-/// amendment — `decomp`'s literal-tag pattern match (`Data.OpenUnion`,
-/// underlying every `reinterpret`/`reinterpret2` call) had no tolerance for
-/// a BOXED `W#` tag reaching it from un-inlined cross-module generic code,
-/// unlike its sibling `emit_data_dispatch`'s already-existing "Runtime
-/// Lit-tolerance" in the opposite direction. Fixed in
-/// `tidepool-codegen/src/emit/case.rs`'s `emit_lit_dispatch` by routing the
-/// scrutinee through the same arity-guarded `unwrap_boxing_chain`
-/// `unbox_addr`/`unbox_bytearray` already use.
+/// handler — reaches the driver classified as `SuspensionRouting::Subagent`.
+/// See `tests/reinterpret_rowchange_repro.rs` for a minimal, isolated
+/// repro of the underlying JIT dispatch mechanism this relies on (no
+/// Subagent/Worktree involved).
 ///
 /// This test is the full real-world positive path (isolated by direct
 /// comparison against `direct_subagent_send_dispatches_within_the_answerer_row`

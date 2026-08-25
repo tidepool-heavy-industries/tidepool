@@ -1,8 +1,7 @@
 //! The undercount that motivated `tidepool-extract-cmd`: a `run_turn` compile
-//! spawns `tidepool-extract`, and the process-global spawn counter — the
-//! extract-wave plan's done-criterion — could not see it, because the counter
-//! lived in `tidepool-harness::compile` and only that crate's `compile_turn`
-//! bumped it (`plans/post-restart/extract-manifest.md`, D-B).
+//! spawns `tidepool-extract`, and the process-global spawn counter could not
+//! see it, because the counter lived in `tidepool-harness::compile` and only
+//! that crate's `compile_turn` bumped it.
 //!
 //! Its own test binary: [`tidepool_extract_cmd::extract_spawn_count`] is
 //! PROCESS-GLOBAL, so a test asserting on it must not share a process with

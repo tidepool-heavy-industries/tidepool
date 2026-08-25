@@ -1,7 +1,7 @@
 //! The resident session: ONE live [`JitEffectMachine`] + the Lane-A decl
 //! library + the value-plane [`BindingTable`], driven turn-by-turn via the
 //! re-entry APIs. See `tidepool-repl/CLAUDE.md`'s "Internals: session
-//! lifecycle" for the three-layer split (`session.rs`/`manager.rs`/`state.rs`).
+//! lifecycle" for the split between this module and `manager.rs`.
 //!
 //! `run_block` drives a `session_run` block by classifying each item and
 //! reusing the per-item handlers: `run_def`, `run_eval`, `run_meta`.
@@ -2380,8 +2380,7 @@ impl Session {
                         // `:t` is pure introspection: read the type, print it,
                         // discard the bind — never registered in session scope,
                         // so it must never trip the cross-row guard meant for
-                        // binds that persist across turns (friction 2, round-2
-                        // test-user report).
+                        // binds that persist across turns.
                         probe_only: true,
                     }),
                 ) {

@@ -1,6 +1,5 @@
 //! Explicit multi-target extraction (`engine::compile_turns`, extract's
-//! `--targets` mode — `haskell/app/Main.hs`'s `runMultiTargetClosed`; see
-//! `plans/post-restart/extract-wave/boot/03-targets-prereq.md`). These pin
+//! `--targets` mode — `haskell/app/Main.hs`'s `runMultiTargetClosed`). These pin
 //! the two requirements that distinguish this mode from `--all-closed`
 //! (whose correct behaviour is the opposite of both):
 //!

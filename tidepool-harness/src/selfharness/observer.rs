@@ -153,7 +153,7 @@ pub enum Event {
     /// next window's framing.
     OperatorMessage { text: String },
     /// Per-loop-boundary machine instrumentation for the SHARED outer
-    /// machine (one-session plan, Phase 4): compiled-fragment count
+    /// machine: compiled-fragment count
     /// (monotonic — executable memory is never reclaimed), live session-heap
     /// bytes, and collections run. The rotation-cadence evidence base.
     MachineStats {

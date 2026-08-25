@@ -6,9 +6,8 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | Test fixture for PRD 20 S1-L4 ("concurrent cognition windows") and
--- PRD 21 locked decision 6 (a branch's abnormal exit folds as DATA at its
--- own position): a harness whose 'loop' opens ONE 'runLLMTurnFanout' hole
+-- | Test fixture for concurrent cognition windows, where a branch's
+-- abnormal exit folds as DATA at its own position: a harness whose 'loop' opens ONE 'runLLMTurnFanout' hole
 -- carrying NINE prompts. `runLLMTurnFanout` is generated onto
 -- `Tidepool.Effects` whenever `RunLLMTurn` is in the compiling row
 -- (row-polymorphic helpers), so it is reachable from the OUTER session
@@ -57,8 +56,8 @@ render :: State -> Text
 render st =
   [fmt|Concurrent fanout harness. Loop count: {loopCount st}.|]
 
--- | ONE fanout of nine prompts, answered CONCURRENTLY by the driver (PRD 20
--- S1-L4) — each in its own freshly-minted answerer realm, up to the
+-- | ONE fanout of nine prompts, answered CONCURRENTLY by the driver
+-- — each in its own freshly-minted answerer realm, up to the
 -- driver's concurrency cap.
 loop :: State -> Harness State
 loop st = do

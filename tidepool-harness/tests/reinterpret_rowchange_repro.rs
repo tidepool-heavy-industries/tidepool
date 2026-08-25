@@ -1,6 +1,4 @@
-//! Minimal standalone repro for the JIT row-changing `reinterpret` gap named
-//! in PRD 21 C5's second amendment
-//! (`plans/self-iterating-harness/21-c5-delegate-effect-survey.md`): a
+//! Minimal standalone repro for a JIT row-changing `reinterpret` gap: a
 //! `reinterpret`'d handler body that performs a `send` which must reach the
 //! driver as a real suspension does not classify correctly on this JIT.
 //!
@@ -84,9 +82,8 @@ fn engine_cfg() -> EngineConfig {
 /// reinterpretation handler. If the JIT executes freer-simple's row-changing
 /// `reinterpret`/`replaceRelay`/`decomp`/`weaken` correctly, this must
 /// classify identically to the direct send in the control test below:
-/// `SuspensionRouting::Note { text: "ping" }`. The PRD 21 C5 lane's observation was
-/// that it instead reaches the driver as an UNCLASSIFIED suspension
-/// (`SuspensionRouting::Ask { payload: Null }`).
+/// `SuspensionRouting::Note { text: "ping" }`. It instead reaches the driver
+/// as an UNCLASSIFIED suspension (`SuspensionRouting::Ask { payload: Null }`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reinterpret_handler_send_classifies_correctly() {
     support::require_extract();
@@ -135,8 +132,7 @@ async fn reinterpret_handler_send_classifies_correctly() {
                 "a `send` performed from inside a `reinterpret` handler body \
                  must classify identically to the same `send` written \
                  directly in the turn's own text — got {:?}. This is the \
-                 JIT row-changing `reinterpret` gap named in PRD 21 C5's \
-                 second amendment.",
+                 JIT row-changing `reinterpret` gap this test reproduces.",
                 classified.routing
             );
         }

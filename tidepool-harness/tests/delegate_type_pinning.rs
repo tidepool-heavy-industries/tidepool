@@ -1,5 +1,5 @@
-//! PRD 21 C5 — compile-level acceptance for the delegation surface's
-//! unnameability, AND (the reshape) that a delegating window's model text
+//! Compile-level acceptance for the delegation surface's
+//! unnameability, AND that a delegating window's model text
 //! compiles at exactly the row `type M` names. Same evidence class as
 //! `finalize_type_pinning.rs`: one deterministic `tidepool-extract` call per
 //! case, no model in the loop.
@@ -63,8 +63,8 @@ fn delegating_cfg() -> EngineConfig {
     cfg
 }
 
-/// Compile one delegating-window turn against the row `type M` names (PRD 21
-/// C5's reshape) — `runDelegate` is applied by the EXPR template's own
+/// Compile one delegating-window turn against the row `type M` names —
+/// `runDelegate` is applied by the EXPR template's own
 /// RESULT position (`EngineConfig::delegate_wrap`'s doc, `engine::template_turn_for`),
 /// never by a text prepend to `code`: this test hands `code` straight
 /// through, unmodified, exactly as `Harness::run_block` now does. Driven
@@ -128,12 +128,7 @@ fn delegate_call_compiles_against_the_narrow_row() {
 /// fluent in canonical GHCi idiom reaches for on its own — must compile
 /// against the row `type M` NAMES for this delegating window, i.e. the narrow
 /// `[Delegate, AskUser, Fork, ReadState, Green, Finalize T]`, not the outer
-/// `[Subagent, Worktree, ...]` row the machine actually dispatches. Before
-/// the reshape this was the live PRD 21 C5 defect (companion dogfood,
-/// 2026-08-20): `M` was the OUTER row, so the annotation forced a type
-/// `runDelegate` could never unify its argument against, surfacing as a
-/// baffling doubled-`Worktree` GHC diagnostic rather than the model's actual
-/// mistake (if any).
+/// `[Subagent, Worktree, ...]` row the machine actually dispatches.
 #[test]
 fn annotated_m_type_compiles_against_the_narrow_row() {
     support::require_extract();
@@ -209,11 +204,9 @@ fn compile_delegating_answerer_turn(
     )
 }
 
-/// PRD 21 C5 row-truth completion: `template_answer_turn` is the
+/// `template_answer_turn` is the
 /// fork/return-control answerer's compile path — the ONE `template_turn_for`
-/// callers above never exercise, and one of the paths the live dogfood run's
-/// operator report (`.exo/tmp/operator-round4.md`, 2026-08-20) reproduced
-/// failing 4× independently. This block exercises `fork` and `delegate`
+/// callers above never exercise. This block exercises `fork` and `delegate`
 /// together, terminating in `resume` (this compile path's OWN designed idiom
 /// — `template_answer_turn`'s doc: "GHC infers the result type from the
 /// block... the answerer's `resume :: T -> M T` helper fixes T"; UNLIKE
@@ -230,19 +223,13 @@ fn compile_delegating_answerer_turn(
 /// companion's own session types (this suite compiles against
 /// `examples/harness`, not the companion fixture) — and must
 /// compile against the narrow row with `Finalize` genuinely pinned to
-/// `Decision`, not the bare default `Void` (the contract-pin half of the
-/// bug: `template_answer_turn` never called `turn_target` with the contract
-/// at all before this fix).
+/// `Decision`, not the bare default `Void`.
 ///
 /// `code` calls `fork` BARE — no `import Tidepool.Fork` in `code_imports` —
 /// which is the production shape: the collapsed companion's own blocks never
-/// name that import either, and the poke-round finding (2026-08-24) was
-/// exactly this: `fork`/`forkAll` are the surface verbs of `Tidepool.Fork`,
-/// which used to fall through `extra_imports_for!`'s empty default arm, so a
-/// production turn reaching for `fork` died on `Variable not in scope: fork`
-/// even though a hand-written test importing `Tidepool.Fork` explicitly (the
-/// shape this test used before the fix) passed. This test previously carried
-/// that explicit import; it is gone on purpose — its absence is the pin.
+/// name that import either, and `fork`/`forkAll` (the surface verbs of
+/// `Tidepool.Fork`) are auto-imported same as `AskUser`'s `Tidepool.Form` —
+/// the absence of that import here is the pin.
 #[test]
 fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_with_pinned_contract()
 {
@@ -265,29 +252,15 @@ fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_wit
     );
 }
 
-/// PRD 21 C5 row-truth completion, PROMOTED from an expected-failure pin
-/// (row-poly-sweep lane, 2026-08-20). `note`/`getStateJson`/`askUserWith`
-/// used to be declared with a CONCRETE `M` (`noteRaw :: Text -> M ()`/
-/// `askUserRaw :: Value -> M Value`/`getStateJson :: M Value`,
-/// `tidepool-mcp/src/effect_defs.rs`'s `AskUser`/`ReadState` defs), so `M`
-/// there was FIXED at their own definition site to `Tidepool.Effects.M` —
-/// the OUTER, `Subagent`/`Worktree`-carrying row — regardless of any LOCAL
-/// `type M` shadow the delegating turn module defines for itself
-/// (`delegate_aware_preamble` only ever affects names written in the turn
-/// module's OWN source text — `resume`, `paginateResult`'s respelled
-/// signature — never a library function's already-fixed type). `runDelegate`
-/// wraps the WHOLE block, structurally requiring it to be `Eff (Delegate ':
-/// effs) a`; a block whose type was pinned to `Tidepool.Effects.M` (via any
-/// call to `note`/`getStateJson`/`askUserWith`) was headed by `Subagent`, not
-/// `Delegate` — an unavoidable mismatch, independent of whether `delegate`
-/// itself was also called. Reproduced the operator report's exact isolated
-/// `askUserWith`-alone failure.
-///
-/// The fix is the SAME mechanism `RunLLMTurn`/`Finalize`/`Fork` already use:
-/// `AskUser`'s `askUserRaw`/`noteRaw` and `ReadState`'s `getStateJson` are now
-/// `Member <Eff> effs => ... -> Eff effs T`, with `helpers_row_polymorphic
-/// true` on both defs (`tidepool-mcp/src/effect_defs.rs`). All three now
-/// compile — and RUN, via the same `delegate`-then-`finalize` shape the other
+/// `runDelegate` wraps the WHOLE block, structurally requiring it to be
+/// `Eff (Delegate ': effs) a`, so any library helper it calls must be
+/// ROW-POLYMORPHIC rather than fixed to the outer, `Subagent`/
+/// `Worktree`-carrying `Tidepool.Effects.M`: `AskUser`'s `askUserRaw`/
+/// `noteRaw` and `ReadState`'s `getStateJson` are `Member <Eff> effs => ...
+/// -> Eff effs T` (`helpers_row_polymorphic true` on both defs,
+/// `tidepool-mcp/src/effect_defs.rs`), the same mechanism
+/// `RunLLMTurn`/`Finalize`/`Fork` already use. All three compile — and RUN,
+/// via the same `delegate`-then-`finalize` shape the other
 /// positive tests in this file use — against the narrow delegating row.
 #[test]
 fn note_getstatejson_and_askuserwith_all_compile_against_the_narrow_row() {
@@ -409,13 +382,10 @@ fn reply(content: &str) -> RecordedReply {
     }
 }
 
-/// PRD 21 C5 acceptance (b): a top-level `data` DECLARATION compiles and
+/// A top-level `data` DECLARATION compiles and
 /// defines successfully in a delegating window, and is usable in a LATER
-/// turn on the same node — the shape `run_block`'s OLD `runDelegate $ do
-/// <block>` text prepend made impossible (it reached the `Decl` candidate
-/// too, turning a bare `data` declaration into invalid Haskell). Single-item
-/// blocks (one item per turn), not the multi-item block lane — this is the
-/// case the reshape's `run_block` fix targets directly.
+/// turn on the same node. Single-item
+/// blocks (one item per turn), not the multi-item block lane.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_declaration_defines_and_is_usable_in_a_delegating_window() {
     support::require_extract();

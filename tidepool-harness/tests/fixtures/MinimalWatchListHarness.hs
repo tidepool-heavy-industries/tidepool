@@ -8,7 +8,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | THE SMALLEST KNOWN REPRODUCER of the tenure-then-resume rooting gap
--- (PRD 20 S1-L4; see `tidepool-runtime/tests/nested_async_repro.rs`'s
+-- (see `tidepool-runtime/tests/nested_async_repro.rs`'s
 -- module doc for the full mechanism writeup). Bisected down from
 -- `Tidepool.Node.forkNode` (`node_mailboxes.rs`'s fixture) by removing,
 -- one piece at a time, everything not load-bearing for the crash:

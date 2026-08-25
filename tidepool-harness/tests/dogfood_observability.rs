@@ -1,5 +1,4 @@
-//! Acceptance coverage for the wave-1.5 dogfood-observability spec
-//! (`plans/post-restart/dev/dogfood-observability.md`): a person watching the
+//! Acceptance coverage for dogfood observability: a person watching the
 //! console can narrate what the self-iterating harness is doing — what
 //! source it compiled, what types it extracted, what it asked, what came
 //! back — without reading code, AND tier-0 telemetry (first-compile success

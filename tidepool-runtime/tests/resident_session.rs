@@ -182,7 +182,7 @@ fn multi_turn_accumulates_across_suspend_resume() {
 
     // The session is now suspended — no OS thread is parked (E2). A NEW run is
     // rejected cleanly until the ask is resolved.
-    // PARKED PATH (one-session plan, Phase 1): a new top-level run over a
+    // PARKED PATH: a new top-level run over a
     // parked frame is ORDINARY — it completes while the frame stays parked
     // and rooted. (This inverts the old reject-while-suspended pin.)
     let (intrude_expr, intrude_table) =

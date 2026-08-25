@@ -1,4 +1,4 @@
-//! PRD 21 lane C2 — the scope-tree acceptance suite: locked decision 4 proved
+//! The scope-tree acceptance suite: the scope-tree name-visibility rules proved
 //! END TO END through the REAL harness compile path (model reply → extract →
 //! GHC → resident session), the escaped-closure crown jewel, and the root
 //! accounting that makes the retirement claim honest.
@@ -9,13 +9,12 @@
 //! (`examples/harness/mount-spike`) and its suite
 //! (`tests/companion_mount_spike.rs`) are deliberately untouched — that suite
 //! is the FLAT-session mount user, and its passing UNMODIFIED is a back-compat
-//! proof obligation of this lane (`plans/self-iterating-harness/21-c2-scope-trees.md`
-//! §5.3).
+//! proof obligation of this lane.
 //!
 //! # What each test proves
 //!
 //! - [`locked_decision_4_holds_through_the_real_compile_path`] — all four
-//!   name-visibility clauses of locked decision 4, as VALUES rather than as
+//!   name-visibility clauses, as VALUES rather than as
 //!   GHC error strings: ROOT defines `helper` (and a never-shadowed `shared`),
 //!   two sibling scopes are minted, one sibling defines its own `helper`, and
 //!   the OTHER sibling's FIRST use of the name still sees ROOT's body. That
@@ -69,7 +68,7 @@
 //! space grows monotonically with the TOTAL number of mounts ever made,
 //! bounded per turn; retirement caps what stays TRACED (and therefore what a
 //! collection must walk), not what stays ALLOCATED. Same bound recorded in
-//! `tidepool-codegen/CLAUDE.md` and PRD 21's deferred list.
+//! `tidepool-codegen/CLAUDE.md`.
 
 mod support;
 
@@ -256,10 +255,10 @@ fn mint(harness: &Harness, sid: SessionId, parent: ScopeId, what: &str) -> Scope
 }
 
 // ---------------------------------------------------------------------------
-// TEST 1 — locked decision 4, end to end
+// TEST 1 — scope-tree name-visibility rules, end to end
 // ---------------------------------------------------------------------------
 
-/// Every clause of locked decision 4, through the REAL harness compile path
+/// Every scope-tree name-visibility clause, through the REAL harness compile path
 /// (model reply → extract → GHC → resident session), asserted as VALUES.
 ///
 /// The sequence is the proof. `A` and `B` are BOTH minted before EITHER

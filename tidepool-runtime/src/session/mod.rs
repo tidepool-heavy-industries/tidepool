@@ -109,19 +109,17 @@ pub enum SessionError {
     Toolchain(#[from] crate::toolchain::ToolchainError),
     /// A scope-taking mutation (a mount, a scoped define/retract, a scope
     /// assignment) targeted a [`ScopeId`] that is not live — never minted, or
-    /// already retired (PRD 21 lane C2, `plans/self-iterating-harness/21-c2-scope-trees.md`).
-    /// A dead scope's lookup chain is empty, so anything written under it
-    /// would be permanently unreachable and, for a mounted root, a
-    /// permanent GC root by construction. Never the user's declaration — a
-    /// stale or forged `ScopeId`.
+    /// already retired. A dead scope's lookup chain is empty, so anything
+    /// written under it would be permanently unreachable and, for a mounted
+    /// root, a permanent GC root by construction. Never the user's
+    /// declaration — a stale or forged `ScopeId`.
     #[error("scope {0:?} is not live (never minted, or already retired)")]
     DeadScope(ScopeId),
     /// A mount ([`super::resident::ResidentSession::mount_handle_in`])
     /// targeted a `(scope, name)` pair that resolves to no live binding — the
     /// throwaway placeholder bind that mints the `name`'s identity was never
     /// run in `scope`, or under a different name. Never the user's
-    /// declaration; a caller bug in the mount seam's two-step idiom (PRD 21
-    /// lane C1).
+    /// declaration; a caller bug in the mount seam's two-step idiom.
     #[error("no live binding for `{name}` in scope {scope:?} (the mount seam's placeholder bind must run first, under the same name)")]
     UnknownBinding { scope: ScopeId, name: String },
 }
@@ -176,8 +174,7 @@ pub struct SessionLib {
     /// only the stdlib). Set via [`with_validation_include`](Self::with_validation_include).
     extra_include: Vec<PathBuf>,
     /// Each scope's current decl-plane tip: the generation a new turn in that
-    /// scope chains its [`DeclTurn::parent`] from (PRD 21 lane C2,
-    /// `plans/self-iterating-harness/21-c2-scope-trees.md` §1.2). `SessionLib`
+    /// scope chains its [`DeclTurn::parent`] from. `SessionLib`
     /// does not own the [`tidepool_codegen::scope::ScopeTree`] itself (that
     /// lives on `PersistentSession`) — it only keys this map by whatever
     /// [`ScopeId`] a caller passes to an `_in` method.
@@ -190,9 +187,10 @@ pub struct SessionLib {
     /// tip. Falling back to the global tip would hand a scope whatever turn
     /// happened to be pushed last in ANY scope, so a sibling defining between
     /// a scope's mint and its first use would leak into it, and a child
-    /// defining before its parent's next turn would leak UPWARD. Both are
-    /// direct violations of PRD 21 locked decision 4; the regression is pinned
-    /// by `session_decl_scope_tree.rs`.
+    /// defining before its parent's next turn would leak UPWARD. Both would
+    /// violate the rule that a scope's lookups are visible only to itself and
+    /// its descendants, never sideways or upward; the regression is pinned by
+    /// `session_decl_scope_tree.rs`.
     tips: HashMap<ScopeId, Generation>,
 }
 
@@ -801,10 +799,10 @@ mod tests {
     }
 
     /// An unseeded scope resolves to the EMPTY environment, never to the
-    /// log's global tip. The global-tip fallback is the leak PRD 21 locked
-    /// decision 4 forbids in both directions: a sibling pushing a turn
-    /// between a scope's mint and its first use would leak into that scope,
-    /// and a child defining before its parent's next turn would leak upward
+    /// log's global tip. The global-tip fallback is the leak forbidden in
+    /// both directions: a sibling pushing a turn between a scope's mint and
+    /// its first use would leak into that scope, and a child defining before
+    /// its parent's next turn would leak upward
     /// into the parent. (The GHC-validated end-to-end form of this lives in
     /// `tests/session_decl_scope_tree.rs`; this pins the pure tip algebra.)
     #[test]

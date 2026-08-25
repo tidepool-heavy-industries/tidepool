@@ -83,7 +83,8 @@ const RECLAIMED_NOTICE: &str = "The session was reclaimed: its declarations and 
 /// carries [`RECLAIMED_NOTICE`] by construction rather than by three separate
 /// authors remembering to append it — and so the message is unit-testable
 /// WITHOUT driving a real runaway, which is the one wedge transition that has no
-/// reliable test seam (see `plans/unpark/feasibility-map.md` §6.3).
+/// reliable test seam (entry INTO `Wedged` needs a JIT-cancel-resistant runaway
+/// or a seam to simulate one; the reclaim paths OUT of it are pinned).
 ///
 /// `effect_in_flight` distinguishes a turn blocked inside an effect handler (an
 /// external call still running, the JIT idle so the JIT cancel cannot bite) from
@@ -1457,7 +1458,7 @@ mod tests {
     /// routing them through `wedged_message` is what makes the notice structural,
     /// and this is what keeps it that way. Testing the function directly also
     /// sidesteps the one wedge transition with no reliable seam — ENTRY via a
-    /// real runaway (`plans/unpark/feasibility-map.md` §6.3).
+    /// real runaway.
     #[test]
     fn every_wedge_message_states_the_session_was_reclaimed() {
         for effect_in_flight in [true, false] {
@@ -1564,11 +1565,9 @@ mod tests {
         );
     }
 
-    /// Durable fix for the dead-resource-link class of bug: every `tidepool://`
+    /// Guards the dead-resource-link class of bug: every `tidepool://`
     /// URI the tool description POINTS a model at must actually resolve on
-    /// THIS server. `tidepool://capabilities` used to be advertised here while
-    /// only `tidepool://session/bindings` was served — a model following the
-    /// docs got "Unknown resource". GHC-free: `resources::read` only touches
+    /// THIS server. GHC-free: `resources::read` only touches
     /// strings + the filesystem, no compile.
     #[test]
     fn every_advertised_tidepool_uri_resolves() {

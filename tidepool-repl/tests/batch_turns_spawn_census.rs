@@ -1,9 +1,7 @@
-//! CENSUS (measurement-only, `batch-turns` baseline). Actual `tidepool-extract`
-//! spawns per repl item shape, driven through the REAL `session_run` entry
-//! point — the numbers `plans/post-restart/batch-turns-feasibility.md` §1
-//! predicts from code reading. This test measures instead of predicting.
-//! Changes NOTHING in the compile path; it only reads the process-global
-//! spawn counter around real turns.
+//! CENSUS (measurement-only). Actual `tidepool-extract` spawns per repl item
+//! shape, driven through the REAL `session_run` entry point. Changes NOTHING
+//! in the compile path; it only reads the process-global spawn counter
+//! around real turns.
 //!
 //! Its own test binary is required: `tidepool_extract_cmd::extract_spawn_count`
 //! is PROCESS-GLOBAL (nextest gives one process per test binary). A single

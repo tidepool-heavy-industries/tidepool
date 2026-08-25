@@ -1,4 +1,4 @@
-//! Wave 3b hardening — DIMENSION: declaration plane (Lane A) depth.
+//! DIMENSION: declaration plane (Lane A) depth.
 //!
 //! Adversarial integration tests driving the REAL `tidepool-repl` entry point
 //! (session_run — the harness `def`/`eval`/`cmd`
@@ -168,11 +168,9 @@ async fn type_alias_and_newtype() {
     );
 }
 
-/// CASE 6 — record syntax on session-bound values, ALL PATHS. Historically the
-/// Eff reference path over a live session-bound custom ADT crashed kind=4
-/// TypeMetadata (selector AND case alike; pure-fallback path worked). Fixed
-/// collaterally 2026-07-02 (verbatim-wrapper + LetRec-knot emit work); this
-/// test now ASSERTS correct values on every path it previously only logged.
+/// CASE 6 — record syntax on session-bound values, ALL PATHS: the Eff
+/// reference path over a live session-bound custom ADT (selector AND case
+/// alike) must yield correct values, same as the pure-fallback path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_syntax_selectors_localized() {
     require_extract();
@@ -226,11 +224,9 @@ async fn record_syntax_selectors_localized() {
     );
 }
 
-/// Record field selector on a session-bound value via the Eff path — was the
-/// last standing kind=4 TypeMetadata crash, fixed collaterally 2026-07-02 by
-/// the verbatim-wrapper + LetRec-knot emit work (verified live: bare selector,
-/// record-dot, and a mapped section `(.py)` over two session binds all
-/// return correct values). Un-ignored the same day.
+/// Record field selector on a session-bound value via the Eff path: bare
+/// selector, record-dot, and a mapped section `(.py)` over two session binds
+/// must all return correct values.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn record_selector_on_bound_value_via_eff_path() {
     require_extract();
@@ -453,8 +449,8 @@ async fn bad_decl_does_not_poison_log() {
 }
 
 /// WHOLE-BLOCK DECL ELABORATION (M1): a type signature and its binding in
-/// SEPARATE items of one block now typecheck together (batched as one
-/// generation) — previously "the type signature lacks an accompanying binding".
+/// SEPARATE items of one block typecheck together (batched as one
+/// generation).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sig_and_binding_split_across_items() {
     require_extract();
@@ -468,8 +464,7 @@ async fn sig_and_binding_split_across_items() {
 }
 
 /// WHOLE-BLOCK DECL ELABORATION (M1): mutually-recursive functions defined in
-/// SEPARATE items of one block now resolve (batched together) — previously
-/// "Variable not in scope: isOdd".
+/// SEPARATE items of one block resolve (batched together).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutual_recursion_across_items() {
     require_extract();
@@ -685,7 +680,7 @@ async fn colliding_pure_bind_shadows_gracefully() {
 }
 
 /// PURE-BIND-AS-DECL (M2): a polymorphic empty-list bind stays polymorphic and
-/// instantiates per use — the case that used to throw an interface error.
+/// instantiates per use.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_polymorphic_bind_instantiates_per_use() {
     require_extract();

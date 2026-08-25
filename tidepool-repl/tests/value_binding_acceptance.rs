@@ -1,4 +1,4 @@
-//! Wave 3b — THE HEADLINE ACCEPTANCE SWEEP: value binding end-to-end through the
+//! THE HEADLINE ACCEPTANCE SWEEP: value binding end-to-end through the
 //! REAL `tidepool-repl` entry point, multi-turn, with organic GC between bind and
 //! read (the standing rule: production tool dispatch over real turns, natural
 //! allocation/collection — never a bespoke harness or forced GC).
@@ -10,7 +10,7 @@
 //! allocation. (The structured-JSON `Value` bind/read case lives separately in
 //! `value_fidelity.rs::structured_json_value_bind_and_read`.)
 //!
-//! Requires the Wave-3b `tidepool-extract` (set `TIDEPOOL_EXTRACT`, with the
+//! Requires a session-aware `tidepool-extract` (set `TIDEPOOL_EXTRACT`, with the
 //! with-packages GHC on `PATH` + `TIDEPOOL_GHC_LIBDIR`); panics loudly otherwise.
 
 mod common;

@@ -1,5 +1,4 @@
-//! Scope-tree decl-plane integration test (PRD 21 lane C2 Wave A2,
-//! `plans/self-iterating-harness/21-c2-scope-trees.md` §1.2).
+//! Scope-tree decl-plane integration test.
 //!
 //! Drives the REAL compile path, same shape as `session_decl_accum.rs`, but
 //! exercises `SessionLib`'s `_in(scope)` API against a genuine

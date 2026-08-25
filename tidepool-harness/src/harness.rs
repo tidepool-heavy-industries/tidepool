@@ -195,13 +195,13 @@ struct NodeConvo {
     effect_trace: EffectTrace,
     /// Monotonic per-node effect sequence number for the logged `Event::Effect`s.
     effect_seq: u64,
-    /// The realm this node's turns park under on its session (one-session
-    /// collapse: attached answerer nodes each get their own realm on the
-    /// SHARED machine; retirement is that realm's scope exit). `None` = the
+    /// The realm this node's turns park under on its session (attached
+    /// answerer nodes each get their own realm on the SHARED machine;
+    /// retirement is that realm's scope exit). `None` = the
     /// session's default realm ([`OUTER_REALM`]).
     realm: Option<tidepool_codegen::jit_machine::RealmId>,
-    /// The scope-tree node this node's turns COMPILE and BIND in (PRD 21 lane
-    /// C2). The `realm` above is the window's HEAP-side lifetime (parked
+    /// The scope-tree node this node's turns COMPILE and BIND in. The
+    /// `realm` above is the window's HEAP-side lifetime (parked
     /// frames, handles); this is its NAME-side one (decl tip, value-plane
     /// frame). `None` = [`ScopeId::ROOT`], the flat session — which is every
     /// pre-C2 node, unchanged. [`Harness::terminate_node`] exits BOTH in one
@@ -244,8 +244,8 @@ struct NodeConvo {
     /// [`HarnessError::TurnInFlight`] — set via
     /// [`Harness::set_retry_checkout_on_contention`] for a node whose
     /// contention is EXPECTED and benign: a concurrently-driven sibling
-    /// realm on the SAME shared session (PRD 20 S1-L4,
-    /// `SelfHarnessDriver::drive_fanout_child`), never a re-entrant/manually
+    /// realm on the SAME shared session
+    /// (`SelfHarnessDriver::drive_fanout_child`), never a re-entrant/manually
     /// held conflict. `false` by default for every node — the existing
     /// fail-fast contract (`tests/turn_lease.rs`) is unchanged unless a
     /// caller explicitly opts in. Read fresh per checkout attempt (not
@@ -278,8 +278,7 @@ impl Drop for TurnLease<'_> {
     }
 }
 
-/// One authoritative record of domain metadata for a currently-parked hole
-/// (item 5 of the session-ownership capstone, `plans/registry-capstone.md`).
+/// One authoritative record of domain metadata for a currently-parked hole.
 /// The session registry's own hole SET (machine-reported) is the ownership
 /// truth; this is the harness-level domain truth for what each hole IS and
 /// what it takes to resume it — held in [`Harness::pending_suspensions`], keyed by
@@ -294,8 +293,8 @@ struct PendingSuspension {
     /// this is what makes a node-scoped read ([`Harness::node_pending`]) a
     /// plain scan rather than a second index to keep in sync. The registry's
     /// own hole SET is multi because it spans MULTIPLE NODES sharing one
-    /// session (the one-session collapse's concurrently-driven attached
-    /// answerer realms), not because one node juggles several holes.
+    /// session (concurrently-driven attached answerer realms), not because
+    /// one node juggles several holes.
     node: NodeId,
     hole: HoleId,
     classified: ClassifiedSuspension,
@@ -422,7 +421,7 @@ struct LiveTurnContext {
 
 /// Render a turn-compile failure as text a MODEL can act on, with GHC's
 /// coordinates remapped from TEMPLATE space to the model's own turn text
-/// (`block`) — see `plans/post-restart/dev/error-coordinates.md`.
+/// (`block`).
 ///
 /// `CompileError::Diagnostics`' own `Display` reports only how many
 /// diagnostics there were, not what they said — fine for a log line, useless
@@ -636,7 +635,7 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// The effect-row a window-opening hole card should STATE (PRD 21 C5):
+    /// The effect-row a window-opening hole card should STATE:
     /// `self.cfg.effect_names` for a non-delegating config, or the narrow
     /// `Delegate`-form row a delegating config's model-facing block actually
     /// compiles against — see [`EngineConfig::finalize_typed_request_prompt_effect_row`]. Never
@@ -971,7 +970,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Force `node` ONTO the shared session `sid` (one-session collapse): the
+    /// Force `node` ONTO the shared session `sid`: the
     /// same consent line and transcript/convo seeding as [`Self::force`], but
     /// no machine is built — the node's turns run as a realm on the shared
     /// machine (assign one via [`Self::set_node_realm`]), and its retirement
@@ -990,8 +989,8 @@ impl Harness {
         Ok(())
     }
 
-    /// Adopt a node-less session into the tree's registry (the one-session
-    /// OUTER session) — the caller owns its retirement (see
+    /// Adopt a node-less session into the tree's registry (the shared OUTER
+    /// session) — the caller owns its retirement (see
     /// [`Self::retire_adopted_session`]).
     pub fn adopt_session(&self, session: Session) -> tidepool_repr::SessionId {
         self.tree.adopt_session(session)
@@ -999,7 +998,7 @@ impl Harness {
 
     /// Retire a node-LESS adopted session (F6: [`Self::adopt_session`]'s own
     /// doc names the caller as owning retirement, but until this existed
-    /// nothing actually called it — the one-session driver's
+    /// nothing actually called it — the driver's own
     /// `discard_resident_state` dropped only its own `sid` handle on a cycle
     /// error, never removing the machine from the registry, so the session
     /// — heap, code arena, every still-parked frame — stayed alive there
@@ -1012,8 +1011,8 @@ impl Harness {
         self.tree.registry().remove(sid);
     }
 
-    /// Replace the machine under `sid` with a fresh one (machine ROTATION —
-    /// one-session plan, Phase 4). The caller guarantees quiescence (no
+    /// Replace the machine under `sid` with a fresh one (machine ROTATION).
+    /// The caller guarantees quiescence (no
     /// parked holes, no turn in flight): this is the driver's own
     /// loop-boundary maintenance on a session it owns, and the old machine
     /// drops here (heap + roots reclaimed; the leaked code arena is the
@@ -1102,7 +1101,7 @@ impl Harness {
     }
 
     /// Run a closure against the shared (node-less) session `sid` under the
-    /// full checkout discipline — the one-session driver's outer render/loop
+    /// full checkout discipline — the driver's outer render/loop
     /// runs and resumes go through here, restoring with the session's OWN
     /// reported hole set. Synchronous by design (the driver's outer calls
     /// always were); the machine mutation happens on the caller's thread.
@@ -1948,10 +1947,8 @@ impl Harness {
 
     /// Multi-item sibling of [`Self::run_block`], reached only when
     /// [`engine::split_block_items`] finds more than one item in `block` (a
-    /// helper declaration followed by the answer expression, say) — the
-    /// one-spawn-turn-protocol Phase B block lane, adopted from
-    /// `tidepool-repl`'s `Session::run_block`/`drive_block`
-    /// (`plans/one-spawn-turn-protocol-phase-b.md` decision 1): classify the
+    /// helper declaration followed by the answer expression, say), adopted
+    /// from `tidepool-repl`'s `Session::run_block`/`drive_block`: classify the
     /// WHOLE block in ONE [`classify_block`] spawn, then run each item with
     /// its verdict already in hand.
     ///
@@ -2618,7 +2615,7 @@ impl Harness {
 
     /// Like [`Self::pending_suspension_full`], plus the RAW suspended request
     /// `Value` — what a caller needs to dispatch a suspension whose payload
-    /// `ClassifiedSuspension` doesn't carry (PRD 21 C5: [`SuspensionRouting::Subagent`]
+    /// `ClassifiedSuspension` doesn't carry ([`SuspensionRouting::Subagent`]
     /// is a unit variant — no spec/schema/cycle id — because the OUTER
     /// loop's own equivalent servicing reads those off the original request
     /// it never discards; a nested-answerer node discards it once
@@ -2664,8 +2661,8 @@ impl Harness {
     /// Resume `node`'s parked continuation with a RAW `Value` answer,
     /// bypassing [`Self::answer_dialog`]'s `Ask`/`AskUser`/`ReadState`
     /// routing restriction — for a suspension whose answer is already a
-    /// bridged Core `Value` rather than operator-submitted JSON (PRD 21 C5:
-    /// [`SuspensionRouting::Subagent`], serviced the same way the AUTHORED outer
+    /// bridged Core `Value` rather than operator-submitted JSON
+    /// ([`SuspensionRouting::Subagent`], serviced the same way the AUTHORED outer
     /// loop's own Subagent suspension already is —
     /// `SelfHarnessDriver::service_outer_subagent`'s dispatch, just resumed
     /// against a NODE's own session instead of the outer one).
@@ -2834,8 +2831,8 @@ impl Harness {
             .machine()
             .abort(&hole.0, "finalize consumed (answerer reused)".to_string());
         // Restore with the session's OWN reported hole set — the aborted
-        // finalize hole is gone, but any OTHER parked holes (multi-hole,
-        // one-session plan) must survive; a bare restore_idle would desync
+        // finalize hole is gone, but any OTHER parked holes (multi-hole
+        // sessions) must survive; a bare restore_idle would desync
         // the slot from the machine's still-rooted frames.
         let holes: Vec<HoleId> = co
             .machine()
@@ -2850,8 +2847,8 @@ impl Harness {
         Ok((value, rendered))
     }
 
-    /// CLOSURE sibling of [`Self::take_finalized_value_keep_open`] (pillar B,
-    /// the one-session collapse): the finalize payload is a live closure, so
+    /// CLOSURE sibling of [`Self::take_finalized_value_keep_open`] (pillar B):
+    /// the finalize payload is a live closure, so
     /// instead of bridging a data `Value` (which would sentinel it), MINT a
     /// [`ValueHandle`] over the parked frame's payload, then consume the
     /// finalize hole exactly like the value path (abort the frame — the
@@ -3664,13 +3661,13 @@ impl Harness {
             if self.tree.node_owns_session(node) {
                 self.tree.registry().remove(sid);
             } else {
-                // An ATTACHED node (one-session collapse): its retirement is
+                // An ATTACHED node: its retirement is
                 // its WINDOW's exit on the shared machine, never slot removal
                 // — the outer session outlives every answerer node it hosts.
                 // Two halves, retired together in `exit_agent_session`: the REALM
-                // (parked frames + outstanding handles) and, since PRD 21 lane
-                // C2, the node's SCOPE (its value-plane frame, and the GC roots
-                // that frame solely owns). A window's names and its heap roots
+                // (parked frames + outstanding handles) and the node's SCOPE
+                // (its value-plane frame, and the GC roots that frame solely
+                // owns). A window's names and its heap roots
                 // have one lifetime, so there is one retirement step, not two.
                 //
                 // The exit is an EVENTUAL POSTCONDITION, not a best-effort side
@@ -3722,7 +3719,7 @@ impl Harness {
 
     /// Assign `node`'s realm — every subsequent turn this node runs on its
     /// session parks under it (set into the session at run time, inside the
-    /// checkout). The one-session driver mints one realm per answerer node.
+    /// checkout). The driver mints one realm per answerer node.
     pub fn set_node_realm(&self, node: NodeId, realm: tidepool_codegen::jit_machine::RealmId) {
         let mut convos = self.convos.lock();
         if let Some(convo) = convos.get_mut(&node) {
@@ -3762,7 +3759,7 @@ impl Harness {
     /// — see [`NodeConvo::retry_checkout_on_contention`]'s doc for the exact
     /// contract and why this is safe to enable ONLY for a node whose
     /// contention is a concurrently-driven sibling realm on the SAME shared
-    /// session (PRD 20 S1-L4). `false` by default; every existing caller
+    /// session. `false` by default; every existing caller
     /// (which never calls this) keeps today's fail-fast behavior unchanged.
     pub fn set_retry_checkout_on_contention(&self, node: NodeId, retry: bool) {
         let mut convos = self.convos.lock();

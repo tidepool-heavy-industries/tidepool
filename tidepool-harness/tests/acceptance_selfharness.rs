@@ -1,5 +1,4 @@
-//! Acceptance coverage for the self-iterating harness
-//! (`plans/self-iterating-harness/07-impl-orchestration.md`): a MULTI-cycle
+//! Acceptance coverage for the self-iterating harness: a MULTI-cycle
 //! run of the reference generic-assistant harness
 //! (`examples/harness/Harness.hs`) through the production entry point
 //! (`SelfHarnessDriver::run_one_loop_iteration`, called repeatedly — the same
@@ -204,7 +203,7 @@ impl tidepool_harness::Observer for CapturingObserver {
     }
 }
 
-/// MACHINE ROTATION (one-session plan, Phase 4): with the fragment ceiling
+/// MACHINE ROTATION: with the fragment ceiling
 /// forced to 1, the second cycle's loop-boundary maintenance finds the
 /// shared machine over the ceiling and quiescent, ROTATES it (fresh machine
 /// under the same session id), and the cycle then runs to completion with

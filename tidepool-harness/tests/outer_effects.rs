@@ -1,5 +1,4 @@
-//! Acceptance for S1-L1 outer-row servicing
-//! (`plans/self-iterating-harness/20-exomonad-v3-prd.md`): the AUTHORED loop
+//! Acceptance for outer-row servicing: the AUTHORED loop
 //! calls `say` (Console), `createWorktree` (Worktree), `run` (Exec), a
 //! `withHandler`/`headChanged` subscribe-drain-unsubscribe cycle (RepoEvent),
 //! an `after`/`nextEvent` blocking deadline wait (RepoEvent's `RepoEventAwait`
@@ -19,8 +18,7 @@
 //! subscribe/drain/unsubscribe SUSPENSION-SERVICING path without depending on
 //! `WorktreeMonitor::register` (a separate concern from S1-L1).
 //!
-//! PRD 20 S1-L4 wave 2 (`plans/self-iterating-harness/20-s1l4-green-threads.md`)
-//! widens the same fixture/compile with `Tidepool.Event.waitEvent` and
+//! A later widening of the same fixture/compile adds `Tidepool.Event.waitEvent` and
 //! `Tidepool.Node`'s capability-handle mailboxes — proving the driver's
 //! NON-BLOCKING `RepoEventAwait` servicing (a parent parked in a select does
 //! not stall a sibling green thread's mailbox sends) and the mailbox
@@ -192,7 +190,7 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
          (RepoEventAwait), got {state:?}"
     );
 
-    // Tidepool.Async (PRD 20 S1-L4) — the green-thread scheduler.
+    // Tidepool.Async — the green-thread scheduler.
     assert_eq!(
         state.get("asyncOne").and_then(|v| v.as_i64()),
         Some(21),
@@ -227,7 +225,7 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
          differing-length recursive sum), regardless of completion order, got {state:?}"
     );
 
-    // Tidepool.Event.waitEvent (PRD 20 S1-L4 wave 2) — a select over
+    // Tidepool.Event.waitEvent — a select over
     // {thread completion, deadline} that takes the completion branch and
     // reads the typed result with one immediate `wait`.
     assert_eq!(
@@ -389,8 +387,7 @@ fn load_run_entries(log_dir: &std::path::Path, run_id: &str) -> Vec<JournalEntry
     entries
 }
 
-/// Acceptance for PRD 20 S1-L5 wave 1/3 (`plans/self-iterating-harness/
-/// 20-s1-l5-resume.md`): the driver-side boot fold, across a run's journal
+/// Acceptance for the driver-side boot fold, across a run's journal
 /// SEGMENTS. `ResumeHarness.hs` declares BOTH `loop` (walks the first two of
 /// three steps — a run a crash caught with one step still to go) and
 /// `resumeLoop` (walks every step against the injected fold, skipping what is

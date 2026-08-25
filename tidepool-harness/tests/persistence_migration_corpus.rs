@@ -1,5 +1,4 @@
-//! The old-corpus replay test (`plans/persistence-versioning-design.md`
-//! §4): every fixture under `tests/fixtures/persistence-corpus/<kind>/` is a
+//! The old-corpus replay test: every fixture under `tests/fixtures/persistence-corpus/<kind>/` is a
 //! FROZEN, NEVER-REGENERATED artifact standing in for a real operator's
 //! on-disk state at some past version — the inverse of `tidepool-repr`'s
 //! `golden_wire_contract.rs` corpus, which IS regenerated on every breaking

@@ -6,7 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
--- | Test fixture for PRD 20 S1-L5 wave 2b: the CRASH path of the boot fold.
+-- | Test fixture for the CRASH path of the boot fold.
 -- Where @ResumeHarness.hs@ makes entry SELECTION observable (its two entries
 -- cover deliberately different amounts of work), this one makes ABNORMAL
 -- TERMINATION observable: both entries walk the SAME four steps, and what a

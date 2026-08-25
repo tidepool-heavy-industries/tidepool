@@ -1,5 +1,5 @@
-//! Acceptance for the outer-row Subagent seam (`plans/companion-memory.md`
-//! Phase 1): the AUTHORED loop calls `spawnAgent @CuratorReceipt`, the driver
+//! Acceptance for the outer-row Subagent seam: the AUTHORED loop calls
+//! `spawnAgent @CuratorReceipt`, the driver
 //! services the resulting `Subagent` suspension through its driver-owned
 //! `SubagentHandler` (suspension-serviced — the outer session's handled
 //! prefix stays EMPTY on the shared machine), and the typed receipt crosses

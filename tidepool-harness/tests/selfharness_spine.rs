@@ -1,5 +1,4 @@
-//! Acceptance coverage for the self-iterating harness driver spine
-//! (`plans/self-iterating-harness/07-impl-orchestration.md`): ONE full
+//! Acceptance coverage for the self-iterating harness driver spine: ONE full
 //! `render` -> `loop` -> `runLLMTurn @Decision` -> `finalize` -> `render`
 //! cycle, driven through the production entry point
 //! (`SelfHarnessDriver::run_one_loop_iteration`), against the reference harness

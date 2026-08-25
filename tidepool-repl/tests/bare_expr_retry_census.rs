@@ -1,17 +1,14 @@
-//! `bare-expr-waste` lane: pins down the mechanism behind the baseline's
-//! bare-expression "+1" spawn (`plans/post-restart/batch-turns-baseline.md`
-//! §1 Disagreement #2) and measures the PURE-vs-MONADIC split that decides
-//! whether a fix is worth landing.
+//! `bare-expr-waste` lane: pins down the mechanism behind a bare-expression's
+//! extra turn-compile spawn and measures the PURE-vs-MONADIC split that
+//! decides whether a fix is worth landing.
 //!
-//! The baseline's own §1 table attributes the +1 to `query_inner_type`
-//! (`session.rs:2277`). That attribution is WRONG for the steady-state path
-//! this test drives: `query_inner_type` is called ONLY from
-//! `run_plain_eval` (`session.rs:1619`), which is itself reached ONLY when
-//! `run_eval`'s `verdict` is `None` — i.e. the block's batch `classify_block`
-//! spawn (`session.rs:778`) itself failed. Every item in a normal
-//! `session_run` block gets a real verdict from that one batch spawn, so
-//! `run_plain_eval`/`query_inner_type` never fires here. The actual +1 is
-//! `run_bare_expr`'s (`session.rs:2096`) monadic-first try-cascade: it always
+//! The extra spawn is NOT `query_inner_type` (`session.rs:2277`): that is
+//! called ONLY from `run_plain_eval` (`session.rs:1619`), which is itself
+//! reached ONLY when `run_eval`'s `verdict` is `None` — i.e. the block's
+//! batch `classify_block` spawn (`session.rs:778`) itself failed. Every item
+//! in a normal `session_run` block gets a real verdict from that one batch
+//! spawn, so `run_plain_eval`/`query_inner_type` never fires here. The actual
+//! +1 is `run_bare_expr`'s (`session.rs:2096`) monadic-first try-cascade: it always
 //! compiles `wrap_bare_it_monadic` (`it <- __user`) FIRST, and only on ANY
 //! compile failure retries with `wrap_bare_it_pure` (`let { it = __user }`).
 //! For a PURE bare expression the first attempt is doomed (its `Eff`-typed

@@ -1,10 +1,10 @@
-//! Acceptance coverage for `plans/turn-latency-state-injection.md`: two
+//! Acceptance coverage for state injection: two
 //! consecutive `SelfHarnessDriver::run_one_loop_iteration` calls over the reference
 //! generic-assistant harness (`examples/harness/Harness.hs`), each pushing
 //! genuinely DIFFERENT `State` through the fused outer render/loop compile
 //! (`SelfHarnessDriver::compile_loop_entry`).
 //!
-//! Two independent proofs, matching the plan's acceptance bullet verbatim:
+//! Two independent proofs:
 //!
 //! 1. **Rendered outer module byte-identical.** The `Event::OuterCompile{label:
 //!    "render+loop", source}` this driver emits every cycle is captured for
@@ -19,7 +19,7 @@
 //!    out, while the deliberately-uncacheable harness-ctx bind still pays
 //!    its cost every cycle.
 //!
-//! **DEMOTED (session-test-review quick win #5).** The model provider ALWAYS
+//! **DEMOTED: the answerer's own turn is never reached.** The model provider ALWAYS
 //! fails its `complete()` call, so `run_one_loop_iteration` still runs the
 //! fused render/loop compile (`compile_loop_entry`, called BEFORE the model
 //! is ever invoked — see that method's own doc) but the loop never gets a

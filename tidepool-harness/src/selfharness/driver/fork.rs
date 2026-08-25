@@ -325,11 +325,11 @@ impl BranchAgentSessionGuard {
         })
     }
 
-    /// Success (fork-subsumes-split step 3, seam map §7.10): a fork answer
+    /// Success: a fork answer
     /// is bare data. A successful fork child's durable ending must be
     /// `NodeDone`, recorded BEFORE retirement — `terminate_node` alone would
-    /// mark it `NodeCancelled`, an accidental mismatch the seam map calls
-    /// out by name. Retries the finalized-value take across a
+    /// mark it `NodeCancelled`, an accidental mismatch this guards against
+    /// by name. Retries the finalized-value take across a
     /// `TurnInFlight` race (the original one-shot fork path's own
     /// discipline). Consumes the window.
     pub(crate) async fn finalize_fork_data(mut self) -> Result<(Value, String), HarnessError> {
@@ -388,8 +388,8 @@ impl Drop for BranchAgentSessionGuard {
 
 impl SelfHarnessDriver {
     /// Service a `runLLMTurnFork @T`/`runLLMTurnFanout @T` suspension raised
-    /// DIRECTLY by the AUTHORED outer loop (PRD 20 S1-L4, "concurrent
-    /// cognition windows") — `fan: Some(_)` for a fanout (`prompts` one per
+    /// DIRECTLY by the AUTHORED outer loop (concurrent cognition windows) —
+    /// `fan: Some(_)` for a fanout (`prompts` one per
     /// child, answered as `[T]`), `fan: None` for a single fork (answered as
     /// bare `T`, `single_prompt` the one task text). Unlike this driver's
     /// other fork-servicing path ([`Self::drain_answerer_fork`], which drives
@@ -402,7 +402,7 @@ impl SelfHarnessDriver {
     /// Completion order is never observable — results are re-sorted back to
     /// DECLARATION order before assembly.
     ///
-    /// # The child-attributable / mechanism line (PRD 21 locked decision 6)
+    /// # The child-attributable / mechanism line
     ///
     /// This is the ONE place the two are separated, and the separation is the
     /// whole point of the verbs' `Either` shape:
@@ -733,12 +733,11 @@ impl SelfHarnessDriver {
         let mut nudged = false;
         let mut ultimatum = false;
         // Session-scoped (all rounds): total fork children, direct + green.
-        // DEPTH CONTAINMENT (fork-subsumes-split step 1½): a CHILD session's
-        // fork budget is ZERO — the pump path removed the old fork-free
-        // child row's structural depth-one bound, and un-stripping is unsafe
-        // until step 2's subtree depth/total-node budgets are checked
-        // atomically at spawn (seam map §6). A zero cap rides the existing
-        // loud-refusal machinery; `fork_budget_refusal` teaches the boundary.
+        // DEPTH CONTAINMENT: a child session's fork budget is the ordinary
+        // per-window cap, forced to ZERO once `fork_depth` reaches
+        // `max_fork_depth` — that's the depth-cap enforcement point. A zero
+        // cap rides the existing loud-refusal machinery;
+        // `fork_budget_refusal` teaches the boundary.
         let mut fork_budget = ForkBudget {
             cap: if fork_depth >= self.max_fork_depth {
                 0
@@ -1531,7 +1530,7 @@ impl SelfHarnessDriver {
         let _ = self.agent.terminate_node(node, reason);
     }
 
-    /// Fork-subsumes-split STEP 1 (plans/fork-subsumes-split.md): drive ONE
+    /// Drive ONE
     /// fork child as a full ATTACHED WINDOW on the shared session. A child
     /// on the window pump can explore across rounds, present operator
     /// forms, and answer with a REAL `finalize @T` —
@@ -1541,11 +1540,11 @@ impl SelfHarnessDriver {
     /// checkpoint (`register_fork_child_with_card` — the multi-round
     /// answerer card), child scope minted from the LIVE parent node's
     /// scope — which IS the declaration-inheritance wiring on the shared
-    /// session (locked decision 4's ancestry scoping; no separate-session
+    /// session (the ancestry-scoping rule; no separate-session
     /// include dance), and the finalize contract pinned from the fork
     /// site's own resolved modules.
     ///
-    /// STEP 3 (seam map §7): this child gets its own operator-GUI/tree
+    /// This child gets its own operator-GUI/tree
     /// lifecycle — a derived label/path (`Self::fork_child_label`),
     /// `node_gate`/`node_seeded` at birth (the AUTHORED brief, not the
     /// composed hole card), `node_finalized`/`node_failed` at the fold, and
@@ -1561,7 +1560,7 @@ impl SelfHarnessDriver {
     /// the pump itself. A child ending in `InvocationExit` (round
     /// exhaustion, a non-answer ending, its own provider call failing) is
     /// NOT one of those: fork children are not branch positions with a
-    /// typed `Left` to fold into (PRD 21 decision 6 draws that line at the
+    /// typed `Left` to fold into (that applies at the
     /// concurrent `runLLMTurnFork`/`Fanout` branch position, not here), so
     /// this driver instead returns `Ok(Err(corrective))` — a plain-language
     /// message the caller ([`Self::drive_fork_children`]) hands up to
@@ -1569,11 +1568,10 @@ impl SelfHarnessDriver {
     /// abort the CONSUMING block through the same `refuse_pending_suspension`
     /// corrective plumbing [`GreenRoundExit::ForkBudgetRefused`] already
     /// uses — the parent session and the run survive; only the block that
-    /// was `wait`-ing/consuming this child dies. TERMINAL FIX (seam map
-    /// §7.10): a successful child is marked `NodeDone` BEFORE resource
-    /// retirement (`BranchAgentSessionGuard::finalize_fork_data`), instead of
-    /// the old path's accidental `NodeCancelled`-via-`terminate_node`-only
-    /// ending.
+    /// was `wait`-ing/consuming this child dies. A successful child is
+    /// marked `NodeDone` BEFORE resource
+    /// retirement (`BranchAgentSessionGuard::finalize_fork_data`), never via
+    /// `NodeCancelled`-through-`terminate_node`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_fork_child_agent_session(
         &self,
@@ -1765,7 +1763,7 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// Fork-subsumes-split step 3 (seam map §7.1): derive a stable GUI
+    /// Derive a stable GUI
     /// label/tree-path for a fork child. Unlike `runLLMTurnBranchLabeled`,
     /// a fork's brief carries no wire-carried label, so both the label and
     /// the path segment are derived here rather than read off the wire.

@@ -6,7 +6,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
--- | Test fixture for PRD 20 S1-L5's boot fold: a harness declaring BOTH entry
+-- | Test fixture for the boot fold: a harness declaring BOTH entry
 -- points — the universal @loop@ and the opt-in @resumeLoop@ — so the driver's
 -- entry SELECTION is what is under test.
 --

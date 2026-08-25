@@ -60,7 +60,7 @@ impl SelfHarnessDriver {
     /// (`CodexAgentBackend` owns its own runtime and `block_on`s it — the
     /// same discipline every `OperatorGate` call uses), so a lane-1 coupled
     /// spawn blocking this loop turn for the agent's whole cycle (~30–120s
-    /// live, by design — `plans/companion-memory.md`) frees the tokio worker
+    /// live, by design) frees the tokio worker
     /// rather than parking it. The lock held for that call is
     /// [`Self::subagent`] alone, NOT [`Self::handlers`] — see that field's
     /// doc for why: a long subagent cycle must never starve an unrelated
@@ -204,7 +204,7 @@ impl SelfHarnessDriver {
     }
 
     /// Non-blocking companion to the `RepoEventAwait` interception inside the
-    /// `SuspensionRouting::OuterEffect` servicing arm (PRD 20 S1-L4 wave 2): decode
+    /// `SuspensionRouting::OuterEffect` servicing arm: decode
     /// the original suspended request's `subscription`, poll the event
     /// handler's plain (non-sleeping) drain, and report `None` on an empty
     /// batch — still parked, nothing to resume with — or `Some(value)`

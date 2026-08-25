@@ -36,17 +36,17 @@ use tidepool_repr::version_ladder::{self, LadderError, Migration, MigrationError
 
 use super::observer::{Event, Observer};
 
-/// [`Checkpoint`]'s own envelope version — kind 1 of
-/// `plans/persistence-versioning-design.md`'s six persistence-versioning
-/// kinds. Governs every top-level `Checkpoint` field EXCEPT `state`, which
+/// [`Checkpoint`]'s own envelope version — kind 1 of the six
+/// persistence-versioning kinds (see `tidepool-repr/CLAUDE.md`'s
+/// `version_ladder` section). Governs every top-level `Checkpoint` field EXCEPT `state`, which
 /// carries its own independent counter (see [`STATE_CURRENT`]) since it is
 /// opaque, harness-authored JSON this crate never interprets.
 pub const ENVELOPE_CURRENT: u32 = 1;
 /// The oldest envelope version this build still loads. `0` — a checkpoint
 /// written before this scheme existed, carrying no `"version"` key at all —
 /// stays accepted so an existing operator's `checkpoint.json` keeps
-/// loading; see `persistence-versioning-design.md` §6 for when this is ever
-/// raised.
+/// loading; raise it only when a breaking envelope change genuinely needs
+/// to drop support for the unstamped shape.
 pub const ENVELOPE_FLOOR: u32 = 0;
 
 fn envelope_v0_to_v1(v: Json) -> Result<Json, MigrationError> {
@@ -60,10 +60,9 @@ fn envelope_v0_to_v1(v: Json) -> Result<Json, MigrationError> {
 const ENVELOPE_MIGRATIONS: &[Migration] = &[envelope_v0_to_v1];
 
 /// The `state` blob's own version — kind 2 ("per-harness `State` blob") of
-/// the six persistence-versioning kinds, per Open Question 1's answer
-/// (Rust-side JSON surgery, kept deliberately minimal per the operator's
-/// caveat that `State`'s own longevity is uncertain): ONE flat ladder
-/// shared across every harness, not a per-harness-fingerprint registry.
+/// the six persistence-versioning kinds: Rust-side JSON surgery, kept
+/// deliberately minimal since `State`'s own longevity is uncertain: ONE flat
+/// ladder shared across every harness, not a per-harness-fingerprint registry.
 /// Lives as a SIBLING envelope field (`state_version`, never a key inside
 /// `state` itself) — `state` stays exactly what a harness's own Haskell
 /// `State` type produced, with no reserved key this crate imposes on every
@@ -74,11 +73,10 @@ pub const STATE_CURRENT: u32 = 1;
 pub const STATE_FLOOR: u32 = 0;
 
 fn state_v0_to_v1(v: Json) -> Result<Json, MigrationError> {
-    // No real migration exists yet (see this module's doc and
-    // `persistence-versioning-design.md` §5's rollout order: the stamp
-    // lands with the ladder wired but empty). `state_version` — not a key
-    // inside `state` — is what records that this blob has passed through
-    // the (identity) `0 -> 1` step; see `load_checkpoint`.
+    // No real migration exists yet — the stamp lands with the ladder wired
+    // but empty. `state_version` — not a key inside `state` — is what
+    // records that this blob has passed through the (identity) `0 -> 1`
+    // step; see `load_checkpoint`.
     Ok(v)
 }
 
@@ -150,10 +148,9 @@ impl CheckpointGeneration {
 }
 
 /// The loop-iteration count carried in the checkpoint envelope — a runtime
-/// fact, never part of the authored `State`
-/// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
-/// context is the runtime's job"). `#[serde(transparent)]` keeps the wire byte
-/// for byte identical to the plain `u64` this replaces. See
+/// fact, never part of the authored `State` (runtime context is the
+/// runtime's job). `#[serde(transparent)]` keeps the wire byte-for-byte
+/// identical to the plain `u64` this replaces. See
 /// [`CheckpointGeneration`]'s docs for why this is a distinct type rather than
 /// a second `u64` field with a different persistence law.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,8 +172,8 @@ impl LoopIteration {
 /// `crate::selfharness::resume::acquire_lease`'s doc. Absent (the default),
 /// a live-owned lease is a hard refusal, never a silent join: two processes
 /// committing the same effects twice — writes, commits, model calls — is
-/// exactly the hazard PRD 20's segments-not-single-file design leaves open,
-/// since segment safety only protects the JOURNAL bytes, never anything an
+/// exactly the hazard the segments-not-single-file journal design leaves
+/// open, since segment safety only protects the JOURNAL bytes, never anything an
 /// answerer turn already did in the outside world. Read directly by
 /// `acquire_lease`, and named here (beside the error it gates) rather than
 /// in `resume.rs`, so the constant and the message that tells an operator to
@@ -211,7 +208,7 @@ pub enum PersistenceError {
     /// `"state"`, see [`ENVELOPE_CURRENT`]/[`STATE_CURRENT`]) rejected the
     /// read. Mirrors `PersistenceError::LiveLeaseHeld`'s style: a full
     /// paragraph naming the exact path and the two real remedies, not a
-    /// terse code (`persistence-versioning-design.md` §6).
+    /// terse code.
     #[error(
         "checkpoint {path:?} {of} version {found} is below the floor this build still supports \
          ({floor}) — archive or delete the checkpoint and start a fresh run, or restore it with \
@@ -293,9 +290,7 @@ pub struct Checkpoint {
     /// the source that produced this generation.
     pub harness_source: String,
     /// The number of loop cycles completed as of this generation — a
-    /// runtime fact, not part of the authored `State` (see
-    /// `plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
-    /// context is the runtime's job"). `0` before any cycle has completed;
+    /// runtime fact, not part of the authored `State`. `0` before any cycle has completed;
     /// incremented by one per completed cycle, alongside `generation`.
     iteration: LoopIteration,
     /// The operator's between-loops message, threaded into the next
@@ -530,14 +525,13 @@ pub struct JsonlObserver {
     path: PathBuf,
 }
 
-/// This transcript's version — kind 6 of
-/// `plans/persistence-versioning-design.md`'s six persistence-versioning
-/// kinds, the lowest-risk of the four JSONL consumers (§2): the stream is
+/// This transcript's version — kind 6 of the six persistence-versioning
+/// kinds, the lowest-risk of the four JSONL consumers: the stream is
 /// explicitly best-effort ([`SyncPolicy::None`]) and, as of this writing,
 /// has no first-party reader anywhere in this codebase to break — nothing
 /// GATES on this version yet, only [`JsonlObserver::create`] stamps it.
 /// [`read_transcript_header`] exists to give the old-corpus replay test
-/// (`persistence-versioning-design.md` §4) something real to read, ahead of
+/// something real to read, ahead of
 /// whatever the first production reader turns out to need.
 pub const TRANSCRIPT_CURRENT: u32 = 1;
 
@@ -836,7 +830,7 @@ mod tests {
     }
 
     /// A future envelope version is a loud, typed refusal — never a silent
-    /// best-effort read. Mirrors `persistence-versioning-design.md` §6.
+    /// best-effort read.
     #[test]
     fn future_envelope_version_is_a_typed_rejection() {
         let dir = tempfile_dir();
@@ -929,11 +923,9 @@ mod tests {
         assert_eq!(loaded, cp);
     }
 
-    /// Pure-Rust smoke proof of the restart-continuity requirement
-    /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
-    /// context is the runtime's job": the driver "MUST persist the
-    /// iteration count in the checkpoint ENVELOPE so restart behavior stays
-    /// continuous"), independent of the JIT/GHC-extract-backed acceptance
+    /// Pure-Rust smoke proof of the restart-continuity requirement (the
+    /// driver MUST persist the iteration count in the checkpoint ENVELOPE
+    /// so restart behavior stays continuous), independent of the JIT/GHC-extract-backed acceptance
     /// path ([`crate::selfharness::driver`]'s `SelfHarnessDriver` needs a
     /// compiled harness to run a cycle at all, so this exercises the
     /// envelope logic — [`save_checkpoint`]/[`load_checkpoint`] plus the

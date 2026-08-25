@@ -151,7 +151,7 @@ turn's domain result, so an errored `run`/`resume` still restores correctly.
 are always owned by its own realm on a shared machine (see Self-iterating
 harness below).
 
-MULTI-HOLE (one-session plan, Phase 2): a suspended session carries a SET of
+MULTI-HOLE: a suspended session carries a SET of
 parked holes, each resumable by identity in any order (the machine's
 continuation registry imposes none) — a NEW top-level run over parked frames
 is an ordinary `checkout_run`, not a refusal; the old reject-while-suspended
@@ -180,7 +180,7 @@ terminalize the tree entry (`NodeTree::node_cancelled`, skipped if already
 `Done`/`Cancelled`), then retire the SESSION according to who owns it. An
 OWNING node (the ordinary case) has its session removed from the registry
 (`SessionRegistry::remove`, dropping the machine); an ATTACHED node (the
-one-session collapse's per-loop answerer — see Self-iterating harness below)
+per-loop answerer — see Self-iterating harness below)
 never owns the shared session, so its retirement is realm SCOPE EXIT
 (`close_realm` on the shared machine: the realm's parked frames and any
 outstanding `ValueHandle`s are released together, sibling realms untouched) —
@@ -225,7 +225,7 @@ a second node→hole index to keep in sync; session/node counts in flight are
 small (bounded by concurrent fanout width, not corpus size). `NodeState`
 stays single-hole for the same reason — the registry's multi-hole SET is
 multi because it spans MULTIPLE NODES sharing one session (concurrently-
-driven attached answerer realms, the one-session collapse), never because one
+driven attached answerer realms), never because one
 node juggles several holes.
 
 Two methods own every transition: `Harness::publish_suspension` (log
@@ -871,11 +871,7 @@ Gate: `tests/outer_fanout.rs`.
 
 ### One session: attached realms, closure delivery, machine rotation
 
-Pre-collapse, the outer `render`/`loop` session and each loop's answerer
-Agent were separate resident sessions, and a finalized answer crossed between
-them by BRIDGING to a JSON-shaped `Value` — a closure could not survive that
-crossing. The one-session collapse (landed 2026-08-12) removes the
-boundary: the outer session is the tree's one node-less, registry-owned
+The outer session is the tree's one node-less, registry-owned
 session (`SelfHarnessDriver::bootstrap` calls `Harness::adopt_session`, which
 is `NodeTree::adopt_session` — the driver holds only the `SessionId`), and
 every per-loop answerer node ATTACHES to that same session instead of getting

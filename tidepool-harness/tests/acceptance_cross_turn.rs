@@ -219,8 +219,7 @@ async fn multi_block_reply_runs_in_order_and_fails_with_resume_point() {
     );
 }
 
-/// Multi-ITEM adoption of the block lane (`plans/one-spawn-turn-protocol-
-/// phase-b.md`): ONE fenced block, TWO items separated by a blank line — a
+/// Multi-ITEM adoption of the block lane: ONE fenced block, TWO items separated by a blank line — a
 /// helper declaration, then the answer expression that calls it. Today's
 /// single-item `run_block` has no template that parses "decl, then expr" as
 /// one unit; the block lane classifies both items in ONE `classify_block`

@@ -2,8 +2,7 @@
 //! the WRONG item when a value-producing item is followed by an unrelated
 //! Meta payload that also carries a `value` key, e.g. `:stub`) and F2 (a
 //! block ending in a bind/meta must leave the top-level `value` null instead
-//! of leaking an EARLIER expression's value — see
-//! `plans/repo-review-2026-07-06/06-repl-session.md`).
+//! of leaking an EARLIER expression's value).
 //!
 //! Both bugs live in the same `run_block` post-loop step, fixed together: the
 //! item to strip is recorded by INDEX at the moment `TurnOutcome::Value` sets

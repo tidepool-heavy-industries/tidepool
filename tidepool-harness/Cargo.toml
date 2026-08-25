@@ -20,7 +20,7 @@ tidepool-extract-cmd.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
 # `#[derive(FromCore)]` for the generated suspension-decode request enums
-# under `src/generated/` (PRD 22 step 1) — the same derive
+# under `src/generated/` — the same derive
 # `tidepool-handlers`'s generated `<Eff>Req` enums use.
 tidepool-bridge-derive.workspace = true
 # The FromCore-capable bridge record types (`EvRepositoryEvent`/`WtWorktreeId`)
@@ -45,7 +45,7 @@ base64 = "0.23"
 uuid = { workspace = true, features = ["v5"] }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "sync", "time"] }
 # Bounded-concurrency stream combinator (`buffer_unordered`) for driving N
-# concurrent fanout/fork RunLLMTurn answerer children (PRD 20 S1-L4) without
+# concurrent fanout/fork RunLLMTurn answerer children without
 # the `'static` requirement `tokio::spawn` would impose on borrowed driver
 # state — already in the workspace's resolved graph (pulled in transitively
 # by reqwest), pinned here as a direct dependency.

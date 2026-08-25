@@ -75,8 +75,8 @@ struct NodeEntry {
     session: Option<SessionId>,
     /// Whether this node OWNS its session's registry slot (true for a
     /// session minted by [`NodeTree::force`]) or merely runs ON a shared one
-    /// (false — [`NodeTree::force_attached`], the one-session collapse:
-    /// answerer nodes execute as realms on the outer session). Retirement
+    /// (false — [`NodeTree::force_attached`]: answerer nodes execute as
+    /// realms on the outer session). Retirement
     /// removes the registry slot only for owners; a non-owner's retirement
     /// is realm scope-exit, done by the caller against the shared machine.
     owns_session: bool,
@@ -139,8 +139,8 @@ impl<M> NodeTree<M> {
         &self.registry
     }
 
-    /// Register a NODE-LESS session (the one-session collapse's OUTER
-    /// session): mints a `SessionId` from the same counter `force` uses and
+    /// Register a NODE-LESS session (the outer session attached nodes run
+    /// on as realms): mints a `SessionId` from the same counter `force` uses and
     /// inserts the machine as `Idle`. The caller owns retirement (there is
     /// no node whose termination would remove it); attached nodes
     /// ([`Self::force_attached`]) run on it as realms.
@@ -225,7 +225,7 @@ impl<M> NodeTree<M> {
         Ok(session)
     }
 
-    /// Force `node` ONTO AN EXISTING session (the one-session collapse):
+    /// Force `node` ONTO AN EXISTING session:
     /// same `Thunk → Running` transition and `Event::Forced` consent line as
     /// [`Self::force`], but no machine is minted — the node's turns run as a
     /// realm on `session`'s machine, and the node does NOT own the registry

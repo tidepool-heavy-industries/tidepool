@@ -1,4 +1,4 @@
-//! Wave-2 acceptance — the real `tidepool-repl` entry point, multi-turn, on one
+//! Acceptance test: the real `tidepool-repl` entry point, multi-turn, on one
 //! resident machine (the standing rule: drive the production tool dispatch over
 //! several real turns, not a bespoke harness).
 //!

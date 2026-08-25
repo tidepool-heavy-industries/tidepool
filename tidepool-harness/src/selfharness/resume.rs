@@ -1,5 +1,4 @@
-//! The READ half of git-plus-journal persistence (PRD 20 S1-L5,
-//! `plans/self-iterating-harness/20-s1-l5-resume.md`): run identity that
+//! The READ half of git-plus-journal persistence: run identity that
 //! outlives a process, and the boot-time FOLD of that run's journal.
 //!
 //! `record` (`Tidepool.Journal`) is write-only on the authored surface. Locating
@@ -741,7 +740,7 @@ pub fn acquire_lease(log_dir: &Path) -> Result<AcquiredLease, PersistenceError> 
 
 /// Retire the ACTIVE lease at a normal run completion: RENAME it to
 /// `run-<runId>.json` so the next boot mints a fresh run instead of resuming a
-/// finished one. Retained, never deleted (PRD 20's "retained like worktrees").
+/// finished one. Retained, never deleted, like worktrees.
 ///
 /// `Ok(None)` when there was no active lease — retiring twice, or retiring a
 /// run that never took one, is a no-op rather than an error.

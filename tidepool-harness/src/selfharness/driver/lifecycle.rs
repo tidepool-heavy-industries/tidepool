@@ -32,7 +32,7 @@ use crate::selfharness::state_cross;
 use crate::timing;
 
 pub(crate) struct OuterSession {
-    /// The SHARED session's registry id (one-session collapse): the outer
+    /// The SHARED session's registry id: the outer
     /// render/loop fragments AND every answerer node's turns run on this one
     /// machine — the driver holds the id, the registry holds the machine,
     /// every access goes through the checkout discipline
@@ -145,7 +145,7 @@ impl SelfHarnessDriver {
 
         let session = Self::build_outer_session(&outer_cfg, Self::open_outer_plane(&outer_cfg));
 
-        // The one-session collapse: the outer session lives in the tree's
+        // The outer session lives in the tree's
         // registry (uniform checkout discipline, panic-safety Drop), the
         // driver holds only its id. Answerer nodes attach to it as realms.
         let sid = self.agent.adopt_session(session);
@@ -169,7 +169,7 @@ impl SelfHarnessDriver {
         tidepool_runtime::paths::cache_dir().join("selfharness/outer-plane")
     }
 
-    /// Open the shared session's decl plane (one-session LIVING STRUCTURE):
+    /// Open the shared session's decl plane — a LIVING STRUCTURE:
     /// model-authored declarations accumulate here as SOURCE, in scope for
     /// every later answerer turn — across loops, and across machine
     /// rotations (the plane transfers; it is source-side state). Validated
@@ -236,8 +236,8 @@ impl SelfHarnessDriver {
         )
     }
 
-    /// LOOP-BOUNDARY MACHINE MAINTENANCE (one-session plan, Phase 4 —
-    /// bounded lifetime, not immortality): emit the machine's
+    /// LOOP-BOUNDARY MACHINE MAINTENANCE (bounded lifetime, not
+    /// immortality): emit the machine's
     /// instrumentation ([`Event::MachineStats`] — the rotation-cadence
     /// evidence base), and at the fragment CEILING rotate: a fresh machine
     /// adopted under the SAME session id at a quiescent boundary. Durable
@@ -246,8 +246,7 @@ impl SelfHarnessDriver {
     /// session VALUES are lost — ENUMERATED into [`Event::MachineRotated`]
     /// and the next render's legible-loss note, never silently. A
     /// non-quiescent machine at the ceiling refuses the loop with a legible
-    /// error instead of growing silently (the enforced bound the parking
-    /// contract's §2(c) amendment names).
+    /// error instead of growing silently — the enforced bound.
     pub(crate) fn machine_maintenance(&mut self) -> Result<(), DriverError> {
         let sid = self.outer_sid()?;
         let (stats, hole_count, bindings) = self
@@ -410,8 +409,7 @@ impl SelfHarnessDriver {
     /// Compile the PRE-loop `render` and this cycle's `loop` fragment as TWO
     /// entries of ONE module, in a SINGLE `tidepool-extract` spawn
     /// ([`compile_turns`]) — the pre-model boot-path fusion this
-    /// driver exists to land (`plans/post-restart/extract-wave/spawn-latency/
-    /// 04-turn-latency-plan.md` §2). Both entries splice
+    /// driver exists to land. Both entries splice
     /// `state_cross::state_in(prior_state)` with the SAME `prior_state`, so
     /// their helper text is byte-identical by construction — one splice, not
     /// two — and [`tidepool_mcp::TurnTemplate::extra_entries`] renders the
@@ -513,7 +511,7 @@ impl SelfHarnessDriver {
     /// The `--session-root` the harness-ctx bind writes/reads its `.hi`
     /// iface under — reuses [`Self::outer_plane_root`] rather than a
     /// separate directory: the OUTER session's `PersistentSession` is ONE
-    /// `BindingTable`/value plane (the one-session collapse), so once
+    /// `BindingTable`/value plane, so once
     /// `Val.G0` is registered there, ANY later compile on the same session
     /// that consults `live_val_modules`/`current_val_modules` — in
     /// particular an answerer turn's compile, which injects every live
@@ -534,8 +532,8 @@ impl SelfHarnessDriver {
 
     /// (Re-)bind [`state_cross::HARNESS_CTX_BINDING`] at
     /// [`state_cross::harness_ctx_module`] on the OUTER session to this
-    /// cycle's `(stateJson, operatorMsgJson)` — the value half of
-    /// `plans/turn-latency-state-injection.md`'s injection (the type/iface
+    /// cycle's `(stateJson, operatorMsgJson)` — the value half of the
+    /// turn-invariant harness-context injection (the type/iface
     /// half is [`Self::compile_loop_entry`]'s `--inject-val`).
     ///
     /// Compiles a tiny standalone module
@@ -659,7 +657,7 @@ impl SelfHarnessDriver {
             return Err(e);
         }
         // Loop-boundary machine maintenance: instrumentation + the enforced
-        // fragment ceiling (rotation at quiescence) — one-session plan, Phase 4.
+        // fragment ceiling (rotation at quiescence).
         self.machine_maintenance()?;
         self.emit(Event::LoopBoundary);
 
@@ -1142,7 +1140,7 @@ impl SelfHarnessDriver {
             }
         };
 
-        // The scheduler's FIFO ready queue (PRD 20 S1-L4) — EVERY suspension
+        // The scheduler's FIFO ready queue — EVERY suspension
         // this loop drives (the primary `loop` chain's own, and any green
         // thread's) goes through it uniformly: pop one already-produced
         // outcome, classify it, service it (pushing back whatever it
@@ -1301,13 +1299,13 @@ impl SelfHarnessDriver {
                                 outcome: next,
                             })
                         }
-                        // Console/Worktree/RepoEvent/Exec (S1-L1) / Journal
+                        // Console/Worktree/RepoEvent/Exec / Journal
                         // (run-journal lane) — same suspension-servicing
                         // shape as Subagent above, generalized over
                         // `OuterEffectKind`.
                         SuspensionRouting::OuterEffect(kind) => {
                             let kind = *kind;
-                            // `RepoEventAwait` (PRD 20 S1-L4 wave 2) is the
+                            // `RepoEventAwait` is the
                             // ONE outer-row suspension whose handler-side
                             // implementation can BLOCK indefinitely
                             // (`repo_event_await`'s own reconcile/check/sleep
@@ -1401,7 +1399,7 @@ impl SelfHarnessDriver {
                                 })
                             }
                         }
-                        // `Tidepool.Async`'s substrate (PRD 20 S1-L4) — raised
+                        // `Tidepool.Async`'s substrate — raised
                         // either by the loop itself or by a green thread's own
                         // body. Unlike every other arm here, servicing may push
                         // ZERO, ONE, or TWO ready items (a park with no terminal
@@ -1532,10 +1530,9 @@ impl SelfHarnessDriver {
     /// shown to the nested answerer, which sees only its own row's section
     /// (appended by the caller that builds `self.answerer_framing`, via
     /// [`typed_request_agent_framing_suffix`]). `render` itself takes only `State`
-    /// (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
-    /// context is the runtime's job") — the compaction summary and the
+    /// — runtime context is the runtime's job, so the compaction summary and the
     /// iteration count are runtime facts the AUTHOR no longer states.
-    /// Runtime-invoked at loop boundaries ONLY (02-runtime.md LOCKED).
+    /// Runtime-invoked at loop boundaries ONLY.
     /// `state_json` is `None` only for the very first cycle — then the render
     /// splice references `Loaded.initialState` directly (no JSON to decode),
     /// per [`state_cross::state_in`]. `last_compaction` is the
