@@ -1200,8 +1200,14 @@ data Console a where
         assert!(effects_mod.contains("askRaw prompt payload = send (AskWith prompt payload)"));
         // #335: llm is errors-tagged (fully total — budget exhaustion is DATA);
         // tryLlm is gone (llm supersedes it). The composed `llm` (which calls
-        // `schemaToValue`) lives in `Tidepool.Form.Schema` too, same split as
-        // `ask`/`askRaw` — only the thin `llmRaw` verb wrapper is generated.
+        // `schemaToValue`) lives in its own `Tidepool.Llm` module, same split
+        // as `ask`/`askRaw` — only the thin `llmRaw` verb wrapper is
+        // generated. `Tidepool.Llm` is a SEPARATE module from
+        // `Tidepool.Form.Schema` (not merely a different name for the same
+        // one): `Ask` is universal but `Llm` is not, so folding `llm` into
+        // the always-imported `Tidepool.Form.Schema` broke every Ask-only
+        // roster (e.g. `build_minimal_stack`'s Console-only rosters) — see
+        // `extra_imports_for!(Llm)`'s own arm in `effect_defs.rs`.
         assert!(!effects_mod.contains(
             "llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)"
         ));

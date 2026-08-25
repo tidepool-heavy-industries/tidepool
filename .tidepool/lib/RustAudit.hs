@@ -6,6 +6,8 @@ module RustAudit where
 
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
+import Tidepool.Form.Schema
+import Tidepool.Llm
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
 

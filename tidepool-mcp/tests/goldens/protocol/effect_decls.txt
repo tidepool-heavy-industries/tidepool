@@ -1263,7 +1263,11 @@ LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
 -- type_defs (0 items) --
 -- end type_defs --
 
--- extra_imports (0 items) --
+-- extra_imports (1 items) --
+-- extra_imports[0] (19 bytes) --
+import Tidepool.Llm
+-- end extra_imports[0] --
+
 -- end extra_imports --
 
 -- helpers (3 items) --

@@ -71,7 +71,7 @@ import GHC.OverloadedLabels (IsLabel (..))
 import Tidepool.Aeson.FromJSON (Result (..), fromJSON)
 import Tidepool.Aeson.Value (Value (..))
 import Control.Monad.Freer (Eff, Member)
-import Tidepool.Effects (AskUser, askUserRaw, noteRaw)
+import Tidepool.Effects.Core (AskUser, askUserRaw, noteRaw)
 import Tidepool.Form.GForm (DerivedForm, formShape)
 import Tidepool.Form.Shape
   ( FieldKey

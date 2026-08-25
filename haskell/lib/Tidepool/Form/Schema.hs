@@ -1,36 +1,42 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The @Schema@ vocabulary shared by @ask@ and @llm@ (`Tidepool.Effects`'
--- @Ask@/@Llm@): a small JSON-Schema-shaped sum, the pure recursion that
--- renders it as an actual JSON Schema 'Value', and @ask@\/@llm@ themselves.
+-- | The @Schema@ vocabulary behind @ask@ (`Tidepool.Effects.Core`'s @Ask@): a
+-- small JSON-Schema-shaped sum, the pure recursion that renders it as an
+-- actual JSON Schema 'Value', and @ask@ itself. `Tidepool.Llm`'s @llm@ shares
+-- this same 'Schema' vocabulary but is NOT declared here — see that module's
+-- doc for why the two are split despite sharing a schema shape.
 --
 -- Deliberately NOT under 'Tidepool.Form' proper (which builds on
 -- @askUserRaw@ and only compiles in a row containing @AskUser@): @Ask@ is
 -- always present in the ordinary eval\/session roster (unlike the gated
--- @AskUser@), so this module is auto-imported unconditionally whenever
--- @Ask@ is (see @extra_imports_for!@ in @tidepool-mcp/src/effect_defs.rs@),
--- independent of whether @AskUser@'s @Tidepool.Form@ is in the row at all.
+-- @AskUser@) — @EffectRoster::from_handlers@ unconditionally appends it to
+-- every stack, `tidepool-mcp/src/server.rs` — so this module is auto-imported
+-- unconditionally whenever @Ask@ is (see @extra_imports_for!@ in
+-- @tidepool-mcp/src/effect_defs.rs@), independent of whether @AskUser@'s
+-- @Tidepool.Form@ or @Llm@ is in the row at all. That universality is exactly
+-- why this module must NOT also require @Llm@ (see the regression this split
+-- fixes: a roster carrying @Ask@ without @Llm@ — e.g. `build_minimal_stack`'s
+-- interposed-effects-only rosters — failed to compile this module at all when
+-- @llm@ briefly lived here too).
 --
--- @ask@\/@llm@ build on the generated module's thin @askRaw@\/@llmRaw@ the
--- same way 'Tidepool.Form'\'s @askUser@ builds on @askUserRaw@: the generated
--- @Tidepool.Effects@ module cannot import authored library code, so only the
--- bare @send (Ctor …)@ wrappers stay there, and anything composed on top —
--- here, JSON-Schema rendering — lives here instead.
+-- @ask@ builds on the generated module's thin @askRaw@ the same way
+-- 'Tidepool.Form'\'s @askUser@ builds on @askUserRaw@: the generated
+-- @Tidepool.Effects.Core@ module cannot import authored library code, so only
+-- the bare @send (Ctor …)@ wrapper stays there, and anything composed on top
+-- — here, JSON-Schema rendering — lives here instead.
 module Tidepool.Form.Schema
   ( Schema (..)
   , schemaToValue
   , isOpt
   , innerSchema
   , ask
-  , llm
   ) where
 
 import Prelude
 import Data.Text (Text)
 import Control.Monad.Freer (Eff, Member)
 import Tidepool.Aeson (Value, object, (.=))
-import Tidepool.Effects (Ask, Llm, askRaw, llmRaw)
-import Tidepool.Records.Stable (LlmError)
+import Tidepool.Effects.Core (Ask, askRaw)
 
 -- | @ask@\/@llm@'s shared request shape: a JSON-Schema-shaped sum, not a raw
 -- JSON 'Value' — see 'schemaToValue' for the rendering.
@@ -70,11 +76,3 @@ schemaToValue (SObj fields) = object ["type" .= ("object" :: Text), "properties"
 -- returned 'Value' with optics, e.g. @v ^? key "path" . _String@.
 ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
 ask schema prompt = askRaw prompt (object ["schema" .= schemaToValue schema])
-
--- | Call an LLM for structured output. Failure is TYPED and TOTAL (#335):
--- @Left (LlmApi _)@ on an API/network failure, @Left (LlmRefusal _)@ on a
--- declined answer, @Left LlmBudget@ when the per-eval call budget is
--- exhausted — none of these abort the eval. Unwrap with @Right v <- llm
--- schema prompt@ or @>>= liftEither@.
-llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)
-llm schema prompt = llmRaw prompt (schemaToValue schema)

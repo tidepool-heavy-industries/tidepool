@@ -262,12 +262,24 @@ macro_rules! extra_imports_for {
     // module from `Tidepool.Form` proper, because `Ask` (unlike the gated
     // `AskUser`) is always in the ordinary roster, so this import must be
     // unconditional too; `Tidepool.Form` itself only compiles in a row
-    // containing `AskUser`. `Llm`'s `llm` helper depends on `schemaToValue`
-    // transitively through `Ask` always being present alongside it — same
-    // invariant as before the move, just resolved through an import now
-    // instead of shared generated-module text.
+    // containing `AskUser`. `Tidepool.Form.Schema` deliberately does NOT
+    // declare `llm` (a Llm-only roster without Ask, or an Ask-only roster
+    // without Llm, both exist — `build_minimal_stack`'s Console-only rosters
+    // are the latter) — see `Llm`'s own arm below and `Tidepool.Llm`'s module
+    // doc for the regression this split fixes.
     (Ask) => {
         &["import Tidepool.Form.Schema"]
+    };
+    // `Llm`'s composed `llm` (built on `schemaToValue`, `Tidepool.Form.
+    // Schema`'s vocabulary) lives in its OWN module, `Tidepool.Llm` —
+    // independent of `Ask`'s arm above, because `Llm` and `Ask` are
+    // independently-gated effects (see `Tidepool.Llm`'s module doc). `Llm`
+    // is NOT a base effect (unlike `Entropy`/`KV` below): it is present only
+    // in stacks that wire an `LlmHandler` (`build_base_stack`), so this
+    // import is conditional on `Llm` actually being in the roster, exactly
+    // like `Ask`'s arm is conditional on `Ask`.
+    (Llm) => {
+        &["import Tidepool.Llm"]
     };
     //
     // `Tidepool.Random`'s `mkStdGen`/`randomR`/`randoms`/`split` (pure) and
@@ -942,9 +954,10 @@ macro_rules! ask_effect_def {
             // authored). `Ask` is always present in every ordinary stack, so
             // the `Tidepool.Form.Schema` import reaches `.tidepool/lib`
             // modules and Llm-less stacks exactly as the old inline
-            // `type_defs` did — llm (llm_decl) still depends on
-            // `schemaToValue` transitively through Ask always being present
-            // alongside it.
+            // `type_defs` did. `Tidepool.Form.Schema` does NOT declare `llm`
+            // — that lives in its own `Tidepool.Llm` module, gated by `Llm`'s
+            // own `extra_imports_for!` arm, independent of this one (see that
+            // module's doc for why the split is load-bearing, not cosmetic).
             type_defs [],
             verbs [
                 { ctor AskWith, method ask_with,
@@ -1022,10 +1035,12 @@ macro_rules! llm_effect_def {
             ],
             helpers [
                 // The composed `llm` (which calls `schemaToValue`) lives in
-                // `Tidepool.Form.Schema` now — the generated module cannot
-                // import authored library code, so only the thin raw verb
-                // wrapper stays here, same split as `Ask`'s `askRaw`/`ask`
-                // (see `ask_effect_def!`'s doc for the full rationale).
+                // its own `Tidepool.Llm` module now — the generated module
+                // cannot import authored library code, so only the thin raw
+                // verb wrapper stays here, same split as `Ask`'s
+                // `askRaw`/`ask` (see `ask_effect_def!`'s doc for the full
+                // rationale, and `Tidepool.Llm`'s module doc for why `llm`
+                // is NOT in `Tidepool.Form.Schema` alongside `ask`).
                 { raw substrate ["llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)",
                        "llmRaw prompt payload = send (LlmStructured prompt payload)"] },
                 // Pure tally utilities (no LLM/Ask): build a frequency list while
