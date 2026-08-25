@@ -679,7 +679,13 @@ impl CycleSaga {
             let lease = sub.bind(worktree.id(), &binding_ref)?;
             // The linked worktree's git metadata lives in the SOURCE repo's
             // `.git`; the sandbox must admit it or no worker can ever commit.
-            let git_dir = utf8_or_panic(&sub.source_repository().join(".git"));
+            // Derived from the RESOLVED worktree's own recorded provenance
+            // (`WorktreeReceipt.source_repository`), never the handler-wide
+            // `SpawnSubstrate::source_repository` — a worktree resolved from
+            // a different source repository than the one the handler was
+            // configured with (e.g. `SpawnWorkspace::Existing`, or any future
+            // multi-repo manager) must get ITS OWN `.git`, not the handler's.
+            let git_dir = utf8_or_panic(&worktree.receipt().source_repository.join(".git"));
             (worktree, agent, binding_ref, git_dir, lease)
         };
         // Lock released — everything below may block for a whole turn, and
