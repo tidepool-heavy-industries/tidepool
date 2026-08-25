@@ -8,17 +8,23 @@ charter / glossary and the plan file is deleted (git is the archive).
 ## Active work
 
 - [Persistence versioning design](persistence-versioning-design.md):
-  design doc AWAITING OPERATOR REVIEW (2026-08-24) — version-stamped
-  checkpoint + journal persistence mirroring repr's CBOR versioning;
-  four open questions flagged for sign-off; no implementation until
-  approved. Wire bytes (the log `Event` enum, `Checkpoint` struct, serde
-  tags, journal kinds) stay frozen until this lands.
+  LANDED 2026-08-24 — all six persistence kinds carry version stamps via
+  `tidepool_repr::version_ladder`; legacy files migrate as v0, future
+  versions refuse loudly; old-corpus replay test in place. Doc awaits its
+  hoist-and-delete at wave end.
 - [Resident-session kernel design](resident-session-kernel-design.md):
-  design doc AWAITING OPERATOR REVIEW (2026-08-24) — unifying repl
-  ask/suspend with harness suspension routing; recommends a
-  tidepool-runtime module over a new crate (needs the operator's call),
-  migration order conditioned on one-session.md Phase 6; four open
-  questions.
+  decision-complete (operator answers recorded inline 2026-08-24);
+  implementation lane in flight against it.
+- [Compile daemon design](compile-daemon-design.md): decision-complete
+  (operator picks in the Decisions section, 2026-08-24); phase 0
+  (opt-in daemon mode + `ExtractCmd` socket transport + warm spike
+  measurement) in flight.
+- [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
+  merged, turn-count top-5 lane in flight; nextest setup-scripts pilot
+  DEFERRED pending compile-daemon phase 1 (still experimental upstream).
+- [Session test review](session-test-review.md): read-only catalog of
+  ~285 session-compile-driving tests feeding the turn-count cuts;
+  retires with them.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): live process doc
   for autonomous fresh-session dogfood rounds driven by the root + native
   subagents while the operator is offline; robot-operator form answering,
@@ -35,11 +41,6 @@ Small still-open items whose originating plan doc has been retired:
 - `:t` (a type-answer turn classification arm) remains unbuilt; the interim
   mitigation (signatures folded into the answerer prompt) covers the
   near-term need. Revisit at the next spawn that wants it.
-- Resident compile daemon direction: viable in principle (every compile
-  input is already explicit, no ambient interactive context to externalize),
-  but blocked on the `localVarId` determinism gap — a long-running process's
-  session-Unique counter would make two back-to-back compiles of identical
-  source diverge on nested-Id `VarId`s. Cannot land before that gap closes.
 - Held pending an explicit operator ping: moving the hand-carried Haskell
   turn/agent decls (`typed_request_agent_decls` et al.) into
   tidepool-protocol's generator; schema support for polymorphic verbs whose
