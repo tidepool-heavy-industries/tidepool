@@ -317,6 +317,16 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         out.push_str("import qualified Tidepool.Git as Git\n");
         out.push_str("import qualified Tidepool.Cargo as Cargo\n");
     }
+    // `paginateInteractive` (gated on Ask below) calls `ask SStr …`, whose
+    // composed verb and Schema constructors live in the authored stdlib
+    // since the #24 move out of the Ask decl. Orchestrate — unlike the
+    // generated Tidepool.Effects/Core modules — MAY import authored library
+    // modules (Tidepool.Prelude above is one already), so it takes the
+    // import directly rather than through `extra_imports` (which reaches
+    // only the eval/decl planes).
+    if names.contains("Ask") {
+        out.push_str("import Tidepool.Form.Schema\n");
+    }
     out.push('\n');
 
     // ToWire: result-rendering class for show-default mode (tidepool-repl).
