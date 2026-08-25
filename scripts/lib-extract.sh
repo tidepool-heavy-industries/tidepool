@@ -140,27 +140,32 @@ PY
   return 0
 }
 
+# Regenerable cache root, mirroring tidepool-runtime::paths::cache_dir()
+# (XDG_CACHE_HOME -> ~/.cache -> $TMPDIR, joined with "tidepool"). The ONE
+# bash reimplementation of that precedence — scripts/current-run.sh sources
+# this file and calls this function rather than keeping its own copy (root
+# CLAUDE.md's "kept-in-sync copies are forbidden" rule).
+cache_dir() {
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    echo "${XDG_CACHE_HOME}/tidepool"
+  elif [ -n "${HOME:-}" ]; then
+    echo "${HOME}/.cache/tidepool"
+  else
+    echo "${TMPDIR:-/tmp}/tidepool"
+  fi
+}
+
 # Resolves the deploy-handshake toolchain stamp path the same way the
 # servers do (tidepool-runtime::toolchain, haskell/CLAUDE.md's Deploy
 # handshake section: <cache_dir>/toolchain-stamp.json, override
 # $TIDEPOOL_TOOLCHAIN_STAMP) — not a second path-resolution mechanism, just
-# this precedence expressed in bash, the same way scripts/current-run.sh's
-# own cache_dir() already mirrors tidepool-runtime::paths::cache_dir()
-# (XDG_CACHE_HOME -> ~/.cache -> $TMPDIR, joined with "tidepool").
+# this precedence expressed in bash, via the shared cache_dir() above.
 _battery_daemon_stamp_path() {
   if [ -n "${TIDEPOOL_TOOLCHAIN_STAMP:-}" ]; then
     echo "$TIDEPOOL_TOOLCHAIN_STAMP"
     return
   fi
-  local cdir
-  if [ -n "${XDG_CACHE_HOME:-}" ]; then
-    cdir="${XDG_CACHE_HOME}/tidepool"
-  elif [ -n "${HOME:-}" ]; then
-    cdir="${HOME}/.cache/tidepool"
-  else
-    cdir="${TMPDIR:-/tmp}/tidepool"
-  fi
-  echo "$cdir/toolchain-stamp.json"
+  echo "$(cache_dir)/toolchain-stamp.json"
 }
 
 # Starts a per-run resident compile daemon and exports
@@ -257,35 +262,47 @@ start_battery_daemon() {
   echo "==> compile daemon up: pid=$BATTERY_DAEMON_PID socket=$sock" >&2
 }
 
+# Sends TERM to pid $1, waits up to a 10s grace period (polling `kill -0`),
+# escalates to KILL on that SAME pid if it's still alive, then blocks until
+# it's actually reaped (`wait`) — so a caller never proceeds (e.g. releasing
+# the ghc-slots.sh semaphore by exiting) while $1 or its own children may
+# still be alive. $2 is a short label for the log lines. Still "exact
+# recorded pid, never pattern-kill" — this only ever escalates signal
+# strength on the SAME identified process, never widens the target.
+#
+# The escalation is load-bearing, not defensive fluff: observed in
+# practice, a process can catch SIGTERM (it's in its signal mask) without
+# exiting promptly while idle-blocked in a syscall (e.g. the compile
+# daemon's own accept() loop — GHC's RTS defers signal handling to the next
+# safe point, which an idle blocking accept() may not reach for a while).
+# A plain TERM+wait can therefore hang the caller indefinitely; SIGKILL
+# cannot be caught or deferred, so the bound is a hard guarantee. Shared by
+# teardown_battery_daemon below and both battery scripts' on_signal, so this
+# sequence has exactly one implementation.
+_terminate_and_wait() {
+  local pid="$1" label="$2"
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  local term_sent_at=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ $((SECONDS - term_sent_at)) -ge 10 ]; then
+      echo "==> $label (pid $pid) still alive 10s after SIGTERM — escalating to SIGKILL" >&2
+      kill -KILL "$pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.5
+  done
+  wait "$pid" 2>/dev/null || true
+}
+
 # Tears down a daemon this process started (no-op if BATTERY_DAEMON_OWNED=0
-# — disabled, failed to start, or reusing an outer wrapper's daemon).
-# TERM by the exact recorded pid first, never pattern-kill; if it hasn't
-# exited within a bounded grace period, escalate to KILL on that SAME pid
-# (still not a pattern-kill — same identified process, a stronger signal).
-# The escalation is load-bearing, not defensive fluff: observed in practice,
-# the daemon binary can catch SIGTERM (it's in its signal mask) without
-# exiting promptly while idle-blocked in its own accept() loop — GHC's RTS
-# defers signal handling to the next safe point, which an idle blocking
-# accept() may not reach for a while. A plain TERM+wait can therefore hang
-# this teardown, and with it the whole calling script, indefinitely; SIGKILL
-# cannot be caught or deferred, so the bound is a hard guarantee. Call from
-# an EXIT trap installed BEFORE start_battery_daemon runs, so it also fires
-# if a signal lands mid-boot (see start_battery_daemon's comment).
+# — disabled, failed to start, or reusing an outer wrapper's daemon), via
+# _terminate_and_wait above. Call from an EXIT trap installed BEFORE
+# start_battery_daemon runs, so it also fires if a signal lands mid-boot
+# (see start_battery_daemon's comment).
 teardown_battery_daemon() {
   if [ "$BATTERY_DAEMON_OWNED" = 1 ] && [ -n "$BATTERY_DAEMON_PID" ]; then
-    if kill -0 "$BATTERY_DAEMON_PID" 2>/dev/null; then
-      kill -TERM "$BATTERY_DAEMON_PID" 2>/dev/null || true
-      local term_sent_at=$SECONDS
-      while kill -0 "$BATTERY_DAEMON_PID" 2>/dev/null; do
-        if [ $((SECONDS - term_sent_at)) -ge 10 ]; then
-          echo "==> compile daemon (pid $BATTERY_DAEMON_PID) still alive 10s after SIGTERM — escalating to SIGKILL" >&2
-          kill -KILL "$BATTERY_DAEMON_PID" 2>/dev/null || true
-          break
-        fi
-        sleep 0.5
-      done
-      wait "$BATTERY_DAEMON_PID" 2>/dev/null || true
-    fi
+    _terminate_and_wait "$BATTERY_DAEMON_PID" "compile daemon"
     echo "==> compile daemon (pid $BATTERY_DAEMON_PID) torn down" >&2
   fi
   BATTERY_DAEMON_PID=""

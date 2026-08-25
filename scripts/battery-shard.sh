@@ -116,9 +116,10 @@ trap cleanup_exit EXIT
 # nextest runs backgrounded + waited (below) to make it interruptible.
 on_signal() {
   echo "==> signal received — stopping nextest and tearing down the compile daemon" >&2
-  if [ -n "$nextest_pid" ] && kill -0 "$nextest_pid" 2>/dev/null; then
-    kill -TERM "$nextest_pid" 2>/dev/null || true
-  fi
+  # See scripts/battery.sh's on_signal comment: waits for nextest to
+  # actually exit before returning, so the ghc-slots.sh semaphore slot is
+  # never released while nextest or its child compiles might still be alive.
+  [ -n "$nextest_pid" ] && _terminate_and_wait "$nextest_pid" "nextest"
   exit 130
 }
 trap on_signal INT TERM

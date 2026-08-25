@@ -94,9 +94,12 @@ trap cleanup_exit EXIT
 # wait immediately, so this fires promptly either way.
 on_signal() {
   echo "==> signal received — stopping nextest and tearing down the compile daemon" >&2
-  if [ -n "$nextest_pid" ] && kill -0 "$nextest_pid" 2>/dev/null; then
-    kill -TERM "$nextest_pid" 2>/dev/null || true
-  fi
+  # Waits for nextest to actually exit (escalating to KILL after a grace
+  # period if needed) before this function returns — never exit while
+  # nextest or its own child tidepool-extract compiles might still be
+  # alive, which would let the ghc-slots.sh wrapper release its semaphore
+  # slot early (the exact hazard that semaphore exists to prevent).
+  [ -n "$nextest_pid" ] && _terminate_and_wait "$nextest_pid" "nextest"
   exit 130
 }
 trap on_signal INT TERM

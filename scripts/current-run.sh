@@ -16,15 +16,11 @@
 #   scripts/current-run.sh tail [transcript|log|journal]   tail -f the named stream (default: log)
 set -euo pipefail
 
-cache_dir() {
-  if [ -n "${XDG_CACHE_HOME:-}" ]; then
-    echo "${XDG_CACHE_HOME}/tidepool"
-  elif [ -n "${HOME:-}" ]; then
-    echo "${HOME}/.cache/tidepool"
-  else
-    echo "${TMPDIR:-/tmp}/tidepool"
-  fi
-}
+# cache_dir() lives in lib-extract.sh (shared with scripts/battery.sh's
+# compile-daemon stamp-path resolution) rather than duplicated here — root
+# CLAUDE.md's "kept-in-sync copies are forbidden" rule. Sourcing it has no
+# side effects (it only defines functions); its other helpers are unused here.
+source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
 
 selfharness_dir="$(cache_dir)/selfharness"
 lease_file="$selfharness_dir/run-current.json"
