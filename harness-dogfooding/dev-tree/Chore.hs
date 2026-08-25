@@ -49,6 +49,7 @@ chorePlan =
                 , "grep -q 'worker-typecheck' harness-dogfooding/dev-tree/Prompts.hs"
                 ]
             , nodeBoundary = ["scripts/worker-typecheck.sh", "harness-dogfooding/dev-tree/Prompts.hs"]
+            , nodeTolerated = []
             , nodeOnFailure = Retry
             , nodeSplit = Nothing
             , childPlans = []
@@ -62,6 +63,7 @@ chorePlan =
                 , "grep -qE 'encodeRequest|sendRequest' haskell/app/Main.hs"
                 ]
             , nodeBoundary = ["haskell/app/Main.hs", "haskell/src/Tidepool/DaemonServer.hs"]
+            , nodeTolerated = []
             , nodeOnFailure = Retry
             , nodeSplit = Nothing
             , childPlans = []
