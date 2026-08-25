@@ -87,6 +87,7 @@ import Tidepool.Effects
   , say
   )
 import Tidepool.Form (askUser)
+import Tidepool.Shell (runInTry)
 import Tidepool.Harness (Harness, runLLMTurn)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
@@ -248,14 +249,16 @@ effectivePlan fold st = case choreMode of
   Authored {authoredPlan = p} -> pure (Right p)
   ProposeFromGoal -> case lookupEvent ProposeKind proposalJournalKey fold of
     Just (_, ProposeEvent {evProposePlan = p}) -> pure (Right p)
-    _ -> proposeAttempt 1 Nothing
+    _ -> do
+      grounding <- groundingPack
+      proposeAttempt grounding 1 Nothing
   where
-    proposeAttempt attempt priorNote = do
+    proposeAttempt grounding attempt priorNote = do
       let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
-      proposed <- runLLMTurn @DevPlan (proposePrompt st.goal st.budget <> revision)
+      proposed <- runLLMTurn @DevPlan (proposePrompt st.goal st.budget grounding <> revision)
       case proposalViolation st.budget proposed of
         Just why
-          | attempt == 1 -> proposeAttempt 2 (Just why)
+          | attempt == 1 -> proposeAttempt grounding 2 (Just why)
           | otherwise -> pure (Left ("Proposed plan remained outside the budget: " <> why))
         Nothing -> do
           say (renderPlan 0 proposed)
@@ -266,7 +269,7 @@ effectivePlan fold st = case choreMode of
               pure (Right proposed)
             else
               if attempt == 1
-                then proposeAttempt 2 (Just approval.revisionNote)
+                then proposeAttempt grounding 2 (Just approval.revisionNote)
                 else pure (Left ("Plan proposal rejected: " <> approval.revisionNote))
 
 -- | The first structural budget breach, if any. Root depth is zero.
@@ -284,6 +287,25 @@ proposalViolation b = go 0
     firstJust [] = Nothing
     firstJust (Nothing : xs) = firstJust xs
     firstJust (found : _) = found
+
+-- | Deterministic repository grounding for the propose turn: the proposer is
+-- a runLLMTurn session with no repo access of its own, so CODE assembles what
+-- it needs — the tracked-file shape and the top of the root docs.  Assembled
+-- via Exec in the source checkout; a command that fails degrades to a note
+-- rather than blocking the proposal.
+groundingPack :: Harness Text
+groundingPack = do
+  files <- groundingCmd "git ls-files | head -n 250"
+  docs <- groundingCmd "sed -n '1,40p' CLAUDE.md"
+  pure [fmt|  Tracked files (first 250):
+{files}
+  Root CLAUDE.md (first 40 lines):
+{docs}|]
+  where
+    groundingCmd cmd =
+      runInTry "." cmd <&> \case
+        Left err -> [fmt|  ({cmd} unavailable: {err})|]
+        Right pr -> pr.stdout
 
 blocked :: State -> Text -> State
 blocked st reason =

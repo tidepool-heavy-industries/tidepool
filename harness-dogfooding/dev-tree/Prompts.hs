@@ -34,17 +34,41 @@ import Tidepool.Prelude
 import Tidepool.QQ (fmt)
 import Workers (checkFailed)
 
-proposePrompt :: Text -> Budget -> Text
-proposePrompt requestedGoal b = [fmt|
-  Propose a typed DevPlan tree for this software goal:
+proposePrompt :: Text -> Budget -> Text -> Text
+proposePrompt requestedGoal b grounding = [fmt|
+  You are the planning lead for a typed development tree. Propose a DevPlan
+  for this goal (which may be PRD-sized — read all of it):
   {requestedGoal}
 
-  The root is depth 0. Keep the tree at or below depth {b.maxDepth}, and give
-  every node at most {b.gateWiderThan} direct children. Use unique kebab-case
-  nodeName values. Give every node a tight nodeBoundary, concrete
-  orchestrator-runnable shell commands in nodeChecks (exit 0 means success),
-  a self-contained nodeTask, an explicit nodeOnFailure policy, and only useful
-  children. Respect the total allowance of {b.maxAgentCycles} agent cycles.
+  Repository grounding (assembled by the orchestrator; trust it over guesses):
+{grounding}
+
+  SIZING: cut COARSE. A leaf is a whole coherent deliverable one strong
+  worker finishes in one sitting — never a fragment. Reach for nodeSplit
+  (micro-decomposition) only on a leaf that is genuinely restructure-sized.
+  Interior nodes exist only when children truly need separate worktrees and
+  an integration merge. The root is depth 0; stay at or below depth
+  {b.maxDepth}; at most {b.gateWiderThan} direct children per node; respect
+  the total allowance of {b.maxAgentCycles} agent cycles (a leaf costs one,
+  an interior node two).
+
+  Per node: unique kebab-case nodeName; a self-contained nodeTask a worker
+  can act on without this conversation; a tight nodeBoundary (product paths)
+  plus nodeTolerated for hygiene paths a worker may touch without failing
+  (README, ignore files, lockfiles); nodeChecks as concrete
+  orchestrator-runnable shell commands that DISCRIMINATE (exit 0 = success;
+  they run harness-side with full tooling, so cargo/cabal/test commands are
+  allowed where they fit a 600-second budget); an explicit nodeOnFailure.
+
+  SURFACING DECISIONS: this is a multi-round session. If the goal leaves a
+  genuine architectural fork only the operator should close, surface it
+  BEFORE finalizing: declare a small record in a haskell block —
+  data MyDecision = MyDecision {{ choice :: Text, rationale :: Text }}
+    deriving stock (Generic)
+    deriving anyclass (DerivedForm)
+  — then evaluate askUser @MyDecision; the operator answers a typed form and
+  your next round sees the value. At most two decisions; never ask what the
+  grounding or the goal already answers.
 |]
 
 -- | The Git trust boundary shared by workers that edit the assigned worktree.
