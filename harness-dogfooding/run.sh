@@ -2,6 +2,7 @@
 # Launch the self-iterating harness dogfood against an authored harness.
 #   ./harness-dogfooding/run.sh                         # the open-ended companion
 #   ./harness-dogfooding/run.sh path/to/Harness.hs      # any authored harness
+#   ./harness-dogfooding/run.sh path/to/Harness.hs --port 4620   # extra args forwarded
 # Rebuilds the extract + bin so it always runs the current tree. Model defaults
 # to the OAuth (Codex) default baked into the bin; override with TIDEPOOL_LLM_MODEL.
 set -euo pipefail
@@ -41,4 +42,5 @@ echo "==> dogfood cache: $XDG_CACHE_HOME/tidepool/selfharness"
 # Companion memory store (plans/companion-memory.md): resolved and
 # auto-seeded by the binary itself (default
 # ~/.local/share/tidepool/companion-memory; TIDEPOOL_MEMORY_REPO overrides).
-exec "./target/$PROFILE/tidepool-selfharness" --harness "$HARNESS"
+shift $(( $# > 0 ? 1 : 0 ))
+exec "./target/$PROFILE/tidepool-selfharness" --harness "$HARNESS" "$@"
