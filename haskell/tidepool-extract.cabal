@@ -268,6 +268,7 @@ test-suite extract-fidelity-test
     Fidelity.ClosureTier
     Fidelity.TopoRecovery
     Fidelity.DaemonCodec
+    Fidelity.MissingFields
   build-depends:
     tidepool-extract-internal,
     base         >= 4.20 && < 5,
