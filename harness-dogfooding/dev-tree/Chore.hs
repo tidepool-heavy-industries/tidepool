@@ -23,56 +23,35 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Give sandboxed workers real in-cycle Haskell typechecking: a repo script that drives tidepool-extract with the right includes, and a --connect client mode so a worker-started in-sandbox daemon makes repeat checks warm."
+choreGoal = "Make missing record fields (and their runtime-bottom kin) a COMPILE error in the extract pipeline, so config-class Haskell fails loud at compile instead of exploding mid-run."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "worker-compile-service"
-    , nodeTask = ""
+    { nodeName = "fatal-missing-fields"
+    , nodeTask =
+        "A live run just crashed at runtime on a Chore.hs record construction missing a field — GHC warned, the pipeline surfaced only errors, and laziness deferred the explosion mid-run. Fix at the mechanism: (1) In haskell/src/Tidepool/GhcPipeline.hs, promote missing-fields AND incomplete-patterns AND incomplete-uni-patterns to FATAL warnings in the DynFlags every pipeline variant compiles user/harness code with (the GHC API: wopt_set for the WarningFlag plus wopt_set_fatal / adding to fatal warning flags — find the exact idiom in the GHC 9.12 API; the file already customizes general flags like Opt_FullLaziness, follow that style and comment WHY: config-class modules must fail loud at compile, per the runtime missing-field crash of 2026-08-25). Make sure the promotion applies to harness/session/eval compiles uniformly and does NOT reject the stdlib itself (if any stdlib module currently has an incomplete pattern, fix that module too — it is a latent bug by this policy). (2) Add a Fidelity regression group in the extract-fidelity-test suite (haskell/test — follow the existing Fidelity.* group structure and cabal stanza wiring if a new module needs listing in haskell/tidepool-extract.cabal): a module with a missing record field must FAIL the pipeline with a diagnostic naming the field, red-then-green style. (3) In tidepool-harness/tests/dogfood_harness_typecheck.rs, add a force-probe line to the dev-tree probe's extra_decls: a binding that deep-forces the chore values (e.g. __choreForce :: Int; __choreForce = length (show chorePlan) + length (show choreBudget)) so a runtime-bottom in chore VALUES is caught at pin time even for bottoms fatal warnings cannot see. NOTE: worker-typecheck.sh does NOT apply to extract-internal sources (they need the ghc package; the orchestrator gates those with cabal) — use it only for the Rust-side probe file edits if any .hs is touched elsewhere."
     , nodeChecks =
-        [ "test -x scripts/worker-typecheck.sh"
-        , "grep -q 'connect' haskell/app/Main.hs"
+        [ "grep -qE 'MissingFields|missing-fields' haskell/src/Tidepool/GhcPipeline.hs"
+        , "grep -qE 'IncompletePatterns|incomplete-patterns' haskell/src/Tidepool/GhcPipeline.hs"
+        , "grep -q '__choreForce' tidepool-harness/tests/dogfood_harness_typecheck.rs"
         ]
-    , nodeBoundary = ["scripts/worker-typecheck.sh", "haskell/app/Main.hs", "haskell/src/Tidepool/DaemonServer.hs", "harness-dogfooding/dev-tree/Prompts.hs"]
+    , nodeBoundary =
+        ["haskell/src/Tidepool/GhcPipeline.hs", "haskell/test", "haskell/lib", "haskell/tidepool-extract.cabal", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
     , nodeTolerated = []
     , nodeOnFailure = AskOperator
-    , nodeSplit = Nothing
-    , childPlans =
-        [ DevPlan
-            { nodeName = "typecheck-script"
-            , nodeTask =
-                "Create scripts/worker-typecheck.sh (executable): a self-contained script a SANDBOXED codex worker runs to typecheck Haskell edits in-cycle. Contract: `scripts/worker-typecheck.sh FILE.hs [-- extra extract args]` resolves the extract binary ($TIDEPOOL_EXTRACT, hard error with a plain message if unset/unreadable), builds the include set — always the repo's haskell/lib, plus the file's own directory, plus (when the file's imports mention Tidepool.Effects) the NEWEST generated effects-module directory discoverable under the ambient cache (the content-addressed dirs the Rust engine mints; search ${XDG_CACHE_HOME:-$HOME/.cache}/tidepool*/ for dirs containing Tidepool/Effects.hs, newest mtime wins, say clearly when none is found) — and invokes the extract with --all-closed --target-module-only and an --output-dir under /tmp, forwarding diagnostics verbatim and exiting with the extract's code. Honor TIDEPOOL_EXTRACT_DAEMON_SOCKET if the extract grows daemon routing later, but do not depend on it. Keep it plain POSIX-ish bash matching scripts/ house style (set -euo pipefail, comments explaining WHY). Also add one sentence to the orchestratorChecksContract fragment in harness-dogfooding/dev-tree/Prompts.hs: workers editing Haskell SHOULD run scripts/worker-typecheck.sh on each edited file before finishing (replacing the your-shell-has-no-ghc sentence's do-not-attempt framing with do-it-via-the-script)."
-            , nodeChecks =
-                [ "test -x scripts/worker-typecheck.sh"
-                , "bash -n scripts/worker-typecheck.sh"
-                , "grep -q 'worker-typecheck' harness-dogfooding/dev-tree/Prompts.hs"
-                ]
-            , nodeBoundary = ["scripts/worker-typecheck.sh", "harness-dogfooding/dev-tree/Prompts.hs"]
-            , nodeTolerated = []
-            , nodeOnFailure = Retry
-            , nodeSplit = Nothing
-            , childPlans = []
+    , nodeSplit =
+        Just
+          SplitSpec
+            { splitHints =
+                "Split into 2-3 sequential microtasks: the DynFlags promotion + any stdlib incomplete-pattern fixes it flushes out first, then the Fidelity red-then-green regression, then the Rust force-probe + self-consistency sweep. The orchestrator gates compilation (cabal build for extract internals) after the fold."
+            , splitMaxTasks = 3
             }
-        , DevPlan
-            { nodeName = "connect-shim"
-            , nodeTask =
-                "Add a daemon CLIENT mode to the extract binary: `tidepool-extract --connect <socket> <normal argv...>` sends (current working directory, the remaining argv) to a running compile daemon over its UNIX socket using the exact frame codec the daemon already speaks (haskell/src/Tidepool/DaemonServer.hs — encodeRequest/decodeResponse and the framing recvRequest expects), streams the response's stdout/stderr to the local stdout/stderr, and exits with the returned exit code. Home: haskell/app/Main.hs beside parseDaemonArgs, following its parser style (a --connect anywhere in argv splits client mode; everything after the socket path is the request argv, passed through verbatim). Export any needed codec helpers from Tidepool.DaemonServer rather than duplicating framing — one codec, one home. Connection failure is a hard, plainly-worded error (no silent fallback: the CALLER decides fallback). This enables a worker to start its OWN in-sandbox daemon ($TIDEPOOL_EXTRACT --daemon --socket .tidepool/extract.sock &) and get warm repeat checks; no server-side changes should be needed and none are in scope beyond exporting codec helpers."
-            , nodeChecks =
-                [ "grep -q 'connect' haskell/app/Main.hs"
-                , "grep -qE 'encodeRequest|sendRequest' haskell/app/Main.hs"
-                ]
-            , nodeBoundary = ["haskell/app/Main.hs", "haskell/src/Tidepool/DaemonServer.hs"]
-            , nodeTolerated = []
-            , nodeOnFailure = Retry
-            , nodeSplit = Nothing
-            , childPlans = []
-            }
-        ]
+    , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 2, maxAgentCycles = 8, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 6, gateWiderThan = 4}
 
 -- | Clean-tree protocol (operator, 2026-08-25): the chore config is
 -- COMMITTED before launch, so runs fork from a real commit and fold back
