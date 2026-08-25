@@ -435,7 +435,7 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) 
 // ---------------------------------------------------------------------------
 // Invocation-keyed artifact sets
 //
-// The second consumer of this module. `compile_haskell` above memoizes ONE
+// The second consumer of this module. `cache_key_salted` above memoizes ONE
 // eval compile as a fixed (expr, meta) pair keyed by (source, target,
 // includes-by-path, binary). `crate::artifacts::compile_targets` needs a
 // memo for a whole `tidepool-extract` INVOCATION: N targets, a variable artifact set
@@ -443,7 +443,7 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8]) 
 // depends on the target count), and a key that survives the same content
 // appearing under a different absolute path. Rather than fork the fingerprint/
 // staleness discipline solved above, that shape is expressed here, over the
-// same primitives. See `plans/compile-memo.md`.
+// same primitives.
 // ---------------------------------------------------------------------------
 
 /// Leads an [`InvocationKey`]'s hash, so an invocation key can never collide
@@ -488,10 +488,9 @@ pub struct Invocation<'a> {
     pub bin: &'a Path,
     /// A single session `Val` module permitted as a CACHEABLE `--inject-val`
     /// target, despite `--session-root`/`--inject-val` otherwise making an
-    /// invocation uncacheable (see [`invocation_key`]'s doc, hazard (b) in
-    /// `plans/compile-memo.md`). This is the harness driver's ONE stable,
-    /// never-rotating "harness context" module
-    /// (`plans/turn-latency-state-injection.md`): its NAME and TYPE never
+    /// invocation uncacheable (see [`invocation_key`]'s doc). This is the
+    /// harness driver's ONE stable, never-rotating "harness context" module:
+    /// its NAME and TYPE never
     /// change turn to turn — only the heap value a later run resolves it to
     /// does, and the iface never encodes a value — so the compiled artifact
     /// really is independent of which turn produced it, which is what makes
@@ -524,8 +523,8 @@ pub struct Invocation<'a> {
 ///   it only ever points GHC's OWN `hiDir`/`objectDir` at a warm-cache
 ///   location so `checkOldIface` can skip an unchanged home module — a
 ///   directory whose CONTENT never changes what the extract PRODUCES, only
-///   how much frontend work it redoes to produce it (spike-verified:
-///   `plans/turn-latency-state-injection.md`; a cold-dir and a warm-dir
+///   how much frontend work it redoes to produce it (spike-verified: a
+///   cold-dir and a warm-dir
 ///   compile of the same source/argv/include/binary are asserted
 ///   byte-identical by `build_products_dir_is_deterministic` below). Its
 ///   mutable CONTENTS are therefore never hashed into the key either — doing

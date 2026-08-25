@@ -46,8 +46,7 @@ pub fn cache_dir() -> PathBuf {
 /// writers reach the same entry only when every input that can reach the
 /// output bytes is identical, in which case they are the same compilation and
 /// are entitled to the same bytes. `tidepool-harness/tests/support`'s
-/// `isolate_cache` is the caller that wants exactly this — see
-/// `plans/compile-memo.md`.
+/// `isolate_cache` is the caller that wants exactly this.
 pub fn compile_cache_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TIDEPOOL_COMPILE_CACHE_DIR") {
         return PathBuf::from(d);
@@ -103,8 +102,7 @@ pub fn eval_failure_log_path() -> PathBuf {
 
 /// Persistent, shared `-fwrite-interface` output dir: module-granular GHC
 /// recompilation avoidance ACROSS `tidepool-extract` spawns (spike-verified
-/// 2026-08-20, `plans/turn-latency-state-injection.md`'s "Direction: toward
-/// a resident compile daemon" section) — GHC's own `checkOldIface`
+/// 2026-08-20) — GHC's own `checkOldIface`
 /// recompilation checking skips an unchanged home module (typically every
 /// stdlib module a turn doesn't itself edit) when its interface is already
 /// sitting in this dir from a PRIOR spawn, instead of redoing

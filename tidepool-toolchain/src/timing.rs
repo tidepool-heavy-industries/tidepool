@@ -25,8 +25,7 @@
 //! Stages are FLAT and non-nesting: a collector sums by `stage` and never has
 //! to reason about containment. Where a coarse stage contains finer ones, the
 //! fine stages are prefixed by WHICH `tidepool-extract` spawn they came from —
-//! a harness turn makes exactly ONE spawn (see `plans/self-iterating-harness/
-//! 11-extract-timing-contract.md`'s pipeline walk): `extract.*` is the inside
+//! a harness turn makes exactly ONE spawn: `extract.*` is the inside
 //! of that single `--turn` spawn's `extract_spawn`, including its own
 //! in-process `classify` substep (`extract.classify`). `classify.*` is a
 //! DIFFERENT lane's prefix — the block-classify spawn `tidepool_runtime::
