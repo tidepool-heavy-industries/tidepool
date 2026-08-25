@@ -64,3 +64,41 @@ fn effect_roster_shape_sentinel() {
             should turn up nothing tied to `standard_decls()`'s ordering.\n"
     );
 }
+
+/// The substrate-marker literal exists in exactly two places by structural
+/// necessity (`substrate_marker!` must be a `macro_rules!` literal because it
+/// is spliced into `concat!`, which cannot take a `const` path — see the doc
+/// on `tidepool_protocol::schema::SUBSTRATE_MARKER`). This converts that
+/// "must stay byte-identical" note into an enforced invariant, through the
+/// public surface: every substrate helper's rendered text carries the marker
+/// as its first line, so any drift in `tidepool-mcp`'s copy shows up in
+/// `standard_decls()` output.
+#[test]
+fn substrate_marker_matches_the_schema_constant() {
+    let marker = tidepool_protocol::schema::SUBSTRATE_MARKER;
+    let decls = tidepool_mcp::standard_decls();
+    let substrate_lines: Vec<&str> = decls
+        .iter()
+        .flat_map(|d| d.helpers.iter().flat_map(|h| h.lines()))
+        // Loose prefix on purpose: a drifted variant of the marker must be
+        // CAUGHT by the equality below, not silently filtered out here.
+        .filter(|line| line.trim_start().starts_with("-- @substrate"))
+        .collect();
+    assert!(
+        !substrate_lines.is_empty(),
+        "no substrate-marked helpers found in standard_decls() — either the \
+         marker was renamed beyond the `-- @substrate` prefix (update this \
+         test AND tidepool_protocol::schema::SUBSTRATE_MARKER together) or \
+         substrate helpers vanished entirely"
+    );
+    for line in substrate_lines {
+        assert_eq!(
+            line.trim_start(),
+            marker,
+            "tidepool-mcp's substrate_marker! literal drifted from \
+             tidepool_protocol::schema::SUBSTRATE_MARKER — the two copies \
+             must stay byte-identical (see SUBSTRATE_MARKER's doc for why \
+             two copies exist at all)"
+        );
+    }
+}
