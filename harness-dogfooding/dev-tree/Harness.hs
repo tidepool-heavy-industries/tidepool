@@ -110,6 +110,7 @@ import Resume
   , adoptedWork
   , amendPlan
   , amendmentIsNewest
+  , rescuePending
   , resumePlanFor
   , resumed
   , retainWorktree
@@ -151,6 +152,7 @@ initialState =
     , snapshotDirtySource = choreSnapshotDirtySource
     , budget = choreBudget
     , lastRun = Nothing
+    , rescueCount = Nothing
     }
 
 -- ---------------------------------------------------------------------------
@@ -175,12 +177,25 @@ loop = resumeLoop emptyResume
 -- non-empty fold buys.
 resumeLoop :: ResumeFold -> State -> Harness State
 resumeLoop fold st
-  | phase st /= Ready = pure st
-  | otherwise = do
-      effectivePlan fold st >>= \case
-        Left why -> pure (blocked st why)
-        Right proposedPlan -> runEffective st {plan = proposedPlan}
+  | phase st == Ready = enter st
+  -- A COMPLETED run re-enters (once) when the journal still holds a pending
+  -- amendment for a failed subtree — without this, a Replan decision
+  -- journaled during a finished turn is unreachable forever: the phase
+  -- guard blocks every later turn before resume can consume it (run 24:
+  -- turns 2 and 3 no-oped on exactly this).  Bounded by 'rescueCount' so a
+  -- rescue that fails again does not re-enter every turn until restart.
+  | phase st == Completed
+  , Just branch <- rootBranchOf fold (nodeName (plan st))
+  , rescuePending fold branch (plan st)
+  , fromMaybe 0 (rescueCount st) < 1 = do
+      say "Re-entering completed run: the journal holds a pending amendment for a failed subtree."
+      enter st {rescueCount = Just (fromMaybe 0 (rescueCount st) + 1)}
+  | otherwise = pure st
   where
+    enter entrySt =
+      effectivePlan fold entrySt >>= \case
+        Left why -> pure (blocked entrySt why)
+        Right proposedPlan -> runEffective entrySt {plan = proposedPlan}
     runEffective effective =
       rootTree fold effective >>= \case
         Left why -> pure (blocked effective why)

@@ -21,6 +21,7 @@ module Resume
   , resumed
   , resumePlanFor
   , descendantAmendPending
+  , rescuePending
   , newestEntry
   , amendmentIsNewest
   , amendPlan
@@ -196,6 +197,18 @@ resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEnt
         `orElse` lookupEvent OutcomeKind (nodeName p) fold
     recordedSplit = splitEntry >>= (splitRecordOf . snd)
     recordedPlan = maybe p (.splitPlan) recordedSplit
+
+-- | Should a COMPLETED run re-enter?  True exactly when the fold's verdict
+-- for the root is rescue-shaped: a pending (non-abandoning) amendment, or
+-- the replan-rescue re-entry itself.  A Done root skips ('ResumeSkip'), an
+-- un-amended failure stays terminal ('ResumeSkip'), and an empty fold is
+-- never a reason to re-run ('ResumeFresh').
+rescuePending :: ResumeFold -> Text -> DevPlan -> Bool
+rescuePending fold branch p = case resumePlanFor fold branch p of
+  ResumeSkip _ -> False
+  ResumeFresh -> False
+  ResumeReplay {} -> True
+  ResumeAmend d _ -> not d.abandonSubtree
 
 -- | Does any descendant branch's own resume verdict come out 'ResumeAmend'?
 -- Walks the recorded plan tree (a journaled split plan carries its whole

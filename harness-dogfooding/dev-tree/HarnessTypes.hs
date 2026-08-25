@@ -74,6 +74,10 @@ data State = State
   , snapshotDirtySource :: Bool
   , budget              :: Budget
   , lastRun             :: Maybe RunSummary
+  , -- | How many times a COMPLETED run has re-entered to consume a pending
+    -- journaled amendment (bounded to one).  'Maybe' so checkpoints written
+    -- before this field decode as 'Nothing'.
+    rescueCount         :: Maybe Int
   }
   deriving (Generic, ToJSON, FromJSON, Show)
 
