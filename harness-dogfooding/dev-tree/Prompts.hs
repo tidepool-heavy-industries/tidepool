@@ -44,8 +44,11 @@ proposePrompt requestedGoal b grounding = [fmt|
 {grounding}
 
   SIZING: cut COARSE. A leaf is a whole coherent deliverable one strong
-  worker finishes in one sitting — never a fragment. Reach for nodeSplit
-  (micro-decomposition) only on a leaf that is genuinely restructure-sized.
+  worker finishes in one sitting — never a fragment. Mark nodeSplit
+  (micro-decomposition) on any leaf whose task names three or more distinct
+  components — a split leaf turns "already done?" into a per-microtask
+  verdict with its own receipt, where an unsplit one can stall on
+  whole-leaf scope judgment.
   Interior nodes exist only when children truly need separate worktrees and
   an integration merge. The root is depth 0; stay at or below depth
   {b.maxDepth}; at most {b.gateWiderThan} direct children per node; respect
