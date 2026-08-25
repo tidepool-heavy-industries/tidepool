@@ -101,7 +101,11 @@ pub trait OperatorGate: Send + Sync {
 
     /// The labeled window's starting prompt — the authored brief the window
     /// was opened with, sent once at birth, right after the eager
-    /// [`Self::node_gate`] registration. Default no-op, same reasoning as
+    /// [`Self::node_gate`] registration. Lifecycle callbacks are made on the
+    /// parent gate (the registry owner), while the gate returned by
+    /// [`Self::node_gate`] receives that node's asks, notes, and turn source.
+    /// Keeping those roles separate makes registration optional without
+    /// losing lifecycle announcements. Default no-op, same reasoning as
     /// [`Self::post_note`]; a web/GUI gate stores it so the operator can see
     /// what a node was asked to do, not only what it says.
     fn node_seeded(&self, _label: &str, _seed: &str) {}
@@ -117,7 +121,9 @@ pub trait OperatorGate: Send + Sync {
     /// `InvocationExit` rendering (round exhaustion, non-finalize ending,
     /// provider failure) or the closure-refusal message. Called after
     /// [`Self::retire_node`], mutually exclusive with
-    /// [`Self::node_finalized`]. Default no-op.
+    /// [`Self::node_finalized`]. Like the other lifecycle callbacks, this is
+    /// delivered to the parent gate even when [`Self::node_gate`] returned
+    /// `None`. Default no-op.
     fn node_failed(&self, _label: &str, _reason: &str) {}
 
     /// Withdraw a still-outstanding [`Self::present_form`] presentation of
