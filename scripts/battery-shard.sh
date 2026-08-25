@@ -60,6 +60,14 @@
 #   -E 'binary(multi_binder) or binary(info_introspect) or binary(lifecycle_state) or binary(lost_session) or binary(gc_heap_verify_stress) or binary(gc_field_replay)'
 #   -E 'binary(value_fidelity) or binary(shadow_rebind) or binary(bindings_dedup)'
 #   -E 'binary(text_bind) or binary(stub_fetch) or binary(session_acceptance) or binary(repro_decl_library_import) or binary(value_binding_acceptance) or binary(repro_t_multiline_sig) or binary(name_shadowing)'
+#
+# Resident compile daemon (plans/compile-daemon-design.md, phase 1): same
+# per-run daemon scripts/battery.sh starts — see its header for the full
+# rationale. This script starts one (or reuses an outer wrapper's, e.g. when
+# chained across the sub-shard groups above) via the shared
+# lib-extract.sh helpers, exports the socket for the nextest invocation
+# below, and tears it down (by exact pid) on exit, including
+# SIGINT/SIGTERM. TIDEPOOL_EXTRACT_NO_DAEMON=1 disables it.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -84,6 +92,35 @@ fi
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
 resolve_tidepool_extract
+
+# Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
+# 1) — see scripts/battery.sh's matching comment for the full rationale;
+# this mirrors it via the shared lib-extract.sh helpers rather than
+# duplicating the logic. Opt-out: TIDEPOOL_EXTRACT_NO_DAEMON=1.
+# Outer-wrapper respect: when battery-shard.sh runs as one leg of a chain
+# (scripts/battery-shard.sh's own header documents the multi-shard sequence
+# for tidepool-harness/runtime/repl), a daemon already started by an earlier
+# leg or an enclosing script is reused, not restarted or torn down here.
+nextest_pid=""
+tmp_log="$(mktemp)"
+cleanup_exit() {
+  rm -f "$tmp_log"
+  teardown_battery_daemon
+}
+trap cleanup_exit EXIT
+# See scripts/battery.sh's on_signal comment: a signal sent directly to this
+# script's pid isn't delivered to a synchronous foreground command, so
+# nextest runs backgrounded + waited (below) to make it interruptible.
+on_signal() {
+  echo "==> signal received — stopping nextest and tearing down the compile daemon" >&2
+  if [ -n "$nextest_pid" ] && kill -0 "$nextest_pid" 2>/dev/null; then
+    kill -TERM "$nextest_pid" 2>/dev/null || true
+  fi
+  exit 130
+}
+trap on_signal INT TERM
+start_battery_daemon
+
 echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=${TIDEPOOL_EXPENSIVE_TESTS:-unset})"
 
 # `exec` here would replace this shell before any check could run — so a run
@@ -96,10 +133,10 @@ echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=
 # included; stdout is otherwise unused) — tee it through unchanged via a
 # process substitution so a caller piping/redirecting stderr still sees the
 # identical live stream.
-tmp_log="$(mktemp)"
-trap 'rm -f "$tmp_log"' EXIT
 set +e
-cargo nextest run --ignore-default-filter --no-fail-fast -p "$crate" "$@" 2> >(tee "$tmp_log" >&2)
+cargo nextest run --ignore-default-filter --no-fail-fast -p "$crate" "$@" 2> >(tee "$tmp_log" >&2) &
+nextest_pid=$!
+wait "$nextest_pid"
 run_status=$?
 set -e
 
