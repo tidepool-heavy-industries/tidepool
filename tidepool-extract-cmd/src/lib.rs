@@ -931,6 +931,14 @@ mod tests {
 
         reset_extract_spawn_count();
 
+        // This test is about the DIRECT-SPAWN counter: under an inherited
+        // live daemon socket (battery default since 2026-08-24) run() would
+        // route to the daemon and return Ok(diagnostics) instead of the
+        // NotFound this asserts. Safe to clear without restore: nextest runs
+        // each test in its own process, and the daemon tests below set the
+        // var themselves for their own duration.
+        std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+
         // Never launched: not counted.
         let mut missing = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
             dir.join("does-not-exist"),
