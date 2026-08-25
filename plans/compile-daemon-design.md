@@ -698,6 +698,12 @@ begin with.
    Request-count rotation N=256 as primary, RSS ceiling 2048MB as backstop,
    both settable via daemon flags. Phase 0's measurement is the sizing
    authority; these are conservative starting values, not conclusions.
+4a. **Deferred ("eventually", operator 2026-08-24): orchestrator-owned
+   wave-shared daemons.** One daemon per agent wave, socket injected into
+   children's env, owner = the orchestrator — would consolidate N
+   per-context daemons and retire the slot semaphore entirely. Deferred
+   because general daemon management in the orchestrator is too
+   heavyweight for now; per-context ownership (below) stands.
 4. **Lifecycle ownership: per-context, no shared singleton.** The
    selfharness driver spawns and owns a daemon for its own lifetime
    (Phase 2); each battery run starts its own daemon on a per-run socket
