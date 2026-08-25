@@ -27,40 +27,32 @@ use serde_json::json;
 /// CASE 1 — Text is first-class: bind a Text, then read/transform it.
 ///
 /// `s <- pure (T.pack "hi")` ; `T.length s` => 2 ; `T.unpack s` ; `T.toUpper s`.
-/// Text binds (Tier-0 deep_force of a Text heap object) + references back.
+/// Text binds (Tier-0 deep_force of a Text heap object) + references back —
+/// no cross-turn claim, so one multi-item block proves all four facts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_first_class_bind_and_reference() {
     require_extract();
     let repl = Repl::new();
 
-    repl.eval("s <- pure (T.pack \"hi\")")
-        .await
-        .expect_ok("bind s :: Text");
-
-    let len = repl.eval("T.length s").await;
-    assert!(
-        len.expect_ok("T.length s").contains('2'),
-        "T.length s: expected 2, got: {}",
-        len.text
-    );
-
-    let unpacked = repl.eval("T.unpack s").await;
-    assert!(
-        unpacked.expect_ok("T.unpack s").contains("hi"),
-        "T.unpack s: expected hi, got: {}",
-        unpacked.text
-    );
-
     // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Previously
     // materializing a Text result fired "forced type metadata (should be dead code)"
     // even with a valid bound `s`; the fix in GhcPipeline.runSessionPipeline
     // resolved it. Now asserts success.
-    let upper = repl.eval("pure (T.toUpper s)").await;
+    let out = repl
+        .run(&[
+            "s <- pure (T.pack \"hi\")",
+            "T.length s",
+            "T.unpack s",
+            "pure (T.toUpper s)",
+        ])
+        .await;
+    let text = out.expect_ok("text bind + 3 read-back forms");
     assert!(
-        upper.expect_ok("T.toUpper s").contains("HI"),
-        "T.toUpper s: expected HI, got: {}",
-        upper.text
+        text.contains("\"value\":2"),
+        "T.length s: expected 2, got: {text}"
     );
+    assert!(text.contains("hi"), "T.unpack s: expected hi, got: {text}");
+    assert!(text.contains("HI"), "T.toUpper s: expected HI, got: {text}");
 }
 
 /// CASE 2 — THE KEY DIAGNOSTIC: a Tier-0 Text bind under a DIFFERENT name while
@@ -117,7 +109,9 @@ async fn text_bind_with_prior_live_binding_diagnostic() {
 /// CASE 3 — A bind that REFERENCES an earlier binding at bind time.
 ///
 /// `k <- pure (5 :: Int)`; `m <- pure (k + 1)`; `m` => 6.
-/// The `m` bind action reads `k` through the seeded ExternalEnv.
+/// The `m` bind action reads `k` through the seeded ExternalEnv — `k`'s bind
+/// stays its own turn (the property is about the ExternalEnv seeded from a
+/// PRIOR turn's binding); `m`'s bind and its readback share the later turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bind_references_earlier_binding() {
     require_extract();
@@ -126,15 +120,12 @@ async fn bind_references_earlier_binding() {
     repl.eval("k <- pure (5 :: Int)")
         .await
         .expect_ok("bind k=5");
-    repl.eval("m <- pure (k + 1)")
-        .await
-        .expect_ok("bind m = k + 1 (references k)");
 
-    let out = repl.eval("m").await;
+    let out = repl.run(&["m <- pure (k + 1)", "m"]).await;
+    let text = out.expect_ok("bind m = k + 1 (references k) + reference m");
     assert!(
-        out.expect_ok("reference m").contains('6'),
-        "bind-references-earlier: expected 6, got: {}",
-        out.text
+        text.contains("\"value\":6"),
+        "bind-references-earlier: expected 6, got: {text}"
     );
 }
 
@@ -174,109 +165,110 @@ async fn closure_captures_binding_survives_gc() {
 
 /// CASE 5 — Nested/recursive ADT: bind a tree, sum it a later turn.
 ///
-/// def `data Tree = Leaf Int | Node Tree Tree`;
-/// `t <- pure (Node (Leaf 1) (Node (Leaf 2) (Leaf 3)))`;
-/// def `sumT t = case t of { Leaf n -> n; Node a b -> sumT a + sumT b }`;
-/// `pure (sumT t)` => 6.
-/// Real con names (Leaf/Node) must resolve from the merged session DataConTable
-/// against the tenured heap value (not `<unknown>`).
+/// def `data Tree = Leaf Int | Node Tree Tree` + bind `t` share one turn;
+/// def `sumT t = case t of { Leaf n -> n; Node a b -> sumT a + sumT b }` +
+/// `pure (sumT t)` share a LATER turn. Real con names (Leaf/Node) must resolve
+/// from the merged session DataConTable against the tenured heap value (not
+/// `<unknown>`) — the cross-turn boundary between bind and use is the proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nested_recursive_adt_bind_and_sum() {
     require_extract();
     let repl = Repl::new();
 
-    repl.def("data Tree = Leaf Int | Node Tree Tree")
-        .await
-        .expect_ok("def Tree");
-    repl.eval("t <- pure (Node (Leaf 1) (Node (Leaf 2) (Leaf 3)))")
-        .await
-        .expect_ok("bind t (nested Tree)");
-    repl.def("sumT t = case t of { Leaf n -> n; Node a b -> sumT a + sumT b }")
-        .await
-        .expect_ok("def sumT");
+    repl.run(&[
+        "data Tree = Leaf Int | Node Tree Tree",
+        "t <- pure (Node (Leaf 1) (Node (Leaf 2) (Leaf 3)))",
+    ])
+    .await
+    .expect_ok("def Tree + bind t (nested Tree)");
 
     // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Spine
     // traversal of a deep bound ADT used to fire here; now asserts success.
-    let out = repl.eval("pure (sumT t)").await;
+    let out = repl
+        .run(&[
+            "sumT t = case t of { Leaf n -> n; Node a b -> sumT a + sumT b }",
+            "pure (sumT t)",
+        ])
+        .await;
+    let text = out.expect_ok("def sumT + sumT t");
     assert!(
-        out.expect_ok("sumT t").contains('6'),
-        "nested ADT sum: expected 6, got: {}",
-        out.text
+        text.contains('6'),
+        "nested ADT sum: expected 6, got: {text}"
     );
 }
 
 /// CASE 6a — Maybe: bind `Just 7`, case-match it.
 ///
 /// `mb <- pure (Just (7 :: Int))`; `case mb of { Just n -> n; Nothing -> 0 }` => 7.
+/// No cross-turn claim — one multi-item block proves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maybe_bind_and_case() {
     require_extract();
     let repl = Repl::new();
 
-    repl.eval("mb <- pure (Just (7 :: Int))")
-        .await
-        .expect_ok("bind mb = Just 7");
-    let out = repl.eval("case mb of { Just n -> n; Nothing -> 0 }").await;
-    assert!(
-        out.expect_ok("case mb").contains('7'),
-        "Maybe case: expected 7, got: {}",
-        out.text
-    );
+    let out = repl
+        .run(&[
+            "mb <- pure (Just (7 :: Int))",
+            "case mb of { Just n -> n; Nothing -> 0 }",
+        ])
+        .await;
+    let text = out.expect_ok("bind mb = Just 7 + case mb");
+    assert!(text.contains('7'), "Maybe case: expected 7, got: {text}");
 }
 
 /// CASE 6b — Either: bind `Left 1`, case-match it.
 ///
 /// `e <- pure (Left (1 :: Int) :: Either Int Int)`;
 /// `case e of { Left a -> a; Right b -> b }` => 1.
+/// No cross-turn claim — one multi-item block proves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn either_bind_and_case() {
     require_extract();
     let repl = Repl::new();
 
-    repl.eval("e <- pure (Left (1 :: Int) :: Either Int Int)")
-        .await
-        .expect_ok("bind e = Left 1");
-    let out = repl.eval("case e of { Left a -> a; Right b -> b }").await;
-    assert!(
-        out.expect_ok("case e").contains('1'),
-        "Either case: expected 1, got: {}",
-        out.text
-    );
+    let out = repl
+        .run(&[
+            "e <- pure (Left (1 :: Int) :: Either Int Int)",
+            "case e of { Left a -> a; Right b -> b }",
+        ])
+        .await;
+    let text = out.expect_ok("bind e = Left 1 + case e");
+    assert!(text.contains('1'), "Either case: expected 1, got: {text}");
 }
 
 /// CASE 7 — Structured JSON `Value`: bind an `object`, read a field back.
 ///
 /// `v <- pure (object [("a", toJSON (1 :: Int)), ("b", toJSON (2 :: Int))])`;
 /// `renderJson v` (and an optics read `v ^? key "a" . _Integer`).
-/// Tier-0 structured value + DataConTable round-trip.
+/// Tier-0 structured value + DataConTable round-trip; no cross-turn claim, so
+/// one multi-item block proves all three facts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn structured_json_value_bind_and_read() {
     require_extract();
     let repl = Repl::new();
 
-    repl.eval("v <- pure (object [(\"a\", toJSON (1 :: Int)), (\"b\", toJSON (2 :: Int))])")
-        .await
-        .expect_ok("bind v = object {a:1,b:2}");
-
     // Regression witness: was the kind=4 TypeMetadata crash (now fixed). Reading
     // back a bound JSON `Value` used to fire here; now asserts success.
-    let rendered = repl.eval("renderJson v").await;
-    let r = rendered.expect_ok("renderJson v");
+    let out = repl
+        .run(&[
+            "v <- pure (object [(\"a\", toJSON (1 :: Int)), (\"b\", toJSON (2 :: Int))])",
+            "renderJson v",
+            "v ^? key \"a\" . _Integer",
+        ])
+        .await;
+    let text = out.expect_ok("bind v + renderJson v + optics read");
     assert!(
-        r.contains("\\\"a\\\"") || r.contains("\"a\"") || r.contains('a'),
-        "renderJson v: expected to mention field a, got: {r}"
+        text.contains("\\\"a\\\"") || text.contains("\"a\"") || text.contains('a'),
+        "renderJson v: expected to mention field a, got: {text}"
     );
     assert!(
-        r.contains('1') && r.contains('2'),
-        "renderJson v: expected 1 and 2, got: {r}"
+        text.contains('1') && text.contains('2'),
+        "renderJson v: expected 1 and 2, got: {text}"
     );
-
-    // Optics read of a single field — should be 1.
-    let field = repl.eval("v ^? key \"a\" . _Integer").await;
+    // Optics read of a single field — should be 1 (the final item's top-level value).
     assert!(
-        field.expect_ok("v ^? key a . _Integer").contains('1'),
-        "v ^? key a: expected 1, got: {}",
-        field.text
+        text.contains("\"value\":1"),
+        "v ^? key a . _Integer: expected 1, got: {text}"
     );
 }
 
@@ -323,24 +315,20 @@ async fn list_bind_survives_gc() {
 /// CASE 9 — A function bound, then a value bound FROM applying it.
 ///
 /// `g <- pure (\n -> n * 2 :: Int)`; `h <- pure (g 21)`; `h` => 42.
-/// The closure is applied at bind time and its result rooted as a Tier-0 value.
+/// The closure is applied at bind time and its result rooted as a Tier-0
+/// value — no cross-turn claim, so one multi-item block proves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn function_applied_at_bind_time() {
     require_extract();
     let repl = Repl::new();
 
-    repl.eval("g <- pure (\\n -> n * 2 :: Int)")
-        .await
-        .expect_ok("bind g");
-    repl.eval("h <- pure (g 21)")
-        .await
-        .expect_ok("bind h = g 21");
-
-    let out = repl.eval("h").await;
+    let out = repl
+        .run(&["g <- pure (\\n -> n * 2 :: Int)", "h <- pure (g 21)", "h"])
+        .await;
+    let text = out.expect_ok("bind g + bind h = g 21 + reference h");
     assert!(
-        out.expect_ok("reference h").contains("42"),
-        "function-applied-at-bind: expected 42, got: {}",
-        out.text
+        text.contains("42"),
+        "function-applied-at-bind: expected 42, got: {text}"
     );
 }
 
@@ -360,6 +348,23 @@ fn value_of(turn: &Turn) -> serde_json::Value {
     // never clobbers an item field) — so a MISSING key here means the real
     // value was `null`, exactly the case `Nothing` renders as.
     v.get("value").cloned().unwrap_or(serde_json::Value::Null)
+}
+
+/// As [`value_of`], but for a MULTI-item `.run()` block's raw envelope: item
+/// `idx`'s value is inline in `items[idx].value` unless it's the block's LAST
+/// executed item, whose value is hoisted to the top-level `value` only
+/// (`Block::render`'s slim shape — see `session.rs`'s `finish_block`).
+fn item_value(turn: &Turn, idx: usize, is_last: bool) -> serde_json::Value {
+    let v = serde_json::from_str::<serde_json::Value>(&turn.text)
+        .unwrap_or_else(|e| panic!("turn text is not JSON ({e}): {}", turn.text));
+    if is_last {
+        return v.get("value").cloned().unwrap_or(serde_json::Value::Null);
+    }
+    v.get("items")
+        .and_then(|items| items.get(idx))
+        .and_then(|item| item.get("value"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -382,12 +387,15 @@ async fn towire_list_of_int_renders_as_json_array() {
 async fn towire_list_of_records_renders_as_array_of_show_leaves() {
     require_extract();
     let repl = Repl::new();
-    repl.def("data Pt = Pt { px :: Int, py :: Int } deriving Show")
-        .await
-        .expect_ok("def Pt");
-    let out = repl.eval("pure [Pt 1 2, Pt 3 4]").await;
-    out.expect_ok("list of records");
-    let v = value_of(&out);
+    // Mixed decl+expr items are allowed in one block — no cross-turn claim.
+    let out = repl
+        .run(&[
+            "data Pt = Pt { px :: Int, py :: Int } deriving Show",
+            "pure [Pt 1 2, Pt 3 4]",
+        ])
+        .await;
+    out.expect_ok("def Pt + list of records");
+    let v = item_value(&out, 1, true);
     let arr = v
         .as_array()
         .unwrap_or_else(|| panic!("expected a JSON array of records, got: {v}"));
@@ -408,18 +416,20 @@ async fn towire_string_and_text_stay_bare() {
     require_extract();
     let repl = Repl::new();
 
-    // A bare [Char]/String result stays a plain JSON string, not `["'h'",...]`.
-    let out = repl.eval("pure \"hi\"").await;
-    out.expect_ok("bare String");
+    // A bare [Char]/String result stays a plain JSON string, not `["'h'",...]`;
+    // Text stays bare too — both checked in one block (no cross-turn claim).
+    let out = repl.run(&["pure \"hi\"", "pure (T.pack \"hi\")"]).await;
+    out.expect_ok("bare String + bare Text");
     assert_eq!(
-        value_of(&out),
+        item_value(&out, 0, false),
         json!("hi"),
         "String must render bare, not as a list of chars"
     );
-
-    let out = repl.eval("pure (T.pack \"hi\")").await;
-    out.expect_ok("bare Text");
-    assert_eq!(value_of(&out), json!("hi"), "Text must render bare");
+    assert_eq!(
+        item_value(&out, 1, true),
+        json!("hi"),
+        "Text must render bare"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -428,19 +438,19 @@ async fn towire_maybe_renders_as_null_or_payload() {
     let repl = Repl::new();
 
     // `Maybe` contributes the Just/Nothing -> payload/null structure; the Int
-    // payload renders as a native JSON number via `ToWire Int`.
-    let just_out = repl.eval("pure (Just (3 :: Int))").await;
-    just_out.expect_ok("Just 3");
+    // payload renders as a native JSON number via `ToWire Int`. No cross-turn
+    // claim — both checked in one block.
+    let out = repl
+        .run(&["pure (Just (3 :: Int))", "pure (Nothing :: Maybe Int)"])
+        .await;
+    out.expect_ok("Just 3 + Nothing");
     assert_eq!(
-        value_of(&just_out),
+        item_value(&out, 0, false),
         json!(3),
         "Just 3 should unwrap to the bare number payload 3, not \"Just 3\" or \"3\""
     );
-
-    let nothing_out = repl.eval("pure (Nothing :: Maybe Int)").await;
-    nothing_out.expect_ok("Nothing");
     assert_eq!(
-        value_of(&nothing_out),
+        item_value(&out, 1, true),
         serde_json::Value::Null,
         "Nothing should render as JSON null"
     );
@@ -450,13 +460,16 @@ async fn towire_maybe_renders_as_null_or_payload() {
 async fn towire_bare_show_only_adt_still_hits_the_floor() {
     require_extract();
     let repl = Repl::new();
-    repl.def("data Color = Red | Green | Blue deriving Show")
-        .await
-        .expect_ok("def Color");
-    let out = repl.eval("pure Green").await;
-    out.expect_ok("bare Show-only ADT");
+    // Mixed decl+expr items in one block — no cross-turn claim.
+    let out = repl
+        .run(&[
+            "data Color = Red | Green | Blue deriving Show",
+            "pure Green",
+        ])
+        .await;
+    out.expect_ok("def Color + bare Show-only ADT");
     assert_eq!(
-        value_of(&out),
+        item_value(&out, 1, true),
         json!("Green"),
         "a non-container Show-only ADT must still hit the Show floor"
     );

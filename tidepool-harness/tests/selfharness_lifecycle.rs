@@ -126,20 +126,59 @@ fn driver_over(provider: FlakyProvider, log_tag: &str) -> SelfHarnessDriver {
 /// than reused: if it had not been discarded, the second `run_one_loop_iteration`
 /// would hit the resident session's own "already suspended" guard instead of
 /// completing.
+///
+/// MERGED with the ghost-node hazard check below (formerly the standalone
+/// `retired_answerer_nodes_are_terminal_across_cycles`, session-test-review
+/// quick win #4): both drive the IDENTICAL `FlakyProvider(fail_first=1)`-
+/// then-recover, 2-cycle shape and differed only in which assertion they
+/// made — lifecycle state here, tree-node terminality below. One execution,
+/// two assertion blocks; saves the second compiling cycle.
+///
+/// Ghost-node hazard: `retire_typed_request_agent` (called at the end of every
+/// `run_loop_fragment`, regardless of whether the cycle succeeds or fails)
+/// must TERMINALIZE the per-loop answerer node it retires, not just drop the
+/// harness's convenience `NodeConvo`/session — a forever-loop retires one
+/// answerer per cycle, so a `terminate_node` that silently no-ops (or a bare
+/// session drop with no tree transition) would leave one ghost
+/// `Running`/`Suspended` node behind PER CYCLE, growing without bound.
+/// `decision_block`'s scripted reply never forks, so each cycle creates
+/// exactly one node (the loop's answerer).
+///
+/// Mutation: revert `SelfHarnessDriver::retire_typed_request_agent`'s body to
+/// `self.agent.drop_session(node)`-equivalent (no tree terminalization) —
+/// this test must go RED (a retired-but-not-terminalized answerer node stays
+/// `Running`/`Suspended`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
     support::require_extract();
     let _cache_guard = support::isolate_cache();
 
-    let mut driver = driver_over(
-        FlakyProvider {
-            calls: AtomicU32::new(0),
-            fail_first: 1,
-            reply: decision_block("observe", "Medium"),
-        },
-        "recover",
-    );
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        prelude_dir(),
+        Some(examples_harness_dir()),
+    )
+    .expect("answerer engine config");
+    let provider = FlakyProvider {
+        calls: AtomicU32::new(0),
+        fail_first: 1,
+        reply: decision_block("observe", "Medium"),
+    };
+    let dyn_provider: Arc<dyn DynModelProvider> = Arc::new(provider);
+    let writer = tidepool_harness::log::LogWriter::create(
+        std::env::temp_dir().join(format!(
+            "selfharness-lifecycle-recover-{}.jsonl",
+            std::process::id()
+        )),
+        &header(),
+    )
+    .expect("log writer");
+    let harness = Arc::new(Harness::new(writer, agent_cfg, dyn_provider).expect("agent boots"));
+    let mut driver = SelfHarnessDriver::new(harness.clone(), Arc::new(LogObserver));
     let harness_source = source();
+
+    let mut seen_before: Vec<_> = harness.tree().node_ids();
+    let mut retired_nodes = Vec::new();
 
     let cycle1 = driver.run_one_loop_iteration(&harness_source, None).await;
     assert!(
@@ -151,6 +190,19 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         "an errored cycle must publish Failed, not the cosmetic Idle, got {:?}",
         driver.lifecycle()
     );
+    let after_cycle1 = harness.tree().node_ids();
+    let new_in_cycle1: Vec<_> = after_cycle1
+        .iter()
+        .copied()
+        .filter(|id| !seen_before.contains(id))
+        .collect();
+    assert_eq!(
+        new_in_cycle1.len(),
+        1,
+        "cycle 1 must create exactly one node (the loop's answerer), got {new_in_cycle1:?}"
+    );
+    retired_nodes.extend(new_in_cycle1);
+    seen_before = after_cycle1;
 
     let cycle2 = driver
         .run_one_loop_iteration(&harness_source, None)
@@ -170,6 +222,29 @@ async fn errored_cycle_leaves_lifecycle_failed_and_next_cycle_recovers() {
         cycle2.state_json.get("mode").and_then(|v| v.as_str()),
         Some("Deciding"),
     );
+    let after_cycle2 = harness.tree().node_ids();
+    let new_in_cycle2: Vec<_> = after_cycle2
+        .iter()
+        .copied()
+        .filter(|id| !seen_before.contains(id))
+        .collect();
+    assert_eq!(
+        new_in_cycle2.len(),
+        1,
+        "cycle 2 must create exactly one node (the loop's answerer), got {new_in_cycle2:?}"
+    );
+    retired_nodes.extend(new_in_cycle2);
+
+    for node in &retired_nodes {
+        let state = harness.tree().state(*node);
+        assert!(
+            matches!(
+                state,
+                Some(NodeState::Done) | Some(NodeState::Cancelled { .. })
+            ),
+            "retired answerer node {node:?} must be terminal, got {state:?}"
+        );
+    }
 }
 
 /// A bootstrap failure on a driver that has never run a cycle before (not
@@ -294,107 +369,4 @@ async fn poisoned_driver_refuses_entry_points() {
         driver.restore(&harness_source).await,
         Err(DriverError::Poisoned(_))
     ));
-}
-
-/// Ghost-node hazard: `retire_typed_request_agent` (called at the end of every
-/// `run_loop_fragment`, regardless of whether the cycle succeeds or fails)
-/// must TERMINALIZE the per-loop answerer node it retires, not just drop the
-/// harness's convenience `NodeConvo`/session — a forever-loop retires one
-/// answerer per cycle, so a `terminate_node` that silently no-ops (or a bare
-/// session drop with no tree transition) would leave one ghost
-/// `Running`/`Suspended` node behind PER CYCLE, growing without bound.
-///
-/// Drives TWO cycles on one driver (cycle 1 fails via the scripted provider,
-/// cycle 2 runs a real compile+finalize) and asserts every node either cycle
-/// created is terminal (`Done` or `Cancelled`) once its cycle completes.
-/// decision_block's scripted reply never forks, so each cycle creates
-/// exactly one node (the loop's answerer).
-///
-/// Mutation: revert `SelfHarnessDriver::retire_typed_request_agent`'s body to
-/// `self.agent.drop_session(node)`-equivalent (no tree terminalization) —
-/// this test must go RED (a retired-but-not-terminalized answerer node stays
-/// `Running`/`Suspended`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retired_answerer_nodes_are_terminal_across_cycles() {
-    support::require_extract();
-    let _cache_guard = support::isolate_cache();
-
-    let agent_cfg = EngineConfig::from_decls(
-        typed_request_agent_decls(),
-        prelude_dir(),
-        Some(examples_harness_dir()),
-    )
-    .expect("answerer engine config");
-    let provider = FlakyProvider {
-        calls: AtomicU32::new(0),
-        fail_first: 1,
-        reply: decision_block("observe", "Medium"),
-    };
-    let dyn_provider: Arc<dyn DynModelProvider> = Arc::new(provider);
-    let writer = tidepool_harness::log::LogWriter::create(
-        std::env::temp_dir().join(format!(
-            "selfharness-lifecycle-ghost-node-{}.jsonl",
-            std::process::id()
-        )),
-        &header(),
-    )
-    .expect("log writer");
-    let harness = Arc::new(Harness::new(writer, agent_cfg, dyn_provider).expect("agent boots"));
-    let mut driver = SelfHarnessDriver::new(harness.clone(), Arc::new(LogObserver));
-    let harness_source = source();
-
-    let mut seen_before: Vec<_> = harness.tree().node_ids();
-    let mut retired_nodes = Vec::new();
-
-    // Cycle 1: the scripted first model call fails — but `retire_typed_request_agent`
-    // still runs (it is called unconditionally after
-    // `run_loop_fragment_inner`), so this already-forced answerer node must
-    // still be retired terminally.
-    let cycle1 = driver.run_one_loop_iteration(&harness_source, None).await;
-    assert!(
-        cycle1.is_err(),
-        "the scripted first model call must fail this cycle"
-    );
-    let after_cycle1 = harness.tree().node_ids();
-    let new_in_cycle1: Vec<_> = after_cycle1
-        .iter()
-        .copied()
-        .filter(|id| !seen_before.contains(id))
-        .collect();
-    assert_eq!(
-        new_in_cycle1.len(),
-        1,
-        "cycle 1 must create exactly one node (the loop's answerer), got {new_in_cycle1:?}"
-    );
-    retired_nodes.extend(new_in_cycle1);
-    seen_before = after_cycle1;
-
-    // Cycle 2: the model call now succeeds — a real GHC-compiled turn + finalize.
-    driver
-        .run_one_loop_iteration(&harness_source, None)
-        .await
-        .expect("cycle 2 (after the recovered driver) must succeed");
-    let after_cycle2 = harness.tree().node_ids();
-    let new_in_cycle2: Vec<_> = after_cycle2
-        .iter()
-        .copied()
-        .filter(|id| !seen_before.contains(id))
-        .collect();
-    assert_eq!(
-        new_in_cycle2.len(),
-        1,
-        "cycle 2 must create exactly one node (the loop's answerer), got {new_in_cycle2:?}"
-    );
-    retired_nodes.extend(new_in_cycle2);
-
-    for node in &retired_nodes {
-        let state = harness.tree().state(*node);
-        assert!(
-            matches!(
-                state,
-                Some(NodeState::Done) | Some(NodeState::Cancelled { .. })
-            ),
-            "retired answerer node {node:?} must be terminal, got {state:?}"
-        );
-    }
 }

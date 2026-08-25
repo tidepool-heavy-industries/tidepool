@@ -17,21 +17,57 @@
 
 mod common;
 use common::*;
+use serde_json::json;
+
+/// Parse a multi-item `.run()` block's raw envelope into its `items` array
+/// (strips the optional `## Output\n...\n## Result\n` captured-output prefix,
+/// same as `dispatch`'s callers elsewhere).
+fn items_of(turn: &Turn) -> Vec<serde_json::Value> {
+    let json_part = if let Some(pos) = turn.text.rfind("\n## Result\n") {
+        &turn.text[pos + "\n## Result\n".len()..]
+    } else {
+        &turn.text
+    };
+    serde_json::from_str::<serde_json::Value>(json_part)
+        .ok()
+        .and_then(|v| v.get("items").and_then(|a| a.as_array()).cloned())
+        .unwrap_or_default()
+}
+
+/// Item `idx`'s JSON `value` from a multi-item block: inline in `items[idx]`
+/// unless it's the block's LAST executed item, whose value is hoisted to the
+/// top-level `value` only (`Block::render`'s slim shape).
+fn item_value(turn: &Turn, idx: usize, is_last: bool) -> serde_json::Value {
+    if is_last {
+        let json_part = if let Some(pos) = turn.text.rfind("\n## Result\n") {
+            &turn.text[pos + "\n## Result\n".len()..]
+        } else {
+            &turn.text
+        };
+        return serde_json::from_str::<serde_json::Value>(json_part)
+            .ok()
+            .and_then(|v| v.get("value").cloned())
+            .unwrap_or(serde_json::Value::Null);
+    }
+    items_of(turn)
+        .get(idx)
+        .and_then(|item| item.get("value"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
 
 /// CASE 1 — `let` single bind (control).
 /// `let x = (5 :: Int)` then `x + 1` => 6. Pins down that the single-binder
 /// `let` path is healthy (multi-bind must NOT interfere with single binds).
+/// No cross-turn claim — one multi-item block proves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn let_single_bind() {
     require_extract();
     let repl = Repl::new();
 
-    let t = repl.eval("let x = (5 :: Int)").await;
-    t.expect_ok("let x = 5");
-
-    let t = repl.eval("x + 1").await;
-    let out = t.expect_ok("x + 1");
-    assert!(out.contains("6"), "let-single: expected 6, got: {out}");
+    let out = repl.run(&["let x = (5 :: Int)", "x + 1"]).await;
+    let text = out.expect_ok("let x = 5 + x + 1");
+    assert!(text.contains('6'), "let-single: expected 6, got: {text}");
 }
 
 /// CASE 2 — Tuple bind both components (the BUG-5 headline), including the
@@ -41,40 +77,55 @@ async fn let_single_bind() {
 /// (~6 MiB into the 2 MiB nursery) forces real minor collections, and both
 /// components must still resolve correctly afterward — a dangling slot would
 /// crash or produce garbage instead of 1/2.
+///
+/// Pre-GC checks (bind + `:bindings` + both reads + sum) share ONE turn — none
+/// of them make a cross-turn claim. The GC-forcing turn stands alone: the gap
+/// it opens IS the property. Post-GC reads (`a`, `b`) share the final turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_bind_both_components() {
     require_extract();
     let repl = Repl::new();
 
-    let bind = repl.eval("(a, b) <- pure ((1 :: Int), (2 :: Int))").await;
-    eprintln!(
-        "[tuple_bind] bind turn -> is_error={} text={}",
-        bind.is_error, bind.text
-    );
-    bind.expect_ok("tuple bind should succeed");
+    let pre = repl
+        .run(&[
+            "(a, b) <- pure ((1 :: Int), (2 :: Int))",
+            ":bindings",
+            "a",
+            "b",
+            "a + b",
+        ])
+        .await;
+    let text = pre.expect_ok("tuple bind + :bindings + a + b + a+b");
+    eprintln!("[tuple_bind] pre-GC turn -> {text}");
 
-    // Both components are in scope.
-    let listing = repl.cmd(":bindings").await;
-    let out = listing.expect_ok(":bindings after tuple bind");
-    eprintln!("[tuple_bind] :bindings -> {out}");
+    // Both components are in scope (item 1, `:bindings`).
+    let bindings_text = items_of(&pre)
+        .get(1)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     assert!(
-        out.contains("\"a\"") && out.contains("\"b\""),
-        "both a and b must be bound, got: {out}"
+        bindings_text.contains("\"a\"") && bindings_text.contains("\"b\""),
+        "both a and b must be bound, got: {bindings_text}"
     );
 
-    // Components are independently referenceable.
-    let ta = repl.eval("a").await;
-    let aout = ta.expect_ok("a");
-    assert!(aout.contains("1"), "a should be 1, got: {aout}");
+    // Components are independently referenceable (items 2 and 3).
+    assert_eq!(
+        item_value(&pre, 2, false),
+        json!(1),
+        "a should be 1, got: {text}"
+    );
+    assert_eq!(
+        item_value(&pre, 3, false),
+        json!(2),
+        "b should be 2, got: {text}"
+    );
 
-    let tb = repl.eval("b").await;
-    let bout = tb.expect_ok("b");
-    assert!(bout.contains("2"), "b should be 2, got: {bout}");
-
-    // Sum is correct.
-    let t = repl.eval("a + b").await;
-    let out = t.expect_ok("a + b");
-    assert!(out.contains("3"), "expected a + b == 3, got: {out}");
+    // Sum is correct (item 4, the block's final item).
+    assert_eq!(
+        item_value(&pre, 4, true),
+        json!(3),
+        "expected a + b == 3, got: {text}"
+    );
 
     // GC-rooting guard: heavy allocation (foldl' over 200k elements, ~6 MiB into
     // the 2 MiB nursery) forces real minor collections; both slots must still
@@ -85,64 +136,66 @@ async fn tuple_bind_both_components() {
         .await
         .expect_ok("gc stressor");
 
-    let ta = repl.eval("a").await;
-    assert!(
-        ta.expect_ok("a post-GC").contains("1"),
-        "post-GC a should be 1"
+    let post = repl.run(&["a", "b"]).await;
+    let text = post.expect_ok("a + b post-GC");
+    assert_eq!(
+        item_value(&post, 0, false),
+        json!(1),
+        "post-GC a should be 1, got: {text}"
     );
-    let tb = repl.eval("b").await;
-    assert!(
-        tb.expect_ok("b post-GC").contains("2"),
-        "post-GC b should be 2"
+    assert_eq!(
+        item_value(&post, 1, true),
+        json!(2),
+        "post-GC b should be 2, got: {text}"
     );
 }
 
 /// CASE 3 — `let`-tuple works.
 /// `let (x, y) = ((10 :: Int), (20 :: Int))` binds both x and y;
-/// `x + y == 30`.
+/// `x + y == 30`. No cross-turn claim — one multi-item block proves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn let_tuple_works() {
     require_extract();
     let repl = Repl::new();
 
-    let bind = repl.eval("let (x, y) = ((10 :: Int), (20 :: Int))").await;
-    eprintln!(
-        "[let_tuple] bind turn -> is_error={} text={}",
-        bind.is_error, bind.text
-    );
-    bind.expect_ok("let-tuple bind should succeed");
-
-    let t = repl.eval("x + y").await;
-    let out = t.expect_ok("x + y");
-    assert!(out.contains("30"), "expected x + y == 30, got: {out}");
+    let out = repl
+        .run(&["let (x, y) = ((10 :: Int), (20 :: Int))", "x + y"])
+        .await;
+    let text = out.expect_ok("let-tuple bind + x + y");
+    eprintln!("[let_tuple] turn -> is_error={} text={text}", out.is_error);
+    assert!(text.contains("30"), "expected x + y == 30, got: {text}");
 }
 
 /// CASE 4 — Three-tuple works.
 /// `(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))` binds all three;
-/// `p + q + r == 6`.
+/// `p + q + r == 6`. No cross-turn claim — one multi-item block proves it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_tuple_works() {
     require_extract();
     let repl = Repl::new();
 
-    let bind = repl
-        .eval("(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))")
+    let out = repl
+        .run(&[
+            "(p, q, r) <- pure ((1::Int),(2::Int),(3::Int))",
+            "p + q + r",
+        ])
         .await;
+    let text = out.expect_ok("three-tuple bind + p+q+r");
     eprintln!(
-        "[three_tuple] bind turn -> is_error={} text={}",
-        bind.is_error, bind.text
+        "[three_tuple] turn -> is_error={} text={text}",
+        out.is_error
     );
-    bind.expect_ok("three-tuple bind should succeed");
-
-    let t = repl.eval("p + q + r").await;
-    let out = t.expect_ok("p + q + r");
-    assert!(out.contains("6"), "expected p + q + r == 6, got: {out}");
+    assert!(text.contains('6'), "expected p + q + r == 6, got: {text}");
 }
 
 /// CASE 5 — Type-mismatch multi-bind is LOUDLY REJECTED (GHC compile error).
 /// `(a, b) <- pure (42 :: Int)` has 2 binders but the action returns a plain
 /// `Int`, not a 2-tuple. GHC reports a type error at compile time — a loud,
 /// clean rejection. The session must remain usable after the error.
+///
+/// The failing bind needs its own turn (it errors, so nothing after it in the
+/// same block would run). The 3 recovery checks (nothing leaked, a fresh bind
+/// works, it reads back) share ONE later turn — no cross-turn claim among them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mismatched_type_rejected_loudly() {
     require_extract();
@@ -156,22 +209,19 @@ async fn mismatched_type_rejected_loudly() {
     // Must error — can't match (a,b) pattern against Int.
     bind.expect_err("type-mismatch multi-bind should be rejected");
 
+    let recovery = repl.run(&[":bindings", "let z = (9 :: Int)", "z"]).await;
+    let text = recovery.expect_ok(":bindings after reject + let z + z");
+
     // Neither variable leaked into scope.
-    let listing = repl.cmd(":bindings").await;
-    let out = listing.expect_ok(":bindings after rejected mismatch bind");
+    let bindings_text = items_of(&recovery)
+        .first()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     assert!(
-        !out.contains("\"a\"") && !out.contains("\"b\""),
-        "rejected bind must leave nothing bound, got: {out}"
+        !bindings_text.contains("\"a\"") && !bindings_text.contains("\"b\""),
+        "rejected bind must leave nothing bound, got: {bindings_text}"
     );
 
-    // Session survived: a fresh bind works.
-    repl.eval("let z = (9 :: Int)")
-        .await
-        .expect_ok("let z after reject");
-    let t = repl.eval("z").await;
-    assert!(
-        t.expect_ok("z after reject").contains("9"),
-        "post-reject z: {}",
-        t.text
-    );
+    // Session survived: a fresh bind works and reads back.
+    assert!(text.contains('9'), "post-reject z: {text}");
 }

@@ -16,8 +16,36 @@
 //!    for cycle 2 is exactly ONE LESS than cycle 1's — the fused
 //!    render+loop compile's own spawn (the only one memo-sensitive in this
 //!    accounting; see the per-cycle spawn breakdown comment below) drops
-//!    out, while the deliberately-uncacheable harness-ctx bind and the
-//!    answerer's own reply compile still pay their cost every cycle.
+//!    out, while the deliberately-uncacheable harness-ctx bind still pays
+//!    its cost every cycle.
+//!
+//! **DEMOTED (session-test-review quick win #5).** The model provider ALWAYS
+//! fails its `complete()` call, so `run_one_loop_iteration` still runs the
+//! fused render/loop compile (`compile_loop_entry`, called BEFORE the model
+//! is ever invoked — see that method's own doc) but the loop never gets a
+//! reply to extract+compile as the answerer's own turn: this eliminates the
+//! 2 SESSION-SCOPED answerer compiles the prior version of this test paid
+//! (one per cycle, via a scripted `ReplayProvider` reply), while the 2 fused
+//! (non-session-scoped) compiles this test actually measures stay exactly as
+//! they were — hand-built `State` JSONs stand in for the `ReplayProvider`
+//! replies that used to produce them. `compile_loop_entry` itself is
+//! `pub(crate)` — not reachable directly from this crate's integration tests
+//! without widening its visibility, a `tidepool-harness/src` change outside
+//! this lane's boundary — so an always-failing provider is the in-bounds way
+//! to reach the identical code path through the public
+//! `run_one_loop_iteration` entry point, the same "standalone PROBE" spirit
+//! `agent_stack_scoping.rs`/`finalize_type_pinning.rs`/
+//! `dogfood_harness_typecheck.rs` already use (there, by calling a public
+//! lower-level compile fn directly; here, by starving the public entry point
+//! of the one thing that would make it pay for more than what's measured).
+//! This drops the prior version's "the run still observes the SECOND state's
+//! values" tertiary check (which needs a COMPLETED loop, i.e. a real answerer
+//! reply) — that property (injected state genuinely flowing through, not
+//! staying stale) is already proven, over this identical `compile_loop_entry`
+//! mechanism, by `acceptance_selfharness.rs`'s
+//! `selfharness_multi_cycle_state_accumulates_across_loop_boundaries`
+//! (a real 2-cycle run whose whole point is that state accumulates and is
+//! read back correctly).
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
@@ -25,13 +53,16 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde_json::json;
 
 mod support;
 
-use tidepool_harness::engine::{self, EngineConfig};
+use tidepool_harness::engine;
+use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;
-use tidepool_harness::provider::{DynModelProvider, Usage};
-use tidepool_harness::replay::{RecordedReply, ReplayProvider};
+use tidepool_harness::provider::{
+    DynModelProvider, ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse,
+};
 use tidepool_harness::{
     load_harness_source, typed_request_agent_decls, Event, Harness, Observer, SelfHarnessDriver,
 };
@@ -60,24 +91,21 @@ fn header() -> LogHeader {
     }
 }
 
-/// One recorded `finalize @Decision (...)` reply — mirrors
-/// `acceptance_selfharness.rs`'s `decision_reply` fixture (a known-clean,
-/// no-retry compile against the reference harness's `Decision`/`Confidence`
-/// constructors), so each cycle's answerer pays exactly ONE reply compile.
-fn decision_reply(action: &str, rationale: &str, confidence: &str) -> RecordedReply {
-    let content = format!(
-        "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\n\n\
-         (finalize @Decision (Decision {{ action = \"{action}\", rationale = \"{rationale}\", \
-         confidence = {confidence} }}) :: M ())\n```"
-    );
-    RecordedReply {
-        content,
-        usage: Usage {
-            input_tokens: 50,
-            output_tokens: 10,
-            cached_input_tokens: None,
-            cache_write_tokens: None,
-        },
+/// A [`ModelProvider`] that never lets the loop finish: every `complete()`
+/// call fails, so the answerer's own reply is never extracted/compiled. This
+/// is what lets the test reach `compile_loop_entry` (called BEFORE the model
+/// is invoked) at zero session-scoped compile cost — see the module doc.
+struct AlwaysFailingProvider;
+
+impl ModelProvider for AlwaysFailingProvider {
+    async fn complete(
+        &self,
+        _req: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        Err(ProviderError::Api(
+            "scripted: this test never lets the model answer".into(),
+        ))
     }
 }
 
@@ -126,14 +154,7 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
         Some(examples_harness_dir()),
     )
     .expect("answerer engine config");
-    // Two DIFFERENT replies, so cycle 2's State (loopCount, mode, notes,
-    // lastDecision) genuinely differs from cycle 1's — the same fixture
-    // shape `acceptance_selfharness.rs` uses to prove state accumulates.
-    let replies = vec![
-        decision_reply("observe", "first loop", "Medium"),
-        decision_reply("decide", "second loop", "High"),
-    ];
-    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let provider: Arc<dyn DynModelProvider> = Arc::new(AlwaysFailingProvider);
     let writer = tidepool_harness::log::LogWriter::create(
         std::env::temp_dir().join(format!(
             "state-injection-memo-hit-{}.jsonl",
@@ -149,22 +170,39 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     let source = load_harness_source(&examples_harness_dir().join("Harness.hs"))
         .expect("reference harness source loads");
 
+    // Two hand-built, genuinely different `State` JSONs (matching
+    // `HarnessTypes.State`'s shape) stand in for what two `ReplayProvider`
+    // replies used to produce — no model round-trip needed to get them.
+    let state1 = json!({ "mode": "Observing", "notes": [], "lastDecision": null });
+    let state2 = json!({
+        "mode": "Deciding",
+        "notes": ["first loop"],
+        "lastDecision": {
+            "action": "observe",
+            "rationale": "first loop",
+            "confidence": "Medium",
+        },
+    });
+
     // Own process (nextest gives every test binary its own).
     engine::reset_extract_spawn_count();
 
     let before_cycle1 = engine::extract_spawn_count();
-    let outcome1 = driver
-        .run_one_loop_iteration(&source, None)
-        .await
-        .expect("cycle 1 (cold memo)");
+    let cycle1 = driver.run_one_loop_iteration(&source, Some(&state1)).await;
     let spawns_cycle1 = engine::extract_spawn_count() - before_cycle1;
+    assert!(
+        cycle1.is_err(),
+        "the scripted provider always fails, so the cycle must error — this \
+         test only needs the fused compile to have run, never the loop to finish"
+    );
 
     let before_cycle2 = engine::extract_spawn_count();
-    let outcome2 = driver
-        .run_one_loop_iteration(&source, Some(&outcome1.state_json))
-        .await
-        .expect("cycle 2 (warm memo)");
+    let cycle2 = driver.run_one_loop_iteration(&source, Some(&state2)).await;
     let spawns_cycle2 = engine::extract_spawn_count() - before_cycle2;
+    assert!(
+        cycle2.is_err(),
+        "cycle 2 also never gets past the always-failing provider"
+    );
 
     // --- Proof 1: the fused outer module's rendered TEXT is turn-invariant.
     let sources = capture.render_loop_sources();
@@ -172,10 +210,6 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
         sources.len(),
         2,
         "each cycle must emit exactly one render+loop OuterCompile event, got {sources:?}"
-    );
-    assert_ne!(
-        outcome1.state_json, outcome2.state_json,
-        "the two cycles must carry genuinely different State for this to prove anything"
     );
     assert_eq!(
         sources[0], sources[1],
@@ -185,49 +219,17 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     );
 
     // --- Proof 2: cycle 2 pays STRICTLY FEWER extract spawns than cycle 1 —
-    // the fused compile's own spawn dropping out as a memo hit (directly
-    // confirmed via `TIDEPOOL_TIMING`-free instrumentation while developing
-    // this test: cycle 1's fused compile is 1 spawn, MISS as expected;
-    // cycle 2's is 0, a HIT). Not asserted as an EXACT delta here: the
-    // answerer's own turn compile path (`EngineConfig::turn_target`'s
-    // standalone shim probe) is independently content-addressed and ALSO
-    // warms up between cycle 1 and cycle 2 — a second, pre-existing memo
-    // this test doesn't own, compounding with the fused compile's own hit.
-    // `refresh_harness_ctx`'s bind is the one spawn that NEVER drops
-    // (hazard (b): fresh literal content every cycle) — so a strict
-    // decrease can only come from something ELSE memoizing, and the fused
-    // compile is the one this test's byte-identical-source proof above
-    // already pins as a guaranteed contributor.
+    // the fused compile's own spawn dropping out as a memo hit. With the
+    // model always failing, the fused compile + the harness-ctx bind
+    // (`refresh_harness_ctx`, which NEVER memo-hits by design — fresh literal
+    // content every cycle) are this test's ONLY spawn sources per cycle, so
+    // the delta is exactly the fused compile's own hit: cycle 1 pays 2 (ctx
+    // bind + fused compile, cold MISS), cycle 2 pays 1 (ctx bind + fused
+    // compile, HIT).
     assert!(
         spawns_cycle2 < spawns_cycle1,
         "cycle 2 must pay fewer extract spawns than cycle 1 (the fused render/loop \
          compile's own spawn dropping out as a memo hit) — cycle 1 paid {spawns_cycle1}, \
          cycle 2 paid {spawns_cycle2}"
-    );
-
-    // --- The run still observes the SECOND state's values — the injected
-    // value plumbing is live, not stale (byte-identical source alone would
-    // also pass if `__harnessCtx` silently resolved to cycle 1's frozen
-    // value on cycle 2).
-    assert_eq!(
-        outcome2.state_json.get("mode").and_then(|v| v.as_str()),
-        Some("Acting"),
-        "cycle 2 must observe its OWN (second) state, got {:?}",
-        outcome2.state_json
-    );
-    let decision = outcome2
-        .state_json
-        .get("lastDecision")
-        .and_then(|v| v.as_object())
-        .expect("cycle 2: lastDecision must be a Just Decision");
-    assert_eq!(
-        decision.get("action").and_then(|v| v.as_str()),
-        Some("decide"),
-        "cycle 2 must observe the SECOND reply's decision, not the first's"
-    );
-    assert!(
-        outcome2.prompt_after.contains("High"),
-        "cycle 2's post-loop render must reflect the SECOND state's confidence, got:\n{}",
-        outcome2.prompt_after
     );
 }
