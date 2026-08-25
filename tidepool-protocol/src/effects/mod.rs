@@ -75,15 +75,18 @@ pub fn all_described() -> Vec<Effect> {
 /// data for disjoint purposes, not because the effects themselves are
 /// unmigrated. `Ask`'s decl text remains hand-carried in
 /// `tidepool-mcp/src/effect_defs.rs`: its GADT/verb shape is fully
-/// schema-described, but its surface helpers (`ask`, `isOpt`, `innerSchema`,
-/// `schemaToValue`) are ordinary pure Haskell functions over the `Schema`
-/// sum — not OPAQUE, not `*Sited`, wrapping no verb — so [`HelperBody`]'s
-/// reviewed shapes (including the OPAQUE+Sited family that unblocked the
-/// other five) cannot express them, and representing arbitrary
-/// pattern-matching function bodies as schema data would be a new
-/// general-purpose mechanism, not a bounded extension — see [`ask`]'s own
-/// module doc and this schema's `Helper` doc ("a helper that is neither of
-/// those… stays hand-written OUTSIDE the contract"). `Console`/`Subagent`
+/// schema-described, but its one surface helper (`ask`) is ordinary pure
+/// Haskell that calls `schemaToValue` directly — not OPAQUE, not `*Sited`,
+/// wrapping no verb — so [`HelperBody`]'s reviewed shapes (including the
+/// OPAQUE+Sited family that unblocked the other five) cannot express it, and
+/// representing arbitrary pattern-matching function bodies as schema data
+/// would be a new general-purpose mechanism, not a bounded extension — see
+/// [`ask`]'s own module doc and this schema's `Helper` doc ("a helper that is
+/// neither of those… stays hand-written OUTSIDE the contract"). (`isOpt`/
+/// `innerSchema`/`schemaToValue` themselves are no longer part of `Ask`'s
+/// decl at all — they migrated to `haskell/lib/Tidepool/Form/Schema.hs`,
+/// stdlib code auto-imported whenever `Ask` is, per `ask`'s own module doc.)
+/// `Console`/`Subagent`
 /// stay hand-carried for an unrelated reason: their macro ALSO feeds a real
 /// `tidepool-handlers` `EffectHandler` projection, so flipping either would
 /// need `tidepool-handlers` edits, out of this migration's scope (see each

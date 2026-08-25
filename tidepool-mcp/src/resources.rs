@@ -786,7 +786,10 @@ mod tests {
         assert!(help(&ctx, "edits").contains("update"));
         // Effect topics: bare name and `effect <Name>` both resolve.
         assert!(help(&ctx, "Fs").contains("readFile"));
-        assert!(help(&ctx, "effect Llm").contains("llm :: forall effs. Member Llm effs"));
+        // `llm` itself (schema-composed) now lives in the stdlib
+        // (`Tidepool.Form.Schema`); only the thin `llmRaw` verb wrapper is
+        // decl-generated and shows up in the per-effect resource.
+        assert!(help(&ctx, "effect Llm").contains("llmRaw :: forall effs. Member Llm effs"));
         // Empty / unknown fall back to the index.
         assert!(help(&ctx, "").contains("help topics"));
         assert!(help(&ctx, "nope").contains("Unknown help topic"));

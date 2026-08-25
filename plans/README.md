@@ -46,24 +46,20 @@ Small still-open items whose originating plan doc has been retired:
   mitigation (signatures folded into the answerer prompt) covers the
   near-term need. Revisit at the next spawn that wants it.
 - **#24 (stdlib-vs-generator ownership, the standing one-home rule for what
-  the generator owns vs. the stdlib vs. verb libraries) — precondition now
-  MET, still held pending an explicit operator ping; do not start it from
-  this note alone.** Both prior preconditions landed: schema support for
-  polymorphic verbs whose response type binds at the invocation site
-  (`Polymorphism::ArgBound`/`ResultBound`, schema-plane-decls lane) and the
-  OPAQUE+`*Sited`+`unsafeCoerce` `HelperBody` shapes that let
-  Fork/Finalize/RunLLMTurn/Green's decl text flip onto the generator
-  (helperbody-flip lane). `Ask` (`tidepool-protocol/src/effects/ask.rs`) is
-  the concrete motivating case #24 should resolve: its helpers
-  (`isOpt`/`innerSchema`/`schemaToValue`) are ordinary pure Haskell functions
-  over the `Schema` sum — stdlib-shaped code, not decl-shaped — and stay
-  hand-carried in `tidepool-mcp/src/effect_defs.rs` because representing an
-  arbitrary function body as schema data would be a new general-purpose
-  mechanism, not a bounded extension. The likely #24 resolution is that
-  helpers like these migrate to `haskell/lib` (imported via the preamble,
-  the same relocation Worktree's/RepoEvent's own non-representable helpers
-  already took) and `Ask`'s decl block shrinks to `ask`'s own thin verb
-  wrapper — but that is a design call for #24 itself, not decided here.
+  the generator owns vs. the stdlib vs. verb libraries) — first act landed,
+  the rest still open.** `Ask`'s pure `isOpt`/`innerSchema`/`schemaToValue`/
+  `data Schema` (`tidepool-protocol/src/effects/ask.rs`'s motivating case)
+  moved from `effect_defs.rs`'s decl `type_defs`/`helpers` into
+  `haskell/lib/Tidepool/Form/Schema.hs`, auto-imported via
+  `extra_imports_for!(Ask)`; `Ask`'s decl block is now just `ask`'s own thin
+  verb wrapper. The generator flip itself did NOT happen and still can't:
+  `ask` calls `schemaToValue` directly rather than a bare `send (Ctor …)`,
+  so it stays outside `HelperBody`'s reviewed shapes and hand-carried in
+  `effect_defs.rs` — see `ask.rs`'s module doc for the detail. What #24 as a
+  whole still owes: a stated general rule (not just this one instance) for
+  when a decl helper belongs in the stdlib vs. the generator vs. a verb
+  library, and an audit of whether any other hand-carried effect has the
+  same stdlib-shaped-helper smell `Ask` had.
 - No end-to-end test coverage of the timeout → grace-expiry → `Wedged`
   session transition (the reclaim paths OUT of `Wedged` are pinned; entry
   INTO it needs a JIT-cancel-resistant runaway or a seam to simulate one).

@@ -1,4 +1,4 @@
--- build_preamble (1416 bytes) --
+-- build_preamble (1444 bytes) --
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}
 module Expr where
 import Tidepool.Prelude hiding (error)
@@ -21,6 +21,7 @@ import Tidepool.Shell (sh)
 import qualified Tidepool.Cargo as Cargo
 import qualified Tidepool.Git as Git
 import Tidepool.Random
+import Tidepool.Form.Schema
 import Tidepool.Orchestrate
 default (Int, Double, Text)
 
@@ -29,7 +30,7 @@ paginateResult = paginateInteractive
 
 -- end build_preamble --
 
--- session_decl_module_env (1315 bytes) --
+-- session_decl_module_env (1343 bytes) --
 {-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}
 import Tidepool.Prelude hiding (error)
 import Tidepool.Effects
@@ -51,6 +52,7 @@ import Tidepool.Shell (sh)
 import qualified Tidepool.Cargo as Cargo
 import qualified Tidepool.Git as Git
 import Tidepool.Random
+import Tidepool.Form.Schema
 import Tidepool.Orchestrate
 -- end session_decl_module_env --
 

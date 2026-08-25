@@ -1027,8 +1027,12 @@ data Console a where
         assert!(preamble.contains(
             "httpGet :: forall effs. Member Http effs => Text -> Eff effs (Either HttpError Value)"
         ));
+        // `ask` itself now lives in the stdlib (`Tidepool.Form.Schema`,
+        // auto-imported here); only the thin `askRaw` verb wrapper is
+        // generated.
         assert!(preamble
-            .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
+            .contains("askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value"));
+        assert!(preamble.contains("import Tidepool.Form.Schema"));
     }
 
     #[test]
@@ -1039,15 +1043,24 @@ data Console a where
         // (schema-carrying) remains.
         assert_eq!(decl.constructors.len(), 1);
         assert!(decl.constructors[0].contains("AskWith :: Text -> Value -> Ask Value"));
-        // The Schema vocabulary lives on the Ask effect (always present in every
-        // stack) so .tidepool/lib modules and Llm-less stacks can build schemas.
+        // The Schema vocabulary (`data Schema`/`schemaToValue`/`isOpt`/
+        // `innerSchema`) AND `ask` itself now live in the stdlib
+        // (`Tidepool.Form.Schema`), auto-imported via `extra_imports` since
+        // Ask is always present in every stack, reaching .tidepool/lib
+        // modules and Llm-less stacks exactly as the old inline `type_defs`
+        // did. Only the thin `askRaw` verb wrapper stays in the decl itself
+        // — the generated module cannot import authored library code.
         let type_defs = decl.type_defs.join("\n");
-        assert!(type_defs.contains("data Schema"));
+        assert!(!type_defs.contains("data Schema"));
         assert!(!type_defs.contains("data Q a"));
+        assert!(decl.extra_imports.contains(&"import Tidepool.Form.Schema"));
         let helpers = decl.helpers.join("\n");
         assert!(helpers
+            .contains("askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value"));
+        assert!(helpers.contains("askRaw prompt payload = send (AskWith prompt payload)"));
+        assert!(!helpers.contains("schemaToValue"));
+        assert!(!helpers
             .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
-        assert!(helpers.contains("schemaToValue :: Schema -> Value"));
         assert!(!helpers.contains("askQ"));
     }
 
@@ -1169,20 +1182,34 @@ data Console a where
         assert!(preamble.contains("import Tidepool.Orchestrate"));
         assert!(!preamble.contains("runChecked :: Text -> M Text"));
         assert!(!preamble.contains("searchFiles :: Text -> Text -> M [(Text, Int, Text)]"));
-        // The structured Ask/Llm surface lives in the generated Tidepool.Effects
-        // module — one Schema vocabulary, extract with optics. The Q-builder DSL
-        // and the `??`/`?!`/triage/survey/sift sugar are removed.
+        // The structured Ask/Llm surface's thin verb wrappers live in the
+        // generated Tidepool.Effects module — one Schema vocabulary, extract
+        // with optics. The Q-builder DSL and the `??`/`?!`/triage/survey/sift
+        // sugar are removed. `data Schema`/`schemaToValue`/`ask` itself now
+        // live in the stdlib (`Tidepool.Form.Schema`) — the generated module
+        // cannot import authored library code, so it keeps only the thin
+        // `askRaw` verb wrapper (bare `send (AskWith …)`, no `Schema`
+        // reference at all).
         let effects_mod = effects_core_module_source(&decls);
-        assert!(effects_mod.contains("data Schema = SObj"));
-        assert!(effects_mod
+        assert!(!effects_mod.contains("data Schema = SObj"));
+        assert!(!effects_mod.contains("import Tidepool.Form.Schema"));
+        assert!(!effects_mod
             .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
-        // #335: llm is errors-tagged (fully total — budget exhaustion is DATA);
-        // tryLlm is gone (llm supersedes it).
-        assert!(effects_mod.contains("llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)"));
-        assert!(!effects_mod.contains("tryLlm"));
-        // ask suspends to the caller via AskWith (no autonomous LLM call)
         assert!(effects_mod
-            .contains("send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"));
+            .contains("askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value"));
+        assert!(effects_mod.contains("askRaw prompt payload = send (AskWith prompt payload)"));
+        // #335: llm is errors-tagged (fully total — budget exhaustion is DATA);
+        // tryLlm is gone (llm supersedes it). The composed `llm` (which calls
+        // `schemaToValue`) lives in `Tidepool.Form.Schema` too, same split as
+        // `ask`/`askRaw` — only the thin `llmRaw` verb wrapper is generated.
+        assert!(!effects_mod.contains(
+            "llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)"
+        ));
+        assert!(effects_mod.contains(
+            "llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)"
+        ));
+        assert!(effects_mod.contains("llmRaw prompt payload = send (LlmStructured prompt payload)"));
+        assert!(!effects_mod.contains("tryLlm"));
         // The removed Q layer + sugar are gone.
         assert!(!effects_mod.contains("data Q a"));
         assert!(!effects_mod.contains("askQ ::"));
@@ -1196,14 +1223,14 @@ data Console a where
         assert!(!effects_mod.contains("sift ::"));
         // and NOT duplicated in the preamble (one definition site)
         assert!(!preamble.contains("data Schema = SObj"));
-        // ask lives in ask_decl (always present), so it survives an Llm-less stack
+        // askRaw lives in ask_decl (always present), so it survives an Llm-less stack
         let no_llm: Vec<EffectDecl> = standard_decls()
             .into_iter()
             .filter(|d| d.type_name != "Llm")
             .collect();
         let no_llm_mod = effects_core_module_source(&no_llm);
         assert!(no_llm_mod
-            .contains("ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value"));
+            .contains("askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value"));
         // llm needs the Llm effect — absent from an Llm-less stack.
         assert!(!no_llm_mod.contains("llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)"));
     }

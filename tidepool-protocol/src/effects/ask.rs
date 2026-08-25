@@ -28,17 +28,20 @@
 //! exactly the raw-hatch-by-another-name this schema's no-raw-hatch rule
 //! exists to refuse.
 //!
-//! **This is the concrete motivating case for the parked #24 one-home rule**
-//! (stdlib-vs-generator ownership, `plans/README.md`'s carried-forward
-//! list): `isOpt`/`innerSchema`/`schemaToValue` are STDLIB-shaped code (pure
-//! functions over a schema type), not DECL-shaped code (a thin verb
-//! surface) — the likely #24 resolution is that helpers like these migrate
-//! to `haskell/lib` (imported via the preamble, the same relocation
-//! Worktree's/RepoEvent's own non-representable helpers already took — see
-//! `worktree.rs`/`event.rs`'s module docs) and this effect's decl block
-//! shrinks to `ask`'s own thin verb wrapper, rather than the generator ever
-//! learning to express arbitrary function bodies. Not decided or started
-//! here — #24 is still parked, this module is just its waiting example.
+//! **This was the concrete motivating case for #24's first act** (stdlib-vs-
+//! generator ownership, `plans/README.md`'s carried-forward list):
+//! `isOpt`/`innerSchema`/`schemaToValue`/`data Schema` were STDLIB-shaped
+//! code (pure functions over a schema type), not DECL-shaped code (a thin
+//! verb surface) — they have since migrated to `haskell/lib/Tidepool/Form/
+//! Schema.hs`, auto-imported via `extra_imports_for!(Ask)`
+//! (`tidepool-mcp/src/effect_defs.rs`), the same relocation Worktree's/
+//! RepoEvent's own non-representable helpers already took (see
+//! `worktree.rs`/`event.rs`'s module docs). `Ask`'s decl block is now just
+//! `ask`'s own thin verb wrapper — but that wrapper still calls
+//! `schemaToValue` directly (not a bare `send (Ctor …)`), so it remains
+//! unrepresentable by `HelperBody`'s reviewed shapes and this effect stays
+//! hand-carried in `effect_defs.rs`, same as before the stdlib move; the
+//! generator was never the blocker for the stdlib relocation.
 
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};

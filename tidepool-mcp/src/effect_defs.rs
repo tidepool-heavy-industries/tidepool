@@ -254,6 +254,22 @@ macro_rules! extra_imports_for {
     // straight into its generated decl. See
     // `tidepool-protocol/src/effects/ask_user.rs`.
     //
+    // `Ask` stays hand-carried (see `ask_effect_def!`'s doc and
+    // `tidepool-protocol/src/effects/ask.rs`'s module doc for why it can't
+    // flip onto the generator), but its pure `Schema`/`schemaToValue`/
+    // `isOpt`/`innerSchema` vocabulary moved OUT of the decl's `type_defs`
+    // and into `Tidepool.Form.Schema` (issue #24's first act) — a SEPARATE
+    // module from `Tidepool.Form` proper, because `Ask` (unlike the gated
+    // `AskUser`) is always in the ordinary roster, so this import must be
+    // unconditional too; `Tidepool.Form` itself only compiles in a row
+    // containing `AskUser`. `Llm`'s `llm` helper depends on `schemaToValue`
+    // transitively through `Ask` always being present alongside it — same
+    // invariant as before the move, just resolved through an import now
+    // instead of shared generated-module text.
+    (Ask) => {
+        &["import Tidepool.Form.Schema"]
+    };
+    //
     // `Tidepool.Random`'s `mkStdGen`/`randomR`/`randoms`/`split` (pure) and
     // `newStdGen`/`randomRIO` (built on `entropySeed`) — same
     // built-on-the-raw-substrate-verb shape as `AskUser`/`Tidepool.Form`.
@@ -909,35 +925,35 @@ macro_rules! ask_effect_def {
                 "Extract fields from the returned Value with optics, e.g. ",
                 "`v ^? key \"path\" . _String`.",
             ],
-            // Schema vocabulary lives on the Ask effect (always present in
-            // every stack) so .tidepool/lib modules and Llm-less stacks can
-            // build schemas. llm (llm_decl) references schemaToValue from
-            // here — same generated module.
-            type_defs [
-                "data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema",
-            ],
+            // The Schema vocabulary (`data Schema`, `schemaToValue`, `isOpt`,
+            // `innerSchema`) AND `ask` itself now live in the stdlib —
+            // `Tidepool.Form.Schema`, auto-imported via
+            // `extra_imports_for!(Ask)` — because they are ordinary pure/
+            // composed Haskell, not decl-shaped verb surface (issue #24's
+            // first act; see `tidepool-protocol/src/effects/ask.rs`'s module
+            // doc). Only the THIN raw verb wrapper (`askRaw`, bare `send
+            // (Ctor …)`) stays spliced into the generated module below — the
+            // generated module cannot import authored library code (see
+            // `extra_imports_for!`'s own doc), so anything referencing
+            // `Schema`/`schemaToValue` must live OUTSIDE it, same split as
+            // `AskUser`'s `askUserRaw` (thin, generated) vs. `Tidepool.Form`'s
+            // `askUser` (composed, authored) and `Entropy`'s `entropySeed`
+            // (thin, generated) vs. `Tidepool.Random`'s `newStdGen` (composed,
+            // authored). `Ask` is always present in every ordinary stack, so
+            // the `Tidepool.Form.Schema` import reaches `.tidepool/lib`
+            // modules and Llm-less stacks exactly as the old inline
+            // `type_defs` did — llm (llm_decl) still depends on
+            // `schemaToValue` transitively through Ask always being present
+            // alongside it.
+            type_defs [],
             verbs [
                 { ctor AskWith, method ask_with,
                   args { prompt: "Text" as String, payload: "Value" as tidepool_eval::value::Value },
                   ret "Value" },
             ],
             helpers [
-                { raw ["ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value",
-                       "ask schema prompt = send (AskWith prompt (object [\"schema\" .= schemaToValue schema]))"] },
-                { raw substrate ["isOpt :: Schema -> Bool",
-                       "isOpt (SOpt _) = True",
-                       "isOpt _ = False"] },
-                { raw substrate ["innerSchema :: Schema -> Schema",
-                       "innerSchema (SOpt s) = s",
-                       "innerSchema s = s"] },
-                { raw substrate ["schemaToValue :: Schema -> Value",
-                       "schemaToValue SStr = object [\"type\" .= (\"string\" :: Text)]",
-                       "schemaToValue SNum = object [\"type\" .= (\"number\" :: Text)]",
-                       "schemaToValue SBool = object [\"type\" .= (\"boolean\" :: Text)]",
-                       "schemaToValue (SEnum vs) = object [\"type\" .= (\"string\" :: Text), \"enum\" .= vs]",
-                       "schemaToValue (SArr item) = object [\"type\" .= (\"array\" :: Text), \"items\" .= schemaToValue item]",
-                       "schemaToValue (SOpt s) = schemaToValue s",
-                       "schemaToValue (SObj fields) = object [\"type\" .= (\"object\" :: Text), \"properties\" .= object (map (\\(k,s) -> k .= schemaToValue (innerSchema s)) fields), \"required\" .= map fst (filter (not . isOpt . snd) fields)]"] },
+                { raw substrate ["askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value",
+                       "askRaw prompt payload = send (AskWith prompt payload)"] },
             ],
         }
     };
@@ -1005,14 +1021,13 @@ macro_rules! llm_effect_def {
                   ret "Value", errors LlmError },
             ],
             helpers [
-                // schemaToValue lives in ask_decl (Ask is always present).
-                { raw ["-- | Call the LLM for structured output. Failure is TYPED and TOTAL",
-                       "-- (#335): `Left (LlmApi _)` on an API/network failure, `Left (LlmRefusal",
-                       "-- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget",
-                       "-- is exhausted — none of these abort the eval. Unwrap with `Right v <- llm",
-                       "-- schema prompt` or `>>= liftEither`.",
-                       "llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)",
-                       "llm schema prompt = send (LlmStructured prompt (schemaToValue schema))"] },
+                // The composed `llm` (which calls `schemaToValue`) lives in
+                // `Tidepool.Form.Schema` now — the generated module cannot
+                // import authored library code, so only the thin raw verb
+                // wrapper stays here, same split as `Ask`'s `askRaw`/`ask`
+                // (see `ask_effect_def!`'s doc for the full rationale).
+                { raw substrate ["llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)",
+                       "llmRaw prompt payload = send (LlmStructured prompt payload)"] },
                 // Pure tally utilities (no LLM/Ask): build a frequency list while
                 // preserving first-seen order. Kept for .tidepool/lib verbs.
                 { raw ["findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]",

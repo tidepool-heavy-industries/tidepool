@@ -880,47 +880,22 @@ AskWith :: Text -> Value -> Ask Value
 
 -- end constructors --
 
--- type_defs (1 items) --
--- type_defs[0] (100 bytes) --
-data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema
--- end type_defs[0] --
-
+-- type_defs (0 items) --
 -- end type_defs --
 
--- extra_imports (0 items) --
+-- extra_imports (1 items) --
+-- extra_imports[0] (27 bytes) --
+import Tidepool.Form.Schema
+-- end extra_imports[0] --
+
 -- end extra_imports --
 
--- helpers (4 items) --
--- helpers[0] (157 bytes) --
-ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
-ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
+-- helpers (1 items) --
+-- helpers[0] (149 bytes) --
+-- @substrate-helper@
+askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value
+askRaw prompt payload = send (AskWith prompt payload)
 -- end helpers[0] --
-
--- helpers[1] (83 bytes) --
--- @substrate-helper@
-isOpt :: Schema -> Bool
-isOpt (SOpt _) = True
-isOpt _ = False
--- end helpers[1] --
-
--- helpers[2] (96 bytes) --
--- @substrate-helper@
-innerSchema :: Schema -> Schema
-innerSchema (SOpt s) = s
-innerSchema s = s
--- end helpers[2] --
-
--- helpers[3] (660 bytes) --
--- @substrate-helper@
-schemaToValue :: Schema -> Value
-schemaToValue SStr = object ["type" .= ("string" :: Text)]
-schemaToValue SNum = object ["type" .= ("number" :: Text)]
-schemaToValue SBool = object ["type" .= ("boolean" :: Text)]
-schemaToValue (SEnum vs) = object ["type" .= ("string" :: Text), "enum" .= vs]
-schemaToValue (SArr item) = object ["type" .= ("array" :: Text), "items" .= schemaToValue item]
-schemaToValue (SOpt s) = schemaToValue s
-schemaToValue (SObj fields) = object ["type" .= ("object" :: Text), "properties" .= object (map (\(k,s) -> k .= schemaToValue (innerSchema s)) fields), "required" .= map fst (filter (not . isOpt . snd) fields)]
--- end helpers[3] --
 
 -- end helpers --
 
@@ -1064,28 +1039,16 @@ RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
 
 -- end constructors --
 
--- type_defs (2 items) --
--- type_defs[0] (410 bytes) --
--- | Why a forked child agent session ended WITHOUT a typed answer.
--- Folded as data at the failing branch's own position — never an
--- exception that erases the results its siblings already produced.
--- Each constructor carries the runtime's own detail text.
-data InvocationExit
-  = ExitRoundsExhausted Text
-  | ExitNotFinalized Text
-  | ExitCancelled Text
-  | ExitRuntimeFailure Text
-  deriving (Show, Eq)
--- end type_defs[0] --
-
--- type_defs[1] (455 bytes) --
+-- type_defs (1 items) --
+-- type_defs[0] (594 bytes) --
+data InvocationExit = ExitRoundsExhausted Text | ExitNotFinalized Text | ExitCancelled Text | ExitRuntimeFailure Text deriving (Show, Eq)
 instance ToJSON InvocationExit where
   toJSON e = case e of
     ExitRoundsExhausted detail -> object ["tag" .= ("ExitRoundsExhausted" :: Text), "detail" .= detail]
     ExitNotFinalized detail -> object ["tag" .= ("ExitNotFinalized" :: Text), "detail" .= detail]
     ExitCancelled detail -> object ["tag" .= ("ExitCancelled" :: Text), "detail" .= detail]
     ExitRuntimeFailure detail -> object ["tag" .= ("ExitRuntimeFailure" :: Text), "detail" .= detail]
--- end type_defs[1] --
+-- end type_defs[0] --
 
 -- end type_defs --
 
@@ -1304,14 +1267,10 @@ LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
 -- end extra_imports --
 
 -- helpers (3 items) --
--- helpers[0] (495 bytes) --
--- | Call the LLM for structured output. Failure is TYPED and TOTAL
--- (#335): `Left (LlmApi _)` on an API/network failure, `Left (LlmRefusal
--- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget
--- is exhausted — none of these abort the eval. Unwrap with `Right v <- llm
--- schema prompt` or `>>= liftEither`.
-llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)
-llm schema prompt = send (LlmStructured prompt (schemaToValue schema))
+-- helpers[0] (173 bytes) --
+-- @substrate-helper@
+llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)
+llmRaw prompt payload = send (LlmStructured prompt payload)
 -- end helpers[0] --
 
 -- helpers[1] (239 bytes) --

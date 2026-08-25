@@ -9,13 +9,12 @@
   Exec: Run shell commands and capture output.
       verbs: run, runIn, runArgv
   Llm: Call an LLM for classification, extraction, or judgment.
-      verbs: llm, findTally, tallyList
+      verbs: findTally, tallyList
   Git: Read-only git repository queries.
       verbs: gitLog, gitStatus, gitDiffStat, gitShow, gitLogNumstat
   Time: UTC wall-clock access (epoch milliseconds).
       verbs: getCurrentTime
   Entropy: Randomness.
   Ask: Suspend execution and ask the calling agent a STRUCTURED question.
-      verbs: ask
   RunLLMTurn: Suspend for a TYPED answer.
       verbs: runLLMTurn, runLLMTurnFork, runLLMTurnFanout, renderInvocationExit

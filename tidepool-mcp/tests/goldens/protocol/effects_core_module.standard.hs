@@ -80,26 +80,17 @@ data Time a where
 data Entropy a where
   EntropySeed :: Entropy Int
 
-data Schema = SObj [(Text, Schema)] | SArr Schema | SStr | SNum | SBool | SEnum [Text] | SOpt Schema
 data Ask a where
   AskWith :: Text -> Value -> Ask Value
 
--- | Why a forked child agent session ended WITHOUT a typed answer.
--- Folded as data at the failing branch's own position — never an
--- exception that erases the results its siblings already produced.
--- Each constructor carries the runtime's own detail text.
-data InvocationExit
-  = ExitRoundsExhausted Text
-  | ExitNotFinalized Text
-  | ExitCancelled Text
-  | ExitRuntimeFailure Text
-  deriving (Show, Eq)
+data InvocationExit = ExitRoundsExhausted Text | ExitNotFinalized Text | ExitCancelled Text | ExitRuntimeFailure Text deriving (Show, Eq)
 instance ToJSON InvocationExit where
   toJSON e = case e of
     ExitRoundsExhausted detail -> object ["tag" .= ("ExitRoundsExhausted" :: Text), "detail" .= detail]
     ExitNotFinalized detail -> object ["tag" .= ("ExitNotFinalized" :: Text), "detail" .= detail]
     ExitCancelled detail -> object ["tag" .= ("ExitCancelled" :: Text), "detail" .= detail]
     ExitRuntimeFailure detail -> object ["tag" .= ("ExitRuntimeFailure" :: Text), "detail" .= detail]
+
 data RunLLMTurn a where
   RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
 
@@ -328,13 +319,9 @@ runIn :: forall effs. Member Exec effs => Text -> Text -> Eff effs (Either ExecE
 runIn dir cmd = send (RunIn dir cmd)
 runArgv :: forall effs. Member Exec effs => [Text] -> Eff effs (Either ExecError Proc)
 runArgv = send . RunArgv
--- | Call the LLM for structured output. Failure is TYPED and TOTAL
--- (#335): `Left (LlmApi _)` on an API/network failure, `Left (LlmRefusal
--- _)` on a declined answer, `Left LlmBudget` when the per-eval call budget
--- is exhausted — none of these abort the eval. Unwrap with `Right v <- llm
--- schema prompt` or `>>= liftEither`.
-llm :: forall effs. Member Llm effs => Schema -> Text -> Eff effs (Either LlmError Value)
-llm schema prompt = send (LlmStructured prompt (schemaToValue schema))
+-- @substrate-helper@
+llmRaw :: forall effs. Member Llm effs => Text -> Value -> Eff effs (Either LlmError Value)
+llmRaw prompt payload = send (LlmStructured prompt payload)
 findTally :: Eq a => a -> [(a, Int)] -> Maybe [(a, Int)]
 findTally _ [] = Nothing
 findTally x ((k, n):rest) = if x == k then Just ((k, n + 1) : rest) else case findTally x rest of { Just rest' -> Just ((k, n) : rest'); Nothing -> Nothing }
@@ -373,25 +360,9 @@ getCurrentTime = UTCTime <$> send TimeNow
 -- @substrate-helper@
 entropySeed :: forall effs. Member Entropy effs => Eff effs Int
 entropySeed = send EntropySeed
-ask :: forall effs. Member Ask effs => Schema -> Text -> Eff effs Value
-ask schema prompt = send (AskWith prompt (object ["schema" .= schemaToValue schema]))
 -- @substrate-helper@
-isOpt :: Schema -> Bool
-isOpt (SOpt _) = True
-isOpt _ = False
--- @substrate-helper@
-innerSchema :: Schema -> Schema
-innerSchema (SOpt s) = s
-innerSchema s = s
--- @substrate-helper@
-schemaToValue :: Schema -> Value
-schemaToValue SStr = object ["type" .= ("string" :: Text)]
-schemaToValue SNum = object ["type" .= ("number" :: Text)]
-schemaToValue SBool = object ["type" .= ("boolean" :: Text)]
-schemaToValue (SEnum vs) = object ["type" .= ("string" :: Text), "enum" .= vs]
-schemaToValue (SArr item) = object ["type" .= ("array" :: Text), "items" .= schemaToValue item]
-schemaToValue (SOpt s) = schemaToValue s
-schemaToValue (SObj fields) = object ["type" .= ("object" :: Text), "properties" .= object (map (\(k,s) -> k .= schemaToValue (innerSchema s)) fields), "required" .= map fst (filter (not . isOpt . snd) fields)]
+askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value
+askRaw prompt payload = send (AskWith prompt payload)
 {-# OPAQUE runLLMTurn #-}
 runLLMTurn :: forall a effs. Member RunLLMTurn effs => Text -> Eff effs a
 runLLMTurn prompt = runLLMTurnSited 0 prompt
