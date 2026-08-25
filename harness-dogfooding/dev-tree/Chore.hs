@@ -8,11 +8,10 @@
 -- so swapping a chore is an edit here, never a change to the harness's own
 -- logic.
 --
--- The shipped chore is TIDEPOOL-ON-TIDEPOOL: dev-tree fixing a real bug in
--- its own stdlib — the bug dev-tree's first live run discovered
--- (Tidepool.Event's helpers liftEither every EventError, so any event
--- failure is process-fatal instead of data the failure policy reads).
--- Point TIDEPOOL_SOURCE_REPO at the tidepool dev checkout to run it.
+-- The shipped chore is the SCALE-UP tidepool-on-tidepool run: a multi-child
+-- tree against the dev checkout — an empty-task root (scaffold skipped
+-- structurally), one direct leaf, one micro-split leaf, folded by the
+-- integration merge. Both tasks close loops this morning's runs opened.
 module Chore
   ( choreGoal
   , chorePlan
@@ -20,33 +19,61 @@ module Chore
   , choreSnapshotDirtySource
   ) where
 
-import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..))
+import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Give Tidepool.Event a non-fatal error surface: Try variants that return EventError as data instead of throwing out of the harness loop."
+choreGoal = "Harden dev-tree's event-failure story end to end: adopt the new non-fatal Tidepool.Event Try surface in the harness, and make the codex adapter's turn-deadline errors say what actually happened."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "event-try-surface"
-    , nodeTask =
-        "In haskell/lib/Tidepool/Event.hs ONLY, add two non-fatal variants alongside the existing throwing helpers (which must stay byte-for-byte unchanged): `withHandlerTry :: Event a -> (Either EventError a -> M ()) -> M b -> M (Either EventError b)` and `nextEventTry :: Event a -> M (Either EventError (Observed a))`. Semantics: a subscribe failure returns Left immediately and the body/wait never runs; a drain failure mid-body and an unsubscribe failure at exit are delivered to the HANDLER as Left values (the body's result stays total, so the caller's policy decides — nothing is ever thrown). For nextEventTry, any failure is the returned Left. Follow the file's existing style exactly (haddock density, naming, the runInTry precedent from Tidepool.Shell for the -Try suffix). Export both from the module head next to their throwing siblings. Do not modify any other file, and do not change any existing function."
+    { nodeName = "event-hardening"
+    , nodeTask = ""
     , nodeChecks =
-        [ "grep -q 'withHandlerTry ::' haskell/lib/Tidepool/Event.hs"
-        , "grep -q 'nextEventTry ::' haskell/lib/Tidepool/Event.hs"
-        , "grep -q 'withHandlerTry' haskell/lib/Tidepool/Event.hs && grep -A40 'module Tidepool.Event' haskell/lib/Tidepool/Event.hs | grep -q 'withHandlerTry'"
+        [ "grep -q 'withHandlerTry' harness-dogfooding/dev-tree/Harness.hs"
+        , "grep -rq 'deadline' tidepool-agent/src/backend/codex/"
         ]
-    , nodeBoundary = ["haskell/lib/Tidepool/Event.hs"]
+    , nodeBoundary = ["harness-dogfooding/dev-tree/Harness.hs", "tidepool-agent"]
     , nodeOnFailure = AskOperator
     , nodeSplit = Nothing
-    , childPlans = []
+    , childPlans =
+        [ DevPlan
+            { nodeName = "adopt-try"
+            , nodeTask =
+                "In harness-dogfooding/dev-tree/Harness.hs ONLY: migrate runWorker's event observation from the throwing `withHandler (headChanged tree) (noteHeadMove name)` to the new non-fatal `withHandlerTry` from Tidepool.Event, so an EventError can no longer abort the harness loop. Semantics: the handler now receives `Either EventError (Observed HeadChangeReceipt)` — on Right, behave exactly as noteHeadMove does today; on Left, `say` a short note that head-move observation failed (include the rendered error) and continue. If withHandlerTry itself returns Left (subscribe failed, so the body never ran), fall back to running the same spawnAgent call WITHOUT any handler, after saying that observation is degraded — the worker cycle must still happen. Keep the function's public shape and everything else in the file byte-identical; follow the file's haddock and naming style."
+            , nodeChecks =
+                [ "grep -q 'withHandlerTry' harness-dogfooding/dev-tree/Harness.hs"
+                ]
+            , nodeBoundary = ["harness-dogfooding/dev-tree/Harness.hs"]
+            , nodeOnFailure = Retry
+            , nodeSplit = Nothing
+            , childPlans = []
+            }
+        , DevPlan
+            { nodeName = "timeout-attribution"
+            , nodeTask =
+                "In the tidepool-agent crate: the codex adapter's per-cycle deadline currently surfaces as a request timeout that reads as backend unavailability (SessionError's `request {method} timed out after {timeout:?}` from src/backend/codex/process.rs, produced by `pump` when a whole TURN exceeds the driver's turn_timeout — see DEFAULT_TURN_TIMEOUT in driver.rs). Observed live: a worker mid-edit was reported as 'backend unavailable: request turn/start timed out'. Make the error attribution truthful: a turn-deadline expiry must be distinguishable from a request-level/protocol timeout, and its rendered message must say the turn exceeded its deadline (naming the configured duration) and that the worker may still have been running — not that the backend was unavailable. Keep the existing variant semantics for genuine request timeouts. Add or extend a unit test pinning the new message/variant. Stay inside tidepool-agent; follow existing error-type style in process.rs."
+            , nodeChecks =
+                [ "grep -rq 'deadline' tidepool-agent/src/backend/codex/"
+                ]
+            , nodeBoundary = ["tidepool-agent"]
+            , nodeOnFailure = Retry
+            , nodeSplit =
+                Just
+                  SplitSpec
+                    { splitHints =
+                        "Split into 2-3 sequential microtasks: first locate and reshape the error path (variant + rendering), then the unit test. Each microtask gets one or two cheap structural shell checks (grep class); cargo builds in this worktree are cold and slow, so prefer grep/test -s checks and leave compilation to the orchestrator's own gate."
+                    , splitMaxTasks = 3
+                    }
+            , childPlans = []
+            }
+        ]
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 2, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 2, maxAgentCycles = 10, gateWiderThan = 4}
 
--- | The dev tree carries in-flight (uncommitted) morning surface work; the
--- run snapshots it rather than requiring a clean source.
+-- | The chore edit itself rides as uncommitted state in the dev tree.
 choreSnapshotDirtySource :: Bool
 choreSnapshotDirtySource = True

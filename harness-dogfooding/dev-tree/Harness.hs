@@ -1193,8 +1193,17 @@ boundaryViolations tree prefixes =
 runWorker :: WorktreeHandle -> Text -> Text -> Harness (Either SpawnError WorkerResult)
 runWorker tree name prompt = do
   result <-
-    withHandler (headChanged tree) (noteHeadMove name) $
-      spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
+    withHandlerTry
+      (headChanged tree)
+      (\case
+        Right change -> noteHeadMove name change
+        Left err -> say [fmt|{name} HEAD-move observation failed: {show err}|])
+      (spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd)
+      >>= \case
+        Right workerResult -> pure workerResult
+        Left err -> do
+          say [fmt|{name} HEAD-move observation degraded: {show err}|]
+          spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
   case result of
     Right wr -> do
       snapshotWork tree name
