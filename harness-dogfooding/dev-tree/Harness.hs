@@ -186,7 +186,7 @@ resumeLoop fold st
   -- rescue that fails again does not re-enter every turn until restart.
   | phase st == Completed
   , Just branch <- rootBranchOf fold (nodeName (plan st))
-  , rescuePending fold branch (plan st)
+  , rescuePending foldLadder fold branch (plan st)
   , fromMaybe 0 (rescueCount st) < 1 = do
       say "Re-entering completed run: the journal holds a pending amendment for a failed subtree."
       enter st {rescueCount = Just (fromMaybe 0 (rescueCount st) + 1)}

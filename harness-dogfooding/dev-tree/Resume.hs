@@ -145,7 +145,7 @@ resumed hooks fold inner
   | not (isResumed fold) = inner
   | otherwise = go
   where
-    go seed = case resumePlanFor fold (branchOf seed.seedTree) seed.seedPlan of
+    go seed = case resumePlanFor hooks.resumeFoldLadder fold (branchOf seed.seedTree) seed.seedPlan of
       ResumeSkip o -> pure (Swarm.PlanF (replayedWork seed o) [])
       ResumeReplay sp -> replaySplit hooks fold seed sp
       ResumeFresh -> adoptOrUnfold hooks fold inner seed
@@ -166,18 +166,25 @@ resumed hooks fold inner
         | otherwise -> inner seed {seedPlan = amended}
 
 -- | The fold's verdict for one branch.  Pure: no effects, git, or I/O.
+-- @ladder@ is the fold ladder ('ResumeHooks.resumeFoldLadder'): the journal's
+-- outcome wire stores the PRE-ladder receipt (a bare receipt decodes 'Done'
+-- even when its own evidence — @receiptHeadMoved@, @receiptOutside@, failed
+-- checks — fails the ladder), so doneness here must be judged on the
+-- LADDERED outcome, exactly as 'recordedDone' already does.  Run 24: the
+-- root's journaled receipt decoded 'Done', raw-doneness said skip, and the
+-- rescue below never fired.
 --
--- A recorded interior 'Failed' outcome is terminal on resume EXCEPT when a
+-- A recorded interior failure is terminal on resume EXCEPT when a
 -- descendant branch still holds an unconsumed amendment (its own newest
 -- entry is a 'ReplanEvent').  The fold journals the child's replan BEFORE
 -- the parent's outcome, so the comparison must be per-descendant-branch
 -- newest-wins, never replan-seq-vs-this-outcome-seq (run 24b: the root's
--- Failed outcome shadowed the panel child's pending amendment and the
+-- failed outcome shadowed the panel child's pending amendment and the
 -- resumed turn did nothing).
-resumePlanFor :: ResumeFold -> Text -> DevPlan -> ResumePlan
-resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEntry of
+resumePlanFor :: (Outcome -> Outcome) -> ResumeFold -> Text -> DevPlan -> ResumePlan
+resumePlanFor ladder fold branch p = case newestEntry replanEntry splitEntry outcomeEntry of
   Just (_, OutcomeEvent {evOutcome = o})
-    | not (outcomeIsDone o) && descendantAmendPending fold recordedPlan ->
+    | not (outcomeIsDone (ladder o)) && descendantAmendPending ladder fold recordedPlan ->
         maybe ResumeFresh ResumeReplay recordedSplit
     | otherwise -> ResumeSkip o
   Just (_, SplitEvent {}) -> case recordedSplit of
@@ -203,8 +210,8 @@ resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEnt
 -- the replan-rescue re-entry itself.  A Done root skips ('ResumeSkip'), an
 -- un-amended failure stays terminal ('ResumeSkip'), and an empty fold is
 -- never a reason to re-run ('ResumeFresh').
-rescuePending :: ResumeFold -> Text -> DevPlan -> Bool
-rescuePending fold branch p = case resumePlanFor fold branch p of
+rescuePending :: (Outcome -> Outcome) -> ResumeFold -> Text -> DevPlan -> Bool
+rescuePending ladder fold branch p = case resumePlanFor ladder fold branch p of
   ResumeSkip _ -> False
   ResumeFresh -> False
   ResumeReplay {} -> True
@@ -215,12 +222,12 @@ rescuePending fold branch p = case resumePlanFor fold branch p of
 -- subtree), resolving each child's branch through the fold's recorded
 -- child-tree tables and falling back to the node name — the same keying
 -- 'resumePlanFor' itself accepts.
-descendantAmendPending :: ResumeFold -> DevPlan -> Bool
-descendantAmendPending fold p = any pending (childPlans p)
+descendantAmendPending :: (Outcome -> Outcome) -> ResumeFold -> DevPlan -> Bool
+descendantAmendPending ladder fold p = any pending (childPlans p)
   where
-    pending k = case resumePlanFor fold (branchFor k) k of
+    pending k = case resumePlanFor ladder fold (branchFor k) k of
       ResumeAmend {} -> True
-      _ -> descendantAmendPending fold k
+      _ -> descendantAmendPending ladder fold k
     branchFor k =
       fromMaybe
         (nodeName k)
