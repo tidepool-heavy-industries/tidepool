@@ -1,0 +1,29 @@
+[package]
+name = "tidepool-toolchain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Locate, validate, fingerprint, and cache the Tidepool toolchain and its compile outputs"
+readme = "../README.md"
+
+[dependencies]
+tidepool-atomic-write.workspace = true
+thiserror.workspace = true
+tidepool-repr.workspace = true
+tidepool-extract-cmd.workspace = true
+tidepool-codegen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+blake3.workspace = true
+which = "8"
+log.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+serial_test.workspace = true
+filetime = "0.2"

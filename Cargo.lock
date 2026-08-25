@@ -4198,7 +4198,6 @@ dependencies = [
 name = "tidepool-runtime"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "ciborium",
  "filetime",
  "frunk",
@@ -4224,10 +4223,10 @@ dependencies = [
  "tidepool-optimize",
  "tidepool-repr",
  "tidepool-testing",
+ "tidepool-toolchain",
  "tokio",
  "tracing",
  "trybuild",
- "which",
 ]
 
 [[package]]
@@ -4275,6 +4274,27 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "tidepool-toolchain"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "filetime",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "tempfile",
+ "thiserror",
+ "tidepool-atomic-write",
+ "tidepool-codegen",
+ "tidepool-extract-cmd",
+ "tidepool-repr",
+ "tracing",
+ "which",
 ]
 
 [[package]]

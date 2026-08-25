@@ -109,7 +109,8 @@ tidepool/
 ├── tidepool-effect/       ← Effect handling: DispatchEffect, EffectHandler, HList  [CLAUDE.md]
 ├── tidepool-agent/        ← Typed headless subagents: the backend seam + the Codex adapter (the ONLY place a coding backend is named)  [CLAUDE.md]
 ├── tidepool-codegen/      ← Cranelift JIT compiler + effect machine  [CLAUDE.md]
-├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, cache  [CLAUDE.md]
+├── tidepool-toolchain/    ← Locate, validate, fingerprint, and cache the toolchain + its compile outputs  [CLAUDE.md]
+├── tidepool-runtime/      ← High-level API: compile_haskell, compile_and_run, session substrate  [CLAUDE.md]
 ├── tidepool-mcp/          ← MCP server library (generic over effect handlers)  [CLAUDE.md]
 ├── tidepool-protocol/     ← The effect protocol as data: schema + generators, zero-dep leaf  [CLAUDE.md]
 ├── tidepool-handlers/     ← Central effect-request handler arms (`<Eff>Req` matches)  [CLAUDE.md]
@@ -136,8 +137,10 @@ in the same change that creates it.
 |---|---|
 | git subprocess invocation | `tidepool-worktree::git::GitCli` (the ONE git call site) |
 | durable JSONL append/read | the shared primitive under `tidepool-repr` (consumers: worktree journal, handlers journal, harness log, selfharness observer) |
-| config/cache/project path resolution | `tidepool-runtime::paths` |
+| config/cache/project path resolution | `tidepool-toolchain::paths` |
 | executable resolution + strict validation | `tidepool-extract-cmd` |
+| version-independent compiled-artifact memo (compile cache) | `tidepool-toolchain::cache` |
+| toolchain location/fingerprint + extract-stdlib deploy handshake | `tidepool-toolchain::toolchain` |
 | in-process monotonic id minting | `tidepool-repr`'s issuer |
 | Haskell turn-module templates (bind/expr wrappers) | `tidepool-runtime::session::turn` |
 | version stamping / migration ladders for durable, non-reproducible persistence formats | `tidepool_repr::version_ladder` |
@@ -163,6 +166,9 @@ in that directory):
   join-point evaluation, WHNF-only `Value`, thunk lifecycle, how it's actually
   tested (differential harnesses, not its own unit suite).
 - `tidepool-codegen/CLAUDE.md` — JIT/effect/cache diagnostics, case-trap → `emit_case_trap` (poison + breadcrumb, not SIGILL).
+- `tidepool-toolchain/CLAUDE.md` — the compile-output memo's two content-addressed
+  layers, invocation-key allowlist discipline, and the extract/stdlib deploy
+  handshake.
 - `tidepool-mcp/CLAUDE.md` — eval-authoring patterns (aperture/census/diff verbs),
   structural search, how to add an effect.
 - `tidepool-handlers/CLAUDE.md` — the Rust side of the effect contract: adding a
@@ -305,7 +311,7 @@ tempdir — so a second run of a GHC-heavy leg is much cheaper than the first
 (measured on three harness binaries: 99s cold, 47s warm). Two consequences:
 a COLD number needs the memo removed (`rm -rf $XDG_CACHE_HOME/tidepool`), and
 a test that measures compile COST must pin its own memo dir rather than
-inherit the shared one. See `tidepool-runtime/CLAUDE.md` for the memo's
+inherit the shared one. See `tidepool-toolchain/CLAUDE.md` for the memo's
 keying spec.
 
 Changed `haskell/`? See `haskell/CLAUDE.md` for the rebuild + deploy steps.

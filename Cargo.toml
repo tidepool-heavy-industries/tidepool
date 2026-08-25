@@ -14,6 +14,7 @@ members = [
     "tidepool-extract-cmd",
     "tidepool-atomic-write",
     "tidepool-codegen",
+    "tidepool-toolchain",
     "tidepool-runtime",
     "tidepool-mcp",
     "tidepool-protocol",
@@ -60,6 +61,7 @@ tidepool-protocol = { version = "0.1.0", path = "tidepool-protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool-runtime" }
 tidepool-testing = { path = "tidepool-testing" }
+tidepool-toolchain = { path = "tidepool-toolchain" }
 tidepool-web = { path = "tidepool-web" }
 tidepool-worktree = { path = "tidepool-worktree" }
 

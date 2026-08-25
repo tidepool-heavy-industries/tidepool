@@ -1,5 +1,5 @@
 //! The ONE policy-bearing `tidepool-extract` compile front door:
-//! [`CompileInvocation`] + [`compile_invocation`]. [`crate::compile_haskell`]
+//! [`CompileInvocation`] + [`compile_invocation`]. `tidepool_runtime::compile_haskell`
 //! (one target, eval/session lane) and [`compile_targets`] (N targets sharing
 //! one GHC session, harness turn lane) are both thin projections that build a
 //! [`CompileInvocation`] and hand it to [`compile_invocation`] — spawning the
@@ -14,7 +14,7 @@
 //!
 //! [`CompileInvocation::cache`] ([`CacheStrategy`]) is the one remaining
 //! policy delta between the lanes. The eval lane
-//! ([`crate::compile_haskell`]/[`crate::compile_haskell_salted`]) keys
+//! (`tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`) keys
 //! through [`crate::cache::cache_key_salted`] / [`crate::cache::cache_load`] /
 //! [`crate::cache::cache_store`] (a single `(expr, meta)` pair, optionally
 //! salted per session/generation); the turn lane ([`compile_targets`]) keys
@@ -24,8 +24,7 @@
 //! no salt concept). Merging those two key spaces is out of scope: a key
 //! change would cold every existing on-disk memo (including the harness test
 //! suite's shared one and every deployed eval cache) for whichever lane's
-//! scheme lost — see `plans/compile-memo.md` and root CLAUDE.md's "THE MEMO
-//! IS THE HAZARD" note.
+//! scheme lost.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -141,9 +140,8 @@ impl AsksSidecar {
 /// `--session-root <dir> --inject-val <module>` — see
 /// [`cache::Invocation::stable_val`]'s doc for why this is safe to treat as
 /// CACHEABLE despite naming a session-scoped iface. The ONLY caller today is
-/// the self-iterating harness driver's fused outer render/loop compile
-/// (`plans/turn-latency-state-injection.md`); every other
-/// `--inject-val`/`--session-root` use (the interactive session's rotating
+/// the self-iterating harness driver's fused outer render/loop compile;
+/// every other `--inject-val`/`--session-root` use (the interactive session's rotating
 /// `Val.G<g>` value plane, `tidepool_runtime::session::turn`) stays on the
 /// ordinary uncacheable path and never constructs one of these.
 pub struct StableValInject<'a> {
@@ -206,8 +204,8 @@ pub struct CompiledArtifacts {
 
 /// How a [`CompileInvocation`]'s result is memoized — the one deliberate
 /// policy delta between the two lanes; see the module doc.
-pub(crate) enum CacheStrategy<'a> {
-    /// [`crate::compile_haskell`]/[`crate::compile_haskell_salted`]'s scheme:
+pub enum CacheStrategy<'a> {
+    /// `tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`'s scheme:
     /// a single `(expr, meta)` pair keyed by [`cache::cache_key_salted`].
     Eval { salt: Option<&'a str> },
     /// [`compile_targets`]'s scheme: a whole artifact SET keyed by
@@ -222,12 +220,12 @@ pub(crate) enum CacheStrategy<'a> {
 }
 
 /// One `tidepool-extract` invocation, as built by either production front
-/// door. [`crate::compile_haskell_salted`] builds one with a single-element
+/// door. `tidepool_runtime::compile_haskell_salted` builds one with a single-element
 /// `targets` and [`CacheStrategy::Eval`]; [`compile_targets`] builds one with
 /// N targets and [`CacheStrategy::Invocation`] — single-target compilation is
 /// a PROJECTION of the same [`compile_invocation`] this drives for the batch
 /// case, not a separate spawn/read/deserialize path.
-pub(crate) struct CompileInvocation<'a> {
+pub struct CompileInvocation<'a> {
     pub source: &'a str,
     pub targets: &'a [&'a str],
     pub include: &'a [PathBuf],
@@ -265,7 +263,7 @@ pub(crate) struct CompileInvocation<'a> {
 /// target inside a shared [`CompiledArtifacts`]. Drives the extract's
 /// `--targets a,b` mode (`haskell/app/Main.hs`'s `runMultiTargetClosed`,
 /// which handles a single-element list identically to the legacy `--target`
-/// flag) — see `plans/post-restart/extract-wave/boot/03-targets-prereq.md`.
+/// flag).
 ///
 /// A REQUESTED target is a contract: a nonzero exit fails the WHOLE spawn if
 /// ANY target can't translate, rather than silently emitting the targets
@@ -287,7 +285,7 @@ pub(crate) struct CompileInvocation<'a> {
 /// through its own collector without this crate needing to know what a
 /// "node" or "round" is. A caller with no use for timing passes `|_, _, _|
 /// {}`.
-pub(crate) fn compile_invocation(
+pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
@@ -362,8 +360,7 @@ pub(crate) fn compile_invocation(
     // (internalized top-level floats) make a compile's VarIds a pure
     // function of Core shape, never of session Unique-allocation history —
     // see `tidepool-runtime/tests/build_products_dir_differential.rs`, the
-    // byte-identical-cold-vs-warm acceptance gate for this mechanism, and
-    // plans/turn-latency-state-injection.md for the full history.
+    // byte-identical-cold-vs-warm acceptance gate for this mechanism.
     //
     // `crate::paths::build_products_dir` is keyed by the resolved extract
     // binary's own content fingerprint, so a rebuilt/updated extract gets a
@@ -378,9 +375,8 @@ pub(crate) fn compile_invocation(
     // GHC's own interface content-hash check means the losing race forces a
     // recompile rather than silently reusing mismatched output, so the
     // failure mode is wasted work, not wrong output — see
-    // plans/turn-latency-state-injection.md's daemon-direction section,
-    // where a single resident process (not many concurrent spawns) is the
-    // long-term answer.
+    // plans/compile-daemon-design.md, where a single resident process (not
+    // many concurrent spawns) is the long-term answer.
     //
     // `$TIDEPOOL_BUILD_PRODUCTS_DIR` still overrides the LOCATION (an
     // isolated dir for a test that needs a genuinely cold measurement,
@@ -494,7 +490,7 @@ pub fn compile_targets(
 /// As [`compile_targets`], but additionally injects a [`StableValInject`]
 /// (`--session-root <dir> --inject-val <module>`) — see that type's doc. The
 /// self-iterating harness driver's fused outer render/loop compile is the
-/// only caller (`plans/turn-latency-state-injection.md`).
+/// only caller.
 pub fn compile_targets_with_stable_inject(
     source: &str,
     targets: &[&str],
@@ -550,7 +546,7 @@ pub fn compile_targets_with_session_inject(
 }
 
 // ---------------------------------------------------------------------------
-// Shared spawn + read + deserialize (also used by `crate::compile_haskell`)
+// Shared spawn + read + deserialize (also used by `tidepool_runtime::compile_haskell`)
 // ---------------------------------------------------------------------------
 
 /// One target's raw (pre-deserialize) bytes.
@@ -568,7 +564,7 @@ pub(crate) struct RawTargetOutput {
 /// `compile_targets` only warns on failure).
 ///
 /// A nonzero exit is read through the structured diagnostics contract
-/// ([`diag::parse_diag_report`]) — the SAME reading [`crate::compile_haskell`]
+/// ([`diag::parse_diag_report`]) — the SAME reading `tidepool_runtime::compile_haskell`
 /// already gives an ordinary eval compile, so a bad target name or any other
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
