@@ -23,35 +23,37 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..), SplitSpec (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Refactor dev-tree's prompt layer into compositional fmt fragments: every trust-contract obligation stated exactly once, prompts as templates whose holes name fragments."
+choreGoal = "Close the five verified fold-soundness holes from the cross-family review: micro failures must be ladder-visible, denials must fail loudly, snapshots must not lie, recon must be provably clean, and Retry must retry."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "prompt-fragments"
+    { nodeName = "fold-soundness"
     , nodeTask =
-        "Refactor the prompt section of harness-dogfooding/dev-tree/Harness.hs (the \"Prompts — the one place typed orchestration becomes prose\" section) so every shared trust-contract obligation is a NAMED fragment stated exactly once, and each per-role prompt is one [fmt|...|] template whose holes name those fragments. This is a Writing Good Code exercise: the section should read as a small document grammar — fmt blocks naming other fmt blocks, compositional, no <> assembly chains for prompt bodies. Concretely: (1) introduce haddocked fragment values/functions above the prompts, one per shared obligation — the sandbox-git contract (git dir read-only, do NOT run git commit/add, orchestrator snapshots), the orchestrator-runs-checks contract including the your-shell-has-no-ghc sentence (parameterized over the rendered check lines, since node checks and microtask checks render from different sources), the boundary contract (product paths + tolerated tier, parameterized over the plan), and the WorkerResult finishing contract including evidence-never-a-sha, obstacles, and frictionNotes (parameterized over the role-specific what-to-describe phrase). (2) Rewrite workerPrompt, scaffoldPrompt, integrationPrompt, and microPrompt as single [fmt|...|] templates that interpolate those fragments by name; reconPrompt, microPlanPrompt, resolutionPrompt, and replanPrompt keep their own text but adopt any fragment that genuinely applies. (3) The rendered prompts must preserve every obligation and all task-specific content; wording may unify where duplicates drifted. (4) Success is mechanically visible: each of these phrases appears EXACTLY ONCE in the whole file afterwards — 'do NOT run', 'never a commit sha', 'Include obstacles', 'shell has no ghc' (baseline today: 4, 3, 4, 2). Do not change any type, any non-prompt function, or any other file."
+        "Fix five verified soundness holes in harness-dogfooding/dev-tree/{Harness.hs,HarnessTypes.hs} (a cross-model review confirmed each with a concrete failing scenario; fixture literals in tidepool-harness/tests/dogfood_harness_typecheck.rs may be updated ONLY if a type change forces it). (1) MICRO FAILURES MUST REACH THE LADDER: runMicrotasks currently reduces failed micro-checks to prose escalations, so foldLadder never sees them. Make it return typed per-microtask results carrying each micro's CheckResults; microLeaf must MERGE every micro CheckResult into the receiptChecks it hands finishFold (so ladder rung 2 judges them mechanically), and when the sequence stopped early the leaf must fold to Failed with a NEW FailureKind MicrotasksIncomplete naming how many of the accepted tasks ran — never a Done whose evidence quietly mentions unrun work. (2) ALL-CHILDREN-DENIED IS A FAILURE, NOT A LEAF: in integrate, a WorkReady whose plan HAS childPlans but whose workKids is empty must fold to Failed with the (currently never-constructed) FailureKind WorktreeDenied carrying the denial texts — today it falls through to leafFold and the parent quietly implements the node itself. (3) SNAPSHOTS MUST NOT LIE: snapshotWork currently ignores every git failure; make it return whether a snapshot was needed and whether it succeeded, and on failure have runWorker surface a loud evidence/escalation line AND leave the receipt honest (a dirty tree whose commit failed must not fold Done — thread the failure so finishFold's caller can fail the node with SnapshotFailed, a second new FailureKind). (4) RECON IS PROVABLY READ-ONLY: after the recon spawn in microLeaf, run git status --porcelain in the worktree; if dirty, git checkout -- . && git clean -fd (the recon contract says read-only, so nothing of value is lost), and record an evidence line that recon strayed and was reset. (5) RETRY MUST RETRY: onChildFailure's Retry arm (and the TriageRetry answer there) currently only appends an escalation; make Retry respawn the failed LEAF child's worker once — runWorker in the child's own worktree with the original workerPrompt plus a short previous-attempt-failed amendment naming the failure — then re-run that child's checks and boundary, re-judge via the same finishFold/foldLadder path, count the extra cycle in the accumulator, and merge the child only if the retried outcome is Done; a second failure keeps today's escalation behavior. Also update the render/renderPlan and any prompt sentence that a new FailureKind or changed semantics makes stale, and keep every existing green-path behavior byte-compatible (empty tolerated/denials/etc. unchanged). Follow the file's haddock style; every new mechanism gets the same comment density its neighbors have."
     , nodeChecks =
-        [ "test 1 -eq $(grep -c 'do NOT run' harness-dogfooding/dev-tree/Harness.hs)"
-        , "test 1 -eq $(grep -c 'never a commit sha' harness-dogfooding/dev-tree/Harness.hs)"
-        , "test 1 -eq $(grep -c 'Include obstacles' harness-dogfooding/dev-tree/Harness.hs)"
-        , "test 1 -eq $(grep -c 'shell has no ghc' harness-dogfooding/dev-tree/Harness.hs)"
+        [ "grep -q 'MicrotasksIncomplete' harness-dogfooding/dev-tree/HarnessTypes.hs"
+        , "grep -q 'SnapshotFailed' harness-dogfooding/dev-tree/HarnessTypes.hs"
+        , "grep -q 'WorktreeDenied' harness-dogfooding/dev-tree/Harness.hs"
+        , "grep -qE 'checkout -- .|clean -fd' harness-dogfooding/dev-tree/Harness.hs"
+        , "test 1 -eq $(grep -c 'do NOT run' harness-dogfooding/dev-tree/Harness.hs)"
         ]
-    , nodeBoundary = ["harness-dogfooding/dev-tree/Harness.hs"]
+    , nodeBoundary =
+        ["harness-dogfooding/dev-tree", "tidepool-harness/tests/dogfood_harness_typecheck.rs"]
     , nodeTolerated = []
     , nodeOnFailure = AskOperator
     , nodeSplit =
         Just
           SplitSpec
             { splitHints =
-                "Split into 2-3 sequential microtasks: carve out the named fragments first (with the four heavy prompts rewritten to use them, since fragments without consumers are dead text), then the remaining prompts' adoption pass, then a final duplication-count sweep against the exact-once phrases. Cheap grep-count checks per microtask; GHC compilation is the orchestrator's gate, your shell has none."
-            , splitMaxTasks = 3
+                "Split into 3-5 sequential microtasks along the five fixes — types first (the two new FailureKinds + the typed micro-result record, with every construction/match site updated in the same cycle so the file never sits mid-broken), then the runMicrotasks/microLeaf rework, then denial routing + snapshot honesty, then recon reset + Retry respawn. Grep-class checks per micro; compilation is the orchestrator's post-fold gate (your shell has no ghc)."
+            , splitMaxTasks = 5
             }
     , childPlans = []
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 6, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 1, maxAgentCycles = 8, gateWiderThan = 4}
 
 -- | The chore edit itself rides as uncommitted state in the dev tree.
 choreSnapshotDirtySource :: Bool

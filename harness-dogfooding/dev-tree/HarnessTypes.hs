@@ -24,6 +24,8 @@ module HarnessTypes
   , SplitSpec (..)
   , RepoSurvey (..)
   , Microtask (..)
+  , MicrotaskResult (..)
+  , MicrotaskRun (..)
   , MicroPlan (..)
   , WorkerResult (..)
   , ResolutionResult (..)
@@ -186,6 +188,31 @@ data Microtask = Microtask
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
+-- | The orchestrator's typed account of one accepted microtask.  The worker's
+-- prose remains evidence, but the checks are the code-owned values that must
+-- be carried into the containing node's receipt and trust ladder.
+data MicrotaskResult = MicrotaskResult
+  { microResultName    :: Text
+  , microResultSummary :: Text
+  , microResultChecks  :: [CheckResult]
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | The complete account of one sequential microtask run.  A run may stop
+-- before all accepted tasks finish; the explicit accounting keeps that fact
+-- typed rather than hiding it in an escalation line.
+data MicrotaskRun = MicrotaskRun
+  { microtaskResults      :: [MicrotaskResult]
+  , microtasksAccepted    :: Int
+  , microtasksRan         :: Int
+  , microtasksComplete    :: Bool
+  , microtaskEvidence     :: [Text]
+  , microtaskEscalations  :: [Text]
+  , microtaskObstacles    :: [Text]
+  , microtaskFrictions    :: [Text]
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
 -- | The planning turn's whole answer ('Harness.microLeaf' asks for it with
 -- @runLLMTurn \@MicroPlan@).  Tasks run in LIST ORDER, sequentially, in the
 -- node's one worktree — earlier tasks lay foundations later ones build on.
@@ -333,6 +360,14 @@ data FailureKind
   | DepthCapped
   | LayerRefused
   | ChildrenFailed
+  -- Keep new constructors at the end so existing derived JSON constructor
+  -- tags retain their clean-path meanings.
+  | MicrotasksIncomplete
+      { acceptedMicrotasksRan :: Int
+      }
+  | SnapshotFailed
+      { snapshotName :: Text
+      }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | The typed receipt every fold carries — the trust ladder and
@@ -446,11 +481,20 @@ checksLine r = case r.receiptChecks of
     passed c = c.checkExit == 0
 
 renderFailure :: Failure -> Text
-renderFailure f = [fmt|{show f.failureKind}: {f.failureDetail}{pathsPart}|]
+renderFailure f = [fmt|{renderFailureKind f.failureKind}: {f.failureDetail}{pathsPart}|]
   where
     pathsPart = case f.failurePaths of
       [] -> "" :: Text
       ps -> " [" <> T.intercalate ", " ps <> "]"
+
+-- | Render payload-bearing failure kinds without making callers parse their
+-- derived 'Show' form.  Existing nullary kinds retain their established text.
+renderFailureKind :: FailureKind -> Text
+renderFailureKind kind = case kind of
+  MicrotasksIncomplete {acceptedMicrotasksRan = ran} ->
+    [fmt|MicrotasksIncomplete ({ran} accepted microtasks ran)|]
+  SnapshotFailed {snapshotName = snapshot} -> [fmt|SnapshotFailed ({snapshot})|]
+  _ -> show kind
 
 -- | Build a 'Failed' outcome.
 --

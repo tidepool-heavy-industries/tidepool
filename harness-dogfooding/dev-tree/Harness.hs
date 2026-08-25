@@ -145,19 +145,29 @@ data NodeSeed = NodeSeed
     seedAdopted :: Maybe GitOid
   }
 
+-- | The harness-owned snapshot account for one worker cycle.  A clean tree
+-- is a successful no-op; every other path records whether the snapshot was
+-- needed and which git step, if any, failed so callers cannot mistake a
+-- dirty uncommitted worktree for a completed worker.
+data SnapshotResult = SnapshotResult
+  { snapshotNeeded    :: Bool
+  , snapshotSucceeded :: Bool
+  , snapshotFailure   :: Maybe Text
+  }
+
 -- | What the coalgebra decided, handed to the algebra unchanged.  The hylo's
 -- @t@.
 --
--- A plain sum of the three mutually-exclusive things a coalgebra step can
--- decide — ordinary work, a pre-algebra refusal, or a resumed/adopted
--- terminal outcome — rather than three 'Maybe' fields on one product whose
--- precedence 'integrate' had to establish by nested inspection.  Every
--- construction site below (this module's four smart constructors:
--- 'splitWork', 'refusalWork', 'replayedWork', 'adoptedWork') names, by its own
--- constructor choice, whether children may exist — 'WorkReady' is the only
--- one that carries any.  This type is module-private; only those four sites
--- (plus their two match sites, 'integrate' and 'stampFold') construct or take
--- one apart.
+-- A plain sum of the four mutually-exclusive things a coalgebra step can
+-- decide — ordinary work, a pre-algebra refusal, a worker failure, or a
+-- resumed/adopted terminal outcome — rather than four 'Maybe' fields on one
+-- product whose precedence 'integrate' had to establish by nested
+-- inspection.  Every construction site below (this module's five smart
+-- constructors: 'splitWork', 'refusalWork', 'failureWork', 'replayedWork',
+-- 'adoptedWork') names, by its own constructor choice, whether children may
+-- exist — 'WorkReady' is the only one that carries any.  This type is
+-- module-private; only those five sites (plus their two match sites,
+-- 'integrate' and 'stampFold') construct or take one apart.
 --
 -- @workKids@ is the parent's own record of the seeds it unfolded, in plan
 -- order.  It is what lets the algebra zip its @[Outcome]@ back against the
@@ -182,6 +192,13 @@ data NodeWork
     WorkResumed
       { workSeed    :: NodeSeed
       , workOutcome :: ResumedFold
+      }
+  | -- | A worker ran, but its harness snapshot failed.  This is distinct from
+    -- 'WorkRefused': policy refusals remain skipped, while a dirty tree whose
+    -- commit failed is an actual node failure.
+    WorkFailed
+      { workSeed    :: NodeSeed
+      , workFailure :: Failure
       }
 
 -- | Where a resumed node's outcome came from — and therefore whether it still
@@ -399,9 +416,17 @@ decompose seed
                   (refusalWork seed (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
                   []
               )
-          Right scaffold -> do
-            scaffoldHead <- worktreeHead seed.seedTree
-            emitSplit seed (Just scaffold) scaffoldHead
+          Right (scaffold, snapshot) ->
+            if snapshot.snapshotSucceeded
+              then do
+                scaffoldHead <- worktreeHead seed.seedTree
+                emitSplit seed (Just scaffold) scaffoldHead
+              else
+                pure
+                  ( Swarm.PlanF
+                      (failureWork seed (snapshotFailureFor name snapshot))
+                      []
+                  )
   where
     p = seed.seedPlan
     name = nodeName p
@@ -444,6 +469,9 @@ splitWork seed scaffold childSeeds denied =
 -- itself by handing the algebra a childless, refused node instead.
 refusalWork :: NodeSeed -> Failure -> NodeWork
 refusalWork seed f = WorkRefused {workSeed = seed, workFailure = f}
+
+failureWork :: NodeSeed -> Failure -> NodeWork
+failureWork seed f = WorkFailed {workSeed = seed, workFailure = f}
 
 -- ---------------------------------------------------------------------------
 -- The coalgebra's policy slots
@@ -620,9 +648,18 @@ integrate (Swarm.PlanF w kids) = case w of
   WorkResumed {workOutcome = AdoptedOutcome o} -> pure o
   WorkRefused {workSeed = seed, workFailure = f} ->
     pure Skipped {outcomeNode = nodeName seed.seedPlan, outcomeTrail = [], skipReason = renderFailure f}
-  WorkReady {workSeed = seed, workKids = wkids, workDenied = denied} -> case kids of
-    [] -> leafFold seed
-    _ -> interiorFold seed wkids denied kids
+  WorkFailed {workSeed = seed, workFailure = f} ->
+    pure (failedOutcome (nodeName seed.seedPlan) f Nothing)
+  WorkReady {workSeed = seed, workKids = wkids, workDenied = denied}
+    | not (null (childPlans seed.seedPlan)) && null wkids ->
+        pure
+          ( failedOutcome
+              (nodeName seed.seedPlan)
+              (Failure WorktreeDenied [fmt|{nodeName seed.seedPlan} has child plans but no child worktrees were allocated|] denied)
+              Nothing
+          )
+    | null kids -> leafFold seed
+    | otherwise -> interiorFold seed wkids denied kids
 
 -- | 'Swarm.receipted''s slot, and the whole trust ladder in one place.
 --
@@ -710,10 +747,10 @@ directLeaf seed = do
   runWorker tree name (workerPrompt p) >>= \case
     Left err ->
       pure (failedOutcome name (Failure SpawnDenied (renderSpawnError err) []) Nothing)
-    Right wr -> do
+    Right (wr, snapshot) -> do
       after <- worktreeHead tree
       checks <- runChecks tree p
-      finishFold seed wr (before, after) [] [] 1 True checks
+      finishFold seed wr (before, after) [] [] 1 True checks (snapshotFailureMaybe name snapshot)
   where
     tree = seed.seedTree
     p = seed.seedPlan
@@ -745,6 +782,48 @@ microLeaf seed spec = do
     Left err ->
       pure (failedOutcome name (Failure SpawnDenied [fmt|{name} recon: {renderSpawnError err}|] []) Nothing)
     Right (_, survey) -> do
+      -- Recon is contractually read-only, but its native shell still runs in
+      -- the node worktree.  Check the actual tree after the spawn, and clear
+      -- only what this authorized recon lane could have left behind.
+      gitIn tree "status --porcelain" >>= \case
+        Left err ->
+          reconFailure
+            before
+            survey
+            [fmt|{name}: RECON STATUS FAILED — could not verify that recon stayed read-only: {err}|]
+        Right status
+          | status.exitCode /= 0 ->
+              reconFailure
+                before
+                survey
+                [fmt|{name}: RECON STATUS FAILED — git status --porcelain exited {status.exitCode}: {firstLine status.stderr}|]
+          | T.null (T.strip status.stdout) -> runPlanned before survey []
+          | otherwise -> do
+              let stray = T.intercalate ", " (filter (not . T.null) (T.lines status.stdout))
+              say [fmt|{name}: RECON STRAYED — resetting recon-owned changes: {stray}|]
+              resets <- traverse (gitIn tree) ["checkout -- .", "clean -fd"]
+              let resetFailures =
+                    [ detail
+                    | (command, result) <- zip ["git checkout -- .", "git clean -fd"] resets
+                    , let detail = case result of
+                            Left err -> [fmt|{command} could not run: {err}|]
+                            Right proc
+                              | proc.exitCode /= 0 -> [fmt|{command} exited {proc.exitCode}: {firstLine proc.stderr}|]
+                              | otherwise -> ""
+                    , not (T.null detail)
+                    ]
+              if null resetFailures
+                then do
+                  let resetEvidence = [fmt|{name}: recon strayed ({stray}) and was reset with git checkout -- . and git clean -fd|]
+                  say resetEvidence
+                  runPlanned before survey [resetEvidence]
+                else
+                  reconFailure
+                    before
+                    survey
+                    [fmt|{name}: RECON RESET FAILED — recon strayed ({stray}); {T.intercalate "; " resetFailures}|]
+  where
+    runPlanned before survey reconEvidence = do
       microPlan <- runLLMTurn @MicroPlan (microPlanPrompt p spec survey)
       let planned = microPlan.microtasks
           -- One cycle is already spent on recon; the rest of this subtree's
@@ -757,59 +836,143 @@ microLeaf seed spec = do
             | not (null dropped)
             ]
       say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
-      (ranEvidence, microEsc, microObstacles, microFrictions, spent) <- runMicrotasks tree p toRun
+      (microRun, microSnapshotFailure) <- runMicrotasks tree p toRun
       after <- worktreeHead tree
       checks <- runChecks tree p
       let wr =
             WorkerResult
               { workSummary =
-                  [fmt|Micro-split leaf: {spent} of {length toRun} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
-              , evidence = [fmt|recon survey: {survey.surveyLayout}|] : ranEvidence <> droppedNote
-              , readyForIntegration = null microEsc
-              , obstacles = microObstacles
-              , frictionNotes = microFrictions
+                  [fmt|Micro-split leaf: {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
+              , evidence = [fmt|recon survey: {survey.surveyLayout}|] : reconEvidence <> microRun.microtaskEvidence <> droppedNote
+              , readyForIntegration = null microRun.microtaskEscalations
+              , obstacles = microRun.microtaskObstacles
+              , frictionNotes = microRun.microtaskFrictions
               }
-      finishFold seed wr (before, after) [] microEsc (1 + spent) True checks
-  where
+          -- Keep every microtask check in the receipt, including the failing
+          -- one that stopped the sequence.  The node checks remain first so
+          -- the pre-existing receipt ordering stays stable; the ladder then
+          -- judges both sets mechanically at the final head.
+          receiptChecks = checks <> concatMap (.microResultChecks) microRun.microtaskResults
+      folded <-
+        finishFold
+          seed
+          wr
+          (before, after)
+          []
+          microRun.microtaskEscalations
+          (1 + microRun.microtasksRan)
+          True
+          receiptChecks
+          microSnapshotFailure
+      pure $ case folded of
+        Done {doneReceipt = receipt}
+          | not microRun.microtasksComplete ->
+              failedOutcome
+                name
+                ( Failure
+                    (MicrotasksIncomplete {acceptedMicrotasksRan = microRun.microtasksRan})
+                    [fmt|microtask sequence stopped after {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran|]
+                    []
+                )
+                (Just receipt)
+        _ -> folded
+
+    reconFailure before survey detail = do
+      let failure = Failure BoundaryViolated detail []
+          wr =
+            WorkerResult
+              { workSummary = [fmt|Read-only recon could not be verified for {name}|]
+              , evidence = [[fmt|recon survey: {survey.surveyLayout}|], detail]
+              , readyForIntegration = False
+              , obstacles = [detail]
+              , frictionNotes = []
+              }
+      say detail
+      after <- worktreeHead tree
+      checks <- runChecks tree p
+      finishFold seed wr (before, after) [] [] 1 True checks (Just failure)
     tree = seed.seedTree
     p = seed.seedPlan
     name = nodeName p
 
 -- | Run accepted microtasks in LIST order.  A microtask whose own checks fail
 -- STOPS the sequence — later tasks were planned against a foundation that did
--- not hold — and everything unrun is said so, as data.  Returns (evidence
--- lines, escalations, per-micro obstacles, per-micro friction notes, agent
--- cycles actually spent).
-runMicrotasks :: WorktreeHandle -> DevPlan -> [Microtask] -> Harness ([Text], [Text], [Text], [Text], Int)
-runMicrotasks tree p = go 0 [] [] [] []
+-- not hold — and everything unrun is said so, as data.  The returned pair's
+-- 'MicrotaskRun' carries every executed microtask's checks in typed form,
+-- together with explicit accepted/ran/completed accounting; the optional
+-- 'Failure' carries a snapshot failure without hiding it in prose.
+runMicrotasks :: WorktreeHandle -> DevPlan -> [Microtask] -> Harness (MicrotaskRun, Maybe Failure)
+runMicrotasks tree p accepted = walk emptyMicroAcc accepted
   where
-    go spent ev esc ob fr [] = pure (reverse ev, reverse esc, reverse ob, reverse fr, spent)
-    go spent ev esc ob fr (m : rest) =
-      runWorker tree (nodeName p <> "-" <> m.microName) (microPrompt p m) >>= \case
+    walk acc [] = pure (closeRun True acc, Nothing)
+    walk acc (m : rest) =
+      runWorker tree (microWorkerName m) (microPrompt p m) >>= \case
         Left err ->
-          stop spent ev ([fmt|{m.microName}: spawn failed — {renderSpawnError err}|] : esc) ob fr rest
-        Right wr -> do
-          results <- traverse (runCheckCmd tree) m.microChecks
-          let failedChecks = filter checkFailed results
-              passedCount = length results - length failedChecks
-              spent' = spent + 1
-              line = [fmt|{m.microName}: {wr.workSummary} ({passedCount}/{length results} micro checks passed)|]
-              tag t = m.microName <> ": " <> t
-              ob' = map tag wr.obstacles <> ob
-              fr' = map tag wr.frictionNotes <> fr
-          if null failedChecks
-            then go spent' (line : ev) esc ob' fr' rest
-            else do
-              let failedNames = T.intercalate ", " (map (.checkCommand) failedChecks)
-              stop spent' (line : ev) ([fmt|{m.microName}: micro checks failed — {failedNames}|] : esc) ob' fr' rest
-    stop spent ev esc ob fr rest =
-      pure
-        ( reverse ev
-        , reverse ([[fmt|{length rest} remaining microtasks not run (sequence stopped)|] | not (null rest)] <> esc)
-        , reverse ob
-        , reverse fr
-        , spent
-        )
+          halt (noteEscalation [fmt|{m.microName}: spawn failed — {renderSpawnError err}|] acc) rest Nothing
+        Right (wr, snapshot) -> do
+          checks <- traverse (runCheckCmd tree) m.microChecks
+          let acc' = recordCycle m wr checks acc
+          case snapshotFailureMaybe (microWorkerName m) snapshot of
+            Just failure -> halt (noteEscalation (renderFailure failure) acc') rest (Just failure)
+            Nothing
+              | any checkFailed checks ->
+                  halt (noteEscalation [fmt|{m.microName}: micro checks failed — {failedNames checks}|] acc') rest Nothing
+              | otherwise -> walk acc' rest
+
+    -- A sequence that stops says how much was left undone, then closes.
+    halt acc rest failure = pure (closeRun False (unrunNote rest acc), failure)
+    unrunNote rest acc
+      | null rest = acc
+      | otherwise = noteEscalation [fmt|{length rest} remaining microtasks not run (sequence stopped)|] acc
+
+    -- One completed worker cycle, folded into the accumulator whole: its
+    -- typed result, its evidence line, and its tagged self-reports.
+    recordCycle m wr checks acc =
+      MicroAcc
+        { accResults = MicrotaskResult m.microName wr.workSummary checks : accResults acc
+        , accEvidence = cycleLine m wr checks : accEvidence acc
+        , accEscalations = accEscalations acc
+        , accObstacles = map (tag m) wr.obstacles <> accObstacles acc
+        , accFrictions = map (tag m) wr.frictionNotes <> accFrictions acc
+        , accSpent = accSpent acc + 1
+        }
+    cycleLine m wr checks =
+      let passed = length (filter (not . checkFailed) checks)
+       in [fmt|{m.microName}: {wr.workSummary} ({passed}/{length checks} micro checks passed)|]
+    noteEscalation line acc = acc {accEscalations = line : accEscalations acc}
+    failedNames checks = T.intercalate ", " (map (.checkCommand) (filter checkFailed checks))
+    tag m t = m.microName <> ": " <> t
+    microWorkerName m = nodeName p <> "-" <> m.microName
+
+    -- The accumulator holds newest-first lists; this is the one reversal.
+    -- @ranToEnd@ is the honest completion bit: a halt is incomplete even
+    -- when it happened on the final task.
+    closeRun ranToEnd acc =
+      MicrotaskRun
+        { microtaskResults = reverse (accResults acc)
+        , microtasksAccepted = length accepted
+        , microtasksRan = accSpent acc
+        , microtasksComplete = ranToEnd
+        , microtaskEvidence = reverse (accEvidence acc)
+        , microtaskEscalations = reverse (accEscalations acc)
+        , microtaskObstacles = reverse (accObstacles acc)
+        , microtaskFrictions = reverse (accFrictions acc)
+        }
+
+-- | The interior accumulator for one micro sequence.  Every list is
+-- newest-first while accumulating; 'runMicrotasks' reverses once when it
+-- closes the run.
+data MicroAcc = MicroAcc
+  { accResults     :: [MicrotaskResult]
+  , accEvidence    :: [Text]
+  , accEscalations :: [Text]
+  , accObstacles   :: [Text]
+  , accFrictions   :: [Text]
+  , accSpent       :: Int
+  }
+
+emptyMicroAcc :: MicroAcc
+emptyMicroAcc = MicroAcc {accResults = [], accEvidence = [], accEscalations = [], accObstacles = [], accFrictions = [], accSpent = 0}
 
 -- | An interior node: the eager rebase cascade, the merges, then the ladder.
 --
@@ -823,9 +986,9 @@ interiorFold seed workKids denied kids = do
   acc <- foldChildren tree p (zip workKids kids) emptyAcc {accEsc = deniedEsc}
   checks0 <- runChecks tree p
   let needsAgent = not (null acc.accEsc) || any checkFailed checks0
-  (wr, agentCycles, agentRan) <-
+  (wr, agentCycles, agentRan, snapshotFailure) <-
     if not needsAgent
-      then pure (mechanicalResult acc, 0, False)
+      then pure (mechanicalResult acc, 0, False, Nothing)
       else
         spawnIntegration tree p acc checks0 >>= \case
           Left err ->
@@ -834,8 +997,10 @@ interiorFold seed workKids denied kids = do
                   {accEsc = acc.accEsc <> [[fmt|integration spawn failed: {renderSpawnError err}|]]}
               , 0
               , False
+              , Nothing
               )
-          Right merged -> pure (merged, 1, True)
+          Right (merged, snapshot) ->
+            pure (merged, 1, True, snapshotFailureMaybe (nodeName p <> "-integration") snapshot)
   checks <- if agentRan then runChecks tree p else pure checks0
   after <- worktreeHead tree
   folded <-
@@ -848,6 +1013,7 @@ interiorFold seed workKids denied kids = do
       (acc.accCycles + agentCycles)
       agentRan
       checks
+      snapshotFailure
   -- An abandoned subtree is the one node-local verdict the receipt cannot
   -- carry: the evidence is fine as far as it goes, and what failed is that a
   -- policy chose to stop.  Everything else this fold is worth is 'foldLadder''s.
@@ -877,7 +1043,7 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
     foldChildren tree p rest acc {accEsc = acc.accEsc <> [[fmt|{childName}: not merged (subtree abandoned)|]]}
   Nothing
     | not (outcomeIsDone o) -> do
-        next <- onChildFailure tree p s o acc
+        next <- onChildFailure tree p s o rest acc
         foldChildren tree p rest next
     | otherwise ->
         mergeChild tree p s >>= \case
@@ -898,11 +1064,13 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
     childName = nodeName s.seedPlan
 
 -- | A child that failed on its own terms.  The parent's policy decides whether
--- that stops the fold; 'Replan' opens a planning agent session and JOURNALS the
--- amendment, because re-unfolding a subtree means re-entering the coalgebra —
--- which is resume's job, not this fold's.
-onChildFailure :: WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> FoldAcc -> Harness FoldAcc
-onChildFailure _ p s o acc = case nodeOnFailure p of
+-- that stops the fold; a leaf 'Retry' gets one fresh worker cycle and is merged
+-- only when that cycle passes the same receipt ladder.  'Replan' opens a
+-- planning agent session and JOURNALS the amendment, because re-unfolding a
+-- subtree means re-entering the coalgebra — which is resume's job, not this
+-- fold's.  A non-leaf retry remains the rebase-policy-shaped escalation it was.
+onChildFailure :: WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> [(NodeSeed, Outcome)] -> FoldAcc -> Harness FoldAcc
+onChildFailure tree p s o rest acc = case nodeOnFailure p of
   Abandon -> pure acc {accAbandon = Just why, accEsc = acc.accEsc <> [why]}
   Replan -> do
     decision <- runLLMTurn @ReplanDecision (replanPrompt p s why)
@@ -914,15 +1082,75 @@ onChildFailure _ p s o acc = case nodeOnFailure p of
   AskOperator ->
     askUser @Triage >>= \t -> case t.triageAction of
       TriageAbandon -> pure acc {accAbandon = Just (why <> " — operator abandoned"), accEsc = acc.accEsc <> [why]}
-      _ -> pure acc {accEsc = acc.accEsc <> [[fmt|{why} — operator: {t.triageNote}|]]}
-  Retry -> pure acc {accEsc = acc.accEsc <> [why]}
+      TriageRetry
+        | retryableLeaf -> retryLeaf t.triageNote
+        | otherwise -> pure acc {accEsc = acc.accEsc <> [[fmt|{why} — operator: {t.triageNote}|]]}
+      TriageSkip -> pure acc {accEsc = acc.accEsc <> [[fmt|{why} — operator: {t.triageNote}|]]}
+  Retry
+    | retryableLeaf -> retryLeaf ""
+    | otherwise -> pure acc {accEsc = acc.accEsc <> [why]}
   where
     why = [fmt|{outcomeNodeName o}: {failureText o}|]
+    retryableLeaf = null (childPlans s.seedPlan) && case o of
+      Failed {} -> True
+      _ -> False
+    retryLeaf operatorNote = do
+      before <- worktreeHead s.seedTree
+      let child = nodeName s.seedPlan
+          retryName = child <> "-retry"
+          retryPrompt =
+            workerPrompt s.seedPlan
+              <> [fmt|\n\nPrevious attempt failed for {child}: {failureText o}. Re-check that failure and complete the task.|]
+              <> [fmt|{operatorAmendment}|]
+          spent = acc {accCycles = acc.accCycles + 1}
+          operatorAmendment
+            | T.null (T.strip operatorNote) = ""
+            | otherwise = [fmt| Operator guidance from triage: {operatorNote}|]
+      runWorker s.seedTree retryName retryPrompt >>= \case
+        Left _err -> pure spent {accEsc = spent.accEsc <> [why]}
+        Right (wr, snapshot) -> do
+          after <- worktreeHead s.seedTree
+          checks <- runChecks s.seedTree s.seedPlan
+          retried <-
+            finishFold
+              s
+              wr
+              (before, after)
+              []
+              []
+              1
+              True
+              checks
+              (snapshotFailureMaybe retryName snapshot)
+          let judged = foldLadder retried
+          case judged of
+            Done {} ->
+              mergeChild tree p s >>= \case
+                Left mergeWhy -> escalate p s mergeWhy spent
+                Right note -> do
+                  newHead <- worktreeHead tree
+                  let ahead = [sib | (sib, out) <- rest, outcomeIsDone out]
+                  cascade
+                    p
+                    newHead
+                    ahead
+                    spent
+                      { accNotes = spent.accNotes <> [note]
+                      , accMerged = spent.accMerged + 1
+                      }
+            _ -> pure spent {accEsc = spent.accEsc <> [why]}
 
 failureText :: Outcome -> Text
 failureText o = case o of
   Done {} -> "done"
-  Failed {outcomeFailure = f} -> renderFailure f
+  Failed {outcomeFailure = f} -> case f.failureKind of
+    -- Keep the durable payload legible to failure-policy prompts instead of
+    -- asking them to recover the count or snapshot identity from prose.
+    MicrotasksIncomplete {acceptedMicrotasksRan = ran} ->
+      [fmt|{renderFailure f} — {ran} accepted microtasks ran|]
+    SnapshotFailed {snapshotName = snapshot} ->
+      [fmt|{renderFailure f} — failed snapshot {snapshot}|]
+    _ -> renderFailure f
   Skipped {skipReason = r} -> r
 
 -- ---------------------------------------------------------------------------
@@ -1115,13 +1343,11 @@ finishFold
   -> Int
   -> Bool
   -> [CheckResult]
+  -> Maybe Failure
   -> Harness Outcome
-finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
+finishFold seed wr (before, after) notes escalations cycles agentRan checks forcedFailure = do
   (outside, tolerated) <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
-  pure
-    ( Done
-        name
-        []
+  let receipt =
         FoldReceipt
           { receiptNode = name
           , receiptBranch = branchOf tree
@@ -1142,7 +1368,9 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks = do
                 <> escalations
                 <> map ("tolerated: " <>) tolerated
           }
-    )
+  pure $ case forcedFailure of
+    Just failure -> failedOutcome name failure (Just receipt)
+    Nothing -> Done name [] receipt
   where
     tree = seed.seedTree
     p = seed.seedPlan
@@ -1202,7 +1430,7 @@ boundaryViolations tree prefixes tolerated =
 -- means every caller's very next git read (a scaffold head, a leaf's
 -- before\/after, a re-run of checks) already sees the real commit — nobody
 -- downstream has to remember to ask for it.
-runWorker :: WorktreeHandle -> Text -> Text -> Harness (Either SpawnError WorkerResult)
+runWorker :: WorktreeHandle -> Text -> Text -> Harness (Either SpawnError (WorkerResult, SnapshotResult))
 runWorker tree name prompt = do
   result <-
     withHandlerTry
@@ -1218,12 +1446,22 @@ runWorker tree name prompt = do
           spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
   case result of
     Right wr -> do
-      snapshotWork tree name
+      snapshot <- snapshotWork tree name
+      let wr' = case snapshot.snapshotFailure of
+            Nothing -> wr
+            Just detail ->
+              let line = [fmt|{name}: SNAPSHOT FAILED — {detail}|]
+               in wr
+                    { evidence = wr.evidence <> [line]
+                    , readyForIntegration = False
+                    , obstacles = wr.obstacles <> [line]
+                    }
+      traverse_ (say . (\f -> [fmt|{name}: {f}|])) (maybeToList snapshot.snapshotFailure)
       -- Surface self-reported friction immediately (note feed + log); it
       -- also rides the receipt via 'finishFold'.  Advisory only.
-      traverse_ (\f -> say [fmt|{name} friction: {f}|]) wr.frictionNotes
-    Left _ -> pure ()
-  pure result
+      traverse_ (\f -> say [fmt|{name} friction: {f}|]) wr'.frictionNotes
+      pure (Right (wr', snapshot))
+    Left err -> pure (Left err)
 
 -- | The harness's own commit of whatever a worker left uncommitted. Codex
 -- workers cannot commit — verified deterministically with @codex sandbox@,
@@ -1232,22 +1470,38 @@ runWorker tree name prompt = do
 -- instead of trusting a worker's prose claim of a commit sha. A clean tree
 -- is a no-op. The message is harness-authored and deterministic, never
 -- model prose.
-snapshotWork :: WorktreeHandle -> Text -> Harness ()
+snapshotWork :: WorktreeHandle -> Text -> Harness SnapshotResult
 snapshotWork tree name =
   gitIn tree "status --porcelain" >>= \case
-    Left _ -> pure ()
+    Left err -> pure (SnapshotResult True False (Just [fmt|status --porcelain failed: {err}|]))
     Right pr
-      | T.null (T.strip pr.stdout) -> pure ()
+      | T.null (T.strip pr.stdout) -> pure (SnapshotResult False True Nothing)
       | otherwise -> do
-          _ <- gitIn tree "add -A"
-          gitIn tree [fmt|commit -m "{name}: agent work"|] >>= \case
-            Left _ -> pure ()
-            Right _ -> do
-              sha <- worktreeHead tree
-              say [fmt|{name}: harness snapshot-committed uncommitted worker output at {renderGitOid sha}|]
+          gitIn tree "add -A" >>= \case
+            Left err -> pure (SnapshotResult True False (Just [fmt|add -A failed: {err}|]))
+            Right _ ->
+              gitIn tree [fmt|commit -m "{name}: agent work"|] >>= \case
+                Left err -> pure (SnapshotResult True False (Just [fmt|commit failed: {err}|]))
+                Right _ -> do
+                  sha <- worktreeHead tree
+                  say [fmt|{name}: harness snapshot-committed uncommitted worker output at {renderGitOid sha}|]
+                  pure (SnapshotResult True True Nothing)
+
+snapshotFailureFor :: Text -> SnapshotResult -> Failure
+snapshotFailureFor name snapshot =
+  Failure
+    { failureKind = SnapshotFailed {snapshotName = name}
+    , failureDetail = maybe [fmt|{name}: snapshot did not complete|] (\detail -> [fmt|{name}: {detail}|]) snapshot.snapshotFailure
+    , failurePaths = []
+    }
+
+snapshotFailureMaybe :: Text -> SnapshotResult -> Maybe Failure
+snapshotFailureMaybe name snapshot
+  | snapshot.snapshotSucceeded = Nothing
+  | otherwise = Just (snapshotFailureFor name snapshot)
 
 spawnIntegration
-  :: WorktreeHandle -> DevPlan -> FoldAcc -> [CheckResult] -> Harness (Either SpawnError WorkerResult)
+  :: WorktreeHandle -> DevPlan -> FoldAcc -> [CheckResult] -> Harness (Either SpawnError (WorkerResult, SnapshotResult))
 spawnIntegration tree p acc checks =
   runWorker tree (nodeName p <> "-integration") (integrationPrompt p acc checks)
 
