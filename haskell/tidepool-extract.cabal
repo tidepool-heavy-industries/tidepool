@@ -42,7 +42,8 @@ library tidepool-extract-internal
     errors,
     witherable,
     safe,
-    network
+    network,
+    unix
   default-language: GHC2024
   default-extensions: OverloadedStrings
   ghc-options:      -Wall

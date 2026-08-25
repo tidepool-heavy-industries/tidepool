@@ -492,13 +492,43 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
                     (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
           cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
           pure (simplified, (externalizeInternalTops simplified, mfUserType mf, mfResultType mf))
+    -- A memo hit is trusted only if the cached entry's own 'ModSummary' has
+    -- the SAME content fingerprint ('ms_hs_hash', already computed by
+    -- 'depanal' for every summary — GHC's own signal for "this source
+    -- changed", the same field 'invalidateModSummaryCache' resets to force a
+    -- miss) as the summary THIS cycle just downswept for the same
+    -- 'ModuleName'. This is required because a 'ModuleName' is not always a
+    -- stable proxy for stable CONTENT: a generated module can be a pure
+    -- function of the request's own effect vocabulary
+    -- (@Tidepool.Effects.Core@ — content-addressed into a distinct include
+    -- dir per vocabulary on the Rust side, tidepool-mcp/CLAUDE.md's
+    -- "Stable-effects-core" section) while always resolving under the SAME
+    -- fixed module name, so two independent requests with different
+    -- vocabularies can populate/consult the shared memo under one key with
+    -- genuinely different bindings (e.g. one row lacking
+    -- @Tidepool.Agent.Spawn@'s @spawnSpec@) — exactly the "module names are
+    -- not globally unique across independent requests" hazard design §2.2
+    -- names, one step past what 'sanitizeMemo's target\/@Tidepool.Session.*@
+    -- exclusion already covers (spawnrow-fix, plans/compile-daemon-design.md
+    -- §7). A hash mismatch is treated as an ordinary miss: compiled fresh
+    -- below, and the memo entry is overwritten with the new content via the
+    -- existing 'Map.insert'. Costs nothing when content is unchanged (the
+    -- overwhelmingly common case — same vocabulary, same hash, hit as
+    -- before).
+    let lookupValidMemo modSum = case mMemoRef of
+          Nothing  -> pure Nothing
+          Just ref -> liftIO $ do
+            m <- readIORef ref
+            pure $ do
+              entry <- Map.lookup (ms_mod_name modSum) m
+              if ms_hs_hash (mfSummary (gmeFront entry)) == ms_hs_hash modSum
+                then Just entry
+                else Nothing
     (fronts, results, mReachable) <- case cpTier plan of
       OptimizeEveryModule -> do
         pairs <- forM summaries $ \modSum -> do
           let mn = ms_mod_name modSum
-          cached <- case mMemoRef of
-            Nothing  -> pure Nothing
-            Just ref -> liftIO (Map.lookup mn <$> readIORef ref)
+          cached <- lookupValidMemo modSum
           case cached of
             -- Memo hit: skip parse/typecheck/desugar/core2core entirely —
             -- this is the win (§7.6: 3114ms -> 9ms per reused cycle). Still
@@ -544,10 +574,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
         -- never core2core'd, so the memo is never asked to serve one where
         -- reachability differs from what produced the entry.
         pairs <- forM summaries $ \modSum -> do
-          let mn = ms_mod_name modSum
-          cached <- case mMemoRef of
-            Nothing  -> pure Nothing
-            Just ref -> liftIO (Map.lookup mn <$> readIORef ref)
+          cached <- lookupValidMemo modSum
           case cached of
             Just entry -> pure (gmeFront entry, Just (gmeResult entry))
             Nothing    -> do
