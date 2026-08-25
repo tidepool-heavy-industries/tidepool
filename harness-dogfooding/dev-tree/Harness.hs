@@ -39,7 +39,7 @@
 -- folds one at a time, so the parent HEAD genuinely moves under live sibling
 -- tips.  The drift v1 designed around now exists, and 'cascade' is the answer:
 -- mechanical git first, an ephemeral resolution agent second, escalation as
--- data third.  See @plans\/self-iterating-harness\/20-s1-l3-dev-tree-v2.md@.
+-- data third.
 --
 -- __Resume.__ The run journal this file writes at every split, outcome,
 -- replan, rebase, and escalation is read back by 'resumeLoop' — the opt-in
@@ -47,7 +47,7 @@
 -- crash.  'loop' IS @resumeLoop emptyResume@, so a fresh run and a resumed run
 -- are one spelling of the run rather than two that can drift, and a fold with
 -- no entries takes the ordinary path by construction ('resumed' is @id@ when
--- 'isResumed' is false).  See @plans\/self-iterating-harness\/20-s1-l5-resume.md@.
+-- 'isResumed' is false).
 module Harness
   ( State (..)
   , Phase (..)
@@ -71,6 +71,7 @@ module Harness
   , childAllowance
   ) where
 
+import Chore (choreBudget, choreGoal, chorePlan, choreSnapshotDirtySource)
 import qualified Data.Text as T
 import DevTreeJournal
   ( JournalEvent (..)
@@ -214,6 +215,24 @@ data FoldAcc = FoldAcc
 
 emptyAcc :: FoldAcc
 emptyAcc = FoldAcc {accNotes = [], accEsc = [], accCycles = 0, accMerged = 0, accAbandon = Nothing}
+
+-- ---------------------------------------------------------------------------
+-- Initial state
+-- ---------------------------------------------------------------------------
+
+-- | Built from "Chore"'s values, not hardcoded here — the chore is what this
+-- run is asked to do, and swapping it is an edit to "Chore" alone.
+initialState :: State
+initialState =
+  State
+    { goal = choreGoal
+    , plan = chorePlan
+    , phase = Ready
+    , cycleCount = 0
+    , snapshotDirtySource = choreSnapshotDirtySource
+    , budget = choreBudget
+    , lastRun = Nothing
+    }
 
 -- ---------------------------------------------------------------------------
 -- The resident cycle

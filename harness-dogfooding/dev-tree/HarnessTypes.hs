@@ -35,7 +35,6 @@ module HarnessTypes
   , RebaseNote (..)
   , RebaseTier (..)
   , RunSummary (..)
-  , initialState
   , render
   , outcomeNodeName
   , outcomeTrailOf
@@ -381,77 +380,6 @@ failedOutcome n f receipt =
 -- constructor, so there is nothing to case-split on.
 withTrail :: [Text] -> Outcome -> Outcome
 withTrail childTrail o = o {outcomeTrail = childTrail <> [outcomeLine o]}
-
--- ---------------------------------------------------------------------------
--- Initial state
--- ---------------------------------------------------------------------------
-
-initialState :: State
-initialState =
-  State
-    { goal = "Land the first useful typed Worktree/Event substrate in Tidepool"
-    , plan = initialPlan
-    , phase = Ready
-    , cycleCount = 0
-    , snapshotDirtySource = False
-    , budget = Budget {maxDepth = 3, maxAgentCycles = 24, gateWiderThan = 4}
-    , lastRun = Nothing
-    }
-
-initialPlan :: DevPlan
-initialPlan =
-  DevPlan
-    { nodeName = "integration"
-    , nodeTask =
-        "Own the shared seam, keep the tree coherent, and integrate the child "
-          <> "branches after their workers finish."
-    , nodeChecks = ["cargo check --workspace"]
-    , nodeBoundary = []
-    , nodeOnFailure = AskOperator
-    , childPlans =
-        [ DevPlan
-            { nodeName = "worktree-runtime"
-            , nodeTask =
-                "Implement managed worktree allocation, stable identities, "
-                  <> "clean-source rejection, and the opt-in dirty snapshot."
-            , nodeChecks = ["cargo check -p tidepool-worktree"]
-            , nodeBoundary = ["tidepool-worktree"]
-            , nodeOnFailure = Replan
-            , childPlans =
-                [ DevPlan
-                    { nodeName = "commit-monitor"
-                    , nodeTask =
-                        "Implement reconciled commit and HEAD-change observation. "
-                          <> "Start with polling and leave the hook/socket seam clean."
-                    , nodeChecks = ["cargo check -p tidepool-worktree"]
-                    , nodeBoundary = ["tidepool-worktree/src/events"]
-                    , nodeOnFailure = Retry
-                    , childPlans = []
-                    }
-                ]
-            }
-        , DevPlan
-            { nodeName = "haskell-surface"
-            , nodeTask =
-                "Implement Event and withHandler with lexical, cycle-scoped "
-                  <> "handler lifetimes and parent-effect execution."
-            , nodeChecks = ["cargo check -p tidepool-mcp"]
-            , nodeBoundary = ["haskell/lib/Tidepool", "tidepool-mcp/src"]
-            , nodeOnFailure = Retry
-            , childPlans = []
-            }
-        , DevPlan
-            { nodeName = "acceptance"
-            , nodeTask =
-                "Write end-to-end acceptance coverage for worktree isolation, "
-                  <> "dirty-source policy, event delivery, and retained state."
-            , nodeChecks = ["cargo check --workspace --tests"]
-            , nodeBoundary = ["tidepool-worktree/tests"]
-            , nodeOnFailure = Abandon
-            , childPlans = []
-            }
-        ]
-    }
 
 -- ---------------------------------------------------------------------------
 -- Render
