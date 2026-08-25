@@ -604,8 +604,8 @@ impl EvalHarness {
 }
 
 /// The base MCP effect stack (Console, KV, Fs, Http, Exec, Llm, Git, Time,
-/// Ask, RunLLMTurn) as a hand-maintained GADT preamble, plus matching stub
-/// handlers and a ready-made [`mock::min_stack`] `frunk` HList.
+/// Entropy, Ask, RunLLMTurn) as a hand-maintained GADT preamble, plus matching
+/// stub handlers and a ready-made [`mock::min_stack`] `frunk` HList.
 ///
 /// The GADT preamble text and stub handlers below are a STATIC mirror of the
 /// real stack, not a derivation — it exists so callers can compile a
@@ -706,6 +706,8 @@ data Llm a where
   LlmStructured :: Text -> Value -> Llm (Either LlmError Value)
 data Time a where
   TimeNow :: Time Int
+data Entropy a where
+  EntropySeed :: Entropy Int
 data Ask a where
   Ask :: Text -> Ask Value
 data RunLLMTurn a where
@@ -714,7 +716,7 @@ data Fork a where
   ForkWith :: Int -> Text -> Fork Value
   ForkAllWith :: Int -> [Text] -> Fork Value
 
-type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, Fork]
+type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn, Fork]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
@@ -949,7 +951,24 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, For
         }
     }
 
-    // 8: Ask (stub)
+    // 8: Entropy (stub — fixed deterministic seed, never real OS entropy).
+    #[derive(FromCore)]
+    #[allow(dead_code)]
+    pub enum EntropyReq {
+        #[core(name = "EntropySeed")]
+        EntropySeed,
+    }
+    pub struct MockEntropy;
+    impl EffectHandler for MockEntropy {
+        type Request = EntropyReq;
+        fn handle(&mut self, req: EntropyReq, cx: &EffectContext) -> Result<Response, EffectError> {
+            match req {
+                EntropyReq::EntropySeed => cx.respond(42i64),
+            }
+        }
+    }
+
+    // 9: Ask (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum AskReq {
@@ -964,7 +983,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, For
         }
     }
 
-    // 9: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
+    // 10: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
     // Ask; this mock harness dispatches every tag through the handler HList
     // (no suspend-tag threshold), so it needs its own stub same as MockAsk).
     #[derive(FromCore)]
@@ -985,7 +1004,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, For
         }
     }
 
-    // 10: Fork (stub — the answerer parallel-delegation effect; same
+    // 11: Fork (stub — the answerer parallel-delegation effect; same
     // dispatch-every-tag reasoning as MockRunLLMTurn).
     #[derive(FromCore)]
     #[allow(dead_code)]
@@ -1005,7 +1024,8 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, For
 
     /// The base-stack mock handler HList, in stack order (matches
     /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Llm, Git, Time,
-    /// Ask, RunLLMTurn, Fork]` — pass straight to [`super::EvalHarness::run`].
+    /// Entropy, Ask, RunLLMTurn, Fork]` — pass straight to
+    /// [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
         MockKv,
@@ -1015,6 +1035,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, For
         MockLlm,
         MockGit,
         MockTime,
+        MockEntropy,
         MockAsk,
         MockRunLLMTurn,
         MockFork
@@ -1028,6 +1049,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask, RunLLMTurn, For
             MockLlm,
             MockGit,
             MockTime,
+            MockEntropy,
             MockAsk,
             MockRunLLMTurn,
             MockFork
