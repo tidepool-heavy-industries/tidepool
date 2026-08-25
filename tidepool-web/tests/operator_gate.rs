@@ -955,7 +955,7 @@ async fn post_note_appears_above_the_pending_form_in_post_order() {
 /// follows), and the answered gate itself stays on the page as its answered
 /// form.
 #[tokio::test(flavor = "multi_thread")]
-async fn notes_and_answered_between_turns_gate_persist_across_the_loop_boundary() {
+async fn notes_persist_across_continue() {
     let (addr, state) = boot().await;
     let base = format!("http://{addr}");
     let client = Client::new();
