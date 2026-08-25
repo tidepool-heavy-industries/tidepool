@@ -64,6 +64,14 @@ fn concurrent_header() -> LogHeader {
     }
 }
 
+fn hylo_concurrent_header() -> LogHeader {
+    LogHeader {
+        prelude_hash: "outer-subagent-hylo-concurrent".into(),
+        extract_fingerprint: "outer-subagent-hylo-concurrent".into(),
+        harness_version: "test".into(),
+    }
+}
+
 /// The full round trip: authored `loop` → `spawnAgent` → Subagent suspension
 /// → driver-owned handler (real saga, mock backend) → typed
 /// `CuratorReceipt` decode → resumed continuation → durable `State`.
@@ -352,6 +360,108 @@ async fn outer_loop_two_concurrent_spawn_agent_calls_overlap_in_wall_time() {
         state.get("digestB").and_then(|v| v.as_str()),
         Some("digest-b"),
         "child B's own receipt must land on the RIGHT handle, got {state:?}"
+    );
+    assert_eq!(
+        state.get("lastError").and_then(|v| v.as_str()),
+        Some(""),
+        "both spawns must succeed (no rendered SpawnError), got {state:?}"
+    );
+}
+
+/// The same overlap receipt as
+/// `outer_loop_two_concurrent_spawn_agent_calls_overlap_in_wall_time`, but
+/// through `Tidepool.Swarm.hyloConcurrentM` itself
+/// (`HyloConcurrentSubagentHarness.hs`): a two-leaf plan tree, unfolded by a
+/// trivial coalgebra and folded by an algebra whose LEAF case is where each
+/// `spawnAgent` cycle lives, driven via
+/// `hyloConcurrentM mapConcurrently planAlg planCoalg RootSeed` instead of a
+/// hand-written pair of `async`/`wait` calls. Proves the combinator itself —
+/// not just `Tidepool.Async` underneath it — actually overlaps its children's
+/// Subagent cycles when run through the real driver (the fast-tier property
+/// suite in `haskell/test-swarm/SwarmSpec.hs` already proves plan-order
+/// reassembly under a bare `Identity`; this is the wall-clock half of the
+/// same combinator).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hylo_concurrent_m_two_leaf_subagent_spawns_overlap_in_wall_time() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+
+    let agent_cfg = EngineConfig::from_decls(
+        typed_request_agent_decls(),
+        repo_root().join("haskell/lib"),
+        Some(fixtures_dir()),
+    )
+    .expect("answerer engine config");
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(Vec::new()));
+    let writer = tidepool_harness::log::LogWriter::create(
+        support::unique_temp_log_path("outer-subagent-hylo-concurrent"),
+        &hylo_concurrent_header(),
+    )
+    .expect("log writer");
+    let agent = Arc::new(Harness::new(writer, agent_cfg, provider).expect("agent harness boots"));
+    let mut driver = SelfHarnessDriver::new(agent, Arc::new(LogObserver));
+
+    let store = TestRepo::init().expect("git init the memory store");
+    store
+        .writer()
+        .commit_file("MEMORY.md", "seed digest\n", "seed the store")
+        .expect("seed commit");
+    let roots = tempfile::TempDir::new().expect("substrate roots");
+
+    let delay = Duration::from_millis(150);
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+    let payloads = Arc::new(Mutex::new(VecDeque::from(vec![
+        json!({"digest": "digest-a", "summary": "a"}),
+        json!({"digest": "digest-b", "summary": "b"}),
+    ])));
+    let factory = DelayingBackendFactory {
+        delay,
+        concurrent: concurrent.clone(),
+        max_concurrent: max_concurrent.clone(),
+        payloads,
+    };
+    let handler = SubagentHandler::with_backends(
+        roots.path().join("registry"),
+        roots.path().join("worktrees"),
+        roots.path().join("bindings"),
+        store.path().to_path_buf(),
+        Box::new(factory),
+    )
+    .expect("subagent handler opens");
+    driver.set_subagent_handler(handler);
+
+    let source = load_harness_source(&fixtures_dir().join("HyloConcurrentSubagentHarness.hs"))
+        .expect("fixture harness loads");
+
+    let outcome = driver
+        .run_one_loop_iteration(&source, None)
+        .await
+        .expect("one cycle: hyloConcurrentM drives two leaves, both receipts cross back");
+
+    assert!(
+        max_concurrent.load(Ordering::SeqCst) >= 2,
+        "both leaves' backend `start_turn` sleeps must have been in flight at the \
+         same time (max_concurrent() == {}) — hyloConcurrentM driving its children \
+         one at a time would never exceed 1",
+        max_concurrent.load(Ordering::SeqCst)
+    );
+
+    let state = &outcome.state_json;
+    assert_eq!(
+        state.get("runs").and_then(|v| v.as_i64()),
+        Some(1),
+        "the loop completed exactly one round, got {state:?}"
+    );
+    assert_eq!(
+        state.get("digestA").and_then(|v| v.as_str()),
+        Some("digest-a"),
+        "leaf A's own receipt must land on the RIGHT (plan-order) handle, got {state:?}"
+    );
+    assert_eq!(
+        state.get("digestB").and_then(|v| v.as_str()),
+        Some("digest-b"),
+        "leaf B's own receipt must land on the RIGHT (plan-order) handle, got {state:?}"
     );
     assert_eq!(
         state.get("lastError").and_then(|v| v.as_str()),

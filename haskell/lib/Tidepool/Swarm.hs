@@ -45,10 +45,13 @@
 --
 -- == Deliberately NOT here
 --
--- Any 'Strategy' parameter or concurrent\/pooled traversal (a later
--- green-threads lane); node residency; and every domain type — @Outcome@, @Review@, @Spec@,
--- receipts, budgets, approvals. This module is the recursion scheme plus four
--- transformers over it; everything that decides what a node's task MEANS is a
+-- Any 'Strategy' parameter (a policy switch over HOW to traverse — pooled,
+-- bounded, priority-ordered); node residency; and every domain type —
+-- @Outcome@, @Review@, @Spec@, receipts, budgets, approvals.
+-- 'hyloConcurrentM' (below) is the one concurrency seam this module owns,
+-- and it is a plain traversal-shaped function argument, never a hardwired
+-- effect import — this module is the recursion scheme plus its policy
+-- middleware; everything that decides what a node's task MEANS is a
 -- caller's.
 --
 -- Journaling is deliberately not a wrapper either: a journal entry's payload
@@ -61,6 +64,7 @@ module Tidepool.Swarm
   , Alg
   , Coalg
   , hyloM
+  , hyloConcurrentM
     -- * Policy middleware
   , receipted
   , budgeted
@@ -108,6 +112,39 @@ hyloM :: Monad m => Alg m t b -> Coalg m t a -> a -> m b
 hyloM alg coalg = go
   where
     go a = coalg a >>= traverse go >>= alg
+
+-- | The concurrent-sibling hylomorphism: same shape as 'hyloM', but a node's
+-- children are driven through a caller-supplied concurrent traversal instead
+-- of the plain sequential 'traverse' — pass 'Tidepool.Async.mapConcurrently'
+-- (or 'Tidepool.Async.forConcurrently', flipped) to let siblings' effects
+-- overlap instead of running one fully to completion before the next starts.
+--
+-- Reassembly is always in PLAN order, never completion order — the
+-- concurrency-correctness contract every combinator in this module is built
+-- to hold, and it holds here by construction: the supplied traversal is
+-- trusted to return its list in the SAME order as the children it was given
+-- (exactly what 'mapConcurrently' promises — see its own "order-insensitivity"
+-- doc), and 'hyloConcurrentM' does nothing further to the list before handing
+-- the reassembled node to the algebra.
+--
+-- This module stays effect-monad-agnostic even here: the concurrency
+-- primitive is a plain function argument, not an import of 'Tidepool.Async'
+-- (which resolves only inside a live session's generated effect row) — so
+-- the property suite that exercises this combinator can still run under a
+-- bare 'Data.Functor.Identity.Identity', with no JIT/extract compile at all.
+hyloConcurrentM
+  :: Monad m
+  => ((a -> m b) -> [a] -> m [b])
+  -> Alg m t b
+  -> Coalg m t a
+  -> a
+  -> m b
+hyloConcurrentM concTraverse alg coalg = go
+  where
+    go a = do
+      PlanF t kids <- coalg a
+      kids' <- concTraverse go kids
+      alg (PlanF t kids')
 
 -- | Stamp every fold with its evidence.
 --
