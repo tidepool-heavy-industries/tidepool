@@ -37,6 +37,7 @@ module Tidepool.DaemonServer
   , DaemonRequest(..), DaemonResponse(..)
   , encodeRequest, decodeRequest
   , encodeResponse, decodeResponse
+  , sendRequest, recvResponse, sendRequestToDaemon
   ) where
 
 import Network.Socket
@@ -203,8 +204,33 @@ recvRequest sock = do
   argvBytesList <- replicateM (fromIntegral argc) (recvFrame sock)
   pure (DaemonRequest (decodeTextBytes cwdBytes) (map decodeTextBytes argvBytesList))
 
+-- | Send one request using the same encoding as 'recvRequest' consumes.
+sendRequest :: Socket -> DaemonRequest -> IO ()
+sendRequest sock req = NBS.sendAll sock (encodeRequest req)
+
+-- | Receive one response using the streamed counterpart of 'decodeResponse'.
+recvResponse :: Socket -> IO DaemonResponse
+recvResponse sock = do
+  codeW <- recvU32 sock
+  outBytes <- recvFrame sock
+  errBytes <- recvFrame sock
+  pure (DaemonResponse
+    (fromIntegral (fromIntegral codeW :: Int32))
+    (decodeTextBytes outBytes)
+    (decodeTextBytes errBytes))
+
 sendResponse :: Socket -> DaemonResponse -> IO ()
 sendResponse sock resp = NBS.sendAll sock (encodeResponse resp)
+
+-- | Connect to a running daemon for exactly one request/response exchange.
+-- Socket ownership stays in this module so callers cannot accidentally grow
+-- a second implementation of the wire protocol.
+sendRequestToDaemon :: FilePath -> DaemonRequest -> IO DaemonResponse
+sendRequestToDaemon path req =
+  bracket (socket AF_UNIX Stream defaultProtocol) close $ \sock -> do
+    connect sock (SockAddrUnix path)
+    sendRequest sock req
+    recvResponse sock
 
 --------------------------------------------------------------------------------
 -- stdout/stderr capture — turns an in-process IO action into the same
