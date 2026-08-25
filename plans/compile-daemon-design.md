@@ -859,8 +859,10 @@ nothing else needs to move. **The default flips to on only after the
 spawnSpec poison bug (below) is fixed and the daemon leg of the A/B goes
 green** — a one-line change in `lib-extract.sh`'s `start_battery_daemon`
 (swap which of the `TIDEPOOL_EXTRACT_NO_DAEMON`/`TIDEPOOL_EXTRACT_DAEMON`
-checks is the default-skip), owned by whoever lands that fix, not by this
-lane.
+checks is the default-skip). **Status: the spawnSpec fix has landed and its
+own A/B is green (see "Spawn-row memo divergence" below) — the flip itself
+stays scripts-owned, not made by the spawnrow-fix lane (its own `ALLOWED
+PATHS` excludes `scripts/`).**
 
 **Teardown-hygiene finding and fix.** Verifying the SIGINT path (a signal
 sent directly to the script's own pid, as distinct from a terminal Ctrl-C
@@ -896,12 +898,16 @@ closed within this lane's scope:
    lane's `ALLOWED PATHS`) — operator confirmed (2026-08-24) it goes into
    the spawnSpec fix lane's scope alongside the correctness bug below; the
    TERM→KILL escalation here is the right containment on the scripts side
-   meanwhile, kept regardless of what that lane does.
+   meanwhile, kept regardless of what that lane does. **Closed on the
+   daemon-binary side by the spawnrow-fix lane** — see the SIGTERM-while-idle
+   fix below; the scripts-side KILL escalation stays as a second, independent
+   bound regardless.
 
-**Correctness blocker — NOT closed, reported to the parent rather than
-worked around.** The phase-1 acceptance protocol (`scripts/battery.sh -p
-tidepool-handlers`, daemon vs. `TIDEPOOL_EXTRACT_NO_DAEMON=1`) surfaced a
-reproducible daemon correctness bug, isolated from every other variable:
+**Correctness blocker — CLOSED by the spawnrow-fix lane (see "Spawn-row
+memo divergence" below).** The phase-1 acceptance protocol
+(`scripts/battery.sh -p tidepool-handlers`, daemon vs.
+`TIDEPOOL_EXTRACT_NO_DAEMON=1`) surfaced a reproducible daemon correctness
+bug, isolated from every other variable:
 
 - Both legs run against the identical built `tidepool-extract-bin` and,
   critically, each against its OWN brand-fresh, never-before-used
@@ -945,4 +951,111 @@ reproducible daemon correctness bug, isolated from every other variable:
   satisfy phase 1 for the scripts-wiring lane — the "daemon leg green"
   criterion itself moves to whichever lane fixes the spawnSpec bug in
   `haskell/src`, gated on this doc's Decisions-adjacent one-line default
-  flip once that lane's own A/B goes green.
+  flip once that lane's own A/B goes green. **Status: that fix has now
+  landed and its own A/B is green — see "Spawn-row memo divergence"
+  immediately below for the diagnosis, the fix, and both legs' numbers.**
+
+## Spawn-row memo divergence (spawnrow-fix lane)
+
+**Root cause.** `Tidepool.Effects.Core` (`tidepool-mcp/CLAUDE.md`'s
+"Stable-effects-core" section) is a GENERATED module that is "a pure
+function of the effect VOCABULARY alone" — but only within ONE vocabulary.
+Two independent daemon requests compiling DIFFERENT vocabularies (e.g. a
+row without `Tidepool.Agent.Spawn` vs. the Subagent/Worktree/Spawn row that
+needs `spawnSpec`) each resolve the SAME fixed module name
+`Tidepool.Effects.Core` against a DIFFERENT, vocabulary-keyed
+content-addressed include dir on the Rust side
+(`tidepool-mcp/src/lib.rs`'s `ensure_effects_core_module`) — genuinely
+different file content under one module name. `runCompileCycle`'s shared
+`GutsMemo` (§2.3/§7 deviation 1-2 above) is keyed on `ModuleName` alone, and
+`sanitizeMemo` strips only the cycle's own target module and any
+`Tidepool.Session.*` name (§7 deviation 1) — neither exclusion covers
+`Tidepool.Effects.Core`, because unlike a session/target module it is
+*meant* to be reused across requests that share a vocabulary. A narrower
+request's compile therefore warms the shared memo entry for
+`Tidepool.Effects.Core` WITHOUT `spawnSpec`; a later, wider request's own
+`depanal`/`load'` correctly resolves the fresh, `spawnSpec`-bearing file
+from its own include dir, but the memo-consultation step (`OptimizeCoreReachable`'s and `OptimizeEveryModule`'s `cached <- Map.lookup mn <$>
+readIORef ref`) trusted the ModuleName-keyed hit unconditionally and reused
+the stale, narrower compile instead of reading the correct file — the
+target's reference to `spawnSpec` then has no definition anywhere in the
+merged binder set, and `Translate.hs` silently replaces it with a poison
+sentinel (the `[extract] POISONED ... spawnSpec` stderr line), discovered
+downstream by the JIT only when forced
+(`tidepool-codegen/src/host_fns/errors.rs`'s runtime error text — the
+"unresolved external ... poison sentinel" phrasing the daemon-phase1 lane
+observed). Reproduced directly with a two-request minimal case (a narrow
+`Tidepool.Effects.Core` compiled first, a wide one defining `spawnSpec`
+compiled second through the same warm daemon) before the fix — see
+`tidepool-extract-cmd/tests/daemon_integration.rs`'s check (f) below, whose
+red-then-green history against this exact repro is the fix's proof.
+
+**Fix — memo-hit validation via GHC's own content fingerprint, not a
+named-module exclusion.** `GhcPipeline.hs`'s `runCompileCycle` now trusts a
+`GutsMemo` hit only when the cached entry's own `ModSummary` has the SAME
+`ms_hs_hash` (GHC's per-summary content fingerprint, already computed for
+free by `depanal`'s downsweep — the same field GHC's own
+`invalidateModSummaryCache` resets to force a cache miss) as the
+`ModSummary` THIS cycle's own downsweep just produced for the same
+`ModuleName` (`lookupValidMemo`, shared by both the `OptimizeEveryModule`
+and `OptimizeCoreReachable` tiers). A hash mismatch is an ordinary miss:
+compiled fresh from this cycle's own (correctly resolved) file, and the
+memo entry is overwritten via the existing `Map.insert` — no second
+freshness mechanism, just a correctness gate on the existing one. This was
+chosen over excluding `Tidepool.Effects.Core` from the shared memo by name
+(the alternative the spec allowed, "excluding the offending module class
+from the shared warm state") because a name-based exclusion only patches
+the ONE named module and pays its full warm-up cost on every request
+sharing its vocabulary; the content-hash check generalizes to ANY future
+generated module with the same "fixed name, vocabulary-dependent content"
+shape, and it costs nothing when content is unchanged (the overwhelmingly
+common case — same vocabulary, same hash, hit exactly as before). Measured
+warmth cost: zero observed regression — the A/B acceptance run below shows
+the daemon leg still faster than the no-daemon leg by a wide margin.
+
+**SIGTERM-while-idle fix.** `DaemonServer.hs`'s `runDaemon` now installs an
+explicit `SIGTERM` handler (`System.Posix.Signals.installHandler`, the
+`unix` package — already in the with-packages GHC closure, added to
+`tidepool-extract-internal`'s `build-depends`) that sets a shutdown
+`IORef`, and the accept loop bounds its own blocking wait to 1s
+(`System.Timeout.timeout`, the same idiom already used for the per-request
+read timeout) so an idle-blocked daemon re-checks the flag at least once a
+second instead of only at GHC RTS's next safe point. Measured before: 15+s
+to exit on `SIGTERM` while idle. Measured after: ~0.07s.
+
+**Regression coverage.** `tidepool-extract-cmd/tests/daemon_integration.rs`
+gained check (f), `check_f_spawn_row_warm_second_request`, run against the
+SAME warm daemon as checks (a)-(d) (family-bundle discipline — no new
+per-test extract compile beyond the fixtures this check itself needs): a
+NARROW-vocabulary `Tidepool.Effects.Core` fixture compiles first (warms the
+shared memo entry), then a WIDE-vocabulary one defining `spawnSpec`
+compiles second through the same daemon, asserting success, no
+`[extract] POISONED` stderr line, and CBOR/diagnostics byte-parity against
+a direct spawn of the same wide fixture. Confirmed red against the
+pre-fix `GhcPipeline.hs` (reverted via a local patch, rebuilt, rerun):
+`[extract] POISONED 1 unresolved external(s) ... Tidepool.Effects.Core.spawnSpec`
+— the exact production symptom — then green after reapplying the fix. A
+dedicated SIGTERM-latency check was not added to this Rust integration
+test: the fix is entirely inside `DaemonServer.hs`'s accept loop with no
+client-visible protocol surface for `tidepool-extract-cmd` to assert
+against, and this crate's std-only charter has no existing signal-handling
+test idiom to extend cheaply — verified manually instead (see above), and
+the daemon-phase1 lane's own scripts-side teardown test already covers the
+calling script's side of this bound.
+
+**Full acceptance A/B — both legs green.** `scripts/battery.sh -p
+tidepool-handlers`, same built extract, each leg on its own brand-fresh
+`$TIDEPOOL_COMPILE_CACHE_DIR`. Run before this branch had rebased onto the
+daemon-phase1 scripts wiring, so the daemon leg was driven by starting
+`tidepool-extract-bin --daemon` directly and exporting
+`$TIDEPOOL_EXTRACT_DAEMON_SOCKET` around the SAME, unmodified
+`scripts/battery.sh` (this lane's `ALLOWED PATHS` excludes `scripts/`
+either way) — `ExtractCmd::run()`'s env-gated daemon discovery needs
+nothing from the calling script:
+
+- **No daemon** (`$TIDEPOOL_EXTRACT_DAEMON_SOCKET` unset, isolated cache):
+  197/197 passed, 63.3s wall (nextest summary).
+- **Daemon** (isolated cache, same extract binary): 197/197 passed, 40.7s
+  wall (nextest summary) — including all 10 previously-failing
+  `repo_event_with_handler`/`subagent_tool_loop`/`subagent_one_cycle`
+  cases, and faster than the no-daemon leg.

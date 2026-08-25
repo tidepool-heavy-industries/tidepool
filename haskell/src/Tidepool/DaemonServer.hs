@@ -52,7 +52,7 @@ import Data.List (isPrefixOf)
 import Control.Exception
   ( bracket, finally, catch, try, throwIO, SomeException, IOException )
 import Control.Monad (replicateM, when)
-import Data.IORef (newIORef, atomicModifyIORef')
+import Data.IORef (newIORef, atomicModifyIORef', writeIORef, readIORef)
 import System.Directory (removeFile, getTemporaryDirectory)
 import System.IO
   ( Handle, stdout, stderr, hFlush, hClose, hPutStrLn, openTempFile )
@@ -60,6 +60,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.IO.Error (isDoesNotExistError)
 import System.Exit (ExitCode(..))
 import System.Timeout (timeout)
+import System.Posix.Signals (installHandler, sigTERM, Handler(Catch))
 
 --------------------------------------------------------------------------------
 -- Frame primitives
@@ -280,30 +281,52 @@ data DaemonConfig = DaemonConfig
     -- wedged or malformed peer cannot block the single worker forever.
   }
 
--- | Serve requests on @dcSocketPath cfg@ until rotation, the RSS ceiling, or
--- a detected toolchain-stamp change trigger a clean exit — all three share
--- the SAME exit path (stop accepting, close and remove the socket, return),
--- never a third independent shutdown mechanism. Checked once after each
--- request completes: RSS/stamp checks are cheap (a small @\/proc@ read and a
--- small file read respectively — nothing like the toolchain module's own
--- blake3 fingerprint recompute), so checking on every request keeps the
--- bound tight without needing a separate timer thread. Recorded as a
--- deliberate Phase 0 simplification in plans/compile-daemon-design.md §7
--- (the design doc frames this as a background TICK, not per-request).
+-- | How often an idle 'acceptLoop' wakes from a blocking @accept@ to re-check
+-- 'shutdownRequested' — the bound on SIGTERM-to-exit latency while idle (see
+-- 'runDaemon''s SIGTERM handling note). One second is "boring and portable":
+-- short enough that a caller tearing the daemon down never mistakes it for a
+-- hang, long enough that idle polling costs nothing observable.
+acceptPollMicros :: Int
+acceptPollMicros = 1000000
+
+-- | Serve requests on @dcSocketPath cfg@ until rotation, the RSS ceiling, a
+-- detected toolchain-stamp change, or SIGTERM trigger a clean exit — all four
+-- share the SAME exit path (stop accepting, close and remove the socket,
+-- return), never a second independent shutdown mechanism. Rotation/RSS/stamp
+-- are checked once after each request completes: RSS/stamp checks are cheap
+-- (a small @\/proc@ read and a small file read respectively — nothing like
+-- the toolchain module's own blake3 fingerprint recompute), so checking on
+-- every request keeps the bound tight without needing a separate timer
+-- thread. Recorded as a deliberate Phase 0 simplification in
+-- plans/compile-daemon-design.md §7 (the design doc frames this as a
+-- background TICK, not per-request).
+--
+-- SIGTERM: an idle-blocked @accept@ does not itself observe a signal — a
+-- caught SIGTERM only sets 'shutdownRequested', which is why 'acceptLoop'
+-- bounds its own blocking wait to 'acceptPollMicros' instead of calling
+-- 'accept' directly, and re-checks the flag on every wake (spawnrow-fix,
+-- plans/compile-daemon-design.md §7: 15+s observed to exit on TERM while
+-- idle-blocked in a plain @accept@, before this fix).
 runDaemon :: DaemonConfig -> RequestHandler -> IO ()
 runDaemon cfg handler = do
   bootStamp <- maybe (pure Nothing) readIfPresent (dcWatchStamp cfg)
+  shutdownRequested <- newIORef False
+  _ <- installHandler sigTERM (Catch (writeIORef shutdownRequested True)) Nothing
   bracket (openListener (dcSocketPath cfg)) (closeListener (dcSocketPath cfg)) $ \sock -> do
     countRef <- newIORef (0 :: Int)
     let acceptLoop = do
-          accepted <- try (accept sock)
-          case accepted of
-            Left (_ :: SomeException) -> pure ()  -- listener closed out from under us
-            Right (conn, _) -> do
-              serveOne (dcRequestTimeoutSec cfg) handler conn `finally` close conn
-              n <- atomicModifyIORef' countRef (\c -> (c + 1, c + 1))
-              stop <- shouldStopNow cfg bootStamp n
-              if stop then pure () else acceptLoop
+          termed <- readIORef shutdownRequested
+          if termed then pure () else do
+            accepted <- try (timeout acceptPollMicros (accept sock))
+            case accepted of
+              Left (_ :: SomeException) -> pure ()  -- listener closed out from under us
+              Right Nothing -> acceptLoop            -- poll elapsed, re-check the flag
+              Right (Just (conn, _)) -> do
+                serveOne (dcRequestTimeoutSec cfg) handler conn `finally` close conn
+                n <- atomicModifyIORef' countRef (\c -> (c + 1, c + 1))
+                stop <- shouldStopNow cfg bootStamp n
+                termedAfter <- readIORef shutdownRequested
+                if stop || termedAfter then pure () else acceptLoop
     acceptLoop
 
 shouldStopNow :: DaemonConfig -> Maybe BS.ByteString -> Int -> IO Bool
