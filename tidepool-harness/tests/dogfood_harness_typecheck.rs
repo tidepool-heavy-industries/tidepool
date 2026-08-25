@@ -79,7 +79,10 @@ fn typecheck(
         extra_decls = extra_decls,
     );
     if let Err(e) = compile_turn(&cfg.extract_bin, &source, "__probe", &cfg.include, 0, 0) {
-        panic!("{harness_dir} does not typecheck against today's surface:\n{e}");
+        // Debug form: the Display for a compile failure summarizes to a
+        // diagnostic COUNT; the Debug form carries every diagnostic's text,
+        // and a failing pin is exactly when someone needs them.
+        panic!("{harness_dir} does not typecheck against today's surface:\n{e:#?}");
     }
 }
 
@@ -152,7 +155,7 @@ fn dev_tree_typechecks() {
     typecheck(
         "harness-dogfooding/dev-tree",
         outer_row_decls(),
-        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\n",
+        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\nimport qualified Data.Text as T\n",
         concat!(
             "__resumeProbe :: M Text\n",
             "__resumeProbe = do { st <- resumeLoop emptyResume initialState; pure (render st) }\n",
@@ -164,7 +167,7 @@ fn dev_tree_typechecks() {
             // is a runtime bottom laziness would otherwise defer to mid-run
             // (live crash 2026-08-25) — Show forces every field at pin time.
             "__choreForce :: Int\n",
-            "__choreForce = length (show chorePlan) + length (show choreBudget)\n",
+            "__choreForce = T.length (show chorePlan) + T.length (show choreBudget)\n",
         ),
     );
 }

@@ -172,6 +172,9 @@ resumePlanFor fold branch p = case newestEntry replanEntry splitEntry outcomeEnt
     Nothing -> ResumeFresh
   Just (_, ReplanEvent {evDecision = d}) ->
     ResumeAmend d (amendPlan d (maybe p (.splitPlan) recordedSplit))
+  -- Only the three kinds looked up below can reach here; any other event
+  -- as "newest" would mean a lookup bug, and fresh work is the safe verdict.
+  Just _ -> ResumeFresh
   Nothing -> ResumeFresh
   where
     splitEntry = lookupEvent SplitKind branch fold
