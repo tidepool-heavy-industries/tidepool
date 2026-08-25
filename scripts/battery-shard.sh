@@ -58,7 +58,7 @@
 #   -E 'binary(batch_turns_spawn_census)'
 #   -E 'binary(lifecycle_meta) or binary(it_binding) or binary(error_recovery)'
 #   -E 'binary(multi_binder) or binary(info_introspect) or binary(lifecycle_state) or binary(lost_session) or binary(gc_heap_verify_stress) or binary(gc_field_replay)'
-#   -E 'binary(value_fidelity) or binary(shadow_rebind)'
+#   -E 'binary(value_fidelity) or binary(shadow_rebind) or binary(bindings_dedup)'
 #   -E 'binary(text_bind) or binary(stub_fetch) or binary(session_acceptance) or binary(repro_decl_library_import) or binary(value_binding_acceptance) or binary(repro_t_multiline_sig) or binary(name_shadowing)'
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
