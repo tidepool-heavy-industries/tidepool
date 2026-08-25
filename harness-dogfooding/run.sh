@@ -39,6 +39,16 @@ export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug}"
 # unreachable from tests regardless of what the box is running.
 export XDG_CACHE_HOME="${TIDEPOOL_DOGFOOD_CACHE:-$HOME/.cache/tidepool-dogfood}"
 echo "==> dogfood cache: $XDG_CACHE_HOME/tidepool/selfharness"
+# Worker sandbox provisioning (2026-08-25, from live workers' own friction
+# reports, 3x recurrence): the codex child env is allowlist-filtered
+# (tidepool-agent's CHILD_ENV_ALLOWLIST), so workers neither see
+# TIDEPOOL_EXTRACT (needed for targeted in-worktree tests) nor any
+# RUSTC_WRAPPER override — and the operator's cargo-config sccache wrapper
+# is blocked by the sandbox, which every Rust-building worker rediscovered
+# independently. Pass both through; empty RUSTC_WRAPPER disables the
+# config-file wrapper.
+export RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
+export TIDEPOOL_AGENT_ENV_PASSTHROUGH="${TIDEPOOL_AGENT_ENV_PASSTHROUGH:-RUSTC_WRAPPER,TIDEPOOL_EXTRACT}"
 # Companion memory store (plans/companion-memory.md): resolved and
 # auto-seeded by the binary itself (default
 # ~/.local/share/tidepool/companion-memory; TIDEPOOL_MEMORY_REPO overrides).
