@@ -19,7 +19,7 @@
 //! NOT in [`crate::effects::all`] — see [`crate::effects::suspension_roster`].
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
 fn value_arg(name: &'static str) -> Arg {
     Arg {
@@ -117,5 +117,10 @@ pub fn subagent() -> Effect {
             },
         ],
         helpers: Vec::new(),
+        polymorphism: Polymorphism::None,
+        // Same double-duty shape as Console (see that module's `dispatched`
+        // doc): the hand macro also feeds `tidepool-handlers`'s real
+        // `SubagentHandler` projection, out of this migration's scope.
+        dispatched: true,
     }
 }

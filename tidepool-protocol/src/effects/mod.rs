@@ -23,6 +23,17 @@ pub mod worktree;
 use crate::schema::Effect;
 
 /// Every effect whose contract this crate owns AND generates files for.
+///
+/// `AskUser`/`ReadState` sit alongside the four dispatched base effects here
+/// even though they have no `tidepool-handlers` `EffectHandler`
+/// (`Effect::dispatched` is `false` for both) — `decl_rs` still owns their
+/// Haskell decl text; `crate::gen::all_files` reads `dispatched` to skip
+/// `handler_rs`/`wire_rs`/`adapter_rs` for them rather than emitting glue for
+/// a handler that does not exist. They are ALSO listed in
+/// [`suspension_roster`] (a different generator, `harness_req_rs`, needs
+/// their decode-only request enum) — being in both lists is expected, not a
+/// duplication: two generators reading the same effect data for two disjoint
+/// purposes.
 #[must_use]
 pub fn all() -> Vec<Effect> {
     vec![
@@ -30,6 +41,8 @@ pub fn all() -> Vec<Effect> {
         journal::journal(),
         worktree::worktree(),
         event::event(),
+        ask_user::ask_user(),
+        read_state::read_state(),
     ]
 }
 
@@ -51,16 +64,29 @@ pub fn all_described() -> Vec<Effect> {
 /// `classify_hole` needs constructor names + payload shapes for, generated as
 /// decode-only request enums into `tidepool-harness/src/generated/`.
 ///
-/// Deliberately DISJOINT from [`all`]/[`all_described`]: these nine effects'
-/// Haskell decls stay hand-carried in `tidepool-mcp/src/effect_defs.rs` for
-/// now (steps 2-3, held behind an operator ping — see each module's doc), so
-/// none of them flip through [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/
-/// [`crate::gen::handler_rs`]/[`crate::gen::adapter_rs`], only through
-/// [`crate::gen::harness_req_rs`]. The four already-migrated outer effects
-/// (`Worktree`/`RepoEvent`/`Exec`/`Journal`) are NOT repeated here — their
-/// request enums already exist, generated into `tidepool-handlers`, and
-/// `tidepool-harness` (a dependent of that crate already) reuses them
-/// directly rather than duplicating a second generated copy.
+/// #20 steps 2-3: `AskUser`/`ReadState`'s Haskell decl text has fully flipped
+/// onto [`crate::gen::decl_rs`] (see [`all`]'s doc) — they stay listed here
+/// too because `harness_req_rs` (this generator) and `decl_rs` are disjoint
+/// GENERATORS reading the same effect data for disjoint purposes, not because
+/// the effects themselves are unmigrated. `Ask`/`RunLlmTurn`/`Finalize`/
+/// `Fork`/`Green`'s decl text remains hand-carried in
+/// `tidepool-mcp/src/effect_defs.rs`: their GADT/verb shape is fully
+/// schema-described (including `Finalize`'s real invocation-site
+/// [`crate::schema::Polymorphism::ArgBound`]), but their surface HELPER text
+/// (OPAQUE pragmas, `Member`-polymorphic `*Sited` delegation, `unsafeCoerce`
+/// marshaling) is not yet representable by [`crate::schema::HelperBody`]'s
+/// reviewed shapes — see each module's own doc. `Console`/`Subagent` stay
+/// hand-carried for an unrelated reason: their macro ALSO feeds a real
+/// `tidepool-handlers` `EffectHandler` projection, so flipping either would
+/// need `tidepool-handlers` edits, out of this migration's scope (see each
+/// module's `dispatched` doc). None of these five flip through
+/// [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/[`crate::gen::handler_rs`]/
+/// [`crate::gen::adapter_rs`], only through [`crate::gen::harness_req_rs`].
+/// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/
+/// `Journal`) are NOT repeated here — their request enums already exist,
+/// generated into `tidepool-handlers`, and `tidepool-harness` (a dependent of
+/// that crate already) reuses them directly rather than duplicating a second
+/// generated copy.
 #[must_use]
 pub fn suspension_roster() -> Vec<Effect> {
     vec![

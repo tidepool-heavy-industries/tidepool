@@ -13,7 +13,7 @@
 
 use crate::hs::HsType;
 use crate::schema::{
-    Arg, Effect, HandlingClass, Helper, HelperBody, OuterEffect, RustBinding, Verb,
+    Arg, Effect, HandlingClass, Helper, HelperBody, OuterEffect, Polymorphism, RustBinding, Verb,
 };
 
 /// The Journal effect, completely.
@@ -80,5 +80,7 @@ pub fn journal() -> Effect {
             ],
             body: HelperBody::Applied(&["kind", "key", "payload"]),
         }],
+        polymorphism: Polymorphism::None,
+        dispatched: true,
     }
 }

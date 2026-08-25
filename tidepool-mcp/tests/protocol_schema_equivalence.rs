@@ -130,6 +130,31 @@ fn event_decl_matches_the_schema_exactly() {
     );
 }
 
+/// Written to run BEFORE the flip, against the still-hand-written
+/// `askuser_effect_def!` macro — see the module doc. #20 steps 2-3: the first
+/// migrated effect with two constructors riding one GADT (`AskUserWith`/
+/// `NoteWith`) and the first whose helpers are ALL representable as-is (both
+/// `askUserRaw`/`noteRaw` are thin single-verb `send` wrappers) — nothing
+/// relocates to `haskell/lib`.
+#[test]
+fn ask_user_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::askuser_decl(),
+        &tidepool_protocol::effects::ask_user::ask_user(),
+    );
+}
+
+/// Written to run BEFORE the flip, against the still-hand-written
+/// `readstate_effect_def!` macro — see the module doc. #20 steps 2-3: the
+/// smallest migrated effect (one nullary verb, one nullary helper).
+#[test]
+fn read_state_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::readstate_decl(),
+        &tidepool_protocol::effects::read_state::read_state(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -141,7 +166,14 @@ fn every_schema_effect_is_reachable() {
         .collect();
     assert_eq!(
         names,
-        vec!["Exec", "Journal", "Worktree", "RepoEvent"],
+        vec![
+            "Exec",
+            "Journal",
+            "Worktree",
+            "RepoEvent",
+            "AskUser",
+            "ReadState"
+        ],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );
 }

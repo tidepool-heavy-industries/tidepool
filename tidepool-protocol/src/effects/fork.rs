@@ -9,7 +9,7 @@
 //! [`crate::effects::suspension_roster`].
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
 fn site_arg() -> Arg {
     Arg {
@@ -49,7 +49,7 @@ pub fn fork() -> Effect {
                         rust: RustBinding::Derived,
                     },
                 ],
-                ret: HsType::Unit,
+                ret: HsType::Value,
                 errors: None,
                 handling: HandlingClass::Fork,
                 extract: None,
@@ -65,12 +65,23 @@ pub fn fork() -> Effect {
                         rust: RustBinding::Derived,
                     },
                 ],
-                ret: HsType::Unit,
+                ret: HsType::Value,
                 errors: None,
                 handling: HandlingClass::Fork,
                 extract: None,
             },
         ],
         helpers: Vec::new(),
+        // Both constructors return concrete `Value` — the `fork @T`/`forkAll
+        // @T` polymorphism lives entirely in `forkSited`/`forkAllSited`'s
+        // `unsafeCoerce`-marshaling signatures (`Tidepool.Effects`, not this
+        // GADT), which are not yet representable by `HelperBody`'s reviewed
+        // shapes (OPAQUE pragma + `Member`-polymorphic Sited delegation).
+        // `None` here is correct, not a placeholder: nothing at the GADT/row
+        // level binds at an invocation site.
+        polymorphism: Polymorphism::None,
+        // No real `tidepool-handlers` handler (see the module doc); deferred
+        // for the reason above (helpers, not the GADT/verbs, are the gap).
+        dispatched: false,
     }
 }

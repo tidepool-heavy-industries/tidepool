@@ -15,7 +15,7 @@
 //! [`crate::effects::suspension_roster`].
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
 fn site_arg() -> Arg {
     Arg {
@@ -63,7 +63,7 @@ pub fn green() -> Effect {
                         rust: RustBinding::CoreValue,
                     },
                 ],
-                ret: HsType::Unit,
+                ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::Green,
                 extract: None,
@@ -92,7 +92,7 @@ pub fn green() -> Effect {
                     ty: HsType::list(HsType::Int),
                     rust: RustBinding::Derived,
                 }],
-                ret: HsType::Unit,
+                ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::Green,
                 extract: None,
@@ -101,7 +101,7 @@ pub fn green() -> Effect {
                 ctor: "AsyncStatusWith",
                 method: "async_status_with",
                 args: vec![thread_id_arg()],
-                ret: HsType::Unit,
+                ret: HsType::Int,
                 errors: None,
                 handling: HandlingClass::Green,
                 extract: None,
@@ -110,7 +110,11 @@ pub fn green() -> Effect {
                 ctor: "AsyncResultWith",
                 method: "async_result_with",
                 args: vec![thread_id_arg()],
-                ret: HsType::Unit,
+                // Ordinary Hindley-Milner polymorphism inferred from the
+                // thread body's own type, not `@T`-style invocation binding
+                // (no `TypeApplications` call site for extract to pattern-
+                // match on) — `Polymorphism::None` below is correct.
+                ret: HsType::Var("a"),
                 errors: None,
                 handling: HandlingClass::Green,
                 extract: None,
@@ -126,5 +130,14 @@ pub fn green() -> Effect {
             },
         ],
         helpers: Vec::new(),
+        // `AsyncDoneWith`/`AsyncResultWith`'s `Var("a")` usage is ordinary
+        // inferred polymorphism (from `asyncSpawn :: M a -> M Int`'s own
+        // argument), not an `@T` invocation-site binding — no call site
+        // applies a type argument here. `None` is correct.
+        polymorphism: Polymorphism::None,
+        // There is deliberately no `GreenHandler` (see the module doc);
+        // deferred — the substrate helpers (`asyncSpawn`/`asyncResult`/…) are
+        // not yet representable by `HelperBody`'s reviewed shapes.
+        dispatched: false,
     }
 }

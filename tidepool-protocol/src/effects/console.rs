@@ -11,7 +11,7 @@
 //! [`crate::effects::suspension_roster`].
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, OuterEffect, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, OuterEffect, Polymorphism, RustBinding, Verb};
 
 /// The `Console` suspension (`Print` only), decode-only.
 #[must_use]
@@ -45,5 +45,15 @@ pub fn console() -> Effect {
             extract: None,
         }],
         helpers: Vec::new(),
+        polymorphism: Polymorphism::None,
+        // Console has a REAL `tidepool-handlers::ConsoleHandler` — the hand
+        // macro (`console_effect_def!`) still feeds BOTH the decl side
+        // (`effect_decl_projection!`, here) and the handler side
+        // (`effect_rust_projection!`, in `tidepool-handlers`), so this schema
+        // entry cannot flip on its own without also touching
+        // `tidepool-handlers` (out of scope for this migration — see
+        // `suspension_roster`'s doc). `true` documents the real shape even
+        // though this Effect stays out of `effects::all()` for now.
+        dispatched: true,
     }
 }

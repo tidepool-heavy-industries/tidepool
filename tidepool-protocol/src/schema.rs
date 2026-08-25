@@ -78,6 +78,75 @@ pub struct Effect {
     pub verbs: Vec<Verb>,
     /// The thin send-wrapper surface authored code actually calls.
     pub helpers: Vec<Helper>,
+    /// How this effect's row admits a type bound at the invocation site
+    /// (`fork @T`, `finalize @T x`, `runLLMTurn @T`) — #20 steps 2-3's design
+    /// gate, decided explicit-per-effect data (not inferred from an
+    /// unconstrained [`HsType::Var`] turning up in some verb's `ret`) for the
+    /// same reason [`Verb::handling`]/[`Verb::extract`] are required fields
+    /// rather than shape-sniffed: a verb's polymorphism kind is answered once,
+    /// at the definition, not re-derived by a renderer guessing from shape.
+    /// See [`Polymorphism`]'s own variants for the two real shapes this
+    /// migration found.
+    pub polymorphism: Polymorphism,
+    /// Does this effect have a real `tidepool-handlers` `EffectHandler` that
+    /// dispatches its verbs? `true` for an ordinary base effect (`Exec`,
+    /// `Worktree`, …) — [`crate::gen::all_files`] emits `handler_rs`/`wire_rs`/
+    /// `adapter_rs` output for it into `tidepool-handlers`/
+    /// `tidepool-bridge-effects`. `false` for a SUSPENDING effect (`AskUser`,
+    /// `ReadState`, `Fork`, `Finalize`, `RunLlmTurn`, `Green`, `Ask`) that
+    /// never reaches an `EffectHandler` — the harness/driver services it
+    /// directly (see [`crate::effects::suspension_roster`]) — for which
+    /// generating handler/wire/adapter glue would be actively wrong: there is
+    /// no handler struct for it to dispatch into. Such an effect can still
+    /// contribute its DECL text (`decl_rs`) once its helpers are fully
+    /// schema-representable, entirely independent of this flag.
+    pub dispatched: bool,
+}
+
+/// How an effect's row admits a type bound at the invocation site — #20
+/// steps 2-3's design gate (Option B: explicit per-effect data).
+///
+/// The two variants are the two shapes this migration actually found, not a
+/// speculative menu: [`Effect::validate`] checks each against the effect's own
+/// `type_params`/verb shapes, so a mismatch (e.g. an `ArgBound` tyvar absent
+/// from `type_params`) fails at generation time, the same discipline
+/// [`Verb::errors`] tagging already gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Polymorphism {
+    /// Every verb's result is monomorphic; nothing binds at an invocation
+    /// site. The default for almost every effect, including ones whose
+    /// SURFACE helpers (not yet schema-represented) are `@T`-polymorphic one
+    /// layer down — `Fork`/`RunLlmTurn`/`Green`'s own GADT constructors all
+    /// return a concrete type (`Value`, or a verb-local `Int`/`()`); their
+    /// `@T` binding lives entirely in a `*Sited` substrate helper's signature,
+    /// not in the row/GADT this variant describes.
+    None,
+    /// The invocation-bound type variable is a REAL FIELD of at least one
+    /// constructor, and a real, applied parameter of the GADT head — `v` in
+    /// `data Finalize v a where FinalizeWith :: Int -> v -> Finalize v a`.
+    /// The ROW ENTRY itself is the constraint (`Member (Finalize T) effs`),
+    /// exactly the shape `State s` uses — `finalize @T` type-checks because
+    /// the row was built with `Finalize T` in it, not because of anything
+    /// verb-local.
+    ArgBound {
+        /// The type parameter's name, as it appears in `type_params` and in
+        /// the field(s)/`ret` that use it (`"v"`).
+        tyvar: &'static str,
+    },
+    /// The invocation-bound type variable is a PHANTOM at the GADT level: it
+    /// would appear in the GADT's own type parameter list and in a verb's
+    /// `ret`, but never in a constructor FIELD — reserved for an effect whose
+    /// constructor genuinely returns the bare tyvar (no wrapping `Value`/
+    /// concrete type to marshal through). No effect in this schema uses this
+    /// shape yet (`Fork`/`RunLlmTurn`'s constructors return concrete `Value`,
+    /// not a bare `a` — their polymorphism lives in a deferred substrate
+    /// helper, not the GADT), but the variant is named now so a later
+    /// migration of those helpers has a home to bind to rather than inventing
+    /// one under time pressure.
+    ResultBound {
+        /// The type parameter's name (`"a"`).
+        tyvar: &'static str,
+    },
 }
 
 impl Effect {
@@ -248,6 +317,60 @@ impl Effect {
                 self.default_row_args.len(),
                 self.type_params.len()
             ));
+        }
+
+        match self.polymorphism {
+            Polymorphism::None => {}
+            Polymorphism::ArgBound { tyvar } => {
+                if !self.type_params.contains(&tyvar) {
+                    errs.push(format!(
+                        "{}: ArgBound tyvar `{tyvar}` must appear in type_params (it is a real, \
+                         applied GADT parameter)",
+                        self.name
+                    ));
+                }
+                if !self.verbs.iter().any(|v| {
+                    v.args
+                        .iter()
+                        .any(|a| matches!(&a.ty, HsType::Var(t) if *t == tyvar))
+                }) {
+                    errs.push(format!(
+                        "{}: ArgBound tyvar `{tyvar}` must appear as some verb's argument type \
+                         (that is what makes it argument-bound, not result-bound)",
+                        self.name
+                    ));
+                }
+            }
+            Polymorphism::ResultBound { tyvar } => {
+                if self.type_params.contains(&tyvar) {
+                    errs.push(format!(
+                        "{}: ResultBound tyvar `{tyvar}` must NOT appear in type_params (it is a \
+                         phantom, never an applied GADT parameter)",
+                        self.name
+                    ));
+                }
+                if !self
+                    .verbs
+                    .iter()
+                    .any(|v| matches!(&v.ret, HsType::Var(t) if *t == tyvar))
+                {
+                    errs.push(format!(
+                        "{}: ResultBound tyvar `{tyvar}` must appear as some verb's `ret`",
+                        self.name
+                    ));
+                }
+                if self.verbs.iter().any(|v| {
+                    v.args
+                        .iter()
+                        .any(|a| matches!(&a.ty, HsType::Var(t) if *t == tyvar))
+                }) {
+                    errs.push(format!(
+                        "{}: ResultBound tyvar `{tyvar}` must not appear as any verb's argument \
+                         type (that would make it argument-bound, not result-bound)",
+                        self.name
+                    ));
+                }
+            }
         }
 
         // --- supporting type declarations ---------------------------------
