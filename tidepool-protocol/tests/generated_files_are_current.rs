@@ -233,7 +233,10 @@ fn journal_contract_text_is_pinned() {
 
     assert_eq!(
         journal.constructor_signatures(),
-        vec!["RecordStep :: Text -> Text -> Value -> Journal ()"]
+        vec![
+            "RecordStep :: Text -> Text -> Value -> Journal ()",
+            "TraceStep :: Text -> Text -> Value -> Journal ()",
+        ]
     );
 
     assert!(journal.type_def_texts().is_empty());
@@ -246,6 +249,15 @@ fn journal_contract_text_is_pinned() {
             "-- immediately; append-only — never rewritten or compacted.\n",
             "record :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\n",
             "record kind key payload = send (RecordStep kind key payload)",
+        ), concat!(
+            "-- | Append one observability entry to the run's sibling TRACE stream: ",
+            "decision narration and telemetry, never folded into resume. `stage` ",
+            "names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); ",
+            "`key` is the branch or unit it concerns; `payload` is an opaque JSON ",
+            "value whose shape may evolve freely. The handler stamps a timestamp ",
+            "on every line, so trace and journal merge into one timeline.\n",
+            "trace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\n",
+            "trace stage key payload = send (TraceStep stage key payload)",
         )]
     );
 
@@ -257,7 +269,11 @@ fn journal_contract_text_is_pinned() {
          payload` appends ONE entry — `kind` and `key` are caller-chosen labels \
          (e.g. a step kind and the branch or task it concerns), `payload` is an \
          opaque JSON value. Every append is flushed immediately; the journal is \
-         append-only forever — there is no rewrite or compaction verb."
+         append-only forever — there is no rewrite or compaction verb. \
+         `trace stage key payload` appends ONE observability entry to the run's \
+         sibling TRACE stream instead: never folded into resume, timestamped at \
+         the handler, for decision narration and telemetry a reader merges into \
+         one timeline by ts."
     );
     assert_eq!(
         journal.extra_imports,
