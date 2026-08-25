@@ -21,21 +21,38 @@ import HarnessTypes (Budget (..), DevPlan (..), OnFailure (..))
 import Tidepool.Prelude
 
 choreGoal :: Text
-choreGoal = "Create NOTES.md with a short haiku about tide pools and commit it."
+choreGoal = "Assemble a small tide-pool field guide: a haiku and a facts file."
 
 chorePlan :: DevPlan
 chorePlan =
   DevPlan
-    { nodeName = "haiku-notes"
-    , nodeTask = "Create NOTES.md containing a short haiku about tide pools, then commit it."
-    , nodeChecks = ["test -s NOTES.md"]
-    , nodeBoundary = ["NOTES.md"]
+    { nodeName = "field-guide"
+    , nodeTask = "Coordinate two children producing HAIKU.md and FACTS.md."
+    , nodeChecks = ["test -s HAIKU.md", "test -s FACTS.md"]
+    , nodeBoundary = ["HAIKU.md", "FACTS.md"]
     , nodeOnFailure = AskOperator
-    , childPlans = []
+    , childPlans =
+        [ DevPlan
+            { nodeName = "haiku"
+            , nodeTask = "Create HAIKU.md containing a short haiku about tide pools."
+            , nodeChecks = ["test -s HAIKU.md"]
+            , nodeBoundary = ["HAIKU.md"]
+            , nodeOnFailure = Retry
+            , childPlans = []
+            }
+        , DevPlan
+            { nodeName = "facts"
+            , nodeTask = "Create FACTS.md listing three true facts about tide pools, one per line."
+            , nodeChecks = ["test -s FACTS.md"]
+            , nodeBoundary = ["FACTS.md"]
+            , nodeOnFailure = Retry
+            , childPlans = []
+            }
+        ]
     }
 
 choreBudget :: Budget
-choreBudget = Budget {maxDepth = 1, maxAgentCycles = 2, gateWiderThan = 4}
+choreBudget = Budget {maxDepth = 2, maxAgentCycles = 6, gateWiderThan = 4}
 
 choreSnapshotDirtySource :: Bool
 choreSnapshotDirtySource = False
