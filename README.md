@@ -3,7 +3,7 @@
 Compile Haskell effect stacks into Cranelift-backed state machines drivable from Rust.
 
 [![CI](https://github.com/tidepool-heavy-industries/tidepool/actions/workflows/ci.yml/badge.svg)](https://github.com/tidepool-heavy-industries/tidepool/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE.md)
 
 ## What is Tidepool?
 
@@ -471,5 +471,11 @@ cargo nextest run        # Quick tier: pure-Rust crates only (see CONTRIBUTING.m
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)
-or [MIT license](http://opensource.org/licenses/MIT) at your option.
+Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md):
+free to use, modify, and share for any noncommercial purpose (personal
+projects, research, education, charitable and government use included).
+Commercial use requires a separate license — open an issue or contact the
+author.
+
+Versions published before this license change remain available under
+their original MIT/Apache-2.0 terms via git history.
