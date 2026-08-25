@@ -69,7 +69,7 @@ pub fn page(
                         }
                         span id="conn" class="conn ok" { "live" }
                     }
-                    div id="tree" data-node="tree" {
+                    div id="tree" data-node="tree" data-loop-path=(crate::DEFAULT_NODE_ID) {
                         @for (node_id, panel) in &panels {
                             div class="node-slot"
                                 data-node-id=(node_id)
@@ -501,12 +501,18 @@ function mountPanel(next) {
   const slot = document.createElement('div');
   slot.className = 'node-slot';
   slot.setAttribute('data-node-id', path);
+  if (path === tree.getAttribute('data-loop-path')) slot.setAttribute('data-pinned', '');
   const depth = (path.match(/\//g) || []).length;
   slot.style.marginLeft = (depth * 14) + 'px';
   slot.appendChild(next);
   const siblings = Array.from(tree.querySelectorAll(':scope > .node-slot'));
-  const after = siblings.find((s) => !s.hasAttribute('data-pinned')
-    && s.getAttribute('data-node-id') > path);
+  const sortKey = (s) => [s.hasAttribute('data-pinned') ? 0 : 1,
+    s.getAttribute('data-node-id') || ''];
+  const compareSlots = (a, b) => {
+    const ka = sortKey(a), kb = sortKey(b);
+    return ka[0] - kb[0] || ka[1].localeCompare(kb[1]);
+  };
+  const after = siblings.find((s) => compareSlots(slot, s) < 0);
   tree.insertBefore(slot, after || null);
   wire(slot);
 }
@@ -681,7 +687,11 @@ async function post(url, el, body, form) {
 
 function toast(msg, isErr) {
   let t = document.getElementById('toast');
-  if (!t) { t = document.createElement('div'); t.id = 'toast'; document.body.appendChild(t); }
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    document.querySelector('body').appendChild(t);
+  }
   if (!msg) { t.classList.remove('show'); return; }
   t.className = (isErr ? 'err ' : '') + 'show';
   t.textContent = msg;
@@ -821,6 +831,46 @@ mod tests {
         assert!(doc.contains(&format!("style=\"{root_style}\"")), "{doc}");
         assert!(doc.contains(&format!("style=\"{mid_style}\"")), "{doc}");
         assert!(doc.contains(&format!("style=\"{leaf_style}\"")), "{doc}");
+    }
+
+    /// The legacy shell is one outline. Its source must not regress to the
+    /// former navigation model or hide all but one panel on initial render.
+    #[test]
+    fn shell_source_has_no_tab_navigation() {
+        let doc = page(vec![], None, None).into_string();
+        assert!(doc.contains("id=\"tree\""), "{doc}");
+        assert!(!doc.contains("data-tab="), "{doc}");
+        assert!(!JS.contains("activeTab"), "{JS}");
+    }
+
+    /// Collapse state belongs to the wrapper which `applyPatch` leaves in
+    /// place, rather than the replaceable panel returned by SSE.
+    #[test]
+    fn collapse_state_is_applied_to_the_stable_slot() {
+        assert!(
+            CORE_JS.contains("const slot = btn.closest('.node-slot')"),
+            "{CORE_JS}"
+        );
+        assert!(
+            CORE_JS.contains("slot.classList.toggle('collapsed')"),
+            "{CORE_JS}"
+        );
+        assert!(CORE_JS.contains("cur.replaceWith(next)"), "{CORE_JS}");
+    }
+
+    /// A panel first observed through SSE is wrapped and inserted into the
+    /// outline according to the same pinned/path ordering as initial nodes.
+    #[test]
+    fn late_node_mount_is_sorted_into_the_outline() {
+        assert!(
+            CORE_JS.contains("next.getAttribute('data-path')"),
+            "{CORE_JS}"
+        );
+        assert!(CORE_JS.contains("const compareSlots"), "{CORE_JS}");
+        assert!(
+            CORE_JS.contains("tree.insertBefore(slot, after || null)"),
+            "{CORE_JS}"
+        );
     }
 
     /// When a run id is set, the masthead carries it as small text — so a
