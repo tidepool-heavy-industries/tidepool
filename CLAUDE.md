@@ -152,6 +152,7 @@ in the same change that creates it.
 | field/laziness triviality policy | `tidepool-repr` (both JIT and eval call it) |
 | concurrency for authored/model Haskell | `Tidepool.Async` (Control.Concurrent.Async mirror) |
 | operator interaction (forms, gates, steering) | the ask/form machinery (`OperatorGate::present_form` + `Tidepool.Form`) — never a second channel |
+| operator listen channel (durable outbound frame queue + UDS + `tidepool listen` client) | `tidepool-harness::listen` |
 | effect/error type definitions | the effect schema (`effect_defs.rs` / `tidepool-protocol`) — every projection generated, never hand-carried |
 
 **Per-crate `CLAUDE.md` files hold the crate-specific docs** (loaded when you work

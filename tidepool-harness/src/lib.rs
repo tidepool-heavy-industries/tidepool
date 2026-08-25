@@ -3,9 +3,10 @@
 //! [`tree`]), the orchestrator ([`harness`]), the durable event log
 //! ([`log`]) + replay ([`replay`]), frozen context snapshots ([`snapshot`]),
 //! calling-model providers ([`provider`]),
-//! and the self-iterating harness's `render`/`loop` driver
-//! ([`selfharness`]). See this crate's `CLAUDE.md` for the full module map
-//! and the machine-lifecycle/replay-scope notes that don't fit here.
+//! the self-iterating harness's `render`/`loop` driver
+//! ([`selfharness`]), and the operator listen channel ([`listen`]). See
+//! this crate's `CLAUDE.md` for the full module map and the
+//! machine-lifecycle/replay-scope notes that don't fit here.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod effect_trace;
@@ -13,6 +14,7 @@ pub mod engine;
 pub mod forcing;
 mod generated;
 pub mod harness;
+pub mod listen;
 pub mod log;
 pub mod provider;
 pub mod registry;
@@ -30,6 +32,7 @@ pub use engine::{
 };
 pub use forcing::{derive_teaser, NodeTree, TreeError};
 pub use harness::{Harness, HarnessError};
+pub use listen::{ListenPaths, ListenServer, ListenServerError};
 pub use registry::{Checkout, CheckoutError, SessionRegistry};
 pub use selfharness::{
     acquire_lease, fold_run_journal, list_segments, load_harness_source, retire_lease,

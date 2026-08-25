@@ -660,6 +660,14 @@ pub struct SelfHarnessDriver {
     /// checking first (sol cross-family review finding 11: this map was
     /// previously append-only for the harness's whole life).
     fork_child_seq: Mutex<HashMap<NodeId, u32>>,
+    /// The operator listen channel's publisher handle, wired by the
+    /// composition root via [`Self::set_listen_server`] — `None` until then
+    /// (and always `None` for an embedder/test driver that never wires one).
+    /// Deliberately NOT threaded into [`OperatorGate`]: that trait is the
+    /// frozen ask/form contract, and the listen channel is a separate
+    /// outbound-notify mechanism (`crate::listen`) future harness code can
+    /// publish through via [`Self::listen_server`].
+    listen: Option<Arc<crate::listen::ListenServer>>,
 }
 
 /// A boot fold and where its segments live, held together so the
@@ -813,6 +821,7 @@ impl SelfHarnessDriver {
             resume: None,
             node_labels: Mutex::new(HashMap::new()),
             fork_child_seq: Mutex::new(HashMap::new()),
+            listen: None,
         }
     }
 
@@ -864,6 +873,20 @@ impl SelfHarnessDriver {
     /// stdin.
     pub fn set_gate(&mut self, gate: Arc<dyn OperatorGate>) {
         self.gate = gate;
+    }
+
+    /// Wire the operator listen channel's publisher handle — the
+    /// composition root constructs a [`crate::listen::ListenServer`] at boot
+    /// (see `tidepool-selfharness`'s `main`) and hands it here so any future
+    /// harness code can publish outbound frames via [`Self::listen_server`].
+    pub fn set_listen_server(&mut self, listen: Arc<crate::listen::ListenServer>) {
+        self.listen = Some(listen);
+    }
+
+    /// The wired listen-channel publisher, if any — `None` until
+    /// [`Self::set_listen_server`] has been called.
+    pub fn listen_server(&self) -> Option<&Arc<crate::listen::ListenServer>> {
+        self.listen.as_ref()
     }
 
     /// Wire the subagent seam: the handler a `Subagent` suspension from the

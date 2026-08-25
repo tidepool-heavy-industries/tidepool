@@ -5,6 +5,7 @@ use tidepool_handlers::HandlerConfig;
 use tidepool_mcp::server_common;
 
 mod config;
+mod listen_client;
 mod prelude;
 mod setup;
 mod stack;
@@ -15,9 +16,20 @@ use config::Config;
 // CLI
 // ---------------------------------------------------------------------------
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Connect to a resident harness's listen channel and print each frame
+    /// it publishes to stdout, acking after each flush. See
+    /// `tidepool_harness::listen` for the channel this talks to.
+    Listen(listen_client::ListenArgs),
+}
+
 #[derive(clap::Parser)]
 #[command(name = "tidepool", about = "Tidepool MCP server")]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Serve over streamable HTTP instead of stdio. Example: --http 0.0.0.0:8080
     #[arg(long, conflicts_with = "port")]
     http: Option<SocketAddr>,
@@ -107,6 +119,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use clap::Parser;
     let args = Args::parse();
+
+    if let Some(Command::Listen(listen_args)) = &args.command {
+        return listen_client::run(listen_args).await;
+    }
+
     let http_addr = args
         .http
         .or(args.port.map(|p| SocketAddr::from(([0, 0, 0, 0], p))));

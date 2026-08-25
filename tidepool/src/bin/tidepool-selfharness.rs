@@ -290,6 +290,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "outer effect boundary wired (Console/Worktree/RepoEvent/Exec/Journal)"
     );
 
+    // The operator listen channel (swarm plan P3): a durable outbound
+    // message feed from this process to an operator's terminal. Keyed on
+    // the run lease id, so `tidepool listen --run-id <id>` reconnects to the
+    // SAME channel across a crash/restart of this process. Boot frame names
+    // the pid + socket path so an operator watching the raw socket can
+    // correlate it to this process.
+    let listen_paths = tidepool_harness::ListenPaths::for_run(&acquired.lease.run_id);
+    let listen_sock = listen_paths.sock.clone();
+    let listen_server = Arc::new(tidepool_harness::ListenServer::start(listen_paths)?);
+    listen_server.publish(&format!(
+        "listen channel up (pid {}, socket {})",
+        std::process::id(),
+        listen_sock.display()
+    ))?;
+    tracing::info!(
+        target: "tidepool_web",
+        run_id = %acquired.lease.run_id,
+        socket = %listen_sock.display(),
+        "listen channel wired"
+    );
+    driver.set_listen_server(listen_server);
+
     // The subagent boundary: delegation targets the companion's MEMORY
     // store ONLY (operator decision, 2026-08-23) — the standalone git repo
     // of one-fact-per-file markdown — never

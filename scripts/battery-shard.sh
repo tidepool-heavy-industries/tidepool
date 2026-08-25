@@ -38,7 +38,7 @@
 #   -E 'binary(acceptance_askuser) or binary(acceptance_boot_compile_count) or binary(acceptance_cross_turn) or binary(acceptance_finalize) or binary(acceptance_lazy_boot) or binary(acceptance_multi_target) or binary(acceptance_selfharness)'
 #   -E 'binary(selfharness_budget) or binary(selfharness_compaction_fixes) or binary(selfharness_compaction) or binary(selfharness_context_window) or binary(selfharness_framing) or binary(selfharness_lifecycle) or binary(selfharness_spine) or binary(companion_mount_spike) or binary(companion_scope_trees)'
 #   -E 'binary(selfharness_persistence) or binary(selfharness_fn_finalize_spike) or binary(persistence_migration_corpus)'
-#   -E 'binary(companion_collapsed_slice) or binary(answerer_async_fork) or binary(fork_child_decl_plane_type)'
+#   -E 'binary(companion_collapsed_slice) or binary(answerer_async_fork) or binary(fork_child_decl_plane_type) or binary(listen_channel)'
 #   -E 'binary(agent_stack_scoping) or binary(decl_plane_run_scoping) or binary(dogfood_harness_typecheck) or binary(dogfood_observability) or binary(finalize_type_pinning) or binary(outer_effects) or binary(outer_fanout) or binary(outer_subagent) or binary(timing_emission_pin) or binary(turn_lease) or binary(provider_behavior)'
 #   -E 'binary(compile_fail) or binary(delegate_positive_path) or binary(delegate_type_pinning)'
 #   -E 'binary(minimal_watch_list) or binary(nested_async_repro) or binary(node_mailboxes) or binary(reinterpret_rowchange_repro) or binary(selfharness_decl_plane_replay) or binary(stable_effects_core_decl_plane) or binary(state_injection_memo_hit)'
