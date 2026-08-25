@@ -1065,12 +1065,11 @@ RunLLMTurnWith :: Text -> Value -> RunLLMTurn Value
 -- end constructors --
 
 -- type_defs (2 items) --
--- type_defs[0] (440 bytes) --
+-- type_defs[0] (410 bytes) --
 -- | Why a forked child agent session ended WITHOUT a typed answer.
--- Folded as data at the failing branch's own position (PRD 21
--- locked decision 6) — never an exception that erases the results
--- its siblings already produced. Each constructor carries the
--- runtime's own detail text.
+-- Folded as data at the failing branch's own position — never an
+-- exception that erases the results its siblings already produced.
+-- Each constructor carries the runtime's own detail text.
 data InvocationExit
   = ExitRoundsExhausted Text
   | ExitNotFinalized Text

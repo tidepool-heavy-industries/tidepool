@@ -8,12 +8,9 @@
 //! `==` can observe — the same render-fidelity carve-out `jit_surface.rs`
 //! documents for its own non-finite-Double probes.
 //!
-//! `test_unicode_length` is NOT absorbed: it was already a pre-existing
-//! failure at HEAD (`len` is not exported by `Tidepool.Prelude` — "Variable
-//! not in scope: len"; the probably-intended function is `T.length`, but
-//! fixing that is out of this lane's scope). Kept standalone and unmodified
-//! so its own compile failure stays isolated to its own spawn, exactly as
-//! before, instead of taking the whole family bundle's compile down with it.
+//! `test_unicode_length` is NOT absorbed: it exercises its own compile
+//! (kept standalone so a compile failure stays isolated to its own spawn
+//! instead of taking the whole family bundle's compile down with it).
 
 use serde_json::json;
 use tidepool_testing::eval_harness::EvalHarness;
@@ -37,13 +34,11 @@ result = {body}
         .to_json()
 }
 
-/// Pre-existing failure at HEAD, unrelated to this lane's consolidation —
-/// see the module doc. Left standalone and unmodified.
 #[test]
 fn test_unicode_length() {
     // "héllo" is 5 CHARACTERS (6 bytes in UTF-8) — length is character count,
     // matching base/text.
-    let json = run_plain("len \"héllo\"");
+    let json = run_plain("T.length \"héllo\"");
     assert_eq!(json, serde_json::json!(5));
 }
 
