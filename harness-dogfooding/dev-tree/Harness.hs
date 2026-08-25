@@ -1071,10 +1071,44 @@ boundaryViolations tree prefixes =
 -- not fit comes back as @Left (SpawnResultMalformed …)@, never as a success
 -- with a defaulted field.  The worktree already exists, so the spec names it by
 -- id ('spawnSpecIn') rather than asking for a new one.
+--
+-- ONE HOME for the post-cycle snapshot: every codex worker (scaffold, leaf,
+-- integration — 'decompose', 'leafFold', 'spawnIntegration' all bottom out
+-- here) runs under a sandbox whose git dir is read-only, so none of them can
+-- commit their own output. Snapshotting here, before this function returns,
+-- means every caller's very next git read (a scaffold head, a leaf's
+-- before\/after, a re-run of checks) already sees the real commit — nobody
+-- downstream has to remember to ask for it.
 runWorker :: WorktreeHandle -> Text -> Text -> Harness (Either SpawnError WorkerResult)
-runWorker tree name prompt =
-  withHandler (headChanged tree) (noteHeadMove name) $
-    spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
+runWorker tree name prompt = do
+  result <-
+    withHandler (headChanged tree) (noteHeadMove name) $
+      spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
+  case result of
+    Right _ -> snapshotWork tree name
+    Left _ -> pure ()
+  pure result
+
+-- | The harness's own commit of whatever a worker left uncommitted. Codex
+-- workers cannot commit — verified deterministically with @codex sandbox@,
+-- unaffected by @writable_roots@, and our seam sets @approval_policy Never@
+-- so there is no escalation path — so this closes the gap mechanically
+-- instead of trusting a worker's prose claim of a commit sha. A clean tree
+-- is a no-op. The message is harness-authored and deterministic, never
+-- model prose.
+snapshotWork :: WorktreeHandle -> Text -> Harness ()
+snapshotWork tree name =
+  gitIn tree "status --porcelain" >>= \case
+    Left _ -> pure ()
+    Right pr
+      | T.null (T.strip pr.stdout) -> pure ()
+      | otherwise -> do
+          _ <- gitIn tree "add -A"
+          gitIn tree [fmt|commit -m "{name}: agent work"|] >>= \case
+            Left _ -> pure ()
+            Right _ -> do
+              sha <- worktreeHead tree
+              say [fmt|{name}: harness snapshot-committed uncommitted worker output at {renderGitOid sha}|]
 
 spawnIntegration
   :: WorktreeHandle -> DevPlan -> FoldAcc -> [CheckResult] -> Harness (Either SpawnError WorkerResult)
@@ -1589,33 +1623,39 @@ workerPrompt p = [fmt|
   strays:
 {boundaryLines p}
 
-  Inspect the repository before editing. Keep your branch buildable and commit
-  coherent progress — the commits are what your parent integrates, and the
-  repository events they raise are the authoritative record of your work.
-  Do not merely claim Git work: perform it, and cite the evidence.
+  Inspect the repository before editing. Keep your branch buildable and leave
+  coherent progress in the working tree. Your sandbox's git directory is
+  read-only: do NOT run `git commit` (or `git add`, or any other git write —
+  they will fail). Leave your changes uncommitted; the orchestrator snapshots
+  and commits them itself once your turn ends.
 
-  Finish your turn with a WorkerResult: a one-paragraph workSummary, an
-  evidence list (commands run, checks passed, commits made), and
+  Finish your turn with a WorkerResult: a one-paragraph workSummary describing
+  WHAT you changed, an evidence list (commands run, checks passed, files
+  edited — never a commit sha, since you did not and cannot commit), and
   readyForIntegration.
 |]
 
 scaffoldPrompt :: DevPlan -> [DevPlan] -> Text
 scaffoldPrompt p kids = [fmt|
-  You are the SCAFFOLD worker for node {nodeName p}. Your commit is the seam
-  every child below you will be seeded from, so it lands before any child
-  worktree exists.
+  You are the SCAFFOLD worker for node {nodeName p}. What you leave in the
+  working tree is the seam every child below you will be seeded from. Your
+  sandbox's git directory is read-only: do NOT run `git commit` (or `git add`,
+  or any other git write — they will fail). Leave your changes uncommitted;
+  the orchestrator snapshots and commits them once your turn ends, and only
+  then creates the child worktrees.
 
   Task: {nodeTask p}
 
-  These children will fork from the HEAD you leave behind. Write the shared
-  types, stubs, and module boundaries they will need; do not implement their
-  work:
+  These children will fork from the HEAD the orchestrator leaves after
+  committing your work. Write the shared types, stubs, and module boundaries
+  they will need; do not implement their work:
 {childLines}
 
   The orchestrator runs these checks in this worktree afterwards:
 {checkLines p}
 
-  Finish your turn with a WorkerResult describing the seam you left.
+  Finish your turn with a WorkerResult describing WHAT you left in the working
+  tree — never a commit sha, since you did not and cannot commit.
 |]
   where
     childLines =
@@ -1637,14 +1677,17 @@ integrationPrompt p acc checks = [fmt|
 
   Inspect every child diff and its test evidence, finish the integration with
   your native Git tools, resolve remaining conflicts by understanding both
-  implementations, run the combined checks, and commit the integrated result.
-  Never discard a child's work merely to make the merge easy.
+  implementations, and run the combined checks. Your sandbox's git directory
+  is read-only: do NOT run `git commit` (or any other git write — it will
+  fail). Leave the integrated result in the working tree; the orchestrator
+  snapshots and commits it once your turn ends. Never discard a child's work
+  merely to make the merge easy.
 
   The orchestrator re-runs the checks itself after your cycle, at whatever
-  commit you leave HEAD on.
+  commit it leaves HEAD on once it has snapshotted your work.
 
   Finish your turn with a WorkerResult describing what you merged and what you
-  ran.
+  ran — never a commit sha, since you did not and cannot commit.
 |]
   where
     escLines = bulletLines acc.accEsc

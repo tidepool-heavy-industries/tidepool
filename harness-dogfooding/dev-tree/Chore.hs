@@ -28,7 +28,7 @@ chorePlan =
   DevPlan
     { nodeName = "haiku-notes"
     , nodeTask = "Create NOTES.md containing a short haiku about tide pools, then commit it."
-    , nodeChecks = ["true"]
+    , nodeChecks = ["test -s NOTES.md"]
     , nodeBoundary = ["NOTES.md"]
     , nodeOnFailure = AskOperator
     , childPlans = []
