@@ -2,7 +2,7 @@ module Main where
 
 import System.Environment (getArgs, setEnv)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
-import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
@@ -15,7 +15,7 @@ import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import System.Exit (ExitCode(..), exitWith)
-import System.IO (hPutStrLn, stderr, stdout, hSetEncoding, utf8)
+import System.IO (hPutStr, hPutStrLn, stderr, stdout, hSetEncoding, utf8)
 
 import GHC.Types.SourceError (SourceError)
 import GHC (moduleName, moduleNameString, TyCon, Type)
@@ -67,10 +67,48 @@ main :: IO ()
 main = do
   hSetEncoding stdout utf8
   rawArgs <- getArgs
-  case parseDaemonArgs rawArgs of
+  case parseConnectArgs rawArgs of
     Just (Left err) -> hPutStrLn stderr err >> exitWith (ExitFailure 2)
-    Just (Right da) -> runDaemonMode da
-    Nothing         -> runOneInvocation runPipelineSession rawArgs >>= exitWith
+    Just (Right ca) -> runConnectMode ca
+    Nothing -> case parseDaemonArgs rawArgs of
+      Just (Left err) -> hPutStrLn stderr err >> exitWith (ExitFailure 2)
+      Just (Right da) -> runDaemonMode da
+      Nothing         -> runOneInvocation runPipelineSession rawArgs >>= exitWith
+
+-- | Client-mode entry: forward one ordinary invocation to an already-running
+-- daemon, preserving its stdout, stderr, and exit status locally.
+runConnectMode :: ConnectArgs -> IO ()
+runConnectMode ca = do
+  cwd <- getCurrentDirectory
+  result <- try (DaemonServer.sendRequestToDaemon
+    (caSocket ca)
+    (DaemonServer.DaemonRequest cwd (caArgv ca)))
+  case result of
+    Left (err :: SomeException) -> do
+      hPutStrLn stderr ("--connect: could not communicate with daemon at " ++ caSocket ca ++ ": " ++ show err)
+      exitWith (ExitFailure 2)
+    Right response -> do
+      hPutStr stdout (DaemonServer.respStdout response)
+      hPutStr stderr (DaemonServer.respStderr response)
+      exitWith (intToExitCode (DaemonServer.respExitCode response))
+  where
+    intToExitCode 0 = ExitSuccess
+    intToExitCode code = ExitFailure code
+
+data ConnectArgs = ConnectArgs
+  { caSocket :: FilePath
+  , caArgv   :: [String]
+  }
+
+-- | A @--connect@ anywhere selects client mode. Arguments before it belong to
+-- the local launcher; everything following its socket path is forwarded
+-- byte-for-byte as the daemon request argv.
+parseConnectArgs :: [String] -> Maybe (Either String ConnectArgs)
+parseConnectArgs [] = Nothing
+parseConnectArgs ["--connect"] = Just (Left "--connect: socket path is required")
+parseConnectArgs ("--connect" : socketPath : requestArgv) =
+  Just (Right (ConnectArgs socketPath requestArgv))
+parseConnectArgs (_ : rest) = parseConnectArgs rest
 
 -- | One invocation's worth of work: parse argv, seed the build-products-dir
 -- env (per 'argBuildProductsDir'), splice the harness-compilation-profile
