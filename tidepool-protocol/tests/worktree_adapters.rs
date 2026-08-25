@@ -4,7 +4,7 @@
 //! `generated_files_are_current` never sees this module — nothing is written to
 //! disk on this branch. These tests exercise `gen::adapter_rs::file` directly
 //! against `effects::all_described()`, which is the test-only view that
-//! includes Worktree. See the scaffold doc §11.5/§11.8.
+//! includes Worktree.
 
 use tidepool_protocol::gen::{adapter_rs, handler_rs};
 

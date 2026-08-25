@@ -142,7 +142,7 @@ import qualified Tidepool.Data.Text as T
 --
 -- It lives HERE rather than in the generated @Tidepool.Effects@ because it
 -- calls 'renderWorktreeError', which is authored library code in
--- "Tidepool.Worktree" (PRD 22 lane 3). @Tidepool.Effects@ cannot import that
+-- "Tidepool.Worktree". @Tidepool.Effects@ cannot import that
 -- module — that module imports IT — so a helper spliced into the generated
 -- module may not reference a name that lives in the library layer. Subagent's
 -- row already requires Worktree, so this module can reach it in the one
@@ -240,7 +240,7 @@ spawnAgent spec = spawnAsync @r spec >>= either (pure . Left) (awaitAgent @r)
 -- The phantom @r@ is what makes 'awaitAgent' need no type application: the
 -- schema the child is held to was fixed at 'spawnAsync', and the handle carries
 -- that choice to the await. A handle never crosses a resident-cycle boundary
--- (PRD 19's rule for every runtime handle) — what crosses is the recorded
+-- (the rule for every runtime handle) — what crosses is the recorded
 -- outcome.
 --
 -- ABSTRACT: the constructor is not exported. A 'CycleId' an author could forge

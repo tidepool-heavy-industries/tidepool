@@ -4,11 +4,10 @@
 //! `Event a`/`Observed a`/`instance Functor Event` are genuinely polymorphic
 //! and have no schema vocabulary at all (Worktree's non-representable names
 //! were all HELPERS; here two TYPE declarations and a typeclass instance
-//! relocate too) — see `tidepool-protocol/src/effects/event.rs`'s module doc
-//! and `plans/self-iterating-harness/22-p3-event-survey.md`.
+//! relocate too) — see `tidepool-protocol/src/effects/event.rs`'s module doc.
 //!
 //! These literal strings are HAND-TRANSCRIBED from `event_effect_def!`
-//! (`tidepool-mcp/src/effect_defs.rs`) as it stood before this lane's flip —
+//! (`tidepool-mcp/src/effect_defs.rs`) as it stood before the migration flip —
 //! not copied from the schema's own rendering — so a rendering bug that
 //! produces SOME plausible output is still caught.
 

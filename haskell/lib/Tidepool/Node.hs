@@ -1,8 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Capability-handle mailboxes over a green thread — PRD 20 S1-L4 wave 2
--- (@plans\/self-iterating-harness\/20-s1l4-green-threads.md@, "Wave 2 —
--- capability handles and mailboxes").
+-- | Capability-handle mailboxes over a green thread.
 --
 -- __Handles are capabilities: possession is permission.__ There is no
 -- registry, no node ids, no addressing scheme, and no lookup-by-name or
@@ -21,9 +19,9 @@
 --
 -- The scaffold this module implements sketched @NodeHandle down r@ with no
 -- typed way for the PARENT to observe an up message — an omission inherited
--- from PRD 20's own public-surface sketch, which names 'sendUp' and
+-- from that original sketch, which names 'sendUp' and
 -- 'folded' but never says where an up message is read. Escalation
--- (@Up = Escalate Failure | Progress Text@ in that PRD's own prose) is the
+-- (@Up = Escalate Failure | Progress Text@ in that sketch's own prose) is the
 -- whole point of the uplink, so the omission is a gap in the sketch, not a
 -- deliberate one-directional design. 'NodeHandle' is therefore
 -- @NodeHandle up down r@ here, with 'received' as 'inbox's parent-side
@@ -105,7 +103,7 @@ import Tidepool.Aeson.Value (ToJSON (..), Value (..))
 import qualified Tidepool.Aeson.KeyMap as KM
 import Tidepool.Async (Async, async)
 import Tidepool.Effects (M, liftEither, mailboxNew, mailboxSend)
--- `Event`/`mailbox` are DEFINITIONS in `Tidepool.Event` (PRD 22 lane 4), not
+-- `Event`/`mailbox` are DEFINITIONS in `Tidepool.Event`, not
 -- the generated `Tidepool.Effects` module.
 import Tidepool.Event (Event, mailbox, waitEvent)
 

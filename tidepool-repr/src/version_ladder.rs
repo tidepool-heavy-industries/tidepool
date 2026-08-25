@@ -2,9 +2,8 @@
 //! persistence artifacts (harness log, worktree/handlers journals, the
 //! selfharness transcript, `Checkpoint`) — as opposed to `serial/`'s CBOR
 //! wire format, whose artifacts (`.cbor` fixtures) are reproducible build
-//! outputs and so can just be regenerated on a breaking bump. See
-//! `plans/persistence-versioning-design.md` for the design this implements;
-//! this module is Section 3's "the ladder itself."
+//! outputs and so can just be regenerated on a breaking bump. See this
+//! crate's own `CLAUDE.md`, "Version ladder", for the fuller contract.
 //!
 //! **Per-kind, not per-repo.** Every artifact kind (the harness log's
 //! `Event`, a worktree journal row, a handlers-journal segment, the
@@ -51,9 +50,10 @@ pub struct MigrationError(pub String);
 
 /// Why [`migrate_to_current`] refused to produce a current-shape payload.
 /// Carries no path — each caller's own error enum adds that (and an
-/// operator-legible remedy) when it converts this into its own typed
-/// variant; see `persistence-versioning-design.md` §6 for the floor-policy
-/// message shape this feeds.
+/// operator-legible remedy naming the artifact's path, the version found,
+/// the floor this build still supports, and the two real remedies: archive
+/// or delete and start fresh, or read it with an older build) when it
+/// converts this into its own typed variant.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LadderError {
     /// `found` is older than the oldest version this build still carries a
@@ -99,10 +99,9 @@ pub fn set_version(mut value: Value, to: u32) -> Value {
 /// Fold `value` forward from its `found` version to `current`, through
 /// `migrations` (indexed from `floor`: `migrations[0]` is the
 /// `floor -> floor + 1` step, `migrations[1]` is `floor + 1 -> floor + 2`,
-/// …). Rejects loud and typed outside `[floor, current]` — see
-/// `persistence-versioning-design.md` §6. Never silently regenerates or
-/// resets; the caller decodes the returned value into its own current typed
-/// shape.
+/// …). Rejects loud and typed outside `[floor, current]`. Never silently
+/// regenerates or resets; the caller decodes the returned value into its own
+/// current typed shape.
 ///
 /// Panics if `migrations` is shorter than the ladder needs to climb from
 /// `found` to `current` — a caller registering a `current` its own table

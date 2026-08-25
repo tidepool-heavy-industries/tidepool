@@ -65,7 +65,7 @@
 //! `Render` joined `Plain`/`Binding` so the registry path can serve every
 //! session consumer).
 //!
-//! CONTRACT (see `plans/unpark/`, §6.2, for why this split is load-bearing):
+//! CONTRACT (why this split is load-bearing):
 //! `Project`/`Render` return their tenured [`crate::old_space::RootSlot`]s
 //! inline in the completion; `Bind` cannot, because `RootSlot` is a bare
 //! `*mut *mut u8` newtype that is deliberately NOT `unsafe impl Send` (unlike
@@ -2033,8 +2033,7 @@ impl JitEffectMachine {
             "run_suspendable called while a continuation is already suspended — \
              resume_suspended it first"
         );
-        // Guard (plans/post-restart/codex-review-2026-08-08.md item 11): the
-        // slot-vs-registry exclusion — no machine holds both a slot
+        // Guard: the slot-vs-registry exclusion — no machine holds both a slot
         // continuation and parked ones — is enforced here. The sibling
         // direction (a parked-path entry while the SLOT is occupied) is
         // already caught by the `suspended_continuation.is_none()` assert
@@ -2531,8 +2530,8 @@ impl JitEffectMachine {
                         // already-NF Tier0 case. TOLERANT, not strict: a Tier1
                         // bind (tenured as-is, never forced — a bare closure,
                         // OR any Tier0-shaped type that merely CONTAINS one,
-                        // e.g. a record with a function field, PRD 21 lane
-                        // C1's mounted-value shape) has a real `TAG_CLOSURE`
+                        // e.g. a record with a function field, a
+                        // mounted-value shape) has a real `TAG_CLOSURE`
                         // reachable here, which the strict bridge rejects. The
                         // same substitution `finalize`'s closure path already
                         // uses for its rendered value: the REAL value stays
@@ -2859,8 +2858,7 @@ impl JitEffectMachine {
         //     carry a sparser table than a prior turn did.
         if let Ok(refreshed) = ConTags::from_table(table) {
             if self.tags.is_err() {
-                // NAMED heal event (plans/post-restart/extract-wave/boot's
-                // lazy-boot item): a machine bootstrapped from a ConTags-free
+                // NAMED heal event (the lazy-boot case): a machine bootstrapped from a ConTags-free
                 // expr (e.g. the outer session's pure `render` seed) starts
                 // `Err(MissingConTags)`; this fragment's table is the first to
                 // resolve. Must be loud — the whole point of naming it is that
@@ -3976,7 +3974,7 @@ impl JitEffectMachine {
         (ids.len(), hids.len())
     }
 
-    /// SCOPE RETIREMENT (PRD 21 lane C2): deregister one persistent-binding-store binding's
+    /// SCOPE RETIREMENT: deregister one persistent-binding-store binding's
     /// persistent GC root, because the scope that solely owned it is retiring.
     ///
     /// **This is a scope-retirement primitive, not a general "drop a root"

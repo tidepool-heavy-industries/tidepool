@@ -122,3 +122,36 @@ headers), and is NOT regenerated. Bump both sides in one commit, and pin the
 older-minor read (`read_metadata_accepts_previous_minor_without_poisoned_key`).
 A key that is not optional, or any change to an existing key's shape, is a
 MAJOR bump with the full regeneration dance above.
+
+## Version ladder (`version_ladder.rs`) — the one migration mechanism for durable, non-reproducible persistence artifacts
+
+`serial/`'s CBOR versioning above answers the wire format for `.cbor`
+fixtures — build artifacts that a breaking bump can just regenerate.
+`version_ladder.rs` answers the different case: durable artifacts that are
+NOT reproducible (the harness log, worktree/handlers journals, the
+selfharness transcript, a `Checkpoint`, a harness's own `State` blob) — the
+durable record of one real operator's run, which a breaking change must
+migrate forward, never regenerate.
+
+**Per-kind, not per-repo.** Each artifact kind owns its own `floor`/
+`current`/migration table, mirroring how `serial::VERSION_MAJOR`/
+`VERSION_MINOR` scope to one wire format rather than the whole repo. This
+module supplies only the fold (`migrate_to_current`); each consumer supplies
+its own bounds, its own `Migration` functions, and its own typed,
+path-carrying rejection on top of [`LadderError`] (a
+`PersistenceError::BelowFloor`, a `WorktreeError::JournalFutureVersion`, …).
+
+**The unstamped-file convention.** [`found_version`] reads a payload with no
+top-level `"version"` key as `0`, never as the kind's current version — so an
+artifact written before this scheme existed keeps loading: a consumer's
+`floor` starts at `0`, and its migration table's first entry is the `0 -> 1`
+step that turns the unstamped shape into an explicitly-versioned one.
+
+**The fold.** [`migrate_to_current`] walks `value` forward from its stamped
+`found` version to `current` through a `&[Migration]` table indexed from
+`floor` (`migrations[0]` is the `floor -> floor + 1` step, and so on) —
+`N` versions cost `N - 1` small, independently-testable steps, never one
+from-any-version-to-current function. Rejects loud and typed outside
+`[floor, current]` (`LadderError::BelowFloor`/`UnsupportedVersion`) — never a
+silent reset; a below-floor artifact must be archived/deleted and restarted
+fresh, or read with an older build that still carries the migration path.

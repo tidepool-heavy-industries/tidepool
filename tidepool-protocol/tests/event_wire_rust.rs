@@ -16,7 +16,7 @@
 //!    types, the exact derive line, and `#[core(name = …)]` presence.
 //!
 //! Every expected value in test 2 is HAND-TRANSCRIBED from the `Ev*` block that
-//! was live in `tidepool-bridge-effects/src/lib.rs` before this lane's flip
+//! was live in `tidepool-bridge-effects/src/lib.rs` before the migration flip
 //! (`EvEventId` through `EvRepositoryEvent`) — not copied from this generator's
 //! own output, for the same reason `worktree_wire_rust.rs`'s header gives. It
 //! stays a literal `assert_eq!`, not a snapshot: snapshotting it would seed the
@@ -138,7 +138,7 @@ fn assert_enum(module: &str, wire_name: &str, derive_line: &str, variants: &[&st
 }
 
 /// Every field/variant, in order, transcribed by hand from the `Ev*` block
-/// that was live in `tidepool-bridge-effects/src/lib.rs` before this lane's
+/// that was live in `tidepool-bridge-effects/src/lib.rs` before the migration
 /// flip. See this file's header doc for why that transcription — not the
 /// generator's own output — is what this test proves against.
 #[test]

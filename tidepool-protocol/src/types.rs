@@ -15,10 +15,9 @@
 //! cannot disagree, because there is nothing for them to disagree about — the
 //! comment does not get a better guard, it gets deleted.
 //!
-//! Everything here is CLOSED, per PRD 22's first hard rule. There is no
-//! raw-Haskell slot and no raw-Rust slot. A declaration that cannot be spelled
-//! with these shapes stays hand-written OUTSIDE the contract; it is never
-//! smuggled in as a string. See the scaffold doc §11.
+//! Everything here is CLOSED. There is no raw-Haskell slot and no raw-Rust
+//! slot. A declaration that cannot be spelled with these shapes stays
+//! hand-written OUTSIDE the contract; it is never smuggled in as a string.
 
 use crate::hs::HsType;
 
@@ -41,9 +40,9 @@ pub struct TypeDef {
     /// (`WtWorktreeId` for `WorktreeId`), or `None` when they agree.
     ///
     /// Carried as DATA so retiring the `Wt`/`Ev`/`Ag` prefixes is a one-line
-    /// schema edit rather than a rename across lane boundaries. The scaffold
-    /// doc §11.4 states the trigger: when the last mirror family is generated,
-    /// this field drops from every `TypeDef` in one sweep.
+    /// schema edit rather than a rename across lane boundaries: when the last
+    /// mirror family is generated, this field drops from every `TypeDef` in
+    /// one sweep.
     pub wire_rust: Option<&'static str>,
     /// What kind of declaration this is.
     pub shape: TypeShape,
@@ -281,7 +280,7 @@ pub enum TypeShape {
     /// side no longer has.
     ///
     /// This is the shape that mints a Rust newtype WITH a fallible boundary
-    /// constructor (scaffold doc §11.4). A bare `Int`/`Text` FIELD inside a
+    /// constructor. A bare `Int`/`Text` FIELD inside a
     /// record is deliberately NOT promoted: promoting it would change the
     /// Haskell declaration, and that declaration is byte-locked by the Class A
     /// goldens.
@@ -407,9 +406,9 @@ pub enum JsonInstance {
 
 /// What an [`TypeShape::Identity`]'s fallible boundary constructor enforces.
 ///
-/// PRD 22's requirement: *wire-side integers and identifiers generate as
+/// The requirement: wire-side integers and identifiers generate as
 /// newtypes with fallible boundary constructors — decode once at the edge, typed
-/// everywhere after.* This is the "decode once" policy, as data.
+/// everywhere after. This is the "decode once" policy, as data.
 ///
 /// Tightening one is a schema edit with a test, not a code change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,8 +424,7 @@ pub enum Validation {
     /// Byte-oriented rather than char-oriented deliberately: this mirrors
     /// `tidepool_worktree::WorktreeId::is_path_safe`, which is byte-oriented
     /// because the value is joined into a filesystem path as one component.
-    /// The scaffold doc §11.4 names the duplication this creates and the
-    /// cross-check test that guards it.
+    /// A cross-check test guards the duplication this creates.
     Segment {
         /// Maximum length in bytes.
         max_len: usize,

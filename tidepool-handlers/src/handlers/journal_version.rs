@@ -1,11 +1,11 @@
 //! Version stamp for [`super::journal::JournalHandler`]'s per-segment wire
-//! contract — kind 5 of `plans/persistence-versioning-design.md`'s six
-//! persistence-versioning kinds. Stamped PER SEGMENT, not per run: PRD 20's
-//! segmented-journal design already treats each segment file as
-//! independently readable/foldable (`tidepool_harness::selfharness::resume`),
-//! and a run-level version would need to reach into that crate's
-//! lease/fold machinery, which sits above this crate in the dependency
-//! graph — see `persistence-versioning-design.md` §2/Open Question 4.
+//! contract, on `tidepool_repr::version_ladder` (the one migration-ladder
+//! mechanism for durable, non-reproducible persistence artifacts). Stamped
+//! PER SEGMENT, not per run: the segmented-journal design already treats
+//! each segment file as independently readable/foldable
+//! (`tidepool_harness::selfharness::resume`), and a run-level version would
+//! need to reach into that crate's lease/fold machinery, which sits above
+//! this crate in the dependency graph.
 
 use serde_json::Value;
 use tidepool_repr::version_ladder::{set_version, Migration, MigrationError};

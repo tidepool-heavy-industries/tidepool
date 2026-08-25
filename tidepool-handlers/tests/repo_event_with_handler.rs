@@ -1,4 +1,4 @@
-//! PRD 19 lane L4 — the acceptance harness for `withHandler`.
+//! The acceptance harness for `withHandler`.
 //!
 //! One named test per AUTHORED semantic (`haskell/lib/Tidepool/Event.hs`'s
 //! "Handler semantics" list), each proving its semantic separately, against a
@@ -338,16 +338,15 @@ fn observed_commits(log: &Arc<Mutex<Vec<EvRepositoryEvent>>>) -> Vec<String> {
 /// FAIL LOUDLY when the environment cannot run these gates.
 ///
 /// These gates drive a real extract + JIT + temp git repository; without
-/// `TIDEPOOL_EXTRACT` and GHC they can verify NOTHING. They previously
-/// `return`ed early, which nextest reports as a PASS — and a skip spelled as a
-/// pass is structurally indistinguishable from a real pass: it runs by name,
-/// emits a real PASS line, and counts toward started-vs-run. Seven of these
-/// gates once "passed" in 6ms apiece for exactly that reason. The root
-/// `CLAUDE.md` already required tests without `TIDEPOOL_EXTRACT` to fail loud;
-/// the early return was nonconforming, not a competing convention.
+/// `TIDEPOOL_EXTRACT` and GHC they can verify NOTHING. An early return here
+/// would be a skip spelled as a pass — nextest reports it as a PASS,
+/// structurally indistinguishable from a real one: it runs by name, emits a
+/// real PASS line, and counts toward started-vs-run. The root `CLAUDE.md`
+/// requires tests without `TIDEPOOL_EXTRACT` to fail loud.
 ///
 /// Safe because `scripts/battery.sh` derives `TIDEPOOL_EXTRACT` itself — this
-/// fires only on the direct-invocation mistake that used to yield a false green.
+/// fires only on the direct-invocation mistake that would otherwise yield a
+/// false green.
 fn require_ghc() {
     assert!(
         ghc_available(),

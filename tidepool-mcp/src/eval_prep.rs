@@ -238,14 +238,13 @@ pub fn effects_core_module_source(vocab_effects: &[EffectDecl]) -> String {
     out.push_str("import qualified Tidepool.Patch as Patch\n");
     out.push_str("import Control.Monad.Freer hiding (run)\n");
     // `Eff`'s own constructors, for scopes that INTERPOSE on the computation
-    // they enclose rather than merely sending into it. PRD 19's `withHandler`
+    // they enclose rather than merely sending into it. `withHandler`
     // is the live consumer: it walks its body's freer structure to run a
     // handler before every effect the body performs, which is what lets the
     // author's closure be applied by ordinary Haskell application instead of
     // by a runtime closure-apply entry point that does not exist. `Eff` is the
     // SAME type re-exported by `Control.Monad.Freer`, so this import adds
     // constructors and the queue operations, and shadows nothing.
-    // See plans/post-restart/worktree-lanes/L4-mechanism.md.
     out.push_str("import Control.Monad.Freer.Internal (Eff(..), qApp, tsingleton)\n");
     // runLLMTurn/runLLMTurnFork's hidden *Sited siblings (#R0) coerce the
     // ask reply back to the caller's answer type after extract has statically
@@ -782,7 +781,7 @@ pub struct TurnTemplate<'a> {
     /// bound (an `ideas` array stubbed to a string was the live failure).
     /// Default `false`: every pre-existing caller's bytes are unchanged.
     pub unpaginated: bool,
-    /// PRD 21 C5: when `true`, every entry's result binding applies
+    /// When `true`, every entry's result binding applies
     /// `Tidepool.Agent.Delegate.runDelegate` to its own binder — `_r <-
     /// runDelegate <binder>` instead of `_r <- <binder>` — so the entry's
     /// body (`code`) compiles at the narrow `Delegate ': effs` row

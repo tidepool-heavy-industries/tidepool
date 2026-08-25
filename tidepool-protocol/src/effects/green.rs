@@ -1,4 +1,4 @@
-//! The `Green` suspension — decode-only (PRD 22 step 1).
+//! The `Green` suspension — decode-only.
 //!
 //! `Tidepool.Async`'s substrate (`AsyncSpawnWith`/`AsyncDoneWith`/
 //! `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncResultWith`/`AsyncCancelWith`).

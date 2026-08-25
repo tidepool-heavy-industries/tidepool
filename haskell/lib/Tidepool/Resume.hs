@@ -2,9 +2,7 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | The read half of the durable run journal — PRD 20's ("exomonad v3")
--- "Persistence and resume" section, lane S1-L5
--- (@plans\/self-iterating-harness\/20-s1-l5-resume.md@).
+-- | The read half of the durable run journal.
 --
 -- "Tidepool.Journal" is the WRITE side: @record kind key payload@ appends one
 -- durable entry per completed step. This module is what the authored program

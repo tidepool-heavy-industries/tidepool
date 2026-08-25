@@ -1,7 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 
 -- | Fixtures for the scope-tree acceptance suite
--- (@tidepool-harness\/tests\/companion_scope_trees.rs@, PRD 21 lane C2). The
+-- (@tidepool-harness\/tests\/companion_scope_trees.rs@). The
 -- C1 mount-spike fixture (@examples\/harness\/mount-spike@) is left alone: it
 -- is the FLAT-session mount user, and its passing unmodified is a back-compat
 -- proof obligation.

@@ -1140,7 +1140,7 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-    /// Evidence for `plans/post-restart/agent-lanes/dev-adapter-bringup.md`:
+    /// Live evidence for config isolation:
     /// spawn the real app-server against the operator's real `~/.codex`,
     /// complete the handshake, make one metadata request that spends no
     /// model tokens, shut down cleanly, and prove config isolation held

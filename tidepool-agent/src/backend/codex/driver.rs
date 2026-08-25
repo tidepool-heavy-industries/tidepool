@@ -8,8 +8,8 @@
 //!
 //! # The three shapes this module is responsible for holding
 //!
-//! 1. **`cwd` at turn start, never at thread start.** PRD 18 acceptance
-//!    criterion 11: a `cwd` on `thread/start` triggers Codex's project-trust
+//! 1. **`cwd` at turn start, never at thread start.** A `cwd` on
+//!    `thread/start` triggers Codex's project-trust
 //!    write into the operator's `config.toml`. [`ThreadStartWithDynamicTools`]
 //!    has no `cwd` field at all, so this is structural rather than a
 //!    convention — [`thread_start_omits_cwd`](tests::thread_start_omits_cwd)
@@ -513,7 +513,7 @@ impl Drop for CodexAgentBackend {
 
 /// Makes one [`CodexAgentBackend`] per cycle.
 ///
-/// Config isolation (PRD 18 AC 11: no normal worker run mutates the
+/// Config isolation (no normal worker run mutates the
 /// operator's `~/.codex`) holds for N instances exactly as for one because it
 /// is upheld by the REQUEST SHAPE, not a per-process guard — see this
 /// module's docs, point 1, and `tidepool-agent/CLAUDE.md`'s "Config isolation
@@ -957,7 +957,7 @@ mod tests {
 
     // --- request shapes -----------------------------------------------------
 
-    /// PRD 18 acceptance criterion 11, pinned at the serialization boundary:
+    /// Config isolation, pinned at the serialization boundary:
     /// `thread/start` must carry no `cwd`, because that is the request that
     /// writes `projects.<path>` into the operator's `config.toml`.
     #[test]

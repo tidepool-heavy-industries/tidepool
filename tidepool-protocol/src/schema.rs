@@ -1,14 +1,13 @@
 //! The effect schema — plain data describing one effect completely.
 //!
-//! This is the single source PRD 22 is built around. Everything an effect's
+//! This is the schema's single source of truth. Everything an effect's
 //! generated artifacts need is here as structured data: no raw Haskell, no raw
 //! Rust bodies, no field-order-by-comment.
 //!
 //! Two annotation slots ([`Verb::handling`] and [`Verb::extract`]) exist for
 //! LATER phases. They are required fields, so a verb cannot be added without
-//! answering them — that is PRD 22's acceptance line "a verb missing a
-//! handling-class annotation fails generation, not runtime" — but no phase-1
-//! generator reads them. See the scaffold doc §3.5.
+//! answering them: a verb missing a handling-class annotation fails
+//! generation, not runtime — but no phase-1 generator reads them yet.
 
 use crate::hs::{render_signature, HsType};
 pub use crate::types::{
@@ -164,7 +163,7 @@ impl Effect {
     /// it lands on — the derivation behind [`HelperBody::Projection`].
     ///
     /// Same resolution `wire_rust_of` performs for a `Named` field's Rust
-    /// spelling (§11.10 item 1), one step further: the declaration that DECLARES
+    /// spelling, one step further: the declaration that DECLARES
     /// a type is the only thing asked what its fields are typed. Nothing is
     /// restated, so nothing can drift.
     ///
@@ -693,8 +692,7 @@ pub enum HelperBody {
     /// (`listWorktrees :: M [WorktreeSummary]`, not `M (Either …)`).
     ///
     /// A shape, not a body: `liftEither` is named once here, in Rust, and there
-    /// is no Haskell source in the schema. Added deliberately in lane 3 — see
-    /// the scaffold doc §11's helper table.
+    /// is no Haskell source in the schema.
     ///
     /// The point-free and applied `liftEither` forms are NOT added, because no
     /// migrated effect needs them: Worktree's other two `>>= liftEither`
@@ -707,7 +705,7 @@ pub enum HelperBody {
     /// value, so the helper reads no state. Declares both its types, because
     /// there is no constructor to derive them from.
     ///
-    /// **Why this exists, since §11.9's census ruled it out.** `worktreeId` was
+    /// **Why this exists.** `worktreeId` was
     /// listed among the eleven Worktree helpers to relocate into
     /// `haskell/lib/Tidepool/Worktree.hs`, and it is the one that cannot go:
     /// the RepoEvent helpers `commit` and `headChanged` CALL it, and they are
@@ -717,14 +715,15 @@ pub enum HelperBody {
     /// carrying RepoEvent. Defining it in both places instead would give an eval
     /// (which imports both modules unqualified) an ambiguous occurrence, i.e.
     /// exactly the duplication this migration exists to delete. So the choice
-    /// was to represent it or to block the lane, and §9 step 2 sanctions the
-    /// former: a deliberate schema feature, documented where it is added.
+    /// was to represent it or to block the migration: a deliberate schema
+    /// feature, documented where it is added.
     ///
     /// **It is a shape and stays one.** A binder, an ordered list of field
     /// names, and the two types the projection connects. No application, no
     /// nesting, no constructors, no operators — the closed Haskell EXPRESSION
-    /// AST §11.9 rejected is still rejected, and the other ten helpers stay
-    /// unrepresentable under this variant exactly as they were.
+    /// AST this schema rejects elsewhere is still rejected here, and the other
+    /// ten helpers stay unrepresentable under this variant exactly as they
+    /// were.
     Projection {
         /// The bound parameter: `"h"`.
         binder: &'static str,
@@ -737,8 +736,8 @@ pub enum HelperBody {
         /// "treeId"]` renders `h.handleReceipt.treeId`. Must be non-empty.
         ///
         /// The RESULT type is DERIVED by walking this chain through the
-        /// `type_defs` table ([`Effect::project`]), never declared. §3.4's
-        /// principle is that a restated signature is a drift class: declaring
+        /// `type_defs` table ([`Effect::project`]), never declared. The
+        /// principle: a restated signature is a drift class: declaring
         /// `WorktreeId` here and later retyping `WorktreeReceipt.treeId` would
         /// let the two disagree with nothing noticing. Deriving also turns a
         /// field the declaring `TypeDef` does not have into a GENERATION
@@ -845,11 +844,10 @@ impl Helper {
 /// How a suspension carrying this verb's constructor must be routed.
 ///
 /// Modelled on what `tidepool-harness`'s `classify_hole` ACTUALLY
-/// distinguishes, not on PRD 22's five-name sketch — the sketch was
-/// compression and adopting it would lose information. See the scaffold doc
-/// §3.5, including the phase-3 requirement that an unrecognized constructor
-/// must fail LOUD rather than falling through to [`HandlingClass::Ask`], which
-/// is the silent-misroute path the whole migration exists to close.
+/// distinguishes, not on an earlier five-name sketch that compressed away
+/// real distinctions. An unrecognized constructor must fail LOUD rather than
+/// falling through to [`HandlingClass::Ask`], which is the silent-misroute
+/// path this schema exists to close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandlingClass {
     /// Suspends to the model, answered in the same context.

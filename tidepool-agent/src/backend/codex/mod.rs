@@ -22,8 +22,8 @@
 //!
 //! # Config isolation
 //!
-//! No normal worker run may mutate the operator's Codex user configuration
-//! (PRD 18 acceptance criterion 11). The operator's `~/.codex` holds a live
+//! No normal worker run may mutate the operator's Codex user configuration.
+//! The operator's `~/.codex` holds a live
 //! ChatGPT authentication; credentials are never copied or rewritten into an
 //! isolated `CODEX_HOME` to route around this. The shape that avoids the
 //! documented project-trust write is to omit `cwd` from thread start and supply

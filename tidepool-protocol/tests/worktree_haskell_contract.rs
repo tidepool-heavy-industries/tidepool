@@ -168,7 +168,7 @@ fn worktree_helper_texts_are_pinned() {
 
 /// The honest record of the gap: ten of the macro's fourteen helpers are NOT
 /// representable, so they are not in the schema at all — excluded rather than
-/// smuggled in as raw strings, per PRD 22's first hard rule. They are
+/// smuggled in as raw strings. They are
 /// DEFINITIONS in `haskell/lib/Tidepool/Worktree.hs`, reached from an eval
 /// through this effect's `extra_imports` row. This is a SEPARATE test from the
 /// pinned four above because it asserts an absence, not a rendering.
@@ -186,9 +186,9 @@ fn worktree_helper_texts_are_pinned() {
 /// - `renderWorktreeError` — a ten-arm string-formatting program over
 ///   `WorktreeError`'s variants, the largest of the ten.
 ///
-/// `worktreeId` is NOT here, and its absence from this list is the finding
-/// §11.9 did not have: it is a field-projection chain rather than a verb call,
-/// so the census put it among the relocations — but the generated module's own
+/// `worktreeId` is NOT here, and its absence from this list is worth noting:
+/// it is a field-projection chain rather than a verb call, so it was
+/// originally counted among the relocations — but the generated module's own
 /// RepoEvent helpers call it, and that module cannot import
 /// `Tidepool.Worktree`. It is represented as
 /// `HelperBody::Projection` instead, which is why the count here is ten.
@@ -281,8 +281,8 @@ fn exec_and_journal_type_def_emission_order_is_unchanged() {
 /// `WorktreeReceipt.treeId : WorktreeId`, so the signature reads
 /// `WorktreeHandle -> WorktreeId` without anyone restating it — retyping either
 /// field moves the signature with it instead of letting the two disagree.
-/// That is §3.4's principle (a restated signature is a drift class) applied to
-/// the one helper shape that has no verb to derive from.
+/// That is the schema's principle — a restated signature is a drift class —
+/// applied to the one helper shape that has no verb to derive from.
 #[test]
 fn worktree_id_projection_derives_its_result_type_from_the_field_chain() {
     let wt = worktree();

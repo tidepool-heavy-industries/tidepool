@@ -1,8 +1,7 @@
 //! The scope tree — one shared spine for both the persistent binding store
-//! and the persistent declaration environment (PRD 21 lane
-//! C2, `plans/self-iterating-harness/21-c2-scope-trees.md`).
+//! and the persistent declaration environment.
 //!
-//! Locked decision 4 asks for a *persistent lexical environment*: everything
+//! This module implements a *persistent lexical environment*: everything
 //! immutable, "write" meaning "create a descendant scope", lookup walking
 //! local → parent, siblings shadowing freely and never colliding, and the
 //! parent never gaining a child's names. This module is the whole of that
@@ -13,10 +12,9 @@
 //! ## Identity
 //!
 //! [`ScopeId`] is a monotone counter, **never reused**. That is the whole of
-//! "stable identity" (PRD 21 open question 1): a retired scope's id is never
-//! re-minted, so a stale reference is detectably dead rather than silently
-//! aliased onto a live scope. A scope's parent is fixed at mint time and
-//! never rewritten.
+//! "stable identity": a retired scope's id is never re-minted, so a stale
+//! reference is detectably dead rather than silently aliased onto a live
+//! scope. A scope's parent is fixed at mint time and never rewritten.
 //!
 //! ## Flat sessions are the root scope
 //!
@@ -199,8 +197,8 @@ mod tests {
     }
 
     /// Siblings never see each other: neither appears in the other's chain.
-    /// This is the representational half of locked decision 4's "siblings
-    /// shadow freely and never collide".
+    /// This is the representational half of the rule that siblings shadow
+    /// freely and never collide.
     #[test]
     fn siblings_are_mutually_invisible() {
         let mut t = ScopeTree::new();

@@ -149,15 +149,14 @@ pub struct GitCommitDeltas {
 use tidepool_bridge_derive::FromCore;
 
 // ============================================================================
-// Subagent wire types (PRD 18 lane 1 — coupled spawn), `Ag*`-prefixed.
+// Subagent wire types (coupled spawn), `Ag*`-prefixed.
 //
 // THE `Wt*`/`Ev*` FAMILIES NO LONGER LIVE HERE — both are generated into
-// `src/generated/` from `tidepool-protocol` (PRD 22 phase 3). `Ag*` below
+// `src/generated/` from `tidepool-protocol`. `Ag*` below
 // still does NOT derive `CoreRecord` (its Haskell decls are single-sourced
 // from `subagent_effect_def!`'s `type_defs`), and field ORDER in each struct
 // is the wire contract, matching those decls positionally. PROVISIONAL
-// shapes — this lane exists to inform PRD 18's freezes, and renames land
-// here + in the
+// shapes — renames land here + in the
 // effect def together.
 // ============================================================================
 
@@ -170,8 +169,8 @@ pub struct AgAgentId {
 }
 
 /// Haskell `CycleId` — the handler-scoped identity of one running cycle.
-/// Opaque: Tidepool mints it, echoes it, and never parses it. Cycle-scoped
-/// like every PRD 19 handle — it never crosses a resident-cycle boundary.
+/// Opaque: Tidepool mints it, echoes it, and never parses it. Cycle-scoped —
+/// it never crosses a resident-cycle boundary.
 #[derive(ToCore, FromCore, Clone, Copy, Debug, PartialEq, Eq)]
 #[core(name = "CycleId")]
 pub struct AgCycleId {
@@ -187,7 +186,7 @@ pub struct AgBackendThreadId {
 }
 
 /// Haskell `SpawnWorkspace` — a new managed worktree, or an existing UNBOUND
-/// one by durable id (PRD 18 addendum decision 3/4: coupled-only surface).
+/// one by durable id (coupled-only surface).
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum AgSpawnWorkspace {
     SpawnNewWorktree(WtWorktreeSpec),
@@ -236,8 +235,8 @@ pub enum AgCyclePayload {
 }
 
 /// Haskell `AgentActivity` — receipt-bearing observations from the run. Model
-/// prose is never the source of any field (PRD 18: "runtime receipts are
-/// authoritative"), so `ActivityCommand`'s exit code is what the process
+/// prose is never the source of any field — runtime receipts are
+/// authoritative — so `ActivityCommand`'s exit code is what the process
 /// returned, and `Nothing` is "the backend reported no exit code" (killed by a
 /// signal, or still the only thing it said), never "it succeeded".
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
@@ -260,8 +259,8 @@ pub struct AgTokenUsage {
     pub usage_total: i64,
 }
 
-/// Haskell `WorkerRun` — the coupled pair one spawn yields (PRD 19's result
-/// shape) plus the backend thread identity.
+/// Haskell `WorkerRun` — the coupled pair one spawn yields plus the backend
+/// thread identity.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 #[core(name = "WorkerRun")]
 pub struct AgWorkerRun {

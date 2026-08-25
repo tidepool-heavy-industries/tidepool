@@ -1,10 +1,9 @@
-//! Repository events (PRD 19, lane L4) — the runtime half of `withHandler`.
+//! Repository events — the runtime half of `withHandler`.
 //!
 //! `withHandler` itself is HASKELL: a scoped interposition over its body's
 //! freer-simple structure that runs a drain before every effect the body
 //! performs (`pumpEff`, `drainSubscription` — DEFINITIONS in
-//! `haskell/lib/Tidepool/Event.hs`, PRD 22 lane 4 — and the mechanism write-up
-//! in `plans/post-restart/worktree-lanes/L4-mechanism.md`). The author's handler
+//! `haskell/lib/Tidepool/Event.hs`). The author's handler
 //! closure is applied by ordinary Haskell application inside the resident's
 //! own continuation; it never crosses to Rust and Rust never roots or applies
 //! one.
@@ -55,7 +54,7 @@
 //! JOURNAL (the observer's business — see [`MonitorObservations`]), and the
 //! queue is per-subscription (this registry's business).
 //!
-//! ## Blocking await, and deadlines (PRD 20, S1-L3)
+//! ## Blocking await, and deadlines
 //!
 //! [`RepoEventHandler::repo_event_await`] is [`RepoEventHandler::repo_event_drain`]
 //! plus a timeout: it loops \[reconcile pass, check the queue, sleep bounded
@@ -93,7 +92,7 @@
 //! dropping that stack ends every registration. There is no durable
 //! subscription store here and there must not be one — an attached Haskell
 //! handle, a parked Haskell continuation, and an event subscription are the
-//! three things PRD 19 says never survive a loop iteration.
+//! three things that must never survive a loop iteration.
 //!
 //! Re-registering from explicit state and stable worktree ids each loop iteration is
 //! therefore an ordinary, repeated path, not a recovery story. It is safe
@@ -127,7 +126,7 @@ use tidepool_worktree::storage::now_ms;
 // module's docs for why the panic won.
 
 // EventError, RepoEventReq, DescribeEffect and the EffectHandler dispatch are
-// GENERATED from the `tidepool-protocol` schema (PRD 22 phase 3) — re-exported
+// GENERATED from the `tidepool-protocol` schema — re-exported
 // here so the public paths (`tidepool_handlers::EventError`,
 // `tidepool_handlers::RepoEventReq`) are unchanged. Only the handler struct,
 // the registry, and the per-verb methods below are hand-written.
@@ -311,7 +310,7 @@ impl SubscriptionRegistry {
 
     /// Mint a fresh [`EvEventId`] and broadcast `ObservedAsyncDone` for a
     /// green thread that just reached a terminal state (settle OR cancel —
-    /// PRD 20 S1-L4 wave 2's completion watch, `WatchAsync`/
+    /// the completion watch backing `WatchAsync`/
     /// `Tidepool.Event.waitEvent`). Called by the DRIVER's own scheduler
     /// bookkeeping, never by an authored `RepoEvent` verb — a thread
     /// settling is not a request/response the Haskell side ever sends, so
@@ -656,7 +655,7 @@ fn domain_kind_to_wire(k: &tidepool_worktree::HeadChangeKind) -> EvHeadChangeKin
 }
 
 // ============================================================================
-// Capability mailboxes (PRD 20 S1-L4 wave 2)
+// Capability mailboxes
 // ============================================================================
 
 /// Mailbox identity: minted ids and which are still live. Independent of
@@ -704,9 +703,8 @@ impl MailboxTable {
 /// Serves `RepoEventSubscribe` / `RepoEventDrain` / `RepoEventUnsubscribe` /
 /// `MailboxNew` / `MailboxSend` / `MailboxDrop`.
 ///
-/// Not in `build_base_stack`'s row: PRD 19's surface is opt-in until the
-/// dev-tree dogfood lands, so a caller that wants repository events builds a
-/// row containing this handler explicitly.
+/// Not in `build_base_stack`'s row: this surface is opt-in, so a caller that
+/// wants repository events builds a row containing this handler explicitly.
 pub struct RepoEventHandler {
     registry: SubscriptionRegistry,
     source: Box<dyn ObservationSource>,
@@ -791,7 +789,7 @@ impl RepoEventHandler {
     }
 
     // `pub` (not `fn`, unlike this module's other tagged-verb methods):
-    // PRD 20 S1-L4 wave 2's driver-side non-blocking parked-await servicing
+    // the driver-side non-blocking parked-await servicing
     // calls this DIRECTLY, from `tidepool-harness`, as its own poll step —
     // never `repo_event_await`, whose internal sleep loop would stall the
     // whole green-thread scheduler. Identical to the `RepoEventDrain` verb
@@ -1243,7 +1241,7 @@ mod tests {
         assert_eq!(passes_run(&calls), before);
     }
 
-    // ── await / deadlines (PRD 20, S1-L3) ──
+    // ── await / deadlines ──
 
     #[test]
     fn await_returns_as_soon_as_a_pass_produces_an_observation() {
@@ -1329,7 +1327,7 @@ mod tests {
         );
     }
 
-    // ── capability mailboxes (PRD 20, S1-L4 wave 2) ──
+    // ── capability mailboxes ──
 
     fn payload(v: serde_json::Value) -> crate::effect_glue::JsonArg {
         crate::effect_glue::JsonArg(v)

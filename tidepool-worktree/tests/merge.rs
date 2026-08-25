@@ -1,4 +1,4 @@
-//! Fast-tier acceptance for `merge::merge_branch_into` — PRD 21 C5's typed
+//! Fast-tier acceptance for `merge::merge_branch_into` — the typed
 //! worktree-coordination merge primitive. Real temporary repositories, real
 //! `git worktree add`, no mock of git.
 

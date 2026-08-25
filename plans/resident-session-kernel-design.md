@@ -22,10 +22,10 @@ designs:
 `tidepool-runtime/src/session/persistent.rs:17-33`'s own module doc says the
 slot path "remains the live mechanism for the repl and one-shot eval lanes;
 on the harness lane it is legacy, superseded by the parked path, and its
-deletion is gated on the parked path's production soak" — citing
-`plans/one-session.md`'s **Phase 6** ("repl/one-shot conversion + slot
-deletion"), which `plans/README.md:120-124` confirms is "not currently in
-flight," parked behind a production-soak gate.
+deletion is gated on the parked path's production soak" — that gate is
+Phase 6 (repl/one-shot conversion + slot deletion): the registry path must
+run the harness in production before the repl/one-shot surfaces convert, and
+it stays parked, not currently in flight.
 
 **This is the load-bearing fact for #22.** A kernel that unifies suspend/
 resume orchestration is either (a) sequenced *after* Phase 6, in which case
@@ -218,10 +218,10 @@ loop-boundary checkpoint and re-drives that cycle, per "at-least-once
 semantics" (`tidepool-harness/CLAUDE.md`, "Restart safety is a uniform
 rule"). repl has the same practical outcome (the suspension is gone) via a
 blunter mechanism (nothing survives at all). **The kernel should not invent
-a new persistence story here** — that is explicitly `#21`'s scope
-(`plans/persistence-versioning-design.md`, running in parallel), and this
-doc's crate/seam recommendation (§3-4) should be checked against whatever
-#21 lands rather than pre-empting it.
+a new persistence story here** — persistence versioning
+(`tidepool_repr::version_ladder`) covers the durable-artifact wire-format
+concern; this doc's crate/seam recommendation (§3-4) does not need to
+duplicate it.
 
 ### 1.5 Error paths
 
@@ -437,9 +437,9 @@ session` module," not a new crate.
 This section is written twice — once per answer to **Open Question 1**
 (§ below) — because the two orders diverge from the first step.
 
-### 5.A If Phase 6 (one-session.md) proceeds first
+### 5.A If the slot-path conversion (Phase 6) proceeds first
 
-1. Land Phase 6 as already scoped in `plans/one-session.md`: convert repl
+1. Land Phase 6: convert repl
    and one-shot eval onto the parked path (`Project`/`Render` park kinds
    already exist per Phase 0; the repl-side work is stowing `run_block`'s
    item-loop state — a purely mechanical lift, per the prior unparking lane's
@@ -604,16 +604,16 @@ not design away.
 
 ## Open questions (for the operator, not decided here)
 
-1. **Does #22's kernel wait on Phase 6 (`plans/one-session.md`), or is it
-   explicitly meant to be decoupled from it?** This is the single biggest
-   unknown in this doc — it changes §5's entire migration order and
-   materially changes how hard "the kernel" is to build (generalizing one
-   already-converged mechanism vs. abstracting over two permanently
-   different ones). Phase 6 is currently "parked behind a production-soak
-   gate, not currently in flight" (`plans/README.md:120-124`) — is that gate
-   still the operator's intent, or has the harness's recent production
-   mileage (the companion, the wave's own live-round trigger for #20
-   steps 2-3) changed the calculus for unblocking it?
+1. **Does #22's kernel wait on Phase 6, or is it explicitly meant to be
+   decoupled from it?** This is the single biggest unknown in this doc — it
+   changes §5's entire migration order and materially changes how hard "the
+   kernel" is to build (generalizing one already-converged mechanism vs.
+   abstracting over two permanently different ones). Phase 6 (repl/one-shot
+   conversion + slot deletion) is parked behind a production-soak gate, not
+   currently in flight — is that gate still the operator's intent, or has
+   the harness's recent production mileage (the companion, the wave's own
+   live-round trigger for #20 steps 2-3) changed the calculus for unblocking
+   it?
    **ANSWERED (operator, 2026-08-24): decoupled — kernel first.** Build the
    kernel against today's two frontends as they are; Phase 6 stays parked
    and later becomes an ordinary client migration. §5.B is the operative

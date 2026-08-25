@@ -1,5 +1,5 @@
-//! PRD 22's acceptance bar, mechanically: the `EffectDecl` a migrated effect
-//! produces must be identical, field for field, to what the schema in
+//! This migration's acceptance bar, mechanically: the `EffectDecl` a migrated
+//! effect produces must be identical, field for field, to what the schema in
 //! `tidepool-protocol` renders.
 //!
 //! This test is written to run BEFORE the flip, against the still-hand-written
@@ -121,8 +121,7 @@ fn worktree_decl_matches_the_schema_exactly() {
 /// authored type (`Event a`/`Observed a`) that the schema cannot represent at
 /// all — both relocate to `haskell/lib/Tidepool/Event.hs` alongside eighteen
 /// non-representable helpers (Worktree's lane only ever relocated helpers).
-/// See `tidepool-protocol/src/effects/event.rs`'s module doc and
-/// `plans/self-iterating-harness/22-p3-event-survey.md`.
+/// See `tidepool-protocol/src/effects/event.rs`'s module doc.
 #[test]
 fn event_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(

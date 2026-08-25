@@ -1,8 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE LambdaCase #-}
 
--- | batch-turns feasibility spike
--- (plans/post-restart/batch-turns-feasibility.md §2.3): the ONE open gate —
+-- | batch-turns feasibility spike: the ONE open gate —
 -- can a SINGLE 'runGhc' session run N sequential
 -- setTargets\/depanal\/load' cycles with items 2..N skipping the stdlib
 -- @load'@? Go\/no-go probe only, not the feature. A clean RED (naming the

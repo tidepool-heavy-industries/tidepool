@@ -47,7 +47,7 @@ import Tidepool.QQ (fmt)
 
 -- | Only durable facts cross a turn boundary: the question, the turn count,
 -- and the last turn's answer.  Live contexts, parked continuations and
--- in-flight fork trees are not checkpointed (PRD 21, "Persistence (v1)") — a
+-- in-flight fork trees are not checkpointed — a
 -- process loss mid-turn reruns the turn from here.
 --
 -- No caps live here (fork-subsumes-split step 4): depth and descendant

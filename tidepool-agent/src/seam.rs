@@ -195,8 +195,8 @@ pub struct ThreadSpec {
 /// One work cycle: one turn on one thread, in one workspace.
 ///
 /// `cwd` is supplied HERE and not at thread creation — the request shape that
-/// avoids the documented Codex project-trust config write (PRD 18 acceptance
-/// criterion 11; see `backend::codex`'s module docs). Backends that don't
+/// avoids the documented Codex project-trust config write (see
+/// `backend::codex`'s module docs). Backends that don't
 /// share that hazard still honor the same split, so the seam has one shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CycleSpec {

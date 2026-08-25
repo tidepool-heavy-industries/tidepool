@@ -17,12 +17,12 @@ use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
 use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
 
 // ============================================================================
-// Tag: Worktree (managed git worktrees — PRD 19, deliberately NOT in the
+// Tag: Worktree (managed git worktrees, deliberately NOT in the
 // default base_effects! row)
 // ============================================================================
 
 // WorktreeReq, WorktreeError, DescribeEffect and the EffectHandler dispatch are
-// GENERATED from the `tidepool-protocol` schema (PRD 22 phase 3) — re-exported
+// GENERATED from the `tidepool-protocol` schema — re-exported
 // here so the public paths (`tidepool_handlers::WorktreeReq`,
 // `tidepool_handlers::WorktreeError`) are unchanged. Only the handler struct and
 // the per-verb method bodies below are hand-written.
@@ -300,12 +300,11 @@ impl WorktreeHandler {
     /// `Ok(None)` from `WorktreeManager::lookup` (the id was NEVER
     /// registered — a typo-shaped miss) must stay distinguishable from
     /// `Err(WorktreeLost)` (registered, then gone from disk — data loss); see
-    /// `tidepool-worktree/src/registry.rs`'s `WorktreeRegistry::get` doc and
-    /// PRD 19. `Ok(None)` is spelled here as the wire `WorktreeNotRegistered`
+    /// `tidepool-worktree/src/registry.rs`'s `WorktreeRegistry::get` doc.
+    /// `Ok(None)` is spelled here as the wire `WorktreeNotRegistered`
     /// variant (`never_registered` above), which the `errors` block carries
     /// specifically to preserve this distinction — never collapsed onto
-    /// `WorktreeLost`'s tag, which would erase exactly what PRD 19 asks be
-    /// kept visible.
+    /// `WorktreeLost`'s tag, which would erase that visible distinction.
     pub(crate) fn worktree_lookup(
         &mut self,
         tree_id: WtWorktreeId,
@@ -376,7 +375,7 @@ impl WorktreeHandler {
         Ok(git_oid_to_wire(&head))
     }
 
-    /// The one narrow, deliberate workflow primitive (PRD 21 C5; see
+    /// The one narrow, deliberate workflow primitive (see
     /// `tidepool-worktree/src/merge.rs`): merge `branch` into the worktree
     /// `tree_id` names, through `tidepool_worktree::merge::merge_branch_into`
     /// — the same typed conflict-vs-failure classification and abort-before-

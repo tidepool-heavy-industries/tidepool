@@ -1,9 +1,9 @@
-//! The Exec effect — PRD 22's first migrated effect.
+//! The Exec effect — the first effect migrated onto this schema.
 //!
 //! Chosen because it is the smallest effect present in registries 1, 2 AND 4:
 //! the macro DSL, the bridged `Proc` record, and the harness's constructor-name
-//! routing classifier. That triangle is where the silent-misroute bug class the
-//! PRD exists to close actually lives. See the scaffold doc §2.
+//! routing classifier. That triangle is where the silent-misroute bug class
+//! this schema exists to close actually lives.
 //!
 //! It is also where the no-raw-Haskell rule gets its first real test. All three
 //! Exec helpers use the old grammar's `raw` escape hatch, but none of them is

@@ -1,7 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | D1 mutation test (plans/post-restart/extract-wave/spawn-latency/00-spec.md,
--- codex-review-2026-08-08.md item 7): proves the hard-fail metadata-subset
+-- | D1 mutation test: proves the hard-fail metadata-subset
 -- defense ('Main.assertMetaCoversEmitted' in @app/Main.hs@) is REAL, not
 -- theatre. Drives the ACTUAL @tidepool-extract-bin@ PRODUCTION BINARY as a
 -- subprocess — the defense lives in the executable component, not

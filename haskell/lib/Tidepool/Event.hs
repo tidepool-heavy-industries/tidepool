@@ -228,8 +228,7 @@ l <|> r = Event (l.eventWatches ++ r.eventWatches) (\o -> case l.eventProject o 
 -- for a subscription, and it is structural rather than enforced.
 
 -- | Run `tick` before every effect `body` performs. The scoped
--- interposition `withHandler` is built from; see
--- plans/post-restart/worktree-lanes/L4-mechanism.md.
+-- interposition `withHandler` is built from.
 pumpEff :: Eff effs () -> Eff effs a -> Eff effs a
 pumpEff _ (Val a) = Val a
 pumpEff tick (E u q) = tick >> E u (tsingleton (\x -> pumpEff tick (qApp q x)))
@@ -309,7 +308,7 @@ projectTick :: RepositoryEvent -> Maybe Tick
 projectTick (ObservedTick _ t) = Just t
 projectTick _ = Nothing
 
--- PRD 20 S1-L4 wave 2 — capability mailboxes and the
+-- Capability mailboxes and the
 -- green-thread completion watch. Both payloads stay BARE (like
 -- `Tick`, unlike `commit`/`headChanged`), so `nextEvent` yields
 -- a single `Observed`, not a double wrap.

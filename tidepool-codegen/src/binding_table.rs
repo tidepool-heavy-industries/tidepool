@@ -20,7 +20,7 @@
 //! Haskell extract (`Translate.stableVarId`) and stored here verbatim (see
 //! [`SessionVarId`]).
 //!
-//! ## Scope frames (PRD 21 lane C2)
+//! ## Scope frames
 //!
 //! The shadowing layer is one frame PER SCOPE ([`ScopeId`]), not one map for
 //! the session: `current: ScopeId → (name → newest id)`. `live` stays FLAT and
@@ -163,9 +163,9 @@ impl BindingTable {
     /// bind_in(ScopeId::ROOT, e)`.
     ///
     /// Nothing walks downward, so a child bind is invisible to the parent
-    /// (locked decision 4's "the parent never gains child declarations by
-    /// name" holds by representation, not by a check), and sibling frames are
-    /// disjoint maps, so two siblings binding the same name never collide.
+    /// (the parent never gains child declarations by name — this holds by
+    /// representation, not by a check), and sibling frames are disjoint
+    /// maps, so two siblings binding the same name never collide.
     ///
     /// # Safety
     /// Same slot-liveness contract as [`Self::bind`] — this method only stores
@@ -551,9 +551,10 @@ mod tests {
         assert!(env.get(not_bound).is_none());
     }
 
-    // -- scope frames (PRD 21 lane C2) ------------------------------------
+    // -- scope frames ------------------------------------------------------
     //
-    // One named test per clause of locked decision 4, on the persistent binding store.
+    // One named test per clause of the scope-tree invariants (`scope.rs`'s
+    // module doc), on the persistent binding store.
 
     /// CHILDREN READ PARENT: a name bound only at ROOT resolves from a child,
     /// through the upward walk — and the child's own frame does not have to

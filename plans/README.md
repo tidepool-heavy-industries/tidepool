@@ -7,11 +7,6 @@ charter / glossary and the plan file is deleted (git is the archive).
 
 ## Active work
 
-- [Persistence versioning design](persistence-versioning-design.md):
-  LANDED 2026-08-24 — all six persistence kinds carry version stamps via
-  `tidepool_repr::version_ladder`; legacy files migrate as v0, future
-  versions refuse loudly; old-corpus replay test in place. Doc awaits its
-  hoist-and-delete at wave end.
 - [Resident-session kernel design](resident-session-kernel-design.md):
   decision-complete (operator answers recorded inline 2026-08-24);
   implementation lane in flight against it.
@@ -29,15 +24,15 @@ charter / glossary and the plan file is deleted (git is the archive).
   for autonomous fresh-session dogfood rounds driven by the root + native
   subagents while the operator is offline; robot-operator form answering,
   per-round analysis reports, scenario battery.
-- [One session](one-session.md): Phases 0–5 landed (2026-08-12) — the
-  self-harness runs collapsed on one resident session. Phase 6 (repl/
-  one-shot conversion + slot deletion) stays deliberately parked behind a
-  production-soak gate, not currently in flight.
 
 ## Carried-forward one-liners
 
 Small still-open items whose originating plan doc has been retired:
 
+- The one-session collapse (Phases 0–5, landed 2026-08-12): the self-harness
+  runs collapsed on one resident session. Phase 6 (repl/one-shot conversion +
+  slot deletion) stays deliberately parked behind a production-soak gate, not
+  currently in flight.
 - `:t` (a type-answer turn classification arm) remains unbuilt; the interim
   mitigation (signatures folded into the answerer prompt) covers the
   near-term need. Revisit at the next spawn that wants it.

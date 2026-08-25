@@ -1,4 +1,4 @@
-//! The `RunLLMTurn` suspension — decode-only (PRD 22 step 1).
+//! The `RunLLMTurn` suspension — decode-only.
 //!
 //! `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` (`Tidepool.Agent`) all
 //! suspend on the SAME single constructor, `RunLLMTurnWith prompt payload`,

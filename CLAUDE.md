@@ -140,6 +140,7 @@ in the same change that creates it.
 | executable resolution + strict validation | `tidepool-extract-cmd` |
 | in-process monotonic id minting | `tidepool-repr`'s issuer |
 | Haskell turn-module templates (bind/expr wrappers) | `tidepool-runtime::session::turn` |
+| version stamping / migration ladders for durable, non-reproducible persistence formats | `tidepool_repr::version_ladder` |
 | turn thread supervision (timeout/cancel/crash) | `tidepool-runtime`'s `TurnSupervisor` |
 | session checkout/ownership | `tidepool_runtime::session::registry` (`SessionRegistry`/`Slot`/`Checkout`/`SingleSlot` — `tidepool-harness`'s `registry.rs` and `tidepool-repl`'s `manager.rs` are thin clients) |
 | MCP transport + resource catalog | `tidepool-mcp` shared helpers |

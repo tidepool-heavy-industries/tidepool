@@ -2,8 +2,7 @@
 //!
 //! Each generator emits a whole file, including the `DO NOT EDIT` header naming
 //! the regeneration command. Output is COMMITTED and checked by a test rather
-//! than produced by a `build.rs` — see the scaffold doc §4 for the decision and
-//! the evidence behind it.
+//! than produced by a `build.rs`.
 //!
 //! A generated `.rs` file is subject to `cargo fmt --all -- --check`, so every
 //! emitter here must produce output that is already a fixed point of rustfmt.
@@ -56,7 +55,7 @@ pub fn rust_string_literal(s: &str) -> String {
 ///
 /// One line: regeneration procedure, verification, and the decision to commit
 /// output rather than build.rs it all live in this module's own doc comment
-/// (and the scaffold doc §4) — not restated per file.
+/// — not restated per file.
 #[must_use]
 pub fn header(prefix: &str, what: &str) -> String {
     format!(

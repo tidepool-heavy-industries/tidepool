@@ -292,7 +292,7 @@ macro_rules! extra_imports_for {
     // and must keep being, or this row would silently WIDEN the eval surface
     // this migration promised to leave byte-identical.
     //
-    // `Tidepool.Agent.Delegate`'s narrow surface (PRD 21 C5) rides the SAME
+    // `Tidepool.Agent.Delegate`'s narrow surface rides the SAME
     // row-gate: it only compiles in a row containing `Subagent` (its
     // interpreter lowers onto `Subagent`'s own GADT), so it is auto-imported
     // here rather than through a second identifier — a row admitting
@@ -306,9 +306,9 @@ macro_rules! extra_imports_for {
             "import Tidepool.Agent.Delegate (Delegate, DelegateBrief (..), DelegateResult (..), DelegateError (..), delegate, renderDelegateError, runDelegate)",
         ]
     };
-    // Journal was migrated to the `tidepool-protocol` schema (PRD 22 phase 2);
-    // its `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
-    // READ half of the run journal, PRD 20 S1-L5) is schema data now, emitted
+    // Journal was migrated to the `tidepool-protocol` schema; its
+    // `extra_imports` (`import qualified Tidepool.Resume as Resume` — the
+    // READ half of the run journal) is schema data now, emitted
     // straight into its generated decl. See `tidepool-protocol/src/effects/journal.rs`.
     // The green-thread surface rides `Green`'s substrate verbs, so it is in
     // scope exactly when `Green` is in the row — same row-gating as
@@ -1046,10 +1046,9 @@ macro_rules! askuser_effect_def {
 /// handler, same convention as `askuser_effect_def!`): the self-iterating
 /// harness DRIVER services it — classify by constructor name, resume
 /// IMMEDIATELY with the loop's durable state as JSON (`note`'s service
-/// shape: no operator, no model round). Companion State v2
-/// (`plans/companion-state-v2.md`): the agent computes over its own state —
-/// filtering, archive search, counting — instead of reading only `render`'s
-/// prose projection.
+/// shape: no operator, no model round). This is what lets the agent compute
+/// over its own state — filtering, archive search, counting — instead of
+/// reading only `render`'s prose projection.
 #[macro_export]
 macro_rules! readstate_effect_def {
     ($project:path) => {
@@ -1104,7 +1103,7 @@ macro_rules! readstate_effect_def {
 /// definition; the `handler`/`req`/`method` slots name types that are never
 /// generated (same convention as `ask_effect_def!`'s own doc comment).
 ///
-/// ## Why only the fork/fanout verbs return an `Either` (PRD 21 decision 6)
+/// ## Why only the fork/fanout verbs return an `Either`
 ///
 /// `runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
 /// `runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`;
@@ -1112,9 +1111,9 @@ macro_rules! readstate_effect_def {
 /// real distinction, not an oversight:
 ///
 /// - A fork/fanout child is a BRANCH POSITION. Its agent session is a
-///   separate node with siblings, and PRD 21 locked decision 6 requires an
-///   abnormal exit there to fold as DATA at that position — an exception
-///   would erase every sibling's already-finished result. The caller folding
+///   separate node with siblings, and its abnormal exit there must fold as
+///   DATA at that position — an exception would erase every sibling's
+///   already-finished result. The caller folding
 ///   a failure at the branch position IS the design, so the TYPE hands it to
 ///   them.
 /// - `runLLMTurn @T` is answered IN CONTEXT by the same node, on the outer
@@ -1161,20 +1160,19 @@ macro_rules! runllmturn_effect_def {
                 "In every verb above, `T` may be any type in scope, including one you ",
                 "declared yourself earlier this session.",
             ],
-            // PRD 21 locked decision 6's typed exit, generated here alongside
-            // the GADT exactly as ExecError/FsError are (they come from the
-            // `errors` block; this one is hand-written because RunLLMTurn has
-            // no Rust handler projection to generate an enum for — see this
-            // macro's own doc comment). The Rust side that BUILDS these values
-            // is `tidepool_harness::engine::InvocationExit`; its constructor
+            // The typed exit, generated here alongside the GADT exactly as
+            // ExecError/FsError are (they come from the `errors` block; this
+            // one is hand-written because RunLLMTurn has no Rust handler
+            // projection to generate an enum for — see this macro's own doc
+            // comment). The Rust side that BUILDS these values is
+            // `tidepool_harness::engine::InvocationExit`; its constructor
             // names are this list, and a name missing from a turn's
             // DataConTable is a hard error there, never a defaulted value.
             type_defs [
                 "-- | Why a forked child agent session ended WITHOUT a typed answer.\n\
-                 -- Folded as data at the failing branch's own position (PRD 21\n\
-                 -- locked decision 6) — never an exception that erases the results\n\
-                 -- its siblings already produced. Each constructor carries the\n\
-                 -- runtime's own detail text.\n\
+                 -- Folded as data at the failing branch's own position — never an\n\
+                 -- exception that erases the results its siblings already produced.\n\
+                 -- Each constructor carries the runtime's own detail text.\n\
                  data InvocationExit\n\
                  \x20 = ExitRoundsExhausted Text\n\
                  \x20 | ExitNotFinalized Text\n\
@@ -1194,8 +1192,7 @@ macro_rules! runllmturn_effect_def {
                   ret "Value" },
             ],
             helpers [
-                // #R0 typed-yield pass, plans/harness-r0/10-extract-pass; split out of
-                // Ask by self-iterating-harness WS-B (07-impl-orchestration.md).
+                // #R0 typed-yield pass; split out of Ask.
                 // `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` are the surface
                 // verbs: extract's Translate.hs intercepts their call sites (matched
                 // by name, mirroring the tagToEnum# arm) and head-swaps to the hidden
@@ -1793,13 +1790,11 @@ macro_rules! fs_effect_def {
     };
 }
 
-/// Subagent effect — single definition (PRD 18 LANE 1: the one-cycle coupled
-/// spawn). PROVISIONAL by charter: this lane exists to inform PRD 18's
-/// freezes, and every shape here may be renamed when root freezes the public
+/// Subagent effect — single definition (the one-cycle coupled spawn).
+/// PROVISIONAL: every shape here may be renamed when root freezes the public
 /// surface (in particular, the GADT is `Subagent` rather than `Agent` because
-/// `Tidepool.Agent` is the harness answerer's module and the rename is root's
-/// call — see `plans/post-restart/agent-lanes/inheritance-for-agent-core.md`
-/// §8, and `lane1-scaffold-plan.md` for every other interpretation call).
+/// `Tidepool.Agent` is the harness answerer's module and the rename is
+/// root's call).
 ///
 /// **One verb.** `spawnAgent` is the whole lane-1 authored surface: ONE call
 /// atomically resolves a workspace (new managed worktree, or an existing
@@ -1907,9 +1902,9 @@ macro_rules! subagent_effect_def {
                 // needs one, same reason SpawnStage/BackendFailure do.
                 "instance ToJSON CycleId where toJSON (CycleId n) = toJSON n",
             ],
-            // Typed per-verb failure (#335) + PRD 18 addendum decision 2
-            // (typed failure results everywhere; variant list is this lane's
-            // contact with reality, deliberately provisional).
+            // Typed per-verb failure (#335) — typed failure results
+            // everywhere; variant list is this lane's contact with reality,
+            // deliberately provisional.
             errors SpawnError [
                 { ctor SpawnWorktreeFailed, fields { stage: "SpawnStage" as tidepool_bridge_effects::AgSpawnStage, worktreeFailure: "WorktreeError" as crate::handlers::worktree::WorktreeError },
                   doc "the workspace could not be resolved: creation failed, or an existing id was lost/unregistered" },
@@ -1943,7 +1938,7 @@ macro_rules! subagent_effect_def {
                 { ctor SubagentResume, method subagent_resume,
                   args { agent: "AgentId" as tidepool_bridge_effects::AgAgentId, call: "Text" as String, ok: "Bool" as bool, body: "Value" as crate::effect_glue::JsonArg },
                   ret "AgentStep", errors SpawnError },
-                // The async trio (PRD 20 S1-L2), APPENDED — verb order is the
+                // The async trio, APPENDED — verb order is the
                 // wire contract, so these three sit after the three that
                 // already existed and nothing above moves. Same saga as
                 // `SubagentSpawn`, detached onto its own cycle: spawn returns a
@@ -1957,7 +1952,7 @@ macro_rules! subagent_effect_def {
                   ret "SpawnOutcome", errors SpawnError },
                 // TOTAL, deliberately — no `errors` block. Cancelling a cycle
                 // that already finished, or one this handler never minted, is a
-                // NO-OP, so there is no failure to type (PRD 20).
+                // NO-OP, so there is no failure to type.
                 { ctor SubagentCancel, method subagent_cancel,
                   args { cycle: "CycleId" as tidepool_bridge_effects::AgCycleId },
                   ret "()" },
@@ -2039,17 +2034,16 @@ macro_rules! subagent_effect_def {
     };
 }
 
-// Journal effect: MIGRATED to the `tidepool-protocol` schema (PRD 22 phase 2).
+// Journal effect: MIGRATED to the `tidepool-protocol` schema.
 // `journal_decl()` now comes from `tidepool-mcp/src/generated/journal.rs`; see
 // `tidepool-protocol/src/effects/journal.rs` for the single-source definition.
 
-/// Green effect — single definition (PRD 20, S1-L4: green threads).
+/// Green effect — single definition (green threads).
 ///
 /// A green thread is a continuation parked in the session's multi-hole
 /// registry under its own realm: forking one starts a NEW suspension-capable
 /// top-level run, so two threads blocked on two different effects have BOTH
-/// holes pending at once, resumable in either order. Design and the mechanism
-/// walkthrough: `plans/self-iterating-harness/20-s1l4-green-threads.md`.
+/// holes pending at once, resumable in either order.
 ///
 /// Every verb here is DRIVER-SERVICED, not handler-dispatched — servicing a
 /// spawn means taking the body's `ValueHandle` off the spawner's parked frame

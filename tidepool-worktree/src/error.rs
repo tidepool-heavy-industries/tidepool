@@ -95,8 +95,7 @@ pub enum WorktreeError {
     GitFailure(GitFailureReceipt),
 
     /// The event journal at `path` is below the floor this build still
-    /// carries a migration path from — never a silent reset. See
-    /// `plans/persistence-versioning-design.md` §6.
+    /// carries a migration path from — never a silent reset.
     #[error(
         "event journal {} version {found} is below the floor this build still supports \
          ({floor}) — archive or delete it and start a fresh journal, or read it with an older \

@@ -140,8 +140,7 @@ fn every_suspension_roster_effect_validates() {
 /// a verb tagged with an error ADT the effect does not declare, a helper
 /// wrapping a constructor that does not exist, an arity mismatch between a
 /// helper's parameters and its verb's arguments. All of these are GENERATION
-/// failures by design: PRD 22's acceptance line is that a malformed verb fails
-/// generation, not runtime.
+/// failures by design: a malformed verb fails generation, not runtime.
 #[test]
 fn every_migrated_effect_validates() {
     for e in tidepool_protocol::effects::all() {

@@ -10,8 +10,8 @@
 -- 'Tidepool.Shell.runInTry', NOT defined here; see the note below on why),
 -- and Tidepool observes the result through 'Tidepool.Event'.
 --
--- 'mergeBranchInto' is the ONE deliberate exception (PRD 21 C5's
--- worktree-coordination fold): merge one branch into a target worktree,
+-- 'mergeBranchInto' is the ONE deliberate exception (the recursive
+-- companion's worktree-coordination fold): merge one branch into a target worktree,
 -- typed and classified once — conflict vs. a git failure that never entered a
 -- merge at all — instead of every authored harness re-deriving that
 -- classification over raw 'gitIn'. It is not a general workflow surface;
@@ -108,7 +108,7 @@ module Tidepool.Worktree
   , worktreeBranch
   , worktreeHead
 
-    -- * Merging (PRD 21 C5's one narrow, deliberate workflow primitive)
+    -- * Merging (the one narrow, deliberate workflow primitive)
   , MergeOutcome (..)
   , mergeBranchInto
 

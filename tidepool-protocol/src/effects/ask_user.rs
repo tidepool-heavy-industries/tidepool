@@ -1,4 +1,4 @@
-//! The `AskUser` suspension — decode-only (PRD 22 step 1).
+//! The `AskUser` suspension — decode-only.
 //!
 //! Two constructors ride this one GADT: `AskUserWith spec` (a typed form,
 //! routed to the human operator) and `NoteWith text` (a non-blocking display

@@ -1,4 +1,4 @@
-//! The `Ask` suspension — decode-only (PRD 22 step 1).
+//! The `Ask` suspension — decode-only.
 //!
 //! `ask schema prompt` (structured operator elicitation) — the fallback
 //! [`crate::schema::HandlingClass::Ask`] routing, and also the shape a

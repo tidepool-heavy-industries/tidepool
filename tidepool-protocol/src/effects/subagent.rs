@@ -1,4 +1,4 @@
-//! The `Subagent` suspension — decode-only (PRD 22 step 1).
+//! The `Subagent` suspension — decode-only.
 //!
 //! Six verbs, one saga (`tidepool-handlers`'s `SubagentHandler`). Routed by
 //! CONSTRUCTOR NAME only — `tidepool-harness::engine::classify_hole` never

@@ -334,8 +334,7 @@ pub const TREE_JS: &str = r#"
     // lives inside the side-pane panel fragment, itself already
     // maud-escaped server-side. The drawn label is the node's OWN last path
     // segment (short, truncated server-side to fit the depth column) —
-    // never the full slash path, which is what used to print straight
-    // through sibling/child labels; the full path stays reachable via this
+    // never the full slash path; the full path stays reachable via this
     // <title> hover tooltip and the (unchanged) side panel.
     merged.select('text').text(function (d) { return d.data.label; });
     merged.select('title').text(function (d) { return d.data.path; });

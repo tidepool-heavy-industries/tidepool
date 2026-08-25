@@ -1358,9 +1358,10 @@ impl SelfHarnessDriver {
             answers.push(wrap_fork_value(source, value, table)?);
         }
         if fan.is_none() {
-            Ok(Ok(answers.pop().expect(
-                "fork_briefs yields exactly one brief for a single fork",
-            )))
+            let value = answers.pop().ok_or_else(|| {
+                DriverError::Session("fork_briefs yielded no answer for a single fork".to_string())
+            })?;
+            Ok(Ok(value))
         } else {
             engine::build_list_value(answers, table)
                 .map(Ok)

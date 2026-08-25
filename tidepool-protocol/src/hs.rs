@@ -4,7 +4,7 @@
 //! verb argument, each result, each error-ADT field, across all twenty effects —
 //! falls inside this enum. It is deliberately CLOSED: a type that cannot be
 //! spelled here is not smuggled in as a string, it becomes a reviewed schema
-//! feature (PRD 22's first hard rule).
+//! feature.
 //!
 //! Two renderings, because Haskell needs two and the current hand-written
 //! strings switch between them by convention:
@@ -18,7 +18,7 @@
 //!
 //! Getting this right by structure is the point. In the hand-written registry
 //! the parentheses are remembered per call site, which is exactly the kind of
-//! by-convention protocol PRD 22 exists to delete.
+//! by-convention protocol this schema exists to delete.
 
 /// One Haskell type in the effect contract.
 #[derive(Clone, Debug, PartialEq, Eq)]

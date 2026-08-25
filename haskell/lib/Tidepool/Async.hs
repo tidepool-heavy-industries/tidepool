@@ -51,7 +51,7 @@
 -- == The ONE divergence from @Control.Concurrent.Async@
 --
 -- __A thread's own failure is not an exception.__  The row has none: failure
--- is data (PRD 20's failure-as-data lock), so a thread that can fail says so
+-- is data, so a thread that can fail says so
 -- in its result type — @'Async' ('Either' MyError r)@ — and you get that
 -- 'Either' back from 'wait' like any other value.
 --

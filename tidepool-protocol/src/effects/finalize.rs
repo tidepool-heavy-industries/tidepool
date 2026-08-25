@@ -1,4 +1,4 @@
-//! The `Finalize` suspension — decode-only (PRD 22 step 1).
+//! The `Finalize` suspension — decode-only.
 //!
 //! `finalize @T x` (`Tidepool.Agent`) hands a typed value up to the parent
 //! `runLLMTurn` hole and terminates the answerer's own turn loop. The `value`

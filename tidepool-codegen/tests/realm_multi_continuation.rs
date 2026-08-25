@@ -65,8 +65,8 @@ const ASK_TAG: u64 = 0;
 /// `Pair captured answerWrapped`.
 const PAIR_ID: DataConId = DataConId(2);
 
-// ─── shape-widening additions (W1-W4, plans/post-restart/codex-review-2026-08-08.md
-// item 5) — distinct ids, disjoint from the F1-F4/A5 ids above. ────────────
+// ─── shape-widening additions (W1-W4) — distinct ids, disjoint from the
+// F1-F4/A5 ids above. ──────────────────────────────────────────────────────
 
 /// list cons/nil, matching `EffectContext::respond_list`'s `":"`/`"[]"`
 /// name+arity lookup — used by W2's streamed tail.
@@ -1005,7 +1005,7 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
 // an addition: a caller one level up cannot park only the child and leave the
 // parent in the slot.
 //
-// codex-review-2026-08-08.md item 11: this used to be reachable — a caller
+// Prior bug: this used to be reachable — a caller
 // could park a realm, then call a legacy slot-path entry (`run_suspendable`)
 // successfully, reaching the mixed state, and only find out later when
 // `resume_parked` panicked. `run_suspendable_shared`'s entry guard (the

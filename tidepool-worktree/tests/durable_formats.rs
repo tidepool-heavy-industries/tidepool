@@ -1,11 +1,9 @@
-//! Class D — durable-format goldens (PRD 22 §11.7 of
-//! `plans/self-iterating-harness/22-p1-protocol-scaffold.md`).
+//! Class D — durable-format goldens.
 //!
-//! Captured from the LIVE hand-written types on unmodified trunk, before any
-//! line of the phase-3 wire-record generator exists. These goldens prove the
-//! Worktree effect migration does not move a single persisted byte on
-//! operator machines — same discipline as §5's Class A goldens, applied to
-//! disk instead of to the wire.
+//! Captured from the LIVE hand-written types on unmodified trunk. These
+//! goldens prove the Worktree effect migration does not move a single
+//! persisted byte on operator machines — same discipline as the Class A
+//! goldens, applied to disk instead of to the wire.
 //!
 //! ## Durable roots (grep of every `serde_json::to_*`/`from_*` call site
 //! under `tidepool-worktree/src`, transitive closure of every type reachable

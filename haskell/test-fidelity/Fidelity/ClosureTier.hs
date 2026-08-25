@@ -1,4 +1,4 @@
--- | PRD 21 lane C1's 'GhcPipeline.isClosureType' walk missed a HIGHER-KINDED
+-- | 'GhcPipeline.isClosureType''s walk missed a HIGHER-KINDED
 -- instantiation: for @data Box f = Box (f Int)@ at @f = (->) Bool@, the
 -- datacon's own field is declared as @f Int@ — a tyvar application, opaque
 -- regardless of what @f@ is instantiated to, so the only place function-ness

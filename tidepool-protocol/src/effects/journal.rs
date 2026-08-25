@@ -1,16 +1,14 @@
-//! The Journal effect — PRD 22 phase 2's first migration.
+//! The Journal effect — the first effect migrated in this schema's second
+//! phase.
 //!
 //! Chosen second because it is the smallest live effect that is NOT Exec: one
 //! verb, no error ADT, opt-in row placement (not in `build_base_stack`), and
 //! freshly documented semantics (`haskell/lib/Tidepool/Journal.hs`'s haddock).
-//! See `plans/self-iterating-harness/22-p1-protocol-scaffold.md` §9 — this
-//! effect is the first repeat of that procedure on a lane that did not write
-//! it.
 //!
 //! It is also the first migrated effect to carry a `Value` argument bound as
 //! `RustBinding::JsonValue` (`payload`), and the first with no error ADT at
-//! all — both slots the schema already declared for this purpose (§3.3's
-//! `RustBinding::JsonValue`, `Effect::errors: Option<ErrorAdt>`), so nothing
+//! all — both slots the schema already declared for this purpose
+//! (`RustBinding::JsonValue`, `Effect::errors: Option<ErrorAdt>`), so nothing
 //! new was needed to describe it.
 
 use crate::hs::HsType;
@@ -40,11 +38,9 @@ pub fn journal() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        // The READ half of the run journal (PRD 20 S1-L5). `record` stays
-        // write-only — `Tidepool.Resume` reads nothing; it is the type of the
-        // already-folded value the driver injects at boot. See
-        // `extra_imports_for!(Journal)`'s deleted arm in `effect_defs.rs` for
-        // the full rationale this carries forward verbatim.
+        // The READ half of the run journal. `record` stays write-only —
+        // `Tidepool.Resume` reads nothing; it is the type of the
+        // already-folded value the driver injects at boot.
         extra_imports: &["import qualified Tidepool.Resume as Resume"],
         type_defs: Vec::new(),
         foreign_types: &[],

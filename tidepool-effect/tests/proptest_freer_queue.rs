@@ -19,9 +19,6 @@
 //!   L5 qComp — an E emitted from inside a continuation composes correctly
 //!      with the pending queue (covered by Emit/EmitIfOdd leaves at random
 //!      positions, plus the deep biased runs which sprinkle emits).
-//!
-//! Findings from this suite are catalogued in
-//! `plans/proptest-findings-freer-queue.md`.
 
 use frunk::hlist;
 use proptest::prelude::*;

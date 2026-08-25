@@ -1,5 +1,5 @@
 //! Managed git worktrees and typed repository events — the Rust substrate for
-//! [PRD 19](../../plans/self-iterating-harness/19-managed-worktrees-events-prd.md).
+//! authored Haskell to drive.
 //!
 //! This crate owns everything that is *git truth*: creating retained worktrees,
 //! recording them durably so a restart can still find them, snapshotting a dirty
@@ -7,8 +7,7 @@
 //! observed. It knows nothing about effects, the JIT, Haskell, or agents.
 //!
 //! The effect surface that exposes this to authored Haskell (`Tidepool.Worktree`,
-//! `Tidepool.Event`, `withHandler`) lives outside this crate — see
-//! `plans/post-restart/worktree-lanes/README.md` for the lane map. Keeping the
+//! `Tidepool.Event`, `withHandler`) lives outside this crate. Keeping the
 //! git substrate free of effect machinery is what lets every behaviour here be
 //! tested against a REAL temporary repository driven by a scripted writer,
 //! with no mock of git anywhere.

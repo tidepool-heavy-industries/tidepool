@@ -1,10 +1,9 @@
 //! Throwaway measurement scaffolding for the realm-lifetime spike, COST B
-//! (compiled-function lifetime). See `plans/post-restart/realm-verdict.md`
-//! (§9 Receipts) for the receipts this feeds and the static-analysis half of
-//! the finding (in particular: reading
+//! (compiled-function lifetime). The static-analysis half of the finding
+//! this feeds: reading
 //! `cranelift-jit` 0.129.1's own source shows `ArenaMemoryProvider::drop`
 //! deliberately LEAKS its arena once anything has been finalized, and
-//! nothing in this repo calls the escape-hatch `JITModule::free_memory`).
+//! nothing in this repo calls the escape-hatch `JITModule::free_memory`.
 //!
 //! No Cranelift-side allocated-bytes accessor is reachable from
 //! `JitEffectMachine` (`ArenaMemoryProvider` exposes none publicly, and

@@ -1,7 +1,6 @@
-//! `tidepool-selfharness` — boots the self-iterating harness driver
-//! (`plans/self-iterating-harness/`): the outer `render`/`loop` alternation
-//! over a nested [`tidepool_harness::Harness`], per
-//! `plans/self-iterating-harness/07-impl-orchestration.md`.
+//! `tidepool-selfharness` — boots the self-iterating harness driver: the
+//! outer `render`/`loop` alternation over a nested
+//! [`tidepool_harness::Harness`].
 //!
 //! Provider select (OAuth default, `--replay <log>` for deterministic
 //! replay, `--api-key <ENV_VAR>` for a non-interactive API-key provider),
@@ -116,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let project_lib = project_lib_dir();
     // The nested answerer's SCOPED stack (gui + finalize, base effects dropped
     // — W1 effect-scoping), not the full Agent stack. The recursive-companion
-    // harness gets the delegating row (PRD 21 C5): `Subagent` + `Worktree`
+    // harness gets the delegating row: `Subagent` + `Worktree`
     // prepended, and the model's own block wrapped under `runDelegate` — every
     // other harness keeps compiling exactly as before.
     let mut cfg = if is_recursive_companion(&harness_source_path) {
@@ -213,9 +212,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut driver = SelfHarnessDriver::new(agent, observer);
 
-    // PRD 20 S1-L4: the concurrency cap for concurrently-serviced
-    // fanout/fork `RunLLMTurn` windows (default 8 — see
-    // `SelfHarnessDriver::set_concurrency_cap`'s doc).
+    // The concurrency cap for concurrently-serviced fanout/fork `RunLLMTurn`
+    // windows (default 8 — see `SelfHarnessDriver::set_concurrency_cap`'s doc).
     if let Some(cap) = args.concurrency {
         driver.set_concurrency_cap(cap);
     }
@@ -229,12 +227,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the `/` tree renders one circle and `/legacy` renders one section,
         // both quiet and uncluttered for the single-node case. A second,
         // speculative `register_node("root")` for the recursive-companion
-        // harness used to sit here (PRD 21 C3 §10.3, anticipating the
-        // per-node GUI lane that carries node ids from Haskell); until that
-        // lane lands nothing routes to any node but the default, so all it
-        // produced was a permanently-empty second node in front of the live
-        // operator (dogfood finding, 2026-08-19). Re-add registrations only
-        // together with the routing that feeds them.
+        // harness must not be re-added without the per-node GUI routing that
+        // carries node ids from Haskell — without it nothing routes to any
+        // node but the default, so it would only produce a permanently-empty
+        // second node in front of the live operator (dogfood finding,
+        // 2026-08-19). Re-add registrations only together with the routing
+        // that feeds them.
         let (state, gate) = tidepool_web::spawn_operator_server_multi(port).await?;
         if let Some(live) = &live_settings {
             state.set_model_settings(live.clone());
@@ -243,8 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_state = Some(state);
     }
 
-    // S1-L1 (plans/self-iterating-harness/20-exomonad-v3-prd.md): the
-    // Console/Worktree/RepoEvent/Exec boundaries for the AUTHORED outer loop —
+    // The Console/Worktree/RepoEvent/Exec boundaries for the AUTHORED outer loop —
     // always wired (Console has no external state; Worktree/RepoEvent/Exec
     // are scoped to TIDEPOOL_SOURCE_REPO, defaulting to the repo this process
     // runs in), unlike the optional Subagent boundary below.
@@ -258,7 +255,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     driver.set_worktree_handler(worktree_handler);
     driver.set_event_handler(event_handler);
     driver.set_exec_handler(exec_handler);
-    // The run journal (PRD 20 S1-L5): identity comes from the RUN LEASE, not
+    // The run journal's identity comes from the RUN LEASE, not
     // from this process. `acquire_lease` resumes the run a prior process left
     // behind (a crash leaves the lease on disk) or mints a fresh one — either
     // way this process is handed its OWN, freshly allocated journal SEGMENT
@@ -295,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The subagent boundary: delegation targets the companion's MEMORY
     // store ONLY (operator decision, 2026-08-23) — the standalone git repo
-    // of one-fact-per-file markdown from plans/companion-memory.md — never
+    // of one-fact-per-file markdown — never
     // the source repository. Standard durable-data location, auto-seeded
     // fresh when absent, so delegation works with no launcher or env
     // ceremony; TIDEPOOL_MEMORY_REPO overrides the path.
@@ -391,8 +388,8 @@ const MEMORY_OPERATOR_MD: &str =
 
 const MEMORY_DIGEST_MD: &str = "# Memory digest\n\n(Empty store — no memories filed yet.)\n";
 
-/// Ensure the companion's memory store exists at `store`
-/// (plans/companion-memory.md): seed files + `git init` + first commit when
+/// Ensure the companion's memory store exists at `store`: seed files +
+/// `git init` + first commit when
 /// absent; an EXISTING store (anything with a `.git`) is never touched.
 /// This is the ONE seeding mechanism — the old
 /// `scripts/companion-memory-init.sh` moved here so the binary is
@@ -519,7 +516,7 @@ fn build_subagent_handler(
     Ok(handler)
 }
 
-/// Whether `path` names the recursive-companion harness (PRD 21 C3), the one
+/// Whether `path` names the recursive-companion harness, the one
 /// harness whose recursion tree the multi-node GUI surface exists for.
 ///
 /// Keys on the harness's own DIRECTORY, not its file name: a harness's

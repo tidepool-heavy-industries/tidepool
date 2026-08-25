@@ -1,6 +1,5 @@
 //! The pin for `gen::wire_rs`'s Worktree output — the wire-record analogue of
-//! `generated_files_are_current.rs`'s third layer, and the scaffold doc
-//! §11.7's Class E ("wire-struct identity").
+//! `generated_files_are_current.rs`'s third layer.
 //!
 //! Worktree is deliberately not in [`tidepool_protocol::effects::all`], so
 //! nothing here is written to disk — this test calls the generator directly

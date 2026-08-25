@@ -3,7 +3,7 @@
 //! `finish_suspendable` stopped hand-rolling its own bind epilogue and started
 //! calling `materialize`.
 //!
-//! Why these two are worth pinning (see `plans/unpark/feasibility-map.md` §2):
+//! Why these two are worth pinning:
 //! the repl's multi-bind path (`(a, b) <- e`) and its bare-expression path
 //! (`it` + render, the default for EVERY bare expression) run on exactly these
 //! policies, and both must survive an `ask` mid-turn for the threadless

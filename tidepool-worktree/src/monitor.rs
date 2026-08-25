@@ -25,7 +25,7 @@
 //! [`RepositoryEvent::Commit`] is emitted only when a commit can be honestly
 //! inferred from git state. The monitor NEVER attributes causality to an agent
 //! or a model — it reports what the repository became, and the agent receipts
-//! from PRD 18 separately report what the harness observed a worker doing.
+//! separately report what the harness observed a worker doing.
 //! Those two are complementary evidence; conflating them would let a worker's
 //! prose become proof of a commit.
 //!

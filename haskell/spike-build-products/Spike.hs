@@ -1,8 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Build-products-dir spike (plans/turn-latency-state-injection.md's
--- "Direction: toward a resident compile daemon" section, prerequisite (2)):
--- does GHC's OWN recompilation checking ('GHC.Iface.Recomp.checkOldIface',
+-- | Build-products-dir spike, a prerequisite toward a resident compile
+-- daemon: does GHC's OWN recompilation checking ('GHC.Iface.Recomp.checkOldIface',
 -- reached through 'load'') actually SKIP an unchanged home module under
 -- @backend = noBackend@ (what 'Tidepool.GhcPipeline.canonicalizeDFlags'
 -- pins every extraction to) when interfaces are written to, and read back

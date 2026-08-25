@@ -1,8 +1,6 @@
 //! Controlled two-arm measurement for the realm-spike leak-comparison lane.
-//! See `plans/post-restart/realm-verdict.md` (§9 Receipts) for the receipts
-//! this feeds. Builds on the sibling realm-lifetime finding, also in that
-//! doc: dropping a `JitEffectMachine` does not reclaim its compiled code,
-//! because
+//! Builds on the sibling realm-lifetime finding: dropping a
+//! `JitEffectMachine` does not reclaim its compiled code, because
 //! `cranelift-jit` 0.129.1's `ArenaMemoryProvider::drop` deliberately leaks
 //! once any segment has been finalized (true of every real machine).
 //!

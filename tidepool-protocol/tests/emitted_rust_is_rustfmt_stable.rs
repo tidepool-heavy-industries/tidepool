@@ -1,14 +1,14 @@
 //! Every emitted `.rs` file must be a FIXED POINT of rustfmt.
 //!
-//! This is an acceptance property, not a nicety — the scaffold doc §4 states it
-//! as one. Generated `.rs` is subject to `cargo fmt --all -- --check` like any
+//! This is an acceptance property, not a nicety. Generated `.rs` is subject to
+//! `cargo fmt --all -- --check` like any
 //! other source, so if the emitter's output is not already formatted, the format
 //! gate and the golden gate fight each other: `cargo fmt` rewrites the file,
 //! `generated_files_are_current` then declares it stale, and regenerating it
 //! puts the fight back. There is no stable state.
 //!
-//! It is a TEST rather than a manual check for the reason §4 gives about every
-//! guard in this program: a check nothing runs is not a check. `tidepool-protocol`
+//! It is a TEST rather than a manual check for the reason every guard in this
+//! program follows: a check nothing runs is not a check. `tidepool-protocol`
 //! is outside `.config/nextest.toml`'s `default-filter` exclusion set and needs
 //! no GHC, so a bare `cargo nextest run` reaches this.
 //!
@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 ///
 /// # Panics
 /// Panics when `rustfmt` is absent or rejects the input. Both are hard failures
-/// by design: `cargo fmt --all -- --check` is in this lane's verify list, so a
+/// by design: `cargo fmt --all -- --check` is in this crate's verify list, so a
 /// toolchain that cannot format is a broken toolchain, and source the formatter
 /// REJECTS is source that does not parse — which is a much more serious finding
 /// than a formatting difference.
@@ -157,7 +157,7 @@ fn every_runtime_decode_file_is_a_rustfmt_fixed_point() {
 /// The Worktree wire and adapter modules specifically, named rather than left to
 /// the sweep above.
 ///
-/// They are the two files this lane adds, they are not on disk yet (Worktree is
+/// They are the two Worktree files, not yet on disk (Worktree is
 /// deliberately absent from `effects::all()`), and they are the ones carrying
 /// hand-shaped emitter output — a `match` body, a wrapped `use` list, a
 /// multi-clause boundary-constructor condition. If the sweep above ever stops

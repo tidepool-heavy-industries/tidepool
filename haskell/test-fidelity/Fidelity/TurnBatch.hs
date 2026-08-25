@@ -1,8 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Per-item error attribution for @--turn-batch@
--- (plans/post-restart/batch-turns-feasibility.md §8, batch-extract lane
--- DONE criteria: "a Haskell-side test proving per-item error attribution").
+-- | Per-item error attribution for @--turn-batch@: a Haskell-side test
+-- proving per-item error attribution for the batch-extract lane.
 --
 -- Drives the ACTUAL @tidepool-extract-bin@ PRODUCTION BINARY as a
 -- subprocess, mirroring 'Fidelity.D1Defense' exactly and for the same

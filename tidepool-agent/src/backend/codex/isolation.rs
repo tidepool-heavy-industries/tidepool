@@ -1,6 +1,6 @@
 //! Config isolation checker for the operator's Codex home directory.
 //!
-//! PRD 18 acceptance criterion 11: no normal worker run mutates the
+//! No normal worker run mutates the
 //! operator's global Codex configuration. `$CODEX_HOME` (`~/.codex` when
 //! unset) also holds live sqlite databases the operator's own Codex sessions
 //! write to continuously (`logs_2.sqlite`, `goals_1.sqlite`,

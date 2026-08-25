@@ -8,8 +8,7 @@
 //! `thread/tokenUsage/updated` capture — has to be proven by the real adapter
 //! against real bytes, not encoded by hand in
 //! [`crate::backend::mock::MockBackend`]: a hand-written imitation can only
-//! ever encode what its author believed the server does. Mock policy:
-//! `plans/post-restart/agent-lanes/codex-live-frozen-contract.md`.
+//! ever encode what its author believed the server does.
 //! `tidepool-harness`'s `ReplayProvider` is the named precedent for this
 //! shape.
 //!
@@ -349,8 +348,7 @@ mod tests {
     //! transport is a file.
     //!
     //! They live inside `backend::codex` rather than in `tests/` because this
-    //! crate's containment rule (`lib.rs`, rule 1;
-    //! `plans/post-restart/agent-lanes/README.md`) is that `codex-codes` types
+    //! crate's containment rule (`lib.rs`, rule 1) is that `codex-codes` types
     //! appear ONLY under this module — and a gate about protocol frames cannot
     //! be written without them.
     //!

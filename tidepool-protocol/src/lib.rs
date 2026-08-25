@@ -33,9 +33,7 @@
 //!
 //! Effects move here one at a time, each proven byte-compatible before its
 //! hand-written copy is deleted. [`effects::all`] is the migrated set;
-//! everything else still lives in `tidepool-mcp/src/effect_defs.rs`. See
-//! `plans/self-iterating-harness/22-p1-protocol-scaffold.md` for the schema
-//! design, the golden protocol, and the procedure for migrating the next one.
+//! everything else still lives in `tidepool-mcp/src/effect_defs.rs`.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod effects;

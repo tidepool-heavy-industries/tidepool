@@ -10,7 +10,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 
--- | PRD 21 C5 — the narrow delegation surface a recursive-companion
+-- | The narrow delegation surface a recursive-companion
 -- branch-node agent session compiles against.
 --
 -- @delegate@ is the ONLY verb this module exposes to a model-authored
@@ -23,8 +23,7 @@
 --
 -- 'runDelegate' is the Haskell-side interpreter (freer-simple
 -- 'Control.Monad.Freer.reinterpret2' — the same free-monad-interposition
--- family 'Tidepool.Event.withHandler' is built from; see
--- @plans/post-restart/worktree-lanes/L4-mechanism.md@) that lowers
+-- family 'Tidepool.Event.withHandler' is built from) that lowers
 -- 'Delegate' onto the real 'Subagent' machinery
 -- ("Tidepool.Agent.Spawn" speaks the same GADT). It never SENDS a raw
 -- 'Tidepool.Effects.Worktree' constructor — worktree creation/binding

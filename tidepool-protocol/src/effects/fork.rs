@@ -1,4 +1,4 @@
-//! The `Fork` suspension — decode-only (PRD 22 step 1).
+//! The `Fork` suspension — decode-only.
 //!
 //! `Tidepool.Fork`'s `fork @T brief` / `forkAll @T briefs`. Polymorphic
 //! response type, bound at the invocation site — out of scope for the decl

@@ -303,6 +303,18 @@ pub(crate) enum ThreadServiced {
     },
 }
 
+/// Where one serviced green suspension's resume lands — invariant across
+/// every constructor arm inside one [`SelfHarnessDriver::service_green_hole`]
+/// call; only the answer payload and the diagnostic label vary per call, so
+/// those two stay their own parameters on [`SelfHarnessDriver::deliver_green_resume`].
+pub(crate) struct GreenResumeSite<'a> {
+    pub(crate) host: Option<NodeId>,
+    pub(crate) sid: tidepool_repr::SessionId,
+    pub(crate) delivery: &'a GreenDelivery<'a>,
+    pub(crate) chain: GreenChain,
+    pub(crate) hole: &'a str,
+}
+
 impl SelfHarnessDriver {
     /// [`Harness::with_session_retrying`] when `host` names a real answerer
     /// node (F4: the answerer-plane green scheduler, whose host node may have
@@ -327,27 +339,23 @@ impl SelfHarnessDriver {
     /// [`GreenDelivery`] — see that type's doc for the plane split.
     pub(crate) async fn deliver_green_resume(
         &self,
-        host: Option<NodeId>,
-        sid: tidepool_repr::SessionId,
-        delivery: &GreenDelivery<'_>,
-        chain: GreenChain,
-        hole: &str,
+        site: &GreenResumeSite<'_>,
         answer: GreenAnswer,
         ready: &mut VecDeque<GreenReady>,
         what: &str,
     ) -> Result<(), DriverError> {
-        match delivery {
+        match site.delivery {
             GreenDelivery::Raw => {
                 let next = self
-                    .with_session_maybe_retrying(host, sid, |s| match answer {
-                        GreenAnswer::Value(v) => s.resume(ResidentHole::plain(hole), v),
-                        GreenAnswer::BorrowedRoot(h) => s.resume_handle_borrowed(hole, h),
+                    .with_session_maybe_retrying(site.host, site.sid, |s| match answer {
+                        GreenAnswer::Value(v) => s.resume(ResidentHole::plain(site.hole), v),
+                        GreenAnswer::BorrowedRoot(h) => s.resume_handle_borrowed(site.hole, h),
                     })
                     .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(|e| DriverError::Session(format!("{what} resume failed: {e}")))?;
                 ready.push_back(GreenReady {
-                    chain,
+                    chain: site.chain,
                     outcome: next,
                 });
                 Ok(())
@@ -490,11 +498,13 @@ impl SelfHarnessDriver {
                 // pending record refreshes) before the fresh thread's first
                 // outcome enters the queue.
                 self.deliver_green_resume(
-                    host,
-                    sid,
-                    &delivery,
-                    chain,
-                    hole,
+                    &GreenResumeSite {
+                        host,
+                        sid,
+                        delivery: &delivery,
+                        chain,
+                        hole,
+                    },
                     GreenAnswer::Value(tid_value),
                     ready,
                     "AsyncSpawnWith spawner",
@@ -617,11 +627,13 @@ impl SelfHarnessDriver {
                             DriverError::Session(format!("AsyncJoinAnyWith winner box: {e}"))
                         })?;
                         self.deliver_green_resume(
-                            host,
-                            sid,
-                            &delivery,
-                            chain,
-                            hole,
+                            &GreenResumeSite {
+                                host,
+                                sid,
+                                delivery: &delivery,
+                                chain,
+                                hole,
+                            },
                             GreenAnswer::Value(winner_value),
                             ready,
                             "AsyncJoinAnyWith",
@@ -664,11 +676,13 @@ impl SelfHarnessDriver {
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncStatusWith code box: {e}")))?;
                 self.deliver_green_resume(
-                    host,
-                    sid,
-                    &delivery,
-                    chain,
-                    hole,
+                    &GreenResumeSite {
+                        host,
+                        sid,
+                        delivery: &delivery,
+                        chain,
+                        hole,
+                    },
                     GreenAnswer::Value(code_value),
                     ready,
                     "AsyncStatusWith",
@@ -697,11 +711,13 @@ impl SelfHarnessDriver {
                 };
                 match self
                     .deliver_green_resume(
-                        host,
-                        sid,
-                        &delivery,
-                        chain,
-                        hole,
+                        &GreenResumeSite {
+                            host,
+                            sid,
+                            delivery: &delivery,
+                            chain,
+                            hole,
+                        },
                         match answer {
                             GreenResult::Value(v) => GreenAnswer::Value(v),
                             GreenResult::Root(h) => GreenAnswer::BorrowedRoot(h),
@@ -758,11 +774,13 @@ impl SelfHarnessDriver {
                     .to_value(table)
                     .map_err(|e| DriverError::Session(format!("AsyncCancelWith () bridge: {e}")))?;
                 self.deliver_green_resume(
-                    host,
-                    sid,
-                    &delivery,
-                    chain,
-                    hole,
+                    &GreenResumeSite {
+                        host,
+                        sid,
+                        delivery: &delivery,
+                        chain,
+                        hole,
+                    },
                     GreenAnswer::Value(unit),
                     ready,
                     "AsyncCancelWith",

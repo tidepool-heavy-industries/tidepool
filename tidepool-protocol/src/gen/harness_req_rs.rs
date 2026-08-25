@@ -28,7 +28,7 @@
 //! The effects this generator serves are declared in
 //! [`crate::effects::suspension_roster`], deliberately NOT part of
 //! [`crate::effects::all`]: their Haskell decls stay hand-carried in
-//! `tidepool-mcp/src/effect_defs.rs` for now (PRD 22 step 1's scope is the
+//! `tidepool-mcp/src/effect_defs.rs` for now (this generator's scope is the
 //! decode/typing layer only, not the decl side) — see that function's doc.
 
 use super::{header, index_body, module_name, GeneratedFile};

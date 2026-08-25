@@ -122,7 +122,6 @@ fn no_home_rules_pragmas_in_extract_relevant_haskell_source() {
          package-module definition site, which cannot name a home module — home \
          modules are supplied via --include/importPaths entirely outside package \
          resolution.) Found HOME RULES pragmas in: {offenders:?}. Before adding \
-         one, revisit E6's reachability rule (plans/post-restart/extract-wave/\
-         spawn-latency/02-e6-tiered-o2.md)."
+         one, revisit E6's reachability rule."
     );
 }

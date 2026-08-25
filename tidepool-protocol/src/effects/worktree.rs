@@ -7,7 +7,7 @@
 //! the two lists agree positionally. This module is where that comment goes to
 //! die: one ordered [`crate::types::RecordField`] list produces both sides.
 //!
-//! **Flipped** (scaffold doc §11.13): `worktree_effect_def!` is deleted, the
+//! **Flipped:** `worktree_effect_def!` is deleted, the
 //! hand-written `Wt*` block is deleted, and with it the comment asserting that
 //! the two field lists agree positionally — there is only one list now.
 //!
@@ -16,22 +16,20 @@
 //! three thin wrappers over one verb, plus `worktreeId`, the one pure projection
 //! ([`crate::schema::HelperBody::Projection`]). The other ten are NOT smuggled
 //! in as strings — they are DEFINITIONS in `haskell/lib/Tidepool/Worktree.hs`,
-//! reachable from an eval through this effect's `extra_imports` row, and §11.9
-//! of the scaffold doc records the per-helper verdict. That gap is a real
-//! finding, not a shortfall of effort: the alternative was embedding a Haskell
+//! reachable from an eval through this effect's `extra_imports` row. That gap
+//! is a real finding, not a shortfall of effort: the alternative was embedding a Haskell
 //! expression language in the schema, which is the hatch under a different name.
 //!
-//! Two of the ten could not simply move, and §11.9a is the reason: a helper
-//! emitted into the generated `Tidepool.Effects` is in scope for every OTHER
-//! effect's helpers there, and that module cannot import the library layer.
-//! `worktreeId` was made representable; `renderWorktreeError`'s CALLER moved
-//! instead. Before relocating any helper, grep every `*_effect_def!` for its
-//! name — see §11.12.
+//! Two of the ten could not simply move: a helper emitted into the generated
+//! `Tidepool.Effects` is in scope for every OTHER effect's helpers there, and
+//! that module cannot import the library layer. `worktreeId` was made
+//! representable; `renderWorktreeError`'s CALLER moved instead. Before
+//! relocating any helper, grep every `*_effect_def!` for its name.
 //!
 //! **A fifth verb landed later, outside the fourteen-item census above.**
 //! `WorktreeMergeInto`/`mergeBranchInto` exposes `tidepool_worktree::merge::
-//! merge_branch_into` (PRD 21 C5's one deliberate git-workflow exception —
-//! see `tidepool-worktree/src/merge.rs`) as a typed verb, replacing two
+//! merge_branch_into` (one deliberate git-workflow exception — see
+//! `tidepool-worktree/src/merge.rs`) as a typed verb, replacing two
 //! authored Haskell reimplementations that had drifted from the canonical
 //! conflict/failure classification (`harness-dogfooding/dev-tree` and
 //! `/recursive-companion`'s own `mergeChild`/`mergeChildInto`).
@@ -115,7 +113,7 @@ pub fn worktree() -> Effect {
         default_row_args: &[],
         helpers_row_polymorphic: true,
         // Eleven of the fourteen authored names are not schema-representable
-        // (see the module doc and §11.9) and are DEFINED in
+        // (see the module doc) and are DEFINED in
         // `haskell/lib/Tidepool/Worktree.hs`. This row is what makes that
         // relocation invisible to an eval author: a row carrying Worktree
         // imports that module, so all fourteen names resolve exactly as they
@@ -126,18 +124,18 @@ pub fn worktree() -> Effect {
         type_defs: type_defs(),
         foreign_types: &[],
         // Typed per-verb failure (#335): a dirty source, a lost tree, or a busy
-        // worktree is DATA an author cases on, not an eval abort. These are PRD
-        // 19's `WorktreeError` variants plus the two the PRD's prose requires
-        // but its illustrative ADT did not spell out, plus the three the
-        // storage-error lane added — see `tidepool-worktree/src/error.rs` for
-        // why each stands alone rather than folding into a neighbour.
+        // worktree is DATA an author cases on, not an eval abort. These are
+        // `WorktreeError`'s core variants plus two required but not spelled
+        // out in the original illustrative ADT, plus three the storage-error
+        // lane added — see `tidepool-worktree/src/error.rs` for why each
+        // stands alone rather than folding into a neighbour.
         //
         // `error_to_wire` (the ten-arm domain→wire map in
         // `handlers/worktree.rs`) stays HAND-WRITTEN: it maps between two error
         // vocabularies whose variants differ in arity, and several arms carry a
         // decision about which domain failure becomes which wire failure. There
         // is no `DomainMap` slot on `ErrorAdt` because generating that map is
-        // not attempted; §11's table records the verdict.
+        // not attempted.
         errors: Some(errors()),
         verbs: verbs(),
         helpers: helpers(),
@@ -526,8 +524,7 @@ fn type_defs() -> Vec<TypeDef> {
                     },
                     // NOT promoted to a typed timestamp: promoting `createdAt ::
                     // Int` would change the Haskell declaration, and that
-                    // declaration is byte-locked by the Class A goldens. See the
-                    // scaffold doc §11.4 for the rule and its trigger.
+                    // declaration is byte-locked by the Class A goldens.
                     RecordField {
                         hs_name: "createdAt",
                         rust_name: "created_at",
@@ -799,7 +796,7 @@ fn verbs() -> Vec<Verb> {
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
             extract: None,
         },
-        // The one narrow, deliberate workflow primitive (PRD 21 C5's
+        // The one narrow, deliberate workflow primitive (the
         // worktree-coordination fold — see `tidepool-worktree/src/merge.rs`
         // and this crate's `CLAUDE.md`): merge one branch into a target
         // worktree, typed and classified ONCE, so authored harnesses stop
@@ -843,11 +840,10 @@ fn tree_id_arg() -> Arg {
 /// pure projection.
 ///
 /// Ten more live in `haskell/lib/Tidepool/Worktree.hs` as DEFINITIONS. They are
-/// excluded rather than smuggled in as strings — the per-helper verdict is the
-/// table in the scaffold doc §11.9, and the `extra_imports` row above is what
-/// keeps them on the eval surface.
+/// excluded rather than smuggled in as strings, and the `extra_imports` row
+/// above is what keeps them on the eval surface.
 ///
-/// `worktreeId` is the one §11.9 listed among the relocations that could not
+/// `worktreeId` is the one relocation candidate that could not
 /// go, and the reason is structural: the RepoEvent helpers `commit` and
 /// `headChanged` CALL it from inside the same generated `Tidepool.Effects`
 /// module, which cannot import `Tidepool.Worktree` (that module imports IT).

@@ -3,16 +3,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | REFERENCE ARTIFACT (self-iterating-harness S3 scaffold,
--- 07-impl-orchestration.md). This is the TARGET authored-harness contract —
+-- | REFERENCE ARTIFACT. This is the TARGET authored-harness contract —
 -- an author writes a module shaped exactly like this one to drive the
 -- self-iterating harness (`tidepool-selfharness`). Loaded at RUNTIME by
 -- 'tidepool_harness::load_harness_source' (WS-D), NOT compiled by cargo —
 -- it references 'Harness'/'runLLMTurn' (the 'RunLLMTurn' effect WS-B adds).
 --
--- Contract this freezes (see @plans/self-iterating-harness/02-runtime.md@,
--- @03-agent-surface.md@, and the runtime-context refactor recorded in
--- @plans/self-iterating-harness/15-generic-surface-wave.md@):
+-- Contract this freezes:
 --
 --   * 'State' — any author-defined @(ToJSON s, FromJSON s) => s@. LOCKED.
 --     Small + typed ("bag of typed values": enums, levels, tag lists,
@@ -58,8 +55,7 @@ import HarnessTypes (Confidence (..), Decision (..), Mode (..), State (..),
 import Tidepool.Prelude hiding (render)
 
 -- The self-iterating harness's own orchestration monad ('Eff \'[RunLLMTurn]'
--- for v1, per 07-impl-orchestration.md's locked decisions) and its typed
--- yield.
+-- for v1) and its typed yield.
 import Tidepool.Harness (Harness, runLLMTurn)
 
 -- | @loop :: State -> Harness State@. LOCKED signature. One context window's

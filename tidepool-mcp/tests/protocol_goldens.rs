@@ -1,5 +1,4 @@
-//! PRD 22 phase-1 Class A golden baseline (`plans/self-iterating-harness/`
-//! `22-p1-protocol-scaffold.md` section 5): pins, byte-for-byte, the
+//! Class A golden baseline: pins, byte-for-byte, the
 //! effect-contract artifacts that cross the Rust/Haskell boundary. These
 //! goldens are the non-regression evidence that an effect-at-a-time schema
 //! migration is safe — when lane N later flips effect N, re-asserting these
@@ -30,7 +29,7 @@ use tidepool_mcp::EffectDecl;
 /// in the ORDER its `<eff>_effect_def!` invocation (or, for a flipped effect,
 /// its comment marker) appears there, EXCEPT:
 ///
-///   - `subagent_decl()` — HARD CONSTRAINT (PRD 22 phase-1 spec): a sibling
+///   - `subagent_decl()` — HARD CONSTRAINT: a sibling
 ///     lane is actively editing the `subagent_effect_def!` row in
 ///     `tidepool-mcp/src/effect_defs.rs` right now. Including it here would
 ///     make this baseline chase a moving target instead of pinning stable
@@ -38,7 +37,7 @@ use tidepool_mcp::EffectDecl;
 ///     add it as an ordinary golden update, in the same commit as the rest
 ///     of the diff.
 ///
-///   `event_decl()` was under the same constraint until PRD 22 lane 4 landed
+///   `event_decl()` was under the same constraint until it landed
 ///   (RepoEvent's flip onto the `tidepool-protocol` schema) — it is ordinary
 ///   pinned data now, added in the same commit as that flip.
 ///
@@ -230,7 +229,7 @@ fn tool_description_effects_index_golden_matches_committed_file() {
 // The Exec pins have since outgrown that job. They were transcribed from
 // `effect_defs.rs`'s `exec_effect_def!` while it still existed; that macro is
 // now DELETED and `exec_decl()` is generated from the `tidepool-protocol`
-// schema (PRD 22 phase 1). So these particular literals are a hand-written
+// schema. So these particular literals are a hand-written
 // record of the pre-migration contract that the generated output still
 // satisfies — the most direct byte-compatibility evidence in the tree. Do not
 // "update" them to match a future generator change: a diff here means the

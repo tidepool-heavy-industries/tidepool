@@ -1,4 +1,4 @@
-//! PRD 18 codex-live — the WHOLE parent-serves-the-child's-tools loop, on the
+//! codex-live — the WHOLE parent-serves-the-child's-tools loop, on the
 //! real extract/JIT.
 //!
 //! A Haskell program calls `spawnAgentWithTools` (`Tidepool.Agent.Spawn`) with

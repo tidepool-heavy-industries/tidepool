@@ -1,4 +1,4 @@
-//! Journal effect handler: a durable append-only run journal (PRD 20, S1-L5).
+//! Journal effect handler: a durable append-only run journal.
 //!
 //! One JSON line per `record` call — `{seq, kind, key, payload}` — appended
 //! and `fsync`ed before the call returns. No rewrite or compaction code path
@@ -23,7 +23,7 @@ use tidepool_repr::version_ladder::{self, LadderError};
 use super::journal_version::{self, MIGRATIONS};
 
 // JournalReq, DescribeEffect and the EffectHandler dispatch are GENERATED from
-// the `tidepool-protocol` schema (PRD 22 phase 2) — re-exported here so the
+// the `tidepool-protocol` schema — re-exported here so the
 // public path (`tidepool_handlers::JournalReq`) is unchanged. Only the handler
 // struct and the per-verb method body below are hand-written.
 pub use crate::generated::journal::JournalReq;
@@ -151,8 +151,7 @@ pub enum JournalLoadError {
         detail: String,
     },
     /// This segment's version is below the floor this build still carries a
-    /// migration path from — never a silent reset. See
-    /// `plans/persistence-versioning-design.md` §6.
+    /// migration path from — never a silent reset.
     BelowFloor {
         path: PathBuf,
         found: u32,
@@ -334,7 +333,7 @@ pub fn load_journal(path: &Path) -> Result<Vec<JournalEntry>, JournalLoadError> 
 /// Fold entries down to the LAST record per `key` (later `seq` wins) — the
 /// shape a boot-time resume wants: "what do I already know about this
 /// branch/task". Not wired into anything here; the swarm driver injects this
-/// at boot per PRD 20's "Persistence and resume" lean.
+/// at boot.
 ///
 /// Answers a NARROWER question than [`last_by_kind_key`], and both are kept:
 /// this one is "the latest thing recorded about `key`, whatever kind it was",

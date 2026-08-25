@@ -19,8 +19,7 @@
 //! (rebuilt fresh from the log file on every process start) runs out, not
 //! the reply content. The loop count itself is a runtime fact — carried in
 //! the checkpoint ENVELOPE's `iteration` field, not in `State`
-//! (`plans/self-iterating-harness/15-generic-surface-wave.md`, "Runtime
-//! context is the runtime's job").
+//! (runtime context is the runtime's job).
 //!
 //! Assertions read the persisted checkpoint only through
 //! `SelfHarnessDriver::checkpoint_path`'s public accessor (never a

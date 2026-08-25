@@ -9,7 +9,7 @@ use tidepool_bridge_effects::Proc;
 // ============================================================================
 
 // ExecReq, ExecError, DescribeEffect and the EffectHandler dispatch are
-// GENERATED from the `tidepool-protocol` schema (PRD 22 phase 1) — re-exported
+// GENERATED from the `tidepool-protocol` schema — re-exported
 // here so the public paths (`tidepool_handlers::ExecReq`) are unchanged. Only
 // the handler struct and the per-verb method bodies below are hand-written.
 pub use crate::generated::exec::{ExecError, ExecReq};

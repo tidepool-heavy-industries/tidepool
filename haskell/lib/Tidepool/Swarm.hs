@@ -155,8 +155,8 @@ capped depthOf limit refuse =
 
 -- | Approve a LAYER, after the unfold and before the descent.
 --
--- The slot sees the produced @PlanF t a@, not the seed, and that is locked
--- (PRD 20): an operator approves one layer at a time with its parent's real
+-- The slot sees the produced @PlanF t a@, not the seed, and that is locked:
+-- an operator approves one layer at a time with its parent's real
 -- outcomes already attached, never a speculative whole-tree sign-off. Approving
 -- before the unfold would mean approving a layer nobody has seen.
 --

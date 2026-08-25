@@ -371,7 +371,7 @@ fn run() -> i32 {
 
     // Worktree resolution: what the coupled spawn actually LEFT BEHIND.
     //
-    // Retain-first is locked (PRD 19), so "rolling back" never deletes
+    // Retain-first is locked, so "rolling back" never deletes
     // anything — the question a receipt has to answer is what STATE the
     // worktree and its binding were left in, and whether the child moved the
     // tree at all. A settled binding plus a retained, rebindable worktree is

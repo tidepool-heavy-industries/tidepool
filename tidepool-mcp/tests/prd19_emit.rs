@@ -46,7 +46,7 @@ fn emit_for_gates() {
 }
 
 /// The `(<|>)` COLLISION IS OPEN, RELOCATED — this gate pins the honest
-/// current state after PRD 22 lane 4's flip moved `(<|>)` OUT of the
+/// current state after the flip that moved `(<|>)` OUT of the
 /// generated `Tidepool.Effects` module entirely (it is now a DEFINITION in
 /// `haskell/lib/Tidepool/Event.hs`, not schema-representable — see that
 /// module's own doc). The collision this gate originally tracked —
@@ -71,7 +71,7 @@ fn the_alternative_collision_is_open_and_the_generated_module_is_unchanged() {
     assert!(
         !src.contains("(<|>) ::"),
         "generated Tidepool.Effects no longer defines (<|>) — it relocated to \
-         Tidepool.Event.hs (PRD 22 lane 4)"
+         Tidepool.Event.hs"
     );
     assert!(
         authored_event_module().contains("(<|>) :: Event a -> Event a -> Event a"),
@@ -195,8 +195,8 @@ fn worktree_decl_imports_the_module_that_defines_the_relocated_helpers() {
     );
 }
 
-/// The FOUR helpers `tidepool-protocol`'s Event schema represents (PRD 22
-/// lane 4) — thin wrappers over the capability-mailbox trio plus the
+/// The FOUR helpers `tidepool-protocol`'s Event schema represents — thin
+/// wrappers over the capability-mailbox trio plus the
 /// blocking-wait primitive `nextEvent`/`awaitFirst` build on — plus the
 /// representable TYPE declarations (`Watch`/`HeadChangeKind`/
 /// `RepositoryEvent`/… stay generated; only `Event`/`Observed` and the
@@ -227,7 +227,7 @@ fn generated_module_carries_the_authored_event_surface() {
 /// (genuinely polymorphic types with no schema vocabulary) are DEFINED in
 /// `haskell/lib/Tidepool/Event.hs` and must NOT also be emitted here — same
 /// discipline as Worktree's relocated-helpers gate, extended to type
-/// declarations for the first time (PRD 22 lane 4).
+/// declarations for the first time.
 #[test]
 fn generated_module_does_not_redefine_the_relocated_event_helpers() {
     let src = worktree_and_event_module();
@@ -317,7 +317,7 @@ fn authored_worktree_module() -> String {
 
 /// The authored `Tidepool.Event` source, which now DEFINES eighteen
 /// non-representable helpers plus `Event`/`Observed`/the `Functor` instance
-/// (PRD 22 lane 4) rather than being a pure re-export module.
+/// rather than being a pure re-export module.
 fn authored_event_module() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

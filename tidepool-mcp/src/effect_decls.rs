@@ -271,9 +271,8 @@ crate::fork_effect_def!(crate::effect_defs::effect_decl_projection);
 
 crate::llm_effect_def!(crate::effect_defs::effect_decl_projection);
 
-// Worktree / RepoEvent (PRD 19), Subagent (PRD 18 lane 1), Journal (PRD 20
-// S1-L5), and Green (PRD 20 S1-L4) are all opt-in: NOT in `build_base_stack`'s
-// row, so a caller wanting managed worktrees, repository events, coupled
+// Worktree / RepoEvent, Subagent, Journal, and Green are all opt-in: NOT in
+// `build_base_stack`'s row, so a caller wanting managed worktrees, repository events, coupled
 // agent+worktree spawn, the run journal, or green threads builds its own row
 // containing them (lane L4's acceptance harness does, for Worktree/RepoEvent).
 // Worktree/RepoEvent/Journal are MIGRATED — `worktree_decl()`/`event_decl()`/

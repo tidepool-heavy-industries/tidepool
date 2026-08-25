@@ -1,7 +1,6 @@
-//! A single typed merge primitive for PRD 21 C5's worktree-coordination fold
-//! (`plans/self-iterating-harness/21-recursive-companion-prd.md`, "Worktree
-//! coordination"): a node merges each child's branch into its own worktree,
-//! in declared branch order.
+//! A single typed merge primitive for the worktree-coordination fold: a node
+//! merges each child's branch into its own worktree, in declared branch
+//! order.
 //!
 //! This is NOT a reopening of the "no git workflow verbs" boundary
 //! (`crate::git`'s module docs, this crate's `CLAUDE.md`, and

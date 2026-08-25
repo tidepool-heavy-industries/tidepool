@@ -59,7 +59,7 @@ fn shutdown_backend(backend: Box<dyn AgentBackend + Send>) {
 }
 
 // ============================================================================
-// Tag: Subagent (PRD 18 lane 1 — coupled agent+worktree spawn; deliberately
+// Tag: Subagent (coupled agent+worktree spawn; deliberately
 // NOT in the default base_effects! row, same opt-in status as Worktree /
 // RepoEvent. A row containing Subagent must also contain Worktree — the
 // generated types reference WorktreeSpec/WorktreeHandle/WorktreeError.)
@@ -500,9 +500,8 @@ pub struct SubagentHandler {
     /// Handler configuration rather than an authored-surface field: a model
     /// budget is granted to an OPERATOR, and the operator is who wires the
     /// handler. An authored `spawnAgent` call choosing its own tier would let
-    /// any eval spend at any price — PRD 18 open decision 3 is where a
-    /// semantic tier vocabulary on the authored surface gets decided, and it
-    /// is still open.
+    /// any eval spend at any price. A semantic tier vocabulary on the
+    /// authored surface is still an open decision.
     model: ModelPolicy,
     effort: ReasoningEffort,
 }
@@ -521,9 +520,7 @@ const DEFAULT_CYCLE_CAPACITY: usize = 8;
 /// cycles take a backend each. **Its exhaustion is a fact about the WIRING,
 /// not a policy refusal** — a caller that handed over a single backend
 /// instance has exactly one, and a second concurrent cycle would need a second
-/// one. It must never be read as the one-agent-at-a-time constraint PRD 20
-/// S1-L2 deleted: that constraint is gone, and
-/// [`SubagentHandler::with_backends`] is how a wiring gets N cycles.
+/// one. [`SubagentHandler::with_backends`] is how a wiring gets N cycles.
 struct OneShotBackend(Option<Box<dyn AgentBackend + Send>>);
 
 impl AgentBackendFactory for OneShotBackend {
@@ -743,8 +740,8 @@ impl SubagentHandler {
     }
 
     /// What a `NotRunning` says when no stepped cycle is running `agent` —
-    /// the table owns the lookup that used to happen inside the spawner's own
-    /// map, but the rendering itself is `tidepool_agent::spawn::format_running_agents`.
+    /// the table owns the lookup, and the rendering itself is
+    /// `tidepool_agent::spawn::format_running_agents`.
     fn no_such_agent_detail(&self) -> String {
         format_running_agents(&self.stepped_agents())
     }
@@ -2871,9 +2868,9 @@ mod tests {
     }
 
     /// `SubagentHandler::new` wires ONE pre-built backend, so a second cycle
-    /// has nothing to run on. The refusal must name the WIRING — it is not the
-    /// one-agent-at-a-time constraint this lane deleted, and an operator who
-    /// reads it as one would go looking for a policy that no longer exists.
+    /// has nothing to run on. The refusal must name the WIRING — it is not a
+    /// one-agent-at-a-time policy, and an operator who reads it as one would
+    /// go looking for a policy that does not exist.
     #[test]
     fn handler_one_shot_backend_refusal_names_the_wiring() {
         let fx = Fixture::new();
@@ -3182,9 +3179,7 @@ mod tests {
     /// The synchronous, single-call path (`SubagentSpawn`) confirms its
     /// backend's reap via `shutdown` before returning, on ORDINARY
     /// completion — not merely relying on the implicit `Drop` at the end of
-    /// the call. This is the specific gap the containment review flagged:
-    /// `subagent_spawn`'s backend used to fall through to fire-and-forget
-    /// `Drop` with nothing confirming the reap.
+    /// the call.
     #[test]
     fn handler_subagent_spawn_confirms_backend_shutdown_on_ordinary_completion() {
         let fx = Fixture::new();

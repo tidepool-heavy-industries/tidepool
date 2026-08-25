@@ -1,20 +1,18 @@
-//! The Event effect — typed repository events (PRD 19 lane L4), the second
-//! effect to retire a `Wt*`/`Ev*`-family hand-written wire block (§11 of the
-//! scaffold doc; Worktree was the first).
+//! The Event effect — typed repository events, the second effect to retire a
+//! `Wt*`/`Ev*`-family hand-written wire block (Worktree was the first).
 //!
 //! **The motivating bug lives here.** `RepoEventAwait` was added to registry 1
 //! (`tidepool-mcp/src/effect_defs.rs`) and missed in registry 4
-//! (`tidepool-harness/src/engine.rs`'s `classify_hole`) — the defect PRD 22
-//! exists to make structurally impossible. `classify_hole` was already patched
-//! to cover all seven Event verbs before this lane (see
-//! `22-p3-event-survey.md`); every verb below carries
+//! (`tidepool-harness/src/engine.rs`'s `classify_hole`) — the defect this
+//! schema exists to make structurally impossible. `classify_hole` already
+//! covers all seven Event verbs; every verb below carries
 //! `HandlingClass::OuterDispatch(OuterEffect::RepoEvent)`, the SAME class
 //! `RepoEventAwait` and its six siblings already share at the hand-routed call
 //! site — this is what makes a future eighth verb fail GENERATION rather than
 //! reaching `SuspensionRouting` unclassified (`classify_hole` now refuses an
 //! unknown constructor loudly) if its class is forgotten.
 //!
-//! **Two things this lane needed that Worktree's lane did not, both because
+//! **Two things Event needed that Worktree did not, both because
 //! `Watch`/`HeadChangeKind`/`HeadChangeReceipt`/`CommitReceipt` name Worktree's
 //! OWN types (`WorktreeId`, `GitOid`, `BranchName`) rather than only their own
 //! effect's:**
@@ -36,16 +34,16 @@
 //! instance — none of that has a schema vocabulary, and none should grow one
 //! for a single use. All three stay hand-written, relocated into
 //! `haskell/lib/Tidepool/Event.hs` alongside the eighteen non-representable
-//! helpers (§11.9's lever, applied to type declarations for the first time
-//! rather than only to helpers). No `ToJSON` instance exists anywhere in the
+//! helpers (the same relocation lever, applied to type declarations for the
+//! first time rather than only to helpers). No `ToJSON` instance exists anywhere in the
 //! current registry for any Event type, so every representable `TypeDef` here
 //! carries `json: JsonInstance::None` — simpler than Worktree's seven.
 //!
 //! **Helper representability.** Twenty-two authored names, all `raw` in the
 //! hand-written registry. FOUR are thin wrappers over one verb and are
 //! described here (`awaitSubscriptionRaw`, `mailboxNew`, `mailboxSend`,
-//! `mailboxDrop` — PRD 20 S1-L4 wave 2's capability-mailbox trio plus the
-//! blocking-wait primitive). The other EIGHTEEN — `commit`, `projectCommit`,
+//! `mailboxDrop` — the capability-mailbox trio plus the blocking-wait
+//! primitive). The other EIGHTEEN — `commit`, `projectCommit`,
 //! `headChanged`, `projectHead`, `(<|>)`, `pumpEff`, `drainSubscription`,
 //! `withHandler`, `eventIdOf`, `firstMatch`, `nextEvent`, `awaitFirst`, `after`,
 //! `projectTick`, `mailbox`, `projectMailbox`, `asyncDone`, `projectAsyncDone`
@@ -64,9 +62,8 @@
 //! `tidepool-handlers/src/generated/event_adapters.rs` is emitted.
 //!
 //! **`Translate.hs` (registry 3) is untouched.** Grep across the whole file
-//! finds zero references to `RepoEvent`/`Event`/any Event type — confirmed in
-//! `22-p3-event-survey.md`. `vsMisShapeIsError` (PRD 22 open question 4) is
-//! N/A to this lane; Event's rows never reach it.
+//! finds zero references to `RepoEvent`/`Event`/any Event type.
+//! `vsMisShapeIsError` does not apply to Event; its rows never reach it.
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -624,8 +621,8 @@ fn verbs() -> Vec<Verb> {
             handling: HandlingClass::OuterDispatch(OuterEffect::RepoEvent),
             extract: None,
         },
-        // Capability mailboxes (PRD 20 S1-L4 wave 2). A mailbox IS an event
-        // source, so it lives on RepoEvent rather than Green.
+        // Capability mailboxes. A mailbox IS an event source, so it lives on
+        // RepoEvent rather than Green.
         Verb {
             ctor: "MailboxNew",
             method: "mailbox_new",

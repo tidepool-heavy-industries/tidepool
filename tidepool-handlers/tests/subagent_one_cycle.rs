@@ -1,4 +1,4 @@
-//! PRD 18 lane 1 — the WHOLE one-cycle coupled-spawn vertical, on the real
+//! The WHOLE one-cycle coupled-spawn vertical, on the real
 //! extract/JIT.
 //!
 //! A Haskell program calls the typed `spawnAgent` (`Tidepool.Agent.Spawn`,
@@ -12,8 +12,8 @@
 //!
 //! ## Why this is a standalone driver
 //!
-//! Same shape as `repo_event_with_handler.rs` (PRD 19 lane L4's acceptance
-//! harness): it compiles real Haskell through the real extract, builds a
+//! Same shape as `repo_event_with_handler.rs`'s acceptance
+//! harness: it compiles real Haskell through the real extract, builds a
 //! real `JitEffectMachine`, and drives it on the PARKED path directly
 //! (`run_suspendable_parked`) — not through the resident session or the
 //! harness engine. None of these programs ever suspends (`Subagent`'s one

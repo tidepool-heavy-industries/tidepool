@@ -1,4 +1,4 @@
-//! The `Console` suspension — decode-only (PRD 22 step 1).
+//! The `Console` suspension — decode-only.
 //!
 //! Only `Print` suspends through `classify_hole` (the authored outer loop's
 //! `say`). Recognition only: `classify_hole` tags the constructor and moves

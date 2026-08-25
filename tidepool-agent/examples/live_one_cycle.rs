@@ -4,14 +4,14 @@
 //!
 //!     cargo run -p tidepool-agent --example live_one_cycle
 //!
-//! Read `plans/post-restart/agent-lanes/lane1-live-leg.md` BEFORE running it:
-//! preconditions, the model policy, which lines to paste back as evidence, the
-//! stop-and-hold rule, and the ONE-attempt rule (a token-spending failure is
-//! captured and reported, never retried in a loop).
+//! Before running it: know the model policy, which lines to paste back as
+//! evidence, the stop-and-hold rule, and the ONE-attempt rule (a
+//! token-spending failure is captured and reported, never retried in a
+//! loop).
 //!
 //! What it does, in order:
 //!
-//! 1. Snapshot the operator's Codex config surface (PRD 18 criterion 11).
+//! 1. Snapshot the operator's Codex config surface.
 //! 2. Build a throwaway git repository plus sibling registry / worktree /
 //!    binding roots, all under one temp directory that is KEPT on disk so the
 //!    run is checkable after the fact.
@@ -196,7 +196,7 @@ fn run() -> Result<(), String> {
 
     // 5. Config isolation, after. Reported before any early return: the
     //    verdict is owed regardless of how the spawn went.
-    println!("\n--- config isolation (PRD 18 acceptance criterion 11) ---");
+    println!("\n--- config isolation ---");
     let after = ConfigSnapshot::capture(&codex_home)
         .map_err(|e| format!("could not re-snapshot {}: {e}", codex_home.display()))?;
     let report = before.compare(&after);

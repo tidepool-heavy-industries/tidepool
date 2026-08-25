@@ -1,9 +1,9 @@
-//! Version stamp for [`super::journal::EventJournal`]'s wire contract —
-//! kind 4 of `plans/persistence-versioning-design.md`'s six
-//! persistence-versioning kinds. `EventJournal` is single-owner
-//! (`&mut self` exclusive, see `journal.rs`'s own doc), so the header is
-//! written once, at file creation, the same discipline `LogWriter::create`
-//! uses.
+//! Version stamp for [`super::journal::EventJournal`]'s wire contract, on
+//! `tidepool_repr::version_ladder` (the one migration-ladder mechanism for
+//! durable, non-reproducible persistence artifacts). `EventJournal` is
+//! single-owner (`&mut self` exclusive, see `journal.rs`'s own doc), so the
+//! header is written once, at file creation, the same discipline
+//! `LogWriter::create` uses.
 
 use serde_json::Value;
 use tidepool_repr::version_ladder::{set_version, Migration, MigrationError};

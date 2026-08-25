@@ -78,7 +78,7 @@ data Phase
   | Blocked { blockedReason :: Text }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
--- | Enforced, not advisory (PRD 20, "Failure as data").
+-- | Enforced, not advisory: failure is data.
 --
 -- @maxAgentCycles@ is the whole run's agent-cycle allowance.  It is spent
 -- STRUCTURALLY rather than through a counter: a node reserves what it needs
@@ -118,7 +118,7 @@ data DevPlan = DevPlan
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
--- | PRD 20's failure-policy sum, applied by deterministic code.  Model
+-- | The failure-policy sum, applied by deterministic code.  Model
 -- cognition enters only through 'Replan' (a planning agent session scoped to the
 -- failure) and 'AskOperator' (a typed triage form).
 data OnFailure = Retry | Replan | AskOperator | Abandon
@@ -191,7 +191,7 @@ data LayerApproval = LayerApproval
 -- Outcomes, failures, receipts
 -- ---------------------------------------------------------------------------
 
--- | What a node folds to.  PRD 20's @Done Receipt | Failed Failure | Skipped
+-- | What a node folds to: @Done Receipt | Failed Failure | Skipped
 -- Reason@, with one addition: @outcomeTrail@, a FLAT bottom-up list of one
 -- rendered line per node in this subtree.
 --
@@ -245,8 +245,8 @@ data FailureKind
   | ChildrenFailed
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
--- | The typed receipt every fold carries (PRD 20, "The trust ladder and
--- evidence").  Nothing merges without one; 'Harness.receipted' refuses a fold
+-- | The typed receipt every fold carries — the trust ladder and
+-- evidence.  Nothing merges without one; 'Harness.receipted' refuses a fold
 -- that cannot produce it.
 --
 -- Rung 3 (adversarial review) has its slot here (@receiptReviewed@) and is

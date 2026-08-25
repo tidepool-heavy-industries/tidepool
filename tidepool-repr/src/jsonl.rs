@@ -42,13 +42,13 @@
 //!   the only handle that will ever touch this path again).
 //! - **`Observe`** — leave the file byte-for-byte untouched; the torn row is
 //!   still reported (so the caller can warn) but never truncated away. Right
-//!   for `load_journal`, which folds SEGMENT files it does not own — PRD 20's
-//!   segmented-journal design's "retain first, nothing ever rewrites,
-//!   truncates, or deletes a segment" invariant
-//!   (`tidepool-harness::selfharness::resume`) extends to a torn tail too: a
-//!   later boot redoes the lost row into its OWN fresh segment rather than
-//!   editing a segment some other process (possibly still alive, possibly the
-//!   subject of a later forensic read) exclusively claimed.
+//!   for `load_journal`, which folds SEGMENT files it does not own — the
+//!   segmented journal's "retain first, nothing ever rewrites, truncates, or
+//!   deletes a segment" invariant (`tidepool-harness::selfharness::resume`)
+//!   extends to a torn tail too: a later boot redoes the lost row into its
+//!   OWN fresh segment rather than editing a segment some other process
+//!   (possibly still alive, possibly the subject of a later forensic read)
+//!   exclusively claimed.
 //!
 //! This was flagged as an open design point in the duplication survey that
 //! motivated this consolidation ("whether the shared reader always repairs

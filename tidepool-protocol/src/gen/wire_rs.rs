@@ -17,7 +17,7 @@
 //!   Haskell name, and NEVER on an enum. An enum's data constructors ARE its
 //!   variant names, so the bridge never looks the type name up.
 //! - Every [`crate::types::TypeShape::Identity`] gets a FALLIBLE boundary
-//!   constructor. PRD 22: decode once at the edge, typed everywhere after.
+//!   constructor. The rule: decode once at the edge, typed everywhere after.
 
 use super::{header, index_body, module_name as effect_module_name, GeneratedFile};
 use crate::hs::HsType;
@@ -140,8 +140,8 @@ fn used_bridge_derives(e: &Effect) -> Vec<&'static str> {
 
 /// The Rust type a `RecordField`/`SumVariant` field's `HsType` renders as on
 /// the wire. Closed over exactly the shapes the wire-record language uses
-/// today (§1 of the spec this generator implements); anything else is a
-/// generation-time failure, same spirit as [`Effect::wire_rust_of`]'s panic.
+/// today; anything else is a generation-time failure, same spirit as
+/// [`Effect::wire_rust_of`]'s panic.
 fn rust_type(e: &Effect, ty: &HsType) -> String {
     match ty {
         HsType::Text => "String".to_string(),

@@ -829,7 +829,7 @@ async fn two_nodes_with_pending_forms_resolve_independently_in_either_order() {
 
 /// TWO CONCURRENT ASKS on ONE node: both render (stacked, neither
 /// superseding the other) and both resolve independently, in either order —
-/// the concurrency invariant PRD 20's fanout windows depend on.
+/// the concurrency invariant that fanout windows depend on.
 #[tokio::test(flavor = "multi_thread")]
 async fn two_concurrent_asks_on_one_node_both_render_and_resolve() {
     let (addr, state) = boot().await;

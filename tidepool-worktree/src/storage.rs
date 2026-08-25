@@ -2,8 +2,8 @@
 //! [`binding`](crate::binding), and [`journal`](crate::journal) — plus their
 //! callers outside this crate (`tidepool-agent`'s spawn saga,
 //! `tidepool-handlers`' repository-event handler). Both `now_ms` and
-//! `storage_failure` used to be copied independently at each call site; this
-//! module is the one place either is defined now.
+//! `storage_failure` are defined once, in this module, rather than copied
+//! independently at each call site.
 //!
 //! [`DurableJsonDir`] is the same consolidation for [`registry`] and
 //! [`binding`](crate::binding) specifically: both keep one JSON file per

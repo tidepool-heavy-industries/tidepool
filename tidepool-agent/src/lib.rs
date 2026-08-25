@@ -1,5 +1,4 @@
-//! Typed headless-subagent backends (PRD 18,
-//! `plans/self-iterating-harness/18-typed-subagent-spawning-prd.md`).
+//! Typed headless-subagent backends.
 //!
 //! # The containment boundary
 //!

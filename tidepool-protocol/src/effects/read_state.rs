@@ -1,4 +1,4 @@
-//! The `ReadState` suspension — decode-only (PRD 22 step 1).
+//! The `ReadState` suspension — decode-only.
 //!
 //! `getStateJson` (answerer row only): a nullary suspension serviced
 //! IMMEDIATELY by the driver with the loop's current state JSON — no

@@ -43,7 +43,7 @@
 --
 -- __Resume.__ The run journal this file writes at every split, outcome,
 -- replan, rebase, and escalation is read back by 'resumeLoop' — the opt-in
--- second entry point PRD 20 S1-L5 gives a harness that wants to survive a
+-- second entry point this module gives a harness that wants to survive a
 -- crash.  'loop' IS @resumeLoop emptyResume@, so a fresh run and a resumed run
 -- are one spelling of the run rather than two that can drift, and a fold with
 -- no entries takes the ordinary path by construction ('resumed' is @id@ when
@@ -92,7 +92,7 @@ import Tidepool.Agent.Spawn
 -- `SpawnError`/`spawnSpecIn`, the Console `say`, the Exec verbs, and the
 -- worktree receipt's own fields are generated into `Tidepool.Effects`; the
 -- curated modules re-export only their own vocabulary. `renderSpawnError`
--- moved to `Tidepool.Agent.Spawn` above (PRD 22 lane 3): it calls
+-- moved to `Tidepool.Agent.Spawn` above: it calls
 -- `renderWorktreeError`, which is authored library code the generated module
 -- cannot reach.
 import Tidepool.Effects
@@ -121,7 +121,7 @@ import Tidepool.Worktree
 -- ---------------------------------------------------------------------------
 -- Runtime-only vocabulary
 --
--- Live handles never enter checkpointed 'State' (PRD 19), so the seed and the
+-- Live handles never enter checkpointed 'State', so the seed and the
 -- task — both of which carry a 'WorktreeHandle' — live here rather than in
 -- "HarnessTypes".
 -- ---------------------------------------------------------------------------
@@ -221,13 +221,13 @@ emptyAcc = FoldAcc {accNotes = [], accEsc = [], accCycles = 0, accMerged = 0, ac
 
 -- | One resident cycle unfolds a development tree into isolated agents and
 -- folds their branches back upward.  Haskell never runs a git WORKFLOW verb
--- from the runtime (PRD 19's freeze): the mechanical tier below is authored
+-- from the runtime: the mechanical tier below is authored
 -- policy running plain git through 'Exec' in a worktree this node owns, and
 -- everything cognitive is a coding agent with its own native tools.
 loop :: State -> Harness State
 loop = resumeLoop emptyResume
 
--- | The RESUMED entry (PRD 20 S1-L5).  The driver folds this run's journal at
+-- | The RESUMED entry.  The driver folds this run's journal at
 -- boot and injects it here; 'loop' is this function at 'emptyResume', so there
 -- is ONE spelling of the run.
 --
@@ -250,7 +250,7 @@ resumeLoop fold st
                   , seedCycles = (budget st).maxAgentCycles
                   , seedAdopted = Nothing
                   }
-          -- SEAM (residency, PRD 20 S1-L4).  `hyloM`'s recursive step is
+          -- SEAM (residency).  `hyloM`'s recursive step is
           -- `coalg a >>= traverse go >>= alg`, and `traverse go` is the ONE
           -- place residency changes: today a node is a stack frame that runs
           -- its children to completion in plan order and holds no state
@@ -262,8 +262,8 @@ resumeLoop fold st
           -- that is not the plan's own data — those three are what would make
           -- the swap expensive, so they are deliberately absent.
           --
-          -- POLICY IS MIDDLEWARE, composed by ordinary function application
-          -- (PRD 20, "The hylo core").  Read the coalgebra outside-in: the
+          -- POLICY IS MIDDLEWARE, composed by ordinary function application.
+          -- Read the coalgebra outside-in: the
           -- layer gate sees the produced layer, the depth cap and the cycle
           -- budget refuse BEFORE `decompose` spawns anything, and each one is
           -- a `Coalg -> Coalg` that a test can exercise against a pure
@@ -308,7 +308,7 @@ rootWorktreeSpec st
 -- | The run's root worktree: REBOUND when the fold names it, created when it
 -- does not.
 --
--- PRD 19's retain-first rule is what makes this the first thing resume does —
+-- The retain-first rule is what makes this the first thing resume does —
 -- creating a second root worktree beside the retained one would orphan every
 -- commit under it, which is precisely the outcome the journal exists to
 -- prevent.  The fold names the root branch structurally (the @split@ or
@@ -351,8 +351,7 @@ rootTree fold st = case rootBranchOf fold (nodeName (plan st)) of
 --    is already final.  A LEAF spawns nothing here: for a leaf, "how to
 --    combine nothing" IS "implement it", so its worker is the algebra's.
 -- 2. The split is journaled.  Decomposition is cognition, so it is recorded
---    rather than re-derived; a resumed run replays it instead of re-asking
---    (PRD 20 S1-L5).
+--    rather than re-derived; a resumed run replays it instead of re-asking.
 -- 3. Child worktrees are allocated from the scaffold HEAD.  A worktree that
 --    cannot be created is not a split failure — that child is dropped and the
 --    denial rides in 'workDenied' for the algebra to fold as an escalation.
@@ -541,7 +540,7 @@ freshChild parent k =
 -- | A child of a REPLAYED split: rebind the retained worktree the journal
 -- names for it, and fall back to creating one only for a child the crash
 -- caught before it was ever allocated.  Nothing is recreated and nothing is
--- deleted (PRD 19).
+-- deleted.
 retainedChild :: NodeSeed -> [(Text, Text)] -> DevPlan -> Harness (Either Text WorktreeHandle)
 retainedChild parent trees k = case lookup (nodeName k) trees of
   Nothing -> freshChild parent k
@@ -775,7 +774,7 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
 -- | A child that failed on its own terms.  The parent's policy decides whether
 -- that stops the fold; 'Replan' opens a planning agent session and JOURNALS the
 -- amendment, because re-unfolding a subtree means re-entering the coalgebra —
--- which is resume's job (PRD 20 S1-L5), not this fold's.
+-- which is resume's job, not this fold's.
 onChildFailure :: WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> FoldAcc -> Harness FoldAcc
 onChildFailure _ p s o acc = case nodeOnFailure p of
   Abandon -> pure acc {accAbandon = Just why, accEsc = acc.accEsc <> [why]}
@@ -922,7 +921,7 @@ escalate p s why acc = do
     name = nodeName s.seedPlan
     branch = branchOf s.seedTree
 
--- | PRD 20's failure-policy sum, applied by deterministic code.  Cognition
+-- | The failure-policy sum, applied by deterministic code.  Cognition
 -- enters through exactly two constructors: 'Replan' opens a planning agent session
 -- scoped to the failure, 'AskOperator' presents a typed triage form.
 applyPolicy :: DevPlan -> NodeSeed -> Text -> Harness PolicyOutcome
@@ -1099,7 +1098,7 @@ mechanicalResult acc =
     renderNote n = [fmt|{n.rebaseBranch} onto {n.rebaseOnto}: {show n.rebaseTier}|]
 
 -- ---------------------------------------------------------------------------
--- Resume — consuming the folded run journal (PRD 20 S1-L5)
+-- Resume — consuming the folded run journal
 --
 -- @record@ stays WRITE-ONLY on this side: nothing below opens a file, and
 -- there is no read verb anywhere in the row.  The driver folds this run's
@@ -1228,7 +1227,7 @@ splitRecordOf _ = Nothing
 
 -- | Is the journaled amendment the newest word about this branch?
 --
--- PRD 20 S1-L5's contract is "a branch with a @replan@ NEWER than its @split@
+-- The contract is "a branch with a @replan@ NEWER than its @split@
 -- re-unfolds under the amended plan".  It is compared against the outcome as
 -- well, for the same reason: a replan is recorded AFTER the failure it
 -- answers, so an outcome older than it is not the last word either.  An
@@ -1351,7 +1350,7 @@ adoptOrUnfold fold inner seed = do
 -- Three steps, three types, and only the last one can be adopted:
 --
 -- 1. 'RetainedWorktree' — a handle PROVEN to have come back through the
---    registry's own rebind (PRD 19's rebind-never-recreate rule), minted
+--    registry's own rebind (the rebind-never-recreate rule), minted
 --    only by 'retainWorktree'.
 -- 2. 'HeadChanged' — a retained tree whose HEAD has been read and found to
 --    differ from a baseline sha, i.e. an orphan CANDIDATE. Minted only by
@@ -1376,7 +1375,7 @@ retainedHandle (RetainedWorktree h) = h
 -- | Look a retained worktree up by BRANCH — its durable identity in the
 -- journal — and hand back a proof-carrying handle.
 --
--- REBIND, NEVER RECREATE (PRD 19).  A tree a human removed by hand comes back
+-- REBIND, NEVER RECREATE.  A tree a human removed by hand comes back
 -- as a failure here and is surfaced as data by every caller; it is never
 -- silently replaced, and nothing on this path deletes anything.
 retainWorktree :: Text -> Harness (Either Text RetainedWorktree)

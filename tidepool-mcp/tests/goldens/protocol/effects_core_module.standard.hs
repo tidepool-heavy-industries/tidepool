@@ -85,10 +85,9 @@ data Ask a where
   AskWith :: Text -> Value -> Ask Value
 
 -- | Why a forked child agent session ended WITHOUT a typed answer.
--- Folded as data at the failing branch's own position (PRD 21
--- locked decision 6) — never an exception that erases the results
--- its siblings already produced. Each constructor carries the
--- runtime's own detail text.
+-- Folded as data at the failing branch's own position — never an
+-- exception that erases the results its siblings already produced.
+-- Each constructor carries the runtime's own detail text.
 data InvocationExit
   = ExitRoundsExhausted Text
   | ExitNotFinalized Text
