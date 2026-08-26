@@ -12,7 +12,7 @@ import Tidepool.Aeson (Value, object, toJSON, (.=))
 import qualified Data.Text as T
 
 leafPlan :: DevPlan
-leafPlan = DevPlan { nodeName = "leaf", nodeTask = "implement the leaf", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [], nodeCycles = Nothing }
+leafPlan = DevPlan { nodeName = "leaf", nodeTask = "implement the leaf", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, nodeScaffold = Nothing, childPlans = [], nodeCycles = Nothing }
 
 leafBranch :: Text
 leafBranch = "dev-tree/leaf"

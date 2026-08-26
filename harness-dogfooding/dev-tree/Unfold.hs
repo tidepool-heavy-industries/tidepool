@@ -20,6 +20,8 @@ module Unfold
   , failureWork
   , requiredCycles
   , childAllowance
+  , childAllowances
+  , fundingShortfall
   , cycleRefusal
   , depthRefusal
   , layerGate
@@ -83,20 +85,23 @@ decompose seed
       -- Re-running the scaffold worker over it would be exactly the blind redo
       -- the journal exists to prevent.
       Just adopted -> emitSplit seed Nothing adopted
-      -- An interior node with an EMPTY task has nothing to scaffold: the plan
-      -- is fully authored, its children seed straight from the parent's
-      -- current HEAD, and NO worker runs at all.  This is the structural form
-      -- of a "make no changes" brief — which two live runs showed a scaffold
-      -- worker cannot be trusted to follow (it invented README.md, then
-      -- FIELD_GUIDE.md, tripping its own boundary each time).
-      Nothing | T.null (T.strip (nodeTask p)) ->
+      -- A node that declares (or derives — 'planScaffolds') no scaffold has
+      -- nothing to run: its children seed straight from the parent's current
+      -- HEAD and NO worker spawns.  The typed form exists because a prose
+      -- "make no changes" brief demonstrably cannot be trusted (two live
+      -- runs had the scaffold invent files and trip its own boundary).
+      Nothing | not (planScaffolds p) ->
         worktreeHead seed.seedTree >>= emitSplit seed Nothing
       Nothing ->
         runWorker seed.seedTree name (scaffoldPrompt p kids) >>= \case
+          -- A spawn failure is a FAILURE of this node, not a policy refusal:
+          -- 'WorkFailed' folds to a Failed outcome the parent's failure
+          -- policy can retry or replan, where the refusal channel would
+          -- launder a transient backend hiccup into a permanent Skipped.
           Left err ->
             pure
               ( Swarm.PlanF
-                  (refusalWork seed (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
+                  (failureWork seed (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
                   []
               )
           Right (scaffold, snapshot) ->
@@ -217,9 +222,9 @@ depthRefusal seed
 -- about work that exists rather than a speculative whole-tree sign-off.
 layerGate :: Budget -> Swarm.PlanF NodeWork NodeSeed -> Harness (Maybe NodeWork)
 layerGate b layer
-  | length childSeeds <= b.gateWiderThan = pure Nothing
+  | width <= b.gateWiderThan = pure Nothing
   | otherwise = do
-      say [fmt|{nodeName parent.seedPlan} proposes {length childSeeds} children (gate is {b.gateWiderThan})|]
+      say [fmt|{nodeName parent.seedPlan} proposes {width} children (gate is {b.gateWiderThan})|]
       approval <- askUser @LayerApproval
       pure $
         if approval.layerApproved
@@ -233,6 +238,13 @@ layerGate b layer
   where
     childSeeds = Swarm.kids layer
     parent = (Swarm.task layer).workSeed
+    -- Gate on the PLANNED width for a ready split: worktree denials shrink
+    -- the allocated seed list, and a wide unfold must not slip under the
+    -- gate precisely when the run is already unhealthy enough to be denying
+    -- worktrees.
+    width = case Swarm.task layer of
+      WorkReady {} -> length (childPlans parent.seedPlan)
+      _ -> length childSeeds
 
 -- | Seed one child per plan, in plan order.
 --
@@ -247,23 +259,13 @@ allocateChildren
   -> [DevPlan]
   -> (DevPlan -> Harness (Either Text WorktreeHandle))
   -> Harness ([NodeSeed], [Text])
-allocateChildren parent kids obtain = go kids
+allocateChildren parent kids obtain = go (zip kids (childAllowances parent.seedCycles parent.seedPlan))
   where
-    -- Per-child cycle allowances honor each plan's own 'nodeCycles' ask,
-    -- defaulting to an equal share; asks that oversubscribe the parent's
-    -- remaining budget scale down proportionally (never below one).  This is
-    -- what makes a sprint item's budget real at runtime — an equal split
-    -- across a wide sprint starves every interior item (sol review, run 24).
-    equal = childAllowance parent (length kids)
-    available = max 0 (parent.seedCycles - requiredCycles parent.seedPlan)
-    asks = map (\k -> fromMaybe equal k.nodeCycles) kids
-    totalAsk = sum asks
-    allowanceFor ask
-      | totalAsk <= available || totalAsk == 0 = ask
-      | otherwise = max 1 (ask * available `div` totalAsk)
-    allowances = map allowanceFor asks
+    -- Allowances stay POSITIONALLY paired with their plans: keying positional
+    -- data by name would silently hand two same-named children the first
+    -- one's share.
     go [] = pure ([], [])
-    go (k : rest) =
+    go ((k, allowance) : rest) =
       obtain k >>= \case
         Left why -> do
           (seeds, denied) <- go rest
@@ -275,10 +277,49 @@ allocateChildren parent kids obtain = go kids
                   { seedPlan = k
                   , seedTree = childTree
                   , seedDepth = parent.seedDepth + 1
-                  , seedCycles = fromMaybe equal (lookup (nodeName k) (zip (map nodeName kids) allowances))
+                  , seedCycles = allowance
                   , seedAdopted = Nothing
                   }
           pure (s : seeds, denied)
+
+-- | Per-child cycle allowances from one parent's allowance, in PLAN order.
+-- Each plan's own 'nodeCycles' ask is honored, defaulting to the equal
+-- floor share ('Swarm.splitAllowance'); asks that oversubscribe the
+-- parent's remainder scale down proportionally and NEVER round up — a share
+-- that floors to zero stays zero ('cycleRefusal' turns it into a typed
+-- budget refusal), so no division here can mint a cycle the parent does not
+-- hold.  This is what makes a sprint item's budget real at runtime — an
+-- equal split across a wide sprint starves every interior item (sol review,
+-- run 24).
+--
+-- The ONE division rule: 'allocateChildren' applies it at unfold time and
+-- 'fundingShortfall' simulates it at proposal time, so the two cannot
+-- disagree about what a plan costs.
+childAllowances :: Int -> DevPlan -> [Int]
+childAllowances cycles p = map allowanceFor asks
+  where
+    kids = childPlans p
+    available = max 0 (cycles - requiredCycles p)
+    equal = case Swarm.splitAllowance (Swarm.mkCycles cycles) (Swarm.mkCycles (requiredCycles p)) (length kids) of
+      (_, s : _) -> Swarm.cyclesToInt s
+      (_, []) -> 0
+    asks = map (\k -> fromMaybe equal k.nodeCycles) kids
+    totalAsk = sum asks
+    allowanceFor ask
+      | totalAsk <= available || totalAsk == 0 = ask
+      | otherwise = ask * available `div` totalAsk
+
+-- | The first node the given allowance cannot fund, if any — the same
+-- reservation-and-division walk the unfold performs, run at PROPOSAL time so
+-- an unfundable plan is refused before an operator approval, a worktree, or
+-- a scaffold cycle is spent on it.
+fundingShortfall :: Int -> DevPlan -> Maybe Text
+fundingShortfall cycles p
+  | cycles < required =
+      Just [fmt|node {nodeName p} needs {required} agent cycles but its share of the budget is {cycles} — the plan cannot be funded as shaped|]
+  | otherwise = listToMaybe (catMaybes (zipWith fundingShortfall (childAllowances cycles p) (childPlans p)))
+  where
+    required = requiredCycles p
 
 -- | A child that has never existed: a new worktree off the parent's HEAD.
 freshChild :: NodeSeed -> DevPlan -> Harness (Either Text WorktreeHandle)

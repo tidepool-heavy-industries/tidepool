@@ -103,7 +103,7 @@ import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
 import Tidepool.Async (mapConcurrently)
 import qualified Data.Text as T
-import Prompts (proposePrompt)
+import Prompts (noteRoutingPrompt, proposePrompt)
 import Micro (NodeSeed (..))
 import Fold
 import Resume
@@ -120,12 +120,14 @@ import Resume
   , rootBranchOf
   , ResumeHooks (..)
   )
+import Git (diagnose)
 import Unfold
   ( allocateChildren
   , childAllowance
   , cycleRefusal
   , decompose
   , depthRefusal
+  , fundingShortfall
   , layerGate
   , requiredCycles
   , refusalWork
@@ -180,6 +182,14 @@ loop = resumeLoop emptyResume
 resumeLoop :: ResumeFold -> State -> Harness State
 resumeLoop fold st
   | phase st == Ready = enter st
+  -- A BLOCKED run re-attempts every turn: the blockers (a dirty source, a
+  -- rejected proposal) are external states the operator fixes between
+  -- turns, and a phase that parks forever after the fix is applied is the
+  -- silent-no-op failure the park rule exists to kill.  Still blocked →
+  -- 'blockedLoud' says so again.
+  | Blocked {} <- phase st = do
+      trace "blocked-retry" "loop" (object ["priorReason" .= show (phase st)])
+      enter st
   -- A COMPLETED run re-enters (once) when the journal still holds a pending
   -- amendment for a failed subtree — without this, a Replan decision
   -- journaled during a finished turn is unreachable forever: the phase
@@ -222,7 +232,13 @@ resumeLoop fold st
                   { seedPlan = plan effective
                   , seedTree = rootHandle
                   , seedDepth = 0
-                  , seedCycles = (budget effective).maxAgentCycles
+                  , -- The budget is per-RUN, not per-process: cycles a
+                    -- crashed process already spent (the newest journaled
+                    -- receipt per key) are subtracted, so a crash loop
+                    -- cannot multiply the allowance.  Finished subtrees
+                    -- replay without re-budgeting either way; this bounds
+                    -- only NEW work.
+                    seedCycles = max 0 ((budget effective).maxAgentCycles - journaledSpend fold)
                   , seedAdopted = Nothing
                   }
           -- SEAM (residency).  `hyloM`'s recursive step is
@@ -277,10 +293,43 @@ resumeLoop fold st
               { phase = Completed
               , cycleCount = cycleCount effective + 1
               , lastRun = Just summary
+              , -- A run that ended Done clears the rescue ledger: the next
+                -- failure's journaled amendment deserves its own re-entry.
+                -- A run still failing keeps the count, so a rescue that
+                -- failed again does not re-enter every turn.
+                rescueCount = if outcomeIsDone outcome then Nothing else rescueCount effective
               }
 
+-- | Agent cycles the journal proves this RUN already spent: the
+-- newest-per-key outcome receipts' 'receiptCycles', summed.  Newest-per-key
+-- matches 'lookupEvent''s precedence — a retried node's latest receipt
+-- supersedes its earlier one rather than double-counting.
+journaledSpend :: ResumeFold -> Int
+journaledSpend fold =
+  sum
+    [ r.receiptCycles
+    | k <- nub [k | (k, _, _) <- outcomes]
+    , Just (_, OutcomeEvent {evOutcome = o}) <- [newestFor k]
+    , Just r <- [outcomeReceipt o]
+    ]
+  where
+    outcomes = eventsOfKind OutcomeKind fold
+    newestFor k = foldr pick Nothing [(sq, ev) | (k', sq, ev) <- outcomes, k' == k]
+    pick c Nothing = Just c
+    pick c@(sq, _) (Just cur@(sq', _)) = if sq > sq' then Just c else Just cur
+
+-- | The proposal's journal key carries a fingerprint of the CHORE it was
+-- proposed for: an operator who edits the chore (swaps sprint items, fixes a
+-- budget) and relaunches against the same run journal must get a fresh
+-- proposal, never a silent replay of the plan approved for the OLD chore.
 proposalJournalKey :: Text
-proposalJournalKey = "root-plan"
+proposalJournalKey = "root-plan-" <> choreFingerprint
+
+choreFingerprint :: Text
+choreFingerprint = show (foldl' step (5381 :: Int) (T.unpack basis))
+  where
+    step h c = (h * 33 + fromEnum c) `mod` 1000000007
+    basis = choreGoal <> show choreMode <> show choreBudget
 
 -- | Resolve the plan before root worktree lookup. A recorded proposal always
 -- wins on resume, preserving the root name that retained work is keyed by.
@@ -302,23 +351,27 @@ effectivePlan fold st = case choreMode of
     -- item, planned independently (or taken from an authored override),
     -- composed under an integration-only root.  Disjoint item boundaries are
     -- validated in code before the operator ever sees the approval form.
-    sprintAttempt items grounding attempt priorNote = do
-      let revision =
-            maybe
-              ""
-              ( \note ->
-                  "\nThe operator reviewed the previously COMPOSED sprint (all items) and noted: "
-                    <> note
-                    <> "\nApply only what concerns THIS item's goal; where the note targets a different item, propose THIS item exactly as you otherwise would."
-              )
-              priorNote
-      subtrees <- traverse (resolveItem grounding revision) items
+    --
+    -- A revision note (the operator's, or a validation failure's) is ROUTED
+    -- once, by one bounded model call ('NoteRouting'), to the items it
+    -- concerns: only those planners see revision text, and the others REUSE
+    -- their previously composed subtree — N planners independently deciding
+    -- whether someone else's note applies to them is how attempt 2 diverged
+    -- from attempt 1 on untouched items.
+    sprintAttempt items grounding attempt prior = do
+      routed <- case prior of
+        Nothing -> pure (map (const "") items)
+        Just (note, _) -> routeRevisionNote note
+      let priorSubtrees = case prior of
+            Nothing -> map (const Nothing) items
+            Just (_, subs) -> map Just subs
+      subtrees <- traverse (resolveItem grounding) (zip3 items routed priorSubtrees)
       let composed = sprintRoot subtrees
       case proposalViolation st.budget composed
         `orMaybe` sprintOverlap subtrees
         `orMaybe` sprintShortfall of
         Just why
-          | attempt == (1 :: Int) -> sprintAttempt items grounding 2 (Just why)
+          | attempt == (1 :: Int) -> sprintAttempt items grounding 2 (Just (why, subtrees))
           | otherwise -> pure (Left ("Sprint proposal remained invalid: " <> why))
         Nothing -> do
           audit <- pathAudit composed
@@ -330,20 +383,38 @@ effectivePlan fold st = case choreMode of
               recordEvent ProposeEvent {evKey = JournalKey proposalJournalKey, evProposePlan = composed}
               pure (Right composed)
             else
-              if attempt == 1
-                then sprintAttempt items grounding 2 (Just approval.revisionNote)
+              if attempt == 1 && not (T.null (T.strip approval.revisionNote))
+                then sprintAttempt items grounding 2 (Just (approval.revisionNote, subtrees))
                 else pure (Left ("Sprint proposal rejected: " <> approval.revisionNote))
+
+    routeRevisionNote note = do
+      routing <- runLLMTurn @NoteRouting (noteRoutingPrompt note (map (.itemGoal) items'))
+      -- Positional and padded: a short answer leaves trailing items
+      -- unconcerned; a long one is truncated to the real item count.
+      pure (take (length items') (routing.itemNotes <> map (const "") items'))
+      where
+        items' = case choreMode of
+          SprintBacklog {sprintItems = is} -> is
+          _ -> []
 
     -- The item's cycle allowance is stamped INTO the plan ('nodeCycles'), so
     -- runtime allocation honors it — a prompt-only budget is advice the
     -- scheduler ignores (sol review, run 24).
-    resolveItem grounding revision item = do
+    resolveItem grounding (item, note, priorSub) = do
       sub <- case item.itemPlan of
         Just p -> pure p
-        Nothing ->
-          runLLMTurn @DevPlan
-            (proposePrompt (sprintItemGoal item) st.budget {maxAgentCycles = item.itemCycles} grounding <> revision)
+        Nothing
+          | T.null (T.strip note)
+          , Just p <- priorSub ->
+              pure p
+          | otherwise ->
+              runLLMTurn @DevPlan
+                (proposePrompt (sprintItemGoal item) st.budget {maxAgentCycles = item.itemCycles} grounding <> revisionText note)
       pure sub {nodeCycles = Just item.itemCycles}
+
+    revisionText note
+      | T.null (T.strip note) = ""
+      | otherwise = "\nThe operator reviewed the previously composed sprint, and this part of their note concerns THIS item: " <> note
 
     sprintItemGoal item =
       [fmt|{item.itemGoal}
@@ -370,18 +441,22 @@ effectivePlan fold st = case choreMode of
     -- verdict comes from the item subtrees' own receipts.  Replan keeps the
     -- isolate-and-report contract: a failed item journals its amendment and
     -- the fold continues folding its siblings.
-    -- EMPTY task on purpose: an empty-task interior node is the structural
-    -- "no scaffold worker" form (Unfold seeds children straight from HEAD) —
-    -- a prose "make no edits" brief demonstrably cannot be trusted.
     sprintRoot subtrees =
       DevPlan
         { nodeName = "sprint"
         , nodeTask = ""
         , nodeChecks = []
-        , nodeBoundary = concatMap (.nodeBoundary) subtrees
-        , nodeTolerated = concatMap (.nodeTolerated) subtrees
+        , -- SUBTREE-wide, not root-only: the sprint root's post-merge diff
+          -- is the union of all descendants' paths, so a root-only
+          -- collection would fail the fold on its own children's honest
+          -- merged work.
+          nodeBoundary = concatMap subtreeBoundaries subtrees
+        , nodeTolerated = [t | q <- concatMap planSubtree subtrees, t <- nodeTolerated q]
         , nodeOnFailure = Replan
         , nodeSplit = Nothing
+        , -- TYPED integration-only: no scaffold worker runs, children seed
+          -- straight from HEAD.
+          nodeScaffold = Just False
         , childPlans = subtrees
         , nodeCycles = Nothing
         }
@@ -427,12 +502,37 @@ effectivePlan fold st = case choreMode of
 -- the planner can fix, never a match-nothing boundary that fails the node's
 -- own honest work at fold time.
 proposalViolation :: Budget -> DevPlan -> Maybe Text
-proposalViolation b plan = go 0 plan `orElseMaybe` dupName `orElseMaybe` badPath
+proposalViolation b plan =
+  go 0 plan
+    `orElseMaybe` dupName
+    `orElseMaybe` badPath
+    -- Cycle feasibility is computable at proposal time — the same
+    -- reservation-and-division walk the unfold performs — so an unfundable
+    -- plan is refused here, not discovered as per-child BudgetSpent refusals
+    -- after the worktrees exist.
+    `orElseMaybe` fundingShortfall b.maxAgentCycles plan
   where
     orElseMaybe (Just a) _ = Just a
     orElseMaybe Nothing y = y
     dupName =
       listToMaybe [[fmt|node name {n} appears more than once in the plan|] | n <- duplicateNames plan]
+        `orElseMaybe` badName
+    -- Names become git branch and worktree names ('fromWorktree'), so the
+    -- check is against the identity that matters: two names that differ as
+    -- text but collide (or fail) as refs must be refused HERE, not
+    -- discovered as worktree denials mid-unfold.
+    badName =
+      listToMaybe
+        [ [fmt|node name {n} is not a safe branch segment — use kebab-case (lowercase letters, digits, "-", "_", ".")|]
+        | n <- planNames plan
+        , not (refSafeName n)
+        ]
+    refSafeName n =
+      not (T.null n)
+        && T.all (\c -> c `elem` ("abcdefghijklmnopqrstuvwxyz0123456789-_." :: [Char])) n
+        && not ("." `T.isPrefixOf` n)
+        && not ("." `T.isSuffixOf` n)
+        && not (".." `T.isInfixOf` n)
     badPath =
       listToMaybe
         [ [fmt|node {nodeName q} has an unusable path entry — {why}|]
@@ -495,25 +595,33 @@ sprintOverlap subtrees = unbounded `orElseMaybe` pairOverlap
 -- rather than blocking the proposal.
 groundingPack :: Harness Text
 groundingPack = do
-  files <- groundingCmd 250 "git -C \"${TIDEPOOL_SOURCE_REPO:-.}\" ls-files"
-  docs <- groundingCmd 40 "cat \"${TIDEPOOL_SOURCE_REPO:-.}/CLAUDE.md\""
+  files <- groundingCmd 250 [fmt|git -C {sourceRepo} ls-files|]
+  docs <- groundingCmd 40 [fmt|cat {sourceRepo}/CLAUDE.md|]
   pure [fmt|  Tracked files (first 250):
 {files}
   Root CLAUDE.md (first 40 lines):
 {docs}|]
   where
-    -- Exec's cwd is the managed-worktrees root, NOT the source repo — every
-    -- command must address the repo via $TIDEPOOL_SOURCE_REPO explicitly.
     -- Truncation happens HERE, not via `| head -n`: a pipeline's exit code
     -- is its last stage's, so `git ... | head` reports success (and empty
     -- stdout) when git itself failed — the planner then silently gets a
     -- blank grounding instead of this loud note.
+    groundingCmd :: Int -> Text -> Harness Text
     groundingCmd n cmd =
       runInTry "." cmd <&> \case
         Left err -> [fmt|  ({cmd} unavailable: {err})|]
         Right pr
           | pr.exitCode == 0 -> T.unlines (take n (T.lines pr.stdout))
-          | otherwise -> [fmt|  ({cmd} failed (exit {pr.exitCode}): {pr.stderr})|]
+          | otherwise -> [fmt|  ({cmd} failed (exit {pr.exitCode}): {diagnose pr})|]
+
+-- | Exec's cwd is the managed-worktrees root, NOT the source repo — every
+-- grounding/audit command must address the repo via @$TIDEPOOL_SOURCE_REPO@
+-- explicitly.  @:?@ makes an UNSET variable a loud shell failure: the old
+-- @:-.@ fallback silently grounded the planner (and validated boundaries)
+-- against the worktrees directory, which is itself a git repository with a
+-- completely different file list.
+sourceRepo :: Text
+sourceRepo = "\"${TIDEPOOL_SOURCE_REPO:?TIDEPOOL_SOURCE_REPO is unset}\""
 
 -- | Baseline-run every distinct proposed check in the SOURCE repo before the
 -- operator sees the approval form.  Sprint 25 shipped two checks that could
@@ -527,26 +635,27 @@ groundingPack = do
 -- not fit the 600s in-run budget either.
 checkAudit :: DevPlan -> Harness Text
 checkAudit p = do
-  reports <- traverse probeCheck (nub (collectChecks p))
+  reports <- traverse probeCheck (nub (concatMap nodeChecks (planSubtree p)))
   pure (T.concat (catMaybes reports))
   where
-    collectChecks q = nodeChecks q <> concatMap collectChecks (childPlans q)
     quoted cmd = "'" <> T.replace "'" "'\\''" cmd <> "'"
-    firstLineOf t = T.takeWhile (/= '\n') (T.strip t)
     probeCheck cmd =
-      let wrapped = "cd \"${TIDEPOOL_SOURCE_REPO:-.}\" && timeout 60 sh -c " <> quoted cmd
+      let wrapped = "cd " <> sourceRepo <> " && timeout 60 sh -c " <> quoted cmd
        in runInTry "." wrapped <&> \case
-            Left _ -> Nothing
+            -- A probe that could not even be SPAWNED is a loud audit line,
+            -- never a silently-clean baseline for an untested check.
+            Left err -> Just [fmt|CHECK BASELINE: `{cmd}` could not be probed: {err}
+|]
             Right pr
               | pr.exitCode == 0 -> Nothing
               | pr.exitCode == 124 ->
                   Just [fmt|CHECK BASELINE: `{cmd}` exceeded 60s at baseline — may not fit the in-run budget
 |]
               | pr.exitCode `elem` [2, 126, 127] ->
-                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} (usage/not-found class — likely malformed): {firstLineOf pr.stderr}
+                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} (usage/not-found class — likely malformed): {diagnose pr}
 |]
               | otherwise ->
-                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} at baseline: {firstLineOf pr.stderr}
+                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} at baseline: {diagnose pr}
 |]
 
 -- | Untracked file-shaped boundary/tolerated entries across a whole plan:
@@ -558,27 +667,33 @@ checkAudit p = do
 -- refuses.
 pathAudit :: DevPlan -> Harness Text
 pathAudit p =
-  -- Same cwd caveat as groundingPack: Exec roots at the worktrees dir, so
-  -- git must be pointed at the source repo. A failed or empty listing
-  -- degrades to NO audit — an empty tracked list would otherwise flag every
-  -- file-shaped entry as stale.
-  runInTry "." "git -C \"${TIDEPOOL_SOURCE_REPO:-.}\" ls-files" <&> \case
-    Left _ -> ""
-    Right pr | pr.exitCode /= 0 || T.null (T.strip pr.stdout) -> ""
-    Right pr ->
-      let tracked = T.lines pr.stdout
-          fileShaped e = not ("/" `T.isSuffixOf` e) && "." `T.isInfixOf` lastSegment e
-          suspect e = fileShaped e && e `notElem` tracked
-          bad = filter suspect (collect p)
-       in if null bad
-            then ""
-            else [fmt|POSSIBLY-STALE PATHS (file-shaped, not tracked in this tree): {T.intercalate ", " bad}
+  runInTry "." ("git -C " <> sourceRepo <> " -c core.quotePath=false ls-files -z") <&> \case
+    -- A listing that could not run is a loud audit line, never a silent
+    -- absence — a missing audit reads as "all paths verified".
+    Left err -> [fmt|PATH AUDIT UNAVAILABLE: {err}
 |]
-  where
-    collect q = nodeBoundary q <> nodeTolerated q <> concatMap collect (childPlans q)
-    lastSegment e = case reverse (T.splitOn "/" e) of
-      (x : _) -> x
-      [] -> ""
+    Right pr
+      | pr.exitCode /= 0 -> [fmt|PATH AUDIT UNAVAILABLE (exit {pr.exitCode}): {diagnose pr}
+|]
+      -- An empty tracked list would flag every entry as stale; say so
+      -- instead of flagging or going quiet.
+      | T.null (T.strip pr.stdout) -> "PATH AUDIT UNAVAILABLE: ls-files returned no tracked files\n"
+      | otherwise ->
+          let tracked = map gitPath (filter (not . T.null) (T.splitOn "\0" pr.stdout))
+              entries = [e | q <- planSubtree p, e <- nodeBoundary q <> nodeTolerated q]
+              -- File-shaped entries only: a directory entry or a genuinely
+              -- new file is legitimate (audit, not refusal), and structural
+              -- comparison via RepoPath means a "./x" or trailing-slash
+              -- spelling can no longer dodge the tracked-file match.
+              suspect e = case parseRepoPath e of
+                Left _ -> False -- refused with a sharper message upstream
+                Right rp -> fileShaped rp && rp `notElem` tracked
+              fileShaped rp = "." `T.isInfixOf` T.takeWhileEnd (/= '/') (renderRepoPath rp)
+              bad = filter suspect entries
+           in if null bad
+                then ""
+                else [fmt|POSSIBLY-STALE PATHS (file-shaped, not tracked in this tree): {T.intercalate ", " bad}
+|]
 
 -- | Every blocked transition is LOUD: said to the operator and traced as
 -- data (the park rule — sprint 25b's first attempt died at proposal

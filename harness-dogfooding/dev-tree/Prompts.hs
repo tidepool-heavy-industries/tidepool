@@ -24,6 +24,7 @@ module Prompts
   , resolutionPrompt
   , replanPrompt
   , noOpVerdictPrompt
+  , noteRoutingPrompt
   , checkLines
   , boundaryLines
   , bulletLines
@@ -64,7 +65,10 @@ proposePrompt requestedGoal b grounding = [fmt|
   allowed where they fit a 600-second budget); an explicit nodeOnFailure.
   Optionally set nodeCycles on a child that needs more than an equal share
   of the cycle budget (a leaf costs one cycle; an interior node two plus its
-  children); omit it everywhere else.
+  children); omit it everywhere else. On an interior node that only exists
+  to integrate its children (no shared stubs or types to lay down), set
+  nodeScaffold to false — no scaffold worker runs and children fork straight
+  from the parent's HEAD; omit nodeScaffold everywhere else.
 
   PATHS ARE VERIFIED, NOT INHERITED: the goal text may be stale relative to
   this tree. Every path you put in a boundary or check must appear in the
@@ -383,6 +387,30 @@ noOpVerdictPrompt p wr = [fmt|
   verification-only) and a one-sentence noOpReason. When in doubt, answer
   false: an unearned pass here skips every later check.
 |]
+
+-- | Route one operator revision note across the sprint's items — the one
+-- bounded call that replaces N independent "does this concern me?" prose
+-- judgments.
+noteRoutingPrompt :: Text -> [Text] -> Text
+noteRoutingPrompt note goals = [fmt|
+  An operator reviewed a COMPOSED sprint proposal (one subtree per backlog
+  item below) and left one revision note. Decide which item(s) the note
+  concerns.
+
+  The note: {note}
+
+  The sprint items, in order:
+{goalLines}
+
+  Answer with a NoteRouting: itemNotes is POSITIONAL — one entry per item,
+  in the order above.  For an item the note concerns, write the part of the
+  note that item's planner should act on, in your own words if the note
+  mixes items; for an item it does not concern, write an empty string (that
+  item's plan is reused unchanged).  Add a one-sentence routingRationale.
+|]
+  where
+    goalLines =
+      T.intercalate "\n" [[fmt|  {i}. {g}|] | (i, g) <- zip [1 :: Int ..] goals]
 
 checkLines :: DevPlan -> Text
 checkLines p = bulletLines (nodeChecks p)

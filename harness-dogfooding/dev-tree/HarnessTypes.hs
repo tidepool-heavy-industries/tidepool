@@ -37,6 +37,7 @@ module HarnessTypes
   , TriageAction (..)
   , LayerApproval (..)
   , PlanApproval (..)
+  , NoteRouting (..)
   , Outcome (..)
   , Failure (..)
   , FailureKind (..)
@@ -57,6 +58,7 @@ module HarnessTypes
   , outcomeNodeName
   , outcomeTrailOf
   , outcomeIsDone
+  , outcomeReceipt
   , outcomeLine
   , renderFailure
   , failedOutcome
@@ -68,6 +70,7 @@ module HarnessTypes
   , pathWithin
   , pathsOverlap
   , planSubtree
+  , planScaffolds
   , planNames
   , duplicateNames
   , subtreeBoundaries
@@ -179,6 +182,15 @@ data DevPlan = DevPlan
     -- everything happens inside this node's own worktree.  Ignored on an
     -- interior node.
     nodeSplit     :: Maybe SplitSpec
+  , -- | Whether an INTERIOR node runs a scaffold worker before its children
+    -- fork.  @Just False@ is the TYPED integration-only form — children
+    -- seed straight from the parent's HEAD and no worker runs (a prose
+    -- "make no edits" brief demonstrably cannot be trusted; two live runs
+    -- had the scaffold invent files and trip its own boundary).  'Nothing'
+    -- derives from the task: scaffold exactly when 'nodeTask' is non-blank
+    -- ('planScaffolds'), so structure is never switched by prose emptiness
+    -- alone when a planner can say it outright.  Ignored on a leaf.
+    nodeScaffold  :: Maybe Bool
   , childPlans    :: [DevPlan]
   , -- | This node's agent-cycle ask.  'Nothing' takes an equal share of the
     -- parent's remaining allowance; 'Just' is honored (scaled down
@@ -376,6 +388,18 @@ data LayerApproval = LayerApproval
 data PlanApproval = PlanApproval
   { planApproved :: Bool
   , revisionNote :: Text
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | One operator revision note, routed ONCE to the sprint items it concerns
+-- — a bounded semantic question ("which item is this about?") answered by
+-- one model call, instead of N item planners each independently deciding
+-- whether a note about someone else applies to them.  @itemNotes@ is
+-- positional per sprint item; an empty entry means "not concerned" and that
+-- item's planner sees no revision text at all.
+data NoteRouting = NoteRouting
+  { itemNotes        :: [Text]
+  , routingRationale :: Text
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
@@ -615,6 +639,13 @@ outcomeIsDone o = case o of
   Failed {} -> False
   Skipped {} -> False
 
+-- | The receipt an outcome carries, when it carries one.
+outcomeReceipt :: Outcome -> Maybe FoldReceipt
+outcomeReceipt o = case o of
+  Done {doneReceipt = r} -> Just r
+  Failed {partialReceipt = r} -> r
+  Skipped {} -> Nothing
+
 -- | One rendered line per node — the unit the trail is built from.
 outcomeLine :: Outcome -> Text
 outcomeLine o = case o of
@@ -748,7 +779,13 @@ renderPlan depth p =
     <> children
   where
     indent = T.replicate depth "  "
-    policy = [fmt| (on failure: {show (nodeOnFailure p)})|]
+    -- The cycle ask is SHOWN: it is enforced arithmetic, and an operator
+    -- approving a plan without seeing it is approving a starvation they
+    -- could have caught.
+    policy = [fmt| (on failure: {show (nodeOnFailure p)}{cyclesNote})|]
+    cyclesNote = case nodeCycles p of
+      Nothing -> "" :: Text
+      Just c -> [fmt|; {c} cycles|]
     split = case nodeSplit p of
       Nothing -> "" :: Text
       Just s -> [fmt| (micro-split on the fly, max {s.splitMaxTasks} tasks)|]
@@ -813,6 +850,11 @@ pathsOverlap x y = pathWithin x y || pathWithin y x
 -- ---------------------------------------------------------------------------
 -- The one subtree walk
 -- ---------------------------------------------------------------------------
+
+-- | Does this node run a scaffold worker before its children fork?  The
+-- typed field wins; without one, a non-blank task means yes.
+planScaffolds :: DevPlan -> Bool
+planScaffolds p = fromMaybe (not (T.null (T.strip (nodeTask p)))) p.nodeScaffold
 
 -- | Every node of a plan, root first.  The ONE subtree traversal — name,
 -- boundary, and check collectors are projections of this, so two call sites

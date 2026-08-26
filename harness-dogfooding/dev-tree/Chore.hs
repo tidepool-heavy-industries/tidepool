@@ -37,13 +37,20 @@ choreMode =
             { itemGoal =
                 "worker-typecheck v2, second attempt. Sprint 25's near-complete work is on branch tidepool/worktree/worker-typecheck-v2-wt-c3ea9840-f744-4828-b314-a111a54316d5 (visible from your worktree) — start by evaluating and cherry-picking it rather than rewriting. The task: scripts/worker-typecheck.sh discovers only the newest generated Tidepool/Effects.hs dir and MISSES the separate stable Tidepool.Effects.Core generated dir, so typechecks of files importing the stable module fail (reproduced from the dev checkout itself: `scripts/worker-typecheck.sh harness-dogfooding/dev-tree/Fold.hs` fails with 'Could not find module Tidepool.Effects.Core'); fix discovery to include both dirs. Also add a scoped-format helper mode (only the listed files, never cargo fmt --all). Keep it self-contained POSIX shell; PRESERVE the existing CLI contract (a file argument is required; bare invocation is a usage error — do not add a zero-arg mode). Checks must respect that contract: verify with `sh -n`, and with a real invocation against a tracked .hs file that imports Tidepool.Effects.Core, e.g. `scripts/worker-typecheck.sh harness-dogfooding/dev-tree/Fold.hs`. Boundary: scripts/worker-typecheck.sh only."
             , itemPlan = Nothing
-            , itemCycles = 3
+            , -- 6, not 3: an item whose planner proposes an interior node
+              -- with two children needs 2 (its own reservation) + 1 per
+              -- child MINIMUM, and 3 floors every child's share to zero —
+              -- the item then delivers nothing.  'fundingShortfall' now
+              -- refuses that shape at proposal time; the allowance here is
+              -- sized so the natural 2-3 child plan these goals imply is
+              -- actually fundable.
+              itemCycles = 6
             }
         , SprintItem
             { itemGoal =
                 "Self-hosted CI gate, second attempt. Sprint 25's substantially-complete work is on branch tidepool/worktree/self-hosted-ci-gate-wt-32aab794-07ef-429c-b5b3-0a6228a6ca73 (visible from your worktree) — evaluate and cherry-pick it rather than rewriting; its design was sound and its only in-run check failure was a legitimate formatting violation it correctly caught. The deliverable: ci/gate.sh (portable fail-fast shell) with the ordered default gates fmt-check, clippy -D warnings, fast-tier cargo nextest, the dogfood pin battery, one deterministic GHC battery shard via scripts/battery-shard.sh under scripts/ghc-slots.sh; an explicit full-battery mode; ci/README.md documenting modes, gate order, budget rationale, and the no-mutation contract. IMPORTANT check design: the full default gate builds the workspace and CANNOT run inside your node's 600-second check budget — checks must be structural only (`sh -n ci/gate.sh`, `ci/gate.sh --help`, an invalid-mode exit-code probe); the operator runs the real gate against the dev checkout at fold. Boundary: ci/ (new directory); tolerated: docs/."
             , itemPlan = Nothing
-            , itemCycles = 3
+            , itemCycles = 6
             }
         ]
     }
@@ -61,6 +68,7 @@ chorePlan =
     , nodeTolerated = []
     , nodeOnFailure = Retry
     , nodeSplit = Nothing
+    , nodeScaffold = Nothing
     , childPlans = []
     , nodeCycles = Nothing
     }
