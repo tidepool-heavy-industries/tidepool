@@ -18,6 +18,22 @@ GHC="$(grep -oE '/nix/store/[^:"]*-with-packages/bin' "$HOME/.nix-profile/bin/ti
 echo "==> building extract + bin (fresh) ..."
 ( cd haskell && cabal build tidepool-extract-bin )
 export TIDEPOOL_EXTRACT="$(cd haskell && cabal list-bin tidepool-extract-bin)"
+# Opt-in extract-invocation instrumentation: set TIDEPOOL_EXTRACT_ARGV_LOG to
+# a file path and every extract spawn appends one line (epoch.ns, pid, cwd,
+# full argv) before exec'ing the real binary. Zero-rebuild forensics for
+# compile-resolution failures — a failing spawn's argv diffs directly against
+# a succeeding sibling's.
+if [ -n "${TIDEPOOL_EXTRACT_ARGV_LOG:-}" ]; then
+  REAL_EXTRACT="$TIDEPOOL_EXTRACT"
+  SHIM="$(mktemp -d)/tidepool-extract-logged"
+  cat > "$SHIM" <<EOF
+#!/bin/sh
+echo "\$(date +%s.%N) pid=\$\$ cwd=\$PWD :: \$*" >> "$TIDEPOOL_EXTRACT_ARGV_LOG"
+exec "$REAL_EXTRACT" "\$@"
+EOF
+  chmod +x "$SHIM"
+  export TIDEPOOL_EXTRACT="$SHIM"
+fi
 # Release is the dogfood profile (launch decision 2026-08-09): the JIT hot
 # path is ~1.3-1.5x faster and it is the deployment being pitched.
 # TIDEPOOL_PROFILE=debug overrides for stage-attribution work, whose
