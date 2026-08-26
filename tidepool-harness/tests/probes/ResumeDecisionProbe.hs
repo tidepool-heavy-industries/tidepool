@@ -5,7 +5,7 @@ import Tidepool.Effects
 import Harness
 import HarnessTypes (OnFailure (..), FoldReceipt (..), Failure (..), FailureKind (..), ReplanDecision (..), Outcome (..))
 import Tidepool.Resume (ResumeFold (..), ResumeEntry (..), emptyResume, isResumed)
-import Resume (descendantAmendPending, rescuePending, rootBranchOf)
+import Resume (descendantAmendPending, newestEntry, rescuePending, rootBranchOf, substantiveAmendment)
 import Fold (foldLadder)
 import DevTreeJournal (JournalEvent (..), JournalKey (..), payloadOf)
 import Tidepool.Aeson (Value, object, toJSON, (.=))
@@ -102,15 +102,24 @@ caseUnrelatedBranchIsFresh =
       fold = mkFold [mkEntry 1 "outcome" otherBranch (toJSON (mkReceipt "other" otherBranch))]
   in verify "unrelated-branch-entries-do-not-skip" (resumePlanFor foldLadder fold leafBranch leafPlan == ResumeFresh)
 
--- amendmentIsNewest, directly: the same sequence rule exposed as its
--- retained pure helper, including the outcome comparison.
-caseAmendmentIsNewest :: [Text]
-caseAmendmentIsNewest =
-  [ verify "amendmentIsNewest-no-replan-is-false" (amendmentIsNewest Nothing (Just 5) (Just 3) == False)
-  , verify "amendmentIsNewest-replan-newer-than-both" (amendmentIsNewest (Just 4) (Just 2) (Just 1) == True)
-  , verify "amendmentIsNewest-replan-equal-to-split-not-newer" (amendmentIsNewest (Just 2) (Just 2) Nothing == False)
-  , verify "amendmentIsNewest-replan-newer-than-split-older-than-outcome" (amendmentIsNewest (Just 3) (Just 1) (Just 5) == False)
-  , verify "amendmentIsNewest-replan-with-no-prior-split-or-outcome" (amendmentIsNewest (Just 0) Nothing Nothing == True)
+-- The precedence rule ('newestEntry' — the ONE live spelling; the old
+-- amendmentIsNewest duplicate is deleted) and amendment substance, directly.
+caseSequenceRules :: [Text]
+caseSequenceRules =
+  let evA sq = (sq, EscalationEvent (JournalKey "b") "a" "a")
+      evB sq = (sq, EscalationEvent (JournalKey "b") "b" "b")
+      blankDecision = ReplanDecision { amendedInstruction = "  ", abandonSubtree = False, rationale = "nothing useful to add", amendedSubtree = Nothing }
+      splitPlan = leafPlan { nodeTask = "original" }
+      foldBlank = mkFold [mkEntry 1 "split" leafBranch (splitPayloadFor "leaf" splitPlan "scaffold3"), mkEntry 2 "replan" leafBranch (toJSON blankDecision)]
+      expectedReplay = ResumeReplay SplitRecord { splitNode = "leaf", splitScaffoldHead = "scaffold3", splitPlan = splitPlan, splitChildTrees = [] }
+  in
+  [ verify "newestEntry-strictly-newest-replan-wins" (newestEntry (Just (evA 4)) (Just (evB 2)) Nothing == Just (evA 4))
+  , verify "newestEntry-tie-keeps-non-replan" (newestEntry (Just (evA 2)) (Just (evB 2)) Nothing == Just (evB 2))
+  , verify "newestEntry-all-absent-is-nothing" (newestEntry Nothing Nothing Nothing == Nothing)
+  , verify "blank-non-abandoning-amendment-is-insubstantial" (substantiveAmendment blankDecision == False)
+  -- A blank amendment must not shadow the recorded split into an amend
+  -- verdict: consuming it would burn the one rescue re-entry on a no-op.
+  , verify "insubstantial-replan-does-not-shadow-split" (resumePlanFor foldLadder foldBlank leafBranch leafPlan == expectedReplay)
   ]
 
 -- Run 24's exact journal shape (2026-08-25), WIRE-FAITHFUL: the journal's
@@ -158,4 +167,4 @@ caseRun24Rescue =
   ]
 
 __resumeDecisionReport :: Text
-__resumeDecisionReport = T.intercalate "\n" ( [ caseRecordedOutcome, caseRecordedSplitReplays, caseStaleOutcomeNewerSplitReplays, caseReplanNewerAmends, caseReplanOlderIgnored, caseEmptyFoldIsResumedFalse, caseEmptyFoldDecidesFresh, caseUnrelatedBranchIsFresh ] <> caseAmendmentIsNewest <> caseRun24Rescue )
+__resumeDecisionReport = T.intercalate "\n" ( [ caseRecordedOutcome, caseRecordedSplitReplays, caseStaleOutcomeNewerSplitReplays, caseReplanNewerAmends, caseReplanOlderIgnored, caseEmptyFoldIsResumedFalse, caseEmptyFoldDecidesFresh, caseUnrelatedBranchIsFresh ] <> caseSequenceRules <> caseRun24Rescue )

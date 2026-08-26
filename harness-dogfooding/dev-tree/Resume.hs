@@ -23,7 +23,7 @@ module Resume
   , descendantAmendPending
   , rescuePending
   , newestEntry
-  , amendmentIsNewest
+  , substantiveAmendment
   , amendPlan
   , amendPlanChecked
   , recordedPlanFor
@@ -52,6 +52,7 @@ import DevTreeJournal
   , JournalKind (..)
   , eventsOfKind
   , lookupEvent
+  , undecodableEntries
   )
 import HarnessTypes
 import Micro (NodeSeed (..))
@@ -160,6 +161,12 @@ resumed hooks fold inner
         "resume-verdict"
         branch
         (object ["node" .= nodeName seed.seedPlan, "verdict" .= verdictTag hooks.resumeFoldLadder verdict])
+      -- "Recorded but unreadable" is NOT "never recorded": the decode still
+      -- degrades to fresh work, but the degradation is said — a version-skewed
+      -- entry silently tagged @fresh@ is a redo nobody can diagnose.
+      traverse_
+        (\(kind, k, sq) -> trace "resume-undecodable" branch (object ["kind" .= kind, "key" .= k, "seq" .= sq]))
+        [e | e@(_, k, _) <- undecodableEntries fold, k == branch || k == nodeName seed.seedPlan]
       case verdict of
         ResumeAmend d _
           | Just why <- snd (amendPlanChecked d (recordedPlanFor fold branch seed.seedPlan)) ->
@@ -219,12 +226,35 @@ resumePlanFor ladder fold branch p = case newestEntry replanEntry splitEntry out
   Nothing -> ResumeFresh
   where
     splitEntry = lookupEvent SplitKind branch fold
-    replanEntry = lookupEvent ReplanKind branch fold
+    -- An INSUBSTANTIAL amendment — nothing to say, nothing to restructure,
+    -- not an abandonment — is ignored wholesale: consuming it would burn
+    -- the one rescue re-entry re-running the identical failing plan.
+    replanEntry = case lookupEvent ReplanKind branch fold of
+      e@(Just (_, ReplanEvent {evDecision = d}))
+        | substantiveAmendment d -> e
+      _ -> Nothing
+    -- Both keys can legitimately hold outcomes (receipted ones under the
+    -- branch, receiptless failures/skips under the node name), so they
+    -- compete BY SEQUENCE like everything else here — 'orElse' precedence
+    -- let a stale branch-keyed Done shadow a later node-keyed failure.
     outcomeEntry =
-      lookupEvent OutcomeKind branch fold
-        `orElse` lookupEvent OutcomeKind (nodeName p) fold
+      newestOf
+        (lookupEvent OutcomeKind branch fold)
+        (lookupEvent OutcomeKind (nodeName p) fold)
     recordedSplit = splitEntry >>= (splitRecordOf . snd)
     recordedPlan = maybe p (.splitPlan) recordedSplit
+
+-- | Is a journaled amendment worth consuming?  An abandonment always is; an
+-- amendment that neither restructures nor says anything is not.
+substantiveAmendment :: ReplanDecision -> Bool
+substantiveAmendment d =
+  d.abandonSubtree
+    || isJust d.amendedSubtree
+    || not (T.null (T.strip d.amendedInstruction))
+
+-- | The newer of two optional @(seq, event)@ entries.
+newestOf :: Maybe (Int, JournalEvent) -> Maybe (Int, JournalEvent) -> Maybe (Int, JournalEvent)
+newestOf a b = newestEntry a b Nothing
 
 -- | The trace-stream tag for one resume verdict.  A skip is tagged by its
 -- LADDERED doneness — the raw journaled outcome under-reports (bare-receipt
@@ -307,14 +337,6 @@ splitRecordOf SplitEvent {evSplitPlan = pl, evScaffoldHead = h, evChildTrees = c
       }
 splitRecordOf _ = Nothing
 
--- | Is the journaled amendment newer than both the split and outcome?
-amendmentIsNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool
-amendmentIsNewest replanSeq splitSeq outcomeSeq = case replanSeq of
-  Nothing -> False
-  Just r -> r > absent splitSeq && r > absent outcomeSeq
-  where
-    absent = fromMaybe (-1)
-
 -- | Apply a journaled amendment to a node's plan.  A replacement subtree
 -- (replan-as-decompose) wins over a rephrased instruction; either way the
 -- node's own name survives, because retained worktrees rebind by name and a
@@ -385,7 +407,14 @@ replaySplit hooks fold seed sp = do
       if finished
         then do
           vo <- verifyOrphan fold hc
-          pure (Swarm.PlanF (adoptedWork recorded (adopt vo)) [])
+          let o = adopt vo
+          -- Adoption is the resume branch most worth narrating: it is the
+          -- one that turns found commits into a verdict.
+          trace
+            "resume-adopt"
+            (branchOf seed.seedTree)
+            (object ["node" .= nodeName sp.splitPlan, "head" .= renderGitOid hc.hcFound, "verified" .= outcomeIsDone (hooks.resumeFoldLadder o)])
+          pure (Swarm.PlanF (adoptedWork recorded o) [])
         else unfoldChildren
   where
     recorded = seed {seedPlan = sp.splitPlan}
@@ -419,7 +448,10 @@ integrationComplete hooks fold seed sp
 -- used by the current fold.
 recordedDone :: ResumeHooks -> ResumeFold -> Text -> Text -> Bool
 recordedDone hooks fold branch node =
-  case lookupEvent OutcomeKind branch fold `orElse` lookupEvent OutcomeKind node fold of
+  -- Branch-keyed and node-keyed outcomes compete by SEQUENCE, exactly as in
+  -- 'resumePlanFor': a stale branch-keyed Done must not shadow a later
+  -- node-keyed failure into "already integrated".
+  case newestOf (lookupEvent OutcomeKind branch fold) (lookupEvent OutcomeKind node fold) of
     Just (_, OutcomeEvent {evOutcome = o}) -> outcomeIsDone (hooks.resumeFoldLadder o)
     _ -> False
 
@@ -441,6 +473,10 @@ adoptOrUnfold hooks fold inner seed = do
         else do
           vo <- verifyOrphan fold hc
           let o = adopt vo
+          trace
+            "resume-adopt"
+            (branchOf seed.seedTree)
+            (object ["node" .= nodeName seed.seedPlan, "head" .= renderGitOid hc.hcFound, "verified" .= outcomeIsDone (hooks.resumeFoldLadder o)])
           if null (childPlans seed.seedPlan)
             then pure (Swarm.PlanF (adoptedWork seed o) [])
             else case hooks.resumeFoldLadder o of
@@ -480,7 +516,12 @@ retainWorktree branch = do
   trees <- listWorktrees
   case [s | s <- trees, renderBranchName s.summaryReceipt.branch == branch] of
     [] -> pure (Left [fmt|no retained worktree is registered for branch {branch}|])
-    (s : _)
+    -- Two registered worktrees claiming one branch is a real corrupted
+    -- state, and rebinding to whichever listed first would silently work on
+    -- a coin flip.
+    (_ : _ : _) ->
+      pure (Left [fmt|more than one retained worktree claims branch {branch} — refusing to guess which to rebind|])
+    [s]
       | not s.present ->
           pure
             ( Left
@@ -584,10 +625,15 @@ priorEscalationsFor fold branch =
   ]
 
 -- | The retained root worktree's branch, named structurally by the fold.
+-- The 'RootTreeEvent' written at worktree CREATION is the primary source —
+-- it exists even when a crash landed inside the root scaffold cycle, before
+-- any split or outcome was recorded; the split/outcome fallbacks keep
+-- journals from before that event decodable in spirit.
 rootBranchOf :: ResumeFold -> Text -> Maybe Text
 rootBranchOf fold node =
   listToMaybe
-    ( [key | (key, _, SplitEvent {evSplitPlan = pl}) <- eventsOfKind SplitKind fold, nodeName pl == node]
+    ( [key | (key, _, RootTreeEvent {}) <- eventsOfKind RootTreeKind fold]
+        <> [key | (key, _, SplitEvent {evSplitPlan = pl}) <- eventsOfKind SplitKind fold, nodeName pl == node]
         <> [ key
            | (key, _, OutcomeEvent {evOutcome = o}) <- eventsOfKind OutcomeKind fold
            , outcomeNodeName o == node

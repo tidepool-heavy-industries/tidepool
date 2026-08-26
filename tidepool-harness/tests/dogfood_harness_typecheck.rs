@@ -155,7 +155,7 @@ fn dev_tree_typechecks() {
     typecheck(
         "harness-dogfooding/dev-tree",
         outer_row_decls(),
-        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\nimport HarnessTypes (Budget (..), PlanApproval (..))\nimport Resume (descendantAmendPending, rescuePending)\nimport qualified Data.Text as T\n",
+        "import Tidepool.Resume (ResumeFold, emptyResume)\nimport Chore (chorePlan, choreBudget)\nimport HarnessTypes (Budget (..), PlanApproval (..))\nimport Resume (descendantAmendPending, newestEntry, rescuePending)\nimport DevTreeJournal (JournalEvent)\nimport qualified Data.Text as T\n",
         concat!(
             "__resumeProbe :: M Text\n",
             "__resumeProbe = do { st <- resumeLoop emptyResume initialState; pure (render st) }\n",
@@ -170,8 +170,8 @@ fn dev_tree_typechecks() {
             // outcome must not shadow a descendant branch's pending amendment.
             "__amendRescue :: (Outcome -> Outcome) -> ResumeFold -> DevPlan -> Bool\n",
             "__amendRescue = descendantAmendPending\n",
-            "__amendmentNewest :: Maybe Int -> Maybe Int -> Maybe Int -> Bool\n",
-            "__amendmentNewest = amendmentIsNewest\n",
+            "__newestEntry :: Maybe (Int, JournalEvent) -> Maybe (Int, JournalEvent) -> Maybe (Int, JournalEvent) -> Maybe (Int, JournalEvent)\n",
+            "__newestEntry = newestEntry\n",
             "__proposeDecision :: Budget -> DevPlan -> Maybe Text\n",
             "__proposeDecision = proposalViolation\n",
             // Sprint mode: disjoint-item validation is pure and pinned.
@@ -247,7 +247,7 @@ fn execute_pure(
 }
 
 /// One `module ResumeDecisionProbe where` source: hand-built `ResumeFold`
-/// values covering the decision table `resumePlanFor`/`amendmentIsNewest`
+/// values covering the decision table `resumePlanFor`/`newestEntry`
 /// actually implement (read from `Harness.hs` directly, not assumed), folded
 /// into one newline-separated `PASS`/`FAIL` report per case.
 const RESUME_DECISION_SOURCE: &str = include_str!("probes/ResumeDecisionProbe.hs");
@@ -265,7 +265,7 @@ const RESUME_DECISION_SOURCE: &str = include_str!("probes/ResumeDecisionProbe.hs
 /// recorded split with no outcome, a stale outcome followed by a newer split,
 /// a replan newer than its split, a replan older than its split, the empty
 /// fold, and entries recorded under an unrelated branch — runs
-/// `resumePlanFor`/`amendmentIsNewest` over them on
+/// `resumePlanFor`/`newestEntry` over them on
 /// the real JIT with no agent and no git anywhere in the path, and asserts
 /// what comes back against the decision table read directly out of
 /// `Harness.hs`.

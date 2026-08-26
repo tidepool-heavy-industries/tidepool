@@ -63,7 +63,6 @@ module Harness
   , ResumePlan (..)
   , SplitRecord (..)
   , resumePlanFor
-  , amendmentIsNewest
   , amendPlan
   , proposalViolation
   , sprintOverlap
@@ -111,7 +110,6 @@ import Resume
   , SplitRecord (..)
   , adoptedWork
   , amendPlan
-  , amendmentIsNewest
   , rescuePending
   , resumePlanFor
   , resumed
@@ -121,6 +119,7 @@ import Resume
   , ResumeHooks (..)
   )
 import Git (diagnose)
+import Workers (branchOf)
 import Unfold
   ( allocateChildren
   , childAllowance
@@ -748,7 +747,14 @@ rootTree fold st = case rootBranchOf fold (nodeName (plan st)) of
                   [fmt|Source repository is dirty ({dirtyFiles} uncommitted paths). Commit them, or set snapshotDirtySource to run against a hidden snapshot.|]
               )
       Left err -> pure (Left [fmt|Could not create root worktree: {renderWorktreeError err}|])
-      Right h -> pure (Right h)
+      Right h -> do
+        -- Journaled AT CREATION, before the scaffold cycle: the longest
+        -- crash window in a run is the root scaffold, and a journal whose
+        -- first root-naming entry arrives only with the split would make a
+        -- crash there resume into a SECOND root worktree beside the
+        -- retained one's orphaned commits.
+        recordEvent (RootTreeEvent (JournalKey (branchOf h)))
+        pure (Right h)
 
 -- ---------------------------------------------------------------------------
 -- Run summary

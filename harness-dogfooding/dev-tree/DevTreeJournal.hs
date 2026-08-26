@@ -14,7 +14,7 @@
 -- compiles clean, and only breaks crash recovery, in production, during an
 -- actual crash.
 --
--- This module is the one layer up: the eight kinds dev-tree actually
+-- This module is the one layer up: the kinds dev-tree actually
 -- journals, as a Haskell sum, with exactly one function that turns a value
 -- of it into a @record@ call ('recordEvent') and exactly one that turns a
 -- folded @(kind, key, payload)@ triple back into one ('decodeEvent'). Every
@@ -45,6 +45,7 @@ module DevTreeJournal
   , decodeEvent
   , lookupEvent
   , eventsOfKind
+  , undecodableEntries
   ) where
 
 import HarnessTypes (DevPlan (..), FoldReceipt (..), Outcome (..), RebaseNote (..), ReplanDecision)
@@ -52,7 +53,7 @@ import Tidepool.Aeson (Value, object, toJSON, (.=))
 import Tidepool.Harness (Harness)
 import Tidepool.Journal (record)
 import Tidepool.Prelude
-import Tidepool.Resume (ResumeEntry (..), ResumeFold, lookupResumeEntry, resumeOfKind)
+import Tidepool.Resume (ResumeEntry (..), ResumeFold (..), lookupResumeEntry, resumeOfKind)
 
 -- | The durable identity a journal entry is keyed under. Usually a branch
 -- name, sometimes a plain plan node name (see 'JournalEvent's Outcome case,
@@ -63,9 +64,9 @@ import Tidepool.Resume (ResumeEntry (..), ResumeFold, lookupResumeEntry, resumeO
 newtype JournalKey = JournalKey Text
   deriving (Show, Eq, Ord)
 
--- | The eight kinds dev-tree actually journals, and nothing else. Every kind
+-- | The kinds dev-tree actually journals, and nothing else. Every kind
 -- STRING lives in 'kindText' alone; everywhere else in this file, and
--- everywhere in "Harness", a kind is one of these four-ish constructors.
+-- everywhere in "Harness", a kind is one of these constructors.
 data JournalKind
   = SplitKind
   | ProposeKind
@@ -75,7 +76,11 @@ data JournalKind
   | EscalationKind
   | MicroSplitKind
   | MicroCompleteKind
+  | RootTreeKind
   deriving (Show, Eq)
+
+allKinds :: [JournalKind]
+allKinds = [SplitKind, ProposeKind, OutcomeKind, ReplanKind, RebaseKind, EscalationKind, MicroSplitKind, MicroCompleteKind, RootTreeKind]
 
 kindText :: JournalKind -> Text
 kindText SplitKind = "split"
@@ -86,6 +91,7 @@ kindText RebaseKind = "rebase"
 kindText EscalationKind = "escalation"
 kindText MicroSplitKind = "micro-split"
 kindText MicroCompleteKind = "micro-complete"
+kindText RootTreeKind = "root-tree"
 
 -- | One durable fact dev-tree records. Every constructor carries the key it
 -- is filed under ('evKey') alongside its own typed payload — 'recordEvent'
@@ -150,6 +156,13 @@ data JournalEvent
       { evKey             :: JournalKey
       , evMicrotaskNames  :: [Text]
       }
+  | -- | The run's root worktree branch (the key IS the branch), journaled AT
+    -- CREATION — before the scaffold cycle ever runs — so a crash anywhere
+    -- in that window still rebinds the retained root on resume instead of
+    -- creating a second root worktree beside its orphaned commits.
+    RootTreeEvent
+      { evKey :: JournalKey
+      }
   deriving (Show, Eq)
 
 kindOf :: JournalEvent -> JournalKind
@@ -161,6 +174,7 @@ kindOf RebaseEvent {} = RebaseKind
 kindOf EscalationEvent {} = EscalationKind
 kindOf MicroSplitEvent {} = MicroSplitKind
 kindOf MicroCompleteEvent {} = MicroCompleteKind
+kindOf RootTreeEvent {} = RootTreeKind
 
 keyOf :: JournalEvent -> Text
 keyOf ev = case ev.evKey of JournalKey k -> k
@@ -195,6 +209,7 @@ payloadOf EscalationEvent {evEscNode = n, evEscDetail = why} =
   object ["node" .= n, "detail" .= why]
 payloadOf MicroSplitEvent {evMicrotaskNames = names} = microtaskPayload names
 payloadOf MicroCompleteEvent {evMicrotaskNames = names} = microtaskPayload names
+payloadOf RootTreeEvent {} = object []
 
 microtaskPayload :: [Text] -> Value
 microtaskPayload names = object ["microtasks" .= names]
@@ -228,6 +243,7 @@ decodeEvent kind k payload
         <*> payload ^? key "detail" . _String
   | kind == kindText MicroSplitKind = MicroSplitEvent (JournalKey k) <$> decodeMicrotaskNames payload
   | kind == kindText MicroCompleteKind = MicroCompleteEvent (JournalKey k) <$> decodeMicrotaskNames payload
+  | kind == kindText RootTreeKind = Just (RootTreeEvent (JournalKey k))
   | otherwise = Nothing
 
 decodeMicrotaskNames :: Value -> Maybe [Text]
@@ -242,7 +258,14 @@ decodeSplitEvent k v = do
       { evKey = JournalKey k
       , evSplitPlan = p
       , evScaffoldHead = h
-      , evChildTrees = v ^? key "childTrees" . _Array >>= traverse decodeChildTree
+      , -- Per-ROW tolerance: one malformed child-tree row must not discard
+        -- the whole table — 'Nothing' here means "pre-allocation record",
+        -- and collapsing a partly-readable table into that would recreate
+        -- every OTHER child's retained worktree from scratch, orphaning
+        -- their commits.  A dropped row degrades to that one child's
+        -- fresh-worktree fallback; 'undecodableEntries' makes the loss
+        -- visible on the trace stream.
+        evChildTrees = mapMaybe decodeChildTree <$> (v ^? key "childTrees" . _Array)
       }
   where
     decodeChildTree cv = (,) <$> (cv ^? key "name" . _String) <*> (cv ^? key "branch" . _String)
@@ -277,9 +300,10 @@ decodeJson v = case fromJSON v of
   Error _ -> Nothing
 
 -- | The last event folded under one @(kind, key)@ pair, alongside the
--- sequence number "Harness"'s @amendmentIsNewest@ compares. Total: a kind
+-- sequence number "Resume"'s @newestEntry@ compares. Total: a kind
 -- this sum does not recognise, or a payload it cannot parse, is 'Nothing' —
 -- the same "do the work" degradation 'decodeEvent' documents.
+-- 'undecodableEntries' is the companion that keeps that degradation LOUD.
 lookupEvent :: JournalKind -> Text -> ResumeFold -> Maybe (Int, JournalEvent)
 lookupEvent kind key fold = do
   e <- lookupResumeEntry (kindText kind) key fold
@@ -293,4 +317,17 @@ eventsOfKind kind fold =
   [ (e.resumeKey, e.resumeSeq, ev)
   | e <- resumeOfKind (kindText kind) fold
   , Just ev <- [decodeEvent e.resumeKind e.resumeKey e.resumePayload]
+  ]
+
+-- | Entries of a RECOGNISED kind this reader cannot decode — the honest
+-- difference between "never recorded" and "recorded but unreadable"
+-- (version skew, a truncated write).  The decode itself still degrades to
+-- "do the work"; this is what lets "Resume" say so on the trace stream
+-- instead of tagging both states @fresh@.
+undecodableEntries :: ResumeFold -> [(Text, Text, Int)]
+undecodableEntries fold =
+  [ (e.resumeKind, e.resumeKey, e.resumeSeq)
+  | e <- fold.resumeEntries
+  , e.resumeKind `elem` map kindText allKinds
+  , Nothing <- [decodeEvent e.resumeKind e.resumeKey e.resumePayload]
   ]
