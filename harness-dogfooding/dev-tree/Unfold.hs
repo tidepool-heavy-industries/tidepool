@@ -249,7 +249,19 @@ allocateChildren
   -> Harness ([NodeSeed], [Text])
 allocateChildren parent kids obtain = go kids
   where
-    allowance = childAllowance parent (length kids)
+    -- Per-child cycle allowances honor each plan's own 'nodeCycles' ask,
+    -- defaulting to an equal share; asks that oversubscribe the parent's
+    -- remaining budget scale down proportionally (never below one).  This is
+    -- what makes a sprint item's budget real at runtime — an equal split
+    -- across a wide sprint starves every interior item (sol review, run 24).
+    equal = childAllowance parent (length kids)
+    available = max 0 (parent.seedCycles - requiredCycles parent.seedPlan)
+    asks = map (\k -> fromMaybe equal k.nodeCycles) kids
+    totalAsk = sum asks
+    allowanceFor ask
+      | totalAsk <= available || totalAsk == 0 = ask
+      | otherwise = max 1 (ask * available `div` totalAsk)
+    allowances = map allowanceFor asks
     go [] = pure ([], [])
     go (k : rest) =
       obtain k >>= \case
@@ -263,7 +275,7 @@ allocateChildren parent kids obtain = go kids
                   { seedPlan = k
                   , seedTree = childTree
                   , seedDepth = parent.seedDepth + 1
-                  , seedCycles = allowance
+                  , seedCycles = fromMaybe equal (lookup (nodeName k) (zip (map nodeName kids) allowances))
                   , seedAdopted = Nothing
                   }
           pure (s : seeds, denied)

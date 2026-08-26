@@ -62,6 +62,9 @@ proposePrompt requestedGoal b grounding = [fmt|
   orchestrator-runnable shell commands that DISCRIMINATE (exit 0 = success;
   they run harness-side with full tooling, so cargo/cabal/test commands are
   allowed where they fit a 600-second budget); an explicit nodeOnFailure.
+  Optionally set nodeCycles on a child that needs more than an equal share
+  of the cycle budget (a leaf costs one cycle; an interior node two plus its
+  children); omit it everywhere else.
 
   PATHS ARE VERIFIED, NOT INHERITED: the goal text may be stale relative to
   this tree. Every path you put in a boundary or check must appear in the

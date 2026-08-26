@@ -306,12 +306,15 @@ effectivePlan fold st = case choreMode of
       let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
       subtrees <- traverse (resolveItem grounding revision) items
       let composed = sprintRoot subtrees
-      case proposalViolation st.budget composed `orMaybe` sprintOverlap subtrees of
+      case proposalViolation st.budget composed
+        `orMaybe` sprintOverlap subtrees
+        `orMaybe` sprintShortfall of
         Just why
           | attempt == (1 :: Int) -> sprintAttempt items grounding 2 (Just why)
           | otherwise -> pure (Left ("Sprint proposal remained invalid: " <> why))
         Nothing -> do
-          say (renderPlan 0 composed)
+          audit <- pathAudit composed
+          say (audit <> renderPlan 0 composed)
           approval <- askUser @PlanApproval
           if approval.planApproved
             then do
@@ -322,11 +325,16 @@ effectivePlan fold st = case choreMode of
                 then sprintAttempt items grounding 2 (Just approval.revisionNote)
                 else pure (Left ("Sprint proposal rejected: " <> approval.revisionNote))
 
-    resolveItem grounding revision item = case item.itemPlan of
-      Just p -> pure p
-      Nothing ->
-        runLLMTurn @DevPlan
-          (proposePrompt (sprintItemGoal item) st.budget {maxAgentCycles = item.itemCycles} grounding <> revision)
+    -- The item's cycle allowance is stamped INTO the plan ('nodeCycles'), so
+    -- runtime allocation honors it — a prompt-only budget is advice the
+    -- scheduler ignores (sol review, run 24).
+    resolveItem grounding revision item = do
+      sub <- case item.itemPlan of
+        Just p -> pure p
+        Nothing ->
+          runLLMTurn @DevPlan
+            (proposePrompt (sprintItemGoal item) st.budget {maxAgentCycles = item.itemCycles} grounding <> revision)
+      pure sub {nodeCycles = Just item.itemCycles}
 
     sprintItemGoal item =
       [fmt|{item.itemGoal}
@@ -340,20 +348,34 @@ effectivePlan fold st = case choreMode of
     -- verdict comes from the item subtrees' own receipts.  Replan keeps the
     -- isolate-and-report contract: a failed item journals its amendment and
     -- the fold continues folding its siblings.
+    -- EMPTY task on purpose: an empty-task interior node is the structural
+    -- "no scaffold worker" form (Unfold seeds children straight from HEAD) —
+    -- a prose "make no edits" brief demonstrably cannot be trusted.
     sprintRoot subtrees =
       DevPlan
         { nodeName = "sprint"
-        , nodeTask = "Integration-only sprint root: fold each item subtree into this worktree; make no direct edits at this node."
+        , nodeTask = ""
         , nodeChecks = []
         , nodeBoundary = concatMap (.nodeBoundary) subtrees
         , nodeTolerated = concatMap (.nodeTolerated) subtrees
         , nodeOnFailure = Replan
         , nodeSplit = Nothing
         , childPlans = subtrees
+        , nodeCycles = Nothing
         }
 
     orMaybe (Just a) _ = Just a
     orMaybe Nothing b = b
+
+    -- The sheet's arithmetic must be fundable: root reserves two cycles,
+    -- and the items' summed asks must fit what remains.
+    sprintShortfall = case choreMode of
+      SprintBacklog {sprintItems = items} ->
+        let total = 2 + sum (map (.itemCycles) items)
+         in if total > st.budget.maxAgentCycles
+              then Just [fmt|sprint needs {total} cycles (2 root + item asks) but maxAgentCycles is {st.budget.maxAgentCycles}|]
+              else Nothing
+      _ -> Nothing
     proposeAttempt grounding attempt priorNote = do
       let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
       proposed <- runLLMTurn @DevPlan (proposePrompt st.goal st.budget grounding <> revision)
@@ -362,7 +384,8 @@ effectivePlan fold st = case choreMode of
           | attempt == 1 -> proposeAttempt grounding 2 (Just why)
           | otherwise -> pure (Left ("Proposed plan remained outside the budget: " <> why))
         Nothing -> do
-          say (renderPlan 0 proposed)
+          audit <- pathAudit proposed
+          say (audit <> renderPlan 0 proposed)
           approval <- askUser @PlanApproval
           if approval.planApproved
             then do
@@ -373,10 +396,20 @@ effectivePlan fold st = case choreMode of
                 then proposeAttempt grounding 2 (Just approval.revisionNote)
                 else pure (Left ("Plan proposal rejected: " <> approval.revisionNote))
 
--- | The first structural budget breach, if any. Root depth is zero.
+-- | The first structural budget breach, if any. Root depth is zero.  Also
+-- refuses duplicate node names anywhere in the tree: names key retained
+-- worktrees and journal branch lookups, and uniqueness was previously only
+-- prompt advice (sol review).
 proposalViolation :: Budget -> DevPlan -> Maybe Text
-proposalViolation b = go 0
+proposalViolation b plan = go 0 plan `orElseMaybe` dupName
   where
+    orElseMaybe (Just a) _ = Just a
+    orElseMaybe Nothing y = y
+    dupName =
+      let names = allNames plan
+          dupes = [n | n <- names, length (filter (== n) names) > 1]
+       in listToMaybe [[fmt|node name {n} appears more than once in the plan|] | n <- dupes]
+    allNames q = nodeName q : concatMap allNames (childPlans q)
     go :: Int -> DevPlan -> Maybe Text
     go depth p
       | depth > b.maxDepth = Just [fmt|node {p.nodeName} is at depth {depth}, above maxDepth {b.maxDepth}|]
@@ -391,17 +424,20 @@ proposalViolation b = go 0
 
 -- | The first cross-item boundary overlap in a sprint, if any.  Two boundary
 -- entries overlap when equal or when one is a directory prefix of the other
--- — overlapping items would race in concurrent sibling worktrees.
+-- — overlapping items would race in concurrent sibling worktrees.  Each
+-- item's boundary is its whole SUBTREE's boundary set, not just its root's
+-- (sol review: a root-only check misses every descendant path).
 sprintOverlap :: [DevPlan] -> Maybe Text
 sprintOverlap subtrees =
   listToMaybe
     [ [fmt|sprint items {a.nodeName} and {b.nodeName} overlap on boundary paths {x} and {y}|]
     | (a, b) <- pairs subtrees
-    , x <- a.nodeBoundary
-    , y <- b.nodeBoundary
+    , x <- subtreeBoundaries a
+    , y <- subtreeBoundaries b
     , pathsOverlap x y
     ]
   where
+    subtreeBoundaries q = nodeBoundary q <> concatMap subtreeBoundaries (childPlans q)
     pairs (a : rest) = [(a, b) | b <- rest] <> pairs rest
     pairs [] = []
     pathsOverlap x y =
@@ -427,6 +463,32 @@ groundingPack = do
       runInTry "." cmd <&> \case
         Left err -> [fmt|  ({cmd} unavailable: {err})|]
         Right pr -> pr.stdout
+
+-- | Untracked file-shaped boundary/tolerated entries across a whole plan:
+-- probably stale paths inherited from goal text.  Verification is CODE's job
+-- — the prompt's "paths are verified" line is guidance, this is the check
+-- (sol review: a model reading a truncated grounding list cannot verify
+-- anything).  A directory entry or a genuinely-new file is legitimate, so
+-- this audits — a loud note the operator sees at approval — rather than
+-- refuses.
+pathAudit :: DevPlan -> Harness Text
+pathAudit p =
+  runInTry "." "git ls-files" <&> \case
+    Left _ -> ""
+    Right pr ->
+      let tracked = T.lines pr.stdout
+          fileShaped e = not ("/" `T.isSuffixOf` e) && "." `T.isInfixOf` lastSegment e
+          suspect e = fileShaped e && e `notElem` tracked
+          bad = filter suspect (collect p)
+       in if null bad
+            then ""
+            else [fmt|POSSIBLY-STALE PATHS (file-shaped, not tracked in this tree): {T.intercalate ", " bad}
+|]
+  where
+    collect q = nodeBoundary q <> nodeTolerated q <> concatMap collect (childPlans q)
+    lastSegment e = case reverse (T.splitOn "/" e) of
+      (x : _) -> x
+      [] -> ""
 
 blocked :: State -> Text -> State
 blocked st reason =

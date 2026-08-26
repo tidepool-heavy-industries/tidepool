@@ -43,6 +43,7 @@ chorePlan =
     , nodeOnFailure = Retry
     , nodeSplit = Nothing
     , childPlans = []
+    , nodeCycles = Nothing
     }
 
 choreBudget :: Budget

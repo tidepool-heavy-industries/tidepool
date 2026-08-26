@@ -25,6 +25,8 @@ module Resume
   , newestEntry
   , amendmentIsNewest
   , amendPlan
+  , amendPlanChecked
+  , recordedPlanFor
   , verdictTag
   , splitRecordOf
   , adoptOrUnfold
@@ -157,6 +159,11 @@ resumed hooks fold inner
         "resume-verdict"
         branch
         (object ["node" .= nodeName seed.seedPlan, "verdict" .= verdictTag hooks.resumeFoldLadder verdict])
+      case verdict of
+        ResumeAmend d _
+          | Just why <- snd (amendPlanChecked d (recordedPlanFor fold branch seed.seedPlan)) ->
+              trace "amend-subtree-rejected" branch (object ["why" .= why])
+        _ -> pure ()
       dispatch seed verdict
     dispatch seed = \case
       ResumeSkip o -> pure (Swarm.PlanF (replayedWork seed o) [])
@@ -249,9 +256,14 @@ rescuePending ladder fold branch p = case resumePlanFor ladder fold branch p of
 descendantAmendPending :: (Outcome -> Outcome) -> ResumeFold -> DevPlan -> Bool
 descendantAmendPending ladder fold p = any pending (childPlans p)
   where
+    -- An ABANDONING amendment is not pending work (sol review, run 24: it
+    -- previously re-entered a completed run only to re-refuse), and the
+    -- recursion descends each child's RECORDED split plan when one exists —
+    -- a formerly-leaf child that was re-split carries its amendment under
+    -- topology only the journal knows.
     pending k = case resumePlanFor ladder fold (branchFor k) k of
-      ResumeAmend {} -> True
-      _ -> descendantAmendPending ladder fold k
+      ResumeAmend d _ -> not d.abandonSubtree
+      _ -> descendantAmendPending ladder fold (recordedPlanFor fold (branchFor k) k)
     branchFor k =
       fromMaybe
         (nodeName k)
@@ -262,6 +274,12 @@ descendantAmendPending ladder fold p = any pending (childPlans p)
             , n == nodeName k
             ]
         )
+
+-- | A branch's plan as the journal recorded it at split time, falling back
+-- to the caller's copy when no split was journaled.
+recordedPlanFor :: ResumeFold -> Text -> DevPlan -> DevPlan
+recordedPlanFor fold branch p =
+  fromMaybe p ((.splitPlan) <$> (lookupEvent SplitKind branch fold >>= splitRecordOf . snd))
 
 -- | Select the highest-sequence journal entry from the three resume namespaces.
 newestEntry
@@ -300,12 +318,51 @@ amendmentIsNewest replanSeq splitSeq outcomeSeq = case replanSeq of
 -- (replan-as-decompose) wins over a rephrased instruction; either way the
 -- node's own name survives, because retained worktrees rebind by name and a
 -- renamed root would orphan the tree the failed attempt left behind.
+--
+-- The replacement is model-produced and VALIDATED here, never trusted
+-- wholesale (sol review): every boundary path in the subtree must stay
+-- within the failed node's own boundary (an unbounded original accepts
+-- any), and the subtree's names must be unique.  A violating subtree
+-- degrades to the instruction amendment — the amendment still applies,
+-- just not the restructure — and the violation is reported so the trace
+-- can carry it.  Depth/width/cycles need no check here: the coalgebra
+-- middleware re-guards them at unfold.
 amendPlan :: ReplanDecision -> DevPlan -> DevPlan
-amendPlan d p = case d.amendedSubtree of
-  Just sub -> sub {nodeName = nodeName p}
-  Nothing
-    | T.null (T.strip d.amendedInstruction) -> p
-    | otherwise -> p {nodeTask = d.amendedInstruction}
+amendPlan d p = fst (amendPlanChecked d p)
+
+amendPlanChecked :: ReplanDecision -> DevPlan -> (DevPlan, Maybe Text)
+amendPlanChecked d p = case d.amendedSubtree of
+  Just sub -> case subtreeViolation sub of
+    Nothing -> (sub {nodeName = nodeName p}, Nothing)
+    Just why -> (instructionOnly, Just why)
+  Nothing -> (instructionOnly, Nothing)
+  where
+    instructionOnly
+      | T.null (T.strip d.amendedInstruction) = p
+      | otherwise = p {nodeTask = d.amendedInstruction}
+    subtreeViolation sub =
+      boundaryEscape sub `orElse` duplicateName sub
+    boundaryEscape sub
+      | null (nodeBoundary p) = Nothing
+      | otherwise =
+          listToMaybe
+            [ [fmt|replacement subtree path {b} escapes the failed node's boundary|]
+            | b <- allBoundaries sub
+            , not (any (contains b) (nodeBoundary p))
+            ]
+    contains path parent =
+      let np = T.dropWhileEnd (== '/') parent
+       in path == np || (np <> "/") `T.isPrefixOf` path
+    allBoundaries q = nodeBoundary q <> nodeTolerated q <> concatMap allBoundaries (childPlans q)
+    duplicateName sub =
+      let names = allNames sub
+          dupes = [n | (n : _ : _) <- groupSort names]
+       in listToMaybe [[fmt|replacement subtree repeats node name {n}|] | n <- dupes]
+    allNames q = nodeName q : concatMap allNames (childPlans q)
+    groupSort = go . sort
+      where
+        go [] = []
+        go (x : xs) = (x : takeWhile (== x) xs) : go (dropWhile (== x) xs)
 
 -- | A split that already happened: replay its recorded plan and child trees.
 replaySplit

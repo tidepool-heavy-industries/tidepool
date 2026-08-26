@@ -739,8 +739,12 @@ impl JournalHandler {
         key: String,
         payload: crate::effect_glue::JsonArg,
     ) -> Result<tidepool_effect::Response, EffectError> {
-        self.append_trace(stage, key, payload.0)
-            .map_err(|e| EffectError::Handler(e.to_string()))?;
+        // Observability must never stop the work it observes (sol review):
+        // unlike `record` — whose write failure honestly aborts a run that
+        // could no longer resume — a trace failure degrades to a warning.
+        if let Err(e) = self.append_trace(stage, key, payload.0) {
+            tracing::warn!("trace append failed (observability degraded, run continues): {e}");
+        }
         cx.respond(())
     }
 

@@ -12,11 +12,11 @@ verify :: Text -> Bool -> Text
 verify name ok = (if ok then "PASS: " else "FAIL: ") <> name
 
 childPlan1, childPlan2 :: DevPlan
-childPlan1 = DevPlan { nodeName = "c1", nodeTask = "t1", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [] }
-childPlan2 = DevPlan { nodeName = "c2", nodeTask = "t2", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [] }
+childPlan1 = DevPlan { nodeName = "c1", nodeTask = "t1", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [], nodeCycles = Nothing }
+childPlan2 = DevPlan { nodeName = "c2", nodeTask = "t2", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [], nodeCycles = Nothing }
 
 parentPlan :: DevPlan
-parentPlan = DevPlan { nodeName = "parent", nodeTask = "t", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [childPlan1, childPlan2] }
+parentPlan = DevPlan { nodeName = "parent", nodeTask = "t", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [childPlan1, childPlan2], nodeCycles = Nothing }
 
 splitEv1 :: JournalEvent
 splitEv1 = SplitEvent (JournalKey "dev-tree/parent") parentPlan "scaffoldHead0" Nothing

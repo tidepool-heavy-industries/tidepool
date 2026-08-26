@@ -12,7 +12,7 @@ import Tidepool.Aeson (Value, object, toJSON, (.=))
 import qualified Data.Text as T
 
 leafPlan :: DevPlan
-leafPlan = DevPlan { nodeName = "leaf", nodeTask = "implement the leaf", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [] }
+leafPlan = DevPlan { nodeName = "leaf", nodeTask = "implement the leaf", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, childPlans = [], nodeCycles = Nothing }
 
 leafBranch :: Text
 leafBranch = "dev-tree/leaf"
@@ -44,7 +44,7 @@ caseRecordedOutcome =
 -- being re-derived.
 caseRecordedSplitReplays :: Text
 caseRecordedSplitReplays =
-  let splitPlan = leafPlan { childPlans = [leafPlan { nodeName = "child" }] }
+  let splitPlan = leafPlan { childPlans = [leafPlan { nodeName = "child" }], nodeCycles = Nothing }
       payload = splitPayloadFor "leaf" splitPlan "scaffold0"
       fold = mkFold [mkEntry 1 "split" leafBranch payload]
       expected = ResumeReplay SplitRecord { splitNode = "leaf", splitScaffoldHead = "scaffold0", splitPlan = splitPlan, splitChildTrees = [] }
@@ -54,7 +54,7 @@ caseRecordedSplitReplays =
 -- newest word and must replay rather than skip the branch.
 caseStaleOutcomeNewerSplitReplays :: Text
 caseStaleOutcomeNewerSplitReplays =
-  let splitPlan = leafPlan { childPlans = [leafPlan { nodeName = "child" }] }
+  let splitPlan = leafPlan { childPlans = [leafPlan { nodeName = "child" }], nodeCycles = Nothing }
       splitPayload = splitPayloadFor "leaf" splitPlan "scaffold-stale-outcome"
       receipt = mkReceipt "leaf" leafBranch
       fold = mkFold [mkEntry 1 "outcome" leafBranch (toJSON receipt), mkEntry 3 "split" leafBranch splitPayload]
@@ -128,7 +128,7 @@ run24Panel, run24Seam, run24Outline, run24Root :: DevPlan
 run24Panel = leafPlan { nodeName = "panel", nodeOnFailure = Replan }
 run24Seam = leafPlan { nodeName = "seam" }
 run24Outline = leafPlan { nodeName = "outline" }
-run24Root = leafPlan { nodeName = "root-prd", nodeOnFailure = Replan, childPlans = [run24Seam, run24Panel, run24Outline] }
+run24Root = leafPlan { nodeName = "root-prd", nodeOnFailure = Replan, childPlans = [run24Seam, run24Panel, run24Outline], nodeCycles = Nothing }
 
 run24RootBranch, run24PanelBranch :: Text
 run24RootBranch = "wt/root-integration"

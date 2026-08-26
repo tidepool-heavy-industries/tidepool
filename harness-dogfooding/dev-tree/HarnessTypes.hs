@@ -161,6 +161,13 @@ data DevPlan = DevPlan
     -- interior node.
     nodeSplit     :: Maybe SplitSpec
   , childPlans    :: [DevPlan]
+  , -- | This node's agent-cycle ask.  'Nothing' takes an equal share of the
+    -- parent's remaining allowance; 'Just' is honored (scaled down
+    -- proportionally when siblings' asks oversubscribe the parent).  This is
+    -- what makes a sprint item's budget REAL at runtime rather than prompt
+    -- advice (sol review, run 24).  'Maybe' so pre-field journaled plans
+    -- decode.
+    nodeCycles    :: Maybe Int
   }
   -- No JsonSchema on purpose: runLLMTurn answers cross IN-HEAP through the
   -- Finalize-pinned row (no JSON Schema anywhere in that path), and the
