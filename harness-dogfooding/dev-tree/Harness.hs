@@ -52,6 +52,10 @@ module Harness
   ( State (..)
   , Phase (..)
   , DevPlan (..)
+  , PlanShape (..)
+  , LeafStrategy (..)
+  , BranchStrategy (..)
+  , planShape
   , WorkerResult (..)
   , Outcome (..)
   , RunSummary (..)
@@ -81,6 +85,15 @@ import DevTreeJournal
   , lookupEvent
   , recordEvent
   )
+import DevSwarmTypes
+  ( BranchStrategy (..)
+  , LeafStrategy (..)
+  , NodeSeed (..)
+  , PlanShape (..)
+  , PlanShapeIssue (..)
+  , planShape
+  , planShapeIssue
+  )
 import HarnessTypes
 import Tidepool.Effects
   ( WorktreeHandle (..)
@@ -103,7 +116,6 @@ import Tidepool.Worktree
 import Tidepool.Async (mapConcurrently)
 import qualified Data.Text as T
 import Prompts (noteRoutingPrompt, proposePrompt)
-import Micro (NodeSeed (..))
 import Fold
 import Resume
   ( ResumePlan (..)
@@ -334,7 +346,10 @@ choreFingerprint = show (foldl' step (5381 :: Int) (T.unpack basis))
 -- wins on resume, preserving the root name that retained work is keyed by.
 effectivePlan :: ResumeFold -> State -> Harness (Either Text DevPlan)
 effectivePlan fold st = case choreMode of
-  Authored {authoredPlan = p} -> pure (Right p)
+  Authored {authoredPlan = p} ->
+    pure $ case proposalViolation st.budget p of
+      Just why -> Left ("Authored plan is invalid: " <> why)
+      Nothing -> Right p
   ProposeFromGoal -> case lookupEvent ProposeKind proposalJournalKey fold of
     Just (_, ProposeEvent {evProposePlan = p}) -> pure (Right p)
     _ -> do
@@ -506,6 +521,7 @@ proposalViolation :: Budget -> DevPlan -> Maybe Text
 proposalViolation b plan =
   go 0 plan
     `orElseMaybe` dupName
+    `orElseMaybe` badShape
     `orElseMaybe` badPath
     -- Cycle feasibility is computable at proposal time — the same
     -- reservation-and-division walk the unfold performs — so an unfundable
@@ -526,6 +542,14 @@ proposalViolation b plan =
       listToMaybe
         [ [fmt|node name {n} is not a safe branch segment — use kebab-case (lowercase letters, digits, "-", "_", ".")|]
         | n <- unsafeNames plan
+        ]
+    badShape =
+      listToMaybe
+        [ case issue of
+            LeafScaffoldSpecified -> [fmt|leaf node {nodeName q} specifies nodeScaffold, which belongs only to branches|]
+            BranchSplitSpecified -> [fmt|branch node {nodeName q} specifies nodeSplit, which belongs only to leaves|]
+        | q <- planSubtree plan
+        , issue <- maybeToList (planShapeIssue q)
         ]
     badPath =
       listToMaybe

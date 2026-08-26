@@ -30,14 +30,21 @@ module Unfold
   , retainedChild
   ) where
 
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 import DevTreeJournal
   ( JournalEvent (..)
   , JournalKey (..)
   , recordEvent
   )
+import DevSwarmTypes
+  ( BranchStrategy (..)
+  , LeafStrategy (..)
+  , NodeSeed (..)
+  , PlanShape (..)
+  , planShape
+  )
 import HarnessTypes
-import Micro (NodeSeed (..))
 import Prompts (scaffoldPrompt)
 import Resume
   ( NodeWork (..)
@@ -78,48 +85,48 @@ import Workers
 --    cannot be created is not a split failure — that child is dropped and the
 --    denial rides in 'workDenied' for the algebra to fold as an escalation.
 decompose :: NodeSeed -> Harness (Swarm.PlanF NodeWork NodeSeed)
-decompose seed
-  | null kids = pure (Swarm.PlanF (splitWork seed Nothing [] []) [])
-  | otherwise = case seed.seedAdopted of
+decompose seed = case planShape p of
+  LeafPlan _ -> pure (Swarm.PlanF (splitWork seed Nothing [] []) [])
+  BranchPlan strategy children -> case seed.seedAdopted of
       -- A resumed run already found this node's scaffold commit sitting in its
       -- retained worktree and VERIFIED it (checks + boundary, at that sha).
       -- Re-running the scaffold worker over it would be exactly the blind redo
       -- the journal exists to prevent.
-      Just adopted -> emitSplit seed Nothing adopted
-      -- A node that declares (or derives — 'planScaffolds') no scaffold has
-      -- nothing to run: its children seed straight from the parent's current
-      -- HEAD and NO worker spawns.  The typed form exists because a prose
-      -- "make no changes" brief demonstrably cannot be trusted (two live
-      -- runs had the scaffold invent files and trip its own boundary).
-      Nothing | not (planScaffolds p) ->
-        worktreeHead seed.seedTree >>= emitSplit seed Nothing
-      Nothing ->
-        runWorker seed.seedTree name (scaffoldPrompt p kids) >>= \case
-          -- A spawn failure is a FAILURE of this node, not a policy refusal:
-          -- 'WorkFailed' folds to a Failed outcome the parent's failure
-          -- policy can retry or replan, where the refusal channel would
-          -- launder a transient backend hiccup into a permanent Skipped.
-          Left err ->
-            pure
-              ( Swarm.PlanF
-                  (failureWork seed (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
-                  []
-              )
-          Right (scaffold, snapshot) ->
-            if snapshot.snapshotSucceeded
-              then do
-                scaffoldHead <- worktreeHead seed.seedTree
-                emitSplit seed (Just scaffold) scaffoldHead
-              else
-                pure
-                  ( Swarm.PlanF
-                      (failureWork seed (snapshotFailureFor name snapshot))
-                      []
-                  )
+      Just adopted -> emitSplit seed children Nothing adopted
+      Nothing -> case strategy of
+        -- An integration-only branch has nothing to run: its children seed
+        -- straight from the parent's current HEAD and no worker spawns.
+        IntegrationBranch ->
+          worktreeHead seed.seedTree >>= emitSplit seed children Nothing
+        ScaffoldBranch ->
+          runWorker seed.seedTree name (scaffoldPrompt p kids) >>= \case
+            -- A spawn failure is a FAILURE of this node, not a policy refusal:
+            -- 'WorkFailed' folds to a Failed outcome the parent's failure
+            -- policy can retry or replan, where the refusal channel would
+            -- launder a transient backend hiccup into a permanent Skipped.
+            Left err ->
+              pure
+                ( Swarm.PlanF
+                    (failureWork seed (Failure SpawnDenied [fmt|{name} scaffold: {renderSpawnError err}|] []))
+                    []
+                )
+            Right (scaffold, snapshot) ->
+              if snapshot.snapshotSucceeded
+                then do
+                  scaffoldHead <- worktreeHead seed.seedTree
+                  emitSplit seed children (Just scaffold) scaffoldHead
+                else
+                  pure
+                    ( Swarm.PlanF
+                        (failureWork seed (snapshotFailureFor name snapshot))
+                        []
+                    )
   where
     p = seed.seedPlan
     name = nodeName p
-    kids = childPlans p
+    kids = case planShape p of
+      LeafPlan _ -> []
+      BranchPlan _ children -> NE.toList children
 
 -- | Journal the split and allocate the children from the scaffold head.
 --
@@ -132,15 +139,15 @@ decompose seed
 -- orphaning it behind a batch write that never landed; the final append here
 -- closes with the complete picture (harmless even when it repeats the last
 -- incremental one — same content, same max-seq winner).
-emitSplit :: NodeSeed -> Maybe WorkerResult -> GitOid -> Harness (Swarm.PlanF NodeWork NodeSeed)
-emitSplit seed scaffold scaffoldHead = do
+emitSplit :: NodeSeed -> NE.NonEmpty DevPlan -> Maybe WorkerResult -> GitOid -> Harness (Swarm.PlanF NodeWork NodeSeed)
+emitSplit seed children scaffold scaffoldHead = do
   recordEvent (SplitEvent (JournalKey branch) p scaffoldHeadText Nothing)
   (childSeeds, denied) <- allocateChildren (JournalKey branch) p scaffoldHeadText [] seed kids (freshChild seed)
   recordEvent (SplitEvent (JournalKey branch) p scaffoldHeadText (Just (map childTreeEntry childSeeds)))
   pure (Swarm.PlanF (splitWork seed scaffold childSeeds denied) childSeeds)
   where
     p = seed.seedPlan
-    kids = childPlans p
+    kids = NE.toList children
     branch = branchOf seed.seedTree
     scaffoldHeadText = renderGitOid scaffoldHead
     childTreeEntry s = (nodeName s.seedPlan, branchOf s.seedTree)
@@ -183,10 +190,10 @@ failureWork seed f = WorkFailed {workSeed = seed, workFailure = f}
 -- remains among children — so the two can never disagree about what "this
 -- node's own reservation" means.
 requiredCycles :: DevPlan -> Int
-requiredCycles p
-  | not (null (childPlans p)) = 2
-  | isJust (nodeSplit p) = 2
-  | otherwise = 1
+requiredCycles p = case planShape p of
+  LeafPlan DirectLeaf -> 1
+  LeafPlan SplitLeaf {} -> 2
+  BranchPlan {} -> 2
 
 -- | 'Swarm.budgeted''s slot.  A node reserves its own scaffold plus one
 -- integration cycle; a leaf reserves its implementation.  Resolution agents
@@ -213,9 +220,9 @@ cycleRefusal seed
 -- was nothing to unfold — which is exactly why the slot returns a 'Maybe'
 -- rather than the wrapper deciding on depth alone.
 depthRefusal :: NodeSeed -> Harness (Maybe NodeWork)
-depthRefusal seed
-  | null (childPlans seed.seedPlan) = pure Nothing
-  | otherwise =
+depthRefusal seed = case planShape seed.seedPlan of
+  LeafPlan _ -> pure Nothing
+  BranchPlan {} ->
       pure
         ( Just
             ( refusalWork
@@ -252,7 +259,9 @@ layerGate b layer
     -- gate precisely when the run is already unhealthy enough to be denying
     -- worktrees.
     width = case Swarm.task layer of
-      WorkReady {} -> length (childPlans parent.seedPlan)
+      WorkReady {} -> case planShape parent.seedPlan of
+        LeafPlan _ -> 0
+        BranchPlan _ children -> NE.length children
       _ -> length childSeeds
 
 -- | Seed one child per plan, in plan order.

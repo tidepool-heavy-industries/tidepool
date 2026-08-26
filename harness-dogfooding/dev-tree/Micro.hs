@@ -11,8 +11,7 @@
 -- and the sequential microtask runner; it delegates final fold receipt
 -- construction through the callback seam supplied by the fold facade.
 module Micro
-  ( NodeSeed (..)
-  , microLeaf
+  ( microLeaf
   , runMicrotasks
   , MicroAcc (..)
   ) where
@@ -23,6 +22,7 @@ import DevTreeJournal
   , JournalKey (..)
   , recordEvent
   )
+import DevSwarmTypes (FoldEvidence (..), NodeSeed (..))
 import Git
 import HarnessTypes
 import Tidepool.Agent.Spawn
@@ -47,37 +47,13 @@ import Workers
   , snapshotFailureMaybe
   )
 
--- | What a node needs in order to be unfolded.  The hylo's @a@.
-data NodeSeed = NodeSeed
-  { seedPlan   :: DevPlan
-  , seedTree   :: WorktreeHandle
-  , seedDepth  :: Int
-  , -- | Agent-cycle allowance for THIS SUBTREE.  Spent structurally: a node
-    -- reserves what it needs and divides the remainder among its children, so
-    -- the run's total is bounded with no mutable counter anywhere — and
-    -- completion order cannot reach it.  See 'childAllowance'.
-    seedCycles :: Int
-  , -- | A scaffold commit a RESUMED run found already sitting in this node's
-    -- retained worktree and verified (checks and boundary, at that sha).
-    -- 'decompose' uses it as its scaffold head instead of spawning the
-    -- scaffold worker again — the "never redo blind" half of adopt-and-verify.
-    -- Always 'Nothing' on a fresh run.
-    seedAdopted :: Maybe GitOid
-  }
-
 -- | The fold seam needed by a micro leaf.  The Fold module is still in the
 -- facade during this incremental extraction, so Micro receives its existing
 -- receipt builder rather than importing the facade or duplicating it.
 type FinishFold =
   NodeSeed
     -> WorkerResult
-    -> (GitOid, GitOid)
-    -> [RebaseNote]
-    -> [Text]
-    -> Int
-    -> Bool
-    -> [CheckResult]
-    -> Maybe Failure
+    -> FoldEvidence
     -> Harness Outcome
 
 -- | A leaf with a 'SplitSpec': recon → plan → sequential microtask cycles,
@@ -243,13 +219,15 @@ microLeaf finishFold seed spec = do
                 finishFold
                   seed
                   wr
-                  (before, after)
-                  []
-                  microRun.microtaskEscalations
-                  (1 + microRun.microtasksRan)
-                  True
-                  receiptChecks
-                  microSnapshotFailure
+                  FoldEvidence
+                    { foldHeads = (before, after)
+                    , foldRebases = []
+                    , foldEscalations = microRun.microtaskEscalations
+                    , foldCycles = 1 + microRun.microtasksRan
+                    , foldAgentRan = True
+                    , foldChecks = receiptChecks
+                    , foldFailure = microSnapshotFailure
+                    }
               pure $ case folded of
                 Done {doneReceipt = receipt}
                   | not microRun.microtasksComplete ->
@@ -278,7 +256,18 @@ microLeaf finishFold seed spec = do
       say detail
       after <- worktreeHead tree
       checks <- runChecks tree p
-      finishFold seed wr (before, after) [] [] 1 True checks (Just failure)
+      finishFold
+        seed
+        wr
+        FoldEvidence
+          { foldHeads = (before, after)
+          , foldRebases = []
+          , foldEscalations = []
+          , foldCycles = 1
+          , foldAgentRan = True
+          , foldChecks = checks
+          , foldFailure = Just failure
+          }
 
     tree = seed.seedTree
     p = seed.seedPlan

@@ -181,8 +181,9 @@ data DevPlan = DevPlan
     -- (see 'SplitSpec') instead of being handed to one worker whole.  The
     -- MACRO tree stays authored data; this is the one place decomposition is
     -- delegated to a model, and it never creates worktrees or branches —
-    -- everything happens inside this node's own worktree.  Ignored on an
-    -- interior node.
+    -- everything happens inside this node's own worktree.  Invalid on an
+    -- interior node: new plans are rejected at acceptance; legacy journaled
+    -- plans preserve the historical interpretation and ignore it there.
     nodeSplit     :: Maybe SplitSpec
   , -- | Whether an INTERIOR node runs a scaffold worker before its children
     -- fork.  @Just False@ is the TYPED integration-only form — children
@@ -191,7 +192,9 @@ data DevPlan = DevPlan
     -- had the scaffold invent files and trip its own boundary).  'Nothing'
     -- derives from the task: scaffold exactly when 'nodeTask' is non-blank
     -- ('planScaffolds'), so structure is never switched by prose emptiness
-    -- alone when a planner can say it outright.  Ignored on a leaf.
+    -- alone when a planner can say it outright.  Invalid on a leaf: new plans
+    -- are rejected at acceptance; legacy journaled plans preserve the
+    -- historical interpretation and ignore it there.
     nodeScaffold  :: Maybe Bool
   , childPlans    :: [DevPlan]
   , -- | This node's agent-cycle ask.  'Nothing' takes an equal share of the

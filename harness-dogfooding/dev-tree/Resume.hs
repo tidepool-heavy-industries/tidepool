@@ -55,8 +55,13 @@ import DevTreeJournal
   , lookupEvent
   , undecodableEntries
   )
+import DevSwarmTypes
+  ( LeafStrategy (..)
+  , NodeSeed (..)
+  , PlanShape (..)
+  , planShape
+  )
 import HarnessTypes
-import Micro (NodeSeed (..))
 import Tidepool.Aeson (object, (.=))
 import Tidepool.Effects (WorktreeHandle (..))
 import Tidepool.Journal (trace)
@@ -487,9 +492,10 @@ adoptOrUnfold hooks fold inner seed = do
   changed <- checkHeadChanged seed.seedTree seed.seedPlan baseline
   case changed of
     Nothing -> inner seed
-    Just hc
-      | hasMicroSplit seed.seedPlan && not (microSequenceComplete fold (branchOf seed.seedTree)) -> inner seed
-      | null (childPlans seed.seedPlan) -> do
+    Just hc -> case planShape seed.seedPlan of
+      LeafPlan SplitLeaf {}
+        | not (microSequenceComplete fold (branchOf seed.seedTree)) -> inner seed
+      LeafPlan _ -> do
           vo <- verifyOrphan fold hc
           let o = adopt vo
           trace
@@ -497,7 +503,7 @@ adoptOrUnfold hooks fold inner seed = do
             (branchOf seed.seedTree)
             (object ["node" .= nodeName seed.seedPlan, "head" .= renderGitOid hc.hcFound, "verified" .= outcomeIsDone (hooks.resumeFoldLadder o)])
           pure (Swarm.PlanF (adoptedWork seed o) [])
-      | otherwise ->
+      BranchPlan {} ->
           -- An INTERIOR node's scaffold commit is not the final
           -- deliverable — its own nodeChecks validate the MERGED tree, not
           -- a pre-split scaffold, so judging a scaffold orphan by them
@@ -542,9 +548,6 @@ verifyScaffoldOrphan hc =
   where
     tree = hc.hcTree
     p = hc.hcPlan
-
-hasMicroSplit :: DevPlan -> Bool
-hasMicroSplit p = isJust p.nodeSplit
 
 -- | A micro-split orphan is adoptable only after its accepted and completion
 -- journal events agree on the exact names.

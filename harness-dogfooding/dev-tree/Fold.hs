@@ -41,10 +41,16 @@ import DevTreeJournal
   , JournalKey (..)
   , recordEvent
   )
+import DevSwarmTypes
+  ( FoldEvidence (..)
+  , LeafStrategy (..)
+  , NodeSeed (..)
+  , PlanShape (..)
+  , planShape
+  )
 import Git
 import HarnessTypes
 import qualified Micro
-import Micro (NodeSeed (..))
 import Prompts
 import Resume
   ( NodeWork (..)
@@ -144,16 +150,18 @@ integrate (Swarm.PlanF w kids) = case w of
     pure Skipped {outcomeNode = nodeName seed.seedPlan, outcomeTrail = [], skipReason = renderFailure f}
   WorkFailed {workSeed = seed, workFailure = f} ->
     pure (failedOutcome (nodeName seed.seedPlan) f Nothing)
-  WorkReady {workSeed = seed, workScaffold = scaffold, workKids = wkids, workDenied = denied}
-    | not (null (childPlans seed.seedPlan)) && null wkids ->
-        pure
-          ( failedOutcome
-              (nodeName seed.seedPlan)
-              (Failure WorktreeDenied [fmt|{nodeName seed.seedPlan} has child plans but no child worktrees were allocated|] denied)
-              Nothing
-          )
-    | null kids -> leafFold seed
-    | otherwise -> interiorFold seed (isJust scaffold) wkids denied kids
+  WorkReady {workSeed = seed, workScaffold = scaffold, workKids = wkids, workDenied = denied} ->
+    case planShape seed.seedPlan of
+      LeafPlan strategy -> leafFold strategy seed
+      BranchPlan {}
+        | null wkids ->
+            pure
+              ( failedOutcome
+                  (nodeName seed.seedPlan)
+                  (Failure WorktreeDenied [fmt|{nodeName seed.seedPlan} has child plans but no child worktrees were allocated|] denied)
+                  Nothing
+              )
+        | otherwise -> interiorFold seed (isJust scaffold) wkids denied kids
 
 -- | 'Swarm.receipted''s slot, and the whole trust ladder in one place.
 --
@@ -238,10 +246,10 @@ foldLadder o = case o of
 
 -- | A leaf: one implementation worker (or an on-the-fly micro-split when the
 -- plan asks for one), then the ladder.
-leafFold :: NodeSeed -> Harness Outcome
-leafFold seed = case seed.seedPlan.nodeSplit of
-  Nothing -> directLeaf seed
-  Just spec -> microLeaf seed spec
+leafFold :: LeafStrategy -> NodeSeed -> Harness Outcome
+leafFold strategy seed = case strategy of
+  DirectLeaf -> directLeaf seed
+  SplitLeaf spec -> microLeaf seed spec
 
 -- | The ordinary leaf: one worker cycle, whole task.
 --
@@ -259,7 +267,18 @@ directLeaf seed = do
     Right (wr, snapshot) -> do
       after <- worktreeHead tree
       checks <- runChecks tree p
-      finishFold seed wr (before, after) [] [] 1 True checks (snapshotFailureMaybe name snapshot)
+      finishFold
+        seed
+        wr
+        FoldEvidence
+          { foldHeads = (before, after)
+          , foldRebases = []
+          , foldEscalations = []
+          , foldCycles = 1
+          , foldAgentRan = True
+          , foldChecks = checks
+          , foldFailure = snapshotFailureMaybe name snapshot
+          }
   where
     tree = seed.seedTree
     p = seed.seedPlan
@@ -325,13 +344,15 @@ interiorFold seed scaffoldRan workKids denied kids = do
     finishFold
       seed
       wr
-      (before, after)
-      acc.accNotes
-      (maybeToList acc.accAbandon <> map renderEscalation acc.accEsc)
-      (acc.accCycles + agentCycles)
-      agentRan
-      checks
-      snapshotFailure
+      FoldEvidence
+        { foldHeads = (before, after)
+        , foldRebases = acc.accNotes
+        , foldEscalations = maybeToList acc.accAbandon <> map renderEscalation acc.accEsc
+        , foldCycles = acc.accCycles + agentCycles
+        , foldAgentRan = agentRan
+        , foldChecks = checks
+        , foldFailure = snapshotFailure
+        }
   -- An abandoned subtree is the one node-local verdict the receipt cannot
   -- carry: the evidence is fine as far as it goes, and what failed is that a
   -- policy chose to stop.  Everything else this fold is worth is 'foldLadder''s.
@@ -439,8 +460,8 @@ onChildFailure cap tree p s o rest acc = case nodeOnFailure p of
   where
     why = [fmt|{outcomeNodeName o}: {failureText o}|]
     childEsc suffix = EscChildPending (outcomeNodeName o) (failureText o <> suffix)
-    retryableLeaf = null (childPlans s.seedPlan) && case o of
-      Failed {} -> True
+    retryableLeaf = case (planShape s.seedPlan, o) of
+      (LeafPlan _, Failed {}) -> True
       _ -> False
     retryLeaf operatorNote
       -- Drawn from the SAME pool as the cascade's resolution/retry cycles:
@@ -472,13 +493,15 @@ onChildFailure cap tree p s o rest acc = case nodeOnFailure p of
                 finishFold
                   s
                   wr
-                  (before, after)
-                  []
-                  []
-                  1
-                  True
-                  checks
-                  (snapshotFailureMaybe retryName snapshot)
+                  FoldEvidence
+                    { foldHeads = (before, after)
+                    , foldRebases = []
+                    , foldEscalations = []
+                    , foldCycles = 1
+                    , foldAgentRan = True
+                    , foldChecks = checks
+                    , foldFailure = snapshotFailureMaybe retryName snapshot
+                    }
               -- Match the normal 'stampFold' path: persist the raw receipt before
               -- applying the ladder, so a later resume sees this retry as the
               -- latest outcome rather than resurrecting the original failure.
@@ -810,15 +833,9 @@ mergeChild tree p s =
 finishFold
   :: NodeSeed
   -> WorkerResult
-  -> (GitOid, GitOid)
-  -> [RebaseNote]
-  -> [Text]
-  -> Int
-  -> Bool
-  -> [CheckResult]
-  -> Maybe Failure
+  -> FoldEvidence
   -> Harness Outcome
-finishFold seed wr (before, after) notes escalations cycles agentRan checks forcedFailure = do
+finishFold seed wr observations = do
   boundary <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
   -- An UNCHECKABLE boundary is an infra failure of this fold, never a clean
   -- report: the receipt records an empty outside list (nothing was observed)
@@ -833,7 +850,7 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks forc
   -- Asked only when the cycle would otherwise be judged; the verdict rides
   -- the receipt and 'foldLadder' reads it.
   noOp <-
-    if agentRan && not headMoved && isNothing forcedFailure && isNothing boundaryFailure
+    if observations.foldAgentRan && not headMoved && isNothing observations.foldFailure && isNothing boundaryFailure
       then judgeNoOp p wr
       else pure Nothing
   let receipt =
@@ -843,11 +860,11 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks forc
           , receiptSeedHead = renderGitOid before
           , receiptHead = renderGitOid after
           , receiptHeadMoved = headMoved
-          , receiptChecks = checks
-          , receiptRebases = notes
+          , receiptChecks = observations.foldChecks
+          , receiptRebases = observations.foldRebases
           , receiptOutside = outside
-          , receiptCycles = cycles
-          , receiptAgentRan = agentRan
+          , receiptCycles = observations.foldCycles
+          , receiptAgentRan = observations.foldAgentRan
           , receiptReviewed = False
           , receiptNoOp = noOp
           , receiptSummary = wr.workSummary
@@ -855,17 +872,18 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks forc
               wr.evidence
                 <> map ("obstacle: " <>) wr.obstacles
                 <> map ("friction: " <>) wr.frictionNotes
-                <> escalations
+                <> observations.foldEscalations
                 <> map ("tolerated: " <>) tolerated
                 <> maybeToList (("no-op judged legitimate: " <>) <$> noOp)
           }
-  pure $ case forcedFailure `orElseFailure` boundaryFailure of
+  pure $ case observations.foldFailure `orElseFailure` boundaryFailure of
     Just failure -> failedOutcome name failure (Just receipt)
     Nothing -> Done name [] receipt
   where
     tree = seed.seedTree
     p = seed.seedPlan
     name = nodeName p
+    (before, after) = observations.foldHeads
     orElseFailure (Just a) _ = Just a
     orElseFailure Nothing b = b
 

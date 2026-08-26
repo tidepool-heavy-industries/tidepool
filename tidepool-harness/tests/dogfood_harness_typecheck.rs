@@ -317,8 +317,8 @@ const OVERSPEND_REGRESSION_SOURCE: &str = concat!(
     "import Tidepool.Prelude hiding (render)\n",
     "import Tidepool.Effects\n",
     "import Harness\n",
-    "import HarnessTypes (OnFailure (..))\n",
-    "import Tidepool.QQ (fmt)\n",
+    "import DevSwarmTypes (PlanShapeIssue (..), planShapeIssue)\n",
+    "import HarnessTypes (OnFailure (..), SplitSpec (..))\n",
     "import qualified Data.Text as T\n",
     "\n",
     "leafPlan :: DevPlan\n",
@@ -326,6 +326,18 @@ const OVERSPEND_REGRESSION_SOURCE: &str = concat!(
     "\n",
     "rootPlan :: DevPlan\n",
     "rootPlan = DevPlan { nodeName = \"root\", nodeTask = \"t\", nodeChecks = [], nodeBoundary = [], nodeTolerated = [], nodeOnFailure = Retry, nodeSplit = Nothing, nodeScaffold = Nothing, childPlans = [leafPlan, leafPlan], nodeCycles = Nothing }\n",
+    "\n",
+    "splitLeafPlan :: DevPlan\n",
+    "splitLeafPlan = leafPlan { nodeSplit = Just (SplitSpec { splitHints = \"small\", splitMaxTasks = 2 }) }\n",
+    "\n",
+    "integrationPlan :: DevPlan\n",
+    "integrationPlan = rootPlan { nodeTask = \"\", nodeScaffold = Just False }\n",
+    "\n",
+    "badLeafPlan :: DevPlan\n",
+    "badLeafPlan = leafPlan { nodeScaffold = Just False }\n",
+    "\n",
+    "badBranchPlan :: DevPlan\n",
+    "badBranchPlan = rootPlan { nodeSplit = Just (SplitSpec { splitHints = \"invalid here\", splitMaxTasks = 2 }) }\n",
     "\n",
     "-- Never forced: 'childAllowance'/'requiredCycles' only read 'seedPlan' and\n",
     "-- 'seedCycles', so a live 'WorktreeHandle' is not needed for this pin.\n",
@@ -347,13 +359,23 @@ const OVERSPEND_REGRESSION_SOURCE: &str = concat!(
     "totalSpend :: Int\n",
     "totalSpend = requiredCycles rootPlan + nChildren * childSpend\n",
     "\n",
+    "laws :: [(Text, Bool)]\n",
+    "laws =\n",
+    "  [ (\"zero child share\", childShare == 0)\n",
+    "  , (\"total spend stays within the parent cap\", totalSpend == 2 && totalSpend <= rootSeed.seedCycles)\n",
+    "  , (\"direct leaf shape\", case planShape leafPlan of { LeafPlan DirectLeaf -> True; _ -> False })\n",
+    "  , (\"split leaf shape\", case planShape splitLeafPlan of { LeafPlan SplitLeaf {} -> True; _ -> False })\n",
+    "  , (\"scaffold branch shape\", case planShape rootPlan of { BranchPlan ScaffoldBranch _ -> True; _ -> False })\n",
+    "  , (\"integration branch shape\", case planShape integrationPlan of { BranchPlan IntegrationBranch _ -> True; _ -> False })\n",
+    "  , (\"leaf rejects branch strategy\", planShapeIssue badLeafPlan == Just LeafScaffoldSpecified)\n",
+    "  , (\"branch rejects leaf strategy\", planShapeIssue badBranchPlan == Just BranchSplitSpecified)\n",
+    "  ]\n",
+    "\n",
+    "renderCheck :: (Text, Bool) -> Text\n",
+    "renderCheck (name, passed) = (if passed then \"PASS \" else \"FAIL \") <> name\n",
+    "\n",
     "__overspendReport :: Text\n",
-    "__overspendReport =\n",
-    "  T.intercalate \"\\n\"\n",
-    "    [ [fmt|childShare={childShare}|]\n",
-    "    , [fmt|totalSpend={totalSpend}|]\n",
-    "    , [fmt|withinCap={totalSpend <= rootSeed.seedCycles}|]\n",
-    "    ]\n",
+    "__overspendReport = T.intercalate \"\\n\" (map renderCheck laws)\n",
 );
 
 /// Runs [`OVERSPEND_REGRESSION_SOURCE`] on the real JIT (pure, no agent, no
@@ -380,9 +402,14 @@ fn dev_tree_child_allowance_never_overspends_parent_cap() {
     let report = json
         .as_str()
         .expect("__overspendReport :: Text renders as a JSON string");
-    assert!(report.contains("childShare=0"), "{report}");
-    assert!(report.contains("totalSpend=2"), "{report}");
-    assert!(report.contains("withinCap=True"), "{report}");
+    let failures: Vec<_> = report
+        .lines()
+        .filter(|line| line.starts_with("FAIL"))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "Haskell plan-shape law failed:\n{report}"
+    );
 }
 
 /// The journal vocabulary round-trip pin (dev-tree's own durable
