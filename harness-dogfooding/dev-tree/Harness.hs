@@ -211,11 +211,11 @@ resumeLoop fold st
   where
     enter entrySt =
       effectivePlan fold entrySt >>= \case
-        Left why -> pure (blocked entrySt why)
+        Left why -> blockedLoud entrySt why
         Right proposedPlan -> runEffective entrySt {plan = proposedPlan}
     runEffective effective =
       rootTree fold effective >>= \case
-        Left why -> pure (blocked effective why)
+        Left why -> blockedLoud effective why
         Right rootHandle -> do
           let seed =
                 NodeSeed
@@ -303,7 +303,15 @@ effectivePlan fold st = case choreMode of
     -- composed under an integration-only root.  Disjoint item boundaries are
     -- validated in code before the operator ever sees the approval form.
     sprintAttempt items grounding attempt priorNote = do
-      let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
+      let revision =
+            maybe
+              ""
+              ( \note ->
+                  "\nThe operator reviewed the previously COMPOSED sprint (all items) and noted: "
+                    <> note
+                    <> "\nApply only what concerns THIS item's goal; where the note targets a different item, propose THIS item exactly as you otherwise would."
+              )
+              priorNote
       subtrees <- traverse (resolveItem grounding revision) items
       let composed = sprintRoot subtrees
       case proposalViolation st.budget composed
@@ -350,7 +358,13 @@ effectivePlan fold st = case choreMode of
   item's deliverable (sprint 25: a campaign whose acceptance check was the
   script a sibling item was busy fixing stalled on the unfixed copy). If the
   goal has such a dependency, SAY SO in the node task — the operator
-  serializes it into a later sprint instead.|]
+  serializes it into a later sprint instead.
+
+  THIS ITEM ONLY: your session may contain an earlier item's planning
+  exchange — that item is DONE and none of your business. Propose a plan for
+  THE GOAL ABOVE and nothing else; re-finalizing a previously produced plan
+  is always wrong (sprint 25b: an item planner re-emitted its session's
+  prior item verbatim, and the composed sprint died on duplicate names).|]
 
     -- Integration-only root: no direct edits, no checks of its own — every
     -- verdict comes from the item subtrees' own receipts.  Replan keeps the
@@ -545,6 +559,16 @@ pathAudit p =
     lastSegment e = case reverse (T.splitOn "/" e) of
       (x : _) -> x
       [] -> ""
+
+-- | Every blocked transition is LOUD: said to the operator and traced as
+-- data (the park rule — sprint 25b's first attempt died at proposal
+-- validation and the only externally visible sign was a quiet BetweenTurns
+-- gate).  Callers use 'blockedLoud'; the pure record update stays for tests.
+blockedLoud :: State -> Text -> Harness State
+blockedLoud st reason = do
+  say [fmt|BLOCKED: {reason}|]
+  trace "loop" "blocked" (object ["reason" .= reason])
+  pure (blocked st reason)
 
 blocked :: State -> Text -> State
 blocked st reason =
