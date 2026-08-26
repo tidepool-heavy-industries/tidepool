@@ -716,6 +716,10 @@ rootWorktreeSpec st
   | snapshotDirtySource st = allowDirtySnapshot base
   | otherwise = base
   where
+    -- Fixed branch name: two dev-tree runs launched concurrently against the
+    -- same source checkout would collide here. Not a hazard for the current
+    -- one-run-at-a-time usage; a real fix needs a run-scoped uniqueness
+    -- token this module has no source for today.
     base = fromCurrentRepository "dev-tree/integration"
 
 -- | The run's root worktree: REBOUND when the fold names it, created when it
@@ -740,8 +744,11 @@ rootTree fold st = case rootBranchOf fold (nodeName (plan st)) of
       -- directly, so it says how much is uncommitted and names the flag that
       -- drops the requirement.
       Left (SourceDirty summary) ->
-        let dirtyFiles =
-              length summary.staged + length summary.unstaged + length summary.untracked
+        -- nub'd over the union: a partially-staged path appears in both
+        -- 'staged' and 'unstaged', and a naive sum of the three lengths
+        -- would count it twice in a message whose whole point is a precise
+        -- count.
+        let dirtyFiles = length (nub (summary.staged <> summary.unstaged <> summary.untracked))
          in pure
               ( Left
                   [fmt|Source repository is dirty ({dirtyFiles} uncommitted paths). Commit them, or set snapshotDirtySource to run against a hidden snapshot.|]
@@ -770,10 +777,16 @@ summarize fold root = do
   pure
     RunSummary
       { runRoot = outcomeNodeName root
-      , runStatus = if outcomeIsDone root then "done" else failureText root
+      -- 'failureText' already renders 'Done' as "done" — the same sentinel
+      -- this used to compute a second, independent way.
+      , runStatus = failureText root
       , runTrail = priorTrail fold <> outcomeTrailOf root
       , runEscalations = priorEscalations fold <> escalationsOf root
-      , retainedWorktrees =
+      , -- Every worktree currently retained on this managed-worktrees
+        -- server, NOT scoped to this run: 'listWorktrees' carries no
+        -- per-run identity to filter on. Read as "what is retained right
+        -- now", not "what this run created".
+        retainedWorktrees =
           [renderWorktreeId s.summaryReceipt.treeId | s <- trees, s.present]
       }
 
@@ -786,10 +799,12 @@ priorTrail fold
         : [[fmt|prior process: {renderRebaseNote n}|] | (_, _, RebaseEvent {evNote = n}) <- eventsOfKind RebaseKind fold]
 
 priorEscalations :: ResumeFold -> [Text]
-priorEscalations fold =
-  [ [fmt|prior process — {n}: {why}|]
-  | (_, _, EscalationEvent {evEscNode = n, evEscDetail = why}) <- eventsOfKind EscalationKind fold
-  ]
+priorEscalations fold
+  | not (isResumed fold) = []
+  | otherwise =
+      [ [fmt|prior process — {n}: {why}|]
+      | (_, _, EscalationEvent {evEscNode = n, evEscDetail = why}) <- eventsOfKind EscalationKind fold
+      ]
 
 escalationsOf :: Outcome -> [Text]
 escalationsOf o = case o of

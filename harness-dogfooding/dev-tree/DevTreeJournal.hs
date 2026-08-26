@@ -275,7 +275,10 @@ decodeSplitEvent k v = do
 -- entry was recorded under (a branch, or — for a receiptless 'Failed'\/a
 -- 'Skipped' — the plan node name that also became the key), so the fallback
 -- and the field agree whenever the field is present, and the writer always
--- writes it.
+-- writes it.  'Done' does NOT go through @named@: its wire IS the bare
+-- receipt (no "node" key at that level at all — the field is
+-- @receiptNode@), so its true source is the receipt itself, not this
+-- function's fallback.
 decodeOutcomeValue :: Text -> Value -> Maybe Outcome
 decodeOutcomeValue k v = case v ^? key "skipped" . _String of
   Just why -> Just Skipped {outcomeNode = named, outcomeTrail = [], skipReason = why}
