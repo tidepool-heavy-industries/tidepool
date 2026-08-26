@@ -1,6 +1,6 @@
 //! Journal effect handler: a durable append-only run journal.
 //!
-//! One JSON line per `record` call — `{seq, kind, key, payload}` — appended
+//! One JSON line per `record` call — `{ts, seq, kind, key, payload}` — appended
 //! and `fsync`ed before the call returns. No rewrite or compaction code path
 //! exists. The fold API below (`load_journal`/`last_by_key`/`last_by_kind_key`)
 //! is for the swarm driver's boot-time resume; nothing here wires it in
@@ -36,6 +36,9 @@ pub use crate::generated::journal::JournalReq;
 /// One durable journal entry, as it round-trips to/from a JSON line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JournalEntry {
+    /// Milliseconds since the Unix epoch. `0` means unknown for entries
+    /// migrated from journal versions written before timestamps existed.
+    pub ts: u64,
     pub seq: u64,
     pub kind: String,
     pub key: String,
@@ -45,11 +48,12 @@ pub struct JournalEntry {
 impl JournalEntry {
     /// The entry's wire shape — the SAME object a journal line carries and
     /// the same one a boot-time fold ships to the authored side
-    /// (`Tidepool.Resume`'s `ResumeEntry` decodes exactly these four names).
+    /// (`Tidepool.Resume` ignores the provenance-only `ts` field).
     /// Public so the fold's encoder reuses this one spelling instead of
     /// re-deriving it in another crate, where the two could drift apart.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
+            "ts": self.ts,
             "seq": self.seq,
             "kind": self.kind,
             "key": self.key,
@@ -58,6 +62,15 @@ impl JournalEntry {
     }
 
     fn from_json(v: &serde_json::Value) -> Result<Self, JournalParseError> {
+        // Missing is the legacy wire shape. `0` is the explicit unknown
+        // sentinel also installed by the v1 -> v2 segment migration.
+        let ts = match v.get("ts") {
+            None => 0,
+            Some(ts) => ts.as_u64().ok_or(JournalParseError::Field {
+                field: "ts",
+                reason: "non-integer",
+            })?,
+        };
         let seq =
             v.get("seq")
                 .and_then(serde_json::Value::as_u64)
@@ -86,6 +99,7 @@ impl JournalEntry {
             reason: "missing",
         })?;
         Ok(JournalEntry {
+            ts,
             seq,
             kind,
             key,
@@ -648,7 +662,12 @@ impl JournalHandler {
         let _guard = self.lock.lock();
         let local = self.local_seq.fetch_add(1, Ordering::SeqCst);
         let seq = compose_journal_seq(self.segment_ordinal, local);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let entry = JournalEntry {
+            ts,
             seq,
             kind,
             key,
@@ -757,7 +776,9 @@ impl JournalHandler {
         self.ensure_parent_dir()?;
         let path = self.trace_path();
         let _guard = self.lock.lock();
-        let is_fresh = std::fs::metadata(&path).map(|m| m.len() == 0).unwrap_or(true);
+        let is_fresh = std::fs::metadata(&path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
         if is_fresh {
             let header = serde_json::json!({"version": 1}).to_string();
             jsonl::append_new_line(&path, &header, SyncPolicy::Data).map_err(|source| {
@@ -781,9 +802,8 @@ impl JournalHandler {
             "payload": payload,
         })
         .to_string();
-        jsonl::append_new_line(&path, &line, SyncPolicy::Data).map_err(|source| {
-            JournalAppendError::Write { path, source }
-        })
+        jsonl::append_new_line(&path, &line, SyncPolicy::Data)
+            .map_err(|source| JournalAppendError::Write { path, source })
     }
 }
 
@@ -861,12 +881,20 @@ mod tests {
         let h = JournalHandler::new(SegmentPath::for_test(path.clone()))
             .expect("fresh segment header stamp succeeds");
 
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         h.append(
             "split".into(),
             "branch/a".into(),
             serde_json::json!({"n": 1}),
         )
         .unwrap();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         h.append(
             "outcome".into(),
             "branch/b".into(),
@@ -879,6 +907,10 @@ mod tests {
         assert_eq!(entries[0].kind, "split");
         assert_eq!(entries[0].key, "branch/a");
         assert_eq!(entries[0].payload, serde_json::json!({"n": 1}));
+        assert!(
+            (before..=after).contains(&entries[0].ts),
+            "append must emit a millisecond Unix timestamp"
+        );
         assert_eq!(entries[1].kind, "outcome");
         assert_eq!(entries[1].key, "branch/b");
         assert_eq!(entries[1].payload, serde_json::json!({"ok": true}));
@@ -992,11 +1024,41 @@ mod tests {
 
     fn entry(seq: u64, kind: &str, key: &str, payload: i64) -> JournalEntry {
         JournalEntry {
+            ts: 0,
             seq,
             kind: kind.to_string(),
             key: key.to_string(),
             payload: serde_json::json!(payload),
         }
+    }
+
+    #[test]
+    fn journal_entry_json_round_trip_preserves_timestamp() {
+        let expected = JournalEntry {
+            ts: 1_725_000_123_456,
+            seq: 7,
+            kind: "outcome".into(),
+            key: "branch/a".into(),
+            payload: serde_json::json!({"ok": true}),
+        };
+
+        let wire = expected.to_json();
+        assert_eq!(wire["ts"], serde_json::json!(1_725_000_123_456u64));
+        assert_eq!(JournalEntry::from_json(&wire).unwrap(), expected);
+    }
+
+    #[test]
+    fn timestamp_less_json_decodes_with_unknown_timestamp() {
+        let wire = serde_json::json!({
+            "seq": 3,
+            "kind": "split",
+            "key": "branch/a",
+            "payload": {"n": 2}
+        });
+
+        let entry = JournalEntry::from_json(&wire).expect("legacy wire remains decodable");
+        assert_eq!(entry.ts, 0);
+        assert_eq!(entry.seq, 3);
     }
 
     /// The whole reason `last_by_kind_key` exists next to `last_by_key`: one
@@ -1035,17 +1097,19 @@ mod tests {
     /// never invert the result the way a max-seq fold could.
     #[test]
     fn by_kind_key_takes_the_last_entry_regardless_of_seq() {
-        let entries = vec![
+        let mut entries = vec![
             entry(5, "split", "a", 50), // highest seq, but NOT last in order
             entry(3, "split", "a", 30),
             entry(0, "split", "a", 10), // lowest seq, but LAST in order — wins
             entry(2, "outcome", "a", 20),
         ];
+        entries[0].ts = 9_999;
+        entries[2].ts = 1;
         let folded = last_by_kind_key(&entries);
         assert_eq!(
             folded[&("split".into(), "a".into())].payload,
             serde_json::json!(10),
-            "the physically-last entry must win even though its seq (0) is the lowest"
+            "the physically-last entry must win even though its seq and ts are lowest"
         );
 
         // A rotation is a DIFFERENT physical order and is expected to fold
@@ -1319,8 +1383,12 @@ mod tests {
             serde_json::json!({"verdict": "skip-done"}),
         )
         .unwrap();
-        h.append_trace("park".into(), "loop".into(), serde_json::json!({"why": "completed"}))
-            .unwrap();
+        h.append_trace(
+            "park".into(),
+            "loop".into(),
+            serde_json::json!({"why": "completed"}),
+        )
+        .unwrap();
 
         let trace_path = dir.join("trace-run1.0.jsonl");
         assert!(trace_path.exists(), "trace derives journal- -> trace- name");
@@ -1332,7 +1400,10 @@ mod tests {
         assert_eq!(lines[0], serde_json::json!({"version": 1}));
         assert_eq!(lines.len(), 3);
         for entry in &lines[1..] {
-            assert!(entry["ts"].as_u64().unwrap() > 0, "every line is ts-stamped");
+            assert!(
+                entry["ts"].as_u64().unwrap() > 0,
+                "every line is ts-stamped"
+            );
             assert!(entry.get("seq").is_some());
             assert!(entry.get("stage").is_some());
         }
@@ -1384,21 +1455,33 @@ mod tests {
     fn unstamped_legacy_segment_still_loads() {
         let path = tmp_file("legacy_segment");
         let _ = std::fs::remove_file(&path);
-        let entry = JournalEntry {
-            seq: 0,
-            kind: "split".into(),
-            key: "a".into(),
-            payload: serde_json::json!(1),
-        };
         std::fs::write(
             &path,
-            format!("{}\n", serde_json::to_string(&entry.to_json()).unwrap()),
+            "{\"seq\":0,\"kind\":\"split\",\"key\":\"a\",\"payload\":1}\n",
         )
         .unwrap();
 
         let entries = load_journal(&path).expect("legacy unstamped segment must load");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "a");
+        assert_eq!(entries[0].ts, 0, "legacy timestamps migrate to unknown");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn version_one_segment_migrates_missing_timestamp_to_unknown() {
+        let path = tmp_file("v1_timestamp_migration");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "{\"version\":1}\n{\"seq\":4,\"kind\":\"split\",\"key\":\"a\",\"payload\":1}\n",
+        )
+        .unwrap();
+
+        let entries = load_journal(&path).expect("v1 segment must migrate to current");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].ts, 0);
+        assert_eq!(journal_version::CURRENT, 2);
         let _ = std::fs::remove_file(&path);
     }
 
