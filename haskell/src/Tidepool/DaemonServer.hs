@@ -1,5 +1,4 @@
--- | The resident compile daemon's transport (plans/compile-daemon-design.md,
--- Phase 0). Owns EVERYTHING socket-shaped: bind\/accept loop, the
+-- | The resident compile daemon's transport. Owns socket bind\/accept, the
 -- length-prefixed frame codec, request decode \/ response encode, the
 -- stdout\/stderr capture that turns an in-process dispatch call into the same
 -- @{exit_code, stdout, stderr}@ shape a spawned process's 'System.Process'
@@ -15,7 +14,7 @@
 -- compiler for the one-shot 'Tidepool.GhcPipeline.runPipelineSession') and
 -- hands it to 'runDaemon' — that seam is the boundary.
 --
--- Wire (plans/compile-daemon-design.md Decisions item 6): a UNIX domain
+-- Wire: a UNIX domain
 -- socket, one request\/response per connection, length-prefixed frames — no
 -- JSON, no serde-shaped dependency, both endpoints are in-repo so no
 -- interchange format is needed. All multi-byte integers are little-endian.
@@ -323,16 +322,12 @@ acceptPollMicros = 1000000
 -- (a small @\/proc@ read and a small file read respectively — nothing like
 -- the toolchain module's own blake3 fingerprint recompute), so checking on
 -- every request keeps the bound tight without needing a separate timer
--- thread. Recorded as a deliberate Phase 0 simplification in
--- plans/compile-daemon-design.md §7 (the design doc frames this as a
--- background TICK, not per-request).
+-- thread.
 --
 -- SIGTERM: an idle-blocked @accept@ does not itself observe a signal — a
 -- caught SIGTERM only sets 'shutdownRequested', which is why 'acceptLoop'
 -- bounds its own blocking wait to 'acceptPollMicros' instead of calling
--- 'accept' directly, and re-checks the flag on every wake (spawnrow-fix,
--- plans/compile-daemon-design.md §7: 15+s observed to exit on TERM while
--- idle-blocked in a plain @accept@, before this fix).
+-- 'accept' directly, and re-checks the flag on every wake.
 runDaemon :: DaemonConfig -> RequestHandler -> IO ()
 runDaemon cfg handler = do
   bootStamp <- maybe (pure Nothing) readIfPresent (dcWatchStamp cfg)

@@ -1,4 +1,4 @@
-//! LANE L1 acceptance tests — durable registry, clean worktree creation,
+//! Acceptance tests for durable registry, clean worktree creation,
 //! restart lookup, and the one-worktree-one-agent binding state machine.
 //!
 //! Every test drives a REAL temporary git repository via

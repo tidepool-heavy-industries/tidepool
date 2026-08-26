@@ -28,7 +28,7 @@ mod support;
 
 use std::path::PathBuf;
 use tidepool_harness::engine::compile_turn;
-use tidepool_harness::engine::{EngineConfig, template_answer_turn};
+use tidepool_harness::engine::{template_answer_turn, EngineConfig};
 use tidepool_runtime::compile_and_run_pure;
 
 fn repo_root() -> PathBuf {

@@ -140,7 +140,7 @@ PY
   return 0
 }
 
-# Regenerable cache root, mirroring tidepool-runtime::paths::cache_dir()
+# Regenerable cache root, mirroring tidepool_toolchain::paths::cache_dir()
 # (XDG_CACHE_HOME -> ~/.cache -> $TMPDIR, joined with "tidepool"). The ONE
 # bash reimplementation of that precedence — scripts/current-run.sh sources
 # this file and calls this function rather than keeping its own copy (root
@@ -156,7 +156,7 @@ cache_dir() {
 }
 
 # Resolves the deploy-handshake toolchain stamp path the same way the
-# servers do (tidepool-runtime::toolchain, haskell/CLAUDE.md's Deploy
+# servers do (tidepool-toolchain::toolchain, haskell/CLAUDE.md's deployment
 # handshake section: <cache_dir>/toolchain-stamp.json, override
 # $TIDEPOOL_TOOLCHAIN_STAMP) — not a second path-resolution mechanism, just
 # this precedence expressed in bash, via the shared cache_dir() above.

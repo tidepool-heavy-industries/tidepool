@@ -53,8 +53,7 @@
 //! API cannot carry a hole; suspension-capable turns go through
 //! [`ResidentSession::run`]. `!Send` `RootSlot`s never cross the eval-thread
 //! boundary: parked completions are projected in-thread to `Send` data, a
-//! bind's tenured root riding out as a [`ValueHandle`] (pillar B's
-//! laundering).
+//! bind's tenured root riding out as a [`ValueHandle`].
 
 use std::path::{Path, PathBuf};
 
@@ -503,7 +502,7 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let mut core = PersistentSession::new(lib, ask_tag, nursery_size);
+        let mut core = PersistentSession::new(lib, ask_tag, effect_names.clone(), nursery_size);
         core.bootstrap_if_needed(expr, &table)?;
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -537,7 +536,7 @@ where
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Self {
-        let core = PersistentSession::new(lib, ask_tag, nursery_size);
+        let core = PersistentSession::new(lib, ask_tag, effect_names.clone(), nursery_size);
         ResidentSession {
             core,
             handlers,
@@ -676,7 +675,7 @@ where
         self.scope
     }
 
-    /// SCOPE EXIT for `realm` (pillar A): close the realm
+    /// Scope exit for `realm`: close the realm
     /// on the machine (frames dropped, roots deregistered, handles released)
     /// and RECONCILE this session's parked-hole list against the machine's
     /// surviving frame ids — the machine is the ground truth, so holes whose
@@ -695,7 +694,7 @@ where
     }
 
     /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
-    /// the frame parked on `hole` (pillar B: the payload never bridges to a
+    /// the frame parked on `hole` (the payload never bridges to a
     /// data `Value`; the `Send` handle is how it is passed around and
     /// eventually DELIVERED into a sibling hole via [`Self::resume_handle`]).
     /// The frame stays parked (consume/abort it separately, as the finalize
@@ -728,8 +727,8 @@ where
 
     /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
     /// rooted value — the handle's payload feeds the continuation verbatim,
-    /// no materialization, closures included (pillar B's delivery half; the
-    /// one-session loop receives its `State -> State` this way). Same
+    /// no materialization, closures included. The authored loop receives
+    /// closure-valued state transitions this way. Same
     /// validate-before-consume and ground-truth reconciliation as
     /// [`Self::resume`].
     ///
@@ -777,7 +776,7 @@ where
     /// through `custody`'s tenured payload instead of whatever it was bound
     /// to before — the mount seam: "a handle installed under
     /// a name in a window's declaration scope", the closure-tenure-then-handle
-    /// delivery path (pillar B) pointed the OTHER direction.
+    /// delivery path points the other direction.
     ///
     /// **Atomic:** `name`'s current identity (`SessionVarId`/module/tier/type
     /// display) is resolved INTERNALLY, at mount time, from the live
@@ -1969,7 +1968,7 @@ fn project_parked(
 /// failure, a caught panic, or a completed run of `body` (itself carrying its
 /// own `Result`). Distinct from `SpawnError`/join-panic being conflated into
 /// one `.expect()`, which is exactly what let a spawn failure escape as an
-/// unguarded panic before this fix.
+/// unguarded panic.
 enum EvalThreadOutcome<T> {
     Ran(Result<T, JitError>),
     Panicked(Box<dyn std::any::Any + Send>),

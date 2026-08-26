@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
-use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
+use tidepool_codegen::jit_machine::{ContinuationId, JitEffectMachine, ParkedOutcome, RealmId};
 pub use tidepool_effect::dispatch::DispatchEffect;
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::MetaWarnings;
@@ -240,6 +240,8 @@ pub enum SuspendableRun {
         /// The constructor table this turn compiled against (needed to extract
         /// the prompt/meta from `request` and to convert the answer on resume).
         table: DataConTable,
+        /// Registry identity of the parked continuation.
+        continuation: ContinuationId,
         /// The bridged `Ask` request value.
         request: tidepool_eval::value::Value,
     },
@@ -256,6 +258,7 @@ pub enum ResumedRun {
     /// `&mut` by the resume) holds the new continuation internally, ready for
     /// another [`resume_suspended_turn`].
     Suspended {
+        continuation: ContinuationId,
         request: tidepool_eval::value::Value,
     },
 }
@@ -275,6 +278,7 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     user: &U,
     nursery_size: usize,
     ask_tag: u64,
+    effect_names: &[String],
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<SuspendableRun, RuntimeError> {
     let CompileResult {
@@ -287,21 +291,26 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     }
     table.populate_siblings_from_expr(&expr);
     let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
-    on_ready(machine.cancel_handle());
-    match machine.run_suspendable(&table, handlers, user, ask_tag)? {
-        SuspendableOutcome::Completed(value) => Ok(SuspendableRun::Completed(EvalResult::new(
+    let realm = RealmId(0);
+    on_ready(machine.realm_cancel_handle(realm));
+    let handled_prefix = &effect_names[..ask_tag as usize];
+    match machine.run_suspendable_parked(&table, handlers, user, ask_tag, realm, handled_prefix)? {
+        ParkedOutcome::CompletedValue(value) => Ok(SuspendableRun::Completed(EvalResult::new(
             value,
             table,
             warnings.warnings,
         ))),
-        SuspendableOutcome::Suspended {
+        ParkedOutcome::Suspended {
+            id,
             request,
             has_finalized_closure: _,
         } => Ok(SuspendableRun::Suspended {
             machine,
             table,
+            continuation: id,
             request,
         }),
+        other => unreachable!("plain one-shot run returned {other:?}"),
     }
 }
 
@@ -316,13 +325,13 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
     table: &DataConTable,
     handlers: &mut H,
     user: &U,
-    ask_tag: u64,
+    continuation: ContinuationId,
     input: ResumeInput,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<ResumedRun, RuntimeError> {
-    on_ready(machine.cancel_handle());
-    match machine.resume_suspended(table, handlers, user, ask_tag, input)? {
-        SuspendableOutcome::Completed(value) => {
+    on_ready(machine.realm_cancel_handle(RealmId(0)));
+    match machine.resume_parked(continuation, handlers, user, input)? {
+        ParkedOutcome::CompletedValue(value) => {
             // No recompile happens on resume (the JIT machine is reused as-is),
             // so there are no new warnings to report here — they were already
             // surfaced on the turn that produced this continuation.
@@ -332,10 +341,15 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
                 Vec::new(),
             )))
         }
-        SuspendableOutcome::Suspended {
+        ParkedOutcome::Suspended {
+            id,
             request,
             has_finalized_closure: _,
-        } => Ok(ResumedRun::Suspended { request }),
+        } => Ok(ResumedRun::Suspended {
+            continuation: id,
+            request,
+        }),
+        other => unreachable!("plain one-shot resume returned {other:?}"),
     }
 }
 

@@ -1,4 +1,4 @@
-//! The durable event journal — LANE L3.
+//! The durable event journal.
 //!
 //! Every reconciled event is appended here with its source, result, timestamp,
 //! and [`EventId`].

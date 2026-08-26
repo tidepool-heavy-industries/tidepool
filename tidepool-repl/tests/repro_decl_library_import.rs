@@ -1,6 +1,6 @@
 //! Regression guard for the decl/stmt import-scope asymmetry fix.
 //!
-//! Before this fix, a `decl` item never got `import Library` regardless of
+//! A `decl` item must receive `import Library` whenever
 //! whether a project `Library` facade was on the include path (hardcoded
 //! `false` in `session_decl_module_env`) — so a decl referencing a
 //! Library-re-exported type (e.g. `Edit.EditOutcome`) needed its own explicit

@@ -22,7 +22,7 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::{Value as Json, json};
+use serde_json::{json, Value as Json};
 
 use tidepool_agent::backend::mock::MockBackend;
 use tidepool_agent::seam::CycleResultPayload;
@@ -36,8 +36,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    Harness, LogObserver, OperatorGate, SelfHarnessDriver, load_harness_source,
-    typed_request_agent_decls_with_delegate,
+    load_harness_source, typed_request_agent_decls_with_delegate, Harness, LogObserver,
+    OperatorGate, SelfHarnessDriver,
 };
 use tidepool_worktree::testing::TestRepo;
 

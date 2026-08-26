@@ -1,31 +1,27 @@
 module Tidepool.GhcPipeline
   ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
-    -- * Bound-value type analysis (Wave 3b BIND mode)
+    -- * Bound-value type analysis
   , stripMonadHead, isClosureType, renderType
   , splitTupleType
-    -- * Batch turns (plans/post-restart/batch-turns-feasibility.md §8)
+    -- * Batch turns
   , BatchItem(..), BatchItemResult(..), runBatchPipeline
-    -- * Resident session (plans/compile-daemon-design.md, Phase 0)
+    -- * Resident session
   , withResidentPipeline
   ) where
 
 import GHC
-import GHC.Hs (hsmodDecls)
 import GHC.Driver.Main (hscDesugar, batchMsg, hscTidy)
 import GHC.Driver.Env (hscUpdateFlags, hscUpdateHPT)
 import GHC.Driver.Env.Types (HscEnv(hsc_mod_graph))
 import GHC.Driver.Monad (reflectGhc, reifyGhc)
-import GHC.Unit.Home (homeUnitId)
 import GHC.Unit.Home.ModInfo (HomeModInfo(..), emptyHomeModInfoLinkable, addToHpt)
 import GHC.Driver.Make (load', ModIfaceCache, newIfaceCache)
 import GHC.Iface.Make (mkIfaceTc)
-import GHC.Types.SafeHaskell (SafeHaskellMode(Sf_None))
 import GHC.Types.SourceFile (HscSource(..))
-import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), Severity(..), mkLocMessage)
-import GHC.Types.SrcLoc (unLoc)
+import GHC.Types.Error (mkUnknownDiagnostic, MessageClass(..), mkLocMessage)
 import GHC.Utils.Logger (LogAction)
 import GHC.Data.FastString (unpackFS)
-import GHC.Unit.Module.Graph (mapMG, mkModuleGraph, mgModSummaries', ModuleGraphNode(..))
+import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..))
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Core.Opt.Pipeline (core2core)
 import GHC.Core.Ppr (pprCoreBindings)
@@ -37,14 +33,14 @@ import GHC.Driver.Session
       , Opt_WarnIncompleteUniPatterns
       )
   , wopt_set, wopt_set_fatal
-  , packageFlags, PackageFlag(..), PackageArg(..), ModRenaming(..) )
+  , PackageFlag(..), PackageArg(..), ModRenaming(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
-import GHC.Types.Id (idName, idType)
+import GHC.Types.Id (idName)
 import GHC.Core.Type (splitAppTy_maybe, splitTyConApp_maybe, splitFunTy_maybe)
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique)
 import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey)
@@ -124,9 +120,7 @@ runPipeline = runPipelineSession Nothing
 -- skeleton plus a 'PipelineVariant'; 'runCompile' is a thin per-session
 -- bootstrap around a single 'runCompileCycle' call, and 'runBatchPipeline'
 -- bootstraps once and calls it N times (see 'runCompileCycle''s own haddock
--- for that seam). See plans/post-restart/ghcpipeline-seam-analysis.md for the
--- line-by-line classification the 'PipelineVariant' factoring came out of,
--- and for why the two seams below are the only genuine ones.
+-- for that seam).
 -- ---------------------------------------------------------------------------
 
 -- | Which modules pay 'core2core' — and, inseparably, in what SCHEDULE the
@@ -250,8 +244,8 @@ runPipelineSession mscope path includes
   | otherwise = runCompile (normalVariant path) path includes
 
 -- ---------------------------------------------------------------------------
--- Batch turns (plans/post-restart/batch-turns-feasibility.md §8): N item
--- compiles in ONE GHC session, threading GHC's own 'ModIfaceCache' (§7.1 —
+-- Batch turns: N item compiles in one GHC session, threading GHC's own
+-- 'ModIfaceCache' so
 -- cycles 2..N skip stdlib recompilation) and a per-module dep-guts memo
 -- (§7.6/§7.3 — a module's guts, once compiled in ANY cycle, are reused
 -- verbatim by every LATER cycle that compiles the same module again). The
@@ -508,7 +502,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- function of the request's own effect vocabulary
     -- (@Tidepool.Effects.Core@ — content-addressed into a distinct include
     -- dir per vocabulary on the Rust side, tidepool-mcp/CLAUDE.md's
-    -- "Stable-effects-core" section) while always resolving under the SAME
+    -- "Generated effects modules" section) while always resolving under the SAME
     -- fixed module name, so two independent requests with different
     -- vocabularies can populate/consult the shared memo under one key with
     -- genuinely different bindings (e.g. one row lacking
@@ -530,7 +524,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- varying-content sibling (the per-window @Tidepool.Effects@ shim,
     -- co-generated into the SAME content-addressed staging dir but not
     -- co-hashed at the single-module level, tidepool-mcp/CLAUDE.md's
-    -- "Stable-effects-core" section). A self-hash match is necessary but
+    -- "Generated effects modules" section). A self-hash match is necessary but
     -- not sufficient — the compiled TcGblEnv/Core also nominally reference
     -- whatever THAT module's own home-module imports resolved to, so a memo
     -- hit is trusted only when every direct home import ALSO validated
@@ -804,15 +798,14 @@ data BatchItemResult
   = BatchDeclResult [ExportItem]
   | BatchCompileResult PipelineResult
 
--- | Run a whole batch — ONE GHC boot, ONE 'runGhc', a live 'ModIfaceCache'
--- (§7.1) and per-module dep-guts memo (§7.6) threaded across every item, in
--- order — per plans/post-restart/batch-turns-feasibility.md §8.
+-- | Run a whole batch in one GHC session, threading a live 'ModIfaceCache'
+-- and per-module dependency-guts memo through every item in order.
 --
 -- @onItem index result@ is called for each item that FINISHES COMPILING, in
 -- order, immediately after that item's own artifacts are ready — so a caller
 -- that writes an item's output to disk from inside @onItem@ leaves every item
--- before a mid-batch failure with a complete output directory (§3's
--- run-until-first-error contract; app/Main.hs's @--turn-batch@ mode is that
+-- before a mid-batch failure with a complete output directory. The
+-- @--turn-batch@ mode in app/Main.hs is that
 -- caller). Stops at the first item — its own compile, OR its @onItem@
 -- callback — that throws, returning how many items fully completed and the
 -- exception that stopped the batch (if any); the caller attributes that
@@ -853,8 +846,8 @@ runBatchPipeline includes items onItem = do
         Right () -> go cache memoRef timing (n + 1) rest
 
 -- ---------------------------------------------------------------------------
--- Resident session (plans/compile-daemon-design.md, Phase 0): the daemon's
--- own generalization of 'runBatchPipeline''s loop — ONE 'runGhc' boot, ONE
+-- Resident session: the daemon generalizes 'runBatchPipeline''s loop — one
+-- 'runGhc' boot, one
 -- 'setSessionDynFlags', serving individual compile REQUESTS one at a time
 -- instead of a pre-built @[BatchItem]@ list. Transport-blind: this module
 -- knows nothing about sockets or frames (Tidepool.DaemonServer owns that) —
@@ -1313,7 +1306,7 @@ stripMonadHead ty =
 -- looping; mirrors 'Tidepool.Translate.typeMentionsEffectMonad's walk). The
 -- wider check matters because Tier0 forces the bound value to normal form
 -- before tenuring: a record with a function FIELD (e.g. a companion "mounted
--- value" carrying an applied handler, PRD 21 lane C1) is not itself a
+-- value" carrying an applied handler) is not itself a
 -- function type, but deep-forcing it would try to force through the
 -- function field and crash — it needs the SAME store-as-is treatment a bare
 -- function gets.

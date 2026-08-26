@@ -5,7 +5,7 @@
 # hand (`tidepool-harness/CLAUDE.md`'s prior documented answer was literally
 # `tail -f $(ls -t <cache>/selfharness/log-*.jsonl | head -1)`).
 #
-# All paths mirror tidepool-runtime::paths::cache_dir() (env precedence:
+# All paths mirror tidepool_toolchain::paths::cache_dir() (env precedence:
 # XDG_CACHE_HOME -> ~/.cache -> $TMPDIR, joined with "tidepool") and
 # tidepool-harness's selfharness::persistence/resume path helpers
 # (default_transcript_path, default_checkpoint_path, default_log_path,

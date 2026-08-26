@@ -1,51 +1,9 @@
 //! The high-level JIT effect machine ([`JitEffectMachine`]) and the effect-drive
 //! loop at the JIT↔Rust boundary.
 //!
-//! # Nested child runs on a suspended machine
-//!
-//! A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host an
-//! arbitrary number of SEQUENTIAL child fragment runs — including ones that
-//! force GC and heap doubling — and resume correctly afterward.
-//!
-//! INVARIANT: while a child runs, the parent's stowed continuation must be a
-//! registered GC root, because the child allocates and collects.
-//! [`JitEffectMachine::enter_nested_child`] moves the continuation pointer out
-//! of `suspended_continuation` into a heap-stable `Box` cell and registers
-//! that cell's address in `stowed_roots`, which `perform_gc` folds into its
-//! root assembly; a child collection evacuates the parent's continuation tree
-//! and rewrites the cell in place, and teardown reads the GC-current pointer
-//! back out. The L7 `suspended_continuation.is_none()` asserts on every plain
-//! run entry (`run`/`run_pure`/`run_fragment`/`*_and_bind`) stay UNCHANGED and
-//! still fire if a plain entry runs while a continuation is stowed and
-//! UNREGISTERED — [`JitEffectMachine::run_child_fragment`] and its pure
-//! sibling are the only sanctioned way to run while suspended, since they
-//! empty `suspended_continuation` for the child's duration so the L7 asserts
-//! pass naturally.
-//!
-//! ORDERING INVARIANT: a child turn's [`RegistryGuard::drop`] reclaims the
-//! session heap buffer + high-water cursor into `self.session` (the buffer
-//! may have been swapped/doubled by a child GC). `NestedChildGuard` must drop
-//! AFTER the child's `RegistryGuard`, so it reads the continuation pointer
-//! back out of the stowed cell AFTER the reclaim — observing the POST-child
-//! heap. The pointer stays valid across the reclaim because moving a
-//! `Vec<u64>` moves its 24-byte header, not its heap data.
-//!
-//! `nested_child_depth` counts children currently running against the parent;
-//! a parent resume is rejected while it is > 0, because the heap holds exactly
-//! one computation at a time (sequential-isolated).
-//!
-//! # The parked-continuation registry (runtime resource scope prototype)
-//!
-//! [`JitEffectMachine::run_suspendable_parked`] and [`JitEffectMachine::resume_parked`]
-//! generalize the single `suspended_continuation` slot to a map of many. A
-//! parked continuation is a registered `stowed_roots` entry from the moment it
-//! parks until it resumes, so a collection triggered by ANY later computation
-//! on the machine evacuates it and rewrites its cell.
-//!
-//! The parked path deliberately leaves `suspended_continuation` as `None`, so
-//! the L7 asserts on every plain run entry keep passing. The two paths never
-//! interact: a machine using the parked registry never stows into the slot,
-//! and a machine using the slot never populates the registry.
+//! Every suspended continuation lives in the continuation registry as a
+//! registered GC root from park until resume. This permits unrelated fragment
+//! runs and collections while one or more continuations wait.
 //!
 //! # Completion policies on the suspend/park family
 //!
@@ -60,23 +18,8 @@
 //! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | `Suspendable<Vec<RootSlot>>` | the N tenured roots, IN the completion |
 //! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | `Suspendable<(RootSlot, Value)>` | field 0's tenured root + field 1's render, IN the completion |
 //!
-//! The PARKED (registry) path covers all four — [`ParkKind`] mirrors
-//! `Value`/`Bind`/`Project`/`Render` (one-session plan, Phase 0: `Project`/
-//! `Render` joined `Plain`/`Binding` so the registry path can serve every
-//! session consumer).
-//!
-//! CONTRACT (why this split is load-bearing):
-//! `Project`/`Render` return their tenured [`crate::old_space::RootSlot`]s
-//! inline in the completion; `Bind` cannot, because `RootSlot` is a bare
-//! `*mut *mut u8` newtype that is deliberately NOT `unsafe impl Send` (unlike
-//! its containers, which are blessed under the stowed-XOR-running argument).
-//! `Bind` is the one policy `tidepool_runtime::session::ResidentSession`
-//! drives across `on_eval_thread`'s scoped-thread join, which requires the
-//! completion to be `Send` — a slot riding out inline fails `E0277` there. So
-//! `last_bound_root` (and `suspended_finalized_root`, same reason) LAUNDERS a
-//! `!Send` slot across that boundary by riding inside the machine, which is
-//! already blessed `Send`. Removing the stash would require `unsafe impl Send
-//! for RootSlot` — a new standalone soundness claim, left open deliberately.
+//! [`ParkKind`] carries the completion policy on each frame, so resume cannot
+//! accidentally choose a different materialization path.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -188,8 +131,7 @@ pub struct HeapStats {
     /// Number of fragments ever compiled into this machine's JITModule
     /// ([`JitEffectMachine::add_function`]) — MONOTONIC, never reclaimed
     /// (cranelift leaks finalized code by design), so this is the
-    /// bounded-lifetime ceiling's primary signal (one-session plan, Phase 4:
-    /// rotation, not immortality).
+    /// bounded-lifetime rotation ceiling's primary signal.
     pub fragments: u64,
 }
 
@@ -210,10 +152,9 @@ pub struct ContinuationId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RealmId(pub u64);
 
-/// Opaque, `Send`-able identity of a machine-side rooted heap value (one-
-/// session plan, the handle-delivery rule — the embedder handle). Minted by
-/// [`JitEffectMachine::handle_from_finalized`] (more sources in later
-/// phases), observed via [`JitEffectMachine::observe_handle`], delivered via
+/// Opaque, `Send`-able identity of a machine-side rooted heap value. Minted by
+/// [`JitEffectMachine::handle_from_finalized`], observed via
+/// [`JitEffectMachine::observe_handle`], delivered via
 /// [`ResumeInput::Handle`], released by [`JitEffectMachine::close_realm`] of
 /// the owning runtime resource scope. The `!Send` [`crate::old_space::RootSlot`] underneath
 /// never crosses an API layer.
@@ -237,10 +178,7 @@ struct HandleEntry {
 }
 
 /// What kind of turn parked a continuation — the registry's spelling of the
-/// completion policy, covering ALL FOUR of the [`ResultMaterialization`]
-/// policies (one-session plan, Phase 0: `Project`/`Render` joined
-/// `Plain`/`Binding` so the registry path can serve every session consumer and
-/// the slot path can eventually retire).
+/// completion policy, covering all four [`ResultMaterialization`] policies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParkKind {
     /// A plain suspendable turn: on completion the `Done` pointer is bridged
@@ -265,9 +203,7 @@ pub enum ParkKind {
 }
 
 impl ParkKind {
-    /// Project to the [`ResultMaterialization`] the shared suspendable
-    /// epilogue takes — a one-to-one spelling since Phase 0 of the
-    /// one-session plan.
+    /// Project to the shared epilogue's [`ResultMaterialization`].
     fn materialization(self) -> ResultMaterialization {
         match self {
             ParkKind::Plain => ResultMaterialization::Value,
@@ -280,9 +216,9 @@ impl ParkKind {
 
 /// One parked continuation in a machine's continuation registry.
 ///
-/// `cell` is a heap-stable `Box` holding the continuation pointer, exactly the
-/// `stowed_root_cell` pattern: the machine itself moves between threads (stow
-/// XOR run), but the `Box`'s POINTEE address is a stable heap allocation, so
+/// `cell` is a heap-stable `Box` holding the continuation pointer. The machine
+/// itself moves between threads (stow XOR run), but the `Box`'s pointee address
+/// is stable, so
 /// the `stowed_roots` registration (the cell's address) stays valid across the
 /// move. The GC reads and rewrites `*cell` in place on every collection, so the
 /// pointer read back out at resume is the GC-current one.
@@ -370,8 +306,6 @@ pub enum ParkedOutcome {
 /// suspends. Internal: the public entries pick one and project the result.
 #[derive(Debug, Clone)]
 enum ParkTarget {
-    /// The single `suspended_continuation` slot (every pre-existing entry).
-    Slot,
     /// The continuation registry, under a fresh id in this runtime resource scope.
     Registry {
         realm: RealmId,
@@ -383,128 +317,28 @@ enum ParkTarget {
     },
 }
 
-/// Result of the shared suspendable body before it is projected into whichever
-/// public outcome type the caller's entry returns. `id` is `Some` exactly when
-/// the park target was [`ParkTarget::Registry`].
-///
-/// `Completed` carries a [`ParkedOutcome`] directly — always one of its four
-/// `Completed*` variants, never `Suspended` — so the registry-path projection
-/// ([`Self::into_parked`]) is a plain pass-through and each slot-path
-/// projection matches the one `Completed*` variant its policy produces.
+/// Result of the shared registry body before public projection.
 enum ParkedRaw {
     Completed(ParkedOutcome),
     Suspended {
         request: tidepool_eval::value::Value,
         has_finalized_closure: bool,
-        id: Option<ContinuationId>,
+        id: ContinuationId,
     },
 }
 
 impl ParkedRaw {
-    /// Split a suspension's payload out, asserting the slot-path invariant that
-    /// no continuation id was minted. Shared by every slot-path projection.
-    fn expect_slot_suspension(
-        request: tidepool_eval::value::Value,
-        has_finalized_closure: bool,
-        id: Option<ContinuationId>,
-    ) -> (tidepool_eval::value::Value, bool) {
-        debug_assert!(id.is_none(), "slot park target must not mint an id");
-        (request, has_finalized_closure)
-    }
-
-    /// Project onto the single-slot path's `Value`-completing outcome type
-    /// (the `Value` and `Bind` policies).
-    fn into_suspendable(self) -> SuspendableOutcome {
-        match self {
-            ParkedRaw::Completed(ParkedOutcome::CompletedValue(value))
-            | ParkedRaw::Completed(ParkedOutcome::CompletedBinding { value, .. }) => {
-                SuspendableOutcome::Completed(value)
-            }
-            ParkedRaw::Completed(_) => unreachable!(
-                "into_suspendable is only reached by the Value/Bind entries, \
-                 whose policies produce ParkedOutcome::CompletedValue/CompletedBinding"
-            ),
-            ParkedRaw::Suspended {
-                request,
-                has_finalized_closure,
-                id,
-            } => {
-                let (request, has_finalized_closure) =
-                    Self::expect_slot_suspension(request, has_finalized_closure, id);
-                SuspendableOutcome::Suspended {
-                    request,
-                    has_finalized_closure,
-                }
-            }
-        }
-    }
-
-    /// Project onto the multi-binder entries' outcome: the tenured field roots.
-    fn into_projected(self) -> Suspendable<Vec<crate::old_space::RootSlot>> {
-        match self {
-            ParkedRaw::Completed(ParkedOutcome::CompletedProject { roots }) => {
-                Suspendable::Completed(roots)
-            }
-            ParkedRaw::Completed(_) => unreachable!(
-                "into_projected is only reached by the Project entries, \
-                 whose policy produces ParkedOutcome::CompletedProject"
-            ),
-            ParkedRaw::Suspended {
-                request,
-                has_finalized_closure,
-                id,
-            } => {
-                let (request, has_finalized_closure) =
-                    Self::expect_slot_suspension(request, has_finalized_closure, id);
-                Suspendable::Suspended {
-                    request,
-                    has_finalized_closure,
-                }
-            }
-        }
-    }
-
-    /// Project onto the bind-and-render entries' outcome: field 0's tenured
-    /// root paired with field 1's render.
-    fn into_render(self) -> Suspendable<(crate::old_space::RootSlot, tidepool_eval::value::Value)> {
-        match self {
-            ParkedRaw::Completed(ParkedOutcome::CompletedRender { root, rendered }) => {
-                Suspendable::Completed((root, rendered))
-            }
-            ParkedRaw::Completed(_) => unreachable!(
-                "into_render is only reached by the Render entries, \
-                 whose policy produces ParkedOutcome::CompletedRender"
-            ),
-            ParkedRaw::Suspended {
-                request,
-                has_finalized_closure,
-                id,
-            } => {
-                let (request, has_finalized_closure) =
-                    Self::expect_slot_suspension(request, has_finalized_closure, id);
-                Suspendable::Suspended {
-                    request,
-                    has_finalized_closure,
-                }
-            }
-        }
-    }
-
     /// Project onto the registry path's outcome type. `Completed` already IS
     /// a [`ParkedOutcome`], so this only has to mint the `Suspended` variant.
     fn into_parked(self) -> ParkedOutcome {
         match self {
             ParkedRaw::Completed(outcome) => outcome,
-            #[allow(
-                clippy::expect_used,
-                reason = "registry park target mints an id on suspension"
-            )]
             ParkedRaw::Suspended {
                 request,
                 has_finalized_closure,
                 id,
             } => ParkedOutcome::Suspended {
-                id: id.expect("registry park target mints an id on suspension"),
+                id,
                 request,
                 has_finalized_closure,
             },
@@ -742,88 +576,36 @@ pub struct JitEffectMachine {
     /// `(*vmctx).machine_state`, pointed at this field by
     /// `install_registries`/the run entries.
     machine_state: MachineState,
-    /// The freer-simple continuation heap pointer of a turn that suspended at
-    /// the ask boundary (`run_suspendable` → `SuspendableOutcome::Suspended`),
-    /// waiting for `resume_suspended`. `None` for a running or completed
-    /// machine. The pointer is into this machine's retained session heap.
-    ///
-    /// INVARIANT: while nested CHILD runs execute against the suspended
-    /// parent, this pointer is a REGISTERED GC ROOT, not just protected by
-    /// "no GC runs on a suspended machine" — [`Self::enter_nested_child`]
-    /// copies it into `stowed_root_cell` and registers that heap-stable cell
-    /// in the machine's `stowed_roots` set, so any child collection evacuates
-    /// the continuation tree and rewrites the cell in place; on child
-    /// teardown the (GC-current) pointer is read back out. `resume_suspended`
-    /// still re-roots via `materialize_response_and_resume` for its own
-    /// answer materialization.
-    suspended_continuation: Option<*mut u8>,
-    /// Heap-stable cell holding the stowed continuation pointer WHILE a
-    /// nested child is running. A `Box` (not the `suspended_continuation`
-    /// field directly) because the machine itself moves between threads under
-    /// the stow-XOR-run discipline: the `Box`'s POINTEE address is a stable heap
-    /// allocation that does NOT move with the struct, so the `stowed_roots`
-    /// registration (the cell's address) stays valid across the move — exactly
-    /// the `OldSpace` slots pattern. `None` unless a child is mid-run.
-    stowed_root_cell: Option<Box<*mut u8>>,
-    /// Number of nested child runs currently executing against this suspended
-    /// parent. Zero when idle, suspended-but-no-child, or running its own
-    /// turn. A parent resume is rejected while this is > 0 (exactly one
-    /// computation on the heap at a time — sequential-isolated). Incremented by
-    /// [`Self::enter_nested_child`], decremented on guard drop; the stowed root
-    /// is registered on 0→1 and deregistered on 1→0.
-    nested_child_depth: usize,
+    /// Capacity-one compatibility façade over the continuation registry.
+    /// New code carries continuation ids explicitly; legacy linear callers
+    /// use this field, but the continuation itself is always registry-rooted.
+    linear_continuation: Option<ContinuationId>,
     /// A persistent-binding-store bind whose fragment ran through the SUSPENDABLE
     /// path (`run_fragment_suspendable_binding`/`resume_suspended_binding`) tenures
     /// its `Done` result into old-space and stashes the persistent [`RootSlot`]
     /// here, for the caller to read out AFTER the machine moves back off the eval
     /// thread. A `RootSlot` (`*mut *mut u8`) is `!Send`, so it cannot cross the
     /// eval-thread scope boundary as a bare value — it rides home INSIDE the
-    /// machine (already `Send` under stowed-XOR-running, same as
-    /// `suspended_continuation`; see the module docs for the full contract).
+    /// machine (already `Send` under stowed-XOR-running; see the module docs).
     /// `None` except in the gap between a bind fragment completing and the
     /// caller taking it via [`Self::take_last_bound_root`]. A fork bind lands
     /// here on the eventual `resume`, not the initial (suspending) run.
     ///
-    /// SLOT PATH ONLY: the parked path never writes this field — its
-    /// `ParkedOutcome::CompletedBinding::root` returns the tenured root inline
-    /// instead, so a second runtime resource scope's completion cannot overwrite a first
-    /// runtime resource scope's still-unread root.
+    /// Registry-native callers receive the root inline in
+    /// `ParkedOutcome::CompletedBinding`; only the capacity-one façade uses
+    /// this transport slot.
     last_bound_root: Option<crate::old_space::RootSlot>,
-    /// Finalize-by-reference: the persistent root slot of a suspended
-    /// `finalize @T closure`'s finalized VALUE (field 1 of the request Con),
-    /// tenured at suspend time by [`Self::tenure_finalized_payload`]. `Some`
-    /// only while suspended on a closure-valued finalize; read out by
-    /// [`Self::take_finalized_root`] when the harness applies the closure by
-    /// reference. Rides inside the machine for the same `!Send` reason as
-    /// `last_bound_root`.
-    ///
-    /// SLOT PATH ONLY: the parked path stashes this on the
-    /// [`ContinuationFrame`] instead (`ContinuationFrame::finalized_root`,
-    /// taken via [`Self::take_parked_finalized_root`]) — a frame exists for
-    /// the whole parked lifetime, so there is nowhere for a race to land.
-    suspended_finalized_root: Option<crate::old_space::RootSlot>,
-    /// RUNTIME RESOURCE SCOPE PROTOTYPE — the many-continuation generalization of
-    /// `suspended_continuation`: every continuation parked by
-    /// [`Self::run_suspendable_parked`], keyed by [`ContinuationId`] and tagged
-    /// with the [`RealmId`] that owns it. Empty on every machine that only uses
-    /// the single-slot path.
+    /// Every suspended continuation, keyed by [`ContinuationId`] and tagged
+    /// with its owning [`RealmId`].
     ///
     /// THE INVARIANT: a frame's `cell` is registered in `stowed_roots` from the
-    /// moment it is parked until the moment it is resumed — not just while a
-    /// child runs. The single-slot path protects an idle-suspended continuation
-    /// by a TEMPORAL argument (no GC can run on a suspended machine, enforced by
-    /// the L7 `suspended_continuation.is_none()` asserts) and only falls back to
-    /// a registered root for the span a nested child occupies. A parked frame
-    /// has no such gap: it is a root for its whole parked lifetime, so any
+    /// moment it is parked until the moment it is resumed. Any
     /// collection — from a sibling park's turn, a plain fragment, another
     /// runtime resource scope's resume, or a heap doubling in any of them — evacuates its
-    /// continuation tree and rewrites `*cell` in place. Dropping the temporal
-    /// argument is exactly what lets several continuations coexist on one heap
-    /// while unrelated computation keeps running.
+    /// continuation tree and rewrites `*cell` in place.
     ///
     /// Consequently `stowed_roots_count()` equals `continuations.len()` at
-    /// every quiescent point on the parked path (plus one transiently while a
-    /// `run_child_fragment*` guard is alive on the single-slot path).
+    /// every quiescent point.
     continuations: HashMap<ContinuationId, ContinuationFrame>,
     /// Monotonic source of [`ContinuationId`]s for `continuations`. Never
     /// rewound — a resumed id is not reused, so a stale id from a caller is a
@@ -841,7 +623,7 @@ pub struct JitEffectMachine {
     /// [`Self::realm_cancel_handle`]'s doc for whether a completed run clears
     /// it); [`Self::close_realm`] removes the closed runtime resource scope's entry.
     realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
-    /// The VALUE-HANDLE registry (one-session plan, the handle-delivery rule): opaque,
+    /// Value-handle registry: opaque,
     /// Send-able ids over machine-side persistent roots, so upper layers pass
     /// heap values — closures included — WITHOUT eagerly bridging them into a
     /// Rust [`Value`] (the eager bridge substitutes `CLOSURE_SENTINEL` and is
@@ -878,9 +660,8 @@ pub struct JitEffectMachine {
 // it is either stowed as data (E2 suspension) or running on exactly one eval
 // thread, never both. This mirrors the existing `unsafe impl Send` on
 // `CompiledEffectMachine`/`MachineState`/`GcState`: the JIT executable mappings
-// and heap buffers are process-global address space, valid on any thread, and
-// the raw `suspended_continuation` pointer is a heap offset into an owned
-// buffer that moves with the machine. Concurrent access is prevented by the
+// and heap buffers are process-global address space and valid on any thread.
+// Continuation pointers live in heap-stable registered root cells. Concurrent access is prevented by the
 // SessionEngine registry (a machine is stowed XOR running), so sending
 // ownership across the suspend/resume thread boundary is sound.
 unsafe impl Send for JitEffectMachine {}
@@ -1128,11 +909,8 @@ impl JitEffectMachine {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
             machine_state: MachineState::new(),
-            suspended_continuation: None,
-            stowed_root_cell: None,
-            nested_child_depth: 0,
+            linear_continuation: None,
             last_bound_root: None,
-            suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
@@ -1171,11 +949,8 @@ impl JitEffectMachine {
                 old_space: crate::old_space::OldSpace::new(),
             }),
             machine_state: MachineState::new(),
-            suspended_continuation: None,
-            stowed_root_cell: None,
-            nested_child_depth: 0,
+            linear_continuation: None,
             last_bound_root: None,
-            suspended_finalized_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
@@ -1324,7 +1099,7 @@ impl JitEffectMachine {
 
     /// The shared executor every plain (non-suspending) run route is a thin
     /// wrapper over — see the route table above and [`ResultMaterialization`].
-    /// Owns, exactly once: the L7/session asserts, signal-handler install,
+    /// Owns, exactly once: session assertions, signal-handler install,
     /// registry install (+ its drop-guard), `VMContext`/`CompiledEffectMachine`
     /// construction, and — structurally, not by convention — reclaim arming
     /// LAST, after [`Self::materialize`] (the only place a
@@ -1340,10 +1115,7 @@ impl JitEffectMachine {
         exec_start: &str,
         resume_suffix: &str,
     ) -> Result<MaterializeResult, JitError> {
-        // L7: shared by every plain entry — starting a new turn while a prior
-        // one is still parked at resume_suspended isn't a GC-rooted invariant
-        // anything else enforces.
-        assert!(self.suspended_continuation.is_none(), "{l7_msg}");
+        let _ = l7_msg;
         let tags = match &mode {
             RunTarget::Pure => None,
             RunTarget::Effectful { .. } => Some(self.tags.map_err(JitError::MissingConTags)?),
@@ -1818,6 +1590,36 @@ impl JitEffectMachine {
     /// # Panics
     /// Panics on a non-session machine — heap retention across the suspension
     /// requires [`Self::compile_session`].
+    fn linear_value(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
+        match outcome {
+            ParkedOutcome::CompletedValue(value) => SuspendableOutcome::Completed(value),
+            ParkedOutcome::CompletedBinding { value, root } => {
+                self.last_bound_root = Some(root);
+                SuspendableOutcome::Completed(value)
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.linear_continuation = Some(id);
+                SuspendableOutcome::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+            other => panic!("linear value façade received {other:?}"),
+        }
+    }
+
+    fn take_linear_continuation(&self) -> Result<ContinuationId, JitError> {
+        self.linear_continuation.ok_or_else(|| {
+            JitError::Effect(EffectError::Handler(
+                "machine has no active linear continuation".to_string(),
+            ))
+        })
+    }
+
     pub fn run_suspendable<U, H: DispatchEffect<U>>(
         &mut self,
         table: &DataConTable,
@@ -1825,16 +1627,13 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
-        let func_id = self.func_id;
-        self.run_suspendable_with_entry(
-            func_id,
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            ResultMaterialization::Value,
-        )
-        .map(ParkedRaw::into_suspendable)
+        assert!(
+            self.linear_continuation.is_none(),
+            "resume the active continuation first"
+        );
+        let outcome =
+            self.run_suspendable_parked(table, handlers, user, suspend_tag, RealmId(0), &[])?;
+        Ok(self.linear_value(outcome))
     }
 
     /// Suspend-capable sibling of [`Self::run_fragment`]: drive an
@@ -1858,15 +1657,21 @@ impl JitEffectMachine {
         user: &U,
         suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.run_suspendable_with_entry(
+        assert!(
+            self.linear_continuation.is_none(),
+            "resume the active continuation first"
+        );
+        let outcome = self.run_fragment_suspendable_parked(
             func_id,
             table,
             handlers,
             user,
             suspend_tag,
-            ResultMaterialization::Value,
-        )
-        .map(ParkedRaw::into_suspendable)
+            RealmId(0),
+            ParkKind::Plain,
+            &[],
+        )?;
+        Ok(self.linear_value(outcome))
     }
 
     /// Persistent-binding-store BIND sibling of [`Self::run_fragment_suspendable`]: drive a
@@ -1885,15 +1690,21 @@ impl JitEffectMachine {
         suspend_tag: u64,
         forced: bool,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.run_suspendable_with_entry(
+        assert!(
+            self.linear_continuation.is_none(),
+            "resume the active continuation first"
+        );
+        let outcome = self.run_fragment_suspendable_parked(
             func_id,
             table,
             handlers,
             user,
             suspend_tag,
-            ResultMaterialization::Bind { forced },
-        )
-        .map(ParkedRaw::into_suspendable)
+            RealmId(0),
+            ParkKind::Binding { forced },
+            &[],
+        )?;
+        Ok(self.linear_value(outcome))
     }
 
     /// MULTI-binder sibling of [`Self::run_fragment_suspendable_binding`], and
@@ -1930,15 +1741,35 @@ impl JitEffectMachine {
         )]
         let n_fields = NonZeroUsize::new(n_fields)
             .expect("run_fragment_suspendable_projected requires at least one field");
-        self.run_suspendable_with_entry(
+        assert!(
+            self.linear_continuation.is_none(),
+            "resume the active continuation first"
+        );
+        let outcome = self.run_fragment_suspendable_parked(
             func_id,
             table,
             handlers,
             user,
             suspend_tag,
-            ResultMaterialization::Project { n_fields },
-        )
-        .map(ParkedRaw::into_projected)
+            RealmId(0),
+            ParkKind::Project { n_fields },
+            &[],
+        )?;
+        match outcome {
+            ParkedOutcome::CompletedProject { roots } => Ok(Suspendable::Completed(roots)),
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.linear_continuation = Some(id);
+                Ok(Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                })
+            }
+            other => panic!("linear project façade received {other:?}"),
+        }
     }
 
     /// BIND-AND-RENDER sibling of [`Self::run_fragment_suspendable_binding`],
@@ -1971,47 +1802,41 @@ impl JitEffectMachine {
         suspend_tag: u64,
         field0_forced: bool,
     ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
-        self.run_suspendable_with_entry(
+        assert!(
+            self.linear_continuation.is_none(),
+            "resume the active continuation first"
+        );
+        let outcome = self.run_fragment_suspendable_parked(
             func_id,
             table,
             handlers,
             user,
             suspend_tag,
-            ResultMaterialization::Render { field0_forced },
-        )
-        .map(ParkedRaw::into_render)
+            RealmId(0),
+            ParkKind::Render { field0_forced },
+            &[],
+        )?;
+        match outcome {
+            ParkedOutcome::CompletedRender { root, rendered } => {
+                Ok(Suspendable::Completed((root, rendered)))
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.linear_continuation = Some(id);
+                Ok(Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                })
+            }
+            other => panic!("linear render façade received {other:?}"),
+        }
     }
 
-    /// Shared suspend-capable run body, parametrized by the entry `func_id`.
-    /// [`Self::run_suspendable`] passes the machine's original entry;
-    /// [`Self::run_fragment_suspendable`] passes an [`Self::add_function`]-minted
-    /// fragment id. The lifecycle is identical either way (session vmctx, reclaim
-    /// arming, suspend-capable effect loop).
-    fn run_suspendable_with_entry<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        materialization: ResultMaterialization,
-    ) -> Result<ParkedRaw, JitError> {
-        self.run_suspendable_shared(
-            func_id,
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            materialization,
-            ParkTarget::Slot,
-        )
-    }
-
-    /// Shared suspendable run body for BOTH suspension paths, parametrized by
-    /// the entry `func_id` and by `park` — where a suspension puts its
-    /// continuation (the single `suspended_continuation` slot, or the
-    /// continuation registry). Everything before the epilogue is identical, so
-    /// the pre-existing entries stay byte-identical to the pre-registry body.
+    /// Shared suspendable run body, parametrized by the entry `func_id` and
+    /// registry parking policy.
     #[allow(clippy::too_many_arguments)]
     fn run_suspendable_shared<U, H: DispatchEffect<U>>(
         &mut self,
@@ -2027,54 +1852,10 @@ impl JitEffectMachine {
             self.session.is_some(),
             "run_suspendable requires a session machine (compile_session)"
         );
-        // L7: see run_with_entry's doc.
-        assert!(
-            self.suspended_continuation.is_none(),
-            "run_suspendable called while a continuation is already suspended — \
-             resume_suspended it first"
-        );
-        // Guard: the slot-vs-registry exclusion — no machine holds both a slot
-        // continuation and parked ones — is enforced here. The sibling
-        // direction (a parked-path entry while the SLOT is occupied) is
-        // already caught by the `suspended_continuation.is_none()` assert
-        // above, since every parked-path entry funnels through this same
-        // method too.
-        //
-        // HAZARD: without this check, parking a runtime resource scope and then calling a
-        // legacy slot-path entry reaches a mixed state that isn't caught
-        // until `resume_parked` panics later, after running with the
-        // slot-held continuation unrooted in the meantime. Reject it HERE
-        // instead, before anything is driven.
-        //
-        // A clean `Err`, deliberately NOT a panic/assert: parking a runtime resource scope and
-        // then calling a legacy entry is ordinary caller misuse (a plausible
-        // sequencing mistake, not a violated internal invariant), and it must
-        // reject the same way in every build, debug or release — a
-        // `debug_assert!` here would panic before this Err is ever reached in
-        // the debug builds tests run under, making the "clean rejection" this
-        // guard exists to provide untestable and unreachable in practice.
-        if let ParkTarget::Slot = park {
-            if !self.continuations.is_empty() {
-                return Err(JitError::Effect(EffectError::Handler(format!(
-                    "run_suspendable/run_fragment_suspendable* called while {} \
-                     continuation(s) are parked in the registry — the slot path and the \
-                     registry path must not mix (a slot-held continuation is unrooted; \
-                     parked-path activity can collect while this ran). Use the parked \
-                     path (run_suspendable_parked / run_fragment_suspendable_parked) \
-                     instead.",
-                    self.continuations.len()
-                ))));
-            }
-        }
         let tags = self.tags.map_err(JitError::MissingConTags)?;
         crate::signal_safety::install();
-        // The parked path installs THAT runtime resource scope's cancel flag (lazily minted)
-        // instead of the machine-level one; the slot path installs
-        // `self.cancel_flag`.
-        let park_cancel_flag: Arc<AtomicBool> = match park {
-            ParkTarget::Slot => self.cancel_flag.clone(),
-            ParkTarget::Registry { realm, .. } => self.realm_cancel_flag(realm),
-        };
+        let ParkTarget::Registry { realm, .. } = &park;
+        let park_cancel_flag: Arc<AtomicBool> = self.realm_cancel_flag(*realm);
         let mut _guard = self.install_registries_with_cancel_flag(park_cancel_flag.clone());
         // SAFETY: finalized JIT code pointer; calling convention per contract.
         let func_ptr: unsafe extern "C" fn(*mut VMContext) -> *mut u8 =
@@ -2137,21 +1918,16 @@ impl JitEffectMachine {
     /// Errors if the machine is not currently suspended.
     pub fn resume_suspended<U, H: DispatchEffect<U>>(
         &mut self,
-        table: &DataConTable,
+        _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
+        _suspend_tag: u64,
         input: ResumeInput,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.resume_suspended_inner(
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            input,
-            ResultMaterialization::Value,
-        )
-        .map(ParkedRaw::into_suspendable)
+        let id = self.take_linear_continuation()?;
+        let outcome = self.resume_parked(id, handlers, user, input)?;
+        self.linear_continuation = None;
+        Ok(self.linear_value(outcome))
     }
 
     /// Persistent-binding-store BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
@@ -2161,22 +1937,18 @@ impl JitEffectMachine {
     /// tenuring a Tier1 closure as-is.
     pub fn resume_suspended_binding<U, H: DispatchEffect<U>>(
         &mut self,
-        table: &DataConTable,
+        _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
+        _suspend_tag: u64,
         input: ResumeInput,
         forced: bool,
     ) -> Result<SuspendableOutcome, JitError> {
-        self.resume_suspended_inner(
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            input,
-            ResultMaterialization::Bind { forced },
-        )
-        .map(ParkedRaw::into_suspendable)
+        let _ = forced;
+        let id = self.take_linear_continuation()?;
+        let outcome = self.resume_parked(id, handlers, user, input)?;
+        self.linear_continuation = None;
+        Ok(self.linear_value(outcome))
     }
 
     /// MULTI-binder sibling of [`Self::resume_suspended_binding`]: re-enter a
@@ -2193,10 +1965,10 @@ impl JitEffectMachine {
     /// not currently suspended.
     pub fn resume_suspended_projected<U, H: DispatchEffect<U>>(
         &mut self,
-        table: &DataConTable,
+        _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
+        _suspend_tag: u64,
         input: ResumeInput,
         n_fields: usize,
     ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
@@ -2204,17 +1976,26 @@ impl JitEffectMachine {
             clippy::expect_used,
             reason = "resume_suspended_projected requires at least one field"
         )]
-        let n_fields = NonZeroUsize::new(n_fields)
+        let _ = NonZeroUsize::new(n_fields)
             .expect("resume_suspended_projected requires at least one field");
-        self.resume_suspended_inner(
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            input,
-            ResultMaterialization::Project { n_fields },
-        )
-        .map(ParkedRaw::into_projected)
+        let id = self.take_linear_continuation()?;
+        let outcome = self.resume_parked(id, handlers, user, input)?;
+        self.linear_continuation = None;
+        match outcome {
+            ParkedOutcome::CompletedProject { roots } => Ok(Suspendable::Completed(roots)),
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.linear_continuation = Some(id);
+                Ok(Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                })
+            }
+            other => panic!("linear project façade received {other:?}"),
+        }
     }
 
     /// BIND-AND-RENDER sibling of [`Self::resume_suspended_binding`]: re-enter
@@ -2226,104 +2007,40 @@ impl JitEffectMachine {
     /// [`Self::run_fragment_and_bind_render`].
     pub fn resume_suspended_render<U, H: DispatchEffect<U>>(
         &mut self,
-        table: &DataConTable,
+        _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
+        _suspend_tag: u64,
         input: ResumeInput,
         field0_forced: bool,
     ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
-        self.resume_suspended_inner(
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            input,
-            ResultMaterialization::Render { field0_forced },
-        )
-        .map(ParkedRaw::into_render)
-    }
-
-    /// Shared body of every slot-path resume, parametrized by the
-    /// [`ResultMaterialization`] the completing turn's policy calls for —
-    /// `Value` (plain), `Bind`, `Project`, or `Render`.
-    fn resume_suspended_inner<U, H: DispatchEffect<U>>(
-        &mut self,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        input: ResumeInput,
-        materialization: ResultMaterialization,
-    ) -> Result<ParkedRaw, JitError> {
-        // PEEK the continuation — do NOT consume it yet. The A5 NF-force
-        // rejects a bottom-bearing answer WITHOUT consuming the continuation,
-        // so the caller can retry with a corrected answer; only after the
-        // answer is verified NF do we `.take()` (below).
-        if self.suspended_continuation.is_none() {
-            return Err(JitError::Effect(EffectError::Handler(
-                "resume_suspended called on a machine that is not suspended".into(),
-            )));
+        let _ = field0_forced;
+        let id = self.take_linear_continuation()?;
+        let outcome = self.resume_parked(id, handlers, user, input)?;
+        self.linear_continuation = None;
+        match outcome {
+            ParkedOutcome::CompletedRender { root, rendered } => {
+                Ok(Suspendable::Completed((root, rendered)))
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.linear_continuation = Some(id);
+                Ok(Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                })
+            }
+            other => panic!("linear render façade received {other:?}"),
         }
-        // Defense-in-depth companion to the entry guard in
-        // `run_suspendable_shared` (codex-review-2026-08-08.md item 11): by
-        // construction, the registry can only gain entries while the slot is
-        // empty (the same shared method's L7 assert), so reaching a slot
-        // resume with the registry non-empty should be unreachable. Not a
-        // caller-facing error path — a caller cannot trigger this from the
-        // public API — so `debug_assert!`, not a typed `Err`, matching
-        // `assert_rooting_receipt`'s discipline for an internal invariant.
-        debug_assert!(
-            self.continuations.is_empty(),
-            "slot resume reached with {} realm(s) parked in the registry — \
-             the entry guard in run_suspendable_shared should have prevented this",
-            self.continuations.len()
-        );
-        // A5 — NF-force the data-kinded answer BEFORE consuming the
-        // continuation. A bottom anywhere in the answer (a residual unforced
-        // thunk — an `undefined`/`⊥` the child-answer bridge would have raised,
-        // caught here as defense-in-depth) fails the answer as a retryable
-        // error and leaves `suspended_continuation` intact. Function-bearing
-        // answer types are rejected at extract, so every field of a
-        // data-kinded answer is walkable by construction; the walk terminates
-        // on a visited-set (cyclic data).
-        if let ResumeInput::Answer(val) = &input {
-            answer_force_nf(val).map_err(|reason| {
-                JitError::Effect(EffectError::Handler(format!(
-                    "resume answer is not in normal form (bottom in the answer): {reason}"
-                )))
-            })?;
-        }
-        // Answer verified NF (or this is an Abort) — NOW consume the
-        // continuation. Every early return above left it stowed.
-        #[allow(
-            clippy::expect_used,
-            reason = "suspended_continuation present (checked is_some above)"
-        )]
-        let continuation = self
-            .suspended_continuation
-            .take()
-            .expect("suspended_continuation present (checked is_some above)");
-        let flag = self.cancel_flag.clone();
-        self.resume_applied(
-            continuation,
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            input,
-            materialization,
-            ParkTarget::Slot,
-            flag,
-        )
     }
 
     /// Apply an already-acquired continuation to a resume `input` and drive to
-    /// the next suspension or completion. Shared by BOTH resume paths: the
-    /// single-slot [`Self::resume_suspended_inner`] (which `take()`s the slot)
-    /// and the registry [`Self::resume_parked`] (which removes the frame and
-    /// deregisters its root). Both callers have already run the A5 NF-force, so
-    /// by the time control reaches here the continuation is committed.
+    /// the next suspension or completion. The caller has already run the A5
+    /// NF-force, so by the time control reaches here the continuation is
+    /// committed.
     #[allow(clippy::too_many_arguments)]
     fn resume_applied<U, H: DispatchEffect<U>>(
         &mut self,
@@ -2335,10 +2052,8 @@ impl JitEffectMachine {
         input: ResumeInput,
         materialization: ResultMaterialization,
         park: ParkTarget,
-        // A3: the flag to install for THIS run — `self.cancel_flag` for the
-        // slot path, or (`resume_parked`'s) already-cloned
-        // `ContinuationFrame::cancel_flag` for the registry path, so a
-        // resume never does a second `realm_cancel_flags` lookup.
+        // A3: the frame's already-cloned cancellation flag, so resume never
+        // does a second `realm_cancel_flags` lookup.
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<ParkedRaw, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
@@ -2458,10 +2173,10 @@ impl JitEffectMachine {
     /// What stays HERE, because it is the suspendable path's own concern, in
     /// this order:
     ///
-    /// 1. the machine-level stash — on the SLOT path a `Bind`'s tenured root
-    ///    goes to `self.last_bound_root`, because
+    /// 1. the compatibility façade's machine-level stash: a `Bind`'s tenured
+    ///    root goes to `self.last_bound_root`, because
     ///    [`SuspendableOutcome::Completed`] is fixed at a bare `Value` and
-    ///    cannot carry it; on the REGISTRY path it is returned INLINE via
+    ///    cannot carry it. Registry-native calls return it inline via
     ///    `ParkedOutcome::CompletedBinding::root` instead, so that two runtime resource scopes'
     ///    binds completing before either is drained cannot overwrite one
     ///    machine-level slot. `Project`/`Render` never stash: they complete
@@ -2479,12 +2194,8 @@ impl JitEffectMachine {
     /// (`run_suspendable_shared`, `resume_applied`) arm strictly AFTER this
     /// returns, on every exit path.
     ///
-    /// `park` selects where a SUSPENSION puts its continuation: the single
-    /// `suspended_continuation` slot ([`ParkTarget::Slot`], every pre-existing
-    /// entry) or the continuation registry ([`ParkTarget::Registry`]). `table`
-    /// and `park_cancel_flag` are only consulted on the registry path, to
-    /// populate the newly-parked [`ContinuationFrame`] (A3/A4) — the slot path
-    /// ignores both, unchanged. Enforced constraint 1 (realm-lanes/B-prefix-
+    /// `park` supplies the registry metadata for a newly suspended
+    /// [`ContinuationFrame`] (A3/A4). Enforced constraint 1 (realm-lanes/B-prefix-
     /// compat) is checked and established at ENTRY to the parked path
     /// ([`Self::enter_parked_path`], called from the public
     /// `run_fragment_suspendable_parked`/`resume_parked` entries) — by the
@@ -2515,14 +2226,6 @@ impl JitEffectMachine {
                         Ok(ParkedRaw::Completed(ParkedOutcome::CompletedValue(value)))
                     }
                     MaterializeResult::Bind(slot) => {
-                        // Laundering a `!Send` `RootSlot` across the eval-thread
-                        // boundary — see the module docstring's `RootSlot: !Send`
-                        // contract for why. Only the SLOT path stashes here; the
-                        // registry path returns its root inline in
-                        // `ParkedOutcome::CompletedBinding::root` instead.
-                        if let ParkTarget::Slot = park {
-                            self.last_bound_root = Some(slot);
-                        }
                         // Bridge the TENURED (rooted, stable) value for the
                         // turn's rendered result — never `done_ptr`, which
                         // tenure has just forwarded. SAFETY: slot.current() is
@@ -2593,13 +2296,8 @@ impl JitEffectMachine {
                 // child GC as a persistent root, and hand the slot up so the
                 // harness can apply it by reference via `run_child`.
                 let has_finalized_closure = request_carries_closure_sentinel(&request);
-                // On the slot path the tenured slot goes to
-                // `self.suspended_finalized_root` (only written when
-                // `has_finalized_closure`, so an unrelated suspension never
-                // clobbers a stale value there); on the registry path it
-                // rides to `park_continuation` instead and lands on the
-                // frame — never on a machine-level field a second runtime resource scope
-                // could overwrite.
+                // The root rides into `park_continuation` and lands on the
+                // frame, so another realm cannot overwrite it.
                 let mut parked_finalized_root = None;
                 // `continuation` is a raw heap pointer used AFTER this block
                 // (stored below, or handed to `park_continuation`).
@@ -2624,31 +2322,23 @@ impl JitEffectMachine {
                         );
                     }
                     let slot = self.tenure_finalized_payload(machine, request_ptr)?;
-                    match park {
-                        ParkTarget::Slot => self.suspended_finalized_root = Some(slot),
-                        ParkTarget::Registry { .. } => parked_finalized_root = Some(slot),
-                    }
+                    parked_finalized_root = Some(slot);
                 }
-                let id = match park {
-                    ParkTarget::Slot => {
-                        self.suspended_continuation = Some(continuation);
-                        None
-                    }
-                    ParkTarget::Registry {
-                        realm,
-                        kind,
-                        handled_prefix,
-                    } => Some(self.park_continuation(
-                        continuation,
-                        realm,
-                        kind,
-                        suspend_tag,
-                        park_cancel_flag,
-                        Arc::new(table.clone()),
-                        parked_finalized_root,
-                        handled_prefix,
-                    )),
-                };
+                let ParkTarget::Registry {
+                    realm,
+                    kind,
+                    handled_prefix,
+                } = park;
+                let id = self.park_continuation(
+                    continuation,
+                    realm,
+                    kind,
+                    suspend_tag,
+                    park_cancel_flag,
+                    Arc::new(table.clone()),
+                    parked_finalized_root,
+                    handled_prefix,
+                );
                 Ok(ParkedRaw::Suspended {
                     request,
                     has_finalized_closure,
@@ -2728,10 +2418,6 @@ impl JitEffectMachine {
     /// it here only removes the machine's own handle, not the registration), so
     /// a subsequent `run_child` that references it by slot address is GC-safe.
     /// `None` unless the machine suspended on a closure-valued finalize.
-    pub fn take_finalized_root(&mut self) -> Option<crate::old_space::RootSlot> {
-        self.suspended_finalized_root.take()
-    }
-
     /// Run a pure (non-effectful) program to completion.
     ///
     /// Skips freer-simple effect dispatch entirely — calls the compiled function
@@ -3153,12 +2839,10 @@ impl JitEffectMachine {
     /// Whether this machine is currently suspended at a typed yield (`Ask`),
     /// holding a stowed continuation awaiting `resume_suspended`.
     pub fn is_suspended(&self) -> bool {
-        self.suspended_continuation.is_some()
+        self.linear_continuation.is_some()
     }
 
-    /// Number of stowed GC roots currently registered (test/diagnostic
-    /// accessor — 1 while a nested child is running against a suspended parent,
-    /// 0 otherwise).
+    /// Number of parked-continuation GC roots currently registered.
     pub fn stowed_roots_count(&self) -> usize {
         self.machine_state.stowed_roots_count()
     }
@@ -3190,8 +2874,7 @@ impl JitEffectMachine {
     /// (`Self::tenure_finalized_payload`) and a later resume corrupts a parked
     /// frame's own reference into what tenuring evacuated (the tenure-then-
     /// resume rooting family — see `tidepool-codegen/CLAUDE.md`'s diagnostics
-    /// table). Calling it with the machine suspended (slot path) or holding
-    /// parked frames (registry path) is exactly the intended use.
+    /// table). Calling it while frames are parked is exactly the intended use.
     ///
     /// Installs registries and builds an ordinary session `VMContext` (the
     /// same construction `with_active_run` uses), calls
@@ -3230,65 +2913,10 @@ impl JitEffectMachine {
         }
     }
 
-    // ----------------------------------------------------------------------
-    // Nested child runs on a suspended machine — see the module docstring's
-    // "Nested child runs on a suspended machine" section for the invariant.
-    // ----------------------------------------------------------------------
-
-    /// Enter nested-child mode: MOVE the stowed continuation out of
-    /// `suspended_continuation` into a heap-stable `Box` cell, register that
-    /// cell in `stowed_roots`, and increment `nested_child_depth`. Returns a
-    /// [`NestedChildGuard`] whose `Drop` reads the (GC-current) pointer back out
-    /// and restores it into `suspended_continuation`, deregisters the root, and
-    /// decrements the depth.
-    ///
-    /// Moving the pointer OUT of `suspended_continuation` for the child's
-    /// duration is load-bearing two ways: (1) `suspended_continuation` reads
-    /// `None` while the child runs, so the plain run entries' L7 asserts pass
-    /// naturally — the child fragment goes through `run_fragment*` exactly like
-    /// any turn — and (2) the continuation is protected NOT by the (now-absent)
-    /// temporal argument but by the `stowed_roots` registration on the
-    /// heap-stable cell, which every child collection traces and rewrites in
-    /// place. On guard drop the machine's `suspended_continuation` again points
-    /// at the (possibly relocated) continuation.
-    ///
-    /// # Panics
-    /// Panics if the machine is not suspended (no continuation to root) — a
-    /// nested child requires a suspended parent by construction.
-    fn enter_nested_child(&mut self) -> NestedChildGuard {
-        #[allow(
-            clippy::expect_used,
-            reason = "enter_nested_child on a machine that is not suspended"
-        )]
-        let cont = self
-            .suspended_continuation
-            .take()
-            .expect("enter_nested_child on a machine that is not suspended");
-        // Heap-stable cell: the machine moves between threads (stow XOR run),
-        // but the Box's pointee address is a stable heap allocation, so the
-        // registered slot address stays valid across the move.
-        let mut cell = Box::new(cont);
-        let slot: *mut *mut u8 = &mut *cell;
-        self.stowed_root_cell = Some(cell);
-        // SAFETY: `slot` is the address of the Box's inner cell, stable for the
-        // Box's life (until the guard drops and puts the pointer back). The GC
-        // reads and rewrites `*slot` in place on every collection until then.
-        self.machine_state.register_stowed_root(slot);
-        self.nested_child_depth += 1;
-        NestedChildGuard {
-            machine_state: &self.machine_state as *const MachineState,
-            suspended_continuation: &mut self.suspended_continuation as *mut Option<*mut u8>,
-            stowed_root_cell: &mut self.stowed_root_cell as *mut Option<Box<*mut u8>>,
-            nested_child_depth: &mut self.nested_child_depth as *mut usize,
-            slot,
-        }
-    }
-
     /// Run a fragment as a CHILD against this suspended parent, dispatching
     /// effects through the handler HList exactly as [`Self::run_fragment`] does.
-    /// The parent's stowed continuation is GC-rooted for the child's duration
-    /// (see [`Self::enter_nested_child`]); a child collection — including heap
-    /// doubling — evacuates it, so the parent resumes correctly afterward.
+    /// The parent's continuation remains registry-rooted; a child collection,
+    /// including heap doubling, evacuates it so the parent resumes correctly.
     ///
     /// The child fragment reads the parent's session bindings zero-copy through
     /// its `external_env` (resolved when the fragment was `add_function`-minted),
@@ -3306,13 +2934,9 @@ impl JitEffectMachine {
         user: &U,
     ) -> Result<Value, JitError> {
         assert!(
-            self.suspended_continuation.is_some(),
-            "run_child_fragment requires a suspended parent (call run_fragment on an idle machine)"
+            self.linear_continuation.is_some(),
+            "run_child_fragment requires a suspended parent"
         );
-        let _nested = self.enter_nested_child();
-        // With the continuation moved into the registered stowed cell,
-        // `suspended_continuation` is None — the plain run entry's L7 assert
-        // passes, and the fragment drives byte-identically to any turn.
         self.run_with_entry(func_id, table, handlers, user)
     }
 
@@ -3323,17 +2947,14 @@ impl JitEffectMachine {
     /// Panics if the machine is not currently suspended.
     pub fn run_child_fragment_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
         assert!(
-            self.suspended_continuation.is_some(),
+            self.linear_continuation.is_some(),
             "run_child_fragment_pure requires a suspended parent"
         );
-        let _nested = self.enter_nested_child();
         self.run_pure_with_entry(func_id)
     }
 
     // ----------------------------------------------------------------------
-    // RUNTIME RESOURCE SCOPE PROTOTYPE — the parked-continuation registry. See the module
-    // docstring's "The parked-continuation registry (runtime resource scope prototype)"
-    // section for the invariant.
+    // Parked-continuation registry.
     // ----------------------------------------------------------------------
 
     /// Check `incoming` — a runtime resource scope's handled prefix, the effect names for tags
@@ -3508,13 +3129,9 @@ impl JitEffectMachine {
         id
     }
 
-    /// Parked sibling of [`Self::run_suspendable`]: drive the machine's entry
-    /// through the same suspend path, but PARK a suspension in the continuation
-    /// registry under `realm` instead of stowing it in the single slot.
-    ///
-    /// `suspended_continuation` is left `None` throughout, so the machine stays
-    /// usable: further fragments, further parked turns, and resumes of OTHER
-    /// parked continuations all run against it while this one waits.
+    /// Drive the machine's entry and park any suspension in the continuation
+    /// registry under `realm`. Further fragments, parked turns, and resumes of
+    /// other continuations can run while this one waits.
     ///
     /// `handled_prefix` must be EXACTLY EQUAL to every other non-empty
     /// prefix already on this machine, or empty — see
@@ -3633,14 +3250,6 @@ impl JitEffectMachine {
     /// method no longer accepts a caller-supplied table at all, so resuming a
     /// frame against a foreign row is impossible by construction.
     ///
-    /// # Panics
-    /// Panics if the single `suspended_continuation` slot is occupied. The two
-    /// suspension paths must not be MIXED on one machine: a slot-held
-    /// continuation is unregistered, so driving a parked resume against it
-    /// would let this run's collections free the slot-held one. This is the L7
-    /// assert's sibling for the registry path, and it is why a caller one level
-    /// up (`ResidentSession::run_child`'s `ChildSuspended` wall) has to convert
-    /// its parent to the registry too rather than park only the child.
     pub fn resume_parked<U, H: DispatchEffect<U>>(
         &mut self,
         id: ContinuationId,
@@ -3648,12 +3257,6 @@ impl JitEffectMachine {
         user: &U,
         input: ResumeInput,
     ) -> Result<ParkedOutcome, JitError> {
-        assert!(
-            self.suspended_continuation.is_none(),
-            "resume_parked called while the single-slot continuation is occupied — \
-             the slot-held continuation is UNREGISTERED and this run's collections \
-             would free it. Convert the caller to the parked path; do not mix."
-        );
         // PEEK the frame — do NOT remove it yet (A5).
         let (realm, kind, suspend_tag, handled_prefix) = match self.continuations.get(&id) {
             Some(frame) => (
@@ -3770,7 +3373,7 @@ impl JitEffectMachine {
         self.continuations.get(&id).map(|f| f.realm)
     }
 
-    // --- value handles + scope exit (one-session plan, pillars A/B) --------
+    // --- value handles + scope exit ---------------------------------------
 
     /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
     /// the frame parked under `id` (tenured + persistent-rooted at park time).
@@ -4029,58 +3632,9 @@ impl JitEffectMachine {
     }
 }
 
-/// RAII proof that a nested child is running against a suspended parent.
-/// On drop it reads the (GC-current) continuation pointer back
-/// out of the heap-stable stowed cell and restores it into the machine's
-/// `suspended_continuation`, deregisters the stowed root, drops the cell, and
-/// decrements the nested-child depth — leaving the machine exactly as suspended
-/// as it was on entry, but with the continuation pointer updated to wherever the
-/// child's collections relocated it.
-///
-/// All four raw pointers point into the owning `JitEffectMachine`. The guard is
-/// a local in `run_child_fragment*` and drops at that method's end, strictly
-/// within the method's `&mut self` scope — so `self` cannot have moved or
-/// dropped while the guard is alive. This mirrors `RegistryGuard`, which
-/// likewise holds raw pointers into its owning call frame rather than a borrow
-/// (so `self` stays free for the run call it wraps).
-struct NestedChildGuard {
-    machine_state: *const MachineState,
-    suspended_continuation: *mut Option<*mut u8>,
-    stowed_root_cell: *mut Option<Box<*mut u8>>,
-    nested_child_depth: *mut usize,
-    slot: *mut *mut u8,
-}
-
-impl Drop for NestedChildGuard {
-    fn drop(&mut self) {
-        // SAFETY: all pointers target the owning JitEffectMachine's fields,
-        // live for the guard's whole scope (the guard is a local in the child
-        // run method, which holds `&mut self`). The stowed cell holds the
-        // GC-current continuation pointer (rewritten in place by any child
-        // collection through the registered slot); read it back out and restore
-        // it so the parent stays suspended on the relocated continuation.
-        unsafe {
-            (*self.machine_state).deregister_stowed_root(self.slot);
-            #[allow(
-                clippy::expect_used,
-                reason = "stowed cell present for the guard's life"
-            )]
-            let cell = (*self.stowed_root_cell)
-                .take()
-                .expect("stowed cell present for the guard's life");
-            *self.suspended_continuation = Some(*cell);
-            debug_assert!(
-                *self.nested_child_depth > 0,
-                "nested_child_depth underflow — double drop"
-            );
-            *self.nested_child_depth = (*self.nested_child_depth).saturating_sub(1);
-        }
-    }
-}
-
 impl Drop for JitEffectMachine {
     fn drop(&mut self) {
-        // RUNTIME RESOURCE SCOPE PROTOTYPE: deregister every parked continuation's stowed root
+        // Deregister every parked continuation's stowed root
         // BEFORE its `Box` cell is freed (the `HashMap` drops with `self` after
         // this body returns). `free_session_heap` below also clears stowed
         // roots, but only on a session machine — doing it here makes the
@@ -4242,7 +3796,7 @@ pub enum ResumeInput {
     /// [`tidepool_eval::value::Value`] into the heap: the handle's GC-current
     /// pointer is the response, verbatim. This is how a closure (or any
     /// opaque value) is DELIVERED into a sibling continuation on the same
-    /// heap (one-session plan, the handle-delivery rule). No A5 NF-force applies: the payload
+    /// heap. No A5 NF-force applies: the payload
     /// is already a real heap value whose thunks are ordinary lazy structure,
     /// not a bridged answer that could smuggle a bottom past validation. The
     /// handle is NOT consumed (scope-owned borrow; released by
@@ -4858,50 +4412,6 @@ mod tests {
             matches!(res, Err(JitError::VarIdCollision(_))),
             "Expected VarIdCollision, got success"
         );
-    }
-
-    /// `suspended_continuation` is not a GC root, so every plain run entry
-    /// must assert it is `None` (the L7 assert) rather than rely on external
-    /// discipline. Rather than drive a real `Ask`-boundary suspension (heavy
-    /// effect-machine setup), this directly sets the private field to
-    /// simulate "already suspended" and confirms each entry's assert fires —
-    /// a clean panic, not silent corruption of a live continuation.
-    #[test]
-    fn run_entries_assert_when_a_continuation_is_already_suspended() {
-        use tidepool_repr::tree::RecursiveTree;
-        use tidepool_repr::types::Literal;
-        use tidepool_repr::CoreFrame;
-
-        let expr = RecursiveTree {
-            nodes: vec![CoreFrame::Lit(Literal::LitInt(42))],
-        };
-        let table = DataConTable::new();
-        let mut machine = JitEffectMachine::compile_session(&expr, &table, 1 << 16)
-            .expect("compile_session failed");
-        let func_id = machine.func_id;
-
-        macro_rules! assert_panics_while_suspended {
-            ($name:expr, $call:expr) => {
-                machine.suspended_continuation = Some(std::ptr::null_mut());
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe($call));
-                assert!(
-                    result.is_err(),
-                    "{} must panic while a continuation is suspended (L7)",
-                    $name
-                );
-                machine.suspended_continuation = None;
-            };
-        }
-
-        assert_panics_while_suspended!("run_pure", || {
-            let _ = machine.run_pure();
-        });
-        assert_panics_while_suspended!("run_fragment_pure", || {
-            let _ = machine.run_fragment_pure(func_id);
-        });
-        assert_panics_while_suspended!("run_pure_and_bind", || {
-            let _ = machine.run_pure_and_bind(func_id);
-        });
     }
 
     // ---------------------------------------------------------------------------

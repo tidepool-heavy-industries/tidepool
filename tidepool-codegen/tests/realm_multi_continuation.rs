@@ -1,10 +1,6 @@
 //! REALM FALSIFIER — many continuations parked in ONE machine, resumed out of
-//! order, with GC forced between the parks. Tests the claim that PERMANENT
-//! ROOTING — not the temporal argument the single-slot path relies on (safe
-//! only because no GC can run on a suspended machine, or because a nested
-//! child's continuation is a registered GC root) — is what keeps a parked
-//! continuation safe: every parked continuation is a REGISTERED GC ROOT for
-//! its whole parked lifetime.
+//! order, with GC forced between the parks. Every parked continuation must be
+//! a registered GC root for its whole parked lifetime.
 //!
 //! Every test runs under `TIDEPOOL_GC_POISON` + `TIDEPOOL_HEAP_VERIFY` with a
 //! nursery small enough to collect for real, so a missed root surfaces as a
@@ -22,6 +18,7 @@ use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::{
     ContinuationId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
+    SuspendableOutcome,
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
@@ -589,11 +586,6 @@ fn assert_rooting_receipt(machine: &JitEffectMachine, expect: usize) {
          parked lifetime — a count below the parked count means one is protected \
          by nothing"
     );
-    assert!(
-        !machine.is_suspended(),
-        "the parked path must leave `suspended_continuation` empty so the plain \
-         entries' L7 asserts keep passing"
-    );
 }
 
 /// Park the machine's ENTRY (a suspending parent) into `realm`.
@@ -627,10 +619,8 @@ fn park_entry(
     }
 }
 
-/// Park a FRAGMENT that itself suspends — the case `ChildSuspended` forbids on
-/// the single-slot path. Nothing here is a "child": on the parked path the
-/// machine is not suspended, so this is an ordinary suspendable fragment run
-/// that happens to leave a second continuation parked next to the first.
+/// Park a fragment that itself suspends, leaving a second continuation next
+/// to the first.
 fn park_fragment(
     machine: &mut JitEffectMachine,
     table: &DataConTable,
@@ -706,9 +696,7 @@ fn resume_and_verify(
 }
 
 /// Run a pure GC-forcing fragment through the PLAIN entry against a machine
-/// holding parked continuations, and assert it really collected. The plain
-/// entry is the point: with parked continuations the machine is not suspended,
-/// so no nested-child mode is needed and the L7 assert passes.
+/// holding parked continuations, and assert it really collected.
 fn force_gc_on(machine: &mut JitEffectMachine, table: &DataConTable, name: &str, depth: usize) {
     let before = tidepool_codegen::host_fns::gc_trigger_call_count();
     let frag = machine
@@ -763,8 +751,7 @@ fn f1_two_parks_resumed_child_first() {
         let a = park_entry(&mut machine, &table, RealmId(0), 5);
         assert_rooting_receipt(&machine, 1);
 
-        // Park B — a fragment that ALSO suspends. On the single-slot path this
-        // is `ChildSuspended`; here it is just a second frame in the registry.
+        // Park B — a fragment that also suspends.
         let b = park_fragment(&mut machine, &table, RealmId(1), "child_b", 888, 6);
         assert_rooting_receipt(&machine, 2);
         assert_ne!(a, b, "distinct parks get distinct ids");
@@ -997,72 +984,61 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// THE TWO PATHS MUST NOT MIX. A slot-held continuation is UNREGISTERED — the
-// single-slot path protects it by the temporal argument alone. Driving a parked
-// resume against it would run collections with an unrooted continuation live.
-//
-// This is what makes lifting the `ChildSuspended` wall a CONVERSION rather than
-// an addition: a caller one level up cannot park only the child and leave the
-// parent in the slot.
-//
-// Prior bug: this used to be reachable — a caller
-// could park a realm, then call a legacy slot-path entry (`run_suspendable`)
-// successfully, reaching the mixed state, and only find out later when
-// `resume_parked` panicked. `run_suspendable_shared`'s entry guard (the
-// interim fix; the structural fix — registry-only suspension — is a separate
-// future lane) now rejects the slot-path entry itself, cleanly, the moment
-// the registry is non-empty, so the mixed state is unreachable through the
-// public API at all. The test below exercises exactly that: the
-// park-then-legacy-entry sequence is rejected AT ENTRY, not left to panic
-// downstream at `resume_parked`.
+// The capacity-one façade and explicit realm API share the same registry. A
+// façade continuation therefore remains rooted while an independently parked
+// realm is live, and either can be resumed first.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
 #[serial]
-fn park_then_legacy_slot_suspend_is_rejected_cleanly_at_entry() {
+fn linear_facade_and_explicit_park_are_rooted_together() {
     in_test_thread(|| {
         let table = adversarial_table();
         let mut machine =
             JitEffectMachine::compile_session(&build_suspending_parent(11, 2), &table, 1 << 14)
                 .expect("compile_session");
 
-        // Park one continuation in the REGISTRY first.
+        // Park one explicit continuation first.
         let parked = park_fragment(&mut machine, &table, RealmId(0), "registry_park", 22, 3);
         assert_rooting_receipt(&machine, 1);
 
-        // A legacy slot-path entry, attempted while a realm is parked, must
-        // be rejected cleanly — not panic, and not succeed into the mixed
-        // state.
-        let err = match machine.run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG) {
-            Ok(_) => panic!(
-                "run_suspendable must not succeed while a continuation is parked in the registry"
-            ),
-            Err(e) => e,
+        match machine
+            .run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG)
+            .expect("linear façade run")
+        {
+            SuspendableOutcome::Suspended { request, .. } => {
+                assert_eq!(expect_int(&request), 2);
+            }
+            SuspendableOutcome::Completed(_) => panic!("the linear run should suspend"),
         };
-        assert!(
-            format!("{err}").contains("parked") || format!("{err}").contains("registry"),
-            "rejection must name the parked-registry cause, got: {err}"
-        );
+        assert!(machine.is_suspended());
+        assert_rooting_receipt(&machine, 2);
 
-        // The machine is untouched by the rejected attempt: still not
-        // suspended in the slot, the park is still there and still rooted.
-        assert!(
-            !machine.is_suspended(),
-            "a rejected slot-path attempt must not have stowed a continuation"
-        );
-        assert_rooting_receipt(&machine, 1);
-        assert_eq!(machine.parked_count(), 1, "the registry park is untouched");
-
-        // The parked continuation is still resumable normally — the
-        // rejection left the machine exactly as it was.
+        // Resume the explicit continuation first; the façade continuation is
+        // still present and rooted.
         resume_and_verify(&mut machine, parked, 3, 22);
+        assert!(machine.is_suspended());
+        assert_rooting_receipt(&machine, 1);
+
+        match machine
+            .resume_suspended(
+                &table,
+                &mut NoDispatch,
+                &(),
+                ASK_TAG,
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(2))),
+            )
+            .expect("resume linear façade")
+        {
+            SuspendableOutcome::Completed(value) => assert_pair_result(&value, 11, 2),
+            SuspendableOutcome::Suspended { .. } => panic!("linear resume should complete"),
+        }
         assert_rooting_receipt(&machine, 0);
     });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// The registry does not disturb the single-slot path's guard rail: an unknown
-// id is a clean error, and a resumed id is never reused.
+// An unknown id is a clean error, and a resumed id is never reused.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]

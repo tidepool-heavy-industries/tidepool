@@ -479,8 +479,7 @@ impl Session {
 
     /// The rooting receipt the parking contract offers consumers, asserted at
     /// every quiescent point: a parked continuation must be a REGISTERED GC
-    /// root for its whole parked lifetime, and the parked path must leave the
-    /// single slot empty (invariant (b) — the two paths never mix).
+    /// root for its whole parked lifetime.
     fn assert_rooting_receipt(&self) {
         assert_eq!(
             self.machine.stowed_roots_count(),
@@ -489,10 +488,6 @@ impl Session {
              parked lifetime (parked={}, stowed={})",
             self.machine.parked_count(),
             self.machine.stowed_roots_count()
-        );
-        assert!(
-            !self.machine.is_suspended(),
-            "the parked path must leave `suspended_continuation` empty"
         );
     }
 

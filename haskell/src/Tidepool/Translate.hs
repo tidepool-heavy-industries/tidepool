@@ -42,7 +42,7 @@ import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey, mkUnique)
 import GHC.Types.Unique.Supply (UniqSupply, mkSplitUniqSupply, takeUniqFromSupply)
 import GHC.Types.Var.Env (VarEnv, emptyVarEnv, extendVarEnv, lookupVarEnv)
-import GHC.Core.DataCon (DataCon, dataConRepArity, dataConRepArgTys, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConSrcBangs, dataConOrigArgTys, dataConFieldLabels, dataConTyCon, isUnboxedTupleDataCon, isVanillaDataCon, HsSrcBang(..), HsBang(..), SrcUnpackedness(..), SrcStrictness(..))
+import GHC.Core.DataCon (dataConRepArity, dataConFullSig, dataConTag, dataConWorkId, dataConName, dataConOrigArgTys, isUnboxedTupleDataCon)
 import GHC.Types.FieldLabel (flLabel)
 import Language.Haskell.Syntax.Basic (FieldLabelString(..))
 import Language.Haskell.Syntax.Basic (Boxity(..))
@@ -50,20 +50,19 @@ import GHC.Builtin.Types (consDataCon, nilDataCon, trueDataCon, falseDataCon, ch
 import GHC.Builtin.Names (ioTyConKey)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
-import GHC.Types.Name (nameOccName, isExternalName, isSystemName, nameModule_maybe)
+import GHC.Types.Name (nameOccName, isSystemName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString, fieldOcc_maybe)
 import GHC.Data.FastString (unpackFS)
-import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
 import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
 import GHC.Core.TyCon
-import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isCoercionTy, isUnliftedType)
+import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
 import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
 import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
-import GHC.Types.Var.Set (VarSet, emptyVarSet, extendVarSet, elemVarSet, isEmptyVarSet)
+import GHC.Types.Var.Set (isEmptyVarSet)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
-import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, nonDetEltsUniqSet, mkUniqSet)
+import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, mkUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe, renderWithContext, defaultSDocContext, ppr)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
@@ -86,7 +85,6 @@ import Control.Monad.State
 import Control.Monad (foldM, forM, replicateM, when)
 import System.IO (hPutStrLn, stderr)
 
-import GHC.Driver.Env (HscEnv)
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
 import Tidepool.Session (isSessionValModule)
 import qualified System.Environment
@@ -184,8 +182,7 @@ emitNode n = do
   put s { tsNodes = tsNodes s |> n }
   return idx
 
--- | Encode an error-sentinel VarId (decision D-C,
--- @plans/post-restart/extract-manifest.md@): tag @0x45@ ('E') in the high
+-- | Encode an error-sentinel VarId: tag @0x45@ ('E') in the high
 -- byte, a 48-bit identity @slot@ in the middle bits, the sentinel @kind@ in
 -- the LOW byte. Slotless sentinels (@slot = 0@ — every kind but the
 -- unresolved-external poison) are byte-identical to the pre-slot encoding, so
@@ -215,7 +212,7 @@ freshSynthVarId = do
   -- Tag 'T' = 0x54, shifted left 56 bits
   return (0x5400000000000000 .|. c)
 
--- | D1 mutation-test fault injection (plans/post-restart/extract-wave/spawn-latency/00-spec.md):
+-- | Mutation-test fault injection for constructor-metadata coverage:
 -- @TIDEPOOL_TEST_DROP_DC=\<module-qualified-name\>@ makes 'recordDC' silently
 -- skip recording exactly the one constructor whose 'qualifiedName' matches —
 -- simulating a constructor that reaches the emitted IR but never lands in
@@ -509,7 +506,7 @@ emitRuntimeUnpackFoldrCString addrIdx fIdx zIdx = do
 -- drops (`show (Just (-2.5))` → `Just (-2.5)`). The parens decision is made in
 -- the Rust host fn, so no Core comparison is hand-emitted here.
 emitShowDoubleSpecBody :: Id -> TransM Int
-emitShowDoubleSpecBody binder = do
+emitShowDoubleSpecBody _binder = do
     fmtId      <- freshSynthVarId
     precId     <- freshSynthVarId
     dId        <- freshSynthVarId
@@ -593,11 +590,11 @@ translateModule allBinds targetName unresolvedIds =
      , tsRunLLMTurnSites finalState, tsPoisonSlots finalState )
   where
     findTargetId name binds =
-      case filter isTarget (concatMap bindersOf binds) of
+      case filter isTarget (concatMap localBindersOf binds) of
         (b:_) -> b
         -- Fall back to name-only match if no External binding found
         -- (GHC may mark user bindings as Internal after optimization)
-        []    -> case filter isNameMatch (concatMap bindersOf binds) of
+        []    -> case filter isNameMatch (concatMap localBindersOf binds) of
                    (b:_) -> b
                    []    -> error $ "translateModule: exported top-level binding '" ++ name ++ "' not found"
       where
@@ -610,8 +607,8 @@ translateModule allBinds targetName unresolvedIds =
           occNameString (nameOccName (idName b)) == name
           && not (isSystemName (idName b))
 
-    bindersOf (NonRec b _) = [b]
-    bindersOf (Rec pairs)  = map fst pairs
+    localBindersOf (NonRec b _) = [b]
+    localBindersOf (Rec pairs)  = map fst pairs
 
     -- | Filter bindings to only those transitively reachable from the target.
     -- Flattens Rec groups into individual (binder, rhs) pairs for fine-grained
@@ -962,8 +959,6 @@ translateModuleClosed hscEnv allBinds targetName = do
       in foldl' (\a (FlatAlt _ bs _) -> foldl' (\a' b' -> Set.insert b' a') a bs) withBinder alts
     collectBound acc (NJoin b params _ _) = foldl' (\a p -> Set.insert p a) (Set.insert b acc) params
     collectBound acc _ = acc
-    bindersOfCB (NonRec b _) = [b]
-    bindersOfCB (Rec pairs)  = map fst pairs
 
 -- | #313 t11 fix: globally freshen duplicate binder uniques.
 --
@@ -1357,7 +1352,7 @@ collectUsedDataCons binds =
 -- inside any 'NCase' alt. 'NCase'\'s own 'Word64' is the case BINDER's
 -- varId, not a constructor, and is deliberately excluded. The caller
 -- ('Main.assertMetaCoversEmitted') asserts this set is a subset of the
--- emitted metadata's ids — see plans/post-restart/extract-wave/spawn-latency/00-spec.md.
+-- emitted metadata's ids.
 emittedConIds :: Seq FlatNode -> Set.Set Word64
 emittedConIds = foldl' step Set.empty
   where
@@ -1617,25 +1612,25 @@ translate expr =
     -- `I# 11#`, `show (Just x)` passes `appPrec1`=11, top-level `show` passes
     -- `minExpt`=0). Feed p + d to ShowSignedDoubleAddr so a negative d is
     -- parenthesized when p > 6 (the `showParen` this replacement used to drop).
-    -- args !! 1 is p (safe: a non-empty `drop 2 args` means length args >= 3).
+    -- Match the prefix directly so the precedence argument stays total.
     Var v | isShowDoubleSpecVar v -> do
-        case drop 2 args of  -- skip fmt, p → [d, rest, ...]
-          (dArg : restArg : _) -> do
-            precIdx <- translate (args !! 1)
+        case args of
+          (_fmtArg : precArg : dArg : restArg : _) -> do
+            precIdx <- translate precArg
             argIdx <- translate dArg
             addrIdx <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precIdx, argIdx]
             restIdx <- translate restArg
             emitRuntimeUnpackAppendCString addrIdx restIdx
-          [dArg] -> do
+          [_fmtArg, precArg, dArg] -> do
             -- 3 args applied (fmt, p, d); returns ShowS = String -> String
-            precIdx <- translate (args !! 1)
+            precIdx <- translate precArg
             argIdx <- translate dArg
             addrIdx <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precIdx, argIdx]
             restParamId <- freshSynthVarId
             restRef <- emitNode $ NVar restParamId
             resultIdx <- emitRuntimeUnpackAppendCString addrIdx restRef
             emitNode $ NLam restParamId resultIdx
-          [] -> do
+          _ -> do
             -- Partial application / eta-reduced: emit full lambda wrapper
             emitShowDoubleSpecBody v
 
@@ -2500,7 +2495,6 @@ translateHead = \case
   -- source (e.g., newtype Key = Key Text). Emit unit literal as a placeholder.
   Coercion _ -> emitNode $ NLit (LEInt 0)
   App _ _ -> error "App should be handled by translate"
-  _ -> error "Unexpected expression form"
 
 translateAlt :: CoreAlt -> TransM FlatAlt
 translateAlt (Alt con binders body) = do
@@ -2761,7 +2755,6 @@ mapLit = \case
   LitNullAddr            -> LEInt 0  -- Addr# null → dummy value (dead code path)
   LitLabel{}             -> LEInt 0  -- Function label → dummy value (dead code path)
   LitRubbish{}           -> LEInt 0  -- Rubbish literal → dummy value
-  other                  -> error $ "Unsupported literal: " ++ showPprUnsafe other
 
 -- | Little-endian 64-bit-limb bytes for a BigNat# literal payload (ByteArray#).
 -- @n@ is the non-negative magnitude (sign lives in the IP/IN constructor).
@@ -3035,7 +3028,6 @@ mapPrimOp = \case
   NewArrayOp                  -> "NewArray"
   ReadArrayOp                 -> "ReadArray"
   WriteArrayOp                -> "WriteArray"
-  IndexArrayOp                -> "IndexArray"
   SizeofArrayOp               -> "SizeofArray"
   SizeofMutableArrayOp        -> "SizeofMutableArray"
   UnsafeFreezeArrayOp         -> "UnsafeFreezeArray"

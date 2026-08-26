@@ -87,7 +87,7 @@ fn value_fragment(n: i64) -> CoreExpr {
 /// A bootstrapped, value-plane-only session (no decl plane).
 fn session() -> PersistentSession {
     let table = table_with_c1();
-    let mut core = PersistentSession::new(None, ASK_TAG, 1 << 16);
+    let mut core = PersistentSession::new(None, ASK_TAG, Vec::new(), 1 << 16);
     core.bootstrap_if_needed(&value_fragment(0), &table)
         .expect("compile_session");
     core.seed_session_table(table);

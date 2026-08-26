@@ -312,9 +312,8 @@ fn disarm_gc_hazards() {
     tidepool_codegen::host_fns::set_heap_verify(false);
 }
 
-/// At every quiescent point on the parked path, parked continuations and
-/// registered stowed roots must be equal, and the single slot must stay
-/// empty.
+/// At every quiescent point, parked continuations and registered stowed roots
+/// must be equal.
 fn assert_rooting_receipt(machine: &JitEffectMachine, expect: usize) {
     assert_eq!(machine.parked_count(), expect, "parked continuation count");
     assert_eq!(
@@ -322,10 +321,6 @@ fn assert_rooting_receipt(machine: &JitEffectMachine, expect: usize) {
         expect,
         "every parked continuation must be a REGISTERED GC root for its whole \
          parked lifetime"
-    );
-    assert!(
-        !machine.is_suspended(),
-        "the parked path must leave `suspended_continuation` empty"
     );
 }
 

@@ -77,7 +77,7 @@ pub fn finalize() -> Effect {
             // `a` is finalize's own "return type" — genuinely free, never
             // actually returned (the send diverges via suspension), left
             // INDEPENDENT of `v` on purpose (see `tidepool-harness/CLAUDE.md`'s
-            // "The answer contract" section). Matches the hand-written
+            // "Answer contracts" section). Matches the hand-written
             // `FinalizeWith`'s `ret "a"` exactly.
             ret: HsType::Var("a"),
             errors: None,

@@ -222,7 +222,7 @@ The JIT includes safepoints where long-running or infinite computations can be i
 - `audit-heap-bridge § LitTag::Array / LitTag::SmallArray` — now returns `BridgeError::NullPointer` on null pointer instead of a dummy empty array (Hardened).
 
 ### Silent fallbacks (still wrong-but-valid Value on shape mismatch)
-- `audit-heap-bridge § SmallArray# / Array# coercion` — silently coerces to `Value::Con(DataConId(0), [..])`; type info erased. Hardening candidate; tracked under code-hardening-wave2.
+- `audit-heap-bridge § SmallArray# / Array# coercion` — silently coerces to `Value::Con(DataConId(0), [..])`; type information is erased. Hardening candidate.
 
 ### Cross-module collision risk: Medium (post-#293 hardening)
 - `audit-bridge § String (Text)` — was `high`; reduced to `medium` after `get_resilient` migration. Remaining mitigation: migrate to `get_by_qualified_name` for `Text` constructor.

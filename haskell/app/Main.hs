@@ -24,11 +24,9 @@ import GHC.Core (CoreBind, Bind(..))
 import GHC.Core.DataCon (DataCon)
 import GHC.Core.Type (splitTyConApp_maybe)
 import GHC.Core.TyCon (tyConName)
-import GHC.Types.Name (nameOccName, isExternalName, nameModule_maybe, getOccString)
+import GHC.Types.Name (nameOccName, nameModule_maybe, getOccString)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
-import GHC.Types.Unique (getKey)
-import GHC.Types.Var (varUnique)
 import Data.Word (Word64)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -41,7 +39,7 @@ import Tidepool.Binders
   , StmtBinders(..), TurnOut(..), BoundBinder(..)
   , renderBoundBinderJson, renderAskJson, renderVerdictsJson )
 import Tidepool.GhcPipeline
-  ( runPipeline, runPipelineSession, PipelineResult(..), dumpCore
+  ( runPipelineSession, PipelineResult(..), dumpCore
   , stripMonadHead, isClosureType, renderType, splitTupleType
   , BatchItem(..), BatchItemResult(..), runBatchPipeline
   , withResidentPipeline )
@@ -54,7 +52,7 @@ import Tidepool.Session
   , sessionModuleString, parseSessionModule, sessionBinderName
   , mkThinSessionIface, writeSessionIface
   , scaffoldTargetName, scaffoldOutputBase )
-import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, siblingCloseDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, valueRepArity, mapBang, targetBindingHasIO, stableVarId, typeMentionsEffectMonad)
+import Tidepool.Translate (translateBinds, translateModuleClosed, ClosedModule(..), DCMeta(..), FlatNode, collectDataCons, collectUsedDataCons, collectTransitiveDCons, siblingCloseDCons, emittedConIds, collectReachableConDCs, collectReachableConDCsRaw, wiredInDataCons, mergeMetaPreserving, UnresolvedVar(..), dcToMeta, targetBindingHasIO, stableVarId, typeMentionsEffectMonad)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 
@@ -155,8 +153,8 @@ dispatch
   -> Bool -> Args -> IO ExitCode
 dispatch compiler timing args =
   case () of
-    -- Turn-batch mode (plans/post-restart/batch-turns-feasibility.md §8): N
-    -- item compiles in one GHC session. No positional file at all (the plan
+    -- Turn-batch mode compiles N items in one GHC session. It takes no
+    -- positional file (the plan
     -- is a flag, not argFiles) — checked FIRST, ahead of the argFiles
     -- dispatch every other mode shares.
     _ | isJust (argTurnBatch args) -> runTurnBatchMode args
@@ -166,7 +164,7 @@ dispatch compiler timing args =
         putStrLn (renderDiagsJson [])
         pure ExitSuccess
       (file : _)
-        -- Block classify lane: every positional file is one item, classified
+        -- Block classify mode: every positional file is one item, classified
         -- in ONE GHC session boot. Checked before '--turn' since it reads the
         -- FULL 'argFiles' list rather than just the head.
         | argClassify args                    -> runClassifyMode timing args
@@ -181,7 +179,7 @@ dispatch compiler timing args =
         -- 'argTarget'). This is what lets a caller combine `--targets a,b`
         -- with `--session-root <dir> --inject-val <mod>` in one spawn (the
         -- harness driver's fused outer render/loop compile injecting its
-        -- stable-val context, plans/turn-latency-state-injection.md):
+        -- stable-value context):
         -- 'processFile' itself is session-scope-aware now (see
         -- 'scopeFromArgs'), so this still resolves the injected module for a
         -- multi-target compile; a plain multi-target caller with no session
@@ -308,7 +306,7 @@ harnessProfilePragmaLine =
 -- | The shared epilogue every dispatch arm ends on: render the fixed-shape
 -- JSON diagnostics report to stdout from a captured extraction result, with a
 -- human-readable debug copy on stderr, exiting non-zero on failure. Also used
--- on parse-only lanes (e.g. 'runClassifyMode') where no live GHC session
+-- in parse-only modes (e.g. 'runClassifyMode') where no live GHC session
 -- exists to ever throw a 'SourceError' — 'fromException' can only take the
 -- 'Nothing' branch there.
 reportDiags :: Either SomeException () -> IO ExitCode
@@ -333,8 +331,8 @@ isSessionMode args = argSessionBind args || isJust (argSessionRoot args)
 -- | Build the 'SessionScope' a session-aware compile injects, from the raw
 -- @--session-root@/@--inject-val@ args. The ONE place this construction
 -- happens — 'processFile' (multi-target compiles that also carry session
--- flags, e.g. the harness driver's stable-val injection,
--- @plans/turn-latency-state-injection.md@), 'processSessionFile', and
+-- flags, e.g. the harness driver's stable-value injection),
+-- 'processSessionFile', and
 -- 'runTurnMode' all build the SAME scope from the SAME two args, so this
 -- used to be three copies kept in sync by hand. Unconditional — the caller
 -- decides whether to wrap it in 'Just' (only when 'isSessionMode' holds) or
@@ -349,8 +347,7 @@ scopeFromArgs args = SessionScope
 data Args = Args
   { argOutDir :: Maybe FilePath
   , argTarget :: Maybe String
-  -- --targets mode (explicit multi-target emission,
-  -- plans/post-restart/extract-wave/boot/03-targets-prereq.md): several
+  -- --targets mode: several
   -- explicitly-named targets, one merged meta.cbor. Deliberately a SEPARATE
   -- field from 'argTarget' (never sharing its Maybe-String slot) so the
   -- existing --target contract (single name, last flag wins) cannot be
@@ -373,15 +370,15 @@ data Args = Args
   -- binding — so the cross-row bind guard in 'mkBoundBinders' must not
   -- reject a row-mentioning type here (friction 2, round-2 test-user report).
   , argProbeOnly :: Bool
-  -- --turn mode (one-spawn-per-turn protocol, plans/one-spawn-turn-protocol.md):
+  -- --turn mode (one-spawn-per-turn protocol):
   , argTurn :: Bool
   , argTurnTemplates :: [String]
   , argTurnOut :: Maybe FilePath
   , argTurnVerdict :: Maybe String
-  -- --classify mode (block classify lane, plans/one-spawn-turn-protocol-phase-b.md):
+  -- --classify mode (block classification):
   , argClassify :: Bool
   , argClassifyOut :: Maybe FilePath
-  -- --turn-batch mode (plans/post-restart/batch-turns-feasibility.md §8):
+  -- --turn-batch mode:
   , argTurnBatch :: Maybe FilePath
   , argBatchOut :: Maybe FilePath
   -- Harness compilation profile (generic-surface wave item 4, PART 2): the
@@ -394,8 +391,7 @@ data Args = Args
   -- not). See Tidepool.Harness.Prelude.
   , argHarnessProfile :: Bool
   -- Persistent build-products dir (module-granular GHC recompilation
-  -- avoidance across spawns, plans/turn-latency-state-injection.md's
-  -- "Direction: toward a resident compile daemon" section): 'main' sets
+  -- avoidance across spawns): 'main' sets
   -- $TIDEPOOL_BUILD_PRODUCTS_DIR from this BEFORE any 'GhcPipeline' call,
   -- which is what actually reads it (see 'Tidepool.GhcPipeline.withBuildProductsFromEnv') —
   -- a process-wide setting, not threaded as a function parameter, to avoid
@@ -458,8 +454,7 @@ processFile compiler timing args path = do
     -- (`runPipelineSession Nothing == runPipeline`; an inert scope routes to
     -- the same `normalVariant` path — see `scopeFromArgs`'s doc). This is
     -- what lets `--targets a,b --session-root <dir> --inject-val <mod>`
-    -- (the harness driver's stable-val injection,
-    -- `plans/turn-latency-state-injection.md`) reach a multi-target compile
+    -- (the harness driver's stable-value injection) reach a multi-target compile
     -- at all: `main`'s dispatch sends a BARE `--session-root` to
     -- `processSessionFile` instead, which has no `--targets` handling.
     let scope = if isSessionMode args then Just (scopeFromArgs args) else Nothing
@@ -532,7 +527,7 @@ processFile compiler timing args path = do
         -- per-target skip of its own and re-encodes every survivor for the
         -- actual write.
         closedTargets <- foldM (\acc name -> do
-          result <- try $ do
+          compileAttempt <- try $ do
             closed@ClosedModule { cmNodes = nodes, cmUnresolved = unresolved } <- translateModuleClosed hscEnv binds name
             if not (null unresolved) then do
               let names = map (\uv -> uvModule uv ++ "." ++ uvName uv) unresolved
@@ -541,7 +536,7 @@ processFile compiler timing args path = do
             else do
               _ <- evaluate (BS.length (encodeTree nodes))
               return (Just closed)
-          case result of
+          case compileAttempt of
             Left (e :: SomeException) -> do
               hPutStrLn stderr $ "  SKIPPED (" ++ name ++ "): " ++ show e
               return acc
@@ -561,7 +556,7 @@ processFile compiler timing args path = do
         -- target (shared with the session path; see 'writeWholeModuleClosed').
         -- File base name matches the lookup name here (the general CLI
         -- contract: --target foo produces foo.cbor). This is the branch the
-        -- self-iterating harness's full-compile lane actually exercises
+        -- self-iterating harness's full-compile path actually exercises
         -- (tidepool-harness/src/compile.rs passes --target, never
         -- --all-closed), so it's the one carrying translate/cbor_encode/write
         -- timing.
@@ -579,7 +574,7 @@ processFile compiler timing args path = do
         -- unresolved/dangling tracking (what 'cmVarNames' is built from).
         -- Routing it through the shared writer would mean rebuilding that
         -- closure machinery here, i.e. changing Translate.hs's translation
-        -- semantics for this call site — out of a write-path lane's scope,
+        -- semantics for this call site, which is outside this write path,
         -- and not a real unification if faked. It still gains the two
         -- things its own data honestly supports: a real 'hasIO' (was
         -- hardcoded False) and the asks.json sidecar's loud-absence
@@ -634,8 +629,7 @@ processFile compiler timing args path = do
 -- because none exists on this call graph edge. If you are tempted to fold
 -- @--all-closed@'s try-and-skip into this function behind a 'Bool' argument:
 -- don't — that reintroduces exactly the failure mode explicit multi-target
--- emission exists to prevent (a requested target silently missing, see
--- plans/post-restart/extract-wave/boot/03-targets-prereq.md), and it would
+-- emission exists to prevent (a requested target silently missing), and it would
 -- do so with every existing test still green, since the skip would only
 -- fire when a caller passes the wrong 'Bool'.
 translateTargetClosed :: Bool -> HscEnv -> [CoreBind] -> String -> IO ClosedModule
@@ -706,9 +700,7 @@ mergePoisonedTables tables =
 -- them (the turn mode's rich result) reads them off this one write rather
 -- than re-deriving them.
 --
--- __meta.cbor multi-target scalar rule__ (decided HERE, the one place every
--- target's metadata is in scope at once — see
--- plans/post-restart/extract-wave/boot/03-targets-prereq.md): @has_io@ is
+-- __meta.cbor multi-target scalar rule__: @has_io@ is
 -- the OR across targets (a turn compiled from ANY IO-carrying target counts
 -- as IO-carrying); @var_names@ is the concatenation (bag union) of every
 -- target's @cmVarNames@ — both are diagnostic-only (runtime "unresolved
@@ -779,9 +771,7 @@ writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = d
   --     'siblingCloseDCons').
   --   * transitive: the binder-type closure over the reachable binds
   --     ('collectTransitiveDCons') — target/result + boundary +
-  --     session-bound types, and (per
-  --     plans/post-restart/extract-wave/spawn-latency/04-turn-latency-plan.md's
-  --     root ruling) the ONLY route by which the five freer-simple
+  --     session-bound types, and the ONLY route by which the five freer-simple
   --     scaffolding constructors (Val/E/Union/Leaf/Node) are ever supplied,
   --     since they live in an external package and can never appear in any
   --     home module's mg_tcs. Do NOT replace or bypass this closure.
@@ -789,8 +779,7 @@ writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = d
   -- The home-TyCon sweep ('collectDataCons' over mg_tcs, formerly
   -- @tyconMeta@) is deliberately GONE from this merge: it swept every
   -- constructor of every home-module TyCon regardless of whether this
-  -- compile ever touches it (measured 6.8:1 / 11.1:1 over-collection,
-  -- plans/post-restart/extract-wave/spawn-latency/03-d2-handoff.md), and it
+  -- compile ever touches it, and it
   -- structurally cannot supply anything the two sources above don't already
   -- cover for a runtime-observable root. Safe to remove ONLY because
   -- 'assertMetaCoversEmitted' CHECK A (below) hard-fails extraction the
@@ -832,12 +821,9 @@ writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = d
       allVarNames = concatMap twVarNames writes
       allPoisoned = mergePoisonedTables (map twPoisoned writes)
 
-  -- D1 defense, re-wired at the extract-wave fold (2026-08-09): the merge of
-  -- boot's '--targets' split with spawn-latency's D1-A left
-  -- 'assertMetaCoversEmitted' DEFINED BUT UNCALLED, because the single-target
-  -- body that used to call it was replaced by the 'writeWholeModuleClosed'
-  -- thin wrapper. It belongs HERE — this is now the one write path, so every
-  -- target on every mode passes through it.
+  -- Verify constructor metadata at the multi-target fold as well as the
+  -- single-target path. Otherwise 'assertMetaCoversEmitted' can remain
+  -- defined but uncalled for this mode.
   --
   -- Placement is load-bearing twice over. BEFORE the write step, because CHECK
   -- A's contract is "not a byte of output is written if the emitted metadata
@@ -897,8 +883,7 @@ writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = d
 -- @{site, type}@ pairs it wrote to @asks.json@, so a caller that also needs
 -- them (the turn mode's rich result) reads them off this one translation
 -- rather than re-running 'translateModuleClosed'.
--- | D1 defense (plans/post-restart/extract-wave/spawn-latency/00-spec.md,
--- codex-review-2026-08-08.md item 7): asserts BEFORE a single byte of this
+-- | Assert before writing that the emitted metadata covers every
 -- binder's output is written that the emitted metadata covers every
 -- constructor id the emitted program can reference.
 --
@@ -914,8 +899,8 @@ writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = d
 -- CHECK B (independence, DIAGNOSTIC): every DataCon 'collectReachableConDCs'
 -- finds — an INDEPENDENT syntactic Core visitor that never calls the
 -- translator — is compared against @allMeta@ and any gap is logged loudly to
--- stderr, but does NOT fail extraction. Downgraded from hard-fail (root
--- direction, 2026-08-09): the invariant "every DataCon in reachable Core is
+-- stderr, but does NOT fail extraction. The stronger invariant "every
+-- DataCon in reachable Core is
 -- in the metadata" is FALSE BY DESIGN — the translator's job legitimately
 -- includes NOT translating whole classes of Core (interceptions, elisions,
 -- desugarings; e.g. multi-return primop/FFI unboxed-tuple splitting, Case
@@ -975,8 +960,7 @@ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts t
     [(_, sites)] -> return sites
     _ -> error "writeWholeModuleClosed: writeClosedTargets returned an unexpected result shape"
 
--- | Explicit multi-target mode (@--targets a,b@,
--- plans/post-restart/extract-wave/boot/03-targets-prereq.md): one GHC
+-- | Explicit multi-target mode (@--targets a,b@): one GHC
 -- pipeline invocation (@binds@\/@tycons@\/@hscEnv@ come from the SAME
 -- 'runPipeline' call the caller already made — see 'processFile'), several
 -- explicitly-named targets translated independently via
@@ -1049,7 +1033,7 @@ processSessionFile compiler args path = do
     when (argSessionBind args) (emitBindArtifacts args result)
   reportDiags res
 
--- | Turn mode (@--turn@, plans/one-spawn-turn-protocol.md): classify the RAW
+-- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
 -- matching template, compile through the EXISTING session-compile path
 -- ('runPipelineSession' \/ 'writeWholeModuleClosed'), and write the rich
@@ -1079,8 +1063,8 @@ runTurnMode compiler args path = do
     turnSrc   <- readFile path
     templates <- mapM parseTurnTemplate (argTurnTemplates args)
     mVerdict  <- traverse parseTurnVerdictArg (argTurnVerdict args)
-    -- 'extractStmtBinders' emits no phases of its own (a substep, not a
-    -- lane) — this mode times it as the single @classify@ phase, emitted
+    -- 'extractStmtBinders' emits no phases of its own. This mode times it as
+    -- the single @classify@ phase, emitted
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
@@ -1155,7 +1139,7 @@ runTurnMode compiler args path = do
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
   reportDiags res
 
--- | Block classify lane (@--classify@, plans/one-spawn-turn-protocol-phase-b.md):
+-- | Block classify mode (@--classify@):
 -- classify EVERY positional file in 'argFiles' with ONE GHC session boot
 -- ('classifyBlock'), in argv order, and write the verdicts to
 -- @--classify-out@. Serves @tidepool-repl@'s block runner, which segments a
@@ -1164,7 +1148,7 @@ runTurnMode compiler args path = do
 -- item.
 runClassifyMode :: Bool -> Args -> IO ExitCode
 runClassifyMode timing args =
-  -- No live GHC session exists on this parse-only lane, so the caught
+  -- No live GHC session exists in this parse-only mode, so the caught
   -- exception below always takes 'reportDiags''s 'Nothing' branch (never a
   -- 'SourceError' to distinguish).
   timePhase timing "total" $
@@ -1179,9 +1163,8 @@ runClassifyMode timing args =
       >>= reportDiags
 
 --------------------------------------------------------------------------------
--- Turn-batch mode (--turn-batch <plan.json> --batch-out <dir>,
--- plans/post-restart/batch-turns-feasibility.md §8, ratified rulings in
--- §8.1): N item compiles in ONE tidepool-extract spawn, sharing GHC session
+-- Turn-batch mode (--turn-batch <plan.json> --batch-out <dir>): N item
+-- compiles in one tidepool-extract spawn, sharing GHC session
 -- state (Tidepool.GhcPipeline's ModIfaceCache + per-module dep-guts memo)
 -- across items. Every item writes the byte-identical single-turn output set
 -- (result.cbor / meta.cbor / asks.json / turn.cbor) into its own
@@ -1190,7 +1173,7 @@ runClassifyMode timing args =
 -- 'runTurnMode' uses for a single turn, so a batched item cannot diverge in
 -- what it writes from a per-item spawn.
 --
--- §8.1 rulings this mode is built to (binding, not re-derived here):
+-- Wire and process rules:
 --   1. Exits NON-ZERO whenever any item failed (mirrors a single --turn
 --      spawn); the Rust caller does not read the exit code, only the stdout
 --      document, but shell callers still need a sane code.

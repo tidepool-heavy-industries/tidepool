@@ -757,6 +757,54 @@ getCurrentTime = UTCTime <$> send TimeNow
 true
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: Entropy ===============================
+
+-- type_name (7 bytes) --
+Entropy
+-- end type_name --
+
+-- description (511 bytes) --
+Randomness. Seeded, deterministic generation is pure Haskell — no effect needed: `mkStdGen :: Int -> StdGen`, `randomR :: (a, a) -> StdGen -> (a, StdGen)`, `randoms :: StdGen -> [a]`, `split :: StdGen -> (StdGen, StdGen)` (Int and Double instances; each `randomR` draw stays within the given bounds, inclusive; the same seed always replays the same sequence). For non-deterministic values seeded from OS entropy: `newStdGen :: M StdGen` and `randomRIO :: (a, a) -> M a`, e.g. `n <- randomRIO (1 :: Int, 100)`.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (1 items) --
+-- constructors[0] (26 bytes) --
+EntropySeed :: Entropy Int
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (22 bytes) --
+import Tidepool.Random
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (1 items) --
+-- helpers[0] (116 bytes) --
+-- @substrate-helper@
+entropySeed :: forall effs. Member Entropy effs => Eff effs Int
+entropySeed = send EntropySeed
+-- end helpers[0] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
 =============================== EFFECT: Meta ===============================
 
 -- type_name (4 bytes) --
@@ -1644,22 +1692,283 @@ mailboxDrop = send . MailboxDrop
 true
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: Subagent ===============================
+
+-- type_name (8 bytes) --
+Subagent
+-- end type_name --
+
+-- description (2576 bytes) --
+Typed headless subagents: one-cycle coupled spawn. `spawnAgentRaw spec schema` is ONE atomic call: it allocates or takes a managed worktree, binds it to a fresh agent, dispatches the task to the coding backend, runs ONE work cycle in that worktree, and returns a `SpawnOutcome` (the WorkerRun pair, the terminal payload, and a receipt naming the worktree, binding, backend thread, and EXACT resolved model) — or a case-matchable `SpawnError` naming the stage that failed, with the rollback already done: no binding is left active, and a created worktree is retained and rebindable, never deleted. Build the spec with `spawnSpec` (new worktree) or `spawnSpecIn` (existing unbound worktree). `agentBeginRaw`/`agentResumeRaw` are the same call sequence driven one STOP at a time, for an agent that holds dynamic tools: begin returns either a parked `StepToolCall` (the child called one of your tools; its turn is stopped until you answer) or a `StepDone`, and resume answers the parked call and drives on. Prefer the typed `spawnAgentWithTools`, which runs that loop against your own Haskell tool handlers.
+TYPED SURFACE (`import Tidepool.Agent.Spawn` — not auto-imported): `spawnAgent @r spec` derives the worker's `outputSchema` from `r`'s own structure and decodes the terminal payload into an `r`, so the type IS the schema. `r` must be a SINGLE-CONSTRUCTOR RECORD (a sum renders `oneOf` at the schema root and the turn is refused whole) — model an alternative as a field:
+  data WorkerResult = WorkerResult { summary :: Text, blocked :: Maybe Text } deriving (Generic, FromJSON, JsonSchema)
+  Right (outcome, r) <- spawnAgent @WorkerResult (spawnSpec wspec "porter" "port the handler")
+A payload that does not decode is `SpawnResultMalformed`, never a success with a defaulted field. `spawnAgentWithTools @tools @r rounds tools spec` is the same call for a child that may CALL BACK into your own Haskell handlers.
+CONCURRENT: `spawnAsync @r spec` is the same call detached — it returns an abstract `AgentHandle r` as soon as the cycle is admitted, `awaitAgent h` blocks for that one cycle's `(outcome, r)`, and `cancelAgent h` reaps it (total: cancelling a finished or unknown handle is a no-op, and settles the binding without deleting anything). Run N children by spawning N handles and awaiting them in whatever order suits you — completion order is not an input to any result. A spawn past the handler's cycle cap is refused immediately with `SpawnCapacityExhausted` (a BOUND, not a queue), and an await on a cancelled handle is `SpawnCancelled`, never a hang.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (6 items) --
+-- constructors[0] (80 bytes) --
+SubagentSpawn :: SpawnSpec -> Value -> Subagent (Either SpawnError SpawnOutcome)
+-- end constructors[0] --
+
+-- constructors[1] (86 bytes) --
+SubagentBegin :: SpawnSpec -> Value -> Value -> Subagent (Either SpawnError AgentStep)
+-- end constructors[1] --
+
+-- constructors[2] (92 bytes) --
+SubagentResume :: AgentId -> Text -> Bool -> Value -> Subagent (Either SpawnError AgentStep)
+-- end constructors[2] --
+
+-- constructors[3] (80 bytes) --
+SubagentSpawnAsync :: SpawnSpec -> Value -> Subagent (Either SpawnError CycleId)
+-- end constructors[3] --
+
+-- constructors[4] (69 bytes) --
+SubagentAwait :: CycleId -> Subagent (Either SpawnError SpawnOutcome)
+-- end constructors[4] --
+
+-- constructors[5] (40 bytes) --
+SubagentCancel :: CycleId -> Subagent ()
+-- end constructors[5] --
+
+-- end constructors --
+
+-- type_defs (18 items) --
+-- type_defs[0] (46 bytes) --
+data AgentId = AgentId Int deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- type_defs[1] (63 bytes) --
+data BackendThreadId = BackendThreadId Text deriving (Show, Eq)
+-- end type_defs[1] --
+
+-- type_defs[2] (106 bytes) --
+data SpawnWorkspace = SpawnNewWorktree WorktreeSpec | SpawnExistingWorktree WorktreeId deriving (Show, Eq)
+-- end type_defs[2] --
+
+-- type_defs[3] (127 bytes) --
+data SpawnSpec = SpawnSpec { spawnWorkspace :: SpawnWorkspace, spawnAgentLabel :: Text, spawnTask :: Text } deriving (Show, Eq)
+-- end type_defs[3] --
+
+-- type_defs[4] (124 bytes) --
+data SpawnStage = StageAllocating | StageWorktreeReady | StageBound | StageThreadAccepted | StageRunning deriving (Show, Eq)
+-- end type_defs[4] --
+
+-- type_defs[5] (106 bytes) --
+data BackendFailure = BackendUnavailable Text | ProtocolRejected Text | RunFailed Text deriving (Show, Eq)
+-- end type_defs[5] --
+
+-- type_defs[6] (106 bytes) --
+data CyclePayload = PayloadStructured Value | PayloadUnstructured Text | PayloadAbsent deriving (Show, Eq)
+-- end type_defs[6] --
+
+-- type_defs[7] (131 bytes) --
+data WorkerRun = WorkerRun { runAgent :: AgentId, runWorktree :: WorktreeHandle, runThread :: BackendThreadId } deriving (Show, Eq)
+-- end type_defs[7] --
+
+-- type_defs[8] (100 bytes) --
+data AgentActivity = ActivityCommand Text (Maybe Int) | ActivityFileChanged Text deriving (Show, Eq)
+-- end type_defs[8] --
+
+-- type_defs[9] (163 bytes) --
+data TokenUsage = TokenUsage { usageInput :: Int, usageCachedInput :: Int, usageOutput :: Int, usageReasoningOutput :: Int, usageTotal :: Int } deriving (Show, Eq)
+-- end type_defs[9] --
+
+-- type_defs[10] (271 bytes) --
+data SpawnReceipt = SpawnReceipt { receiptAgent :: AgentId, receiptWorktree :: WorktreeId, receiptBindingRef :: Text, receiptThread :: BackendThreadId, receiptModel :: Text, receiptTurn :: Text, receiptRounds :: Int, receiptUsage :: Maybe TokenUsage } deriving (Show, Eq)
+-- end type_defs[10] --
+
+-- type_defs[11] (180 bytes) --
+data SpawnOutcome = SpawnOutcome { outcomeRun :: WorkerRun, outcomePayload :: CyclePayload, outcomeReceipt :: SpawnReceipt, outcomeActivity :: [AgentActivity] } deriving (Show, Eq)
+-- end type_defs[11] --
+
+-- type_defs[12] (97 bytes) --
+data AgentStep = StepToolCall AgentId Text Text Value | StepDone SpawnOutcome deriving (Show, Eq)
+-- end type_defs[12] --
+
+-- type_defs[13] (59 bytes) --
+instance ToJSON SpawnStage where toJSON s = toJSON (show s)
+-- end type_defs[13] --
+
+-- type_defs[14] (221 bytes) --
+instance ToJSON BackendFailure where { toJSON (BackendUnavailable t) = object ["backendUnavailable" .= t]; toJSON (ProtocolRejected t) = object ["protocolRejected" .= t]; toJSON (RunFailed t) = object ["runFailed" .= t] }
+-- end type_defs[14] --
+
+-- type_defs[15] (46 bytes) --
+data CycleId = CycleId Int deriving (Show, Eq)
+-- end type_defs[15] --
+
+-- type_defs[16] (59 bytes) --
+instance ToJSON CycleId where toJSON (CycleId n) = toJSON n
+-- end type_defs[16] --
+
+-- type_defs[17] (1647 bytes) --
+data SpawnError = SpawnWorktreeFailed SpawnStage WorktreeError | SpawnBindingFailed SpawnStage WorktreeError | SpawnBackendFailed SpawnStage BackendFailure | SpawnRollbackFailed SpawnStage Text Text | SpawnResultMalformed Text | SpawnDriveFailed SpawnStage Text | SpawnCapacityExhausted Int | SpawnCancelled CycleId deriving (Show, Eq)
+instance ToJSON SpawnError where
+  toJSON e = case e of
+    SpawnWorktreeFailed stage worktreeFailure -> object ["tag" .= ("SpawnWorktreeFailed" :: Text), "stage" .= stage, "worktreeFailure" .= worktreeFailure]
+    SpawnBindingFailed bindStage bindingFailure -> object ["tag" .= ("SpawnBindingFailed" :: Text), "bindStage" .= bindStage, "bindingFailure" .= bindingFailure]
+    SpawnBackendFailed backendStage backendFailure -> object ["tag" .= ("SpawnBackendFailed" :: Text), "backendStage" .= backendStage, "backendFailure" .= backendFailure]
+    SpawnRollbackFailed rollbackStage originalFailure rollbackFailure -> object ["tag" .= ("SpawnRollbackFailed" :: Text), "rollbackStage" .= rollbackStage, "originalFailure" .= originalFailure, "rollbackFailure" .= rollbackFailure]
+    SpawnResultMalformed malformedDetail -> object ["tag" .= ("SpawnResultMalformed" :: Text), "malformedDetail" .= malformedDetail]
+    SpawnDriveFailed driveStage driveDetail -> object ["tag" .= ("SpawnDriveFailed" :: Text), "driveStage" .= driveStage, "driveDetail" .= driveDetail]
+    SpawnCapacityExhausted capacityLimit -> object ["tag" .= ("SpawnCapacityExhausted" :: Text), "capacityLimit" .= capacityLimit]
+    SpawnCancelled cancelledCycle -> object ["tag" .= ("SpawnCancelled" :: Text), "cancelledCycle" .= cancelledCycle]
+-- end type_defs[17] --
+
+-- end type_defs --
+
+-- extra_imports (2 items) --
+-- extra_imports[0] (46 bytes) --
+import Tidepool.Agent.Spawn (renderSpawnError)
+-- end extra_imports[0] --
+
+-- extra_imports[1] (215 bytes) --
+import Tidepool.Agent.Delegate (Delegate, DelegateBrief (..), DelegateResult (..), DelegateRun (..), DelegateError (..), delegate, delegateTyped, delegateTypedFrom, delegateTypedIn, renderDelegateError, runDelegate)
+-- end extra_imports[1] --
+
+-- end extra_imports --
+
+-- helpers (9 items) --
+-- helpers[0] (556 bytes) --
+-- @substrate-helper@
+-- | RAW one-cycle coupled spawn: workspace + binding + agent + one
+-- backend cycle, atomically; `schema` is the JSON Schema the terminal
+-- result must conform to. Prefer the typed wrapper in
+-- `Tidepool.Agent.Spawn` (schema derived from your result type's
+-- Generic representation, payload decoded by its FromJSON instance);
+-- this is its substrate.
+spawnAgentRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Eff effs (Either SpawnError SpawnOutcome)
+spawnAgentRaw spec schema = send (SubagentSpawn spec schema)
+-- end helpers[0] --
+
+-- helpers[1] (829 bytes) --
+-- @substrate-helper@
+-- | RAW begin of a coupled spawn that carries dynamic tools: it does
+-- everything `spawnAgentRaw` does, then drives the turn to its FIRST
+-- stop instead of to the end — either `StepToolCall agent callId tool
+-- args` (the child called one of your tools and its turn is PARKED
+-- until you answer) or `StepDone outcome` (it never called one).
+-- `tools` is a JSON array of {name, description, inputSchema};
+-- `schema` is the JSON Schema the terminal result must conform to.
+-- Prefer `spawnAgentWithTools` in `Tidepool.Agent.Spawn`, which
+-- compiles both from your types and runs the answer loop for you.
+agentBeginRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Value -> Eff effs (Either SpawnError AgentStep)
+agentBeginRaw spec tools schema = send (SubagentBegin spec tools schema)
+-- end helpers[1] --
+
+-- helpers[2] (796 bytes) --
+-- @substrate-helper@
+-- | RAW answer to the parked tool call, driving the turn on to its next
+-- stop (another `StepToolCall`, or `StepDone`). `agent` and `callId`
+-- are echoed from the `StepToolCall` you are answering; naming a
+-- different agent or a different call is refused (`SpawnDriveFailed`)
+-- rather than misrouted. `ok` False is a REFUSAL the child reads and
+-- reacts to — an ordinary conversational fact, not a transport error,
+-- and never a way to leave the call unanswered; `body` is then the
+-- text it sees. Prefer `spawnAgentWithTools` in `Tidepool.Agent.Spawn`.
+agentResumeRaw :: forall effs. Member Subagent effs => AgentId -> Text -> Bool -> Value -> Eff effs (Either SpawnError AgentStep)
+agentResumeRaw agent callId ok body = send (SubagentResume agent callId ok body)
+-- end helpers[2] --
+
+-- helpers[3] (197 bytes) --
+-- | Spawn in a NEW managed worktree: worktree spec, agent label, task.
+spawnSpec :: WorktreeSpec -> Text -> Text -> SpawnSpec
+spawnSpec wspec lbl task = SpawnSpec (SpawnNewWorktree wspec) lbl task
+-- end helpers[3] --
+
+-- helpers[4] (260 bytes) --
+-- | Spawn in an EXISTING unbound managed worktree by durable id.
+-- Fails `SpawnBindingFailed` (naming the holder) if it is bound.
+spawnSpecIn :: WorktreeId -> Text -> Text -> SpawnSpec
+spawnSpecIn tid lbl task = SpawnSpec (SpawnExistingWorktree tid) lbl task
+-- end helpers[4] --
+
+-- helpers[5] (385 bytes) --
+-- | One-line operator-readable rendering of a spawn failure.
+-- Case-match the constructor when you mean to BRANCH on it.
+renderBackendFailure :: BackendFailure -> Text
+renderBackendFailure (BackendUnavailable t) = "backend unavailable: " <> t
+renderBackendFailure (ProtocolRejected t) = "backend rejected request: " <> t
+renderBackendFailure (RunFailed t) = "agent run failed: " <> t
+-- end helpers[5] --
+
+-- helpers[6] (822 bytes) --
+-- @substrate-helper@
+-- | RAW async spawn: everything `spawnAgentRaw` does, except that the
+-- cycle runs on its OWN thread and this call returns as soon as it is
+-- admitted — a `CycleId` naming the running cycle, not its outcome.
+-- Refused with `SpawnCapacityExhausted` when the handler's cycle table
+-- is already full; that is a BOUND, not a queue, so nothing is
+-- allocated behind it. Every cycle must eventually be reaped by
+-- `agentAwaitRaw` or `agentCancelRaw`. Prefer the typed wrapper
+-- `spawnAsync` in `Tidepool.Agent.Spawn` (schema derived from your
+-- result type, handle abstract over it); this is its substrate.
+agentSpawnAsyncRaw :: forall effs. Member Subagent effs => SpawnSpec -> Value -> Eff effs (Either SpawnError CycleId)
+agentSpawnAsyncRaw spec schema = send (SubagentSpawnAsync spec schema)
+-- end helpers[6] --
+
+-- helpers[7] (689 bytes) --
+-- @substrate-helper@
+-- | RAW await: BLOCK until the named cycle finishes, and return the same
+-- `Either SpawnError SpawnOutcome` the synchronous `spawnAgentRaw`
+-- returns — the async path is the same call, reaped later. Awaiting a
+-- cycle this handler never minted (or one already reaped) is a
+-- `SpawnDriveFailed` at `StageRunning`: a caller-sequencing failure,
+-- not a backend one. Prefer the typed wrapper `awaitAgent` in
+-- `Tidepool.Agent.Spawn`, which decodes the payload into your result
+-- type as `spawnAgent` does.
+agentAwaitRaw :: forall effs. Member Subagent effs => CycleId -> Eff effs (Either SpawnError SpawnOutcome)
+agentAwaitRaw cycle = send (SubagentAwait cycle)
+-- end helpers[7] --
+
+-- helpers[8] (568 bytes) --
+-- @substrate-helper@
+-- | RAW cancel: reap the named cycle's backend and release its binding.
+-- TOTAL — cancelling a cycle that already finished, or one this handler
+-- never minted, is a NO-OP, so there is nothing to case-match. Retain-
+-- first as everywhere else: the binding is settled, and the worktree
+-- stays registered and rebindable — nothing is deleted. Prefer the
+-- typed wrapper `cancelAgent` in `Tidepool.Agent.Spawn`.
+agentCancelRaw :: forall effs. Member Subagent effs => CycleId -> Eff effs ()
+agentCancelRaw cycle = send (SubagentCancel cycle)
+-- end helpers[8] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
 =============================== EFFECT: Journal ===============================
 
 -- type_name (7 bytes) --
 Journal
 -- end type_name --
 
--- description (491 bytes) --
-Durable append-only run journal: a resident harness records completed steps as it happens, mid-loop, so progress survives a crash and resume can fold the journal instead of redoing finished work. `record kind key payload` appends ONE entry — `kind` and `key` are caller-chosen labels (e.g. a step kind and the branch or task it concerns), `payload` is an opaque JSON value. Every append is flushed immediately; the journal is append-only forever — there is no rewrite or compaction verb.
+-- description (724 bytes) --
+Durable append-only run journal: a resident harness records completed steps as it happens, mid-loop, so progress survives a crash and resume can fold the journal instead of redoing finished work. `record kind key payload` appends ONE entry — `kind` and `key` are caller-chosen labels (e.g. a step kind and the branch or task it concerns), `payload` is an opaque JSON value. Every append is flushed immediately; the journal is append-only forever — there is no rewrite or compaction verb. `trace stage key payload` appends ONE observability entry to the run's sibling TRACE stream instead: never folded into resume, timestamped at the handler, for decision narration and telemetry a reader merges into one timeline by ts.
 -- end description --
 
 -- prompt_card: None --
 
--- constructors (1 items) --
+-- constructors (2 items) --
 -- constructors[0] (49 bytes) --
 RecordStep :: Text -> Text -> Value -> Journal ()
 -- end constructors[0] --
+
+-- constructors[1] (48 bytes) --
+TraceStep :: Text -> Text -> Value -> Journal ()
+-- end constructors[1] --
 
 -- end constructors --
 
@@ -1673,7 +1982,7 @@ import qualified Tidepool.Resume as Resume
 
 -- end extra_imports --
 
--- helpers (1 items) --
+-- helpers (2 items) --
 -- helpers[0] (333 bytes) --
 -- | Append one durable journal entry. `kind` and `key` are
 -- caller-chosen labels; `payload` is an opaque JSON value. Flushed
@@ -1681,6 +1990,129 @@ import qualified Tidepool.Resume as Resume
 record :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()
 record kind key payload = send (RecordStep kind key payload)
 -- end helpers[0] --
+
+-- helpers[1] (546 bytes) --
+-- | Append one observability entry to the run's sibling TRACE stream: decision narration and telemetry, never folded into resume. `stage` names what kind of moment this is (e.g. "resume-verdict", "park"); `key` is the branch or unit it concerns; `payload` is an opaque JSON value whose shape may evolve freely. The handler stamps a timestamp on every line, so trace and journal merge into one timeline.
+trace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()
+trace stage key payload = send (TraceStep stage key payload)
+-- end helpers[1] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: Green ===============================
+
+-- type_name (5 bytes) --
+Green
+-- end type_name --
+
+-- description (659 bytes) --
+Green threads: cooperative concurrency with the authored surface of `Control.Concurrent.Async` (`Tidepool.Async`: `async`/`wait`/ `waitEither`/`cancel`, plus `race`/`concurrently`/`mapConcurrently`). A forked computation parks as its own continuation, so threads blocked on different effects progress independently and several holes are pending at once. Scheduling is cooperative — a thread runs until it performs an effect, then parks, and the driver resumes whichever pending hole is ready. `cancel` closes the thread's runtime resource scope, which discards its pending suspensions. The verbs here are substrate; authors call `Tidepool.Async`, not these.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (413 bytes) --
+`Tidepool.Async` — the `Control.Concurrent.Async` surface (`async`/`wait`/`waitCatch`/`waitEither`/`waitBoth`/`waitAny`/`cancel`, `race`/`concurrently`/`mapConcurrently`), auto-imported. `async (fork @T brief)` runs a fork in a green thread so several can be outstanding before the first `wait`. Spawn and wait in the SAME ```haskell block — threads do not survive their block; results you bound with `<-` do.
+-- end prompt_card.0 --
+
+-- constructors (6 items) --
+-- constructors[0] (51 bytes) --
+AsyncSpawnWith :: Int -> (Int -> M ()) -> Green Int
+-- end constructors[0] --
+
+-- constructors[1] (37 bytes) --
+AsyncDoneWith :: Int -> a -> Green ()
+-- end constructors[1] --
+
+-- constructors[2] (38 bytes) --
+AsyncJoinAnyWith :: [Int] -> Green Int
+-- end constructors[2] --
+
+-- constructors[3] (35 bytes) --
+AsyncStatusWith :: Int -> Green Int
+-- end constructors[3] --
+
+-- constructors[4] (33 bytes) --
+AsyncResultWith :: Int -> Green a
+-- end constructors[4] --
+
+-- constructors[5] (34 bytes) --
+AsyncCancelWith :: Int -> Green ()
+-- end constructors[5] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (86 bytes) --
+data AsyncStatus = AsyncRunning | AsyncSettled | AsyncWasCancelled deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (21 bytes) --
+import Tidepool.Async
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (5 items) --
+-- helpers[0] (501 bytes) --
+-- @substrate-helper@
+-- | Fork a green thread; substrate for 'Tidepool.Async.async'.
+-- The body rides as a lambda so the closure-sentinel scan fires
+-- and the runtime tenures it (see the effect's Rust definition).
+-- The body is wrapped so its last act is an AsyncDoneWith
+-- suspension carrying the result — the return trip uses the
+-- same field-1 crossing as the outbound one.
+asyncSpawn :: M a -> M Int
+asyncSpawn body = send (AsyncSpawnWith 0 (\_ -> body >>= \v -> send (AsyncDoneWith 0 v)))
+-- end helpers[0] --
+
+-- helpers[1] (239 bytes) --
+-- @substrate-helper@
+-- | Park until ANY of these threads reaches a terminal state;
+-- resumes with the id of the one that did.
+asyncJoinAny :: forall effs. Member Green effs => [Int] -> Eff effs Int
+asyncJoinAny = send . AsyncJoinAnyWith
+-- end helpers[1] --
+
+-- helpers[2] (291 bytes) --
+-- @substrate-helper@
+-- | A thread's current state. Never parks.
+asyncStatus :: forall effs. Member Green effs => Int -> Eff effs AsyncStatus
+asyncStatus t = decode <$> send (AsyncStatusWith t)
+  where
+    decode 1 = AsyncSettled
+    decode 2 = AsyncWasCancelled
+    decode _ = AsyncRunning
+-- end helpers[2] --
+
+-- helpers[3] (282 bytes) --
+-- @substrate-helper@
+-- | A settled thread's result, delivered in-heap by handle.
+-- Gate it with 'asyncStatus': the result of a thread that has
+-- not settled is not defined.
+asyncResult :: forall a effs. Member Green effs => Int -> Eff effs a
+asyncResult = send . AsyncResultWith
+-- end helpers[3] --
+
+-- helpers[4] (268 bytes) --
+-- @substrate-helper@
+-- | Cancel a thread: its runtime resource scope closes, discarding its pending
+-- suspensions. Idempotent, and a no-op on a terminal thread.
+asyncCancel :: forall effs. Member Green effs => Int -> Eff effs ()
+asyncCancel = send . AsyncCancelWith
+-- end helpers[4] --
 
 -- end helpers --
 

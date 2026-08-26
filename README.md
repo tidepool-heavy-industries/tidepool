@@ -170,7 +170,8 @@ tidepool-extract-cmd/       The one `tidepool-extract` invocation builder: bin r
 tidepool-atomic-write/      Atomic write-then-rename, shared by every durable on-disk store
 tidepool-protocol/          Effect contract as data: one schema generating macro DSL, wire mirrors, extractor tables, harness classification
 tidepool-codegen/           Cranelift JIT compiler + effect machine
-tidepool-runtime/           High-level API: compile_haskell, compile_and_run, caching
+tidepool-toolchain/         Toolchain discovery, fingerprints, paths, and compile cache
+tidepool-runtime/           High-level API: compile_haskell, compile_and_run, sessions
 tidepool-mcp/               MCP server library (generic over effect handlers)
 tidepool-handlers/          Concrete effect handlers shared by both servers
 tidepool-repl/              GHCi-style resident-session MCP server
@@ -188,9 +189,11 @@ tidepool-testing/           Test utilities + property-based generators (internal
 1. **Write Haskell** using `freer-simple` effects (e.g. `emit "hello" >> awaitInt`)
 2. **Extract GHC Core** via `tidepool-extract`, which serializes to CBOR
 3. **Load in Rust** as `CoreExpr` + `DataConTable` (the IR)
-4. **Optimize** with configurable passes (beta reduction, inlining, dead code elimination)
-5. **Compile to native** via Cranelift, producing a `JitEffectMachine`
-6. **Run with handlers** — the machine yields effect requests; Rust handlers respond
+4. **Compile to native** via Cranelift, producing a `JitEffectMachine`
+5. **Run with handlers** — the machine yields effect requests; Rust handlers respond
+
+The production path does not run `tidepool-optimize`; that crate is used for
+differential and optimizer testing.
 
 ## Examples
 
@@ -349,7 +352,7 @@ The `tidepool` binary provides these effect handlers:
 | **Time** | `TimeNow` — UTC clock (epoch millis; `getCurrentTime`, ISO-8601 helpers) |
 | **Ask** | `AskWith :: Text -> Value -> Ask Value` — suspend and ask the calling LLM a schema-validated question |
 | **RunLLMTurn** | `RunLLMTurnWith`, `RunLLMTurnFreezeWith` — interposed, like `Ask`: `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` open a clean-context model sub-turn and deliver a typed answer; `freezeContext` snapshots the calling context for later branching |
-| **Fork** | `ForkWith`, `ForkAllWith` — `fork @T brief`/`forkAll @T briefs` delegate to one or more sub-answerers, each producing a typed `T` (depth-one — a forked child cannot itself fork) |
+| **Fork** | `ForkWith`, `ForkAllWith` — `fork @T brief`/`forkAll @T briefs` delegate to one or more sub-answerers, each producing a typed `T`; the resident harness supports recursively forked child sessions within configured budgets |
 
 > **`--debug` flag**: Run `tidepool --debug` to enable the **Meta** effect (`MetaConstructors`, `MetaLookupCon`, `MetaPrimOps`, `MetaEffects`, `MetaDiagnostics`, `MetaVersion`, `MetaHelp`) for runtime introspection. For git operations, use `run "git ..."` via the Exec effect.
 

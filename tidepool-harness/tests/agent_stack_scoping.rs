@@ -6,8 +6,7 @@
 //! single shared stack pinned by convention. `type M` is built from a
 //! compile's ROW alone and stays exactly this narrow.
 //!
-//! **`RunLLMTurn` is the one exception to "absent ⇒ not in scope" (extract-wave
-//! item 0b).** Its GADT + `Member`-polymorphic helpers are NAMEABLE in every
+//! `RunLLMTurn` is nameable in every
 //! compile (`EngineConfig`'s vocabulary policy widens `row ∪ {RunLLMTurn}`),
 //! so `runLLMTurn` resolves and typechecks up to the `Member RunLLMTurn effs`
 //! constraint — which then fails to SOLVE against a row that doesn't carry
@@ -127,7 +126,7 @@ fn compile_pinned(
     )
 }
 
-/// THE answerer-side structural guarantee (extract-wave item 0b): `runLLMTurn
+/// `runLLMTurn
 /// @T` does NOT typecheck against the answerer's `Eff '[AskUser, Fork,
 /// ReadState, Green, Finalize]` ROW — `RunLLMTurn` is not in it. But `RunLLMTurn` IS in the
 /// answerer compile's VOCABULARY now (nameable everywhere), so the failure
@@ -163,8 +162,8 @@ fn run_llm_turn_is_a_member_error_not_a_scope_error_in_the_answerer_stack() {
     let lower = err.to_lowercase();
     assert!(
         !lower.contains("not in scope") && !lower.contains("variable not in scope"),
-        "runLLMTurn is NAMEABLE in the answerer compile now (extract-wave item \
-         0b) — a scope error here means the vocabulary widening regressed, \
+        "runLLMTurn must be nameable in the answerer compile; \
+         a scope error here means the vocabulary widening regressed, \
          got:\n{err}"
     );
 }
@@ -188,7 +187,7 @@ fn tidepool_harness_module_is_importable_in_the_answerer_stack() {
         result.is_ok(),
         "importing Tidepool.Harness (which names RunLLMTurn/runLLMTurn) must \
          typecheck against the answerer stack now that RunLLMTurn is nameable \
-         everywhere (extract-wave item 0b), got:\n{:?}",
+         everywhere, got:\n{:?}",
         result.err()
     );
 }

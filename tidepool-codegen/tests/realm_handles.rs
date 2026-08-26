@@ -1,6 +1,5 @@
-//! HANDLE + SCOPE-EXIT FALSIFIER (one-session plan, Phase 0.4) — the embedder
-//! handle API (`ValueHandle`) and structured scope exit (`close_realm`) under
-//! adversarial GC, on one machine holding multiple parked continuations.
+//! `ValueHandle` delivery and `close_realm` under adversarial GC with multiple
+//! parked continuations.
 //!
 //! The claims under test, each of which a missed root or a botched release
 //! turns into a deterministic poisoned tag 221 (never a flaky segfault):
@@ -9,7 +8,7 @@
 //!   a handle, survive collections between mint and delivery, be DELIVERED
 //!   verbatim into a SIBLING parked frame ("the loop") via
 //!   `ResumeInput::Handle`, and be APPLIED by the resumed continuation's own
-//!   compiled code — the end-to-end pillar-B delivery the eager bridge's
+//!   compiled code — delivery the eager bridge's
 //!   `CLOSURE_SENTINEL` makes impossible on the Value path;
 //! - `observe_handle` is the one serialization seam: data bridges, a closure
 //!   payload observes as the sentinel, and observation neither consumes the

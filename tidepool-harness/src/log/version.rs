@@ -12,31 +12,15 @@
 //! [`super::writer::LogWriter::create`] and stripped by
 //! [`super::reader::LogReader::open`].
 
-use serde_json::Value;
-use tidepool_repr::version_ladder::{set_version, Migration, MigrationError};
-
 /// This build's current harness-log version.
-pub const CURRENT: u32 = 1;
-/// The oldest version this build still loads. `0` — an unstamped log
-/// written before this scheme existed — stays accepted so an existing
-/// operator's `log-*.jsonl` keeps loading.
-pub const FLOOR: u32 = 0;
-
-fn header_v0_to_v1(v: Value) -> Result<Value, MigrationError> {
-    // Purely additive: `0` and `1` are the same `LogHeader` shape, this
-    // step only makes the version explicit. See the module doc's
-    // unstamped-file convention.
-    Ok(set_version(v, 1))
-}
-
-fn event_v0_to_v1(v: Value) -> Result<Value, MigrationError> {
-    // Same story as `header_v0_to_v1`, for `EventRecord`'s shape.
-    Ok(set_version(v, 1))
-}
+pub const CURRENT: u32 = 2;
+/// The v2 schema deliberately drops the retired snapshot/branch receipt
+/// variants. Older logs are rejected explicitly rather than partially read.
+pub const FLOOR: u32 = 2;
 
 /// Indexed from [`FLOOR`]: `HEADER_MIGRATIONS[0]` is the `FLOOR -> FLOOR+1`
 /// step for [`super::LogHeader`]'s own shape.
-pub const HEADER_MIGRATIONS: &[Migration] = &[header_v0_to_v1];
+pub const HEADER_MIGRATIONS: &[tidepool_repr::version_ladder::Migration] = &[];
 /// Indexed from [`FLOOR`]: `EVENT_MIGRATIONS[0]` is the `FLOOR -> FLOOR+1`
 /// step for an [`super::EventRecord`] row's shape.
-pub const EVENT_MIGRATIONS: &[Migration] = &[event_v0_to_v1];
+pub const EVENT_MIGRATIONS: &[tidepool_repr::version_ladder::Migration] = &[];

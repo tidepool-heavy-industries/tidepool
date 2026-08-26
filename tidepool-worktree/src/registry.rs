@@ -1,6 +1,6 @@
 //! The durable record of every managed worktree.
 //!
-//! LANE L1 owns the implementation. The types here are frozen scaffold: change
+//! The types here are durable wire/storage vocabulary: change
 //! them only by agreement with the other lanes.
 //!
 //! ## Invariants this module exists to hold

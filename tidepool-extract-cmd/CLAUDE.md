@@ -2,15 +2,14 @@
 
 **Charter.** Belongs: binary resolution (the strict `$TIDEPOOL_EXTRACT`
 policy), typed argument construction (`ExtractCmd`), and the spawn + spawn
-counter — a std-only leaf with zero deps. Does NOT belong: parsing extract's
-output (diagnostics JSON, CBOR payloads — each caller maps `Output` to its
-own error type), the compile memo/cache (`tidepool-runtime::cache`, which
-consumes this crate's `argv()` as its cache key).
+counter — a std-only leaf with zero dependencies. Parsing extractor output
+belongs to callers; the compile cache belongs to `tidepool-toolchain`, which
+uses this crate's `argv()` in its cache key.
 
-## Resident compile daemon (Phase 0)
+## Resident compile daemon
 
 `ExtractCmd::run()` (never `run_with` — see below) transparently tries the
-resident compile daemon (plans/compile-daemon-design.md) before falling back
+resident compile daemon before falling back
 to a direct spawn: when `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a path, it
 connects, sends `(cwd, argv())` over the wire the `daemon` module owns
 (length-prefixed frames — see that module's doc for the exact byte shape,

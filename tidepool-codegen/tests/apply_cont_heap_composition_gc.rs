@@ -6,7 +6,7 @@
 //! composed `E`. A `k2_stack` deep enough — e.g. from nested `mapM`/`foldM`
 //! over many effectful iterations, exactly the shape
 //! `tidepool-runtime/tests/nested_mapm_tag255.rs` stresses — can need more
-//! Node allocations than a single nursery holds. Before this fix, `alloc_con`
+//! Node allocations than a single nursery holds. `alloc_con`
 //! was bump-only: nursery exhaustion mid-composition surfaced as a hard user
 //! error ("apply_cont_heap: failed to allocate E result during continuation
 //! composition"), not a stale-pointer read — the panic message on that test

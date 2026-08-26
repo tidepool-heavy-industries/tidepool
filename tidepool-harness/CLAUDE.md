@@ -1,1055 +1,153 @@
-# tidepool-harness — typed-yield session harness
-
-**Charter.** Belongs: the resident harness — session-tree turn lifecycle,
-`SessionRegistry` checkout ownership, hole/suspension classification, and the
-selfharness driver (self-iterating loop, fork/fanout, the `AskUser` operator
-gate routing). Does NOT belong: the JIT/effect machine itself
-(`tidepool-codegen`), the resident session suspension primitive
-(`tidepool_runtime::session`), concrete effect handlers (`tidepool-handlers`),
-operator GUI rendering (`tidepool-web`).
-
-A frontend over the eval substrate, peer to `tidepool-repl`. Both share ONE
-suspension engine: the threadless stow-as-data mechanism in
-`tidepool_runtime::session::PersistentSession`. Suspension here is threadless
-throughout: no JIT continuation is ever held by a parked thread. (The
-operator gate parks a thread, but it holds no continuation — see below.)
-
-Module map:
-- `tree`/`forcing` — `NodeId`/`NodeState`/`HoleId`/`SiteId`, forcing badges,
-  and `NodeTree<M>`: parent/child structure + per-node lifecycle state,
-  backed by the durable event log. Generic over a machine handle `M` and
-  backed internally by a `SessionRegistry<M>` (see Machine lifecycle below).
-- `registry` — this crate's instantiation of the promoted
-  `tidepool_runtime::session::registry` primitive (the ONE session-ownership
-  mechanism, see the root `CLAUDE.md` Mechanism Index) at `H = HoleId`: a
-  type-alias `SessionRegistry<M>`/`Checkout<'_, M>`/`CheckoutError` fixing the
-  hole-identity parameter, so every call site keeps its pre-promotion
-  single-type-parameter shape. The mechanism itself — the `Idle |
-  Running{holes} | Suspended{machine, holes} | Wedged{since}` slot (MULTI-HOLE:
-  a suspended session carries a SET of parked holes, each resumable by
-  identity in any order), the epoch guard, atomic checkout/restore including a
-  child-run checkout over parked frames (`checkout_child`) — lives in
-  `tidepool-runtime`; this crate never constructs `Slot::Wedged` (a wedged
-  turn here retires the whole node via `Harness::terminate_node` instead).
-- `harness` — `Harness`: the orchestrator. Owns a `NodeTree<Session>` whose
-  `SessionRegistry<Session>` is the one place a resident session lives (see
-  Machine lifecycle below); a `convos` map holds everything ELSE per-node
-  (transcript, framing, turn lease); `pending_suspensions` — a
-  `HashMap<(SessionId, HoleId), PendingSuspension>` — holds every currently-parked
-  hole's domain metadata (classified routing, the raw suspended request, the
-  typed resident continuation, the compile table/asks it suspended with),
-  keyed by session+hole rather than scattered per-node fields (see Suspension
-  metadata below). Drives the turn loop, hole classification, fork/fanout
-  registration, elaborator proposal confirm/reject.
-- `engine` — the turn engine: prompt assembly, provider call, extract+compile
-  the last fenced Haskell block, classify a suspension (`AskWith`/
-  `AskUserWith`/`RunLLMTurnWith`/`FinalizeWith`) by its request's constructor
-  name. `compile_turn`/`compile_turns` (`CompiledTurn`: `CoreExpr` +
-  `DataConTable` + `asks.json` sidecar) are thin wrappers over
-  `tidepool_runtime::artifacts::compile_targets` — the actual
-  spawn/read/deserialize/diagnostics/memo mechanics moved to that crate
-  (architecture review finding 3, 2026-08-17: this crate no longer owns a
-  second compiler frontend). See Compile memo below.
-- `log` — event-log wire schema (header pins prelude+extract fingerprints).
-  `Event::TurnStart{source}` carries the EXTRACTED executed Haskell block, not
-  a "model" tag; `Event::Effect{req,resp}` is written by the live
-  turn loop (`Harness::flush_effects`, drained per turn in `run_block`/`answer_*`)
-  whenever a turn dispatches a HANDLED effect — see Replay below for the
-  substitution boundary and the scoped-stack caveat.
-- `provider` — `ModelProvider` trait (calling-model turns; not the Llm
-  effect) + `provider/{api_key,http,oauth,paths}` impls.
-- `replay` — `ReplayProvider` (turn substitution) + `fold_tree_state`
-  (crash-replay tree reconstruction) — see Replay below.
-- `snapshot` — `SnapshotDigest`, the blake3 identity type the durable log's
-  `Event::SnapshotFrozen`/`Event::BranchInvocation` variants carry. The
-  context-snapshot/branch feature this type used to back was deleted (sol
-  cross-family review findings 7/8: dead vestige, no production caller); the
-  type survives only for wire compatibility with an old log, and nothing
-  mints one anymore.
-- `synopsis` — `type_document`, the full GHC-style `data` declaration a hole
-  card's shape line reads, derived from a compiled `DataConTable` (which
-  carries field TYPES as well as NAMES).
-- `selfharness/driver` — the self-iterating harness's outer `render`/`loop`
-  driver (see `selfharness/mod.rs`'s own doc for where this sits among the
-  rest of `selfharness`), split into a module tree along its own seams, no
-  file over ~1800 lines: `mod.rs` (the `SelfHarnessDriver` struct and its
-  construction/config-setter API, `DriverError`, shared tuning constants)
-  plus `lifecycle` (bootstrap, checkpoint restore, the `render`/`loop`
-  fragment drive, machine rotation, emergency compaction), `suspension`
-  (`askUser`/`note` servicing on both the nested-answerer and outer-loop
-  planes, and the operator-gate/observer plumbing those paths share),
-  `fork`/`green` (fork/fanout spawn-time budgets and child-driving; the
-  green-thread scheduler backing `Tidepool.Async` — split from `fork` on
-  size, both still one pump), `corrective` (retry-feedback text assembly:
-  fork-child failure correctives, the decl-plane "types in scope" hint, the
-  answerer framing suffix), `contract` (the outer and answerer effect decl
-  rows, per-hole `AnswerContract`), and `delegate` (outer-loop effect
-  delegation to `Subagent`/`Console`/`Worktree`/`RepoEvent`/`Exec`/
-  `Journal`). Public surface (`SelfHarnessDriver`, `DriverError`,
-  `typed_request_agent_decls[_with_delegate]`) is unchanged — every other
-  item crossing a module boundary inside the tree is `pub(crate)`, not
-  re-exported further.
-
-## Compile memo — one content-addressed cache, no cache-free path
-
-Every turn compile (`engine::compile_turn`/`compile_turns`, wrapping
-`tidepool_runtime::artifacts::compile_targets`) is memoized. There is no
-cache-free path, no bypass flag, and no second mechanism. The full keying
-spec lives in `tidepool-runtime/CLAUDE.md`'s "Compile cache" section; what
-a reader here needs:
-
-- **The mechanism is `tidepool_runtime::cache`, not a fork of it.**
-  `invocation_key` keys the COMPLETE invocation — source CONTENT, the built
-  `ExtractCmd::argv()` walked against an ALLOWLIST, the include roots by
-  CONTENT with paths RELATIVE to each root, and the extract binary by content.
-  An argv element the allowlist does not classify makes the invocation
-  UNCACHEABLE (compile cold), never silently unkeyed — that is also how
-  session-scope compiles (`--session-bind`/`--inject-val`/`--session-root`,
-  which read per-session MUTABLE dirs) stay out of v1. The session lane
-  (`tidepool_runtime::session::turn`) is untouched.
-- **A hit stores and restores the FULL artifact set** this module reads —
-  `meta.cbor`, every `<target>.cbor`, and the asks sidecar in whichever shape
-  the target count selects, with ABSENT distinct from empty. Hit and miss
-  rejoin at `tidepool_runtime::artifacts::assemble`, so observational
-  identity is a property of the code shape. The one deliberate difference: a
-  hit records no `extract_spawn` timing stage and no `extract.*` phases,
-  because nothing was spawned.
-- **Tests share the memo, not their state.** `tests/support::isolate_cache`
-  still isolates `XDG_CACHE_HOME` per test (checkpoints, transcripts,
-  `log.jsonl`, KV, the generated effects module) but points
-  `TIDEPOOL_COMPILE_CACHE_DIR` at the AMBIENT cache dir so every test process
-  shares one memo. Sharing is safe by construction: content-addressed entries
-  are only reached by identical compilations. Measured on
-  `golden_path + acceptance_askuser + selfharness_spine`: 119s before, 99s
-  cold, **47s warm**.
-- **A test that MEASURES compile cost must opt out** via
-  `support::isolate_compile_memo()` (a fresh memo dir), or its receipt becomes
-  a receipt about cache state. `acceptance_boot_compile_count` is the one such
-  test — its `PRE_MODEL_EXTRACT_COMPILES` counts spawns, which a warm memo
-  drives to 0.
-
-## Machine lifecycle — the registry is the one session-lifecycle truth
-
-`Harness` instantiates its `tree` field as `NodeTree<Session>` (`Session =
-ResidentSession<BoxedStack, CapturedOutput>`), so `NodeTree::force`'s
-caller-supplied machine IS the real resident session — the tree's internal
-`SessionRegistry<Session>` (this crate's instantiation of the promoted
-`tidepool_runtime::session::registry` primitive, `registry.rs`) is the ONLY
-place a session lives. There is no second, hand-rolled take/put discipline: a turn-owning method
-checks a node's machine OUT via `Harness::checkout_run`/`checkout_resume`/
-`checkout_child` (thin wrappers over `SessionRegistry::checkout_run`/
-`checkout_resume`/`checkout_child` that resolve the node's `SessionId` via
-`NodeTree::session_of` and map a refusal through `HarnessError::from_checkout`
-— the one place a `CheckoutError` becomes a node-scoped error), runs the turn
-on the blocking pool via `Harness::run_checked_out`, and restores it with the
-session's OWN post-call reported hole SET (`Session::parked_holes()`) through
-one unified `Checkout::restore_suspended` call — an empty set IS `Idle`, so
-there is no separate idle/suspended restore to desync — not a guess from the
-turn's domain result, so an errored `run`/`resume` still restores correctly.
-`run_checked_out` also applies the node's realm to the machine before the turn
-(`Session::set_realm`) at this one site, so an ATTACHED answerer node's parks
-are always owned by its own realm on a shared machine (see Self-iterating
-harness below).
-
-MULTI-HOLE: a suspended session carries a SET of
-parked holes, each resumable by identity in any order (the machine's
-continuation registry imposes none) — a NEW top-level run over parked frames
-is an ordinary `checkout_run`, not a refusal; the old reject-while-suspended
-behavior and the separate `RunningChild` slot variant are both gone
-(`Slot::Running{holes}` covers a fresh run, a resume, and a child run over
-parked frames alike). A `checkout_child` (a CHILD run over a suspended
-session's parked frames — the discipline an answer value crosses by: a
-non-consuming child run against the TARGET's own session) requires at least
-one parked hole and is otherwise an ordinary checkout: with the continuation
-registry there is no special child agent session, and the parked holes ride
-the checkout like any other turn's.
-
-`Checkout` is panic-safe: if a checkout is dropped without an explicit
-restore (a panic unwinding between checkout and restore, before the machine
-was ever moved off the checkout via `take()`), `Drop` restores it with the
-hole SET it carried out — `Suspended{holes}`, or `Idle` only when that set is
-empty — rather than leaving the registry slot wedged `Running` forever, and
-without losing frames that are still rooted in the machine. The one case
-`Drop` cannot cover is a machine already moved onto the blocking pool via
-`take()`: if that task panics (`JoinError`), the machine is genuinely gone —
-`run_checked_out` calls `Harness::terminate_node` instead of trying to
-restore a machine it does not have.
-
-`Harness::terminate_node` is the ONE retirement path: idempotently
-terminalize the tree entry (`NodeTree::node_cancelled`, skipped if already
-`Done`/`Cancelled`), then retire the SESSION according to who owns it. An
-OWNING node (the ordinary case) has its session removed from the registry
-(`SessionRegistry::remove`, dropping the machine); an ATTACHED node (the
-per-loop answerer — see Self-iterating harness below)
-never owns the shared session, so its retirement is realm SCOPE EXIT
-(`close_realm` on the shared machine: the realm's parked frames and any
-outstanding `ValueHandle`s are released together, sibling realms untouched) —
-the outer session outlives every answerer node it hosts. Either way the
-node's `convos` entry is removed, and any `pending_suspensions` entries still
-belonging to it are purged (see Suspension metadata below — an orphaned
-entry would otherwise sit unconsumable forever). `cancel`, a failed
-fork/fanout child's cleanup, the `JoinError` path above, and the
-self-iterating harness's `retire_typed_request_agent` all retire a node through it —
-there is no second way to retire one. A busy node (`CheckoutError::Running`)
-surfaces as `HarnessError::TurnInFlight`, never `NoSession` — that variant is
-reserved for a node that genuinely has no session (never forced, or already
-terminated).
-
-`convos: Mutex<HashMap<NodeId, NodeConvo>>` still holds everything a session
-checkout doesn't and that isn't suspension-specific: the transcript, per-node
-framing, the answer contract, the turn lease. A read that needs the session's
-own state WITHOUT checking it out (decl-plane context for a session-aware
-compile, the session's import module) goes through `SessionRegistry::peek`,
-which succeeds only when the machine is actually present in its slot
-(`Idle`/`Suspended` — not `Running`/`RunningChild`, checked out elsewhere).
-
-## Suspension metadata — one map, keyed by session + hole
-
-A node's pending suspension's DOMAIN metadata — its classified routing, the
-raw suspended request `Value`, the typed `ResidentHole` continuation token,
-and the `DataConTable`/`AsksSidecar` it compiled against — lives in exactly
-one place: `Harness::pending_suspensions: Mutex<HashMap<(SessionId, HoleId),
-PendingSuspension>>`. This is deliberately SEPARATE from the registry's own hole
-SET (`Slot::Suspended{holes}`, machine-reported, the ownership truth for
-checkout purposes) — the same "authoritative set + external domain metadata"
-split the registry itself draws around `Slot`. Keyed by `(SessionId,
-HoleId)`, not bare `HoleId`: the JIT's `scont_N` continuation ids are minted
-per-machine, so two independent sessions can legitimately produce the same
-string.
-
-A node's own turn is suspended on AT MOST one hole at a time — a
-`ResidentHole` is always REPLACED, never accumulated, across a
-suspend → resume → re-suspend cycle — so `Harness::node_pending(node)` is a
-plain scan (`pending_suspensions.lock().values().find(|p| p.node == node)`), never
-a second node→hole index to keep in sync; session/node counts in flight are
-small (bounded by concurrent fanout width, not corpus size). `NodeState`
-stays single-hole for the same reason — the registry's multi-hole SET is
-multi because it spans MULTIPLE NODES sharing one session (concurrently-
-driven attached answerer realms), never because one
-node juggles several holes.
-
-Two methods own every transition: `Harness::publish_suspension` (log
-`Event::HolePublished`, the tree's `Running → Suspended{hole}` transition,
-then insert into the map) and `Harness::consume_suspension` (log
-`Event::HoleConsumed`, the reverse transition, then remove) — called from
-`finish_run`'s suspend arm and `resume_parent`'s success/re-suspend arms.
-Every other read (`pending_suspension`, `pending_suspension_full`,
-`pending_suspension_with_request`, `pending_turn_outcome`, `take_finalized_value_*`,
-`finalize_is_closure`, `wrap_fork_answer`, `asks_modules`,
-`register_fork_child`, the `answer_*` family) goes through `node_pending`.
-
-## Replay — turn substitution + crash-replay tree reconstruction, NOT effect replay
-
-Two independent pieces, both in `replay.rs`:
-
-- **Turn substitution** (`ReplayProvider`): a `ModelProvider` that serves
-  previously-recorded assistant `TurnDelta` replies back in order instead of
-  calling a live model — a CI run re-drives the same golden path with zero
-  API calls.
-- **Offline log inspection** (`fold_tree_state`/`FoldedTree`): folds a log's
-  events into the terminal per-node `NodeState` + tree structure, so a
-  finished or crashed run's browsable history tree can be reconstructed from
-  the durable log alone — an inspection tool, in the same family as
-  `tail -f log.jsonl`. It is NOT the startup recovery path: that is the
-  generation-tagged `persistence::Checkpoint` the driver restores from at
-  boot (`SelfHarnessDriver::restore`) — a second recovery source folding the
-  log at startup would be dual lifecycle machinery. `golden_path`'s
-  crash-replay assertion (a killed process's log folds back to the terminal
-  tree) is what pins this contract.
-
-**Effects are RECORDED live; they are never SUBSTITUTED on replay.**
-`Harness::flush_effects` drains a node's `effect_trace` after each
-`run_block`/`answer_*` into `NodeTree::effect`, so every turn that dispatches
-a HANDLED (non-suspending) effect writes one `Event::Effect{req,resp}` per
-effect. A SUSPENDING effect (`Ask`/`AskUser`/`RunLLMTurn`/`Finalize`) never
-reaches a handler, so it logs as `HolePublished`/`HoleConsumed`, not `Effect`.
-
-**Scoped-stack caveat:** the self-iterating harness's answerer
-(`[AskUser, Fork, ReadState, Green, Finalize]`) declares ONLY suspending
-effects — no base `Console`/`Fs`/`Http`/… — so `flush_effects` runs but
-drains an empty trace: the answerer node produces NO `Event::Effect` BY
-CONSTRUCTION (that absence IS the capability boundary — the answerer
-structurally cannot run a shell/file/net effect). The OUTER loop's row
-(`outer_decls()`: `[RunLLMTurn, AskUser, Console, Worktree, RepoEvent, Exec,
-Subagent, Journal, Green]`) is NOT suspending-only — it
-carries real base effects with real handlers — but it still writes no
-`Event::Effect` either, for an unrelated reason: the outer session is
-node-less (see One session below), so `flush_effects`/`NodeTree::effect`
-never apply to it at all; its handled effects route through
-`SelfHarnessDriver::service_outer_effect` instead, a separate dispatch
-mechanism this crate's `crate::log` schema does not cover. A general Agent
-node (full base-effect row, on the tree) does produce `Event::Effect`
-entries normally.
-
-**The reserved gap:** nothing READS those records back. Recorded responses are
-never substituted into a resumed session, so a node that suspended after
-running handled effects, then restarted and resumed, RE-EXECUTES them live.
-
-## Scope trees — an agent session's names retire with its heap
-
-A node already carried a `RealmId`: the HEAP-side lifetime of its agent
-session (parked frames, outstanding `ValueHandle`s), exited by `close_realm`.
-C2 gives it the NAME-side one alongside — a `ScopeId` (`tidepool_codegen::scope`),
-the frame both session planes hang their per-session declarations and
-bindings off. One agent session, two halves, **one** retirement step.
-
-**How an agent session gets a scope.** Mint it off the session
-(`with_session(sid, |s| s.mint_scope(parent))` — `PersistentSession` owns the
-one `ScopeTree`, and minting is also where the DECL plane seeds the child's tip
-from its PARENT's, so a sibling that defines in between cannot leak in), then
-`Harness::set_node_scope(node, scope)`. `Harness::run_checked_out` applies it
-to the session (`ResidentSession::set_scope`) at the SAME one site it applies
-the realm, so every run/resume/child path is covered and a node WITHOUT a scope
-runs at `ScopeId::ROOT` — never at whatever scope the last turn on a shared
-machine left behind (the ambient-stickiness hazard the realm reset already
-answers). `with_session`'s own runs reset to ROOT for the same reason.
-
-**What a scoped turn actually compiles against.** `session_bind_context` and
-`session_decl_context` resolve the turn's decl-tip import module and its
-visible `Val.G<g>` set FROM THE NODE'S SCOPE (`session_import_module_in`,
-`current_val_modules_in`), and a decl turn appends to that scope's own tip
-(`define_scoped_in`). That is the whole of the decl-plane inheritance rule on
-the real compile path: a child's tip module already re-exports its parent's chain, so
-parent declarations are callable in every child; the visible-binding walk is
-upward-only with child frames shadowing parent ones, so a sibling's names are
-not even *nameable*; and nothing ever walks downward, so the parent gains
-neither. A value bind lands in the turn's own scope, and the cross-plane rule
-(a name lives in at most one plane) is scoped with it — `materialize_binder`
-retracts the decl head in the BINDING's scope, so a child binding `helper`
-never retracts the parent's. At ROOT every one of these is the pre-C2 path
-verbatim; `tests/companion_mount_spike.rs` passing unmodified is the gate.
-
-**What retirement releases.** `Harness::terminate_node` is still the ONE
-retirement path. For an ATTACHED node it now exits both halves in
-`exit_agent_session`: `close_realm(realm)` first (parked frames + handles), then
-`retire_scope(scope)`. That order is load-bearing — scope retirement's
-sole-ownership rule reads the handle registry, so a handle the realm still
-owned would wrongly pin a root. The immediate path and the QUEUED path
-(`pending_session_exits`, drained by whichever code path next holds the machine)
-go through that one function, so they cannot diverge; both halves of the
-agent session's identity are retained in the queue until the exit is
-CONFIRMED. An OWNING node is unaffected: its whole session is dropped.
-
-The receipt outlives the node. `retire_scope` returns
-`ScopeRetirement { scopes_retired, bindings_retired, roots_released }`, and
-`terminate_node` records it under the node id for `Harness::scope_retirement`
-— by the time a caller checks the ledger the `convos` entry is gone, and
-`roots_released` is the only thing the ledger's movement can be checked
-against.
-
-**The four counted classes, and their harness-visible reads.** Never folded
-together — the full table and the reasoning live in `tidepool-codegen/CLAUDE.md`
-§ root accounting; what a caller here needs is which read to take:
-
-| # | Class | Read (through `with_session`) | Scope retirement |
-|---|-------|-------------------------------|------------------|
-| 1 | parked continuations | `s.stowed_roots_count() == s.parked_count()` | UNCHANGED |
-| 2 | handle registry | `s.value_handle_count()` | UNCHANGED (a mount already transferred out) |
-| 3 | value-plane bindings | `s.binding_names()` (ROOT) / `s.scope_binding_count(scope)` | the retired scope's frame goes to 0 |
-| 4 | GC root ledger | `s.persistent_roots_count()` | drops by EXACTLY the receipt's `roots_released` |
-
-Classes 1 and 2 staying put is an assertion, not an expectation: a parked
-frame's root belongs to a REALM, and a mounted root left the handle registry at
-the mount. Class 4 is the witness — without it class 3 can return to baseline
-while every root stays traced.
-
-**Deregistered is not reclaimed.** Retirement removes a root from the GC TRACE
-LIST; it does not free `OldSpace` bytes (no major or compacting pass exists).
-A long-resident session's OldSpace grows monotonically with the total number of
-mounts ever made and is reclaimed at machine drop or rotation. Written here,
-in `tidepool-codegen/CLAUDE.md`, and in the design doc so nobody re-derives it
-while hunting a leak.
-
-**Escaped closures stay alive by REACHABILITY, not by exemption.** A closure
-finalized in a child scope is mounted into a PARENT-scope binding
-(`mount_handle_in(parent, …)`, the C1 mount seam pointed across a scope
-boundary). That parent binding owns its own `RootSlot`, so retiring the child
-leaves it registered while the child's own bindings' roots go, and the captured
-child-heap objects stay traced transitively through it. Gate:
-`tests/companion_scope_trees.rs`.
-
-## The provider cache-metric gap (read this before claiming a cache win)
-
-**No provider impl in this tree emits `cache_control` breakpoints, and none
-parses a cache metric beyond what the response already reports. Measured
-cache REUSE is therefore not verifiable from our side.** Stated plainly so a
-dogfood report does not go looking for a number that isn't there:
-
-- `TurnRequest` has no metadata slot at all, and nothing anywhere emits
-  `cache_control`. We do not *cause* provider-side cache hits; at most we make
-  a stable prefix available for a provider to cache on its own terms.
-- `Usage` carries `cached_input_tokens: Option<u64>`, populated ONLY from
-  a field the response genuinely has — the Responses-API SSE usage object's
-  `input_tokens_details.cached_tokens` (`provider/oauth.rs`) and genai's
-  `usage.prompt_tokens_details.cached_tokens` (`provider/http.rs`). A provider
-  that reports nothing leaves it `None`. **`None` means NOT REPORTED and is
-  serialized as an absent field — never `0`.** Nothing synthesizes it, and
-  prefix identity is never treated as evidence of a cache hit. `Usage` also
-  carries `cache_write_tokens: Option<u64>` on the same discipline, from
-  `input_tokens_details.cache_write_tokens` — the OAuth `/responses` call
-  sends the body field `prompt_cache_key` (equal to the `session-id`
-  header value), matching the official Codex client's cache-routing contract;
-  `session_id_for`'s derivation is unchanged, only what carries its value.
-- There is no local tokenizer here, so a token-level split of a shared prefix
-  is not claimed; the only verifiable number is the provider's own
-  `input_tokens`/`cached_input_tokens` for a given turn.
-- One prefix-stability hazard: the self-iterating outer loop recomposes its
-  SYSTEM message per iteration (iteration count, operator input, rotation
-  losses), so message 0 is not stable across loops; compaction also rewrites
-  the framing carried into the next render.
-
-**Per-round usage lives on `Event::TurnDelta.usage: Option<Usage>` (nested,
-NOT a top-level key) — every assistant turn.** Written by every model round
-(`Harness::drive_turn`/`summarize_turn`), including corrective-retry and
-answerer-loop rounds, so within-session round-to-round cache ratios are
-computable from any `log-*.jsonl`:
-`jq -c 'select(.event.ev=="turn_delta" and .event.usage != null) |
-{node: .event.node, turn: .event.turn, ratio: ((.event.usage.cached_input_tokens
-// 0) / .event.usage.input_tokens)}' log-*.jsonl`. The `Usage` widening is
-additive + `serde(default)` — the precedent is `Event::TurnDelta`'s
-`reasoning` — so `log.jsonl` files written before it still deserialize.
-
-#### Within-session round-to-round cache affinity (fixed 2026-08-20)
-
-Run-4's dogfood measurement showed only 45% of input tokens served from
-OpenAI's prompt cache, with consecutive model rounds inside ONE agent session
-going 0% / 59% / 0% / 68% / 0% — an append-only conversation should approach
-100% from round 2 on. Diagnosis (`engine.rs`'s
-`within_window_*_is_prefix_extension` tests): **`engine::assemble_request`'s
-output was already a byte-identical-prefix extension every round**, for all
-three within-session shapes (an ordinary next round, a corrective-retry round
-with a freshly-embedded GHC error, and a round following a note/`askUser`
-resume) — `convo.transcript` is `.push()`-only everywhere (`push_user_turn`,
-`drive_turn`'s assistant append, `summarize_turn`), `convo.framing` is set
-once at node creation and never rewritten mid-session, and
-`answer_dialog`/`answer_note` resume the suspended Haskell continuation
-directly without touching the transcript at all. No content near the top of
-the request was being re-rendered.
-
-The actual defect was one level down, in `provider/oauth.rs`'s
-`codex_responses`: the `session-id` header sent with every `/responses` call
-was a **fresh `Uuid::new_v4()` minted on every single HTTP request**, never
-reused across rounds of the same agent session. The reference Codex CLI mints ONE
-`session_id` per conversation and reuses it for every turn; the ChatGPT Codex
-backend uses it to route repeat requests to the inference replica already
-holding that conversation's cached prefix (the same reasoning that already
-justified `x-codex-installation-id` being process-stable, just applied one
-level down to the conversation). A random id every round defeated that
-routing on every round — the alternating hit pattern was occasional
-coincidental routing collisions, not content instability.
-
-Fix: `session_id_for(instructions, opening)` derives a deterministic
-`Uuid::new_v5` from the agent session's two genuinely-invariant pieces —
-`instructions` (the framing) and the session's OPENING message (the first
-non-system item) — both fixed for the life of an agent session by the prefix-
-stability property above, so the header is now identical across every round
-of one agent session while still varying across different agent sessions.
-Not threaded
-through `NodeId`/a session table: `ModelProvider::complete` carries no
-session identity (one provider instance is shared across every node in a
-harness), so deriving from content already in `TurnRequest` avoided widening
-that trait. One accepted consequence: a snapshot-forked branch child, whose
-opening message is inherited verbatim from its parent at the fork checkpoint,
-shares the parent's `session-id` for as long as that inherited message stays
-its first one — harmless (arguably a cache-affinity win, since both share the
-ancestor prefix) under `store: false`, where the header is routing/telemetry
-only, never persisted conversation state.
-
-**2026-08-20 follow-up:** `session-id` alone is a Codex protocol header, not
-the documented cache-routing control — that is the body parameter
-`prompt_cache_key`, and the official Codex client sends both with the same
-session identity. `codex_responses` now sends `prompt_cache_key` equal to
-`session_id_for`'s output alongside the unchanged `session-id` header;
-`session_id_for`'s own derivation is untouched. Separately, `Usage` now
-captures `cache_write_tokens` (from `input_tokens_details.cache_write_tokens`
-on the SSE usage object) alongside `cached_input_tokens`, so a cold-but-wrote-
-cache round is distinguishable from a wasted rewrite in the durable log.
-
-**Backend canary (2026-08-20, live probes against
-`chatgpt.com/backend-api/codex/responses`):** `prompt_cache_key` is ACCEPTED
-(HTTP 200; usage confirms `input_tokens_details.cache_write_tokens` on the
-wire). `prompt_cache_options` is REJECTED (`Unsupported parameter`) and
-`prompt_cache_breakpoint {mode: explicit}` is REJECTED (`not supported on
-this model`) on BOTH `gpt-5.6-terra` and `gpt-5.6-sol` — explicit cache
-breakpoints are unavailable on this backend, so fresh-transcript agent
-sessions (a unique opening prompt with no shared prefix — e.g. a
-fork-child session) are STRUCTURALLY cold: 0% cached on their first round is
-expected, not a defect, and no request-shape change can fix it here. Do not
-re-probe without reason; do not build breakpoint support against this
-backend. Platform-doc facts that govern interpretation: `prompt_cache_key`
-is REQUIRED for reliable matching on gpt-5.6+; ~15 requests/minute per key
-before overflow misses; 1024-token strict minimum prefix; 30-minute TTL
-refreshing on reuse; cache WRITES bill at 1.25× on gpt-5.6+. Bucketed
-sub-keying for high-fanout bursts is deliberately deferred until
-post-`prompt_cache_key` dogfood data shows sibling scatter persisting.
-
-**Turn boundary — recomposed SYSTEM message per loop iteration — is NOT the
-same hazard and was deliberately left alone.** Each self-iterating-harness
-loop iteration creates a brand-NEW per-loop answerer `NodeId`
-(`SelfHarnessDriver::create_root_framed("loop answerer", …,
-self.answerer_framing.clone())`) with its OWN from-scratch transcript — so
-"message 0 differs across loops" is really "these are two different
-conversations, not a continuation of one," and every round WITHIN each of
-those per-loop agent sessions already gets this wave's stability fix. Making the
-framing byte-stable ACROSS loop iterations would mean literally reusing one
-session/transcript for the whole outer loop instead of a fresh answerer node
-per iteration — a real architectural change (touches how `SelfHarnessDriver`
-mints per-loop nodes and threads `answerer_framing`), not a move-to-tail, and
-out of scope here. Compaction's framing rewrite (the other named hazard) is
-the same shape: it deliberately starts a fresh compacted prefix by design
-(`replace_transcript_with_summary`), not an in-place edit of a live agent
-session.
-
-## Invariants
-
-Forcing events are the only work-begins mechanism (consent integrity audits
-to literal zero — `NodeTree::force` is the only transition out of `Thunk`,
-and it logs `Event::Forced{actor}` before any session exists); teasers are
-harness-generated only (`forcing.rs::derive_teaser`).
-
-## Self-iterating harness — the answerer row + the `AskUser` operator gate
-
-The self-iterating harness's answerer Agent (`selfharness::driver::typed_request_agent_decls`)
-compiles against `Eff '[AskUser, Fork, ReadState, Green, Finalize]` — decl-only effects, disjoint
-from the general Agent stack's `standard_decls()` (which keeps `Ask`,
-`RunLLMTurn`, and every base effect untouched; `AskUser` never appears
-there). `AskUser` (`tidepool_mcp::askuser_decl`) is a brand-new effect, not a
-rename of `Ask`: `Ask` suspends `ask schema prompt` to the CALLING LLM AGENT
-with a JSON Schema; `AskUser` suspends `askUserRaw :: Value -> M Value` (the
-raw wire escape; the typed surface authors write is `askUser @T`, plus
-`choose`/`chooseMany` for value-defined alternatives — `Tidepool.Form`) to a
-HUMAN OPERATOR with a typed [`FormShape`]
-(`selfharness::operator`) — the ONE operator-presentation algebra, carried
-bare end to end — routed by CONSTRUCTOR NAME (`AskUserWith`) in
-[`engine::classify_hole`] — no JSON-key probing.
-
-`askUser @T` derives its form from `T`'s own `GHC.Generics` representation
-(`Tidepool.Form.GForm`) with no value of `T`, ships it as the RECURSIVE
-`FormShape` wire (`Tidepool.Form.Wire` encodes exactly the JSON
-`selfharness::operator`'s module docs specify), and rebuilds the typed value
-from ordinary JSON submitted by the operator. `engine::decode_askuser_spec`
-decodes that one bare shape straight through for the gate and observer — no
-wrapper struct. `Tidepool.Form` is
-auto-imported into a turn's preamble whenever `AskUser` is in the compiling
-decl list (`tidepool-mcp`'s `pragmas_and_imports`/`session_decl_module_env`);
-it depends on `askUserRaw`, so it is REACHABLE ONLY on the answerer stack, not
-the general eval/Agent surface.
-
-`Tidepool.Form.note :: Text -> M ()` is a SIBLING, non-blocking display
-channel riding the SAME `AskUser` GADT as a second constructor (`NoteWith`,
-`noteRaw`) — `note "why I'm about to ask this"` posts text to the operator
-GUI's accumulating feed and the driver resumes with `()` IMMEDIATELY, never
-presenting anything via `OperatorGate::present_form`. Routed by constructor
-name into [`crate::engine::SuspensionRouting::Note`], serviced by
-`Harness::answer_note` (the audited resume path, minus the operator wait) and
-`SelfHarnessDriver`'s note-draining helpers wherever an `askUser` chain can
-appear (the nested answerer, the AUTHORED outer loop, and interleaved
-mid-chain in either) — never counted against `ASKUSER_MAX_REPROMPTS`, since
-nothing here waits on a human to spin.
-
-`ReadState` (`tidepool_mcp::readstate_decl`, answerer row only) is the
-agent-computes-over-its-own-state effect:
-`getStateJson :: M Value` suspends on `ReadStateWith`, routed by constructor
-name into `SuspensionRouting::ReadState` and serviced note-style — the driver
-resumes IMMEDIATELY with the loop's current state JSON
-(`SelfHarnessDriver.loop_state_json`, the same JSON the checkpoint holds; no
-operator, no model round, never counted against any cap). Freshness is
-trivially correct because state changes only at loop boundaries — every
-agent session within a loop iteration reads the state that iteration started
-with. A driver context
-with no cycle state (the general Agent path) resumes with JSON `null`.
-
-### The answer contract — `finalize` is pinned by the ROW
-
-An answerer turn does not compile against a polymorphic `finalize`. While a
-node is answering a typed hole it carries an `AnswerContract` (set per hole by
-the driver via `Harness::set_answer_contract`, since the per-loop answerer node
-is reused across holes whose types differ), and its turns compile with:
-
-- **`Finalize` instantiated at the hole's type IN THE ROW.** `Finalize` is
-  type-indexed — `data Finalize v a where FinalizeWith :: Int -> v -> Finalize
-  v a`, `finalize :: forall v a effs. Member (Finalize v) effs => v -> Eff effs
-  a` — so a turn answering a `Decision` hole compiles against `'[AskUser, Fork,
-  ReadState, Finalize Decision]` and `Member (Finalize Decision)` IS the pin. Canonical
-  freer-simple, the same shape as `State s`. A wrong-typed answer is an
-  ordinary GHC error naming the row (`'Finalize Text' is not a member of the
-  type-level list '[AskUser, Fork, ReadState, Green, Finalize Decision]'`), which the
-  corrective-retry loop feeds back. Nothing is shimmed, hidden, or
-  qualified-aliased: the turn uses the ordinary `build_preamble`.
-
-  The tyvar shape is load-bearing and unchanged: `v` first (so `finalize @T x`
-  binds it), `a` genuinely free (`finalize :: forall v a effs. Member
-  (Finalize v) effs => v -> Eff effs a` never constrains `a` to anything —
-  `finalize` diverges, it never returns), `Member` a real constraint (so the
-  dictionary rides as the leading value arg `Translate.hs` re-applies when
-  head-swapping to `finalizeSited`). Extract is untouched by the indexing —
-  `asks.json` records the site type exactly as before, and `v` is erased in
-  Core, so `FinalizeWith` keeps its arity and `Finalize` its positional union
-  tag.
-
-  **`a` being free makes the shared template's `toJSON _r`/`toWire _r`
-  ambiguous, and GHC defaulting does NOT rescue it.** Even under
-  `ExtendedDefaultRules`, with the preamble's explicit `default (Int, Double,
-  Text)`, defaulting fires only when the ambiguous variable's constraint set
-  carries at least one class from GHC's own standard set (numeric, `Show`,
-  `Eq`, `Ord`). `ToJSON`/`ToWire` are ordinary superclass-less library
-  classes, so a solitary `ToJSON a0` never qualifies: `_r <- __user; …
-  (toJSON _r)` is ambiguous by construction whenever a turn's block
-  terminates in `finalize`. (Not an `Eff`-row, `MonoLocalBinds`, or
-  implication artifact — a plain `IO` repro fails identically.)
-  `template_turn_for` (`engine.rs`) supplies the missing anchor: a turn
-  compiled against a real (non-`Void`) `Finalize T` row routes through
-  `tidepool_mcp::template_haskell_anchored`, which passes `_r` through a
-  generated `__anchor :: P.Show a => a -> a; __anchor = P.id` before
-  rendering. It is ADDITIVE — `id` never forces `_r`'s type — so an
-  already-concretely-typed result (an ordinary eval, or an answerer turn that
-  suspends on `askUser` without finalizing) is unaffected, and only
-  `finalize`'s genuinely-ambiguous `_r` newly resolves (to `Int`: the first
-  `default` candidate carrying both `Show` and `ToJSON`/`ToWire`). Every
-  other caller of `tidepool_mcp::template_haskell` is untouched.
-
-  `EngineConfig::turn_target` resolves one turn's compile target, returning a
-  `TurnTarget { include, stack }` derived from a SINGLE `tidepool_mcp::RowArgs`
-  — the effects-module dir (via `ensure_effects_module_at`) and the promoted
-  row string (via `build_effect_stack_type_at`) come from the same place, so
-  they cannot name different rows. Because the row lives in the generated
-  `type M`, a pinned turn gets its own effects-module dir; the dir is
-  content-addressed on the generated source, so two answer types can never be
-  served each other's module and a repeat of the same type is free. The
-  generated module also imports the contract's author modules — naming
-  `Decision` in `type M` needs it in scope THERE, not only in the turn module.
-
-  A turn with no contract compiles at `Finalize Void` — the canonical
-  `Data.Void` uninhabited type, imported into the generated Core module.
-  Such a turn is not answering a typed hole and
-  therefore has no finalize capability at all, which is the true statement, and
-  GHC says it by name. Because the row admits exactly one answer type, a
-  wrong-typed answer cannot compile — it can never cross in-heap into a
-  `T`-typed continuation and case-trap past every check.
-- **The modules that define the type** — resolved by EXTRACT, not scraped by
-  the harness. Every sited call site (`finalize`, `fork`/`forkAll`,
-  `runLLMTurn`/`runLLMTurnFork`/…) reports its answer type's defining
-  modules in `asks.json` alongside the rendered type itself
-  (`Tidepool.Translate.modulesOfType`, walking every tycon the type mentions
-  — `Either MyErr MyOk` reports `Either`'s, `MyErr`'s, AND `MyOk`'s modules,
-  not just the head's) — extract has the real type environment in hand at
-  that point, so it answers directly rather than a downstream caller
-  guessing from a source scan. `tidepool_runtime::AsksSidecar::modules_of`
-  is the Rust-side read; `SelfHarnessDriver::answer_contract` builds
-  `AnswerContract::imports` from it. This replaced
-  `HarnessSource::answerer_imports` (deleted), which only
-  ever found types the harness AUTHOR imported into `loop`'s own module —
-  a type a MODEL declares in the session decl plane compiled everywhere else
-  (the decl plane is on every compile's include path) but could never be
-  named as a fork/finalize answer type, because nothing scraped an import
-  line for it. The extract-side lookup has no such blind spot: it resolves
-  from the type itself, wherever it's defined.
-
-Both halves are load-bearing: without the pin a wrong-typed answer traps, and
-without the imports the model cannot name the type it is being asked for and
-substitutes one that compiles. A hole whose type extract could not resolve to
-any module (an unusual case — e.g. a type with no home module at all) fails
-the second half the same way a scrape-miss used to — `SelfHarnessDriver::
-types_in_scope_hint` says so in the retry rather than looping to the round
-cap. A node with no contract compiles at `Finalize Void` and simply cannot
-finalize. Pinned by `tests/finalize_type_pinning.rs`.
-
-**The pinned row's PROBE compile needs the SAME session context the turn body
-gets, separately.** `EngineConfig::turn_target`'s `validate_finalize_row`
-(above, "the `Finalize`-pinned row") compiles the generated shim STANDALONE,
-before the turn body is ever looked at — a SEPARATE compile from
-`Harness::live_turn_context`'s, which is what actually adds the node's session
-decl-plane dir (`session_include`) and `--session-root`/`--inject-val`
-(`session_root`/`inject_modules`, from `bind_ctx`) to the real turn's include
-set. A decl-plane answer type (a MODEL-declared `type X = …`/`data X = …`,
-not an author type) needs BOTH search-path entries at the PROBE too:
-`turn_target_with_extra_validation_include`'s `extra_session:
-Option<tidepool_runtime::SessionInject>` parameter (threaded from
-`Harness::run_block`/`run_multi_item_block`'s own `session_bind_context`
-read) supplies them — as a plain include-path entry (so `import Lib.G<g>`
-resolves) AND as a `SessionInject` (so `Lib.G<g>.hs` ITSELF, which
-`PersistentSession::define_scoped_in` unconditionally splices a live
-`Val.G<g>` import into, also resolves). Before this, a fork child's own
-`Finalize <T>`-pinned row for a decl-plane `T` died with a raw GHC "Not in
-scope" `EngineError::Setup` — fatal, not a corrective — while the PARENT's
-own turn, naming the identical `T` only in its BODY (never in a pinned row),
-compiled fine; that asymmetry is what let one forced fork child crash the
-whole harness process (2026-08-24 dogfood). `SessionInject`-injected probes
-are routed through `tidepool_runtime::compile_targets_with_session_inject`
-(`CacheStrategy::Uncached` — a session's live `Val.G<g>` set isn't something
-the content-addressed compile memo's argv allowlist can key on; the probe's
-OWN process-level `finalize_probe_memo` still applies, keyed on the session
-context too so two different sessions never collide on it). The separate,
-extract-side half of this bug — `Tidepool.Translate.modulesOfType` resolving
-a TYPE SYNONYM's module by looking THROUGH it (`tyConsOfType`'s `coreView`
-walk), reporting `Int`'s home for `type X = Int` instead of `X`'s own
-decl-plane module — is fixed alongside it (`modulesOfType` now also unions in
-the type's own head TyCon via a raw, non-expanding pattern match). Pinned by
-`tests/fork_child_decl_plane_type.rs`.
-
-A fork child's row is widened from ITS OWN requested type this same way,
-independent of whatever contract its parent happens to carry
-(`SelfHarnessDriver::drive_fork_child_agent_session` answers with a REAL
-`finalize @T` — see "Recursive fork servicing" below).
-
-**A child's row genuinely failing to resolve is the child's REQUEST's fault,
-never the mechanism's, and must not exit the process.**
-`SelfHarnessDriver::drive_agent_session_to_finalize`'s per-round dispatch
-carries an arm for exactly this: `Err(HarnessError::Engine(EngineError::
-Setup(msg))) if msg.contains("Not in scope") && msg.contains(ty_label)` —
-the same detection pattern `types_in_scope_hint`'s type-name arm already uses
-for the analogous `HarnessError::Compile` case — folds to `Ok(Err(
-InvocationExit::RuntimeFailure(_)))`, the SAME "runtime failure" collapse the
-adjacent provider-fault arm uses. For a fork child this reaches
-`drive_fork_child_agent_session`'s `Ok(Err(exit)) =>` arm, which turns it into
-a plain-language `fork_child_failure_corrective` fed back to the PARENT's
-next round (the parent answerer continues; the process survives) — never a
-`DriverError`. The guard is narrow ON PURPOSE: any OTHER `Setup` failure
-(extract binary resolution, cache IO, materializing the shim module) never
-mentions the pinned type's own name, so it falls through to the ordinary
-catch-all and stays a hard mechanism failure, exactly as before.
-
-`askUser` re-prompts by RECURSION on a decode failure (no `Either` — the
-retry is entirely Haskell-side): a bad submission genuinely re-suspends on a
-fresh `AskUserWith`, not an error the driver observes. The driver services
-this in [`SelfHarnessDriver::service_askuser_hole`]: present the form via the
-operator gate, resume via [`Harness::answer_dialog`] (the same audited resume
-path a mechanical `Dialog`/`Ask` answer uses — `answer_dialog` accepts
-`AskUser` alongside them), and repeat while the resume keeps landing on
-another `AskUser` suspension, reading the fresh pending hole via
-[`Harness::pending_suspension_full`] (the resume itself carries no outcome).
-Bounded by `ASKUSER_MAX_REPROMPTS` (8) CONSECUTIVE re-presentations,
-independent of and never counted against the model-round caps
-(`TYPED_REQUEST_AGENT_MAX_ROUNDS`/`LOOP_INFERENCE_CALL_CAP`) — a form resume is not a
-model round, but left uncapped it composes with a non-interactive gate at EOF
-(the default `StdinGate` returns an empty submission on EOF, not an error)
-into an unbounded hot loop no round-based cap catches.
-
-**The operator-input seam is [`selfharness::operator::OperatorGate`]**
-— consume it, never redefine it there: ONE method, `present_form(&FormShape)
--> serde_json::Value`, SYNC-BLOCKING by design (the frozen `OperatorGate`
-contract) even though the driver's turn loop is `async fn` and `.await`s the
-`Harness` directly. `SelfHarnessDriver` holds `gate: Arc<dyn OperatorGate>`,
-defaulting to `StdinGate` (headless: reads one JSON line per form) and
-overridable via `SelfHarnessDriver::set_gate` — a web/GUI implementation
-parks on a channel instead. `between_loops_gate` (the human-checkpoint between
-loop iterations) is an ORDINARY `present_form` call — a driver-authored
-`FormShape` ("Turn N complete — start turn N+1?" plus one optional `steer`
-text field), not a second mechanism. Every gate call runs under
-`tokio::task::block_in_place` so a web gate's channel park yields the tokio
-worker instead of stalling it.
-
-**Restart safety is a uniform rule, not a checkpoint marker.**
-`SelfHarnessDriver::run_loop` gates before the next turn whenever ANY
-checkpoint was restored (`self.last_checkpoint.is_some()`) — regardless of
-whether the prior process crashed mid-turn (the turn simply reruns, per
-existing at-least-once semantics, and the operator is asked again first) or
-genuinely parked at the gate itself (asked again, no different from any other
-restart). Only a first-ever run (no checkpoint at all) skips straight into the
-loop, which asks the seed question via the authored `askUser @SeedQuestion`.
-The between-turns gate writes nothing to disk of its own — no
-`awaiting_continue` marker, no dedicated durability dance — because the
-uniform rule already covers a kill at any point around it: a checkpoint from
-before the gate looks identical to one from mid-park, and both re-present the
-gate on restart. A prior design carried a bespoke `Checkpoint.awaiting_continue`
-field + `mark_awaiting_continue`/`clear_awaiting_continue` writes for exactly
-this; it is gone (old checkpoints carrying that key still decode — the extra
-key is silently ignored).
-
-The OUTER loop can present a form too: `outer_decls()` is `[RunLLMTurn,
-AskUser, Console, Worktree, RepoEvent, Exec, Subagent, Journal,
-Green]` (nine effects — `AskUser` is one entry among real
-base effects, not the row's second half), so an AUTHORED `loop` that
-`import`s `Tidepool.Form` and evaluates
-`askUser` suspends on `AskUserWith`, serviced by
-`SelfHarnessDriver::service_outer_askuser_hole` (the same gate, the same
-`ASKUSER_MAX_REPROMPTS` bound, resuming the OUTER session via
-`engine::json_answer_to_value`). This does NOT add `AskUser` to
-`Tidepool.Harness`/`HarnessEff` (whose row stays `'[RunLLMTurn]`,
-stale-but-unused): `Harness = M` and `askUser`'s `Member AskUser` constraint
-unifies against the wider generated row.
-
-### Recursive fork servicing — the pump, spawn-time budgets, the GUI lifecycle
-
-The answerer's own `fork`/`forkAll` (`Tidepool.Fork`, riding `Fork` in
-`typed_request_agent_decls`) is where fork-subsumes-split landed: the
-companion tree EMERGES from model-authored `async (fork @T
-"brief")` calls rather than from authored split-proposal/gate machinery. A
-fork child is driven by `SelfHarnessDriver::drive_fork_child_agent_session`
-(`drain_answerer_fork`'s direct-chain call, `service_thread_ready`'s
-async-chain call) as a full ATTACHED session on the SAME shared machine as
-its parent (see One session below) — multi-round, can `askUser`, and can
-itself `fork` recursively, bounded only by spawn-time budgets, never by row
-shape (step 2 dropped the `Fork`/`Green` strip that used to bottom a child
-out at depth one — that strip survives only on the unrelated one-shot
-general-Agent path, see "The line…" below).
-
-**Spawn-time budgets, checked in `Self::check_fork_budgets` before every
-spawn (a refusal costs nothing — no session, no machine, no compile):**
-`max_fork_depth` (default [`DEFAULT_MAX_FORK_DEPTH`] = 8) caps recursion
-depth; `fork_subtree_cap` (default [`DEFAULT_FORK_SUBTREE_CAP`] = 32) caps
-total descendant sessions across a whole top-level tree, counted atomically
-across every depth and both fork styles (direct `fork`/`forkAll` and
-green-thread `async (fork …)`); `fork_budget_per_window` (default
-[`DEFAULT_FORK_BUDGET_PER_SESSION`] = 32) caps how many children ONE
-session's own turn may spawn. A refusal is loud, not silent: the answerer
-gets the budget back as data (`fork_budget_refusal`/`fork_subtree_refusal`
-text) and can adapt, not a hard failure.
-
-**GUI lifecycle (fork-subsumes-split step 3):** a fork child gets its own
-operator-page treatment — birth, seed brief, timeline, final typed value or
-failure. Its tree label/path is DERIVED: base
-path from the parent's own registered label (or `"root"`), child segment
-`f<idx>-<ascii-slug-of-brief>` from a per-parent monotonic counter
-(`fork_child_seq`) assigned inside `drive_fork_child_agent_session` itself
-(guard reuse via widening `BranchAgentSessionGuard`, the `finalize_fork_data` exit).
-
-**What step 4 (the companion collapse) changed above this mechanism, not in
-it:** `harness-dogfooding/recursive-companion/Harness.hs` no longer proposes
-splits for authored machinery to execute — `Harness.loop` collapses to seed
-question → one top-level typed request → render, and the tree above is
-entirely what a session's own `fork` calls produce. See that harness's own
-README, not this file, for the companion-side shape.
-
-### Outer fork/fanout servicing — a child's exit is DATA at its position
-
-An AUTHORED `loop` reaching for `runLLMTurnFork @T`/`runLLMTurnFanout @T`
-suspends on `RunLLMTurn`'s own fork payload (no separate `Fork` decl needed —
-`outer_decls()` has none), classified as `SuspensionRouting::Fork` and serviced by
-`SelfHarnessDriver::service_outer_fanout` → `drive_fanout_child`: each child
-gets a freshly-minted answerer realm on the shared outer machine, driven
-CONCURRENTLY up to `set_concurrency_cap`, re-sorted to DECLARATION order
-before assembly so completion order is never observable.
-
-**Every verb that opens an agent session at a BRANCH POSITION answers an
-`Either`:**
-`runLLMTurnFork @T :: Text -> M (Either InvocationExit T)` and
-`runLLMTurnFanout @T :: [Text] -> M [Either InvocationExit T]`. The verb that
-does NOT open a branch position keeps its bare answer: `runLLMTurn @T`,
-answered in context by the same node. That asymmetry is documented at the
-declaration (`tidepool_mcp::runllmturn_effect_def!`).
-
-**The line, and it is the whole point of the shape.** A failure attributable
-to ONE CHILD'S AGENT SESSION — round exhaustion, ending on something that is
-not an answer, that session's own provider call failing — comes back from
-`drive_fanout_child` as `Ok(Err(exit))` and is folded as `Left exit` at that
-child's branch position, so its siblings' finished answers survive. A failure
-of the MECHANISM — fan cardinality, `Either`/list assembly against the
-`DataConTable`, session bookkeeping, the per-loop inference-call runaway cap,
-and a child that finalized a CLOSURE (it DID answer; this driver cannot carry
-it) — still hard-fails the turn. Laundering a broken mechanism into "the model
-failed" would be a false receipt. The nesting of
-`Result<Result<Value, InvocationExit>, DriverError>` IS that contract: outer =
-mechanism, inner = the agent session.
-
-`engine::build_child_answer_value`/`build_invocation_exit_value` construct the
-`Left`/`Right`/`Exit*` values against the turn's own table with
-`build_list_value`'s loud-failure discipline (a missing constructor is a hard
-error, never a default). The constructors are present by construction: a
-fork/fanout site head-swaps to a `*Sited` sibling whose top-level type mentions
-`Either InvocationExit a`, and extract's `collectTransitiveDCons` seeds from
-reachable top-level binders' types.
-
-`SuspensionRouting::Fork` carries `engine::ForkSource` to tell a
-`Tidepool.Fork` hole (`fork`/`forkAll`, always answers bare `T`/`[T]`) from a
-`RunLLMTurn`-sourced one (`runLLMTurnFork`/`runLLMTurnFanout`,
-`Either`-wrapped — see above): the self-harness pump
-(`SelfHarnessDriver::drain_answerer_fork`/`service_thread_ready`, driving
-each child on the full row via `drive_fork_child_agent_session`, its own
-`wrap_fork_value` doing the `Right` wrap). It never produces a `Left` from a
-`Tidepool.Fork`-sourced hole: a child failing there still hard-fails the fan
-as an ordinary `DriverError` (fork children are not branch positions with a
-typed `Left` to fold into — see "The line…" above).
-
-One consequence worth knowing before writing a harness: `InvocationExit` lives
-in the per-fragment generated `Tidepool.Effects`, so the cross-row bind guard
-refuses an `Either InvocationExit T` as a cross-turn session VALUE BIND (same
-rule that already covered `Schema`). Project at the bind —
-`steps <- either (\_ -> []) id <$> runLLMTurnFork @[Int] "…"`.
-
-Gate: `tests/outer_fanout.rs`.
-
-### One session: attached realms, closure delivery, machine rotation
-
-The outer session is the tree's one node-less, registry-owned
-session (`SelfHarnessDriver::bootstrap` calls `Harness::adopt_session`, which
-is `NodeTree::adopt_session` — the driver holds only the `SessionId`), and
-every per-loop answerer node ATTACHES to that same session instead of getting
-its own (`Harness::force_attached`, not `Harness::force`). An attached node
-never OWNS its session (`NodeTree::node_owns_session` is false for it); its
-turns run as a REALM on the shared machine, minted per loop
-(`SelfHarnessDriver::set_node_realm`) and applied to the machine by
-`run_checked_out` before every turn (see Machine lifecycle above), so an
-answerer's parked frames and any values it produces are born directly in the
-loop's own heap. Retiring the answerer at loop end
-(`SelfHarnessDriver::retire_typed_request_agent` → `Harness::terminate_node`) is that
-realm's SCOPE EXIT (`close_realm`), never session/slot removal — the shared
-outer session outlives every answerer node it hosts. Outer `render`/`loop`
-fragments and every answerer turn go through the one checkout discipline via
-`Harness::with_session` (a thin `checkout_run` + restore-with-reported-holes
-wrapper for the node-less shared session).
-
-**Finalize delivery is by HANDLE, not by bridge, when the payload is a
-closure.** A data answer still crosses as a bridged `Value`
-(`Harness::take_finalized_value_keep_open`); a closure (or any value that
-would sentinel under the eager bridge) is taken as a `ValueHandle`
-(`Harness::take_finalized_handle_keep_open`, gated by
-`Harness::finalize_is_closure`) and delivered into the loop's parked
-`runLLMTurn` continuation via `ResidentSession::resume_handle` — the payload
-pointer feeds the resumed continuation verbatim, on the same heap, no
-materialization. This is the mechanism behind `runLLMTurn @(State -> State)`
-working end to end — including closures NESTED in a product (a record of
-functions), routed by a DEEP sentinel scan: the answerer finalizes it, the
-loop applies it directly. And the shared session carries the LIVING DECL
-PLANE (`SelfHarnessDriver::open_outer_plane`): top-level declarations a
-model defines persist BY NAME across loops AND across machine rotations
-(the plane is source-side state; `take_lib` transfers it into the rotated
-machine), validated against an include that admits the STABLE
-`Tidepool.Effects.Core` module but excludes the per-session `M`-carrying shim
-(stable-effects-core — see `tidepool-mcp/CLAUDE.md`'s section of that name).
-This is now the payoff feature, not just a pure-decls guard: a declaration
-written `Member <Eff> effs => ... -> Eff effs T` validates and persists
-exactly like a pure one, and a declaration spelling the per-session `M` alias
-persists identically — `M` still never resolves on this plane, but the
-plane strips the M-mentioning signature before compiling and lets GHC infer
-the same `Member`-polymorphic shape (`tidepool_runtime::session::render`'s
-`generalize_m_signatures`), so which spelling a model reaches for is no
-longer a taxonomy it has to reason about. Only a declaration pinning a
-genuinely CONCRETE row still surfaces the row boundary — as an ordinary
-unsolved-`Member` error at whatever later use can't satisfy it, never a
-define-time refusal — and the authored render/loop compiles still NEVER see
-this plane either way (pillar D, unaffected). The direct, driver-independent
-acceptance of this is `tests/stable_effects_core_decl_plane.rs`. Standing
-acceptances for the pure-decl case, in `tests/selfharness_fn_finalize_spike.rs`: the
-`State -> State` edit, the record-of-functions delivery, and
-`living_helper_survives_loop_boundary_and_rotation` (declare in cycle N,
-resolve after the loop boundary AND a forced machine rotation into cycle
-N+1). A declaration made in one round is visible to every later round/turn
-in the SAME cycle too — `tests/selfharness_decl_plane_replay.rs`'s
-`decl_in_window_one_resolves_in_window_three_same_cycle` declares in the
-first of three sequential `runLLMTurn` agent sessions on one cycle's
-answerer node and resolves it in the third.
-
-**Mechanism — a decl-ending block persists before it nudges.**
-`Harness::run_multi_item_block` (the multi-item-block lane `run_block`
-reaches once `split_block_items` finds more than one item) commits every
-maximal run of consecutive declaration items via `session.define_scoped_in`
-as it walks the block, in order — INCLUDING a trailing run that reaches the
-block's last item. Only once that commit has landed does it check whether
-the block ended on a declaration: if so, the round returns the typed
-`HarnessError::Compile` ("not something that runs") that drives the
-corrective-retry nudge, same as ever — a decl-ending block still does not
-ADVANCE the turn — but by the time that nudge reaches the model, the
-declarations it just wrote are already live on the plane, so the very next
-round (or any later round/turn in the cycle) sees them.
-`Harness::run_block`'s single-item path has the same property by a simpler
-route: a lone decl item both persists AND completes the round. Restart
-persistence of the plane (decl-log disk reload) is future work; heap
-VALUES still die at rotation, enumerated.
-
-The scoped-stack caveat in Replay above still holds unchanged: the answerer
-row is all-suspending, so it produces no `Event::Effect` regardless of
-whether its session is owned or attached.
-
-**Machine lifetime is bounded by rotation, not immortality.** Because
-cross-loop closures are now the point, the shared machine is not rebuilt
-every loop — it is measured every loop boundary
-(`SelfHarnessDriver::machine_maintenance` emits `Event::MachineStats`,
-carrying `HeapStats::fragments`) and ROTATED at a quiescent boundary once
-`stats.fragments` reaches `TIDEPOOL_MACHINE_FRAGMENT_CEILING` (default 4096):
-a fresh machine is adopted under the SAME `SessionId`
-(`Harness::replace_session`), durable `State` flows through the checkpoint
-exactly as every loop already threads it, and whatever cannot reconstruct
-(session-plane bindings, including closures) is enumerated into
-`Event::MachineRotated` and the next render's legible-loss note — never
-silently dropped. A non-quiescent machine (parked holes outstanding) at the
-ceiling refuses the loop with a legible error rather than rotating under a
-live suspension. CI oracle:
-`machine_rotation_between_cycles_preserves_durable_state`.
-
-## Run lease — fail-closed against a live prior process
-
-`selfharness::resume::acquire_lease` (called once, at boot, by
-`tidepool-selfharness`) is the seam that decides which run this process joins
-— see that module's own doc for the full segments/lease design. The one
-property worth stating here: **a lease naming a DIFFERENT, still-LIVE pid is
-a hard refusal**, `Err(PersistenceError::LiveLeaseHeld)`, naming the pid and
-the takeover remedy — never a silent join. Segments make the JOURNAL file
-itself safe under concurrent writers, but they do nothing to stop two live
-processes from independently repeating the same external effects (writes,
-commits, model calls) or racing the shared checkpoint with last-writer-wins;
-that is a real hazard, not merely a cosmetic log warning, so it is a refusal.
-
-Set `TIDEPOOL_SELFHARNESS_TAKEOVER=1`
-(`selfharness::persistence::LEASE_TAKEOVER_ENV_VAR`) to force the join
-anyway — for a verified-stale record (the pid was reused by something
-unrelated, or the box rebooted and `/proc` hasn't caught up) or an
-operator-approved takeover. The prior lease is archived first (a
-`run-<id>.takeover-from-pid-<pid>-at-<ts>.json` sibling, distinct from the
-normal-completion `retire_lease` naming) so a forced claim leaves an audit
-trail, then the resume proceeds exactly as an ordinary dead-pid reclaim. A
-lease naming a genuinely DEAD pid reclaims exactly as before this fix —
-unaffected by the refusal or the takeover machinery, no env var needed. A
-lease naming THIS process's own pid (repeated `acquire_lease` calls within
-one process — a test-only shape; production calls this exactly once per
-boot) is likewise exempt, since there is no second process to refuse.
-
-**Residual, out of scope here:** storage is not namespaced by harness
-identity or run id — every harness sharing one `log_dir` shares one lease
-slot. The live-pid refusal stops the double-run hazard regardless, but two
-DIFFERENT harnesses pointed at the same `log_dir` would still contend for
-the same lease/segment namespace the way one harness's two instances would.
-
-## Tailing the durable log
-
-Two DISTINCT jsonl streams live under `<cache>/selfharness/` (paths from
-`selfharness::persistence`):
-
-- **`transcript.jsonl`** (`default_transcript_path`, written by `JsonlObserver`
-  over the `Observer` seam) — the LOOP-level story, and the whole input to the
-  telemetry fold (first-compile success rate, retries-per-hole —
-  `tests/dogfood_observability.rs`):
-  `LoopBoundary`; `RunLLMTurnHole{site,ty,prompt}` (the hole's human-facing
-  ask, not just its site/type); `TurnStart`/`TurnEnd` (node ids only);
-  `AnswererRound{node,site,round,error}` — one line per answerer round while
-  servicing a `runLLMTurn` hole, `round` 1-based WITHIN that hole's servicing,
-  `error` the UNTRUNCATED GHC error on a failed compile or `null` on a
-  compiled round — the fold groups these by `site`; `Finalize{node,value}`
-  (the finalized answer, rendered to JSON text, not just that one arrived);
-  `FormPresented{source,shape}`/`FormSubmitted{source,submission}` (an
-  `askUser` form's shape and the operator's reply — `source` distinguishes a
-  nested answerer's own form from one the AUTHORED OUTER loop raised
-  directly); `OuterCompile{label,source}` (the OUTER session's own `render`/
-  `loop` fragment compiles — `crate::log::Event::TurnStart` never covers
-  these, the outer session is not a tree node); `CompactionTrigger{summary,…}`.
-  One line per driver `Event`.
-- **`log-<epoch>.jsonl`** (parent directory from `default_log_path`, the
-  durable per-NODE `crate::log` written by the answerer `Harness`'s
-  `LogWriter`) — the fine-grained story:
-  `Forced`, `TurnStart{source}` (the EXTRACTED executed Haskell, so
-  `jq -r 'select(.ev=="turn_start").source'` over the newest `log-*.jsonl` prints
-  the exact blocks the answerer ran — also surfaced at console INFO, not just
-  the durable line), `TurnExtracted{asks,bound}`
-  (what extract said this turn's holes/binds ARE — the `asks.json` site → type
-  table and a value-plane bind's bound name/type, when either is non-empty),
-  `TurnDelta` (the full model reply), `HolePublished`/`HoleConsumed` (each
-  `askUser`/`finalize` suspension + answer), `NodeDone`. `Event::Effect`
-  appears here only for a node whose stack has base effects — the scoped
-  answerer/outer stacks have none, so effect activity shows as
-  `HolePublished`/`HoleConsumed`, not `Effect` (see Replay).
-
-The production binary (`tidepool/src/bin/tidepool-selfharness.rs`) does
-NOT reuse one fixed `log.jsonl`: `LogWriter` refuses to overwrite an existing
-run's log, so each boot mints its own `log-<epoch>.jsonl` sibling under
-`<cache>/selfharness/` — tail the NEWEST one, e.g.
-`tail -f $(ls -t <cache>/selfharness/log-*.jsonl | head -1)`, or use
-`scripts/current-run.sh` (`paths` prints every known path — lease, checkpoint,
-transcript, newest log, this run's journal segments — with liveness; `tail
-[transcript|log|journal]` tails the right one directly). A caller that
-wants one stable, reused filename (a direct test, say) can still boot the
-answerer `Harness` with `LogWriter::create(&default_log_path(), &header)` to
-land a fixed `log.jsonl` on that exact path; the driver writes
-`transcript.jsonl` via a `JsonlObserver` at `default_transcript_path()`
-regardless. `tail -f` either. A `timing` DEBUG stage's `node`/`round` fields
-render as words (`timing::render_node`/`render_round`) — `"bootstrap"`/`"-"`
-for `NO_NODE`/`NO_ROUND`, never a raw `u64::MAX`.
+# tidepool-harness — resident typed-yield harness
+
+## Charter
+
+This crate owns the resident harness: node lifecycle, machine-session checkout,
+suspension routing, authored `render`/`loop` driving, agent sessions, recursive
+forks, operator interaction, durable harness events, and restart handling.
+
+It does not own the JIT (`tidepool-codegen`), the machine-session primitive
+(`tidepool-runtime`), concrete base-effect handlers (`tidepool-handlers`), or
+operator rendering (`tidepool-web`).
+
+Read module documentation for local algorithms. This file records only the
+cross-module constraints that are easy to violate.
+
+## Machine-session ownership
+
+`tidepool_runtime::session::registry` is the session-lifecycle mechanism.
+This crate's `registry` module only fixes the hole identifier type.
+
+- Access a resident machine only through checkout APIs. Never remove a machine,
+  run it, and reinsert it manually.
+- A checkout epoch fences stale settlement. Timeout, cancellation, and panic
+  paths must settle the checkout exactly once.
+- A suspended session may own several holes. Hole identity is
+  `(SessionId, HoleId)`; never recover a suspension by “the current hole.”
+- `pending_suspensions` owns domain metadata for parked holes. The machine
+  registry owns the continuations themselves.
+- A wedged run retires the harness node. This crate does not construct a
+  recoverable `Slot::Wedged` session.
+
+The shared outer machine session is registry-owned. Attached agent nodes borrow
+it through runtime resource scopes and do not own or remove it.
+
+## Compilation and cache
+
+All Haskell compilation goes through
+`tidepool_runtime::artifacts::compile_targets`, backed by the compiled-artifact
+cache in `tidepool-toolchain`. Do not add a cache-free compile path or a second
+extractor frontend here.
+
+Cache keys must include every input that can alter emitted artifacts. Mutable
+per-test state belongs in a temp directory; the content-addressed compile cache
+may be shared.
+
+## Suspension and replay
+
+The harness classifies a suspended request by constructor and routes it as a
+typed hole. A response must be decoded against the exact `DataConTable` and
+answer contract captured when that hole was compiled.
+
+Replay has two meanings only:
+
+- `ReplayProvider` substitutes recorded model replies for provider calls.
+- `fold_tree_state` reconstructs durable node state after a crash.
+
+Handled effects are not replayed. Re-executing an effect from an old log would
+repeat external actions and is forbidden.
+
+## Names and runtime resource scopes
+
+Declarations and bindings have different lifetimes:
+
+- Top-level declarations live in the persistent declaration environment and
+  can survive model rounds, loop iterations, and machine rotation.
+- Heap bindings and parked frames belong to runtime resource scopes.
+- Closing a scope retires its frames, handles, bindings, and roots without
+  touching siblings.
+- Closure-valued results cross between continuations through `ValueHandle`, not
+  JSON or the tolerant bridge.
+
+The GC-root accounting rules are owned by `tidepool-codegen`; scope retirement
+must preserve their reported counts.
+
+## Answer contracts
+
+Every agent session compiles against `Finalize T`. The row pins the answer type;
+do not accept an untyped or post-hoc converted final answer.
+
+The type's defining imports are resolved from extractor metadata. Generated
+turn modules and validation probes must receive the same session include set as
+the turn body.
+
+A declaration-only reply may persist declarations but does not advance a turn.
+Corrective feedback should state the actual compile or contract failure and let
+the next model round use the declarations already committed.
+
+## Forking and failure boundaries
+
+`fork` and `forkAll` create attached child agent sessions on the shared machine.
+Children may fork recursively within configured depth, subtree, and per-session
+budgets. A refused spawn returns a legible budget result without allocating a
+session or compiling a turn.
+
+For authored `runLLMTurnFork`/`runLLMTurnFanout`:
+
+- a child agent's failure is data at that child's position:
+  `Either InvocationExit T`;
+- a scheduler, assembly, constructor-table, or bookkeeping failure is a harness
+  error and must not be laundered into `InvocationExit`;
+- results are restored to declaration order before assembly, so completion
+  order is not observable.
+
+## Operator interaction
+
+`AskUser` forms, notes, continue gates, and steering all use the operator-gate
+machinery. Do not create a second operator-input channel.
+
+The answerer row and outer authored row are intentionally different. When
+adding an effect, update the owning row and its suspension-routing service
+together; declaration alone does not provide a handler.
+
+## Machine rotation
+
+The shared machine rotates only at a quiescent loop boundary after reaching the
+fragment ceiling. Rotation keeps the same session identity, carries checkpointed
+state and persistent declarations forward, and reports machine-local bindings
+that cannot be reconstructed. Never rotate while parked holes remain.
+
+## Durable state and process ownership
+
+The run lease prevents two live selfharness processes from repeating external
+effects and racing checkpoints in the same log directory. A lease held by a
+different live PID is a hard refusal. `TIDEPOOL_SELFHARNESS_TAKEOVER=1` is the
+explicit operator override; takeover archives the previous lease.
+
+There are two durable event streams:
+
+- `transcript.jsonl`: loop-level driver and operator events;
+- `log-<epoch>.jsonl`: per-node turns, compiled source, holes, and answers.
+
+Use `scripts/current-run.sh paths|tail` instead of reconstructing current file
+names in tooling.
+
+## Verification
+
+Choose the smallest relevant integration test. Important families include:
+
+- checkout, timeout, and stale-settlement tests;
+- suspension identity and answer-type pinning;
+- recursive fork and outer fanout behavior;
+- declaration persistence and closure delivery;
+- machine rotation and run-lease recovery;
+- durable observability and replay reconstruction.
+
+This crate is GHC-heavy and skipped by the quick nextest filter. Run a targeted
+test with:
+
+```bash
+scripts/battery.sh -p tidepool-harness -E 'test(<name>)'
+```
+
+Use the binary groups in `scripts/battery-shard.sh` for broader coverage.

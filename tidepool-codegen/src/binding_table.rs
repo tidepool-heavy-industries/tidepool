@@ -174,7 +174,7 @@ impl BindingTable {
         entry.scope = scope;
         let id = entry.id;
         // NEWEST GEN WINS BY COMPARISON, not by insertion order: with
-        // any-order resume (one-session plan), a bind minted at gen 6 can
+        // With any-order resume, a bind minted at gen 6 can
         // MATERIALIZE after a same-name bind minted at gen 7 — arrival order
         // no longer implies gen order. `current` must track the highest-gen
         // binding for the name; an out-of-order older materialization stays
@@ -503,10 +503,9 @@ mod tests {
         assert!(env.get(y_var).is_none());
     }
 
-    /// OUT-OF-ORDER MATERIALIZATION (one-session plan, Phase 1 audit pin):
-    /// with any-order resume, a bind minted at gen 6 can materialize AFTER a
-    /// same-name bind minted at gen 7. `current` must shadow by GEN
-    /// COMPARISON, not insertion order — the late older bind stays `live`
+    /// With any-order resume, an older bind can materialize after a newer
+    /// same-name bind. `current` shadows by generation, not insertion order;
+    /// the late older bind stays `live`
     /// (old-gen fragments still resolve it by id) but never clobbers the
     /// newer name.
     #[test]

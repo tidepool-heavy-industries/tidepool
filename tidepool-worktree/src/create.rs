@@ -1,7 +1,4 @@
-//! Creating and looking up managed worktrees.
-//!
-//! LANE L1 owns clean creation, lookup, and listing. LANE L2 owns the
-//! [`WorktreeSpec::allow_dirty_snapshot`] path (see [`crate::snapshot`]).
+//! Creating and looking up managed worktrees, including dirty-source snapshots.
 
 use std::ffi::OsString;
 use std::fs;

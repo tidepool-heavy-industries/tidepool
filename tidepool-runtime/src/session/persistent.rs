@@ -14,23 +14,10 @@
 //! suspended session — neither in the harness (a TREE of many
 //! simultaneously-suspended nodes cannot pin N+1 threads) nor in the repl.
 //!
-//! There are TWO suspend mechanisms, one per lane (do not conflate them — a
-//! machine never mixes both, asserted both directions):
-//!
-//! - **The SLOT path — implemented in this file.** [`JitEffectMachine`] is
-//!   `Send` precisely because it is stowed-XOR-running: the whole machine
-//!   stows as one `suspended_continuation` slot, and `resume_suspended`
-//!   re-enters it. This is the pair-per-policy family below. It remains the
-//!   live mechanism for the repl and one-shot eval lanes; on the harness lane
-//!   it is legacy, superseded by the parked path, and its deletion is gated
-//!   on the parked path's production soak (Phase 6: repl/one-shot conversion
-//!   + slot deletion, not currently in flight).
-//! - **The PARKED path — `super::resident::ResidentSession`.** A machine's
-//!   continuation REGISTRY holds many independently parked frames at once,
-//!   each a registered GC root, resumable by identity in any order. This is
-//!   the primary suspension mechanism for the harness (resident-session)
-//!   lane as of the one-session collapse; see that module's docstring for
-//!   the fragment × suspend shape.
+//! Suspension uses the machine's continuation registry everywhere. This core
+//! exposes a capacity-one façade for the REPL: it remembers one active
+//! continuation id while the machine-level registry supplies rooting,
+//! cancellation, retry, and resume semantics.
 //!
 //! Every run entry here therefore reports either a completion or a suspension,
 //! and every one has a `resume_*` sibling that re-enters the stowed continuation
@@ -39,17 +26,17 @@
 //! bind+render — each appear as such a pair, each carrying what it actually
 //! produces ([`SuspendableOutcome`] for the two `Value`-completing policies,
 //! [`Suspendable`] over the roots for the other two). See the module docstrings
-//! of [`super::resident`] (the parked path built on this same core, and the
-//! harness's single-node consumer) and `tidepool-repl`'s `session.rs` (the
-//! repl's block-cursor consumer, still on the slot path) for the orchestration
+//! of [`super::resident`] and `tidepool-repl`'s `session.rs` for the orchestration
 //! around this core.
 
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
-    FuncId, JitEffectMachine, ResumeInput, Suspendable, SuspendableOutcome,
+    CancelHandle, ContinuationId, FuncId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId,
+    ResumeInput, Suspendable, SuspendableOutcome,
 };
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
@@ -60,6 +47,16 @@ use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, 
 use super::engine::OutputSink;
 use super::{SessionError, SessionLib};
 use crate::JitError;
+
+/// Cross-thread custody for one completed bind root. The root never moves
+/// independently: it remains inside the session while that session is stowed,
+/// and is taken only after the session returns to its owning thread.
+struct LinearRootStash(Option<RootSlot>);
+
+// SAFETY: identical to JitEffectMachine's stow-XOR-run guarantee. The raw
+// slot is never dereferenced while the containing session is in transit and
+// has a single owner at every point.
+unsafe impl Send for LinearRootStash {}
 
 // ---------------------------------------------------------------------------
 // The shared session core
@@ -105,6 +102,14 @@ pub struct PersistentSession {
     turn_counter: u64,
     /// The `Ask` union tag intercepted at the suspend boundary.
     ask_tag: u64,
+    /// Effect names below `ask_tag`, supplied to the registry's positional
+    /// handler-prefix check.
+    handled_prefix: Vec<String>,
+    /// Capacity-one façade state for the REPL/linear session surface.
+    active_continuation: Option<ContinuationId>,
+    /// A bind root completed through the registry and carried home inside the
+    /// session because `RootSlot` is not `Send` on its own.
+    last_bound_root: LinearRootStash,
     /// JIT nursery size for the resident machine.
     nursery_size: usize,
 }
@@ -113,7 +118,13 @@ impl PersistentSession {
     /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
     /// machine is not bootstrapped until the first turn.
-    pub fn new(lib: Option<SessionLib>, ask_tag: u64, nursery_size: usize) -> Self {
+    pub fn new(
+        lib: Option<SessionLib>,
+        ask_tag: u64,
+        effect_names: Vec<String>,
+        nursery_size: usize,
+    ) -> Self {
+        let handled_prefix = effect_names.into_iter().take(ask_tag as usize).collect();
         PersistentSession {
             machine: None,
             session_table: DataConTable::new(),
@@ -123,6 +134,9 @@ impl PersistentSession {
             scopes: ScopeTree::new(),
             turn_counter: 0,
             ask_tag,
+            handled_prefix,
+            active_continuation: None,
+            last_bound_root: LinearRootStash(None),
             nursery_size,
         }
     }
@@ -191,6 +205,13 @@ impl PersistentSession {
     /// The resident machine, if bootstrapped (mutate).
     pub fn machine_mut(&mut self) -> Option<&mut JitEffectMachine> {
         self.machine.as_mut()
+    }
+
+    /// Cancellation handle for this capacity-one registry realm.
+    pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
+        self.machine
+            .as_mut()
+            .map(|m| m.realm_cancel_handle(RealmId(0)))
     }
 
     // -- table accumulation ------------------------------------------------
@@ -372,15 +393,112 @@ impl PersistentSession {
         machine.add_function(&frag_name, expr, run_table, env)
     }
 
-    // -- in-place suspendable runs (machine owned here) ---------------------
-    //
-    // Each of the four result-materialization policies gets a `run_*` entry and
-    // a `resume_*` sibling; both return a [`SuspendableOutcome`], so a caller
-    // handles completion and suspension with the SAME code whichever run it came
-    // from. A suspension leaves the continuation stowed on the machine — nothing
-    // is parked, nothing blocks — and the caller re-enters through the matching
-    // `resume_*`, which must be the sibling of the entry that suspended (the
-    // policy decides what the completing turn materializes).
+    // -- capacity-one registry façade --------------------------------------
+
+    fn track_value_outcome(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
+        match outcome {
+            ParkedOutcome::CompletedValue(value) => {
+                self.active_continuation = None;
+                SuspendableOutcome::Completed(value)
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.active_continuation = Some(id);
+                SuspendableOutcome::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+            other => panic!("plain registry run returned the wrong completion policy: {other:?}"),
+        }
+    }
+
+    fn track_binding_outcome(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
+        match outcome {
+            ParkedOutcome::CompletedBinding { value, root } => {
+                self.active_continuation = None;
+                self.last_bound_root.0 = Some(root);
+                SuspendableOutcome::Completed(value)
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.active_continuation = Some(id);
+                SuspendableOutcome::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+            other => panic!("binding registry run returned the wrong policy: {other:?}"),
+        }
+    }
+
+    fn track_project_outcome(&mut self, outcome: ParkedOutcome) -> Suspendable<Vec<RootSlot>> {
+        match outcome {
+            ParkedOutcome::CompletedProject { roots } => {
+                self.active_continuation = None;
+                Suspendable::Completed(roots)
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.active_continuation = Some(id);
+                Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+            other => panic!("project registry run returned the wrong policy: {other:?}"),
+        }
+    }
+
+    fn track_render_outcome(&mut self, outcome: ParkedOutcome) -> Suspendable<(RootSlot, Value)> {
+        match outcome {
+            ParkedOutcome::CompletedRender { root, rendered } => {
+                self.active_continuation = None;
+                Suspendable::Completed((root, rendered))
+            }
+            ParkedOutcome::Suspended {
+                id,
+                request,
+                has_finalized_closure,
+            } => {
+                self.active_continuation = Some(id);
+                Suspendable::Suspended {
+                    request,
+                    has_finalized_closure,
+                }
+            }
+            other => panic!("render registry run returned the wrong policy: {other:?}"),
+        }
+    }
+
+    fn resume_active<O, H>(
+        &mut self,
+        handlers: &mut H,
+        captured: &O,
+        input: ResumeInput,
+    ) -> Result<ParkedOutcome, JitError>
+    where
+        O: OutputSink,
+        H: DispatchEffect<O>,
+    {
+        let id = self
+            .active_continuation
+            .expect("resume requires an active continuation");
+        let machine = self
+            .machine
+            .as_mut()
+            .expect("machine present before resume");
+        machine.resume_parked(id, handlers, captured, input)
+    }
 
     /// Run the resident machine's ORIGINAL entry (the seed compiled by
     /// [`Self::bootstrap_if_needed`]) to its first boundary. The repl's first
@@ -397,13 +515,26 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        assert!(
+            self.active_continuation.is_none(),
+            "resume the active turn first"
+        );
         let ask_tag = self.ask_tag;
+        let prefix = self.handled_prefix.clone();
         #[allow(clippy::expect_used, reason = "machine bootstrapped before run_entry")]
         let machine = self
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_entry");
-        machine.run_suspendable(run_table, handlers, captured, ask_tag)
+        let outcome = machine.run_suspendable_parked(
+            run_table,
+            handlers,
+            captured,
+            ask_tag,
+            RealmId(0),
+            &prefix,
+        )?;
+        Ok(self.track_value_outcome(outcome))
     }
 
     /// Drive a fragment (already added) to its first boundary against an
@@ -420,7 +551,12 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        assert!(
+            self.active_continuation.is_none(),
+            "resume the active turn first"
+        );
         let ask_tag = self.ask_tag;
+        let prefix = self.handled_prefix.clone();
         #[allow(
             clippy::expect_used,
             reason = "machine bootstrapped before run_funcid_with_table"
@@ -429,7 +565,17 @@ impl PersistentSession {
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_with_table");
-        machine.run_fragment_suspendable(func_id, run_table, handlers, captured, ask_tag)
+        let outcome = machine.run_fragment_suspendable_parked(
+            func_id,
+            run_table,
+            handlers,
+            captured,
+            ask_tag,
+            RealmId(0),
+            ParkKind::Plain,
+            &prefix,
+        )?;
+        Ok(self.track_value_outcome(outcome))
     }
 
     /// Re-enter a turn suspended by [`Self::run_entry`] or
@@ -438,7 +584,7 @@ impl PersistentSession {
     /// bridged against it).
     pub fn resume_with_table<O, H>(
         &mut self,
-        run_table: &DataConTable,
+        _run_table: &DataConTable,
         handlers: &mut H,
         captured: &O,
         input: ResumeInput,
@@ -447,16 +593,8 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        let ask_tag = self.ask_tag;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine present before resume_with_table"
-        )]
-        let machine = self
-            .machine
-            .as_mut()
-            .expect("machine present before resume_with_table");
-        machine.resume_suspended(run_table, handlers, captured, ask_tag, input)
+        let outcome = self.resume_active(handlers, captured, input)?;
+        Ok(self.track_value_outcome(outcome))
     }
 
     /// Drive a fragment (already added) to its first boundary against the
@@ -472,6 +610,11 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        assert!(
+            self.active_continuation.is_none(),
+            "resume the active turn first"
+        );
+        let prefix = self.handled_prefix.clone();
         let PersistentSession {
             machine,
             session_table,
@@ -485,7 +628,17 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_session");
-        machine.run_fragment_suspendable(func_id, session_table, handlers, captured, *ask_tag)
+        let outcome = machine.run_fragment_suspendable_parked(
+            func_id,
+            session_table,
+            handlers,
+            captured,
+            *ask_tag,
+            RealmId(0),
+            ParkKind::Plain,
+            &prefix,
+        )?;
+        Ok(self.track_value_outcome(outcome))
     }
 
     /// Re-enter a turn suspended by [`Self::run_funcid_session`], against the
@@ -500,17 +653,8 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        let PersistentSession {
-            machine,
-            session_table,
-            ask_tag,
-            ..
-        } = self;
-        #[allow(clippy::expect_used, reason = "machine present before resume_session")]
-        let machine = machine
-            .as_mut()
-            .expect("machine present before resume_session");
-        machine.resume_suspended(session_table, handlers, captured, *ask_tag, input)
+        let outcome = self.resume_active(handlers, captured, input)?;
+        Ok(self.track_value_outcome(outcome))
     }
 
     /// Run a PURE fragment (no effect tree) to a value against the accumulated
@@ -546,6 +690,11 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        assert!(
+            self.active_continuation.is_none(),
+            "resume the active turn first"
+        );
+        let prefix = self.handled_prefix.clone();
         let PersistentSession {
             machine,
             session_table,
@@ -559,14 +708,17 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid");
-        machine.run_fragment_suspendable_binding(
+        let outcome = machine.run_fragment_suspendable_parked(
             func_id,
             session_table,
             handlers,
             captured,
             *ask_tag,
-            forced,
-        )
+            RealmId(0),
+            ParkKind::Binding { forced },
+            &prefix,
+        )?;
+        Ok(self.track_binding_outcome(outcome))
     }
 
     /// Re-enter a turn suspended by [`Self::bind_funcid`]. `forced` is the SAME
@@ -583,17 +735,9 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        let PersistentSession {
-            machine,
-            session_table,
-            ask_tag,
-            ..
-        } = self;
-        #[allow(clippy::expect_used, reason = "machine present before resume_bind")]
-        let machine = machine
-            .as_mut()
-            .expect("machine present before resume_bind");
-        machine.resume_suspended_binding(session_table, handlers, captured, *ask_tag, input, forced)
+        let _ = forced;
+        let outcome = self.resume_active(handlers, captured, input)?;
+        Ok(self.track_binding_outcome(outcome))
     }
 
     /// Multi-binder sibling of [`Self::bind_funcid`]: on completion, project
@@ -613,6 +757,12 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        assert!(
+            self.active_continuation.is_none(),
+            "resume the active turn first"
+        );
+        let prefix = self.handled_prefix.clone();
+        let n_fields = NonZeroUsize::new(n_fields).expect("a projected bind needs fields");
         let PersistentSession {
             machine,
             session_table,
@@ -626,14 +776,17 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_projected");
-        machine.run_fragment_suspendable_projected(
+        let outcome = machine.run_fragment_suspendable_parked(
             func_id,
             session_table,
             handlers,
             captured,
             *ask_tag,
-            n_fields,
-        )
+            RealmId(0),
+            ParkKind::Project { n_fields },
+            &prefix,
+        )?;
+        Ok(self.track_project_outcome(outcome))
     }
 
     /// Re-enter a turn suspended by [`Self::bind_funcid_projected`]. `n_fields`
@@ -650,27 +803,9 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        let PersistentSession {
-            machine,
-            session_table,
-            ask_tag,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine present before resume_bind_projected"
-        )]
-        let machine = machine
-            .as_mut()
-            .expect("machine present before resume_bind_projected");
-        machine.resume_suspended_projected(
-            session_table,
-            handlers,
-            captured,
-            *ask_tag,
-            input,
-            n_fields,
-        )
+        let _ = n_fields;
+        let outcome = self.resume_active(handlers, captured, input)?;
+        Ok(self.track_project_outcome(outcome))
     }
 
     /// Bind-and-render sibling of [`Self::bind_funcid`]: run the fragment ONCE,
@@ -688,6 +823,11 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
+        assert!(
+            self.active_continuation.is_none(),
+            "resume the active turn first"
+        );
+        let prefix = self.handled_prefix.clone();
         let PersistentSession {
             machine,
             session_table,
@@ -701,14 +841,17 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_render");
-        machine.run_fragment_suspendable_render(
+        let outcome = machine.run_fragment_suspendable_parked(
             func_id,
             session_table,
             handlers,
             captured,
             *ask_tag,
-            field0_forced,
-        )
+            RealmId(0),
+            ParkKind::Render { field0_forced },
+            &prefix,
+        )?;
+        Ok(self.track_render_outcome(outcome))
     }
 
     /// Re-enter a turn suspended by [`Self::bind_funcid_render`]. The
@@ -726,27 +869,9 @@ impl PersistentSession {
         O: OutputSink,
         H: DispatchEffect<O>,
     {
-        let PersistentSession {
-            machine,
-            session_table,
-            ask_tag,
-            ..
-        } = self;
-        #[allow(
-            clippy::expect_used,
-            reason = "machine present before resume_bind_render"
-        )]
-        let machine = machine
-            .as_mut()
-            .expect("machine present before resume_bind_render");
-        machine.resume_suspended_render(
-            session_table,
-            handlers,
-            captured,
-            *ask_tag,
-            input,
-            field0_forced,
-        )
+        let _ = field0_forced;
+        let outcome = self.resume_active(handlers, captured, input)?;
+        Ok(self.track_render_outcome(outcome))
     }
 
     /// Take the tenured root a completed [`Self::bind_funcid`] (or
@@ -767,13 +892,13 @@ impl PersistentSession {
     /// `unsafe impl Send for RootSlot`, a standalone soundness claim on a raw
     /// pointer rather than a refactor.
     pub fn take_bound_root(&mut self) -> Option<RootSlot> {
-        self.machine.as_mut().and_then(|m| m.take_last_bound_root())
+        self.last_bound_root.0.take()
     }
 
     /// Whether the machine currently holds a stowed continuation (a turn
     /// suspended at an `Ask` and has not been resumed or aborted).
     pub fn is_suspended(&self) -> bool {
-        self.machine.as_ref().is_some_and(|m| m.is_suspended())
+        self.active_continuation.is_some()
     }
 
     // -- value-plane bookkeeping (delegating over the two planes) ----------

@@ -517,6 +517,7 @@ impl<O: OutputSink> SessionEngine<O> {
                     &captured,
                     nursery_size,
                     ask_tag,
+                    &effect_names,
                     |h| {
                         gate_run.set_compiling(false);
                         *cancel_cb.lock() = Some(h);
@@ -535,15 +536,16 @@ impl<O: OutputSink> SessionEngine<O> {
                 Ok(Ok(SuspendableRun::Suspended {
                     machine,
                     table,
+                    continuation,
                     request,
                 })) => build_suspended_message::<O, H>(
                     machine,
                     table,
+                    continuation,
                     wrapped,
                     request,
                     permit,
                     effect_names,
-                    ask_tag,
                 ),
                 Ok(Err(e)) => {
                     drop(permit);
@@ -951,11 +953,11 @@ impl<O: OutputSink> SessionEngine<O> {
 fn build_suspended_message<O, H>(
     machine: tidepool_codegen::jit_machine::JitEffectMachine,
     table: tidepool_repr::DataConTable,
+    continuation: tidepool_codegen::jit_machine::ContinuationId,
     wrapped: GateDispatcher<H>,
     request: tidepool_eval::value::Value,
     permit: OwnedSemaphorePermit,
     effect_names: Vec<String>,
-    ask_tag: u64,
 ) -> EngineMessage<O>
 where
     O: OutputSink,
@@ -973,7 +975,8 @@ where
             };
         }
     };
-    let resume = make_resume_closure::<O, H>(machine, table, wrapped.inner, effect_names, ask_tag);
+    let resume =
+        make_resume_closure::<O, H>(machine, table, continuation, wrapped.inner, effect_names);
     EngineMessage::SuspendedAsk {
         prompt,
         meta,
@@ -989,9 +992,9 @@ where
 fn make_resume_closure<O, H>(
     mut machine: tidepool_codegen::jit_machine::JitEffectMachine,
     table: tidepool_repr::DataConTable,
+    continuation: tidepool_codegen::jit_machine::ContinuationId,
     base: H,
     effect_names: Vec<String>,
-    ask_tag: u64,
 ) -> StowedResume<O>
 where
     O: OutputSink,
@@ -1036,7 +1039,7 @@ where
                 &table,
                 &mut wrapped,
                 &captured,
-                ask_tag,
+                continuation,
                 codegen_input,
                 |h| {
                     *cancel_cb.lock() = Some(h);
@@ -1051,14 +1054,17 @@ where
                     result: eval_result.to_string_pretty(),
                 }
             }
-            Ok(Ok(ResumedRun::Suspended { request })) => build_suspended_message::<O, H>(
+            Ok(Ok(ResumedRun::Suspended {
+                continuation,
+                request,
+            })) => build_suspended_message::<O, H>(
                 machine,
                 table,
+                continuation,
                 wrapped,
                 request,
                 permit,
                 effect_names,
-                ask_tag,
             ),
             Ok(Err(e)) => {
                 drop(permit);

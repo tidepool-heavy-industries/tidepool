@@ -43,29 +43,19 @@ coding agents using their native tools, and the runtime observes what the
 repository became. Adding a workflow verb beyond the one exception is a
 design regression, not a convenience.
 
-**The one narrow, deliberate exception: `merge.rs`, exposed as a
-`Worktree` verb.** The recursive companion's worktree-coordination fold —
-each node merges its children's worktrees into its own, in declared branch
-order — needs ONE typed primitive: merge a branch into a
-target worktree, abort-and-report on conflict, never leave a half-merged
-tree. `merge::merge_branch_into` is that primitive, through the same
+**The narrow exception is `merge.rs`, exposed as a `Worktree` verb.** It
+provides one typed primitive to merge a branch into a target worktree,
+abort-and-report on conflict, and never leave a half-merged tree.
+`merge::merge_branch_into` operates through the same
 `GitCli` call site as everything else here, with
 `MergeOutcome::{Merged,Conflict}` as its typed result (a non-conflict
 failure stays the ordinary `WorktreeError::GitFailure`). It IS exposed as a
 `Worktree` effect verb — `WorktreeMergeInto` / Haskell `mergeBranchInto`,
 generated from `tidepool-protocol`'s schema like every other Worktree verb —
-because both `harness-dogfooding/dev-tree/Harness.hs`'s `mergeChild` and
-`harness-dogfooding/recursive-companion/Harness.hs`'s `mergeChildInto` had
-reimplemented this exact primitive over raw `Exec` and drifted from it: every
-nonzero exit read as a conflict, and a failed `merge --abort` was silently
-ignored. `merge.rs` exists so that ONE typed, fast-tier-tested definition of
-"merge, conflict, abort" is the ground truth every caller uses, instead of
-the semantics being re-derived ad hoc at each authored call site. What stays
-authored policy on the Haskell side is everything past classification:
-resolving a reported conflict, and any git operation this primitive does not
-cover (rebase, the boundary/status reads) — both harnesses still reach those
-through `gitIn`, now the one shared stdlib helper (`Tidepool.Worktree.gitIn`,
-built on `Tidepool.Shell.runInTry`) rather than a per-harness copy.
+`merge.rs` is the shared definition of merge, conflict classification, and
+abort. Conflict resolution and operations it does not cover remain authored
+policy. Haskell callers reach those operations through the shared
+`Tidepool.Worktree.gitIn` helper.
 
 **Never dirty the source.** The registry root, worktree root, journal, and any
 temporary index all live OUTSIDE the source working tree. Managed branches use
@@ -75,8 +65,7 @@ deliberately outside `refs/heads/` so they never appear in an operator's
 
 **Retain first.** No deletion, no GC, no retention policy. A worktree a human
 removed by hand becomes `WorktreeError::WorktreeLost`; it is never silently
-recreated. Deferred question 1 in the PRD owns any future conversation about
-this — it is not an implementation gap to close on your own initiative.
+recreated. Retention changes require an explicit design decision.
 
 **One `git` call site.** Everything goes through `GitCli`, which scrubs
 `GIT_DIR`/`GIT_INDEX_FILE`/`GIT_WORK_TREE` and friends out of the inherited

@@ -96,7 +96,7 @@ fn utf8_or_lossy(p: &Path) -> Result<String, String> {
 
 /// Blake3 content hash as a lowercase hex digest — the compare-and-swap token
 /// for `FsHash`/`FsWriteCas` (#330). Blake3 matches the cache layer's hash
-/// choice (`tidepool-runtime::cache`), so the whole codebase speaks one digest.
+/// choice (`tidepool-toolchain::cache`), so the whole codebase speaks one digest.
 pub fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }

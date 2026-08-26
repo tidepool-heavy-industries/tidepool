@@ -1,12 +1,7 @@
 //! The property this crate exists to hold: NO workspace crate builds its own
 //! `tidepool-extract` invocation.
 //!
-//! This is deliberately a source scan and not a count. The defect that
-//! motivated the crate (`plans/post-restart/extract-manifest.md`, D-B) was a
-//! spawn counter that could only see one of seven sites, and the fix is only
-//! durable if adding an eighth site FAILS — a "there are exactly seven"
-//! assertion would go stale the moment someone adds one, which is precisely
-//! the moment it needs to fire.
+//! This is a source scan rather than a count so any new open-coded site fails.
 //!
 //! Scope, stated so the scan's silence means something:
 //!
@@ -145,9 +140,8 @@ fn no_workspace_crate_open_codes_an_extract_spawn() {
     );
     assert!(
         offenders.is_empty(),
-        "every `tidepool-extract` spawn must go through `tidepool_extract_cmd::ExtractCmd`, \
-         so the process-global spawn counter sees it (plans/post-restart/extract-manifest.md, \
-         D-B). Open-coded site(s):\n  {}",
+        "every `tidepool-extract` spawn must go through `tidepool_extract_cmd::ExtractCmd`. \
+         Open-coded site(s):\n  {}",
         offenders.join("\n  ")
     );
 }

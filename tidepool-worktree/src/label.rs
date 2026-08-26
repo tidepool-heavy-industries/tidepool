@@ -1,18 +1,5 @@
-//! Caller-supplied label sanitization — one validated source, two named
-//! policies.
-//!
-//! A caller-supplied label is decoration, never a path or an identity. Two
-//! independent call sites sanitize the SAME kind of input under different
-//! rules: `tidepool-agent`'s spawn saga folds a label into the tail of an
-//! [`AgentRef`](crate::AgentRef), and [`crate::create`]'s worktree creation
-//! folds one into the tail of a managed branch name. The two are not
-//! interchangeable — a branch name may contain `/` as a path separator; an
-//! `AgentRef` tail never does — so they stay two named functions,
-//! [`sanitize_agent_label`] and [`sanitize_branch_label`], rather than
-//! collapsing into one. Both share the same `sanitize` sweep, parameterized
-//! on whether `/` survives and on the empty-result fallback, because that
-//! parameterization is enough to reproduce each call site's ORIGINAL
-//! behavior byte-for-byte (pinned by the compatibility corpus below).
+//! Sanitization for caller-supplied labels. Labels are decoration, never paths
+//! or identities. Agent labels reject `/`; managed branch labels preserve it.
 
 /// Sanitized into the tail of an `AgentRef` (`agent-<id>-<label>`). Only
 /// `[A-Za-z0-9._-]` survives; everything else becomes `-`, runs of `-`
@@ -31,10 +18,7 @@ pub fn sanitize_branch_label(raw: &str) -> String {
     sanitize(raw, true, "worktree")
 }
 
-/// The shared sweep. `allow_slash` is the one axis the two policies differ
-/// on: whether `/` is a surviving character (and therefore also a member of
-/// the "separator" class that collapses and trims) or an ordinary character
-/// this sweep rejects to `-` like any other punctuation.
+/// Shared implementation for the two slash policies.
 fn sanitize(label: &str, allow_slash: bool, fallback: &str) -> String {
     let mut out = String::with_capacity(label.len());
     let mut last_was_sep = false;
@@ -70,13 +54,8 @@ fn sanitize(label: &str, allow_slash: bool, fallback: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Compatibility corpus, generated against the two ORIGINAL
-    /// implementations (agent's `spawn.rs::sanitize_label` and worktree's
-    /// pre-consolidation `create.rs::sanitize_label`) before either was
-    /// touched. Each row is `(input, agent_expected, branch_expected)`. A
-    /// change to either policy that breaks a row here is a durable-identifier
-    /// compatibility break, not a refactor — see this crate's `CLAUDE.md` on
-    /// worktree branch/path names being durable registry identifiers.
+    /// `(input, agent_expected, branch_expected)`. These outputs participate
+    /// in durable identifiers and are compatibility-sensitive.
     const CORPUS: &[(&str, &str, &str)] = &[
         ("", "worker", "worktree"),
         ("!!!", "worker", "worktree"),
@@ -143,9 +122,6 @@ mod tests {
         }
     }
 
-    /// The divergence the review named: the same raw label produces
-    /// DIFFERENT sanitized output under the two policies whenever it
-    /// contains a `/` that survives worktree's policy but not agent's.
     #[test]
     fn policies_genuinely_diverge_on_slash_bearing_labels() {
         let raw = "dev-tree/root";

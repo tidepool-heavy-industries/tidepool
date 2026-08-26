@@ -468,7 +468,7 @@ impl SubscriptionRegistry {
 /// One reconciliation pass over the named worktrees.
 ///
 /// Injectable because the git reasoning belongs to
-/// [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor) (lane L3), not here:
+/// [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor), not here:
 /// this crate must not grow a second, drifting notion of what "HEAD moved"
 /// means. [`MonitorObservations`] is the production implementation and is
 /// deliberately thin.

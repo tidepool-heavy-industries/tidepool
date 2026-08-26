@@ -1,4 +1,4 @@
-//! LANE L7 acceptance tests — `WorktreeManager::worktree_head`, the fresh-read
+//! Acceptance tests for `WorktreeManager::worktree_head`, the fresh-read
 //! HEAD lookup on the public surface.
 //!
 //! Every test drives a REAL temporary git repository via

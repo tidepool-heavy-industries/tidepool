@@ -1,4 +1,4 @@
-//! PRD 19 surface gates: the generated `Tidepool.Effects` must actually carry
+//! The generated `Tidepool.Effects` must carry
 //! the authored vocabulary that `Tidepool.Worktree` / `Tidepool.Event`
 //! re-export, and must carry the `ToJSON` instances its own `errors` block
 //! depends on.
@@ -6,13 +6,11 @@
 //! `Tidepool.Worktree` re-exports FOUR of its fourteen names now — the three
 //! thin one-verb wrappers plus the pure projection `worktreeId`, the helper
 //! shapes the effect contract can represent.
-//! The other ten are DEFINITIONS in that module (scaffold doc §11.9), so the
+//! The other ten are definitions in that module, so the
 //! gates covering them read the authored source rather than the generated one,
 //! and the generated module is gated on NOT redefining them.
 //!
-//! Each test here is a ONE-FAILURE-MODE gate and is named for the failure it
-//! catches, so a receipt can cite it individually — an aggregate count cannot
-//! distinguish "the guard held" from "the guard silently stopped existing".
+//! Tests are separated by failure mode for useful diagnostics.
 //!
 //! These are cheap string gates on generated source, deliberately: the real
 //! typecheck is GHC compiling `Tidepool.Worktree`/`Tidepool.Event` against this
@@ -30,43 +28,10 @@ fn worktree_and_event_module() -> String {
     tidepool_mcp::effects_core_module_source(&decls)
 }
 
-/// Emit the generated module for `scripts/prd19-alternative-gates.sh`, which
-/// needs the real source to run its three GHC gates against. `#[ignore]`d so it
-/// never runs as part of an ordinary test pass — it is a fixture producer, not
-/// a gate, and it does nothing without `PRD19_EMIT` set.
+/// A row importing `Tidepool.Event` must hide Prelude's Alternative operator,
+/// while an unrelated row keeps the ordinary Prelude operator available.
 #[test]
-#[ignore = "fixture producer for scripts/prd19-alternative-gates.sh"]
-fn emit_for_gates() {
-    let path = std::env::var("PRD19_EMIT").expect("PRD19_EMIT must name the output path");
-    let p = std::path::Path::new(&path);
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent).expect("create output dir");
-    }
-    std::fs::write(p, worktree_and_event_module()).expect("write generated module");
-}
-
-/// The `(<|>)` COLLISION IS OPEN, RELOCATED — this gate pins the honest
-/// current state after the flip that moved `(<|>)` OUT of the
-/// generated `Tidepool.Effects` module entirely (it is now a DEFINITION in
-/// `haskell/lib/Tidepool/Event.hs`, not schema-representable — see that
-/// module's own doc). The collision this gate originally tracked —
-/// `Tidepool.Prelude`'s `Alternative` `(<|>)` vs Event's merge `(<|>)`, both
-/// reachable unqualified once RepoEvent is in a row — is UNCHANGED in kind,
-/// only in WHERE it lives: `Tidepool.Event.hs` hides Prelude's `(<|>)` for
-/// its OWN internal resolution (needed just to define `(<|>)` without an
-/// ambiguous-occurrence error at its own export list), but an EVAL importing
-/// both `Tidepool.Prelude` (auto) and `Tidepool.Event` (via `extra_imports`)
-/// still sees both unqualified — the fix is still ROUTED to the
-/// AUTHOR-FACING imports (`preamble.rs`'s `eval_import_lines`), not landed
-/// here, for the same reason the original gate gave.
-///
-/// This gate therefore asserts: the generated module no longer defines its
-/// own `(<|>)` (moved out), `Tidepool.Event.hs` does (where the collision
-/// now lives), and the eval preamble's own `Tidepool.Prelude` import is
-/// UNCHANGED (still not hiding `(<|>)`) — so that whoever lands the routed
-/// fix sees this test move and knows where to retarget it.
-#[test]
-fn the_alternative_collision_is_open_and_the_generated_module_is_unchanged() {
+fn event_row_resolves_its_alternative_operator_without_ambiguity() {
     let src = worktree_and_event_module();
     assert!(
         !src.contains("(<|>) ::"),
@@ -80,9 +45,20 @@ fn the_alternative_collision_is_open_and_the_generated_module_is_unchanged() {
     let decls = vec![tidepool_mcp::console_decl(), tidepool_mcp::event_decl()];
     assert!(
         tidepool_mcp::build_preamble(&decls, false)
+            .contains("import Tidepool.Prelude hiding (error, (<|>))\n"),
+        "RepoEvent rows must hide Prelude's (<|>) before importing Tidepool.Event"
+    );
+    assert!(
+        tidepool_mcp::session_decl_module_env(&decls, false)
+            .imports
+            .iter()
+            .any(|i| i == "import Tidepool.Prelude hiding (error, (<|>))"),
+        "the declaration plane must apply the same RepoEvent hide"
+    );
+    assert!(
+        tidepool_mcp::build_preamble(&[tidepool_mcp::console_decl()], false)
             .contains("import Tidepool.Prelude hiding (error)\n"),
-        "the AUTHOR-FACING Prelude import must stay byte-identical to its pre-PRD-19 form — \
-         the routed fix has not landed"
+        "unrelated rows must retain Prelude's ordinary (<|>)"
     );
 }
 

@@ -1,4 +1,4 @@
-//! One worktree, one agent — LANE L1.
+//! One worktree, one agent.
 //!
 //! Every agent gets its own managed worktree, all agents are isolated, and a
 //! managed worktree is the only workspace an agent can receive: at most one

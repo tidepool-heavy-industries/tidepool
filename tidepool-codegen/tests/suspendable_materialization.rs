@@ -530,9 +530,8 @@ fn render_aliased_fields_survive_a_suspension() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// The new entries inherit every guard their siblings have: a run started while
-// a continuation is already suspended is refused exactly as the plain and bind
-// entries refuse it (the L7 assert in `run_suspendable_shared`).
+// The capacity-one façade refuses a second run until its active continuation
+// is resumed.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -587,8 +586,8 @@ fn projected_and_render_entries_refuse_an_already_suspended_machine() {
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_default();
             assert!(
-                msg.contains("already suspended"),
-                "expected the L7 already-suspended assert, got: {msg}"
+                msg.contains("active continuation"),
+                "expected the capacity-one façade refusal, got: {msg}"
             );
         }
         // The refusal left the continuation intact.

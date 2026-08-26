@@ -367,8 +367,8 @@ fn runllmturn_rejects_polymorphic_site() {
 
 #[test]
 fn runllmturn_accepts_pure_function_typed_site() {
-    // One-session plan Phase 3e (TASK 1): `checkRunLLMTurnType` no longer
-    // hard-rejects every function arrow — a PURE function-typed answer now
+    // `checkRunLLMTurnType` does not reject every function arrow: a pure
+    // function-typed answer
     // compiles past the gate (it may still fail LATER for unrelated
     // reasons; this only asserts the old blanket rejection is gone).
     let src_result = try_compile_runllmturn("runLLMTurn @(Int -> Int) \"fn\"", "");

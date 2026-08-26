@@ -718,18 +718,9 @@ fn installation_id() -> String {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string()).clone()
 }
 
-/// A per-CONVERSATION `session-id`, deterministic over the request's stable
-/// prefix rather than a fresh random UUID every call. The reference Codex
-/// CLI mints ONE `session_id` per conversation and reuses it for every turn
-/// (`codex-rs`'s `Session::new` — see the module doc's verification
-/// discipline); the ChatGPT Codex backend uses it to route repeat requests
-/// to the inference replica already holding that conversation's automatic
-/// prompt-cache prefix. Regenerating it on every call (the prior behavior
-/// here — a bare `Uuid::new_v4()` inline in [`codex_responses`]) defeated
-/// that routing on every single round: dogfood run-4 measured an
-/// ALTERNATING 0%/hit/0%/hit cache pattern within a single append-only
-/// window instead of the near-100% from round 2 on that a stable session
-/// affords (`tidepool-harness/CLAUDE.md`'s "provider cache-metric gap").
+/// A per-conversation `session-id`, deterministic over the request's stable
+/// prefix. Reusing it across model rounds lets the backend route an
+/// append-only conversation to its existing prompt-cache prefix.
 ///
 /// `instructions` (the system framing) and a window's OPENING message never
 /// change once a window starts — [`assemble_request`](crate::engine::assemble_request)

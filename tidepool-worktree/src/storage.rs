@@ -1,35 +1,5 @@
-//! Shared plumbing for this crate's durable-store modules — [`registry`],
-//! [`binding`](crate::binding), and [`journal`](crate::journal) — plus their
-//! callers outside this crate (`tidepool-agent`'s spawn saga,
-//! `tidepool-handlers`' repository-event handler). Both `now_ms` and
-//! `storage_failure` are defined once, in this module, rather than copied
-//! independently at each call site.
-//!
-//! [`DurableJsonDir`] is the same consolidation for [`registry`] and
-//! [`binding`](crate::binding) specifically: both keep one JSON file per
-//! path-safe id under a directory, written atomically and read back whole or
-//! by directory scan. Path construction, id-safety validation, raw JSON
-//! load, and error mapping were each implemented twice; only the
-//! (de)serialized shape and the domain rules around it — a registry's single
-//! receipt per id versus a binding table's per-id lease HISTORY, its
-//! rollback-on-persist-failure discipline — differ, and those stay in the
-//! owning module.
-//!
-//! [`registry`]: crate::registry
-//!
-//! ## The `now_ms` behavior this consolidation chose
-//!
-//! Four independent copies existed before this consolidation: `tidepool-agent`'s
-//! spawn saga, this crate's `registry.rs`, this crate's `journal.rs`, and
-//! `tidepool-handlers`' repository-event handler (the `Tick` `firedAtMs`
-//! stamp). Three of the four already agreed on PANICKING on a pre-epoch
-//! clock; the fourth — the event handler's Tick stamp, documented there as
-//! "an observability stamp only" — silently degraded to `0` instead. That
-//! divergence is a bug surfaced by consolidation, not one this module
-//! preserves: every caller now panics. A pre-epoch wall clock is a broken
-//! machine no caller can act on, and a Tick silently stamped `0` on a broken
-//! clock is a worse failure — a wrong-looking-right observability record —
-//! than losing that one tick loudly.
+//! Shared timestamp, error-mapping, and atomic JSON-directory primitives for
+//! worktree storage. Callers own serialization, locking, and domain rollback.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,8 +12,7 @@ use crate::id::WorktreeId;
 ///
 /// # Panics
 ///
-/// If the system clock reads before the Unix epoch — see the module docs for
-/// why every caller here deliberately panics rather than degrading.
+/// If the system clock reads before the Unix epoch.
 pub fn now_ms() -> i64 {
     #[allow(clippy::expect_used, reason = "system clock is before the Unix epoch")]
     {

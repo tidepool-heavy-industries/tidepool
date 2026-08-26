@@ -1,4 +1,4 @@
-//! The ONE place a `tidepool-extract` process is built and spawned.
+//! Typed construction and execution of `tidepool-extract` invocations.
 //!
 //! What lives here:
 //!
@@ -9,28 +9,11 @@
 //! - [`ExtractCmd`] — typed argument construction for every mode the tree
 //!   drives (`--target`/`--targets`/`--turn`/`--classify`/`--session-*`/
 //!   `--include`/`--output-dir`/…).
-//! - The spawn itself, which increments [`extract_spawn_count`] on every
-//!   successful spawn, so the counter is correct BY CONSTRUCTION rather than
-//!   by everyone remembering to bump it.
+//! - Execution and the process-global [`extract_spawn_count`].
 //!
-//! What deliberately does NOT live here: any parsing of the extract's output.
-//! Diagnostics reports are JSON and the payloads are CBOR, which would mean
-//! `serde_json`/`ciborium` dependencies — and this crate is **std-only on
-//! purpose** (D-A: `tidepool-macro` is a proc-macro crate and must not grow a
-//! dependency on the runtime graph). [`ExtractCmd::run`] hands back the raw
-//! [`std::process::Output`], and each caller maps that onto its own error
-//! type (`CompileError`, `SessionError`, `String`).
-//!
-//! Nor does the **compile memo**, for the same reason. Keying a whole
-//! invocation is the natural job for the crate that BUILDS the invocation, and
-//! `tidepool_runtime::cache::invocation_key` is written to accept exactly what
-//! [`ExtractCmd::argv`] returns so the builder could move down here later. It
-//! has not, because a content-addressed memo needs blake3 and atomic
-//! tempfile-rename, and D-A's whole point is that this crate's dependency list
-//! is paid by every crate that transitively expands `haskell_eval!`. So the
-//! memo lives one layer up, over this crate's argv, and the callers that want
-//! it (`tidepool_runtime::compile_haskell`, `tidepool_harness::compile`)
-//! consult it before calling [`ExtractCmd::run`]. See `plans/compile-memo.md`.
+//! This is a std-only leaf because proc-macro crates depend on it. Parsing JSON
+//! diagnostics and CBOR output belongs to callers; the content-addressed
+//! compile cache belongs to `tidepool-toolchain` and keys over [`ExtractCmd::argv`].
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::ffi::{OsStr, OsString};
@@ -47,20 +30,8 @@ use exec_check::is_readable_executable_file;
 /// through `PATH` by the OS at spawn time).
 pub const DEFAULT_BIN: &str = "tidepool-extract";
 
-// ---------------------------------------------------------------------------
-// Process-global spawn counter (`tidepool-harness/src/compile.rs` re-exports
-// these three items so its public surface is unchanged).
-// ---------------------------------------------------------------------------
-
 /// Process-global count of `tidepool-extract` spawns paid through
-/// [`ExtractCmd::run`] — the extract-wave `boot` item's done-criterion needs a
-/// live receipt that the self-iterating harness's pre-model-call compile
-/// count actually dropped (see `plans/post-restart/extract-wave/boot/00-spec.md`),
-/// and since every spawn site in the workspace funnels through this crate,
-/// the count covers the PROCESS rather than one call site.
-/// PROCESS-GLOBAL, not per-`Harness`/per-node: a test asserting
-/// on it must run as its own test binary so no other test's compiles land on
-/// the same count (nextest already gives one process per test binary).
+/// [`ExtractCmd::run`]. Tests asserting on it require process isolation.
 static EXTRACT_SPAWNS: AtomicU64 = AtomicU64::new(0);
 
 /// Number of `tidepool-extract` spawns this process has paid so far.
@@ -272,17 +243,8 @@ pub enum Launcher {
         program: OsString,
         prefix: Vec<OsString>,
     },
-    /// Serve this invocation over a resident compile daemon's UNIX domain
-    /// socket instead of spawning a process at all
-    /// (plans/compile-daemon-design.md, Phase 0). Never the launcher an
-    /// `ExtractCmd` is CONSTRUCTED with — [`ExtractCmd::run`] is the only
-    /// place that reaches for this variant, gated on
-    /// `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` naming a live, connectable socket,
-    /// and falling back to `self.launcher` (`Direct`, for every existing
-    /// caller) on ANY daemon-unavailable signal — see `run`'s own doc. Not
-    /// a [`Command`]-shaped launcher (there is no process to build), so it
-    /// is handled entirely OUTSIDE [`Launcher::command`]/`program` in
-    /// [`ExtractCmd::run_with`].
+    /// Serve this invocation over a resident compile daemon's Unix socket.
+    /// This is not `Command`-shaped and is handled by [`ExtractCmd::run_with`].
     Daemon(PathBuf),
 }
 
@@ -621,21 +583,10 @@ impl ExtractCmd {
 
     /// Spawn, wait, and classify — through this command's own [`Launcher`].
     ///
-    /// Tries the resident compile daemon FIRST when
-    /// `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a socket
-    /// (plans/compile-daemon-design.md, Phase 0): connects, sends this
-    /// command's `argv()` plus the current working directory, and returns
-    /// the daemon's response synthesized into the same [`ExtractRun`] shape
-    /// a direct spawn produces. **No daemon running is not an error — it is
-    /// the default, unconditionally supported path**, exactly as it is
-    /// today for every existing caller: the env var unset, a stale/missing
-    /// socket, a refused connection, a timeout, or a crash mid-request (an
-    /// unexpected EOF — see the `daemon` module doc) all fall back to
-    /// `self.launcher` (`Direct` for every real call site) for THIS one
-    /// request, never a retry against the daemon and never a hang. The
-    /// spawn counter increments once, either way — on the daemon's own
-    /// success, or on the Direct fallback's — never twice for one logical
-    /// request.
+    /// If `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a working daemon, send the
+    /// current directory and argv over it. Any unavailable-daemon error falls
+    /// back to the configured launcher for this request. The spawn counter
+    /// increments once for either route.
     pub fn run(&self) -> Result<ExtractRun, SpawnError> {
         if let Some(socket) = std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET") {
             let socket_path = PathBuf::from(socket);
@@ -957,9 +908,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ExtractCmd::run()'s daemon gating (plans/compile-daemon-design.md,
-    // Phase 0) — a fake daemon proving response synthesis, and a dead
-    // socket proving the Direct fallback. Each test owns
+    // Fake-daemon response synthesis and direct-fallback tests. Each test owns
     // $TIDEPOOL_EXTRACT_DAEMON_SOCKET for its own duration (env vars are
     // process-global) — safe under nextest's one-process-per-test model
     // (root CLAUDE.md), same rationale as bin_resolution_is_strict owning

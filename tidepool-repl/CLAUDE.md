@@ -1,293 +1,109 @@
-# tidepool-repl — GHCi-style stateful session server
+# tidepool-repl — stateful GHCi-style MCP server
 
-**Charter.** Belongs: the GHCi-style resident-session MCP surface
-(`session_run`/`session_resume`/`session_reset`), block-runner item
-classification, and the single-implicit-session policy layer. Does NOT
-belong: the suspension engine itself (`tidepool_runtime::session::
-PersistentSession`), effect handler implementations (`tidepool-handlers`),
-multi-node/multi-hole tree orchestration (`tidepool-harness`).
+## Charter
 
-A resident-JIT session surface. One session = one long-lived JIT machine whose
-value heap and module scope persist across calls — declarations and bindings
-accumulate turn over turn. See the repo-root `CLAUDE.md` for the project map;
-`tidepool-mcp/CLAUDE.md` for the shared eval-authoring patterns (Aperture,
-`update`/`Edit`/diff verbs) that apply here too.
+This crate owns the resident-session MCP protocol, block classification, and
+session manager. The JIT and session engine live in `tidepool-codegen` and
+`tidepool-runtime`; effect definitions live in `tidepool-mcp`.
 
-## The 3 MCP tools + 1 resource
+## MCP surface
 
-ONE implicit session — the multi-agent story is one repl server per agent, so
-there is no session name / no named-sessions map.
+The server exposes:
 
-- **`session_run { items: [String], input?: Value, verbose?: bool }`** — run a
-  block of GHCi-capable items in order; **auto-opens** the session on first use
-  (no open step). See Item classification and Response shape below.
-- **`session_resume { continuation_id, response }`** — answer an in-turn `ask`
-  suspension and run the turn to completion (see Suspension below). A reply that
-  doesn't match the suspension's schema is rejected WITHOUT consuming the
-  continuation, so it can be retried. A session with a pending suspension will
-  not accept a new `session_run` until it is resumed (or the session is reset).
-- **`session_reset {}`** — drop the resident machine (freeing the heap and all
-  bindings) and open a fresh session. Also drops any pending `ask` continuation:
-  **abort folds into reset** (resetting while suspended drops the pending ask).
-  The universal get-unstuck button; takes no arguments. Works from a cold start
-  (never run) too.
+- `session_run`: execute declarations, statements, expressions, or meta commands;
+- `session_resume`: answer a suspended `ask`;
+- `session_abort`: abandon a suspended request;
+- a session resource describing current bindings and declarations.
 
-- **`tidepool://session/bindings`** (resource, `application/json`) — read-only
-  JSON over LIVE session state: `{bindings: [{name, type, kind (decl|bind),
-  generation}], generation, valGeneration}`. Decl-plane heads (`f x = …`,
-  `data Foo`, `class C`) are `kind: "decl"`; value/pure binds are `kind: "bind"`.
-  Republished after every completed turn; read without driving a turn.
+Keep request/response details in the generated tool descriptions and protocol
+types. Do not maintain a second JSON reference here.
 
-Typical flow: repeated `session_run` → `session_reset` when you want a clean
-slate. The `input` field on `session_run` is a payload lane: pass structured
-JSON there (e.g. whole-file content for a write) and it's in scope in every item
-of that block as `input :: Aeson.Value` — avoids Haskell-string-escaping
-large/quote-heavy content in `items` itself.
+## Block classification
 
-## Item classification (the block-runner)
+A request may contain several top-level items. The block runner classifies and
+executes them in order:
 
-Each string in `items` is classified into a kind: **decl** (a top-level
-declaration), **stmt** (a bind `x <- e` / `let x = e`, or a bare expression),
-or **meta** (a `:command` — `:bindings`, `:reset`, `:t`, `:i`, `:vocab`,
-`:browse [Effect]`, `:stub <n>`, `:program`).
-Execution stops on the first error. A block ending in a bind leaves the
-top-level `value` null (read `items[].result` instead); end with a bare
-expression to populate `value`. `:vocab` takes an optional module argument
-(`:vocab Diff`) to scope the digest to one module instead of the full blob;
-an unknown module name reports clearly rather than returning empty.
+- declarations extend the persistent declaration environment;
+- bind statements create persistent heap bindings;
+- expressions evaluate and update `it` where applicable;
+- supported meta commands inspect or modify session state.
 
-**A 4th internal category, `Auto`, backs the decl/stmt split for anything
-without a leading keyword.** Only `:`-prefixed items are unambiguously Meta;
-items starting with a declaration keyword (`data`/`newtype`/`type`/`class`/
-`instance`/`infix*`/`foreign`/`import`/`default`/`{-#`) are unambiguously
-Decl. Everything else (including a bare function equation like `f x = x`,
-which has no leading keyword) is `Auto`: tried as a Decl first, and on a GHC
-parse error, falls back to Stmt. The reported `kind` still comes back as
-"decl" or "stmt" — this is invisible from the outside — but it means a
-function definition takes a try-then-fallback path, not a direct one.
+Split using the Haskell-aware classifier, not line prefixes. Multiline
+declarations, comments, strings, and layout must survive intact.
 
-**decl items compile as their own module.** A signature and its binding —
-and all clauses of a multi-clause function — must be in the SAME item. A
-genuine multi-clause function is therefore ONE item (`f 0 = ..\nf n = ..`);
-its clauses are one declaration and stay together.
+Declarations successfully compiled before a later item fails remain committed.
+A suspension records the cursor and materialization policy needed to resume the
+same item and continue the rest of the block exactly once.
 
-**Redefinition across separate items = REPLACE, latest wins (GHCi parity).**
-Re-running a decl that reuses a name (`rf x = x+1`, later `rf x = x+2` as two
-items) does NOT append an overlapping clause — the newest gen-versioned module
-`hiding`s the prior head, so at eval time only the latest `rf` is in scope
-(`SessionLib`'s `cumulative_exports_before`). `:program` mirrors this: it emits
-only each name's LATEST defining turn (`DeclLog::replayable_sources`, #320), so
-the replay is a compilable module, not two conflicting `rf` equations. This is
-distinct from a real multi-clause function in one item, which is preserved
-whole. (Edge case: a single item co-defining a later-redefined name *and* a
-still-live name is kept intact — the live name is faithful, but the stale
-co-defined head can duplicate in the flat `:program` text; the documented
-one-declaration-per-item idiom avoids this.)
+## Session lifecycle
 
-decl and stmt items share the same base import set (Prelude, effect verbs,
-`T.`/`Map.`/`Set.`/`L.`/etc., `Aeson`); when a project `Library` facade is on
-the include path, both also get `import Library` (guarded by a
-`hiding (...)` clause over the session's own cumulative decl heads, so a
-decl redefining a name Library also re-exports doesn't become an ambiguous
-occurrence). A decl referencing a type from a verb module that `Library`
-does NOT re-export still needs its own explicit `import`, same as a stmt
-would.
+The manager is a single-slot client of
+`tidepool_runtime::session::registry::SingleSlot`.
 
-## Response shape (session_run / session_resume)
+- Every run checks out the session and settles it once as idle, suspended,
+  retired, or wedged.
+- Epochs fence late timeout or panic settlement from overwriting newer state.
+- A suspended session is threadless: the continuation, pending item tail, and
+  block cursor are data owned by the session.
+- Only the matching suspended request may be resumed or aborted.
+- A bottom-bearing resume answer does not consume the continuation.
+- A wedged slot remains visible until reset or TTL reap; do not silently create
+  a replacement session.
 
-Default (slim) shape — no generation counters, no double-encoding:
+The REPL uses the JIT registry's capacity-one façade. The continuation remains
+registry-rooted even though the REPL carries only one active request.
+
+## Persistence semantics
+
+Bindings, declarations, and heap live for the machine session. A reset or
+retirement drops them. The REPL is not a durable database and must not imply
+that state survives server restart.
+
+Generated effects use stable `Tidepool.Effects.Core` plus a per-turn row shim.
+Persistent declarations may be row-polymorphic; values whose types pin a
+per-turn concrete row must not cross turn boundaries.
+
+## Toolchain and configuration
+
+Typical launcher configuration:
 
 ```json
 {
-  "items": [
-    {"kind":"stmt", "ok":true, "bound":"vs", "type":"[Text]"},
-    {"kind":"decl", "ok":true, "decl":"slug", "type":"Text -> Text"},
-    {"kind":"stmt", "ok":true, "type":"Int"}
-  ],
-  "value": 42,
-  "type": "Int"
+  "command": "tidepool-repl"
 }
 ```
 
-- Each item has `kind` + `ok` + inline result fields (no nested `result` string).
-- Bind: `bound` + `type`. Multi-bind: `bound: [names]` + `types: [types]`.
-- Decl: `decl` (the declared identifier head: `slug`, `MyData`, `MyClass`, …)
-  plus `type` — the GHC-inferred (generalized) type the server had at compile
-  time, painted at mutation time so `{decl:"heatOf"}` doesn't cost the caller a
-  `:t` round-trip (#317). **Best-effort:** present for VALUE bindings only;
-  omitted for `data`/`newtype`/`type`/`class`/`instance`/`import`/fixity decls
-  (no term-level type) and when the type probe fails. For a signature+binding
-  pair split across two items, only the binding item carries `type`. Painting
-  costs one extra extract compile per value decl (the ~6s/turn floor), only
-  taken when there's a type to report.
-- Non-final expression: `type` (+ `value` for non-last exprs if more items follow).
-- Final expression: `type` in the item; `value` and `type` at top-level only.
-- Error item: `{"kind":"...", "ok":false, "error":"..."}`.
-- Truncated value: `"truncated": "hint"` at top-level alongside `value`.
+Relevant environment variables are resolved by shared crates:
 
-`verbose: true` — full diagnostic shape for debugging:
-`{items:[{index,kind,ok,result:"<JSON string>"}], value, generation, valGeneration}`.
-The `result` field is the old double-encoded format. Use this only when you need
-generation counters or the raw GHC module name for a declaration.
+- `TIDEPOOL_EXTRACT`
+- `TIDEPOOL_PRELUDE_DIR`
+- `TIDEPOOL_TOOLCHAIN_STAMP`
+- `TIDEPOOL_TOOLCHAIN_HANDSHAKE`
+- `TIDEPOOL_CONFIG_DIR`
+- `TIDEPOOL_EVAL_TIMEOUT_SECS`
 
-## Usage notes
+Do not add REPL-specific copies of toolchain or path precedence.
 
-- **Default render is `Show`, not `ToJSON`.** A function returning a plain
-  ADT (e.g. `checkDiff :: Text -> ParseResult`) renders as derived `Show`
-  text; the JSON shape a module's docstring advertises comes from returning an
-  `Aeson.Value` (`toJSON <$> ...`) — relevant for the sum-type-returning verbs
-  (Diff/Edit/Patch) whose docstrings show JSON.
-- **`:vocab` lists modules that are NOT auto-imported.** Only `Library`
-  re-exports are in scope bare; other listed verb modules need an explicit
-  `import` even though `:vocab` shows them.
-- **`grepGlob regex glob`** — content regex FIRST, path glob SECOND (reversed
-  order is a common mistake). Regex escaping is quad-backslash (JSON escape ×
-  Haskell escape) — e.g. `grepGlob "\\\\.unwrap\\\\(\\\\)" "**/*.rs"`.
+## Caller guidance
 
-## Launcher (MCP config)
+- Use declarations for reusable functions and types, binds for reusable values,
+  and expressions for results.
+- A suspended `ask` must be resumed through `session_resume`, not by issuing a
+  new block and guessing which continuation is active.
+- Treat compile failures as ordinary session responses; they do not imply the
+  server or session died.
+- Large values may stay bound even when their rendered representation is
+  abbreviated.
 
-The MCP client (`~/.claude.json` project section — NOT `.mcp.json`, which is
-inert here) launches `~/.cargo/bin/tidepool-repl` directly
-(re-`cargo install --path tidepool-repl` to update). The extract is resolved
-via `TIDEPOOL_EXTRACT` or, when unset, `tidepool-extract` on PATH — normally
-the nix-profile wrapper, which supplies its own with-packages GHC. To test a
-working-tree extract change before `scripts/redeploy.sh`, set
-`TIDEPOOL_EXTRACT` in the server's `env` block to the cabal-built
-`tidepool-extract-bin` and make sure the with-packages GHC is on `PATH`
-(the extract shells out to `ghc` and needs `lens` on the DB). This makes the
-resolved extract disagree with the last `scripts/redeploy.sh`-written deploy
-stamp, which the startup handshake (`tidepool-runtime/src/toolchain.rs`) treats
-as skew by default — set `TIDEPOOL_TOOLCHAIN_HANDSHAKE=warn` in the same `env`
-block to log the mismatch and continue instead of refusing to start.
+## Verification
 
-## Env knobs
+Test classification, partial commit, bind/`it` behavior, suspension identity,
+timeout settlement, reset/reap, and cross-turn declaration compatibility.
 
-- `TIDEPOOL_PRELUDE_DIR` — override the stdlib dir (falls back to in-repo
-  `haskell/lib`). A set-but-invalid value (no `Tidepool/Prelude.hs` under it)
-  is a hard startup error.
-- `TIDEPOOL_LLM_MODEL` — model for the `llm`/`ask`-adjacent structured calls.
-- `TIDEPOOL_TOOLCHAIN_STAMP` — override the deploy-stamp path checked at
-  startup (default: under the cache dir, `toolchain-stamp.json`).
-- `TIDEPOOL_TOOLCHAIN_HANDSHAKE` — deploy-stamp check severity: `error`
-  (default), `warn` (log and continue — the escape hatch for the worktree-extract
-  workflow above), or `off`.
+This crate is GHC-heavy:
 
-## Suspension (`ask`) — what it means for a caller
+```bash
+scripts/battery.sh -p tidepool-repl -E 'test(<name>)'
+```
 
-Hitting the `Ask` effect mid-block suspends the turn: `session_run` returns a
-`continuation_id` instead of completing. Nothing is blocked in the OS sense —
-the continuation is stowed as data on the session's machine and the rest of the
-block is stowed alongside it — but the session accepts no new `session_run`
-until you call `session_resume` (to answer and continue the rest of the block)
-or `session_reset` (to drop the pending ask and start fresh — abort folds into
-reset). A response that doesn't match the suspension's
-schema is rejected without consuming the continuation, so a bad `session_resume`
-payload can be retried. `session_resume` distinguishes three failure causes
-rather than one generic "unknown or expired continuation_id": no session is
-running, the session is suspended on a DIFFERENT continuation (names the pending
-one), or the session isn't suspended at all.
-
-## Internals: session lifecycle (read if modifying `manager.rs`/`server.rs`, skip otherwise)
-
-**One engine.** The repl is a single-node client of the same threadless
-suspension core `tidepool-harness` drives:
-`tidepool_runtime::session::PersistentSession`. An `ask` STOWS — the JIT
-continuation stays on the machine as data, the run entry returns `Suspended`,
-and the whole `Session` goes back into its slot. No OS thread is parked per
-suspended session, and there is no repl-specific ask dispatcher.
-
-**`session.rs` — what a turn is**, unaffected by the registry promotion.
-`run_turn` returns a `TurnStep` (`Completed(TurnOutcome)` or
-`Suspended(AskRequest)`); `resume_turn`/`abort_turn` re-enter. Because a
-suspension outlives the call that made it, two things that used to sit on a
-native stack are plain data on the `Session`: the suspended item's
-`PendingTail` (one variant per run path — plain eval, bind, multi-bind,
-reference, bare-expr `it`) and the block loop's `BlockCursor` (results so
-far, classify verdicts, next index, the pending item's index/kind, the
-`last_*` accumulators, and the `input` payload lane). A resume re-enters the
-machine through the `resume_*` sibling the tail's materialization policy
-calls for and then runs the SAME `finish_*` the non-suspending path would
-have — completion bookkeeping exists once, not once per arm. Only a single
-item can suspend (a decl batch never runs the machine, nor does a
-`:command`), which is why the cursor has one pending-item slot rather than a
-stack.
-
-**One registry, no second lifecycle truth.** `manager.rs`'s `SessionManager`
-is a thin policy wrapper over `tidepool_runtime::session::registry::
-SingleSlot` — the promoted registry primitive (the ONE session-ownership
-mechanism, root `CLAUDE.md` Mechanism Index) restricted to "at most one
-entry, no id parameter", the same shape `tidepool-harness`'s KEYED
-`SessionRegistry` uses at N = 1. There is no second, independently-
-transitioned `SessionState` enum (`state.rs` is deleted): the registry's own
-`Slot` (`Idle | Running | Suspended{holes} | Wedged{since}`) is the ONLY
-lifecycle truth. `manager.rs` keeps only what is genuinely REPL-specific and
-outside the registry's own opinion:
-
-- **The busy-guard policy** (`SessionManager::admit_run`): this crate's
-  documented contract refuses a fresh `session_run` while `Suspended` — a
-  POLICY choice, not the registry's own, since the shared `checkout_run`
-  itself permits a run over a suspended slot (the harness's multi-hole
-  story). Enforced by taking the checkout for real (the same atomic
-  operation the registry uses — no separate check-then-checkout race) and,
-  only if `Checkout::holes_at_checkout()` reveals the PRE-checkout slot was
-  non-`Idle`, handing the machine straight back before anyone observes it as
-  checked out.
-- **The suspension's caller-facing payload** (`captured` output buffer,
-  `expected_schema`, the reaper's `since` TTL clock) — domain metadata the
-  registry has no opinion on, held in a `Mutex<Option<Suspension>>` field
-  (this crate's session is single-hole: only one `ask` is ever pending at a
-  time) — mirrors how `tidepool-harness` keeps its own per-hole domain
-  metadata OUTSIDE the registry too (`Harness::pending_holes`).
-- **The cancel-handle and live-bindings slots** a turn/resource-read needs
-  without checking the session out.
-
-Every settlement (`restore_idle`/`restore_suspended`/`mark_wedged`/`retire`)
-takes an OWNED `CheckoutReceipt` (from `Checkout::into_parts`) rather than
-the borrowed `Checkout` itself — REPL's `drive_detached` resolves a turn on
-a DETACHED `tokio::spawn`'d task (decoupled from the original RPC future so
-a cancelled/dropped caller can't strand state at `Running`), and a borrowed
-`Checkout<'r, ..>`'s lifetime cannot cross that boundary; the receipt is
-lifetime-free (just the session id + the epoch it read at checkout time) and
-settles later against a FRESH registry borrow taken inside the spawned task.
-`tidepool-harness`'s `run_checked_out` never needs this — it holds the
-borrowed `Checkout` across an `.await` WITHIN the same async fn instead.
-
-Each settlement is guarded by `SessionManager::is_current` — mutating the
-flat `suspension`/`cancel_slot`/`bindings_slot` fields is skipped when the
-receipt's session is no longer the CURRENT one (a `session_reset` raced it):
-those fields have no epoch of their own the way the registry's `Slot` does,
-so this check is what stops a stale settlement from clobbering a fresh
-session's live state. The registry's own settlement (`SingleSlot::
-settle_suspended`/`settle_wedged`/`settle_retire`) stays correct regardless,
-on its own epoch guard.
-
-**Wedged is a real, visible registry slot, not a vanished entry.** A turn
-that never gives the session back (outran its abort grace, or the blocking
-task crashed) settles its receipt via `SessionManager::mark_wedged`, which
-writes `Slot::Wedged{since}` — a TERMINAL placeholder that stays in the
-registry (refusing every checkout with `CheckoutError::Terminal`) until the
-reaper's TTL sweep or an explicit `session_reset` reclaims it. This is
-stronger than the pre-promotion design: a bare `retire()` used to remove the
-whole entry outright, so only the ORIGINAL caller's own already-cloned
-`SharedState` handle ever showed "Wedged" — a later caller's fresh read saw
-nothing and silently auto-opened a new session. `busy_label()` now genuinely
-persists the reason for every caller, and the documented `wedged_ttl` reaper
-sweep is reachable via the real production path, not only a test that
-manufactures the state directly.
-
-**Timeout/cancel is thread-agnostic and unchanged.** `PauseGate::request_abort`
-fires at the next effect dispatch and the JIT `CancelHandle` at the next
-GC/tail-call safepoint. The handler stack is wrapped per turn in
-`tidepool_runtime::session::GateDispatcher` — the SHARED wrapper, also used by
-the eval engine — which makes every effect dispatch a checkpoint and
-deliberately does NOT intercept the ask tag: the JIT's own suspend driver
-catches that first (`tag >= ask_tag`).
-
-**Effects are handled in `tidepool-handlers/src/lib.rs`**, not
-`tidepool-repl/src/main.rs` — main.rs only wires the handler stack via
-`build_base_stack` (see the `use tidepool_handlers::{build_base_stack,
-HandlerConfig}` import and the `build_base_stack(&hcfg)` call there). Live
-stack: Console, KV, Fs, Http, Exec, Llm, Git, Time (Ask never reaches a
-handler — the JIT suspends on its tag; Meta is `--debug`-gated). The stack is
-cloned twice over: once per session, and once more per turn, so per-turn
-handler state starts clean exactly as it did before the cutover.
+Use the binary sub-shards in `scripts/battery-shard.sh` for broader coverage.

@@ -4,7 +4,7 @@ Tidepool is a system for compiling Haskell effect programs into high-performance
 
 ## Compile Pipeline
 
-The transition from Haskell source to native execution goes through four transformations, with no configurable optimization stage in between:
+The transition from Haskell source to native execution goes through five transformations, with no configurable optimization stage in between:
 
 1.  **Haskell Source**: Business logic is written in Haskell using `freer-simple` effect stacks. This allows for pure, composable descriptions of side-effecting operations.
 2.  **GHC Core**: The `tidepool-extract` tool (a GHC frontend plugin) intercepts the compilation process to extract GHC's intermediate representation (Core). During this phase, types are erased, and casts/ticks are stripped.
@@ -53,9 +53,10 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 - **`tidepool-codegen`**: The Cranelift-based compiler that generates native code and manages the `JitEffectMachine` lifecycle.
 - **`tidepool-extract-cmd`**: The one `tidepool-extract` invocation builder (bin resolution, typed args, the spawn) that every caller of the Haskell toolchain goes through. `std`-only, zero deps, so `tidepool-macro` can depend on it without pulling in the runtime graph.
 - **`tidepool-atomic-write`**: The one atomic write-then-rename helper, shared by every durable on-disk store in the workspace (worktree registry, agent binding table, checkpoints, compile cache, toolchain stamp).
-- **`tidepool-runtime`**: The high-level orchestration layer that handles Haskell compilation (via `tidepool-extract-cmd`), caching (via `tidepool-atomic-write`), and running programs. Also owns the `SessionEngine`/`PersistentSession` machinery shared by the one-shot and REPL surfaces (see "Surfaces" above).
+- **`tidepool-toolchain`**: Toolchain discovery, fingerprints, paths, and the compiled-artifact cache.
+- **`tidepool-runtime`**: The high-level orchestration layer for compiling and running programs. Also owns the `SessionEngine`/`PersistentSession` machinery shared by the one-shot and REPL surfaces (see "Surfaces" above).
 - **`tidepool-effect`**: Core traits and logic for effect dispatch and handling (`EffectHandler`, `DispatchEffect`).
-- **`tidepool-protocol`**: The effect contract as data — one schema (verbs, records, errors, field types) that generates the macro DSL strings, wire mirrors, extractor verb tables, and harness classification lists that used to be hand-maintained separately. A `std`-only leaf with no runtime component; effects migrate here one at a time from `tidepool-mcp/src/effect_defs.rs`.
+- **`tidepool-protocol`**: The effect contract as data — one schema (verbs, records, errors, field types) that generates the macro DSL strings, wire mirrors, extractor verb tables, and harness classification lists. A `std`-only leaf with no runtime component; effects migrate here one at a time from `tidepool-mcp/src/effect_defs.rs`.
 - **`tidepool-macro`**: Procedural macros embedding Haskell source as CBOR at build time (`haskell_eval!` for whole programs, `haskell_inline!` for inline snippets).
 - **`tidepool-bridge`**: Provides `FromCore` and `ToCore` traits for seamless data conversion between Rust types and Tidepool `Value`s.
 - **`tidepool-bridge-derive`**: Procedural macro crate providing `#[derive(FromCore)]` and `#[derive(ToCore)]`.
@@ -63,7 +64,7 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 - **`tidepool-handlers`**: Central effect-request handler arms — the Rust side of the effect contract (`<Eff>Req` matches, sandbox enforcement).
 - **`tidepool-mcp`**: MCP server library, generic over effect handlers.
 - **`tidepool-repl`**: GHCi-style resident-session MCP server (declarations and heap persist across calls). See "Surfaces" above for what it actually services.
-- **`tidepool-worktree`**: Managed git worktrees, a durable registry, and typed repository events — the runtime observes git state but has no git-workflow verbs of its own (no merge, no rebase).
+- **`tidepool-worktree`**: Managed git worktrees, a durable registry, and typed repository events. It includes one typed merge-and-abort primitive; conflict resolution and other git workflow remain authored policy.
 - **`tidepool-agent`**: Typed headless coding subagents — the containment boundary and the one place a coding backend (Codex today) is named. Spawns a subagent into a managed `tidepool-worktree` worktree.
 - **`tidepool-harness`**: Resident harness runtime — session-tree turn lifecycle, `SessionRegistry` checkout ownership, the selfharness driver that drives an authored `State`/`render`/`loop` program forever. See "Surfaces" above.
 - **`tidepool-web`**: Operator GUI (HTTP+SSE, Datastar/d3) for the self-iterating harness.

@@ -1,15 +1,11 @@
-//! GHC-heavy integration test for the resident compile daemon
-//! (plans/compile-daemon-design.md, Phase 0). ONE binary, ONE daemon boot
-//! shared across the named checks below (family-bundle discipline, root
-//! CLAUDE.md's "Suite wall time is a standing constraint") — checks (a)-(d)
+//! GHC-heavy integration test for the resident compile daemon. One binary and
+//! daemon boot are shared across checks (a)-(d)
 //! run against one daemon; (e) needs its own (it deliberately kills itself
 //! after 2 requests).
 //!
 //! Needs a resolvable `tidepool-extract` binary (`$TIDEPOOL_EXTRACT` or
 //! `PATH`) and a GHC on `PATH` that can load it (see haskell/CLAUDE.md).
-//! This crate is otherwise excluded from nothing in `.config/nextest.toml`
-//! (that wiring is Phase 1's job, not this lane's — see the design doc's own
-//! migration order), so under a BARE `cargo nextest run` this test must not
+//! Under a bare `cargo nextest run` this test must not
 //! fail loud just because the toolchain isn't set up: `daemon_toolchain()`
 //! skips (prints and returns early, still a PASS) rather than panicking when
 //! the extract binary can't be resolved. Run explicitly via
@@ -26,7 +22,7 @@ use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
 
 /// The stdlib root every fixture's `--include` points at — this crate's own
 /// workspace-relative path, not the general-purpose 5-tier locator
-/// `tidepool-runtime::toolchain` owns (that crate cannot be a dependency
+/// `tidepool-toolchain::toolchain` owns (that crate cannot be a dependency
 /// here — see this crate's own CLAUDE.md). A test running inside this
 /// repo's cargo workspace always has this path; that is the only case this
 /// helper needs to serve.
@@ -404,11 +400,10 @@ fn check_d_relative_target_and_distinct_cwd(bin: &Path, dir: &Path, lib: &Path, 
     assert!(sub.join("out-d/result.cbor").is_file());
 }
 
-/// (f) THE spawn-row regression (spawnrow-fix,
-/// plans/compile-daemon-design.md §7): a generated module can be a pure
+/// A generated module can be a pure
 /// function of the request's own effect VOCABULARY while always resolving
 /// under one FIXED module name (`Tidepool.Effects.Core`,
-/// tidepool-mcp/CLAUDE.md's "Stable-effects-core" section — vocabulary-keyed
+/// tidepool-mcp/CLAUDE.md's "Generated effects modules" section — vocabulary-keyed
 /// into a distinct content-addressed include dir per vocabulary on the Rust
 /// side). A NARROW-vocabulary compile through the warm daemon populates the
 /// shared `GutsMemo` under that name; a LATER, WIDER-vocabulary compile

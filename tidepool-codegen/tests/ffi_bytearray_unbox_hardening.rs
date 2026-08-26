@@ -109,8 +109,8 @@ fn nullary_con_into_sizeof_bytearray_fails_cleanly() {
 /// plausible-looking but unmapped address, well above any valid heap
 /// address, chosen so that — pre-fix — `unbox_bytearray` loads it as `ba_ptr`
 /// and `SizeofByteArray` immediately dereferences it (`load ba_ptr, 0`) with
-/// no host-fn guard in between, unlike the strlen path. This is the exact
-/// escape the review named for `unbox_addr`, reproduced against
+/// no host-fn guard in between, unlike the strlen path. This reproduces the
+/// same escape against
 /// `unbox_bytearray`'s own copy of the same unguarded con-unwrap loop.
 #[test]
 fn one_field_non_array_con_into_sizeof_bytearray_fails_cleanly() {

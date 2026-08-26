@@ -1,4 +1,4 @@
-//! LANE L6 acceptance tests — a genuine filesystem I/O failure against
+//! Storage tests using a genuine filesystem I/O failure against
 //! runtime-owned storage (registry, binding table, journal, worktree root)
 //! must surface as [`WorktreeError::StorageFailure`] naming the path that
 //! actually failed, not abort the process.

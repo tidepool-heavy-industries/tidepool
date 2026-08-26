@@ -276,10 +276,7 @@ pub fn ensure_effects_module_at(
 /// [`ensure_effects_module_at`] with the effect VOCABULARY (what's nameable —
 /// gets a GADT + `type_defs` emitted into the stable Core module) split from
 /// the effect ROW (`row_effects` — what's IN `type M`, i.e. actually
-/// executable via `Member`). This is the mechanism behind "effect vocabulary
-/// available in scope ≠ effects present in M's row" (extract-wave item 0b,
-/// generalized by stable-effects-core to every vocabulary effect, not just
-/// `RunLLMTurn`): a name can be IN SCOPE (compiles, resolves, has a real GADT
+/// executable via `Member`). A name can be in scope (compiles, resolves, has a real GADT
 /// constructor) without being IN THE ROW (a `Member` constraint at its call
 /// site is then unsolved — a comprehensible type error, not "not in scope").
 ///

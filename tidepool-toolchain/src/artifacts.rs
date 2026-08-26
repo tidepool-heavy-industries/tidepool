@@ -450,7 +450,7 @@ pub fn compile_invocation(
         |stderr, success| {
             // The invocation (turn) lane only warns on failure; the eval
             // lane always echoes stderr as a human debug channel — the same
-            // per-lane logging policy each standalone function used before
+            // logging policy each standalone function uses
             // this front door existed.
             if is_invocation_lane {
                 if !success && !stderr.is_empty() {

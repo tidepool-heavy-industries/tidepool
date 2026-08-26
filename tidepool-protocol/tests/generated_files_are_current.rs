@@ -243,13 +243,15 @@ fn journal_contract_text_is_pinned() {
 
     assert_eq!(
         journal.helper_texts(),
-        vec![concat!(
+        vec![
+            concat!(
             "-- | Append one durable journal entry. `kind` and `key` are\n",
             "-- caller-chosen labels; `payload` is an opaque JSON value. Flushed\n",
             "-- immediately; append-only — never rewritten or compacted.\n",
             "record :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\n",
             "record kind key payload = send (RecordStep kind key payload)",
-        ), concat!(
+        ),
+            concat!(
             "-- | Append one observability entry to the run's sibling TRACE stream: ",
             "decision narration and telemetry, never folded into resume. `stage` ",
             "names what kind of moment this is (e.g. \"resume-verdict\", \"park\"); ",
@@ -258,7 +260,8 @@ fn journal_contract_text_is_pinned() {
             "on every line, so trace and journal merge into one timeline.\n",
             "trace :: forall effs. Member Journal effs => Text -> Text -> Value -> Eff effs ()\n",
             "trace stage key payload = send (TraceStep stage key payload)",
-        )]
+        )
+        ]
     );
 
     assert_eq!(

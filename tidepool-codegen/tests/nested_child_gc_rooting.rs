@@ -244,8 +244,8 @@ fn suspend_parent(
     );
     assert_eq!(
         machine.stowed_roots_count(),
-        0,
-        "no stowed root while idle-suspended (registered only during a child run)"
+        1,
+        "a parked continuation remains registered for its whole lifetime"
     );
     machine
 }
@@ -293,11 +293,11 @@ fn child_gc_then_parent_resumes_and_captured_survives() {
                  was suspended (before={gc_before}, after={gc_after})"
             );
 
-            // The child completed: the stowed root is deregistered again.
+            // The child completed, but the parked parent remains registered.
             assert_eq!(
                 machine.stowed_roots_count(),
-                0,
-                "stowed root must be deregistered after the child completes"
+                1,
+                "the parked parent stays rooted after the child completes"
             );
             assert!(
                 machine.is_suspended(),
@@ -517,13 +517,12 @@ fn bottom_answer_does_not_consume_the_continuation() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// (e) Nested-mode misuse: a PLAIN run entry while suspended errors cleanly
-//     (the L7 asserts stay intact — the illegal unregistered case still panics).
+// (e) Ordinary fragments can run while the parent stays registry-rooted.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
 #[serial]
-fn plain_run_entry_while_suspended_still_panics() {
+fn plain_run_entry_while_suspended_preserves_the_parked_parent() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -531,9 +530,6 @@ fn plain_run_entry_while_suspended_still_panics() {
             let mut machine = suspend_parent(&table, 1 << 14, 1, 1);
             assert!(machine.is_suspended());
 
-            // A plain (NON-child) fragment run while suspended must panic — the
-            // continuation is stowed and UNregistered; running a plain entry
-            // would be the illegal state the L7 asserts reject.
             let frag = machine
                 .add_function(
                     "plain_while_suspended",
@@ -542,13 +538,12 @@ fn plain_run_entry_while_suspended_still_panics() {
                     &ExternalEnv::new(),
                 )
                 .expect("add plain fragment");
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = machine.run_fragment_pure(frag);
-            }));
-            assert!(
-                r.is_err(),
-                "a plain run entry while suspended must panic (L7 assert intact)"
-            );
+            let value = machine
+                .run_fragment_pure(frag)
+                .expect("run sibling fragment");
+            assert_eq!(expect_int(&value), 0);
+            assert!(machine.is_suspended());
+            assert_eq!(machine.stowed_roots_count(), 1);
         })
         .unwrap()
         .join()

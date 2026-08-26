@@ -1,257 +1,108 @@
-# tidepool-codegen — Cranelift JIT compiler + effect machine
+# tidepool-codegen — Cranelift JIT and effect machine
 
-**Charter.** Belongs: compiling `CoreExpr` to Cranelift-backed native state
-machines, the GC (heap layout consumer, frame walker, root accounting), and
-the effect machine at the JIT↔Rust boundary. Does NOT belong: the `CoreExpr`
-IR itself (`tidepool-repr`), the differential oracle interpreter
-(`tidepool-eval`), the high-level `compile_haskell`/caching API
-(`tidepool-runtime`).
+## Charter
 
-Compiles `CoreExpr` to Cranelift-backed state machines and drives the effect
-machine at the JIT↔Rust boundary. See the repo-root `CLAUDE.md` for the project
-map and locked decisions.
+This crate compiles `CoreExpr` to native code, implements the JIT effect
+machine, walks JIT frames for GC, and bridges live heap values to the reference
+`Value` representation. Core IR belongs to `tidepool-repr`; high-level compile
+and session orchestration belongs to `tidepool-runtime`.
 
-## Nested child runs on a suspended machine
+## Suspension paths
 
-**This section describes the single-slot suspension path.** As of the
-one-session collapse, the PARKED continuation
-registry (below) is the primary suspension mechanism for the harness
-(resident-session) path — a suspended session there can carry many parked
-holes at once, resumed in any order, and a "child" run is just an ordinary
-fragment run over the parked frames (`JitEffectMachine::run_fragment_suspendable_parked`
-et al.). The single-slot mechanism this section documents remains the live
-path for the repl and one-shot eval paths; for the harness path it is legacy,
-and its deletion is gated on the parked path's production soak — the
-repl/one-shot conversion + slot-deletion phase, deliberately parked behind a
-production-soak gate, not currently in flight. The two paths never mix on one machine
-(asserted both directions).
+There are two suspension mechanisms:
 
-A parent turn suspended at a typed yield (`runLLMTurn`/`Ask`) can host
-SEQUENTIAL child fragment runs on the SAME machine — reading the parent's
-bindings zero-copy — while its stowed continuation is a REGISTERED GC ROOT. The
-full invariant is in the `jit_machine.rs` module docstring; the essentials:
+- a single slot used by one-shot eval and the REPL;
+- a parked-continuation registry used by the resident harness.
 
-- The GC root assembly (`perform_gc`, `host_fns/gc.rs`) folds SIX sources:
-  frame-walked stack, run-scoped `rust_roots`, session `persistent_roots`, the
-  nested-child-scoped `stowed_roots` (`MachineState`), write-barrier
-  `remembered_slots` (tenured-array payload slots touched by a later
-  `writeSmallArray#`/`WriteArray`/`casSmallArray#`/copy), and the vmctx
-  tail-call slots. `stowed_roots` is DELIBERATELY separate from
-  `persistent_roots` so intent is auditable: a persistent root is a
-  machine-lifetime tenured value; a stowed root is a *transient* parent
-  continuation rooted only while a child runs.
-- `OldSpace::tenure` (`old_space.rs`) folds a real minor collection over these
-  same six sources into every tenure call that actually evacuates something
-  (`host_fns::run_minor_collection_for_tenure_fixup`), immediately after its
-  own tenure-root-only `cheney_copy` walk. Without this, a SIBLING object
-  elsewhere on the heap that independently held a pointer into what tenure
-  just moved is left pointing at a `TAG_FORWARDED` stub — not eventually
-  wrong, wrong the instant it is next read, since nothing revisits it until
-  some OTHER collection happens to include it in its own root set. See
-  `old_space.rs`'s "Sibling-reference fixup" module doc section and
-  `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc for the
-  isolated repro.
-- `JitEffectMachine::run_child_fragment{,_pure}` are the ONLY sanctioned run
-  entries while suspended. They go through `enter_nested_child`, which moves the
-  continuation into a heap-stable `Box` cell, registers it in `stowed_roots`,
-  and (by emptying `suspended_continuation` for the child's duration) lets the
-  child drive through the plain entries whose L7 `is_none()` asserts then pass.
-  The `NestedChildGuard` drops AFTER the child's `RegistryGuard` reclaim, so it
-  reads the GC-current continuation pointer back out against the POST-child heap.
-- The L7 asserts on the plain entries are UNCHANGED and still fire for the
-  illegal state (a plain run while a continuation is stowed unregistered).
-- `resume_suspended` NF-forces (A5) a data-kinded answer BEFORE consuming the
-  continuation: a bottom (residual unforced thunk) is rejected as a retryable
-  error WITHOUT consuming, so the caller can resume again with a fixed answer.
+They must never coexist on one machine. The single slot is protected by the
+rule that the machine does not run while suspended; parked continuations are
+registered GC roots and may be resumed in any order. Mixing them would let a
+collection free the unregistered slot continuation.
 
-A suspendable turn completes under one of the SAME four result-materialization
-policies the plain routes use — `Value`, `Bind{forced}`, `Project{n_fields}`
-(multi-bind), `Render{field0_forced}` (bind + render in one run) — each with a
-run entry (`run_fragment_suspendable{,_binding,_projected,_render}`) and a
-resume sibling (`resume_suspended{,_binding,_projected,_render}`). There is one
-implementation (`JitEffectMachine::materialize`), reached by both families, so
-a turn behaves identically whether it completed in its first run or after any
-number of ask suspensions — including `Render`'s load-bearing bridge-field1-
-BEFORE-tenure-field0 ordering, which is what keeps an aliased `(it, toWire it)`
-intact. The PARKED (registry) path covers only the first two: `ParkKind` has no
-`Project`/`Render` spelling. Per-policy table in the `jit_machine.rs` module
-docstring; suspend-then-complete coverage in
-`tests/suspendable_materialization.rs`.
+The public parked-path contract is
+`docs/continuation-parking-contract.md`. Keep frame layout and helper plumbing
+private.
 
-A machine can ALSO hold multiple independently parked continuations in the
-continuation registry (runtime resource scope machinery): each `ContinuationFrame` is a
-registered stowed root, `stowed_roots_count() == parked_count()` holds at
-quiescence (debug_asserted at every registry mutation), handled-prefix
-compatibility is exact equality enforced at entry, and the single-slot path
-above and the parked registry NEVER mix on one machine. Downstream consumers
-read `docs/continuation-parking-contract.md` —
-everything else in the registry is internal and free to churn.
+## Materialization
 
-**`ValueHandle` + `close_realm`** (contract amendment, one-session Phase 0) are
-what let a value — including a closure — move between parked frames on the
-same heap without ever materializing to JSON: `ValueHandle` is an opaque
-`Send` id over a machine-side persistent root (mint via
-`handle_from_finalized`, observe via `observe_handle` — the one boundary where a
-closure renders as `CLOSURE_SENTINEL` — deliver via `ResumeInput::Handle`,
-which feeds the payload into a resumed continuation verbatim). Handles are
-scope-owned borrows: using one doesn't consume it, and `close_realm(realm) ->
-(frames_dropped, handles_released)` is the scope-exit op that reclaims a
-runtime resource scope's parked frames and its outstanding handles together, leaving sibling
-runtime resource scopes untouched. See the contract doc's amendment for the full signature
-table and gates (`tests/realm_handles.rs`).
+Initial completion and resumed completion share one materialization
+implementation. The four policies are:
 
-## Root accounting — four counted classes, never folded together
+- return a bridged value;
+- bind a persistent root, optionally forcing first;
+- project and root product fields;
+- root field zero and bridge field one for REPL rendering.
 
-A session's rooted values fall into four classes with four separate counters.
-They are kept separate so intent stays auditable: folding any two together is
-how a leak becomes invisible (class 3 can return to baseline while every root
-stays traced).
+Do not create a resume-only epilogue. Ordering in render materialization is
+alias-sensitive: bridge the rendered field before tenuring the bound field.
 
-| # | Class | Read | What a SCOPE RETIREMENT does to it |
-|---|-------|------|-------------------------------------|
-| 1 | parked continuations | `stowed_roots_count() == parked_count()` | untouched |
-| 2 | handle registry | `value_handle_count()` | untouched (a mount already transferred out) |
-| 3 | persistent-binding-store bindings | `ResidentSession::binding_names()` (ROOT) / `scope_binding_count(scope)` | the retired scope's frame goes to 0 |
-| 4 | GC root ledger | `persistent_roots_count()` | drops by exactly the sole-owner slots retired |
+## Nested runs
 
-Class 4 is the WITNESS: `PersistentSession::retire_scope` returns a
-`ScopeRetirement { scopes_retired, bindings_retired, roots_released }` and the
-ledger must move by exactly `roots_released`. `retire_scope_root` is the only
-persistent-binding-store deregistration primitive, and it is deliberately named as a
-scope-retirement tool rather than a general "drop a root" one — its invariant
-(sole ownership, exactly once, witnessed) is carried at its definition site.
-Gate: `tidepool-runtime/tests/session_scope_retirement.rs` (GHC-free, but
-`tidepool-runtime` is skipped wholesale by the nextest default-filter, so it
-needs `--ignore-default-filter -p tidepool-runtime`).
+A suspended parent may run sequential child fragments through
+`run_child_fragment*`; its continuation remains registry-rooted throughout.
+Registry-native consumers can run child work as an ordinary fragment while
+other frames remain parked.
 
-**DEREGISTERED IS NOT RECLAIMED — the honest bound.** Deregistration removes a
-root from the GC TRACE LIST. It does not free `OldSpace` bytes: `OldSpace`
-never frees an arena or a slot cell before machine drop, `slots` is push-only,
-`cursor`/`used` are monotone, and the major/compacting pass its module doc
-promises is not implemented. So a long-resident session's OldSpace **grows
-monotonically with the total number of mounts ever made, bounded per turn, and
-is reclaimed only at machine drop**. What retirement actually reclaims is the
-nursery-resident subgraph hanging off the retired root that the remembered set
-does not pin; what it caps is what stays *traced* (and therefore what a
-collection must walk), not what stays *allocated*. This is deliberate and
-bounded — the tenured residue is at most the retired scope's own bindings, the
-same lifetime bound every persistent-binding-store binding already has — and it is written
-here so nobody re-derives it while hunting a leak.
+## Root accounting
 
-Two things that stay true because the slot cell outlives deregistration: an
-already-compiled fragment that `iconst`ed a `RootSlot::addr()` still `load`s
-successfully, and `perform_gc` rebuilds its root vector per collection
-(`extend_persistent_roots`), so `Vec::remove`'s shifting is harmless — no
-tombstones, no index-stability concern. **Do not** pair retirement with
-`forget_remembered_range`: that dangles a live indirection cell and is sound
-only at arena teardown, where the memory itself dies.
+Keep these classes observable separately:
 
-The adversarial suite (`tests/nested_child_gc_rooting.rs`, run with
-`TIDEPOOL_GC_POISON`/`TIDEPOOL_HEAP_VERIFY` on) is the memory-safety gate: child
-GC + heap doubling with a live suspended parent, deep-verified resume, decl
-accretion inert for the parent, bottom-not-consuming, L7 misuse panic, and
-persistent-binding-store tenure across suspend → child GC → resume.
+1. parked/stowed continuation roots;
+2. value-handle roots;
+3. persistent binding roots grouped by runtime resource scope;
+4. the persistent-root ledger traced by GC.
 
-## Diagnostics — JIT runtime / effect machine / cache
+Scope retirement removes registrations and reports what it released. It does
+not compact `OldSpace` or reclaim its slot cells. Do not describe deregistration
+as immediate memory reclamation.
 
-Env-gated, OFF by default. The Rust JIT-runtime traces use `log` + `env_logger`
-(per-subsystem `tidepool::*` targets) driven by `RUST_LOG`. The legacy
-`TIDEPOOL_TRACE*`/`TIDEPOOL_FP_DEBUG` vars are still honored as back-compat
-aliases (mapped in `tidepool_codegen::debug::init_logging`). Example:
-`RUST_LOG=tidepool::calls=trace,tidepool::heap=trace`.
+Every path that can allocate or force must install the full registry set used
+by collection: stack roots, run roots, persistent roots, stowed roots,
+remembered slots, and VM tail-call slots.
 
-For the Haskell-extract knobs (a separate process: `TIDEPOOL_DUMP_CLOSED`,
-`TIDEPOOL_VARID_AUDIT`, `TIDEPOOL_JOINREC_DEBUG`, `TIDEPOOL_IFACE_DEBUG`) see
-`haskell/CLAUDE.md`.
+## Value handles and scope closure
 
-| Knob | Layer | What it shows | Reach for it when |
-|------|-------|---------------|-------------------|
-| `RUST_LOG=tidepool::calls=trace` (legacy `TIDEPOOL_TRACE=calls`) | JIT runtime | Every closure call: name, arg, result (`src/debug.rs`) | Tracing which function received/returned a bad value (e.g. wrong type at a case dispatch) |
-| `RUST_LOG=tidepool::heap=trace` (legacy `TIDEPOOL_TRACE=heap`) | JIT runtime | `calls`+`scope` + heap-object validation before use | Suspected heap corruption / bad pointer breadcrumbs |
-| `RUST_LOG=tidepool::effects=debug` (legacy `TIDEPOOL_TRACE_EFFECTS=1`) | Effect machine | Effect dispatch at the JIT↔Rust boundary | Effect results arriving wrong |
-| `TIDEPOOL_HEAP_VERIFY=1` (tests: `set_heap_verify`) | GC | Post-GC walk of the packed to-space; panics on the first invariant violation (from-space pointer, size-wrap, bad tag) | Corruption INSIDE evacuated objects. Blind to missed stack roots — pair with GC_POISON |
-| `TIDEPOOL_GC_POISON=1` (tests: `set_gc_poison`) | GC | Fills from-space (and the doubling path's intermediate space) with 0xDD before freeing | Timing-dependent SIGSEGVs: a stale pointer the GC missed then reads tag 221 DETERMINISTICALLY (e.g. "application of non-closure (tag=221)") instead of sometimes working |
-| `RUST_LOG=tidepool::fp=debug` (legacy `TIDEPOOL_FP_DEBUG=1`) | Runtime cache | Binary-fingerprint memo keys + sidecar hit/miss (`tidepool-runtime/src/cache.rs`) | Stale-cache suspicion. Note: kernel ctime has ~3ms granularity — sub-tick writes legitimately memo-hit |
-| `NONCE=<x>` / `FORCE=1` | `repro313` test | Cache-busting fresh compile / forces Int result inside the user continuation | Re-running the #313 regression gate against a fresh compile |
-| `JitEffectMachine::force_gc_for_test` (`#[doc(hidden)]`; `ResidentSession::force_gc_for_test` passes through) | GC | Forces a real Cheney minor collection against a session machine's retained heap, with no compiled code on the stack — installs registries, builds an ordinary session `VMContext`, calls `host_fns::gc_trigger` directly (`frame_walker::walk_frames` degrades to zero stack roots with no JIT frame active), then reclaims the buffer exactly like `RegistryGuard`'s drop-time reclaim | Injecting a collection into a SPECIFIC moment a normal run can't land one in deterministically — e.g. between a suspend-time sentinel-tenure (`tenure_finalized_payload`) and a later resume of that same frame, to check whether the parked frame's own references into what tenuring evacuated survive. Safe to call while suspended (slot path) or holding parked frames (registry path) — that's the point |
+`ValueHandle` is an opaque machine-side reference to a persistent root. It
+allows a closure or other opaque heap value to move between parked
+continuations without serialization. Observation may bridge a closure as the
+documented sentinel; delivery uses the heap pointer itself.
 
-Always-on breadcrumbs (`[CASE TRAP]`/`[SHAPE TRAP: …]`, `[BUG]` bad-pointer lines
-on stderr) stay unconditional: they fire only on actual compiler bugs, which must
-be loud. If you see one, that's a reportable codegen bug, not user error.
+`close_realm` releases a runtime resource scope's frames, handles, and
+cancellation state while leaving siblings untouched. Unknown handles and
+continuation IDs are typed errors.
 
-**The JIT emits no bare `trap`s — every fault routes through a host call.** Two
-families:
+## Failure behavior
 
-- **Shape/tag-mismatch traps** → `runtime_shape_trap` (`src/host_fns/errors.rs`),
-  A value's constructor tag or heap shape didn't
-  match what was compiled. Five `ShapeTrapKind` callers: a case scrutinee
-  matching no alternative (`CaseMiss`, `emit_case_trap` in `src/emit/case.rs`);
-  the numeric-unbox guards for wrong Con arity (`BoxingArity`) / wrong literal
-  class (`LitClass`); and the address/byte-array unbox guards (`AddrKind`,
-  `ArrayKind`) that reject a non-address raw kind or an untagged payload
-  before any Addr#/array-consuming primop dereferences it (shared
-  `unwrap_boxing_chain`; pinned by `tests/ffi_strlen_unbox_hardening.rs` and
-  `tests/ffi_bytearray_unbox_hardening.rs`) — all in `src/emit/primop.rs`.
-  The `kind` selects the breadcrumb label (`[CASE TRAP]` / `[SHAPE TRAP: …]`);
-  all five surface `RuntimeError::CaseTrap` and print the enclosing fn +
-  scrutinee tag + expected alt tags. `emit_case_trap` emits no bare `trap` (so no SIGILL) — it
-  CALLs the host fn, uses its poison return, and continues; if a poison/error
-  already cascaded in it returns poison immediately, and a lazy poison-closure
-  scrutinee is triggered to set the error flag.
+- Unexpected runtime shapes produce a poisoned result with a useful breadcrumb,
+  not SIGILL or an invented fallback value.
+- Cancellation checks belong at tail-call and other established safepoints.
+- Unresolved external IDs should report their qualified name when metadata
+  provides it.
+- A resume answer containing bottom is rejected before consuming its
+  continuation.
 
-  **`unbox_addr` does not guard the address itself, so raw dereferences need
-  their own check.** Its `SsaVal::Raw(v, tag)` branch trusts a *static*
-  literal tag (a compile-time label, not a runtime check on `v`) — correct
-  there, since a legitimate `Addr#` computation (`plusAddr#`, `eqAddr#`,
-  `minusAddr#`) must be free to hold a null or out-of-range address without
-  tripping a trap. The hazard is the class of `Addr#`-consuming primop that
-  never calls a host fn (`IndexCharOffAddr`, `IndexWord8OffAddr`,
-  `WriteWord8OffAddr`, `IndexAddrOffAddr`, `IndexInt8OffAddr`,
-  `IndexWord32OffAddr`, `IndexWideCharOffAddr`, `WriteWideCharOffAddr`): those
-  dereference the raw pointer through a Cranelift `load`/`store` with
-  `MemFlags::trusted()`, so a bad address is an uncaught SIGSEGV rather than
-  the clean `RuntimeError` every other fault here surfaces.
-  `emit_addr_deref_guard` (`src/emit/primop.rs`) closes it with a runtime
-  null/low-address check immediately before each of those load/stores,
-  reusing `ShapeTrapKind::AddrKind`. **A new `Addr#`-dereferencing primop must
-  call it.** Pinned by `tests/addr_deref_unbox_hardening.rs` (A/B'd against a
-  real SIGSEGV: `IndexAddrArray` reading a zero-filled `ByteArray#` slot as an
-  address).
+## Diagnostics
 
-- **Runtime domain errors** (division by zero, `Prelude.chr: bad argument`) →
-  the `runtime_error`/`runtime_error_with_msg` machinery, same as a Haskell
-  `error` call. The div/`chr` guards in `src/emit/primop.rs` raise a clean
-  `RuntimeError` (no bare `trap`/`trapnz`, so no SIGILL) and substitute
-  a safe operand so execution continues to a placeholder value the pending error
-  preempts.
+Diagnostics are opt-in and must remain off in normal execution. Search the
+owning module for the current variables before adding a new knob. Prefer an
+existing trace for GC, case traps, unresolved externals, or compiled-function
+inspection over a parallel logging path.
 
-  An **unresolved-external poison** (the `0x45` kind-4 sentinel the extract
-  bakes when it cannot resolve a symbol) is in this family and NAMES the
-  symbol: the emitted node carries a 48-bit identity slot
-  (`VarId::sentinel()`), `meta.cbor`'s `poisoned` table maps slot -> qualified
-  name, `register_poisoned_externals` loads it at metadata read time, and
-  `emit/expr.rs` resolves the slot when it emits the lazy poison — so forcing
-  one raises `RuntimeError::UnresolvedExternal("Dep.helper")` instead of an
-  anonymous kind-4 `TypeMetadata`. An UNNAMED kind-4 now means one of: a
-  pre-2.1 payload, a genuine `$tc*`/`$trModule*` type-metadata sentinel, or a
-  slot the multi-target metadata merge dropped as ambiguous.
+Test-only forcing and GC hooks must be `#[doc(hidden)]`, deterministic, and
+named for the exact state they create. They are not production recovery APIs.
 
-Almost all PrimOpKind variants are implemented; a clean runtime error is
-surfaced when `with_signal_protection` returns, instead of crashing. (A genuine
-SIGILL/SIGSEGV now points at heap corruption or a bad pointer — no routine
-language-level error reaches a signal.) Two variants are NOT emitted:
-`TagToEnum | SeqOp => Err(NotYetImplemented(..))` (`emit/primop.rs:2170`).
-`TagToEnum` is desugared upstream (`haskell/src/Tidepool/Translate.hs`, grep the
-`pop == TagToEnumOp` guard; ~L1796),
-so that half is an unreachable backstop. `SeqOp` is a real differential gap —
-handled by the eval oracle (`tidepool-eval/src/eval.rs:1546`) but NOT the JIT.
-It is latent rather than firing only because the proptest generator
-(`tidepool-testing`) emits no `SeqOp`; **extending the generator to cover it
-means either implementing `SeqOp` in the JIT or excluding it from generation
-explicitly.**
+## Verification
 
-The boxed-array primops (`IndexArray`/`ReadArray`/`IndexSmallArray`/etc.) are
-the same status class as `SeqOp`: JIT-real (`emit/primop.rs` implements them)
-but eval-unsupported (`tidepool-eval/src/eval.rs`'s tree-walker has no boxed-
-array `Value` variant — only the unboxed `ByteArray`). Also unexercised by the
-proptest generator today, so likewise latent rather than firing.
+Use focused tests for:
+
+- JIT/oracle differential behavior;
+- suspension and resume materialization;
+- parked continuation rooting and arbitrary resume order;
+- handled-prefix refusal;
+- GC during tenure, nested runs, and handle observation;
+- scope closure and root-count receipts;
+- case traps, cancellation, and unresolved externals.
+
+```bash
+cargo nextest run -p tidepool-codegen
+```

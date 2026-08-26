@@ -50,7 +50,7 @@ dragging Cranelift and blake3 into every crate that expands
 `ExtractCmd::argv()`, so the builder stays invocation-shaped and can move
 down a crate later without a redesign if `tidepool-extract-cmd` ever grows
 deps. This crate itself sits one layer above `tidepool-extract-cmd` for the
-same reason `tidepool-runtime` used to: it needs Cranelift-adjacent deps
+because it needs Cranelift-adjacent dependencies
 (`tidepool-codegen`, for `binary_content_hash`'s memo and
 `register_var_names`/`register_poisoned_externals`) that the invocation
 builder must stay free of.

@@ -1519,7 +1519,7 @@ mod tests {
 
     /// High-4 regression: `askUserRaw` exposes raw `FormShape` construction to
     /// model-authored data, so a payload-sum's constructor name or bind path
-    /// is untrusted text. Before this fix, `generic_sum` built a `<style>`
+    /// is untrusted text. `generic_sum` must not build a `<style>`
     /// block's CSS text directly from these values (escaping only `\` and
     /// `"`), so a constructor name containing `</style><script>` could break
     /// out of the style element into markup. There must be no `<style>`

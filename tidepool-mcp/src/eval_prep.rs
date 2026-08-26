@@ -98,6 +98,36 @@ pub fn standard_decls() -> Vec<EffectDecl> {
     crate::base_effects!(std_decls_rows)
 }
 
+/// Every authored effect declaration, including opt-in effects, in canonical
+/// contract order. This is an introspection/testing roster, not an executable
+/// handler row: callers that run effects must use the roster for their actual
+/// handler stack.
+pub fn all_decls() -> Vec<EffectDecl> {
+    vec![
+        crate::console_decl(),
+        crate::kv_decl(),
+        crate::fs_decl(),
+        crate::http_decl(),
+        crate::exec_decl(),
+        crate::git_decl(),
+        crate::time_decl(),
+        crate::entropy_decl(),
+        crate::meta_decl(),
+        crate::ask_decl(),
+        crate::askuser_decl(),
+        crate::readstate_decl(),
+        crate::runllmturn_decl(),
+        crate::finalize_decl(),
+        crate::fork_decl(),
+        crate::llm_decl(),
+        crate::worktree_decl(),
+        crate::event_decl(),
+        crate::subagent_decl(),
+        crate::journal_decl(),
+        crate::green_decl(),
+    ]
+}
+
 /// Effects whose GADT genuinely cannot live in the stable Core module,
 /// because at least one CONSTRUCTOR's field type mentions `M` directly —
 /// unlike an ordinary row-closed HELPER (which [`EffectDecl::helpers_row_polymorphic`]

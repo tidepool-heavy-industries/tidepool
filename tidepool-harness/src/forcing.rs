@@ -632,9 +632,7 @@ mod tests {
             | LogEvent::NodeCancelled { node, .. }
             | LogEvent::TurnDelta { node, .. }
             | LogEvent::TurnForked { node, .. }
-            | LogEvent::TurnSpliced { node, .. }
-            | LogEvent::SnapshotFrozen { node, .. }
-            | LogEvent::BranchInvocation { node, .. } => *node,
+            | LogEvent::TurnSpliced { node, .. } => *node,
         }
     }
 

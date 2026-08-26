@@ -1,4 +1,4 @@
-//! Dirty-source snapshots — LANE L2.
+//! Dirty-source snapshots.
 //!
 //! `allowDirtySnapshot` gives a child the source's exact current content
 //! without the operator having committed anything. It writes a hidden synthetic

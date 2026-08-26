@@ -487,7 +487,18 @@ impl Session {
             // Decl validation must resolve the same imports eval does (notably
             // the generated `Tidepool.Effects`), so feed it the base include.
             .with_validation_include(cfg.base_include.clone());
-        let core = PersistentSession::new(Some(lib), cfg.roster.suspend_tag(), cfg.nursery_size);
+        let effect_names = cfg
+            .roster
+            .decls()
+            .iter()
+            .map(|d| d.type_name.to_string())
+            .collect();
+        let core = PersistentSession::new(
+            Some(lib),
+            cfg.roster.suspend_tag(),
+            effect_names,
+            cfg.nursery_size,
+        );
         Ok(Session {
             cfg,
             make_handlers,
@@ -2323,9 +2334,17 @@ impl Session {
                         // value bindings + accumulated table) and the turn
                         // counter in one move.
                         let lib = lib.with_validation_include(self.cfg.base_include.clone());
+                        let effect_names = self
+                            .cfg
+                            .roster
+                            .decls()
+                            .iter()
+                            .map(|d| d.type_name.to_string())
+                            .collect();
                         self.core = PersistentSession::new(
                             Some(lib),
                             self.cfg.roster.suspend_tag(),
+                            effect_names,
                             self.cfg.nursery_size,
                         );
                         // The rebuilt core has no machine, so publish the (now
@@ -2730,15 +2749,15 @@ impl Session {
     /// slot is wired or the machine hasn't bootstrapped).
     fn publish_cancel(&mut self) {
         if let Some(slot) = &self.cancel_slot {
-            *slot.lock() = self.core.machine().map(|m| m.cancel_handle());
+            *slot.lock() = self.core.cancel_handle();
         }
     }
 
     /// Clear a prior cancellation so the next turn starts clean. The cancel flag
     /// is per-machine and shared, so this resets it via the live handle.
     fn reset_cancel(&mut self) {
-        if let Some(m) = self.core.machine() {
-            m.cancel_handle().reset();
+        if let Some(handle) = self.core.cancel_handle() {
+            handle.reset();
         }
     }
 }

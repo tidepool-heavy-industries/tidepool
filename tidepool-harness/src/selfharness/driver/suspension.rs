@@ -126,7 +126,7 @@ impl SelfHarnessDriver {
         // Take the finalized answer AND keep the node live (consume the
         // finalize hole, Suspended→Running) so the NEXT hole can push onto the
         // same accumulating session — not `take_finalized_value`, which cancels.
-        // A CLOSURE payload is taken as a HANDLE (pillar B: it never bridges,
+        // A closure payload is taken as a handle (it never bridges,
         // it is delivered verbatim into the loop's parked continuation on the
         // shared heap); data keeps the bridged-value path.
         let answer = if self.agent.finalize_is_closure(node) {

@@ -1,4 +1,4 @@
-//! Acceptance tests for LANE L3 (poll/reconciliation, coalesced deltas, honest
+//! Acceptance tests for poll/reconciliation, coalesced deltas, and honest
 //! classification, the no-replay journal) — all against real temporary git
 //! repositories via [`TestRepo`] + [`ScriptedWriter`], never a mock of git.
 //!
@@ -618,7 +618,7 @@ fn real_git_worktree_add_is_monitored_directly() {
     assert_eq!(cs[0].oid, new_head);
 }
 
-/// LANE L8 seam fix: `reconcile` on an id `register` never ran for must
+/// `reconcile` on an id that `register` never saw must
 /// return a typed, matchable failure — never panic. Worktree ids reach
 /// `reconcile` from author-supplied values at the effect surface, so an
 /// unregistered id is an ordinary authoring mistake, not a process-ending
@@ -637,7 +637,7 @@ fn reconcile_on_unregistered_worktree_returns_worktree_not_registered() {
     );
 }
 
-/// LANE L8 seam fix, task-3 decision: a worktree that WAS registered but has
+/// A worktree that was registered but has
 /// since been removed from disk (the retain-first "a human deleted it" case,
 /// same condition `WorktreeManager::lookup`/`worktree_head` already type as
 /// `WorktreeLost`) must reconcile as `WorktreeLost`, not surface the raw,
@@ -668,7 +668,7 @@ fn reconcile_of_a_worktree_removed_from_disk_returns_worktree_lost() {
     );
 }
 
-/// LANE L8 seam fix, the load-bearing gate: the [`EventId`] `reconcile`
+/// The [`EventId`] `reconcile`
 /// returns on each [`Observed`] must be the SAME id the journal recorded for
 /// that pass — not a fresh id minted independently at the return path, which
 /// would make every other test in this file pass while correlation to the

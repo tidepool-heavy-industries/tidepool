@@ -590,7 +590,7 @@ async fn multi_item_block_decl_before_failing_item_is_named_kept() {
 }
 
 /// Decl-salvage shape 2 (the fix): a valid declaration sits AFTER the item
-/// that fails. Before this fix, `run_multi_item_block`'s singleton path
+/// that fails. `run_multi_item_block`'s singleton path
 /// returned on the first compile error without ever visiting later items —
 /// so the declaration was silently dropped and a later round referencing it
 /// died on "Not in scope". Now the walk continues scanning (without running

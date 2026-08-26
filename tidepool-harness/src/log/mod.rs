@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::provider::{Role, Usage};
-use crate::snapshot::SnapshotDigest;
 use crate::tree::{FanBadge, HoleId, NodeId, PriceClass, SiteId};
 
 mod reader;
@@ -169,48 +168,6 @@ pub enum Event {
         turn: u64,
         role: Role,
         content: String,
-    },
-    /// NO LONGER EMITTED (sol cross-family review findings 7/8: the
-    /// context-snapshot/branch feature this event backed was deleted as a
-    /// dead vestige with no production caller). Kept for wire
-    /// compatibility — a durable log written before the deletion may still
-    /// carry this variant, and it must still deserialize.
-    ///
-    /// Previously: `node`'s context prefix was FROZEN as a named cache root.
-    /// `digest` is the blake3 identity of the exact prefix
-    /// `engine::assemble_request` re-emits; `messages` is the frozen
-    /// TRANSCRIPT length (the assembled prefix is one longer — the system
-    /// framing message); `prefix_bytes` is the assembled prefix's total
-    /// UTF-8 content bytes, framing included.
-    SnapshotFrozen {
-        node: NodeId,
-        digest: SnapshotDigest,
-        messages: u64,
-        prefix_bytes: u64,
-    },
-    /// NO LONGER EMITTED — see [`Event::SnapshotFrozen`]'s doc. Kept for
-    /// wire compatibility with an old durable log.
-    ///
-    /// Previously: a branch minted off a frozen snapshot ran its FIRST
-    /// turn: what it shares with the frozen root and what it added.
-    ///
-    /// The byte counts are exact and locally recomputable. They are NOT a
-    /// token split — there is no local tokenizer here, so `input_tokens` (the
-    /// provider's own count for this turn's whole request) is carried
-    /// alongside them rather than a derived estimate.
-    ///
-    /// `cached_input_tokens` is `Some` only when the provider's response
-    /// actually reported a cache-read count. `None` means NOT REPORTED and is
-    /// serialized as absent, never as `0` — see [`Usage::cached_input_tokens`]
-    /// and `tidepool-harness/CLAUDE.md`'s "The provider cache-metric gap".
-    BranchInvocation {
-        node: NodeId,
-        snapshot: SnapshotDigest,
-        shared_prefix_bytes: u64,
-        branch_suffix_bytes: u64,
-        input_tokens: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cached_input_tokens: Option<u64>,
     },
 }
 

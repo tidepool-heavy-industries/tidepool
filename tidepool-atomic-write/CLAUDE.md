@@ -7,4 +7,4 @@ registry, agent binding table, self-harness checkpoint, run lease, toolchain
 stamp, session compile cache) uses instead of hand-rolling its own. Does NOT
 belong: hard-link-based exclusive-claim writes (a different primitive, kept
 with its one caller), content-addressed caching itself
-(`tidepool-runtime::cache`).
+(`tidepool-toolchain::cache`).

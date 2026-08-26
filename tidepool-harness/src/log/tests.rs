@@ -251,13 +251,10 @@ fn torn_final_line_reads_cleanly_to_last_whole_event() {
     }
 }
 
-/// An unstamped log (written before this scheme existed — no `"version"`
-/// key on the header line at all) must still load, reading as version `0`
-/// and migrating through the identity `0 -> 1` step — the entire point of
-/// the unstamped-file convention (`tidepool_repr::version_ladder`): an
-/// existing operator log is never bricked by landing the stamp.
+/// V2 deliberately drops the retired snapshot/branch receipt schema. Older
+/// logs are rejected through the typed version boundary, not a serde error.
 #[test]
-fn unstamped_legacy_header_still_loads_as_version_zero() {
+fn unstamped_legacy_log_is_rejected_below_floor() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.jsonl");
 
@@ -270,10 +267,23 @@ fn unstamped_legacy_header_still_loads_as_version_zero() {
     let record_line = serde_json::to_string(&EventRecord { seq: 0, event }).unwrap();
     std::fs::write(&path, format!("{header_line}\n{record_line}\n")).unwrap();
 
-    let (read_header, iter) = LogReader::open(&path).expect("legacy unstamped log must load");
-    assert_eq!(read_header, header);
-    let records: Vec<EventRecord> = iter.collect::<Result<_, _>>().expect("read event");
-    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        LogReader::open(&path),
+        Err(ReadError::BelowFloor { found: 0, floor: 2 })
+    ));
+}
+
+#[test]
+fn version_one_log_is_rejected_below_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("run.jsonl");
+    let mut header = serde_json::to_value(sample_header()).unwrap();
+    header["version"] = json!(1);
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    assert!(matches!(
+        LogReader::open(&path),
+        Err(ReadError::BelowFloor { found: 1, floor: 2 })
+    ));
 }
 
 /// A version newer than this build supports is a loud, typed refusal — never

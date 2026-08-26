@@ -673,7 +673,7 @@ fn archive_stale_lease(log_dir: &Path, lease: &RunLease) -> Result<(), Persisten
 /// process resumes" by calling this function again within one test process);
 /// it is handled here rather than special-cased in every such test.
 ///
-/// A lease naming a DEAD pid resumes exactly as before this fix — reclaim
+/// A lease naming a dead pid resumes by reclaiming
 /// behavior for that case is unchanged.
 ///
 /// Writing the lease on the resume path is deliberate: it re-stamps `pid` and
@@ -1230,7 +1230,7 @@ mod tests {
         let _ = child.wait();
     }
 
-    /// A lease naming a DEAD pid reclaims exactly as before this fix —
+    /// A lease naming a dead pid is reclaimed;
     /// unaffected by the live-pid refusal or the takeover machinery, no env
     /// var needed, and no takeover-archive record is written (this is an
     /// ordinary crash resume, not a forced claim from a live owner).

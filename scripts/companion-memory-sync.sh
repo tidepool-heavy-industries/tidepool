@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fast-forward the companion memory store's checked-out branch to the newest
 # curator worktree branch — OPERATOR tooling, deliberately outside the Rust
-# runtime: PRD 19 frozen rule, "no git workflow verbs in tidepool-worktree";
+# runtime: conflict resolution remains authored policy, not a worktree API;
 # the runtime observes repositories, humans and agents do the git work.
 #
 #   scripts/companion-memory-sync.sh [store]   # default ~/.local/share/tidepool/companion-memory

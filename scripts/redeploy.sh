@@ -110,7 +110,7 @@ run rm -rf "${HOME}/.cache/tidepool/"
 
 # Step 6: write the toolchain deploy stamp — content fingerprints of the
 #   extract + stdlib just deployed, checked by every server at startup
-#   (tidepool-runtime/src/toolchain.rs). MUST run after Step 5: the cache
+#   (tidepool-toolchain/src/toolchain.rs). MUST run after Step 5: the cache
 #   clear above would otherwise delete a stamp written before it.
 #   Skipped when --no-servers was passed: the tidepool binary this stamp
 #   describes was not (re)installed this run, so there is nothing fresh to

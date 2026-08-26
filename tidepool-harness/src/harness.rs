@@ -2847,7 +2847,7 @@ impl Harness {
         Ok((value, rendered))
     }
 
-    /// CLOSURE sibling of [`Self::take_finalized_value_keep_open`] (pillar B):
+    /// Closure sibling of [`Self::take_finalized_value_keep_open`]:
     /// the finalize payload is a live closure, so
     /// instead of bridging a data `Value` (which would sentinel it), MINT a
     /// [`ValueHandle`] over the parked frame's payload, then consume the

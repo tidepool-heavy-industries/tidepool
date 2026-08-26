@@ -366,15 +366,12 @@ pub fn apply_event(folded: &mut FoldedTree, event: Event) {
         // TurnStart / Effect / HoleAnswerAttempt / TurnExtracted do not change
         // tree STATE (they are within-turn detail the replayer substitutes
         // against, not folded into node lifecycle here). TurnForked is fork
-        // PROVENANCE, not lifecycle state. SnapshotFrozen / BranchInvocation
-        // are RECEIPTS about a context prefix, not a node lifecycle state.
+        // provenance, not lifecycle state.
         Event::TurnStart { .. }
         | Event::Effect { .. }
         | Event::HoleAnswerAttempt { .. }
         | Event::TurnExtracted { .. }
-        | Event::TurnForked { .. }
-        | Event::SnapshotFrozen { .. }
-        | Event::BranchInvocation { .. } => {}
+        | Event::TurnForked { .. } => {}
     }
 }
 

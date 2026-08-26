@@ -216,7 +216,7 @@ pub struct LoopIterationOutcome {
 /// How a serviced `runLLMTurn` hole's answer travels back into the loop's
 /// parked continuation: a bridged data value (the pre-collapse path, still
 /// right for data), or a machine-side handle whose payload is DELIVERED
-/// verbatim on the shared heap — the closure path (pillar B; the reason the
+/// verbatim on the shared heap — the closure path (the reason the
 /// collapse exists).
 pub enum FinalAnswer {
     Value(Value),

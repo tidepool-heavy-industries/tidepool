@@ -1,5 +1,4 @@
-//! The client side of the resident compile daemon's transport
-//! (plans/compile-daemon-design.md, Phase 0). Owns the wire codec, the
+//! Client transport for the resident compile daemon. Owns the wire codec,
 //! connect step, and `Output` synthesis. Narrow `pub(crate)` surface —
 //! `ExtractCmd::run`/`run_with` are the only callers.
 //!

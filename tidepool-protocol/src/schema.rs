@@ -777,12 +777,11 @@ pub struct Verb {
     /// `Some` makes the result `Either <Err> <ret>` and changes the handler
     /// method shape — see [`Verb::result_type`].
     pub errors: Option<&'static str>,
-    /// How a suspension carrying this constructor must be routed. PHASE 3
-    /// consumes this; phase 1 requires it and emits nothing for it.
+    /// How a suspension carrying this constructor must be routed.
     pub handling: HandlingClass,
     /// The extractor's per-verb type-shape policy, for the few verbs the
     /// extractor rewrites at the call site. `None` for every ordinary bridged
-    /// verb. PHASE 3 consumes this; phase 1 requires it and emits nothing.
+    /// verb.
     pub extract: Option<ExtractPolicy>,
 }
 
@@ -1603,10 +1602,8 @@ pub struct ExtractPolicy {
     pub answer_shape: AnswerShape,
     /// What happens when the call cannot be rewritten.
     ///
-    /// NOTE for phase 3: the Haskell counterpart (`vsMisShapeIsError`) is
-    /// declared, documented, and set on two rows — but nothing reads it. Do not
-    /// assume a generated form preserves today's behavior until that is
-    /// resolved.
+    /// The Haskell counterpart (`vsMisShapeIsError`) is currently unused; do
+    /// not assume generated Haskell preserves this policy.
     pub mis_shape: MisShape,
 }
 

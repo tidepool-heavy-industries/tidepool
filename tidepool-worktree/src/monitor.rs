@@ -1,4 +1,4 @@
-//! Repository observation — LANE L3.
+//! Repository observation.
 //!
 //! Polling and reconciliation turn "the repository moved" into typed facts.
 //! Hooks, when they arrive, are only a wake-up; the source of truth is always a
@@ -10,9 +10,7 @@
 //! An observer that finds `HEAD` at C after last seeing A reports ONE
 //! transition, even if the tree passed through B. This stream is a sequence of
 //! state deltas, not a movement log, and no consumer may treat it as exhaustive
-//! history. The dependency-propagation job — "children should rebase onto the
-//! parent's latest" — needs only latest-state semantics, which coalescing
-//! preserves exactly.
+//! history. Consumers receive latest-state semantics.
 //!
 //! When the intermediate history is not recoverable, classification degrades to
 //! [`HeadChangeKind::UnknownChange`]. That is a correct answer, not a failure:
@@ -34,8 +32,7 @@
 //! into one `HeadChanged`) and for `Amended` (the replacement tip is a real
 //! commit object). `Rewound`, `Switched`, `Rewritten`, and `UnknownChange`
 //! never carry a co-emitted `Commit`: a reset or checkout creates no new
-//! commit, and a rebase's synthetic commits are not "a commit the user made in
-//! this worktree" in the sense the PRD's review/test/receipt consumers expect.
+//! commit, and a rebase's synthetic commits are not attributed to a user.
 //!
 //! ## First observation of a worktree
 //!
@@ -43,8 +40,7 @@
 //! (recovered from the journal on restart, or a fresh git read otherwise)
 //! before `reconcile` is ever called for that worktree. No `HeadChanged` is
 //! emitted for that priming: there is no prior state for the worktree to have
-//! changed FROM, so there is nothing to report yet, and honest classification
-//! has no kind that means "first sight" — see `L3-receipt.md` for the reasoning.
+//! changed from, so there is nothing to report yet.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -191,7 +191,7 @@ impl SelfHarnessDriver {
     /// unsolved-`Member` error at whatever later use can't satisfy it — never
     /// a define-time refusal. The OUTER render/loop compiles never see this
     /// plane (their include never carries it): the authored harness cannot
-    /// silently depend on model-authored names (pillar D) — unaffected by
+    /// silently depend on model-authored names — unaffected by
     /// this change.
     pub(crate) fn open_outer_plane(
         cfg: &EngineConfig,
@@ -1337,7 +1337,7 @@ impl SelfHarnessDriver {
                                 .agent
                                 .with_session(sid, |s| match answer {
                                     FinalAnswer::Value(v) => s.resume(hole, v),
-                                    // Pillar B: the closure payload is
+                                    // The closure payload is
                                     // DELIVERED by handle — same heap, no
                                     // bridge, no sentinel.
                                     FinalAnswer::Handle(h) => s.resume_handle(hole.cont_id(), h),

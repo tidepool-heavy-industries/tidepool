@@ -65,13 +65,33 @@ pub fn decl_pragmas() -> String {
 /// otherwise collides with it (`Ambiguous occurrence`). `false` everywhere
 /// else keeps `note` reachable on the general eval/Agent surface, which never
 /// imports `Tidepool.Form` at all.
-pub fn eval_import_lines(user_library: bool, hide_note: bool) -> Vec<&'static str> {
+#[derive(Clone, Copy, Default)]
+struct PreludeHides {
+    note: bool,
+    event_alt: bool,
+}
+
+impl PreludeHides {
+    fn for_effects(effects: &[EffectDecl]) -> Self {
+        Self {
+            note: effects.iter().any(|e| e.type_name == "AskUser"),
+            event_alt: effects.iter().any(|e| e.type_name == "RepoEvent"),
+        }
+    }
+
+    fn prelude_import(self) -> &'static str {
+        match (self.note, self.event_alt) {
+            (false, false) => "import Tidepool.Prelude hiding (error)",
+            (true, false) => "import Tidepool.Prelude hiding (error, note)",
+            (false, true) => "import Tidepool.Prelude hiding (error, (<|>))",
+            (true, true) => "import Tidepool.Prelude hiding (error, note, (<|>))",
+        }
+    }
+}
+
+fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static str> {
     let mut v = vec![
-        if hide_note {
-            "import Tidepool.Prelude hiding (error, note)"
-        } else {
-            "import Tidepool.Prelude hiding (error)"
-        },
+        hides.prelude_import(),
         // Effect GADTs, `M`, the `error` shadow, and the send-wrapper helpers
         // live in the generated Tidepool.Effects module so library AND session
         // decl modules can import the SAME types and define effectful verbs.
@@ -144,11 +164,11 @@ pub fn eval_import_lines(user_library: bool, hide_note: bool) -> Vec<&'static st
 /// re-exports, would collide).
 #[must_use]
 pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> ModuleEnv {
-    let hide_note = effects.iter().any(|e| e.type_name == "AskUser");
-    let mut imports: Vec<String> = eval_import_lines(user_library, hide_note)
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let mut imports: Vec<String> =
+        eval_import_lines(user_library, PreludeHides::for_effects(effects))
+            .into_iter()
+            .map(String::from)
+            .collect();
     for decl in effects {
         imports.extend(decl.extra_imports.iter().map(|s| (*s).to_string()));
     }
@@ -204,7 +224,7 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
 /// this env).
 #[must_use]
 pub fn pure_decl_module_env() -> ModuleEnv {
-    let mut imports: Vec<String> = eval_import_lines(false, false)
+    let mut imports: Vec<String> = eval_import_lines(false, PreludeHides::default())
         .into_iter()
         .filter(|l| *l != "import Tidepool.Effects")
         .map(String::from)
@@ -240,8 +260,7 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
     out.push_str("module Expr where\n");
-    let hide_note = effects.iter().any(|e| e.type_name == "AskUser");
-    for imp in eval_import_lines(user_library, hide_note) {
+    for imp in eval_import_lines(user_library, PreludeHides::for_effects(effects)) {
         out.push_str(imp);
         out.push('\n');
     }

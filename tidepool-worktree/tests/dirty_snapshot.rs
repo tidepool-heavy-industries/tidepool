@@ -1,10 +1,10 @@
-//! The untouched-source proof — LANE L2.
+//! Dirty-snapshot tests, including the untouched-source invariant.
 //!
 //! Every test here runs against a REAL temporary repository built by
 //! [`tidepool_worktree::testing::TestRepo`] and driven by its scripted writer;
 //! there is no mock of git.
 //!
-//! `snapshot_source` calls `git::inspect::dirty_summary` (LANE L1's `pre_status`
+//! `snapshot_source` calls `git::inspect::dirty_summary` (`pre_status`
 //! source) after its refuse-first checks.
 
 use std::collections::BTreeMap;
