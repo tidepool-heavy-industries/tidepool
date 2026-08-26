@@ -22,11 +22,13 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 
 use tidepool_agent::backend::mock::MockBackend;
 use tidepool_agent::seam::CycleResultPayload;
-use tidepool_handlers::{ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler};
+use tidepool_handlers::{
+    ConsoleHandler, JournalHandler, SegmentPath, SubagentHandler, WorktreeHandler,
+};
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::{LogHeader, LogWriter};
 use tidepool_harness::provider::{DynModelProvider, Usage};
@@ -34,8 +36,8 @@ use tidepool_harness::replay::{RecordedReply, ReplayProvider};
 use tidepool_harness::selfharness::operator::FormShape;
 use tidepool_harness::selfharness::persistence;
 use tidepool_harness::{
-    load_harness_source, typed_request_agent_decls_with_delegate, Harness, LogObserver,
-    OperatorGate, SelfHarnessDriver,
+    Harness, LogObserver, OperatorGate, SelfHarnessDriver, load_harness_source,
+    typed_request_agent_decls_with_delegate,
 };
 use tidepool_worktree::testing::TestRepo;
 
@@ -86,11 +88,13 @@ fn haskell(block: &str) -> String {
 /// protocol (`HarnessTypes.companionProtocol`) teaches.
 fn delegating_reply() -> String {
     haskell(
-        "do { r <- delegate (DelegateBrief { delegateLabel = \"probe\", \
+        "do { r <- delegateTyped @DelegateResult (DelegateBrief { delegateLabel = \"probe\", \
          delegateInstruction = \"look around\", delegateExpected = \"a one-line summary\" }); \
          case r of { \
            Left e -> (finalize @Text (renderDelegateError e) :: M ()); \
-           Right ok -> (finalize @Text (delegateSummary ok) :: M ()) } }",
+           Right run -> (finalize @Text (delegateSummary (delegateValue run) <> \
+             if delegateBase run == delegateHead run then \" [workspace observed]\" \
+             else \" [workspace advanced]\") :: M ()) } }",
     )
 }
 
@@ -177,19 +181,26 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
         .commit_file("README.md", "hello\n", "seed commit")
         .expect("seed commit");
     let roots = tempfile::TempDir::new().expect("substrate roots");
+    let registry_root = roots.path().join("registry");
+    let worktree_root = roots.path().join("worktrees");
+    let binding_root = roots.path().join("bindings");
     let backend = MockBackend::completing(CycleResultPayload::Structured(json!({
         "delegateSummary": "found one file: README.md",
         "delegateCaveats": ["scope: read-only look-around"],
     })));
     let subagent_handler = SubagentHandler::new(
-        roots.path().join("registry"),
-        roots.path().join("worktrees"),
-        roots.path().join("bindings"),
+        registry_root.clone(),
+        worktree_root.clone(),
+        binding_root,
         store.path().to_path_buf(),
         Box::new(backend),
     )
     .expect("subagent handler opens");
+    let worktree_handler =
+        WorktreeHandler::new(registry_root, worktree_root, store.path().to_path_buf())
+            .expect("worktree handler opens against the subagent registry");
     driver.set_subagent_handler(subagent_handler);
+    driver.set_worktree_handler(worktree_handler);
 
     let source = load_harness_source(&companion_dir().join("Harness.hs"))
         .expect("the shipped recursive-companion harness loads");
@@ -228,7 +239,7 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
     // — delegate results return inline, and the loop stores the root's typed
     // value as-is (fork-subsumes-split step 4).
     assert_eq!(
-        last_answer, "found one file: README.md",
+        last_answer, "found one file: README.md [workspace observed]",
         "lastAnswer must carry the delegated result the session finalized on: {state}"
     );
 
@@ -240,7 +251,7 @@ async fn root_session_delegates_and_finalizes_on_the_result() {
         .find_map(|e| e.payload.get("answer").and_then(Json::as_str))
         .unwrap_or_else(|| panic!("no \"turn\" journal entry with an \"answer\" field"));
     assert!(
-        answer_entry.contains("found one file: README.md"),
+        answer_entry.contains("found one file: README.md [workspace observed]"),
         "the turn journal must carry the delegated subagent's OWN typed \
          result, decoded through the real MockBackend saga — not a \
          placeholder: {answer_entry}"

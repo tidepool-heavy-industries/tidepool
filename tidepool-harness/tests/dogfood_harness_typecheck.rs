@@ -28,7 +28,7 @@ mod support;
 
 use std::path::PathBuf;
 use tidepool_harness::engine::compile_turn;
-use tidepool_harness::engine::EngineConfig;
+use tidepool_harness::engine::{EngineConfig, template_answer_turn};
 use tidepool_runtime::compile_and_run_pure;
 
 fn repo_root() -> PathBuf {
@@ -217,14 +217,60 @@ fn recursive_companion_typechecks() {
     );
 }
 
-/// Compile a PURE (no-`Eff`) target against `harness_dir` and run it on the
-/// real JIT, returning its result as JSON (`tidepool_runtime::render::EvalResult::to_json`).
-///
-/// `decls` still has to name the harness's full assumed effect row — GHC
-/// compiles the imported module WHOLE, so even a target that only touches
-/// pure decision functions needs `Tidepool.Effects` generated at the row the
-/// harness file itself was authored against, or the module fails to
-/// typecheck before the pure part is ever reached.
+/// DevSwarm is a runnable compatibility harness: its outer loop opens one root
+/// owner session, while decomposition happens dynamically inside that session
+/// through `fork`. There is deliberately no pre-authored plan fold to probe.
+#[test]
+fn devswarm_typechecks() {
+    typecheck(
+        "harness-dogfooding/devswarm",
+        outer_row_decls(),
+        "import Tidepool.Resume (ResumeFold)\n",
+        concat!(
+            "__resumeLoop :: ResumeFold -> State -> DevSwarmHarness State\n",
+            "__resumeLoop = resumeLoop\n",
+            "__rootPrompt :: State -> Text\n",
+            "__rootPrompt = rootPrompt\n",
+        ),
+    );
+}
+
+/// The root answer contract imports `HarnessTypes`, which re-exports the
+/// project-local GADT interpreter. Compile the shape an actual owner model
+/// writes against the narrow Delegate row, not merely the outer harness.
+#[test]
+fn devswarm_owner_can_request_typed_research_and_finalize_a_sum() {
+    support::require_extract();
+    let _cache_guard = support::isolate_cache();
+    let cfg = EngineConfig::from_decls(
+        tidepool_harness::typed_request_agent_decls_with_delegate(),
+        repo_root().join("haskell/lib"),
+        Some(repo_root().join("harness-dogfooding/devswarm")),
+    )
+    .expect("DevSwarm delegating answerer config")
+    .with_delegate_wrap();
+    let target = cfg
+        .turn_target(Some(("RootOutcome", &["HarnessTypes".to_string()])))
+        .expect("RootOutcome-pinned answer target");
+    let code = concat!(
+        "do { r <- delegateTask (Investigate (ResearchBrief ",
+        "{ researchQuestion = \"what owns candidate integration?\", ",
+        "researchContext = \"DevSwarm\" })); ",
+        "case r of { ",
+        "Left e -> (finalize @RootOutcome (OwnerBlocked (Blockage (delegateFailureReason e))) :: M ()); ",
+        "Right f -> (finalize @RootOutcome (OwnerCompleted (OwnerReport ",
+        "{ ownerSummary = findingsSummary f, ownerDecisions = findingsObservations f, ",
+        "ownerFollowUps = findingsUnknowns f })) :: M ()) } }",
+    );
+    let source = template_answer_turn(&cfg, &target.stack, code, "HarnessTypes", "");
+    if let Err(e) = compile_turn(&cfg.extract_bin, &source, "result", &target.include, 0, 0) {
+        panic!("DevSwarm owner surface does not compile against the narrow row:\n{e:#?}");
+    }
+}
+
+/// Compile and execute a pure target against one authored harness directory.
+/// Importing an authored module typechecks that module whole even when the
+/// selected binding itself performs no effects.
 fn execute_pure(
     harness_dir: &str,
     decls: Vec<tidepool_mcp::EffectDecl>,
@@ -242,7 +288,7 @@ fn execute_pure(
     let include: Vec<_> = cfg.include.iter().map(|p| p.as_path()).collect();
     match compile_and_run_pure(source, target, &include) {
         Ok(result) => result.to_json(),
-        Err(e) => panic!("{harness_dir}'s resume decisions did not run cleanly:\n{e}"),
+        Err(e) => panic!("{harness_dir}'s pure probe did not run cleanly:\n{e}"),
     }
 }
 

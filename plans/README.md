@@ -7,6 +7,11 @@ charter / glossary and the plan file is deleted (git is the archive).
 
 ## Active work
 
+- [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
+  `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
+  candidate/review/revision interpreter. The current runnable slice uses a
+  thin compatibility `State` while node-scoped workspace/store, durable owner
+  re-entry, and a no-State entrypoint remain the platform gaps.
 - [Resident-session kernel design](resident-session-kernel-design.md):
   decision-complete (operator answers recorded inline 2026-08-24);
   implementation lane in flight against it.

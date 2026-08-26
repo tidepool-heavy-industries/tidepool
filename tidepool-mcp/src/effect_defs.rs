@@ -329,7 +329,7 @@ macro_rules! extra_imports_for {
     (Subagent) => {
         &[
             "import Tidepool.Agent.Spawn (renderSpawnError)",
-            "import Tidepool.Agent.Delegate (Delegate, DelegateBrief (..), DelegateResult (..), DelegateError (..), delegate, renderDelegateError, runDelegate)",
+            "import Tidepool.Agent.Delegate (Delegate, DelegateBrief (..), DelegateResult (..), DelegateRun (..), DelegateError (..), delegate, delegateTyped, delegateTypedFrom, delegateTypedIn, renderDelegateError, runDelegate)",
         ]
     };
     // Journal was migrated to the `tidepool-protocol` schema; its

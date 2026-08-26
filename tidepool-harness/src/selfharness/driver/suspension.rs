@@ -416,6 +416,29 @@ impl SelfHarnessDriver {
                     })
                     .await?;
                 }
+                // An interpreter around an answerer-local effect may use a
+                // driver-owned outer capability without exposing that
+                // capability in the model-authored row.  Delegate does this
+                // after a worker settles: WorktreeHeadOf records the actual
+                // candidate head beside the typed result.  Service it against
+                // this node's parked continuation just as the authored outer
+                // loop services the same request family.
+                SuspensionRouting::OuterEffect(kind) => {
+                    let (pending_suspension, _classified, table, request) = self
+                        .agent
+                        .pending_suspension_with_request(node)
+                        .ok_or_else(|| {
+                            DriverError::Session(format!(
+                                "node {node:?} has no pending {kind:?} hole to service"
+                            ))
+                        })?;
+                    let value = self.service_outer_effect(kind, &request, &table)?;
+                    retry_on_turn_in_flight_async(|| {
+                        self.agent
+                            .resume_with_value(node, &pending_suspension, value.clone())
+                    })
+                    .await?;
+                }
                 _ => break,
             }
             match self.agent.pending_suspension_full(node) {

@@ -184,7 +184,7 @@ impl SelfHarnessDriver {
     /// the operator feed the way the `note` servicing arm does
     /// ([`Self::announce_note`]) before resuming with `()`.
     pub(crate) fn service_outer_effect(
-        &mut self,
+        &self,
         kind: engine::OuterEffectKind,
         request: &Value,
         table: &DataConTable,
