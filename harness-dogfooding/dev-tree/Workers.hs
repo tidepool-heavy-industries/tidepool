@@ -10,26 +10,26 @@
 --
 -- This module owns the boundary between typed agent execution and the
 -- harness's mechanical observations: workers are spawned here, their output
--- is snapshot-committed here, checks and boundary diffs are run here, and
--- small rendering helpers keep those paths byte-for-byte consistent.  It is
--- deliberately independent of "Harness" so the fold and microtask modules
--- can use the same seam without introducing a cycle.
+-- is snapshot-committed here, checks and boundary diffs are run here.  All
+-- git goes through the typed "Git" seam; the only shell-string execution
+-- left is 'runCheckCmd', which runs planner-authored check COMMANDS —
+-- deliberately shell, deliberately at one seam.  It is independent of
+-- "Harness" so the fold and microtask modules can use the same seam without
+-- introducing a cycle.
 module Workers
   ( SnapshotResult (..)
   , runWorker
   , snapshotWork
-  , gitIn
   , runCheckCmd
   , runChecks
-  , checkFailed
   , boundaryViolations
   , snapshotFailureFor
   , snapshotFailureMaybe
   , branchOf
-  , firstLine
   ) where
 
 import qualified Data.Text as T
+import Git
 import HarnessTypes
 import Tidepool.Agent.Spawn
   ( renderSpawnError
@@ -51,7 +51,7 @@ import Tidepool.Event
 import Tidepool.Harness (Harness)
 import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
-import Tidepool.Shell (renderExecError, runInTry)
+import Tidepool.Shell (renderExecError)
 import Tidepool.Worktree
 
 -- | The harness-owned snapshot account for one worker cycle.  A clean tree
@@ -70,6 +70,11 @@ data SnapshotResult = SnapshotResult
 -- payload.  HEAD observation is advisory and degrades to the ordinary spawn
 -- when the observation handler itself fails; snapshotting remains mandatory
 -- before this function returns.
+--
+-- The snapshot verdict stays TYPED ('SnapshotResult', consumed via
+-- 'snapshotFailureMaybe'); it is announced on the note feed but never
+-- edited into the model's own 'WorkerResult' — receipts keep harness facts
+-- and model claims apart.
 runWorker :: WorktreeHandle -> Text -> Text -> Harness (Either SpawnError (WorkerResult, SnapshotResult))
 runWorker tree name prompt = do
   result <-
@@ -81,26 +86,20 @@ runWorker tree name prompt = do
       (spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd)
       >>= \case
         Right workerResult -> pure workerResult
+        -- withHandlerTry's Left is the SUBSCRIBE step failing, before the
+        -- body ever runs ("Tidepool.Event") — this degraded re-spawn cannot
+        -- double-spawn a worker.
         Left err -> do
           say [fmt|{name} HEAD-move observation degraded: {show err}|]
           spawnAgent @WorkerResult (spawnSpecIn (worktreeId tree) name prompt) <&> fmap snd
   case result of
     Right wr -> do
       snapshot <- snapshotWork tree name
-      let wr' = case snapshot.snapshotFailure of
-            Nothing -> wr
-            Just detail ->
-              let line = [fmt|{name}: SNAPSHOT FAILED — {detail}|]
-               in wr
-                    { evidence = wr.evidence <> [line]
-                    , readyForIntegration = False
-                    , obstacles = wr.obstacles <> [line]
-                    }
-      traverse_ (say . (\f -> [fmt|{name}: {f}|])) (maybeToList snapshot.snapshotFailure)
+      traverse_ (\detail -> say [fmt|{name}: snapshot failed — {detail}|]) (maybeToList snapshot.snapshotFailure)
       -- Surface self-reported friction immediately (note feed + log); it
       -- also rides the receipt via 'finishFold'.  Advisory only.
-      traverse_ (\f -> say [fmt|{name} friction: {f}|]) wr'.frictionNotes
-      pure (Right (wr', snapshot))
+      traverse_ (\f -> say [fmt|{name} friction: {f}|]) wr.frictionNotes
+      pure (Right (wr, snapshot))
     Left err -> pure (Left err)
 
 -- | The harness's own commit of whatever a worker left uncommitted.
@@ -108,22 +107,26 @@ runWorker tree name prompt = do
 -- Codex workers cannot commit in their sandbox.  A clean tree is a no-op;
 -- otherwise the harness stages and commits the worker's output, then reads
 -- HEAD again so every caller's next observation sees the real commit.
+-- Every step's exit code is checked: a failed commit (an unset git
+-- identity, a hook) is a snapshot FAILURE, never reported as success with
+-- the work still sitting uncommitted.
 snapshotWork :: WorktreeHandle -> Text -> Harness SnapshotResult
 snapshotWork tree name =
-  gitIn tree "status --porcelain" >>= \case
-    Left err -> pure (SnapshotResult True False (Just [fmt|status --porcelain failed: {err}|]))
-    Right pr
-      | T.null (T.strip pr.stdout) -> pure (SnapshotResult False True Nothing)
-      | otherwise -> do
-          gitIn tree "add -A" >>= \case
-            Left err -> pure (SnapshotResult True False (Just [fmt|add -A failed: {err}|]))
-            Right _ ->
-              gitIn tree [fmt|commit -m "{name}: agent work"|] >>= \case
-                Left err -> pure (SnapshotResult True False (Just [fmt|commit failed: {err}|]))
-                Right _ -> do
-                  sha <- worktreeHead tree
-                  say [fmt|{name}: harness snapshot-committed uncommitted worker output at {renderGitOid sha}|]
-                  pure (SnapshotResult True True Nothing)
+  statusEntries tree >>= \case
+    Left f -> pure (SnapshotResult True False (Just (renderGitFailure f)))
+    Right [] -> pure (SnapshotResult False True Nothing)
+    Right _ ->
+      gitRun tree ["add", "-A"] >>= \case
+        Left f -> pure (SnapshotResult True False (Just (renderGitFailure f)))
+        Right _ ->
+          -- The name is DATA on the argv seam — a quote or metachar in a
+          -- (model-derived) worker name cannot reach a shell.
+          gitRun tree ["commit", "-m", name <> ": agent work"] >>= \case
+            Left f -> pure (SnapshotResult True False (Just (renderGitFailure f)))
+            Right _ -> do
+              sha <- worktreeHead tree
+              say [fmt|{name}: harness snapshot-committed uncommitted worker output at {renderGitOid sha}|]
+              pure (SnapshotResult True True Nothing)
 
 snapshotFailureFor :: Text -> SnapshotResult -> Failure
 snapshotFailureFor name snapshot =
@@ -143,47 +146,45 @@ snapshotFailureMaybe name snapshot
 runChecks :: WorktreeHandle -> DevPlan -> Harness [CheckResult]
 runChecks tree p = traverse (runCheckCmd tree) (nodeChecks p)
 
--- | One orchestrator-run check command.  A command that cannot run is
--- reported as exit 127 with the typed execution error, never as a pass.
+-- | One orchestrator-run check command.  The command is planner-authored
+-- SHELL, run deliberately through the shell seam; its three outcomes stay
+-- typed ('CheckOutcome').  A check that cannot run — a spawn failure, or
+-- the shell's own command-not-found — indicts the CHECK, and is reported as
+-- neither a pass nor a red verdict on the work.
 runCheckCmd :: WorktreeHandle -> Text -> Harness CheckResult
 runCheckCmd tree cmd =
-  runIn tree.handleReceipt.cwd cmd >>= \case
-    Left e -> pure (CheckResult cmd 127 (renderExecError e))
-    Right pr -> pure (CheckResult cmd pr.exitCode (firstLine pr.stderr))
+  runIn (treeDir tree) cmd >>= \case
+    Left e -> pure (CheckResult cmd (CheckUnrunnable (renderExecError e)))
+    Right pr
+      | ok pr -> pure (CheckResult cmd CheckPassed)
+      | pr.exitCode == 127 ->
+          pure (CheckResult cmd (CheckUnrunnable [fmt|exit 127 (command not found): {diagnose pr}|]))
+      | otherwise -> pure (CheckResult cmd (CheckFailed pr.exitCode (diagnose pr)))
 
-checkFailed :: CheckResult -> Bool
-checkFailed c = c.checkExit /= 0
-
--- | Return changed paths outside the declared boundary and paths in the
--- tolerated hygiene tier separately.  An empty boundary is unrestricted.
-boundaryViolations :: WorktreeHandle -> [Text] -> [Text] -> Harness ([Text], [Text])
-boundaryViolations _ [] _ = pure ([], [])
+-- | Changed paths outside the declared boundary, and inside the tolerated
+-- hygiene tier, at this worktree's HEAD relative to its seed.  An empty
+-- boundary is unrestricted.  'Left' is a boundary that could not be CHECKED
+-- — git failed, or an entry could not be parsed — and is loud, never
+-- convertible to "stayed inside".
+boundaryViolations :: WorktreeHandle -> [Text] -> [Text] -> Harness (Either Text ([Text], [Text]))
+boundaryViolations _ [] _ = pure (Right ([], []))
 boundaryViolations tree prefixes tolerated =
-  gitIn tree [fmt|diff --name-only {seedHead}..HEAD|] >>= \case
-    -- A boundary check that could not RUN is a failing boundary check, never
-    -- a clean one: reporting [] here would silently convert "git is broken in
-    -- this worktree" into "this node stayed inside its boundary".
-    Left e -> pure ([[fmt|<boundary check could not run: {e}>|]], [])
-    Right pr -> pure (classify (filter (not . T.null) (T.lines pr.stdout)))
+  case (traverse parseRepoPath prefixes, traverse parseRepoPath tolerated) of
+    (Left why, _) -> pure (Left [fmt|boundary entry unparseable: {why}|])
+    (_, Left why) -> pure (Left [fmt|tolerated entry unparseable: {why}|])
+    (Right bounds, Right tol) ->
+      changedPaths tree seedHead >>= \case
+        Left f -> pure (Left (renderGitFailure f))
+        Right changed -> pure (Right (foldr (classify bounds tol) ([], []) changed))
   where
     seedHead = renderGitOid tree.handleReceipt.sourceHead
-    inside f prefixes' = any (\pre -> f == pre || (pre <> "/") `T.isPrefixOf` f) prefixes'
-    classify = foldr classifyPath ([], [])
-    classifyPath f (outside, toleratedPaths)
-      | inside f prefixes = (outside, toleratedPaths)
-      | inside f tolerated = (outside, f : toleratedPaths)
-      | otherwise = (f : outside, toleratedPaths)
-
-gitIn :: WorktreeHandle -> Text -> Harness (Either Text Proc)
-gitIn tree args = runInTry tree.handleReceipt.cwd ("git " <> args)
+    classify bounds tol f (outside, toleratedPaths)
+      | any (pathWithin f) bounds = (outside, toleratedPaths)
+      | any (pathWithin f) tol = (outside, renderRepoPath f : toleratedPaths)
+      | otherwise = (renderRepoPath f : outside, toleratedPaths)
 
 branchOf :: WorktreeHandle -> Text
 branchOf tree = renderBranchName tree.handleReceipt.branch
-
-firstLine :: Text -> Text
-firstLine t = case T.lines t of
-  [] -> ""
-  (l : _) -> l
 
 noteHeadMove :: Text -> Observed HeadChangeReceipt -> Harness ()
 noteHeadMove name change = say (name <> " HEAD -> " <> renderGitOid receipt.newHead)

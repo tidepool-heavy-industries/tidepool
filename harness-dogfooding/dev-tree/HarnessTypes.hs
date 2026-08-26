@@ -45,6 +45,13 @@ module HarnessTypes
   , RebaseNote (..)
   , RebaseTier (..)
   , RunSummary (..)
+  , CheckOutcome (..)
+  , NoOpVerdict (..)
+  , checkFailed
+  , checkRed
+  , checkUnrunnable
+  , renderCheck
+  , renderRebaseNote
   , render
   , renderPlan
   , outcomeNodeName
@@ -54,8 +61,20 @@ module HarnessTypes
   , renderFailure
   , failedOutcome
   , withTrail
+  , RepoPath
+  , parseRepoPath
+  , gitPath
+  , renderRepoPath
+  , pathWithin
+  , pathsOverlap
+  , planSubtree
+  , planNames
+  , duplicateNames
+  , subtreeBoundaries
+  , subtreeWriteable
   ) where
 
+import qualified Data.List as L
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Tidepool.Aeson (FromJSON, ToJSON)
@@ -416,8 +435,15 @@ data FailureKind
   | DepthCapped
   | LayerRefused
   | ChildrenFailed
-  -- Keep new constructors at the end so existing derived JSON constructor
-  -- tags retain their clean-path meanings.
+  | -- | The harness's own machinery could not observe or act — git failed in
+    -- a worktree, recon status could not run, a boundary could not be
+    -- checked.  The WORK is not indicted; triage should read this as "fix
+    -- the environment", never as a verdict on the node's changes.
+    InfraFailure
+  -- Wire note: generic JSON tags a sum by constructor NAME, not position, so
+  -- adding or reordering constructors is safe.  The breaking change is
+  -- turning an existing nullary constructor into a record one (its payload
+  -- shape changes) — rename instead when that happens.
   | MicrotasksIncomplete
       { acceptedMicrotasksRan :: Int
       }
@@ -458,30 +484,92 @@ data FoldReceipt = FoldReceipt
   , receiptCycles    :: Int
   , receiptAgentRan  :: Bool
   , receiptReviewed  :: Bool
+  , -- | @Just reason@ when an agent cycle moved no HEAD and a bounded model
+    -- verdict ('NoOpVerdict') judged that legitimate — the task genuinely
+    -- required no edit.  'Nothing' otherwise; the ladder fails a headless
+    -- cycle that carries no justification.
+    receiptNoOp      :: Maybe Text
   , receiptSummary   :: Text
   , receiptEvidence  :: [Text]
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
--- | One orchestrator-run check (rung 2).  @checkDetail@ carries the first line
--- of stderr, or the typed 'Tidepool.Effects.ExecError' when the command could
--- not be spawned at all — a check that never ran is a FAILING check, never a
--- silently missing one.
-data CheckResult = CheckResult
-  { checkCommand :: Text
-  , checkExit    :: Int
-  , checkDetail  :: Text
+-- | The bounded semantic question behind a headless agent cycle: "did this
+-- agent do nothing, or was there nothing to do?"  Deterministic code cannot
+-- answer it (the honest no-op and the dressed-up failure look identical in
+-- git), so it is deferred to a model over the worker's own evidence.
+data NoOpVerdict = NoOpVerdict
+  { noOpLegitimate :: Bool
+  , noOpReason     :: Text
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
+-- | One orchestrator-run check (rung 2), with its three honest outcomes kept
+-- apart.  A check that never RAN earns no trust — it is not a pass — but it
+-- also indicts the check's own spelling or environment rather than the work,
+-- and policy treats the two differently ('checkRed' vs 'checkUnrunnable').
+data CheckResult = CheckResult
+  { checkCommand :: Text
+  , checkOutcome :: CheckOutcome
+  }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+data CheckOutcome
+  = CheckPassed
+  | -- | Ran and exited nonzero.  @checkDiag@ is the tail-biased capture of
+    -- BOTH streams ('Git.diagnose') — compilers and test runners put the
+    -- verdict at the end, often on stdout.
+    CheckFailed
+      { checkExit :: Int
+      , checkDiag :: Text
+      }
+  | -- | Could not run at all: spawn failure, or the shell's own
+    -- command-not-found.  Never a pass, never a red verdict on the work.
+    CheckUnrunnable
+      { checkReason :: Text
+      }
+  deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+-- | Untrustworthy: ran red, or could not run.  The trust ladder refuses both.
+checkFailed :: CheckResult -> Bool
+checkFailed c = case c.checkOutcome of
+  CheckPassed -> False
+  CheckFailed {} -> True
+  CheckUnrunnable {} -> True
+
+-- | Ran, and genuinely failed.
+checkRed :: CheckResult -> Bool
+checkRed c = case c.checkOutcome of
+  CheckFailed {} -> True
+  _ -> False
+
+checkUnrunnable :: CheckResult -> Bool
+checkUnrunnable c = case c.checkOutcome of
+  CheckUnrunnable {} -> True
+  _ -> False
+
+-- | One line per check, for prompts and evidence — the diagnosis rides along,
+-- so an agent asked to repair a failure is shown what actually failed.
+renderCheck :: CheckResult -> Text
+renderCheck c = case c.checkOutcome of
+  CheckPassed -> [fmt|{c.checkCommand} — passed|]
+  CheckFailed {checkExit = e, checkDiag = d} -> [fmt|{c.checkCommand} — exit {e}: {d}|]
+  CheckUnrunnable {checkReason = r} -> [fmt|{c.checkCommand} — could not run: {r}|]
+
 -- | One entry in the eager rebase cascade: which tip was moved, onto what, and
--- by which tier.
+-- by which tier.  @rebaseOnto@ is 'Nothing' for an escalation — nothing was
+-- rebased onto anything, and no sentinel pretends otherwise.
 data RebaseNote = RebaseNote
   { rebaseBranch :: Text
-  , rebaseOnto   :: Text
+  , rebaseOnto   :: Maybe Text
   , rebaseTier   :: RebaseTier
   }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
+
+renderRebaseNote :: RebaseNote -> Text
+renderRebaseNote n = case n.rebaseOnto of
+  Just onto -> [fmt|{n.rebaseBranch} onto {onto}: {show n.rebaseTier}|]
+  Nothing -> [fmt|{n.rebaseBranch}: escalated|]
 
 -- | The three tiers, plus the fast path.  'RebaseCurrent' costs one
 -- @merge-base --is-ancestor@ and no rebase at all; 'RebaseClean' is mechanical
@@ -544,9 +632,7 @@ escalationCount r = length (filter ((== RebaseEscalation) . rebaseTier) r.receip
 checksLine :: FoldReceipt -> Text
 checksLine r = case r.receiptChecks of
   [] -> "no checks"
-  cs -> [fmt|{length (filter passed cs)}/{length cs} checks passed|]
-  where
-    passed c = c.checkExit == 0
+  cs -> [fmt|{length (filter (not . checkFailed) cs)}/{length cs} checks passed|]
 
 renderFailure :: Failure -> Text
 renderFailure f = [fmt|{renderFailureKind f.failureKind}: {f.failureDetail}{pathsPart}|]
@@ -556,15 +642,28 @@ renderFailure f = [fmt|{renderFailureKind f.failureKind}: {f.failureDetail}{path
       ps -> " [" <> T.intercalate ", " ps <> "]"
 
 -- | Render payload-bearing failure kinds without making callers parse their
--- derived 'Show' form.  Existing nullary kinds retain their established text.
+-- derived 'Show' form.  EXHAUSTIVE on purpose — the type's own contract is
+-- that render/triage speak about kinds, so a new kind must decide its
+-- operator-facing text here, audited by the compiler.
 renderFailureKind :: FailureKind -> Text
 renderFailureKind kind = case kind of
+  WorktreeDenied -> "WorktreeDenied"
+  SpawnDenied -> "SpawnDenied"
+  NoHeadMove -> "NoHeadMove"
+  ChecksFailed -> "ChecksFailed"
+  BoundaryViolated -> "BoundaryViolated"
+  RebaseEscalated -> "RebaseEscalated"
+  MergeEscalated -> "MergeEscalated"
+  BudgetSpent -> "BudgetSpent"
+  DepthCapped -> "DepthCapped"
+  LayerRefused -> "LayerRefused"
+  ChildrenFailed -> "ChildrenFailed"
+  InfraFailure -> "InfraFailure"
   MicrotasksIncomplete {acceptedMicrotasksRan = ran} ->
     [fmt|MicrotasksIncomplete ({ran} accepted microtasks ran)|]
   SnapshotFailed {snapshotName = snapshot} -> [fmt|SnapshotFailed ({snapshot})|]
   ChildrenPending {pendingChildren = pend, mergedChildren = merged} ->
     [fmt|ChildrenPending (merged: {T.intercalate ", " merged}; pending: {T.intercalate ", " pend})|]
-  _ -> show kind
 
 -- | Build a 'Failed' outcome.
 --
@@ -659,3 +758,83 @@ renderPlan depth p =
     children = case childPlans p of
       [] -> ""
       xs -> "\n" <> T.intercalate "\n" (map (renderPlan (depth + 1)) xs)
+
+-- ---------------------------------------------------------------------------
+-- Repo-relative paths — parsed once, compared structurally
+-- ---------------------------------------------------------------------------
+
+-- | A repo-relative path held as its normalized segments, so no comparison
+-- anywhere downstream depends on how a path was SPELLED.  Paths enter the
+-- harness from exactly two fuzzy sources — model-authored plan fields
+-- ('parseRepoPath', which validates) and git machine output ('gitPath',
+-- which is already clean) — and both land here; raw-'Text' path comparison
+-- is unrepresentable past this boundary.  (The bug this closes: "ci/"
+-- string-prefixed into the match-nothing "ci//", failing a node for a
+-- boundary it never left; "." and "./ci" were the same failure one spelling
+-- over.)
+newtype RepoPath = RepoPath [Text]
+  deriving (Show, Eq, Ord)
+
+-- | Parse a MODEL-AUTHORED path (a boundary, tolerated, or check-adjacent
+-- entry): strip whitespace, normalize @.@ and empty segments away, and
+-- REJECT what cannot literally name a file or subtree.  An entry that
+-- normalizes to nothing is rejected too — an unrestricted boundary is
+-- declared by having no entries, never by an empty one that would silently
+-- match everything.
+parseRepoPath :: Text -> Either Text RepoPath
+parseRepoPath raw
+  | T.null stripped = Left "empty path (an unrestricted boundary declares no entries instead)"
+  | T.any (\c -> c == '*' || c == '?' || c == '[') stripped =
+      Left [fmt|{raw}: glob characters are not supported — boundaries are literal files or directory prefixes|]
+  | ".." `elem` segs = Left [fmt|{raw}: ".." would escape the repository|]
+  | null segs = Left [fmt|{raw}: no path segments|]
+  | otherwise = Right (RepoPath segs)
+  where
+    stripped = T.strip raw
+    segs = filter (\s -> not (T.null s) && s /= ".") (T.splitOn "/" stripped)
+
+-- | A path from git's own machine output (@-z@, quotePath off): already
+-- repo-relative and clean, so this is total.
+gitPath :: Text -> RepoPath
+gitPath = RepoPath . filter (not . T.null) . T.splitOn "/"
+
+renderRepoPath :: RepoPath -> Text
+renderRepoPath (RepoPath segs) = T.intercalate "/" segs
+
+-- | True when @path@ is @dir@ itself or lies anywhere inside it.
+pathWithin :: RepoPath -> RepoPath -> Bool
+pathWithin (RepoPath path) (RepoPath dir) = dir `L.isPrefixOf` path
+
+-- | True when two paths denote the same file/subtree or one contains the
+-- other — the symmetric form of 'pathWithin'.
+pathsOverlap :: RepoPath -> RepoPath -> Bool
+pathsOverlap x y = pathWithin x y || pathWithin y x
+
+-- ---------------------------------------------------------------------------
+-- The one subtree walk
+-- ---------------------------------------------------------------------------
+
+-- | Every node of a plan, root first.  The ONE subtree traversal — name,
+-- boundary, and check collectors are projections of this, so two call sites
+-- can never disagree about what "the whole subtree" means.
+planSubtree :: DevPlan -> [DevPlan]
+planSubtree p = p : concatMap planSubtree (childPlans p)
+
+planNames :: DevPlan -> [Text]
+planNames = map nodeName . planSubtree
+
+-- | Names that appear more than once anywhere in the plan.  Names key
+-- retained worktrees and journal branch lookups, so a duplicate is a
+-- correctness hazard, not a style problem.
+duplicateNames :: DevPlan -> [Text]
+duplicateNames p = [n | (n : _ : _) <- L.group (L.sort (planNames p))]
+
+-- | Every PRODUCT boundary entry in the subtree.
+subtreeBoundaries :: DevPlan -> [Text]
+subtreeBoundaries = concatMap nodeBoundary . planSubtree
+
+-- | Everything the subtree may WRITE: product boundaries plus tolerated
+-- hygiene paths.  This is the set concurrency questions (sprint
+-- disjointness) must use — two items that both tolerate @docs/@ still race.
+subtreeWriteable :: DevPlan -> [Text]
+subtreeWriteable = concatMap (\q -> nodeBoundary q <> nodeTolerated q) . planSubtree

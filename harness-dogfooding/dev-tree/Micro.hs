@@ -23,6 +23,7 @@ import DevTreeJournal
   , JournalKey (..)
   , recordEvent
   )
+import Git
 import HarnessTypes
 import Tidepool.Agent.Spawn
   ( renderSpawnError
@@ -40,9 +41,6 @@ import Tidepool.Worktree
 import Prompts
 import Workers
   ( branchOf
-  , checkFailed
-  , firstLine
-  , gitIn
   , runCheckCmd
   , runChecks
   , runWorker
@@ -101,124 +99,156 @@ type FinishFold =
 microLeaf :: FinishFold -> NodeSeed -> SplitSpec -> Harness Outcome
 microLeaf finishFold seed spec = do
   before <- worktreeHead tree
-  recon <-
-    spawnAgent @RepoSurvey
-      (spawnSpecIn (worktreeId tree) (name <> "-recon") (reconPrompt p spec))
-  case recon of
-    Left err ->
-      pure (failedOutcome name (Failure SpawnDenied [fmt|{name} recon: {renderSpawnError err}|] []) Nothing)
-    Right (_, survey) -> do
-      -- Recon is contractually read-only, but its native shell still runs in
-      -- the node worktree.  Check the actual tree after the spawn, and clear
-      -- only what this authorized recon lane could have left behind.
-      gitIn tree "status --porcelain" >>= \case
-        Left err ->
-          reconFailure
-            before
-            survey
-            [fmt|{name}: RECON STATUS FAILED — could not verify that recon stayed read-only: {err}|]
-        Right status
-          | status.exitCode /= 0 ->
-              reconFailure
-                before
-                survey
-                [fmt|{name}: RECON STATUS FAILED — git status --porcelain exited {status.exitCode}: {firstLine status.stderr}|]
-          | T.null (T.strip status.stdout) -> runPlanned before survey []
-          | otherwise -> do
-              let stray = T.intercalate ", " (filter (not . T.null) (T.lines status.stdout))
-              say [fmt|{name}: RECON STRAYED — resetting recon-owned changes: {stray}|]
-              resets <- traverse (gitIn tree) ["checkout -- .", "clean -fd"]
-              let resetFailures =
-                    [ detail
-                    | (command, result) <- zip ["git checkout -- .", "git clean -fd"] resets
-                    , let detail = case result of
-                            Left err -> [fmt|{command} could not run: {err}|]
-                            Right proc
-                              | proc.exitCode /= 0 -> [fmt|{command} exited {proc.exitCode}: {firstLine proc.stderr}|]
-                              | otherwise -> ""
-                    , not (T.null detail)
-                    ]
-              if null resetFailures
-                then do
-                  let resetEvidence = [fmt|{name}: recon strayed ({stray}) and was reset with git checkout -- . and git clean -fd|]
-                  say resetEvidence
-                  runPlanned before survey [resetEvidence]
-                else
-                  reconFailure
-                    before
-                    survey
-                    [fmt|{name}: RECON RESET FAILED — recon strayed ({stray}); {T.intercalate "; " resetFailures}|]
+  -- The dirty-state BASELINE, before recon ever runs.  A retained worktree
+  -- resumed mid-crash can hold uncommitted work that is NOT recon's; without
+  -- the baseline the cleanup below would blame recon for it and destroy it.
+  statusEntries tree >>= \case
+    Left f ->
+      pure (failedOutcome name (Failure InfraFailure [fmt|{name}: pre-recon status failed — {renderGitFailure f}|] []) Nothing)
+    Right preexisting
+      | not (null preexisting) ->
+          pure
+            ( failedOutcome
+                name
+                ( Failure
+                    InfraFailure
+                    [fmt|{name}: worktree already dirty before recon ({T.intercalate ", " preexisting}) — refusing to run recon over uncommitted state|]
+                    []
+                )
+                Nothing
+            )
+      | otherwise -> spawnRecon before
   where
+    spawnRecon before =
+      spawnAgent @RepoSurvey
+        (spawnSpecIn (worktreeId tree) (name <> "-recon") (reconPrompt p spec))
+        >>= \case
+          Left err ->
+            pure (failedOutcome name (Failure SpawnDenied [fmt|{name} recon: {renderSpawnError err}|] []) Nothing)
+          Right (_, survey) ->
+            -- Recon is contractually read-only, but its native shell still
+            -- runs in the node worktree.  Check the actual tree after the
+            -- spawn; the pre-spawn baseline above proved it was clean, so
+            -- anything dirty now is recon's.
+            statusEntries tree >>= \case
+              Left f ->
+                reconFailure
+                  before
+                  survey
+                  [fmt|{name}: could not verify that recon stayed read-only — {renderGitFailure f}|]
+              Right [] -> runPlanned before survey []
+              Right stray -> do
+                let strayLine = T.intercalate ", " stray
+                say [fmt|{name}: RECON STRAYED — resetting recon-owned changes: {strayLine}|]
+                resetToHead >>= \case
+                  Just why -> reconFailure before survey [fmt|{name}: recon strayed ({strayLine}) and the reset failed — {why}|]
+                  Nothing -> do
+                    let resetEvidence = [fmt|{name}: recon strayed ({strayLine}) and was reset (git reset --hard + clean -fd, verified clean)|]
+                    say resetEvidence
+                    runPlanned before survey [resetEvidence]
+
+    -- Reset the worktree to HEAD and PROVE it landed: @reset --hard@ undoes
+    -- staged changes too (a bare @checkout -- .@ restores from the index and
+    -- cannot), and the closing status re-read is the load-bearing part — a
+    -- reset that silently left dirt would otherwise smuggle recon's writes
+    -- into the next worker's snapshot commit.
+    resetToHead =
+      gitRun tree ["reset", "--hard", "HEAD"] >>= \case
+        Left f -> pure (Just (renderGitFailure f))
+        Right _ ->
+          gitRun tree ["clean", "-fd"] >>= \case
+            Left f -> pure (Just (renderGitFailure f))
+            Right _ ->
+              statusEntries tree >>= \case
+                Left f -> pure (Just (renderGitFailure f))
+                Right [] -> pure Nothing
+                Right still -> pure (Just [fmt|still dirty after reset: {T.intercalate ", " still}|])
+
     runPlanned before survey reconEvidence = do
-      microPlan <- runLLMTurn @MicroPlan (microPlanPrompt p spec survey)
-      let planned = microPlan.microtasks
-          -- One cycle is already spent on recon; the rest of this subtree's
-          -- allowance bounds the sequence, under the authored cap.
-          cap = min spec.splitMaxTasks (max 0 (seed.seedCycles - 1))
-          (toRun, dropped) = splitAt cap planned
-          droppedNames = T.intercalate ", " (map (.microName) dropped)
-          droppedNote =
-            [ [fmt|micro-split: {length dropped} planned microtasks past the cap ({cap}) were not run: {droppedNames}|]
-            | not (null dropped)
-            ]
-      say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
-      let acceptedMicrotaskNames = map (.microName) toRun
-      recordEvent
-        MicroSplitEvent
-          { evKey = JournalKey (branchOf tree)
-          , evMicrotaskNames = acceptedMicrotaskNames
-          }
-      (microRun, microSnapshotFailure) <- runMicrotasks tree p toRun
-      if microRun.microtasksComplete
+      -- One cycle is already spent on recon; the rest of this subtree's
+      -- allowance bounds the sequence, under the authored cap.  An allowance
+      -- that leaves room for NOTHING is a budget refusal, said as one —
+      -- never a "complete" run of zero microtasks.
+      let cap = min spec.splitMaxTasks (max 0 (seed.seedCycles - 1))
+      if cap <= 0
         then
+          pure
+            ( failedOutcome
+                name
+                ( Failure
+                    BudgetSpent
+                    [fmt|{name}: no agent cycles remain for microtasks after recon (subtree allowance {seed.seedCycles}, authored cap {spec.splitMaxTasks})|]
+                    []
+                )
+                Nothing
+            )
+        else do
+          microPlan <- runLLMTurn @MicroPlan (microPlanPrompt p spec survey)
+          let planned = normalizeMicroNames microPlan.microtasks
+              (toRun, dropped) = splitAt cap planned
+              droppedNames = T.intercalate ", " (map (.microName) dropped)
+              droppedNote =
+                [ [fmt|micro-split: {length dropped} planned microtasks past the cap ({cap}) were not run: {droppedNames}|]
+                | not (null dropped)
+                ]
+          say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
+          let acceptedMicrotaskNames = map (.microName) toRun
           recordEvent
-            MicroCompleteEvent
+            MicroSplitEvent
               { evKey = JournalKey (branchOf tree)
               , evMicrotaskNames = acceptedMicrotaskNames
               }
-        else pure ()
-      after <- worktreeHead tree
-      checks <- runChecks tree p
-      let wr =
-            WorkerResult
-              { workSummary =
-                  [fmt|Micro-split leaf: {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
-              , evidence = [fmt|recon survey: {survey.surveyLayout}|] : reconEvidence <> microRun.microtaskEvidence <> droppedNote
-              , readyForIntegration = null microRun.microtaskEscalations
-              , obstacles = microRun.microtaskObstacles
-              , frictionNotes = microRun.microtaskFrictions
-              }
-          -- Keep every microtask check in the receipt, including the failing
-          -- one that stopped the sequence.  The node checks remain first so
-          -- the pre-existing receipt ordering stays stable; the ladder then
-          -- judges both sets mechanically at the final head.
-          receiptChecks = checks <> concatMap (.microResultChecks) microRun.microtaskResults
-      folded <-
-        finishFold
-          seed
-          wr
-          (before, after)
-          []
-          microRun.microtaskEscalations
-          (1 + microRun.microtasksRan)
-          True
-          receiptChecks
-          microSnapshotFailure
-      pure $ case folded of
-        Done {doneReceipt = receipt}
-          | not microRun.microtasksComplete ->
-              failedOutcome
-                name
-                ( Failure
-                    (MicrotasksIncomplete {acceptedMicrotasksRan = microRun.microtasksRan})
-                    [fmt|microtask sequence stopped after {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran|]
-                    []
-                )
-                (Just receipt)
-        _ -> folded
+          (microRun, microSnapshotFailure) <- runMicrotasks tree p toRun
+          when microRun.microtasksComplete $
+            recordEvent
+              MicroCompleteEvent
+                { evKey = JournalKey (branchOf tree)
+                , evMicrotaskNames = acceptedMicrotaskNames
+                }
+          after <- worktreeHead tree
+          checks <- runChecks tree p
+          let wr =
+                WorkerResult
+                  { workSummary =
+                      [fmt|Micro-split leaf: {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
+                  , evidence = [fmt|recon survey: {survey.surveyLayout}|] : reconEvidence <> microRun.microtaskEvidence <> droppedNote
+                  , readyForIntegration = null microRun.microtaskEscalations
+                  , obstacles = microRun.microtaskObstacles
+                  , frictionNotes = microRun.microtaskFrictions
+                  }
+              -- Keep every microtask check in the receipt, including the failing
+              -- one that stopped the sequence.  The node checks remain first so
+              -- the pre-existing receipt ordering stays stable; the ladder then
+              -- judges both sets mechanically at the final head.
+              receiptChecks = checks <> concatMap (.microResultChecks) microRun.microtaskResults
+          folded <-
+            finishFold
+              seed
+              wr
+              (before, after)
+              []
+              microRun.microtaskEscalations
+              (1 + microRun.microtasksRan)
+              True
+              receiptChecks
+              microSnapshotFailure
+          pure $ case folded of
+            Done {doneReceipt = receipt}
+              | not microRun.microtasksComplete ->
+                  failedOutcome
+                    name
+                    ( Failure
+                        (MicrotasksIncomplete {acceptedMicrotasksRan = microRun.microtasksRan})
+                        [fmt|microtask sequence stopped after {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran|]
+                        []
+                    )
+                    (Just receipt)
+            _ -> folded
 
+    -- Recon-lane machinery failure: the environment, not the work, is
+    -- indicted, and the kind says so.
     reconFailure before survey detail = do
-      let failure = Failure BoundaryViolated detail []
+      let failure = Failure InfraFailure detail []
           wr =
             WorkerResult
               { workSummary = [fmt|Read-only recon could not be verified for {name}|]
@@ -231,13 +261,36 @@ microLeaf finishFold seed spec = do
       after <- worktreeHead tree
       checks <- runChecks tree p
       finishFold seed wr (before, after) [] [] 1 True checks (Just failure)
+
     tree = seed.seedTree
     p = seed.seedPlan
     name = nodeName p
 
--- | Run accepted microtasks in LIST order.  A microtask whose own checks fail
--- STOPS the sequence — later tasks were planned against a foundation that did
--- not hold — and everything unrun is said so, as data.  The returned pair's
+-- | Model-authored 'microName's become worker names, commit-message text,
+-- and journaled accept/complete lists — so they are normalized to a safe
+-- slug at ACCEPTANCE, the one seam where model text enters, and duplicates
+-- are disambiguated so the journaled name lists compare exactly.
+normalizeMicroNames :: [Microtask] -> [Microtask]
+normalizeMicroNames ms = go [] (zip [1 :: Int ..] ms)
+  where
+    go _ [] = []
+    go seen ((i, m) : rest) =
+      let base = case slug m.microName of
+            "" -> [fmt|task-{i}|]
+            s -> s
+          named = if base `elem` seen then [fmt|{base}-{i}|] else base
+       in m {microName = named} : go (named : seen) rest
+    slug = T.intercalate "-" . T.words . T.map keepSafe
+    keepSafe c
+      | c `elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" :: [Char]) = c
+      | otherwise = ' '
+
+-- | Run accepted microtasks in LIST order.  A microtask whose own checks RAN
+-- RED stops the sequence — later tasks were planned against a foundation
+-- that did not hold — and everything unrun is said so, as data.  A check
+-- that could not run at all ('CheckUnrunnable') is recorded but does NOT
+-- halt: it indicts the planner's rubric line, not the foundation, and the
+-- node's final ladder still refuses to trust it.  The returned pair's
 -- 'MicrotaskRun' carries every executed microtask's checks in typed form,
 -- together with explicit accepted/ran/completed accounting; the optional
 -- 'Failure' carries a snapshot failure without hiding it in prose.
@@ -255,7 +308,7 @@ runMicrotasks tree p accepted = walk emptyMicroAcc accepted
           case snapshotFailureMaybe (microWorkerName m) snapshot of
             Just failure -> halt (noteEscalation (renderFailure failure) acc') rest (Just failure)
             Nothing
-              | any checkFailed checks ->
+              | any checkRed checks ->
                   halt (noteEscalation [fmt|{m.microName}: micro checks failed — {failedNames checks}|] acc') rest Nothing
               | otherwise -> walk acc' rest
 
@@ -280,7 +333,7 @@ runMicrotasks tree p accepted = walk emptyMicroAcc accepted
       let passed = length (filter (not . checkFailed) checks)
        in [fmt|{m.microName}: {wr.workSummary} ({passed}/{length checks} micro checks passed)|]
     noteEscalation line acc = acc {accEscalations = line : accEscalations acc}
-    failedNames checks = T.intercalate ", " (map (.checkCommand) (filter checkFailed checks))
+    failedNames checks = T.intercalate ", " (map (.checkCommand) (filter checkRed checks))
     tag m t = m.microName <> ": " <> t
     microWorkerName m = nodeName p <> "-" <> m.microName
 

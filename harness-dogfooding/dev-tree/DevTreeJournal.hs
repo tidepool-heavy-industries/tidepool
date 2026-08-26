@@ -219,13 +219,13 @@ decodeEvent kind k payload
   | kind == kindText OutcomeKind = OutcomeEvent (JournalKey k) <$> decodeOutcomeValue k payload
   | kind == kindText ReplanKind = ReplanEvent (JournalKey k) <$> decodeJson payload
   | kind == kindText RebaseKind = RebaseEvent (JournalKey k) <$> decodeJson payload
-  | kind == kindText EscalationKind =
-      Just
-        ( EscalationEvent
-            (JournalKey k)
-            (fromMaybe k (payload ^? key "node" . _String))
-            (fromMaybe "escalated" (payload ^? key "detail" . _String))
-        )
+  | -- Both fields are REQUIRED: a decoder that can never fail would launder
+    -- a garbage payload into a confident "prior escalation: escalated" line
+    -- in an adopted receipt's evidence.
+    kind == kindText EscalationKind =
+      EscalationEvent (JournalKey k)
+        <$> payload ^? key "node" . _String
+        <*> payload ^? key "detail" . _String
   | kind == kindText MicroSplitKind = MicroSplitEvent (JournalKey k) <$> decodeMicrotaskNames payload
   | kind == kindText MicroCompleteKind = MicroCompleteEvent (JournalKey k) <$> decodeMicrotaskNames payload
   | otherwise = Nothing

@@ -419,20 +419,27 @@ effectivePlan fold st = case choreMode of
                 then proposeAttempt grounding 2 (Just approval.revisionNote)
                 else pure (Left ("Plan proposal rejected: " <> approval.revisionNote))
 
--- | The first structural budget breach, if any. Root depth is zero.  Also
--- refuses duplicate node names anywhere in the tree: names key retained
--- worktrees and journal branch lookups, and uniqueness was previously only
--- prompt advice (sol review).
+-- | The first structural breach in a proposed plan, if any. Root depth is
+-- zero.  Refuses: budget shape (depth, width), duplicate node names anywhere
+-- in the tree (names key retained worktrees and journal branch lookups), and
+-- any boundary or tolerated entry 'parseRepoPath' rejects — model-authored
+-- paths are validated at ACCEPTANCE, so an unparseable entry is a refusal
+-- the planner can fix, never a match-nothing boundary that fails the node's
+-- own honest work at fold time.
 proposalViolation :: Budget -> DevPlan -> Maybe Text
-proposalViolation b plan = go 0 plan `orElseMaybe` dupName
+proposalViolation b plan = go 0 plan `orElseMaybe` dupName `orElseMaybe` badPath
   where
     orElseMaybe (Just a) _ = Just a
     orElseMaybe Nothing y = y
     dupName =
-      let names = allNames plan
-          dupes = [n | n <- names, length (filter (== n) names) > 1]
-       in listToMaybe [[fmt|node name {n} appears more than once in the plan|] | n <- dupes]
-    allNames q = nodeName q : concatMap allNames (childPlans q)
+      listToMaybe [[fmt|node name {n} appears more than once in the plan|] | n <- duplicateNames plan]
+    badPath =
+      listToMaybe
+        [ [fmt|node {nodeName q} has an unusable path entry — {why}|]
+        | q <- planSubtree plan
+        , entry <- nodeBoundary q <> nodeTolerated q
+        , Left why <- [parseRepoPath entry]
+        ]
     go :: Int -> DevPlan -> Maybe Text
     go depth p
       | depth > b.maxDepth = Just [fmt|node {p.nodeName} is at depth {depth}, above maxDepth {b.maxDepth}|]
@@ -445,28 +452,41 @@ proposalViolation b plan = go 0 plan `orElseMaybe` dupName
     firstJust (Nothing : xs) = firstJust xs
     firstJust (found : _) = found
 
--- | The first cross-item boundary overlap in a sprint, if any.  Two boundary
--- entries overlap when equal or when one is a directory prefix of the other
--- — overlapping items would race in concurrent sibling worktrees.  Each
--- item's boundary is its whole SUBTREE's boundary set, not just its root's
--- (sol review: a root-only check misses every descendant path).
+-- | The first reason a sprint's items cannot safely run CONCURRENTLY, if
+-- any.  Overlap is judged on each item's whole-subtree WRITE set — product
+-- boundaries plus tolerated paths (two items that both tolerate @docs/@
+-- still race) — and an item whose subtree declares no boundary at all is
+-- refused outright: unbounded write scope cannot be proven disjoint from
+-- anything.
 sprintOverlap :: [DevPlan] -> Maybe Text
-sprintOverlap subtrees =
-  listToMaybe
-    [ [fmt|sprint items {a.nodeName} and {b.nodeName} overlap on boundary paths {x} and {y}|]
-    | (a, b) <- pairs subtrees
-    , x <- subtreeBoundaries a
-    , y <- subtreeBoundaries b
-    , pathsOverlap x y
-    ]
+sprintOverlap subtrees = unbounded `orElseMaybe` pairOverlap
   where
-    subtreeBoundaries q = nodeBoundary q <> concatMap subtreeBoundaries (childPlans q)
+    orElseMaybe (Just a) _ = Just a
+    orElseMaybe Nothing y = y
+    unbounded =
+      listToMaybe
+        [ [fmt|sprint item {a.nodeName} declares no boundary anywhere in its subtree — an unbounded item cannot run concurrently with siblings|]
+        | length subtrees > 1
+        , a <- subtrees
+        , null (subtreeBoundaries a)
+        ]
+    pairOverlap =
+      listToMaybe
+        [ [fmt|sprint items {a.nodeName} and {b.nodeName} overlap on paths {x} and {y}|]
+        | (a, b) <- pairs subtrees
+        , x <- subtreeWriteable a
+        , y <- subtreeWriteable b
+        , overlaps x y
+        ]
+    -- An entry that fails to parse cannot PROVE disjointness, so it counts
+    -- as overlapping ('proposalViolation' refuses it with the sharper
+    -- message first — this is the backstop for authored item plans that
+    -- skip that gate).
+    overlaps x y = case (parseRepoPath x, parseRepoPath y) of
+      (Right px, Right py) -> pathsOverlap px py
+      _ -> True
     pairs (a : rest) = [(a, b) | b <- rest] <> pairs rest
     pairs [] = []
-    pathsOverlap x y =
-      let nx = T.dropWhileEnd (== '/') x
-          ny = T.dropWhileEnd (== '/') y
-       in nx == ny || (nx <> "/") `T.isPrefixOf` ny || (ny <> "/") `T.isPrefixOf` nx
 
 -- | Deterministic repository grounding for the propose turn: the proposer is
 -- a runLLMTurn session with no repo access of its own, so CODE assembles what
@@ -642,9 +662,7 @@ priorTrail fold
   | not (isResumed fold) = []
   | otherwise =
       [fmt|resumed run {fold.resumeRunId}: {length fold.resumeEntries} journaled steps folded in|]
-        : [rebaseLine n | (_, _, RebaseEvent {evNote = n}) <- eventsOfKind RebaseKind fold]
-  where
-    rebaseLine n = [fmt|prior process: rebased {n.rebaseBranch} onto {n.rebaseOnto} ({show n.rebaseTier})|]
+        : [[fmt|prior process: {renderRebaseNote n}|] | (_, _, RebaseEvent {evNote = n}) <- eventsOfKind RebaseKind fold]
 
 priorEscalations :: ResumeFold -> [Text]
 priorEscalations fold =

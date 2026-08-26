@@ -4,7 +4,7 @@ import Tidepool.Prelude hiding (render)
 import Tidepool.Effects
 import Harness
 import DevTreeJournal
-import HarnessTypes (OnFailure (..), DevPlan (..), FoldReceipt (..), Outcome (..), Failure (..), FailureKind (..), CheckResult (..), ReplanDecision (..), RebaseNote (..), RebaseTier (..))
+import HarnessTypes (OnFailure (..), DevPlan (..), FoldReceipt (..), Outcome (..), Failure (..), FailureKind (..), CheckResult (..), CheckOutcome (..), ReplanDecision (..), RebaseNote (..), RebaseTier (..))
 import Tidepool.Aeson (Value, object, toJSON, (.=))
 import qualified Data.Text as T
 
@@ -67,7 +67,7 @@ caseMicroCompleteRoundTrips :: Text
 caseMicroCompleteRoundTrips = verify "micro-complete-round-trips" (decodeEvent "micro-complete" "dev-tree/leaf" (payloadOf microCompleteEv) == Just microCompleteEv)
 
 mkReceipt :: FoldReceipt
-mkReceipt = FoldReceipt { receiptNode = "leaf", receiptBranch = "dev-tree/leaf", receiptSeedHead = "seed0000", receiptHead = "head1111", receiptHeadMoved = True, receiptChecks = [CheckResult "cargo check" 0 ""], receiptRebases = [], receiptOutside = [], receiptCycles = 1, receiptAgentRan = True, receiptReviewed = False, receiptSummary = "done", receiptEvidence = [] }
+mkReceipt = FoldReceipt { receiptNode = "leaf", receiptBranch = "dev-tree/leaf", receiptSeedHead = "seed0000", receiptHead = "head1111", receiptHeadMoved = True, receiptChecks = [CheckResult "cargo check" CheckPassed], receiptRebases = [], receiptOutside = [], receiptCycles = 1, receiptAgentRan = True, receiptReviewed = False, receiptNoOp = Nothing, receiptSummary = "done", receiptEvidence = [] }
 
 doneOutcome :: Outcome
 doneOutcome = Done { outcomeNode = "leaf", outcomeTrail = [], doneReceipt = mkReceipt }
@@ -163,7 +163,7 @@ caseReplanRoundTrips :: Text
 caseReplanRoundTrips = verify "replan-round-trips" (decodeEvent "replan" "dev-tree/child" (payloadOf replanEv) == Just replanEv)
 
 note1 :: RebaseNote
-note1 = RebaseNote { rebaseBranch = "dev-tree/child", rebaseOnto = "abc123", rebaseTier = RebaseClean }
+note1 = RebaseNote { rebaseBranch = "dev-tree/child", rebaseOnto = Just "abc123", rebaseTier = RebaseClean }
 
 rebaseEv :: JournalEvent
 rebaseEv = RebaseEvent (JournalKey "dev-tree/child") note1
@@ -186,11 +186,14 @@ caseEscalationPayload = verify "escalation-payload-matches-legacy-wire" (payload
 caseEscalationRoundTrips :: Text
 caseEscalationRoundTrips = verify "escalation-round-trips" (decodeEvent "escalation" "dev-tree/child" (payloadOf escalationEv) == Just escalationEv)
 
+-- An escalation payload missing a required field is REFUSED, not defaulted:
+-- a decoder that can never fail would launder garbage into a confident
+-- "prior escalation" line in an adopted receipt's evidence.
 caseEscalationDefaultsMissingNode :: Text
 caseEscalationDefaultsMissingNode =
   let p = object ["detail" .= ("unresolved" :: Text)]
       decoded = decodeEvent "escalation" "dev-tree/fallback-key" p
-  in verify "escalation-defaults-node-to-key-when-absent" (decoded == Just (EscalationEvent (JournalKey "dev-tree/fallback-key") "dev-tree/fallback-key" "unresolved"))
+  in verify "escalation-missing-node-is-refused" (decoded == Nothing)
 
 caseUnknownKindIsNothing :: Text
 caseUnknownKindIsNothing = verify "unknown-kind-decodes-to-nothing" (decodeEvent "sprocket" "k" (object []) == Nothing)

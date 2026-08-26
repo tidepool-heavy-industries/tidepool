@@ -64,7 +64,8 @@ import Tidepool.QQ (fmt)
 import Tidepool.Resume (ResumeFold (..), isResumed)
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
-import Workers (boundaryViolations, branchOf, runChecks, gitIn)
+import Git (isAncestor)
+import Workers (boundaryViolations, branchOf, runChecks)
 
 -- | What the coalgebra decided, handed to the algebra unchanged.  The
 -- resumed/adopted terminal form lives here because Resume is its only owner.
@@ -332,9 +333,15 @@ amendPlan d p = fst (amendPlanChecked d p)
 
 amendPlanChecked :: ReplanDecision -> DevPlan -> (DevPlan, Maybe Text)
 amendPlanChecked d p = case d.amendedSubtree of
-  Just sub -> case subtreeViolation sub of
-    Nothing -> (sub {nodeName = nodeName p}, Nothing)
-    Just why -> (instructionOnly, Just why)
+  -- Validation runs on the RENAMED subtree — the name overwrite is part of
+  -- what gets consumed, so validating before it would let the forced root
+  -- name collide with a child the model happened to name after the failed
+  -- node itself.
+  Just sub ->
+    let renamed = sub {nodeName = nodeName p}
+     in case subtreeViolation renamed of
+          Nothing -> (renamed, Nothing)
+          Just why -> (instructionOnly, Just why)
   Nothing -> (instructionOnly, Nothing)
   where
     instructionOnly
@@ -342,27 +349,25 @@ amendPlanChecked d p = case d.amendedSubtree of
       | otherwise = p {nodeTask = d.amendedInstruction}
     subtreeViolation sub =
       boundaryEscape sub `orElse` duplicateName sub
+    -- The subtree's write set must stay inside what the FAILED NODE was
+    -- allowed to write — its product boundary plus its tolerated hygiene
+    -- paths.  (Tolerated entries like README.md legitimately live outside
+    -- the product boundary; requiring them inside it rejected honest
+    -- restructures.)
     boundaryEscape sub
-      | null (nodeBoundary p) = Nothing
-      | otherwise =
-          listToMaybe
-            [ [fmt|replacement subtree path {b} escapes the failed node's boundary|]
-            | b <- allBoundaries sub
-            , not (any (contains b) (nodeBoundary p))
-            ]
-    contains path parent =
-      let np = T.dropWhileEnd (== '/') parent
-       in path == np || (np <> "/") `T.isPrefixOf` path
-    allBoundaries q = nodeBoundary q <> nodeTolerated q <> concatMap allBoundaries (childPlans q)
-    duplicateName sub =
-      let names = allNames sub
-          dupes = [n | (n : _ : _) <- groupSort names]
-       in listToMaybe [[fmt|replacement subtree repeats node name {n}|] | n <- dupes]
-    allNames q = nodeName q : concatMap allNames (childPlans q)
-    groupSort = go . sort
+      | null parentEntries = Nothing
+      | otherwise = case traverse parseRepoPath parentEntries of
+          Left why -> Just [fmt|the failed node's own boundary is unparseable: {why}|]
+          Right parents -> listToMaybe (concatMap (escapes parents) (subtreeWriteable sub))
       where
-        go [] = []
-        go (x : xs) = (x : takeWhile (== x) xs) : go (dropWhile (== x) xs)
+        parentEntries = nodeBoundary p <> nodeTolerated p
+    escapes parents raw = case parseRepoPath raw of
+      Left why -> [[fmt|replacement subtree path {raw} is unparseable: {why}|]]
+      Right b
+        | any (pathWithin b) parents -> []
+        | otherwise -> [[fmt|replacement subtree path {raw} escapes the failed node's boundary|]]
+    duplicateName sub =
+      listToMaybe [[fmt|replacement subtree repeats node name {n}|] | n <- duplicateNames sub]
 
 -- | A split that already happened: replay its recorded plan and child trees.
 replaySplit
@@ -393,7 +398,7 @@ replaySplit hooks fold seed sp = do
 integrationComplete :: ResumeHooks -> ResumeFold -> NodeSeed -> SplitRecord -> Harness Bool
 integrationComplete hooks fold seed sp
   | length doneBranches /= length (childPlans sp.splitPlan) = pure False
-  | otherwise = and <$> traverse isAncestor doneBranches
+  | otherwise = and <$> traverse merged doneBranches
   where
     doneBranches =
       [ branch
@@ -401,10 +406,14 @@ integrationComplete hooks fold seed sp
       , Just branch <- [lookup (nodeName k) sp.splitChildTrees]
       , recordedDone hooks fold branch (nodeName k)
       ]
-    isAncestor b =
-      gitIn seed.seedTree [fmt|merge-base --is-ancestor {b} HEAD|] >>= \case
+    -- 'isAncestor' keeps git's three answers apart; only an OBSERVED
+    -- not-an-ancestor (exit 1) means unmerged.  An infra failure degrades to
+    -- "not complete" — re-unfolding is the recoverable direction — but never
+    -- silently equates a bad object with an honest no.
+    merged b =
+      isAncestor seed.seedTree b "HEAD" >>= \case
+        Right r -> pure r
         Left _ -> pure False
-        Right pr -> pure (ok pr)
 
 -- | A child is complete only when its recorded outcome passes the same ladder
 -- used by the current fold.
@@ -506,35 +515,55 @@ newtype VerifiedOrphan = VerifiedOrphan Outcome
 verifyOrphan :: ResumeFold -> HeadChanged -> Harness VerifiedOrphan
 verifyOrphan fold hc = do
   checks <- runChecks tree p
-  (outside, tolerated) <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
-  pure
-    ( VerifiedOrphan
-        ( Done
-            name
-            []
-            FoldReceipt
-              { receiptNode = name
-              , receiptBranch = branch
-              , receiptSeedHead = hc.hcBaseline
-              , receiptHead = renderGitOid hc.hcFound
-              , receiptHeadMoved = True
-              , receiptChecks = checks
-              , receiptRebases = case lookupEvent RebaseKind branch fold of
-                  Just (_, RebaseEvent {evNote = n}) -> [n]
-                  _ -> []
-              , receiptOutside = outside
-              , receiptCycles = 0
-              , receiptAgentRan = True
-              , receiptReviewed = False
-              , receiptSummary =
-                  [fmt|Adopted work found in this retained worktree at {renderGitOid hc.hcFound}: run {fold.resumeRunId} left it there and crashed before recording an outcome.|]
-              , receiptEvidence =
-                  [fmt|orphaned commits {hc.hcBaseline}..{renderGitOid hc.hcFound}, verified by this orchestrator at that sha|]
-                    : priorEscalationsFor fold branch
-                    <> map ("tolerated: " <>) tolerated
-              }
+  boundary <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
+  case boundary of
+    -- An adoption whose boundary cannot be CHECKED is not verified — the
+    -- word means something.  Loud typed failure; resume surfaces it.
+    Left why ->
+      pure
+        ( VerifiedOrphan
+            ( failedOutcome
+                name
+                (Failure InfraFailure [fmt|{name}: adoption boundary check could not run — {why}|] [])
+                Nothing
+            )
         )
-    )
+    Right (outside, tolerated) ->
+      pure
+        ( VerifiedOrphan
+            ( Done
+                name
+                []
+                FoldReceipt
+                  { receiptNode = name
+                  , receiptBranch = branch
+                  , receiptSeedHead = hc.hcBaseline
+                  , receiptHead = renderGitOid hc.hcFound
+                  , receiptHeadMoved = True
+                  , receiptChecks = checks
+                  , -- The WHOLE journaled rebase history for this branch —
+                    -- a branch that escalated at step 1 and rebased cleanly
+                    -- at step 3 adopts with both facts, not just the last.
+                    receiptRebases =
+                      [n | (k, _, RebaseEvent {evNote = n}) <- eventsOfKind RebaseKind fold, k == branch]
+                  , receiptOutside = outside
+                  , receiptCycles = 0
+                  , -- THIS process ran no agent; the crashed one presumably
+                    -- did, but a receipt records observations, not
+                    -- presumptions.  The commits themselves are the
+                    -- evidence, verified by the checks above.
+                    receiptAgentRan = False
+                  , receiptReviewed = False
+                  , receiptNoOp = Nothing
+                  , receiptSummary =
+                      [fmt|Adopted work found in this retained worktree at {renderGitOid hc.hcFound}: run {fold.resumeRunId} left it there and crashed before recording an outcome.|]
+                  , receiptEvidence =
+                      [fmt|orphaned commits {hc.hcBaseline}..{renderGitOid hc.hcFound}, verified by this orchestrator at that sha|]
+                        : priorEscalationsFor fold branch
+                        <> map ("tolerated: " <>) tolerated
+                  }
+            )
+        )
   where
     tree = hc.hcTree
     p = hc.hcPlan
@@ -545,10 +574,14 @@ verifyOrphan fold hc = do
 adopt :: VerifiedOrphan -> Outcome
 adopt (VerifiedOrphan o) = o
 
+-- | EVERY journaled escalation for this branch, not just the last one under
+-- the key.
 priorEscalationsFor :: ResumeFold -> Text -> [Text]
-priorEscalationsFor fold branch = case lookupEvent EscalationKind branch fold of
-  Just (_, EscalationEvent {evEscDetail = why}) -> [[fmt|prior escalation: {why}|]]
-  _ -> []
+priorEscalationsFor fold branch =
+  [ [fmt|prior escalation: {why}|]
+  | (k, _, EscalationEvent {evEscDetail = why}) <- eventsOfKind EscalationKind fold
+  , k == branch
+  ]
 
 -- | The retained root worktree's branch, named structurally by the fold.
 rootBranchOf :: ResumeFold -> Text -> Maybe Text

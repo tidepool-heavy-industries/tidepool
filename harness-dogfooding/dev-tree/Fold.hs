@@ -41,6 +41,7 @@ import DevTreeJournal
   , JournalKey (..)
   , recordEvent
   )
+import Git
 import HarnessTypes
 import qualified Micro
 import Micro (NodeSeed (..))
@@ -72,9 +73,6 @@ import Workers
   ( SnapshotResult (..)
   , boundaryViolations
   , branchOf
-  , checkFailed
-  , firstLine
-  , gitIn
   , runChecks
   , runWorker
   , snapshotFailureMaybe
@@ -203,24 +201,39 @@ outcomeJournalKey o = case o of
 foldLadder :: Outcome -> Outcome
 foldLadder o = case o of
   Done {outcomeNode = n, doneReceipt = r}
-    | r.receiptAgentRan && not r.receiptHeadMoved ->
-        failedOutcome n (Failure NoHeadMove [fmt|{n} ran an agent cycle but HEAD never moved|] []) (Just r)
+    -- A headless agent cycle fails UNLESS the receipt carries a no-op
+    -- justification — the bounded model verdict 'finishFold' obtained over
+    -- the worker's own evidence ("was there genuinely nothing to change?").
+    | r.receiptAgentRan && not r.receiptHeadMoved && isNothing r.receiptNoOp ->
+        failedOutcome n (Failure NoHeadMove [fmt|{n} ran an agent cycle but HEAD never moved, and no no-op justification was granted|] []) (Just r)
     | not (null r.receiptOutside) ->
         failedOutcome n (Failure BoundaryViolated [fmt|{n} changed paths outside its boundary|] r.receiptOutside) (Just r)
-    | not (null (failing r)) ->
+    -- A check that could not RUN earns no trust either, but it indicts the
+    -- rubric or environment, not the work — its own kind says so.
+    | not (null (unrunnable r)) ->
+        failedOutcome
+          n
+          ( Failure
+              InfraFailure
+              [fmt|{length (unrunnable r)} of {length r.receiptChecks} checks could not run at {r.receiptHead} (the check, not the work, is indicted)|]
+              (map checkCommand (unrunnable r))
+          )
+          (Just r)
+    | not (null (red r)) ->
         failedOutcome
           n
           ( Failure
               ChecksFailed
-              [fmt|{length (failing r)} of {length r.receiptChecks} checks failed at {r.receiptHead}|]
-              (map checkCommand (failing r))
+              [fmt|{length (red r)} of {length r.receiptChecks} checks failed at {r.receiptHead}|]
+              (map checkCommand (red r))
           )
           (Just r)
     | otherwise -> o
   Failed {} -> o
   Skipped {} -> o
   where
-    failing r = filter checkFailed r.receiptChecks
+    red r = filter checkRed r.receiptChecks
+    unrunnable r = filter checkUnrunnable r.receiptChecks
 
 -- | A leaf: one implementation worker (or an on-the-fly micro-split when the
 -- plan asks for one), then the ladder.
@@ -406,10 +419,13 @@ onChildFailure tree p s o rest acc = case nodeOnFailure p of
       before <- worktreeHead s.seedTree
       let child = nodeName s.seedPlan
           retryName = child <> "-retry"
+          -- Real newlines, concatenated OUTSIDE the quoter: the fmt QQ
+          -- passes backslash escapes through as literal characters.
           retryPrompt =
             workerPrompt s.seedPlan
-              <> [fmt|\n\nPrevious attempt failed for {child}: {failureText o}. Re-check that failure and complete the task.|]
-              <> [fmt|{operatorAmendment}|]
+              <> "\n\n"
+              <> [fmt|Previous attempt failed for {child}: {failureText o}. Re-check that failure and complete the task.|]
+              <> operatorAmendment
           spent = acc {accCycles = acc.accCycles + 1}
           operatorAmendment
             | T.null (T.strip operatorNote) = ""
@@ -472,12 +488,16 @@ failureText o = case o of
 
 -- | Bring every still-live sibling tip onto this node's new HEAD.
 --
--- Tier 1 runs for all of them first and costs nothing when it works.  Tier 2
--- then spawns a resolution agent per CONFLICTED tip — all of them at once,
--- through 'spawnAsync', because they are independent worktrees and there is no
--- reason to serialize inference.  They are awaited in PLAN order, so
--- completion order is not an input to any decision here.  Tier 3 is
--- 'escalate': a typed value the parent's policy reads, never an exception.
+-- Tier 1 runs for all of them first and costs nothing when it works.  A tip
+-- whose git MACHINERY failed (bad object, unreachable repository) escalates
+-- directly — an inference cycle is never spent inside a worktree where git
+-- demonstrably cannot run.  Tier 2 then spawns a resolution agent per
+-- genuinely CONFLICTED tip — all of them at once, through 'spawnAsync',
+-- because they are independent worktrees and there is no reason to serialize
+-- inference — each briefed with the actual conflicted paths and diagnosis.
+-- They are awaited in PLAN order, so completion order is not an input to any
+-- decision here.  Tier 3 is 'escalate': a typed value the parent's policy
+-- reads, never an exception.
 --
 -- Convergence: the task is always "rebase onto the parent's CURRENT tip", so
 -- arrival order changes how much work a rebase does, never where it ends up.
@@ -485,44 +505,55 @@ cascade :: DevPlan -> GitOid -> [NodeSeed] -> FoldAcc -> Harness FoldAcc
 cascade p onto seeds acc0 = do
   attempts <- traverse (mechanicalRebase onto) seeds
   let clean = [note | (_, Right note) <- attempts]
-      conflicted = [s | (s, Left _) <- attempts]
+      conflicted = [(s, paths, diag) | (s, Left (BlockConflict paths diag)) <- attempts]
+      broken = [(s, why) | (s, Left (BlockInfra why)) <- attempts]
+  accB <-
+    foldM
+      (\acc (s, why) -> escalate p s [fmt|rebase machinery failed: {why}|] acc)
+      acc0 {accNotes = acc0.accNotes <> clean}
+      broken
   handles <- traverse (spawnResolution onto) conflicted
-  awaitResolutions p onto (zip conflicted handles) acc0 {accNotes = acc0.accNotes <> clean}
+  awaitResolutions p onto (zip [s | (s, _, _) <- conflicted] handles) accB
 
--- | Tier 1.  A tip the new head is already an ancestor of needs nothing at all
--- ('RebaseCurrent'); otherwise plain @git rebase@, aborted on any nonzero exit
--- so a conflicted worktree is never left mid-rebase for the next tier.
-mechanicalRebase :: GitOid -> NodeSeed -> Harness (NodeSeed, Either Text RebaseNote)
+-- | Why tier 1 did not land this tip: a genuine conflict (tier 2's job,
+-- with the evidence in hand) or broken git machinery (never an agent's job).
+data RebaseBlock
+  = BlockConflict [Text] Text
+  | BlockInfra Text
+
+-- | Tier 1, through the typed 'attemptRebase' seam.  A tip the new head is
+-- already an ancestor of needs nothing at all ('RebaseCurrent'); a conflict
+-- arrives aborted-and-verified with its unmerged paths captured.
+mechanicalRebase :: GitOid -> NodeSeed -> Harness (NodeSeed, Either RebaseBlock RebaseNote)
 mechanicalRebase onto s =
-  gitIn tree [fmt|merge-base --is-ancestor {ontoText} HEAD|] >>= \case
-    Left e -> pure (s, Left e)
-    Right ancestry
-      | ok ancestry -> pure (s, Right (RebaseNote branch ontoText RebaseCurrent))
-      | otherwise ->
-          gitIn tree [fmt|rebase {ontoText}|] >>= \case
-            Left e -> pure (s, Left e)
-            Right pr
-              | ok pr -> do
-                  recordEvent (RebaseEvent (JournalKey branch) (RebaseNote branch ontoText RebaseClean))
-                  pure (s, Right (RebaseNote branch ontoText RebaseClean))
-              | otherwise -> do
-                  _ <- gitIn tree "rebase --abort"
-                  pure (s, Left (firstLine pr.stderr))
+  attemptRebase tree ontoText >>= \case
+    RebaseUnneeded -> pure (s, Right (RebaseNote branch (Just ontoText) RebaseCurrent))
+    Rebased -> do
+      recordEvent (RebaseEvent (JournalKey branch) (RebaseNote branch (Just ontoText) RebaseClean))
+      pure (s, Right (RebaseNote branch (Just ontoText) RebaseClean))
+    RebaseConflicted paths diag -> pure (s, Left (BlockConflict (map renderRepoPath paths) diag))
+    RebaseBroken f -> pure (s, Left (BlockInfra (renderGitFailure f)))
   where
     tree = s.seedTree
     branch = branchOf tree
     ontoText = renderGitOid onto
 
 -- | Tier 2, started.  One ephemeral agent per conflicted tip, in the worktree
--- that tip owns — isolation is unchanged, one agent per worktree.
-spawnResolution :: GitOid -> NodeSeed -> Harness (Either SpawnError (AgentHandle ResolutionResult))
-spawnResolution onto s =
+-- that tip owns — isolation is unchanged, one agent per worktree.  The brief
+-- carries tier 1's own evidence: the conflicted paths and the rebase's
+-- diagnosis, not just "it conflicted".
+spawnResolution :: GitOid -> (NodeSeed, [Text], Text) -> Harness (Either SpawnError (AgentHandle ResolutionResult))
+spawnResolution onto (s, paths, diag) =
   spawnAsync @ResolutionResult
     ( spawnSpecIn
         (worktreeId s.seedTree)
         (nodeName s.seedPlan <> "-rebase")
-        (resolutionPrompt s.seedPlan (renderGitOid onto) Nothing)
+        (resolutionPrompt s.seedPlan (renderGitOid onto) (Just evidence))
     )
+  where
+    evidence = case paths of
+      [] -> [fmt|The mechanical attempt's diagnosis: {diag}|]
+      ps -> [fmt|The mechanical attempt conflicted on: {T.intercalate ", " ps}. Diagnosis: {diag}|]
 
 -- | Tier 2, awaited — in PLAN order, whatever order they finish in.
 --
@@ -545,7 +576,10 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
       awaitAgent handle >>= \case
         Left err -> step (Left [fmt|resolution cycle failed: {renderSpawnError err}|]) 1
         Right (_, rr)
-          | rr.resolved -> step (Right ()) 1
+          | rr.resolved ->
+              verifyResolved s onto >>= \case
+                Nothing -> step (Right ()) 1
+                Just why -> step (Left [fmt|agent claimed resolved, but {why}|]) 1
           | otherwise -> step (Left [fmt|unresolved: {rr.resolutionNotes}|]) 1
   where
     name = nodeName s.seedPlan
@@ -553,7 +587,7 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
     step verdict spent = do
       next <- case verdict of
         Right () -> do
-          let note = RebaseNote (branchOf s.seedTree) (renderGitOid onto) RebaseResolved
+          let note = RebaseNote (branchOf s.seedTree) (Just (renderGitOid onto)) RebaseResolved
           recordEvent (RebaseEvent (JournalKey (branchOf s.seedTree)) note)
           pure acc {accNotes = acc.accNotes <> [note], accCycles = acc.accCycles + spent}
         Left why -> do
@@ -563,13 +597,29 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
         Just _ -> reapRest >> awaitResolutions p onto rest next
         Nothing -> awaitResolutions p onto rest next
 
+-- | A resolution agent's @resolved@ is a CLAIM; the receipt is git's.
+-- Resolved means the rebase target is now an ancestor of HEAD (an agent
+-- that "resolved" via @rebase --skip@ or @reset --hard@ fails this — the
+-- branch would be the parent, its own commits gone) AND the worktree is
+-- clean (nothing parked mid-rebase, nothing uncommitted).
+verifyResolved :: NodeSeed -> GitOid -> Harness (Maybe Text)
+verifyResolved s onto =
+  isAncestor s.seedTree (renderGitOid onto) "HEAD" >>= \case
+    Left f -> pure (Just (renderGitFailure f))
+    Right False -> pure (Just [fmt|{renderGitOid onto} is not an ancestor of HEAD|])
+    Right True ->
+      statusEntries s.seedTree >>= \case
+        Left f -> pure (Just (renderGitFailure f))
+        Right [] -> pure Nothing
+        Right entries -> pure (Just [fmt|the worktree is still dirty ({T.intercalate ", " entries})|])
+
 -- | Tier 3.  An unresolved conflict is not an exception and does not stop the
 -- fold: the parent's failure policy — an exhaustive case the compiler audits —
 -- turns it into a retry, a planning agent session, an operator form, or an
 -- abandonment, and whatever it decides rides on as data.
 escalate :: DevPlan -> NodeSeed -> Text -> FoldAcc -> Harness FoldAcc
 escalate p s why acc = do
-  let note = RebaseNote branch "-" RebaseEscalation
+  let note = RebaseNote branch Nothing RebaseEscalation
       base = acc {accNotes = acc.accNotes <> [note]}
   recordEvent (EscalationEvent (JournalKey branch) name why)
   applyPolicy p s why >>= \case
@@ -623,7 +673,12 @@ applyPolicy p s why = case nodeOnFailure p of
           >>= \case
             Left err -> pure (PolicyEscalated [fmt|{why} — retry spawn failed: {renderSpawnError err}|] 1)
             Right (_, rr)
-              | rr.resolved -> pure (PolicyResolved 1)
+              | rr.resolved ->
+                  -- Same discipline as 'awaitResolutions': the claim is
+                  -- verified mechanically before policy treats it as fact.
+                  verifyResolved s h >>= \case
+                    Nothing -> pure (PolicyResolved 1)
+                    Just claimWhy -> pure (PolicyEscalated [fmt|{why} — retry claimed resolved, but {claimWhy}|] 1)
               | otherwise -> pure (PolicyEscalated [fmt|{why} — retry unresolved: {rr.resolutionNotes}|] 1)
 
 -- | Merge one child branch into this node.  Mechanical first — a clean merge
@@ -636,7 +691,7 @@ mergeChild tree p s =
     Left err -> pure (Left (renderWorktreeError err))
     Right (Conflict paths) -> pure (Left [fmt|merge conflict: {T.intercalate ", " paths}|])
     Right (Merged _commit) ->
-      pure (Right (RebaseNote (renderBranchName childBranch) (renderBranchName tree.handleReceipt.branch) RebaseClean))
+      pure (Right (RebaseNote (renderBranchName childBranch) (Just (renderBranchName tree.handleReceipt.branch)) RebaseClean))
   where
     childBranch = s.seedTree.handleReceipt.branch
     message = [fmt|fold {renderBranchName childBranch} into {nodeName p}|]
@@ -664,20 +719,37 @@ finishFold
   -> Maybe Failure
   -> Harness Outcome
 finishFold seed wr (before, after) notes escalations cycles agentRan checks forcedFailure = do
-  (outside, tolerated) <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
+  boundary <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
+  -- An UNCHECKABLE boundary is an infra failure of this fold, never a clean
+  -- report: the receipt records an empty outside list (nothing was observed)
+  -- and the outcome fails with the reason.
+  let (outside, tolerated, boundaryFailure) = case boundary of
+        Right (out, tol) -> (out, tol, Nothing)
+        Left why -> ([], [], Just (Failure InfraFailure [fmt|{name}: boundary could not be checked — {why}|] []))
+      headMoved = renderGitOid before /= renderGitOid after
+  -- A headless agent cycle raises a bounded semantic question deterministic
+  -- code cannot answer — "did the agent do nothing, or was there nothing to
+  -- do?" — so it is deferred to a model over the worker's own evidence.
+  -- Asked only when the cycle would otherwise be judged; the verdict rides
+  -- the receipt and 'foldLadder' reads it.
+  noOp <-
+    if agentRan && not headMoved && isNothing forcedFailure && isNothing boundaryFailure
+      then judgeNoOp p wr
+      else pure Nothing
   let receipt =
         FoldReceipt
           { receiptNode = name
           , receiptBranch = branchOf tree
           , receiptSeedHead = renderGitOid before
           , receiptHead = renderGitOid after
-          , receiptHeadMoved = renderGitOid before /= renderGitOid after
+          , receiptHeadMoved = headMoved
           , receiptChecks = checks
           , receiptRebases = notes
           , receiptOutside = outside
           , receiptCycles = cycles
           , receiptAgentRan = agentRan
           , receiptReviewed = False
+          , receiptNoOp = noOp
           , receiptSummary = wr.workSummary
           , receiptEvidence =
               wr.evidence
@@ -685,14 +757,26 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks forc
                 <> map ("friction: " <>) wr.frictionNotes
                 <> escalations
                 <> map ("tolerated: " <>) tolerated
+                <> maybeToList (("no-op judged legitimate: " <>) <$> noOp)
           }
-  pure $ case forcedFailure of
+  pure $ case forcedFailure `orElseFailure` boundaryFailure of
     Just failure -> failedOutcome name failure (Just receipt)
     Nothing -> Done name [] receipt
   where
     tree = seed.seedTree
     p = seed.seedPlan
     name = nodeName p
+    orElseFailure (Just a) _ = Just a
+    orElseFailure Nothing b = b
+
+-- | The bounded no-op question, one model call, verdict as data.
+judgeNoOp :: DevPlan -> WorkerResult -> Harness (Maybe Text)
+judgeNoOp p wr = do
+  verdict <- runLLMTurn @NoOpVerdict (noOpVerdictPrompt p wr)
+  pure $
+    if verdict.noOpLegitimate
+      then Just verdict.noOpReason
+      else Nothing
 
 -- | Spawn the optional integration worker through the shared worker seam.
 spawnIntegration
@@ -713,10 +797,8 @@ mechanicalResult acc =
   WorkerResult
     { workSummary =
         [fmt|Mechanical fold: {acc.accMerged} child branches merged with no conflicts, {length acc.accNotes} rebase steps, 0 agent cycles.|]
-    , evidence = map renderNote acc.accNotes
+    , evidence = map renderRebaseNote acc.accNotes
     , readyForIntegration = True
     , obstacles = []
     , frictionNotes = []
     }
-  where
-    renderNote n = [fmt|{n.rebaseBranch} onto {n.rebaseOnto}: {show n.rebaseTier}|]

@@ -18,7 +18,7 @@ leafBranch :: Text
 leafBranch = "dev-tree/leaf"
 
 mkReceipt :: Text -> Text -> FoldReceipt
-mkReceipt node branch = FoldReceipt { receiptNode = node, receiptBranch = branch, receiptSeedHead = "seed0000", receiptHead = "head1111", receiptHeadMoved = True, receiptChecks = [], receiptRebases = [], receiptOutside = [], receiptCycles = 1, receiptAgentRan = True, receiptReviewed = False, receiptSummary = "mock done", receiptEvidence = [] }
+mkReceipt node branch = FoldReceipt { receiptNode = node, receiptBranch = branch, receiptSeedHead = "seed0000", receiptHead = "head1111", receiptHeadMoved = True, receiptChecks = [], receiptRebases = [], receiptOutside = [], receiptCycles = 1, receiptAgentRan = True, receiptReviewed = False, receiptNoOp = Nothing, receiptSummary = "mock done", receiptEvidence = [] }
 
 mkEntry :: Int -> Text -> Text -> Value -> ResumeEntry
 mkEntry sq kind key payload = ResumeEntry { resumeSeq = sq, resumeKind = kind, resumeKey = key, resumePayload = payload }

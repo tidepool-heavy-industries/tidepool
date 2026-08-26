@@ -23,6 +23,7 @@ module Prompts
   , integrationPrompt
   , resolutionPrompt
   , replanPrompt
+  , noOpVerdictPrompt
   , checkLines
   , boundaryLines
   , bulletLines
@@ -32,7 +33,6 @@ import qualified Data.Text as T
 import HarnessTypes
 import Tidepool.Prelude
 import Tidepool.QQ (fmt)
-import Workers (checkFailed)
 
 proposePrompt :: Text -> Budget -> Text -> Text
 proposePrompt requestedGoal b grounding = [fmt|
@@ -308,8 +308,10 @@ integrationPrompt p mergedCount escalationLines checks = [fmt|
 |]
   where
     escLines = bulletLines escalationLines
-    failLines = bulletLines [c.checkCommand <> " (exit " <> show c.checkExit <> ")" | c <- checks, checkFailed c]
-    integrationCheckLines = bulletLines [c.checkCommand <> " (exit " <> show c.checkExit <> ")" | c <- checks]
+    -- The DIAGNOSIS rides along ('renderCheck'): an agent asked to repair a
+    -- failure it has been shown nothing about will "fix" the wrong thing.
+    failLines = bulletLines [renderCheck c | c <- checks, checkFailed c]
+    integrationCheckLines = bulletLines (map renderCheck checks)
 
 resolutionPrompt :: DevPlan -> Text -> Maybe Text -> Text
 resolutionPrompt p onto amendment = [fmt|
@@ -355,19 +357,50 @@ replanPrompt p child why = [fmt|
   amendedSubtree to a replacement DevPlan instead: the failed node re-enters
   as that structure (its root name is forced back to the failed node's own,
   so name it freely). Give each child a concrete deliverable, its own checks,
-  and boundary paths within the failed node's boundary; depth and width are
-  still bounded by the run's budget. Use Nothing when a rephrased
-  instruction is enough — a subtree costs one worktree per child.
+  and boundary paths within the failed node's own boundary or tolerated
+  paths; depth and width are still bounded by the run's budget. Use Nothing
+  when a rephrased instruction is enough — a subtree costs one worktree per
+  child.
+|]
+
+-- | The headless-cycle question 'Fold.judgeNoOp' asks: an agent cycle ran
+-- and HEAD never moved.  That is either an honest "nothing to change" or a
+-- failed cycle dressed in a green summary, and only the evidence can tell.
+noOpVerdictPrompt :: DevPlan -> WorkerResult -> Text
+noOpVerdictPrompt p wr = [fmt|
+  An implementation agent ran a full cycle for node {nodeName p} and left NO
+  commit — HEAD never moved.
+
+  Task: {nodeTask p}
+  The agent's summary: {wr.workSummary}
+  The agent's evidence:
+{bulletLines wr.evidence}
+  Obstacles it reported:
+{bulletLines wr.obstacles}
+
+  Answer with a NoOpVerdict: noOpLegitimate (true ONLY when the evidence
+  shows the task genuinely required no edit — already satisfied, or
+  verification-only) and a one-sentence noOpReason. When in doubt, answer
+  false: an unearned pass here skips every later check.
 |]
 
 checkLines :: DevPlan -> Text
 checkLines p = bulletLines (nodeChecks p)
 
 boundaryLines :: DevPlan -> Text
-boundaryLines p =
-  bulletLines (nodeBoundary p)
-    <> "\n  Tolerated paths may be touched as hygiene and are reported informationally, but they are not product paths:\n"
-    <> bulletLines (nodeTolerated p)
+boundaryLines p = boundaryBlock <> toleratedBlock
+  where
+    -- "(none)" under "must stay inside these paths" reads as "touch
+    -- nothing" — the exact inverse of what an empty boundary means.  Say the
+    -- true thing instead, and mention the tolerated tier only when it exists.
+    boundaryBlock = case nodeBoundary p of
+      [] -> "  (unrestricted — this node declares no boundary)"
+      bs -> bulletLines bs
+    toleratedBlock = case nodeTolerated p of
+      [] -> ""
+      ts ->
+        "\n  Tolerated paths may be touched as hygiene and are reported informationally, but they are not product paths:\n"
+          <> bulletLines ts
 
 bulletLines :: [Text] -> Text
 bulletLines [] = "  (none)"
