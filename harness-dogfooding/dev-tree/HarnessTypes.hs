@@ -424,6 +424,18 @@ data FailureKind
   | SnapshotFailed
       { snapshotName :: Text
       }
+  | -- | An interior node whose fold left children unmerged — the verdict
+    -- CARRIES the per-child ledger instead of erasing it into a bare Done
+    -- (the sprint-25 defect: a checkless integration root folded Done over
+    -- three failed children, which both lied and structurally blocked the
+    -- amendment-rescue re-entry, since rescue keys off a non-Done root).
+    -- Partial delivery is a live, resumable state, not a terminal crash:
+    -- merged children are already folded and harvestable, pending ones
+    -- re-enter on resume with their journaled amendments.
+    ChildrenPending
+      { pendingChildren :: [Text]
+      , mergedChildren  :: [Text]
+      }
   deriving (Generic, ToJSON, FromJSON, Show, Eq)
 
 -- | The typed receipt every fold carries — the trust ladder and
@@ -550,6 +562,8 @@ renderFailureKind kind = case kind of
   MicrotasksIncomplete {acceptedMicrotasksRan = ran} ->
     [fmt|MicrotasksIncomplete ({ran} accepted microtasks ran)|]
   SnapshotFailed {snapshotName = snapshot} -> [fmt|SnapshotFailed ({snapshot})|]
+  ChildrenPending {pendingChildren = pend, mergedChildren = merged} ->
+    [fmt|ChildrenPending (merged: {T.intercalate ", " merged}; pending: {T.intercalate ", " pend})|]
   _ -> show kind
 
 -- | Build a 'Failed' outcome.

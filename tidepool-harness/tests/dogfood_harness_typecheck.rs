@@ -424,7 +424,7 @@ fn dev_tree_journal_event_round_trips() {
     );
     assert_eq!(
         lines.len(),
-        24,
-        "expected 24 journal round-trip checks, got:\n{report}"
+        25,
+        "expected 25 journal round-trip checks, got:\n{report}"
     );
 }

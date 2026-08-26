@@ -15,6 +15,9 @@
 module Fold
   ( PolicyOutcome (..)
   , FoldAcc (..)
+  , Escalation (..)
+  , renderEscalation
+  , escMergeClass
   , integrate
   , stampFold
   , journalOutcome
@@ -86,14 +89,39 @@ data PolicyOutcome
 -- | The interior fold's accumulator, threaded in plan order.
 data FoldAcc = FoldAcc
   { accNotes   :: [RebaseNote]
-  , accEsc     :: [Text]
+  , accEsc     :: [Escalation]
   , accCycles  :: Int
   , accMerged  :: Int
+  , accMergedNames :: [Text]
   , accAbandon :: Maybe Text
   }
 
+-- | One escalation the interior fold carries forward as DATA — the class is
+-- load-bearing (sprint-25 lesson learned live).  Merge-class escalations may
+-- summon the integration agent, whose remit is mechanical conflict repair at
+-- the merged head.  Child-pending ones NEVER do: a failed child's work
+-- re-enters through resume with its journaled amendment — it is not
+-- hand-merged at the root.  When these were untyped Text, the integration
+-- agent was handed three failed children's stories as prose and dutifully
+-- cherry-picked their unvalidated work past the fold ladder.
+data Escalation
+  = EscMerge Text
+  | EscChildPending
+      { escChild :: Text
+      , escWhy   :: Text
+      }
+
+renderEscalation :: Escalation -> Text
+renderEscalation = \case
+  EscMerge t -> t
+  EscChildPending {escChild = c, escWhy = w} -> [fmt|{c}: {w}|]
+
+escMergeClass :: Escalation -> Bool
+escMergeClass EscMerge {} = True
+escMergeClass EscChildPending {} = False
+
 emptyAcc :: FoldAcc
-emptyAcc = FoldAcc {accNotes = [], accEsc = [], accCycles = 0, accMerged = 0, accAbandon = Nothing}
+emptyAcc = FoldAcc {accNotes = [], accEsc = [], accCycles = 0, accMerged = 0, accMergedNames = [], accAbandon = Nothing}
 
 -- The algebra — how to combine
 -- ---------------------------------------------------------------------------
@@ -236,7 +264,9 @@ interiorFold seed workKids denied kids = do
   before <- worktreeHead tree
   acc <- foldChildren tree p (zip workKids kids) emptyAcc {accEsc = deniedEsc}
   checks0 <- runChecks tree p
-  let needsAgent = not (null acc.accEsc) || any checkFailed checks0
+  -- Only MERGE-class escalations summon the integration agent; a pending
+  -- child is resume's problem, never a hand-merge at this head.
+  let needsAgent = any escMergeClass acc.accEsc || any checkFailed checks0
   (wr, agentCycles, agentRan, snapshotFailure) <-
     if not needsAgent
       then pure (mechanicalResult acc, 0, False, Nothing)
@@ -245,7 +275,7 @@ interiorFold seed workKids denied kids = do
           Left err ->
             pure
               ( mechanicalResult acc
-                  {accEsc = acc.accEsc <> [[fmt|integration spawn failed: {renderSpawnError err}|]]}
+                  {accEsc = acc.accEsc <> [EscMerge [fmt|integration spawn failed: {renderSpawnError err}|]]}
               , 0
               , False
               , Nothing
@@ -260,7 +290,7 @@ interiorFold seed workKids denied kids = do
       wr
       (before, after)
       acc.accNotes
-      (maybeToList acc.accAbandon <> acc.accEsc)
+      (maybeToList acc.accAbandon <> map renderEscalation acc.accEsc)
       (acc.accCycles + agentCycles)
       agentRan
       checks
@@ -268,14 +298,31 @@ interiorFold seed workKids denied kids = do
   -- An abandoned subtree is the one node-local verdict the receipt cannot
   -- carry: the evidence is fine as far as it goes, and what failed is that a
   -- policy chose to stop.  Everything else this fold is worth is 'foldLadder''s.
+  let pendingKids = [e.escChild | e@EscChildPending {} <- acc.accEsc]
   pure $ case (acc.accAbandon, folded) of
     (Just why, Done {doneReceipt = r}) ->
       failedOutcome (nodeName p) (Failure ChildrenFailed why []) (Just r)
+    -- VERDICT HONESTY: a fold that left children unmerged is not Done, it is
+    -- a partial delivery carrying the per-child ledger.  Non-Done keeps the
+    -- run alive so resume can re-enter the pending children with their
+    -- journaled amendments; the merged children are already folded and
+    -- harvestable.  A bare Done here erased that ledger (sprint 25) and
+    -- structurally blocked the rescue path.
+    (Nothing, Done {doneReceipt = r})
+      | not (null pendingKids) ->
+          failedOutcome
+            (nodeName p)
+            ( Failure
+                (ChildrenPending {pendingChildren = pendingKids, mergedChildren = acc.accMergedNames})
+                [fmt|{length pendingKids} of {length kids} children unmerged — pending amendment/resume|]
+                []
+            )
+            (Just r)
     _ -> folded
   where
     tree = seed.seedTree
     p = seed.seedPlan
-    deniedEsc = map ("child worktree denied — " <>) denied
+    deniedEsc = [EscChildPending d "child worktree denied" | d <- denied]
 
 -- | Walk the children in PLAN order: merge the ones that are done, cascade the
 -- new parent tip to every sibling still ahead of us, and carry everything else
@@ -291,7 +338,7 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
   Just _ ->
     -- Abandoned: the remaining siblings are not merged, and saying so is the
     -- record.  Their branches survive in retained worktrees either way.
-    foldChildren tree p rest acc {accEsc = acc.accEsc <> [[fmt|{childName}: not merged (subtree abandoned)|]]}
+    foldChildren tree p rest acc {accEsc = acc.accEsc <> [EscChildPending childName "not merged (subtree abandoned)"]}
   Nothing
     | not (outcomeIsDone o) -> do
         next <- onChildFailure tree p s o rest acc
@@ -309,7 +356,12 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
             -- branch this node has already decided not to fold would spend a
             -- resolution cycle on work nobody is going to use.
             let ahead = [sib | (sib, out) <- rest, outcomeIsDone out]
-            cascaded <- cascade p newHead ahead acc {accNotes = acc.accNotes <> [note], accMerged = acc.accMerged + 1}
+            cascaded <-
+              cascade p newHead ahead acc
+                { accNotes = acc.accNotes <> [note]
+                , accMerged = acc.accMerged + 1
+                , accMergedNames = acc.accMergedNames <> [childName]
+                }
             foldChildren tree p rest cascaded
   where
     childName = nodeName s.seedPlan
@@ -322,30 +374,31 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
 -- fold's.  A non-leaf retry remains the rebase-policy-shaped escalation it was.
 onChildFailure :: WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> [(NodeSeed, Outcome)] -> FoldAcc -> Harness FoldAcc
 onChildFailure tree p s o rest acc = case nodeOnFailure p of
-  Abandon -> pure acc {accAbandon = Just why, accEsc = acc.accEsc <> [why]}
+  Abandon -> pure acc {accAbandon = Just why, accEsc = acc.accEsc <> [childEsc ""]}
   Replan -> do
     decision <- runLLMTurn @ReplanDecision (replanPrompt p s.seedPlan why)
     recordEvent (ReplanEvent (JournalKey (branchOf s.seedTree)) decision)
     pure $
       if decision.abandonSubtree
-        then acc {accAbandon = Just (why <> " — replan abandoned"), accEsc = acc.accEsc <> [why]}
+        then acc {accAbandon = Just (why <> " — replan abandoned"), accEsc = acc.accEsc <> [childEsc " — replan abandoned"]}
         else case decision.amendedSubtree of
           Just sub ->
-            acc {accEsc = acc.accEsc <> [[fmt|{why} — replanned as a restructured subtree ({length (childPlans sub)} children); re-entry consumes it|]]}
+            acc {accEsc = acc.accEsc <> [childEsc [fmt| — replanned as a restructured subtree ({length (childPlans sub)} children); re-entry consumes it|]]}
           Nothing ->
-            acc {accEsc = acc.accEsc <> [[fmt|{why} — replanned: {decision.amendedInstruction}|]]}
+            acc {accEsc = acc.accEsc <> [childEsc [fmt| — replanned: {decision.amendedInstruction}|]]}
   AskOperator ->
     askUser @Triage >>= \t -> case t.triageAction of
-      TriageAbandon -> pure acc {accAbandon = Just (why <> " — operator abandoned"), accEsc = acc.accEsc <> [why]}
+      TriageAbandon -> pure acc {accAbandon = Just (why <> " — operator abandoned"), accEsc = acc.accEsc <> [childEsc " — operator abandoned"]}
       TriageRetry
         | retryableLeaf -> retryLeaf t.triageNote
-        | otherwise -> pure acc {accEsc = acc.accEsc <> [[fmt|{why} — operator: {t.triageNote}|]]}
-      TriageSkip -> pure acc {accEsc = acc.accEsc <> [[fmt|{why} — operator: {t.triageNote}|]]}
+        | otherwise -> pure acc {accEsc = acc.accEsc <> [childEsc [fmt| — operator: {t.triageNote}|]]}
+      TriageSkip -> pure acc {accEsc = acc.accEsc <> [childEsc [fmt| — operator: {t.triageNote}|]]}
   Retry
     | retryableLeaf -> retryLeaf ""
-    | otherwise -> pure acc {accEsc = acc.accEsc <> [why]}
+    | otherwise -> pure acc {accEsc = acc.accEsc <> [childEsc ""]}
   where
     why = [fmt|{outcomeNodeName o}: {failureText o}|]
+    childEsc suffix = EscChildPending (outcomeNodeName o) (failureText o <> suffix)
     retryableLeaf = null (childPlans s.seedPlan) && case o of
       Failed {} -> True
       _ -> False
@@ -362,7 +415,7 @@ onChildFailure tree p s o rest acc = case nodeOnFailure p of
             | T.null (T.strip operatorNote) = ""
             | otherwise = [fmt| Operator guidance from triage: {operatorNote}|]
       runWorker s.seedTree retryName retryPrompt >>= \case
-        Left _err -> pure spent {accEsc = spent.accEsc <> [why]}
+        Left _err -> pure spent {accEsc = spent.accEsc <> [childEsc " (retry spawn failed)"]}
         Right (wr, snapshot) -> do
           after <- worktreeHead s.seedTree
           checks <- runChecks s.seedTree s.seedPlan
@@ -396,8 +449,9 @@ onChildFailure tree p s o rest acc = case nodeOnFailure p of
                     spent
                       { accNotes = spent.accNotes <> [note]
                       , accMerged = spent.accMerged + 1
+                      , accMergedNames = spent.accMergedNames <> [child]
                       }
-            _ -> pure spent {accEsc = spent.accEsc <> [why]}
+            _ -> pure spent {accEsc = spent.accEsc <> [childEsc " (retry did not converge)"]}
 
 failureText :: Outcome -> Text
 failureText o = case o of
@@ -484,7 +538,7 @@ awaitResolutions _ _ [] acc = pure acc
 awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
   Just _ -> do
     reapRest
-    pure acc {accEsc = acc.accEsc <> [[fmt|{name}: rebase abandoned before it was awaited|]]}
+    pure acc {accEsc = acc.accEsc <> [EscMerge [fmt|{name}: rebase abandoned before it was awaited|]]}
   Nothing -> case h of
     Left err -> step (Left [fmt|resolution spawn failed: {renderSpawnError err}|]) 0
     Right handle ->
@@ -520,14 +574,14 @@ escalate p s why acc = do
   recordEvent (EscalationEvent (JournalKey branch) name why)
   applyPolicy p s why >>= \case
     PolicyResolved spent ->
-      pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [[fmt|{name}: {why} (resolved on policy retry)|]]}
+      pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [EscMerge [fmt|{name}: {why} (resolved on policy retry)|]]}
     PolicyEscalated detail spent ->
-      pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [[fmt|{name}: {detail}|]]}
+      pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [EscMerge [fmt|{name}: {detail}|]]}
     PolicyAbandoned detail spent ->
       pure
         base
           { accCycles = base.accCycles + spent
-          , accEsc = base.accEsc <> [[fmt|{name}: {detail}|]]
+          , accEsc = base.accEsc <> [EscMerge [fmt|{name}: {detail}|]]
           , accAbandon = Just [fmt|{name}: {detail}|]
           }
   where
@@ -644,7 +698,13 @@ finishFold seed wr (before, after) notes escalations cycles agentRan checks forc
 spawnIntegration
   :: WorktreeHandle -> DevPlan -> FoldAcc -> [CheckResult] -> Harness (Either SpawnError (WorkerResult, SnapshotResult))
 spawnIntegration tree p acc checks =
-  runWorker tree (nodeName p <> "-integration") (integrationPrompt p acc.accMerged acc.accEsc checks)
+  -- The agent's brief carries ONLY merge-class escalations: its remit is
+  -- conflict repair at the merged head.  Child-pending escalations are
+  -- resume's re-entry material and never reach an implementation agent here.
+  runWorker
+    tree
+    (nodeName p <> "-integration")
+    (integrationPrompt p acc.accMerged (map renderEscalation (filter escMergeClass acc.accEsc)) checks)
 
 -- | The orchestrator's OWN account of a mechanical fold.  Not a model claim
 -- dressed as one: nothing here was asked of an agent, and the receipt says so.

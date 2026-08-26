@@ -762,6 +762,7 @@ mod tests {
 
     fn entry(seq: u64, kind: &str, key: &str, payload: i64) -> JournalEntry {
         JournalEntry {
+            ts: 0,
             seq,
             kind: kind.to_string(),
             key: key.to_string(),

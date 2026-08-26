@@ -80,6 +80,18 @@ proposePrompt requestedGoal b grounding = [fmt|
   greps ("the old pattern is gone") are a last resort — they break on any
   unrelated occurrence of the pattern.
 
+  CHECK ENVIRONMENT (checks that ignore this fail for reasons unrelated to
+  the work): checks run harness-side in a COLD worktree — no warm cargo
+  target (a workspace-building command starts from scratch and will not fit
+  the 600-second budget), no worker-sandbox generated artifacts, and exactly
+  the arguments you write (a script invoked without its required arguments
+  is a usage error every time, which discriminates nothing). Every proposed
+  check is baseline-run before approval and its baseline exit is shown to
+  the operator; a check whose failure cannot be attributed to missing work
+  is a malformed check, not a safeguard. If the deliverable's real
+  verification is heavier than the budget, say so in the task and give a
+  cheap structural check instead — the operator runs the heavy gate at fold.
+
   SURFACING DECISIONS: this is a multi-round session. If the goal leaves a
   genuine architectural fork only the operator should close, surface it
   BEFORE finalizing: declare a small record in a haskell block —

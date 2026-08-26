@@ -314,7 +314,8 @@ effectivePlan fold st = case choreMode of
           | otherwise -> pure (Left ("Sprint proposal remained invalid: " <> why))
         Nothing -> do
           audit <- pathAudit composed
-          say (audit <> renderPlan 0 composed)
+          checksBaseline <- checkAudit composed
+          say (audit <> checksBaseline <> renderPlan 0 composed)
           approval <- askUser @PlanApproval
           if approval.planApproved
             then do
@@ -342,7 +343,14 @@ effectivePlan fold st = case choreMode of
   This item is ONE SUBTREE of a sprint whose items run CONCURRENTLY in
   sibling worktrees.  Its boundary paths must not overlap any other sprint
   item's — prefer tight directory prefixes over broad ones.  Cycle allowance
-  for this entire item: {item.itemCycles}.|]
+  for this entire item: {item.itemCycles}.
+
+  SIBLING DEPENDENCIES: your item's worktree forks BEFORE any sibling item's
+  work exists, so nothing your tasks or checks rely on may come from another
+  item's deliverable (sprint 25: a campaign whose acceptance check was the
+  script a sibling item was busy fixing stalled on the unfixed copy). If the
+  goal has such a dependency, SAY SO in the node task — the operator
+  serializes it into a later sprint instead.|]
 
     -- Integration-only root: no direct edits, no checks of its own — every
     -- verdict comes from the item subtrees' own receipts.  Replan keeps the
@@ -385,7 +393,8 @@ effectivePlan fold st = case choreMode of
           | otherwise -> pure (Left ("Proposed plan remained outside the budget: " <> why))
         Nothing -> do
           audit <- pathAudit proposed
-          say (audit <> renderPlan 0 proposed)
+          checksBaseline <- checkAudit proposed
+          say (audit <> checksBaseline <> renderPlan 0 proposed)
           approval <- askUser @PlanApproval
           if approval.planApproved
             then do
@@ -471,6 +480,40 @@ groundingPack = do
         Right pr
           | pr.exitCode == 0 -> T.unlines (take n (T.lines pr.stdout))
           | otherwise -> [fmt|  ({cmd} failed (exit {pr.exitCode}): {pr.stderr})|]
+
+-- | Baseline-run every distinct proposed check in the SOURCE repo before the
+-- operator sees the approval form.  Sprint 25 shipped two checks that could
+-- never pass (bare invocations of a script that requires a file argument) and
+-- one that cannot finish inside the in-run Exec budget — all three visible in
+-- one baseline line each, none visible in the rendered plan text.  An AUDIT,
+-- not a refusal (pathAudit precedent): a discriminating check is EXPECTED to
+-- fail at baseline (the work does not exist yet), so results render as
+-- approval notes and judgment stays with the operator.  Usage-class exits
+-- (2/126/127) get the sharper flag; a 60s timeout here warns the check may
+-- not fit the 600s in-run budget either.
+checkAudit :: DevPlan -> Harness Text
+checkAudit p = do
+  reports <- traverse probeCheck (nub (collectChecks p))
+  pure (T.concat (catMaybes reports))
+  where
+    collectChecks q = nodeChecks q <> concatMap collectChecks (childPlans q)
+    quoted cmd = "'" <> T.replace "'" "'\\''" cmd <> "'"
+    firstLineOf t = T.takeWhile (/= '\n') (T.strip t)
+    probeCheck cmd =
+      let wrapped = "cd \"${TIDEPOOL_SOURCE_REPO:-.}\" && timeout 60 sh -c " <> quoted cmd
+       in runInTry "." wrapped <&> \case
+            Left _ -> Nothing
+            Right pr
+              | pr.exitCode == 0 -> Nothing
+              | pr.exitCode == 124 ->
+                  Just [fmt|CHECK BASELINE: `{cmd}` exceeded 60s at baseline — may not fit the in-run budget
+|]
+              | pr.exitCode `elem` [2, 126, 127] ->
+                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} (usage/not-found class — likely malformed): {firstLineOf pr.stderr}
+|]
+              | otherwise ->
+                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} at baseline: {firstLineOf pr.stderr}
+|]
 
 -- | Untracked file-shaped boundary/tolerated entries across a whole plan:
 -- probably stale paths inherited from goal text.  Verification is CODE's job

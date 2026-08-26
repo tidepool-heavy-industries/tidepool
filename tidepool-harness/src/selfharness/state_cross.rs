@@ -301,6 +301,7 @@ mod tests {
         let fold = ResumeFold::fold(
             "run-1",
             &[tidepool_handlers::JournalEntry {
+                ts: 0,
                 seq: 4,
                 kind: "split".into(),
                 key: "branch/a".into(),
@@ -327,6 +328,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, k)| tidepool_handlers::JournalEntry {
+                ts: 0,
                 seq: i as u64,
                 kind: "split".into(),
                 key: (*k).to_string(),

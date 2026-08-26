@@ -114,6 +114,27 @@ caseOutcomeFailedNoReceiptPayload = verify "outcome-failed-no-receipt-payload-ma
 caseOutcomeFailedNoReceiptRoundTrips :: Text
 caseOutcomeFailedNoReceiptRoundTrips = verify "outcome-failed-no-receipt-round-trips" (decodeEvent "outcome" "leaf" (payloadOf outcomeEvFailedNoReceipt) == Just outcomeEvFailedNoReceipt)
 
+-- ChildrenPending is the appended partial-delivery verdict (sprint-25 fix):
+-- an interior fold with unmerged children journals a Failed wire whose kind
+-- CARRIES the per-child ledger.  Round-tripping it here pins the appended
+-- constructor's tag stability.
+childrenPendingFailure :: Failure
+childrenPendingFailure =
+  Failure
+    { failureKind = ChildrenPending { pendingChildren = ["c1", "c2"], mergedChildren = ["c3"] }
+    , failureDetail = "2 of 3 children unmerged — pending amendment/resume"
+    , failurePaths = []
+    }
+
+childrenPendingOutcome :: Outcome
+childrenPendingOutcome = Failed { outcomeNode = "parent", outcomeTrail = [], outcomeFailure = childrenPendingFailure, partialReceipt = Just mkReceipt }
+
+outcomeEvChildrenPending :: JournalEvent
+outcomeEvChildrenPending = OutcomeEvent (JournalKey "dev-tree/integration") childrenPendingOutcome
+
+caseChildrenPendingRoundTrips :: Text
+caseChildrenPendingRoundTrips = verify "outcome-children-pending-round-trips" (decodeEvent "outcome" "dev-tree/integration" (payloadOf outcomeEvChildrenPending) == Just outcomeEvChildrenPending)
+
 skippedOutcome :: Outcome
 skippedOutcome = Skipped { outcomeNode = "leaf", outcomeTrail = [], skipReason = "not merged (subtree abandoned)" }
 
@@ -183,6 +204,7 @@ __journalRoundTripReport = T.intercalate "\n"
   , caseOutcomeDonePayloadIsBareReceipt, caseOutcomeDoneRoundTrips
   , caseOutcomeFailedWithReceiptPayload, caseOutcomeFailedWithReceiptRoundTrips
   , caseOutcomeFailedNoReceiptPayload, caseOutcomeFailedNoReceiptRoundTrips
+  , caseChildrenPendingRoundTrips
   , caseOutcomeSkippedPayload, caseOutcomeSkippedRoundTrips
   , caseReplanPayloadIsBareDecision, caseReplanRoundTrips
   , caseRebasePayloadIsBareNote, caseRebaseRoundTrips
