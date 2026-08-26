@@ -422,6 +422,24 @@ pub fn compile_invocation(
         None
     };
 
+    // The full spawn argv, rendered once: DEBUG on every spawn, and attached
+    // to the failure WARN below. This is the record of what include set /
+    // session-root / flags an individual spawn actually received — without
+    // it, a spawn-specific resolution failure (a module present on disk that
+    // one compile couldn't find, sprint-25 crash class) leaves nothing to
+    // diff against a succeeding sibling invocation.
+    let argv_render: String = cmd
+        .argv()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    tracing::debug!(
+        targets = %inv.targets.join(","),
+        argv = %argv_render,
+        "extract spawn"
+    );
+
     let is_invocation_lane = matches!(inv.cache, CacheStrategy::Invocation);
     let (meta_bytes, raw) = extract_and_read(
         &cmd,

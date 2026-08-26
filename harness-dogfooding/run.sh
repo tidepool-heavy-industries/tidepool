@@ -47,7 +47,7 @@ fi
 
 HARNESS="${1:-harness-dogfooding/companion/Harness.hs}"
 echo "==> launching: $HARNESS  ($PROFILE)  (open the printed 127.0.0.1 URL)"
-export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug}"
+export RUST_LOG="${RUST_LOG:-warn,tidepool_harness=debug,tidepool_web=debug,tidepool_toolchain=debug}"
 # Private dogfood cache (2026-08-08): 12 of 13 harness test files write the
 # DEFAULT ~/.cache/tidepool/selfharness/, so any swarm test shard can poison a
 # live session's checkpoint mid-run (it did, twice in one day — the
