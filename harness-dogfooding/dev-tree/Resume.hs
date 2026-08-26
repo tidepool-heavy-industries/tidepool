@@ -371,7 +371,7 @@ amendPlanChecked d p = case d.amendedSubtree of
       | T.null (T.strip d.amendedInstruction) = p
       | otherwise = p {nodeTask = d.amendedInstruction}
     subtreeViolation sub =
-      boundaryEscape sub `orElse` duplicateName sub
+      boundaryEscape sub `orElse` duplicateName sub `orElse` badName sub
     -- The subtree's write set must stay inside what the FAILED NODE was
     -- allowed to write — its product boundary plus its tolerated hygiene
     -- paths.  (Tolerated entries like README.md legitimately live outside
@@ -391,6 +391,13 @@ amendPlanChecked d p = case d.amendedSubtree of
         | otherwise -> [[fmt|replacement subtree path {raw} escapes the failed node's boundary|]]
     duplicateName sub =
       listToMaybe [[fmt|replacement subtree repeats node name {n}|] | n <- duplicateNames sub]
+    -- The initial proposal gate ('Harness.proposalViolation') refuses a
+    -- name that cannot become a git ref; a replan-supplied subtree names
+    -- new nodes through a completely different path and was not previously
+    -- held to the same bar — it could pass here and only fail later, as an
+    -- opaque worktree denial mid-unfold.
+    badName sub =
+      listToMaybe [[fmt|replacement subtree node name {n} is not a safe branch segment|] | n <- unsafeNames sub]
 
 -- | A split that already happened: replay its recorded plan and child trees.
 replaySplit
@@ -480,23 +487,61 @@ adoptOrUnfold hooks fold inner seed = do
   changed <- checkHeadChanged seed.seedTree seed.seedPlan baseline
   case changed of
     Nothing -> inner seed
-    Just hc ->
-      if hasMicroSplit seed.seedPlan && not (microSequenceComplete fold (branchOf seed.seedTree))
-        then inner seed
-        else do
+    Just hc
+      | hasMicroSplit seed.seedPlan && not (microSequenceComplete fold (branchOf seed.seedTree)) -> inner seed
+      | null (childPlans seed.seedPlan) -> do
           vo <- verifyOrphan fold hc
           let o = adopt vo
           trace
             "resume-adopt"
             (branchOf seed.seedTree)
             (object ["node" .= nodeName seed.seedPlan, "head" .= renderGitOid hc.hcFound, "verified" .= outcomeIsDone (hooks.resumeFoldLadder o)])
-          if null (childPlans seed.seedPlan)
-            then pure (Swarm.PlanF (adoptedWork seed o) [])
-            else case hooks.resumeFoldLadder o of
-              Done {} -> inner seed {seedAdopted = Just hc.hcFound}
-              rejected -> pure (Swarm.PlanF (adoptedWork seed rejected) [])
+          pure (Swarm.PlanF (adoptedWork seed o) [])
+      | otherwise ->
+          -- An INTERIOR node's scaffold commit is not the final
+          -- deliverable — its own nodeChecks validate the MERGED tree, not
+          -- a pre-split scaffold, so judging a scaffold orphan by them
+          -- (via 'verifyOrphan') would reject exactly the valid commit
+          -- adoption exists to rescue.  'verifyScaffoldOrphan' holds it to
+          -- the bar that actually applies at this point: did the scaffold
+          -- stay inside its boundary, and did it leave the tree clean.
+          verifyScaffoldOrphan hc >>= \case
+            Right () -> do
+              trace
+                "resume-adopt"
+                (branchOf seed.seedTree)
+                (object ["node" .= nodeName seed.seedPlan, "head" .= renderGitOid hc.hcFound, "verified" .= True, "scaffold" .= True])
+              inner seed {seedAdopted = Just hc.hcFound}
+            Left why -> do
+              trace
+                "resume-adopt"
+                (branchOf seed.seedTree)
+                (object ["node" .= nodeName seed.seedPlan, "head" .= renderGitOid hc.hcFound, "verified" .= False, "scaffold" .= True, "why" .= why])
+              pure
+                ( Swarm.PlanF
+                    (adoptedWork seed (failedOutcome (nodeName seed.seedPlan) (Failure InfraFailure [fmt|scaffold orphan could not be verified — {why}|] []) Nothing))
+                    []
+                )
   where
     baseline = renderGitOid seed.seedTree.handleReceipt.sourceHead
+
+-- | The bar a SCAFFOLD orphan (an interior node's committed-but-unsplit
+-- scaffold work) must clear: it stayed inside its declared boundary, and
+-- the worktree is clean.  Deliberately NOT the node's own 'nodeChecks' —
+-- see 'adoptOrUnfold'.
+verifyScaffoldOrphan :: HeadChanged -> Harness (Either Text ())
+verifyScaffoldOrphan hc =
+  statusEntries tree >>= \case
+    Left f -> pure (Left [fmt|status check could not run — {renderGitFailure f}|])
+    Right (_ : _) -> pure (Left "the retained worktree is dirty at adoption")
+    Right [] ->
+      boundaryViolations tree (nodeBoundary p) (nodeTolerated p) >>= \case
+        Left why -> pure (Left [fmt|boundary could not be checked — {why}|])
+        Right ([], _) -> pure (Right ())
+        Right (outside, _) -> pure (Left [fmt|scaffold strayed outside its boundary: {T.intercalate ", " outside}|])
+  where
+    tree = hc.hcTree
+    p = hc.hcPlan
 
 hasMicroSplit :: DevPlan -> Bool
 hasMicroSplit p = isJust p.nodeSplit

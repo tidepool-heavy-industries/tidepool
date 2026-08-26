@@ -185,65 +185,83 @@ microLeaf finishFold seed spec = do
         else do
           microPlan <- runLLMTurn @MicroPlan (microPlanPrompt p spec survey)
           let planned = normalizeMicroNames microPlan.microtasks
-              (toRun, dropped) = splitAt cap planned
-              droppedNames = T.intercalate ", " (map (.microName) dropped)
-              droppedNote =
-                [ [fmt|micro-split: {length dropped} planned microtasks past the cap ({cap}) were not run: {droppedNames}|]
-                | not (null dropped)
-                ]
-          say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
-          let acceptedMicrotaskNames = map (.microName) toRun
-          recordEvent
-            MicroSplitEvent
-              { evKey = JournalKey (branchOf tree)
-              , evMicrotaskNames = acceptedMicrotaskNames
-              }
-          (microRun, microSnapshotFailure) <- runMicrotasks tree p toRun
-          when microRun.microtasksComplete $
-            recordEvent
-              MicroCompleteEvent
-                { evKey = JournalKey (branchOf tree)
-                , evMicrotaskNames = acceptedMicrotaskNames
-                }
-          after <- worktreeHead tree
-          checks <- runChecks tree p
-          let wr =
-                WorkerResult
-                  { workSummary =
-                      [fmt|Micro-split leaf: {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
-                  , evidence = [fmt|recon survey: {survey.surveyLayout}|] : reconEvidence <> microRun.microtaskEvidence <> droppedNote
-                  , readyForIntegration = null microRun.microtaskEscalations
-                  , obstacles = microRun.microtaskObstacles
-                  , frictionNotes = microRun.microtaskFrictions
-                  }
-              -- Keep every microtask check in the receipt, including the failing
-              -- one that stopped the sequence.  The node checks remain first so
-              -- the pre-existing receipt ordering stays stable; the ladder then
-              -- judges both sets mechanically at the final head.
-              receiptChecks = checks <> concatMap (.microResultChecks) microRun.microtaskResults
-          folded <-
-            finishFold
-              seed
-              wr
-              (before, after)
-              []
-              microRun.microtaskEscalations
-              (1 + microRun.microtasksRan)
-              True
-              receiptChecks
-              microSnapshotFailure
-          pure $ case folded of
-            Done {doneReceipt = receipt}
-              | not microRun.microtasksComplete ->
-                  failedOutcome
+          if null planned
+            then
+              -- A planner that produces ZERO microtasks is a planning
+              -- failure, not an honest empty-but-complete run: 'walk'
+              -- vacuously "completes" an empty list, and without this
+              -- refusal that could reach 'finishFold''s no-op judge as an
+              -- ordinary headless cycle instead of being called what it is.
+              pure
+                ( failedOutcome
                     name
                     ( Failure
-                        (MicrotasksIncomplete {acceptedMicrotasksRan = microRun.microtasksRan})
-                        [fmt|microtask sequence stopped after {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran|]
+                        (MicrotasksIncomplete {acceptedMicrotasksRan = 0})
+                        [fmt|{name}: micro-split planning produced zero microtasks — nothing to run|]
                         []
                     )
-                    (Just receipt)
-            _ -> folded
+                    Nothing
+                )
+            else do
+              let (toRun, dropped) = splitAt cap planned
+                  droppedNames = T.intercalate ", " (map (.microName) dropped)
+                  droppedNote =
+                    [ [fmt|micro-split: {length dropped} planned microtasks past the cap ({cap}) were not run: {droppedNames}|]
+                    | not (null dropped)
+                    ]
+              say [fmt|{name}: planned {length planned} microtasks, running {length toRun}|]
+              let acceptedMicrotaskNames = map (.microName) toRun
+              recordEvent
+                MicroSplitEvent
+                  { evKey = JournalKey (branchOf tree)
+                  , evMicrotaskNames = acceptedMicrotaskNames
+                  }
+              (microRun, microSnapshotFailure) <- runMicrotasks tree p toRun
+              when microRun.microtasksComplete $
+                recordEvent
+                  MicroCompleteEvent
+                    { evKey = JournalKey (branchOf tree)
+                    , evMicrotaskNames = acceptedMicrotaskNames
+                    }
+              after <- worktreeHead tree
+              checks <- runChecks tree p
+              let wr =
+                    WorkerResult
+                      { workSummary =
+                          [fmt|Micro-split leaf: {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran ({length planned} proposed). Plan rationale: {microPlan.microRationale}|]
+                      , evidence = [fmt|recon survey: {survey.surveyLayout}|] : reconEvidence <> microRun.microtaskEvidence <> droppedNote
+                      , readyForIntegration = null microRun.microtaskEscalations
+                      , obstacles = microRun.microtaskObstacles
+                      , frictionNotes = microRun.microtaskFrictions
+                      }
+                  -- Keep every microtask check in the receipt, including the failing
+                  -- one that stopped the sequence.  The node checks remain first so
+                  -- the pre-existing receipt ordering stays stable; the ladder then
+                  -- judges both sets mechanically at the final head.
+                  receiptChecks = checks <> concatMap (.microResultChecks) microRun.microtaskResults
+              folded <-
+                finishFold
+                  seed
+                  wr
+                  (before, after)
+                  []
+                  microRun.microtaskEscalations
+                  (1 + microRun.microtasksRan)
+                  True
+                  receiptChecks
+                  microSnapshotFailure
+              pure $ case folded of
+                Done {doneReceipt = receipt}
+                  | not microRun.microtasksComplete ->
+                      failedOutcome
+                        name
+                        ( Failure
+                            (MicrotasksIncomplete {acceptedMicrotasksRan = microRun.microtasksRan})
+                            [fmt|microtask sequence stopped after {microRun.microtasksRan} of {microRun.microtasksAccepted} accepted microtasks ran|]
+                            []
+                        )
+                        (Just receipt)
+                _ -> folded
 
     -- Recon-lane machinery failure: the environment, not the work, is
     -- indicted, and the kind says so.

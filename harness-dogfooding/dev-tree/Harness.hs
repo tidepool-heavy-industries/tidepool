@@ -525,15 +525,8 @@ proposalViolation b plan =
     badName =
       listToMaybe
         [ [fmt|node name {n} is not a safe branch segment — use kebab-case (lowercase letters, digits, "-", "_", ".")|]
-        | n <- planNames plan
-        , not (refSafeName n)
+        | n <- unsafeNames plan
         ]
-    refSafeName n =
-      not (T.null n)
-        && T.all (\c -> c `elem` ("abcdefghijklmnopqrstuvwxyz0123456789-_." :: [Char])) n
-        && not ("." `T.isPrefixOf` n)
-        && not ("." `T.isSuffixOf` n)
-        && not (".." `T.isInfixOf` n)
     badPath =
       listToMaybe
         [ [fmt|node {nodeName q} has an unusable path entry — {why}|]

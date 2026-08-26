@@ -175,11 +175,18 @@ failureWork seed f = WorkFailed {workSeed = seed, workFailure = f}
 
 -- | The agent-cycle cost a node's own work requires: one for a leaf's
 -- implementation, two for a node that splits (its own scaffold plus one
--- integration cycle).  Shared with 'childAllowance', which reserves the same
--- amount before dividing what remains among children — so the two can never
--- disagree about what "this node's own reservation" means.
+-- integration cycle).  A SPLIT leaf needs two, not one — one recon cycle
+-- plus at least one microtask — else 'fundingShortfall' approves a plan
+-- that is guaranteed to burn its recon cycle and then hit
+-- 'Micro.microLeaf''s own zero-cap budget refusal.  Shared with
+-- 'childAllowance', which reserves the same amount before dividing what
+-- remains among children — so the two can never disagree about what "this
+-- node's own reservation" means.
 requiredCycles :: DevPlan -> Int
-requiredCycles p = if null (childPlans p) then 1 else 2
+requiredCycles p
+  | not (null (childPlans p)) = 2
+  | isJust (nodeSplit p) = 2
+  | otherwise = 1
 
 -- | 'Swarm.budgeted''s slot.  A node reserves its own scaffold plus one
 -- integration cycle; a leaf reserves its implementation.  Resolution agents

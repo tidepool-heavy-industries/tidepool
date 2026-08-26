@@ -73,6 +73,8 @@ module HarnessTypes
   , planScaffolds
   , planNames
   , duplicateNames
+  , refSafeName
+  , unsafeNames
   , subtreeBoundaries
   , subtreeWriteable
   ) where
@@ -870,6 +872,22 @@ planNames = map nodeName . planSubtree
 -- correctness hazard, not a style problem.
 duplicateNames :: DevPlan -> [Text]
 duplicateNames p = [n | (n : _ : _) <- L.group (L.sort (planNames p))]
+
+-- | Is @n@ safe to become a git branch/worktree segment?  Node names become
+-- exactly that ('Tidepool.Worktree.fromWorktree'), so text-uniqueness alone
+-- (see 'duplicateNames') is not enough — two names that differ as TEXT can
+-- still collide, or simply fail, as refs.
+refSafeName :: Text -> Bool
+refSafeName n =
+  not (T.null n)
+    && T.all (\c -> c `elem` ("abcdefghijklmnopqrstuvwxyz0123456789-_." :: [Char])) n
+    && not ("." `T.isPrefixOf` n)
+    && not ("." `T.isSuffixOf` n)
+    && not (".." `T.isInfixOf` n)
+
+-- | Every node name in the subtree that is not ref-safe.
+unsafeNames :: DevPlan -> [Text]
+unsafeNames p = [n | n <- planNames p, not (refSafeName n)]
 
 -- | Every PRODUCT boundary entry in the subtree.
 subtreeBoundaries :: DevPlan -> [Text]
