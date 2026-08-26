@@ -452,17 +452,25 @@ sprintOverlap subtrees =
 -- rather than blocking the proposal.
 groundingPack :: Harness Text
 groundingPack = do
-  files <- groundingCmd "git ls-files | head -n 250"
-  docs <- groundingCmd "sed -n '1,40p' CLAUDE.md"
+  files <- groundingCmd 250 "git -C \"${TIDEPOOL_SOURCE_REPO:-.}\" ls-files"
+  docs <- groundingCmd 40 "cat \"${TIDEPOOL_SOURCE_REPO:-.}/CLAUDE.md\""
   pure [fmt|  Tracked files (first 250):
 {files}
   Root CLAUDE.md (first 40 lines):
 {docs}|]
   where
-    groundingCmd cmd =
+    -- Exec's cwd is the managed-worktrees root, NOT the source repo — every
+    -- command must address the repo via $TIDEPOOL_SOURCE_REPO explicitly.
+    -- Truncation happens HERE, not via `| head -n`: a pipeline's exit code
+    -- is its last stage's, so `git ... | head` reports success (and empty
+    -- stdout) when git itself failed — the planner then silently gets a
+    -- blank grounding instead of this loud note.
+    groundingCmd n cmd =
       runInTry "." cmd <&> \case
         Left err -> [fmt|  ({cmd} unavailable: {err})|]
-        Right pr -> pr.stdout
+        Right pr
+          | pr.exitCode == 0 -> T.unlines (take n (T.lines pr.stdout))
+          | otherwise -> [fmt|  ({cmd} failed (exit {pr.exitCode}): {pr.stderr})|]
 
 -- | Untracked file-shaped boundary/tolerated entries across a whole plan:
 -- probably stale paths inherited from goal text.  Verification is CODE's job
@@ -473,8 +481,13 @@ groundingPack = do
 -- refuses.
 pathAudit :: DevPlan -> Harness Text
 pathAudit p =
-  runInTry "." "git ls-files" <&> \case
+  -- Same cwd caveat as groundingPack: Exec roots at the worktrees dir, so
+  -- git must be pointed at the source repo. A failed or empty listing
+  -- degrades to NO audit — an empty tracked list would otherwise flag every
+  -- file-shaped entry as stale.
+  runInTry "." "git -C \"${TIDEPOOL_SOURCE_REPO:-.}\" ls-files" <&> \case
     Left _ -> ""
+    Right pr | pr.exitCode /= 0 || T.null (T.strip pr.stdout) -> ""
     Right pr ->
       let tracked = T.lines pr.stdout
           fileShaped e = not ("/" `T.isSuffixOf` e) && "." `T.isInfixOf` lastSegment e
