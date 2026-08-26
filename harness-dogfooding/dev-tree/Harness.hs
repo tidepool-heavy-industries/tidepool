@@ -118,7 +118,7 @@ import Resume
   , rootBranchOf
   , ResumeHooks (..)
   )
-import Git (diagnose)
+import Git (diagnose, treeDir)
 import Workers (branchOf)
 import Unfold
   ( allocateChildren
@@ -338,13 +338,15 @@ effectivePlan fold st = case choreMode of
   ProposeFromGoal -> case lookupEvent ProposeKind proposalJournalKey fold of
     Just (_, ProposeEvent {evProposePlan = p}) -> pure (Right p)
     _ -> do
-      grounding <- groundingPack
-      proposeAttempt grounding 1 Nothing
+      auditTree <- auditWorktree st
+      grounding <- groundingPack auditTree
+      proposeAttempt auditTree grounding 1 Nothing
   SprintBacklog {sprintItems = items} -> case lookupEvent ProposeKind proposalJournalKey fold of
     Just (_, ProposeEvent {evProposePlan = p}) -> pure (Right p)
     _ -> do
-      grounding <- groundingPack
-      sprintAttempt items grounding 1 Nothing
+      auditTree <- auditWorktree st
+      grounding <- groundingPack auditTree
+      sprintAttempt auditTree items grounding 1 Nothing
   where
     -- A sprint is a task-SET made to parallelize: one subtree per backlog
     -- item, planned independently (or taken from an authored override),
@@ -357,7 +359,7 @@ effectivePlan fold st = case choreMode of
     -- their previously composed subtree — N planners independently deciding
     -- whether someone else's note applies to them is how attempt 2 diverged
     -- from attempt 1 on untouched items.
-    sprintAttempt items grounding attempt prior = do
+    sprintAttempt auditTree items grounding attempt prior = do
       routed <- case prior of
         Nothing -> pure (map (const "") items)
         Just (note, _) -> routeRevisionNote note
@@ -370,11 +372,11 @@ effectivePlan fold st = case choreMode of
         `orMaybe` sprintOverlap subtrees
         `orMaybe` sprintShortfall of
         Just why
-          | attempt == (1 :: Int) -> sprintAttempt items grounding 2 (Just (why, subtrees))
+          | attempt == (1 :: Int) -> sprintAttempt auditTree items grounding 2 (Just (why, subtrees))
           | otherwise -> pure (Left ("Sprint proposal remained invalid: " <> why))
         Nothing -> do
-          audit <- pathAudit composed
-          checksBaseline <- checkAudit composed
+          audit <- pathAudit auditTree composed
+          checksBaseline <- checkAudit auditTree composed
           say (audit <> checksBaseline <> renderPlan 0 composed)
           approval <- askUser @PlanApproval
           if approval.planApproved
@@ -383,7 +385,7 @@ effectivePlan fold st = case choreMode of
               pure (Right composed)
             else
               if attempt == 1 && not (T.null (T.strip approval.revisionNote))
-                then sprintAttempt items grounding 2 (Just (approval.revisionNote, subtrees))
+                then sprintAttempt auditTree items grounding 2 (Just (approval.revisionNote, subtrees))
                 else pure (Left ("Sprint proposal rejected: " <> approval.revisionNote))
 
     routeRevisionNote note = do
@@ -472,16 +474,16 @@ effectivePlan fold st = case choreMode of
               then Just [fmt|sprint needs {total} cycles (2 root + item asks) but maxAgentCycles is {st.budget.maxAgentCycles}|]
               else Nothing
       _ -> Nothing
-    proposeAttempt grounding attempt priorNote = do
+    proposeAttempt auditTree grounding attempt priorNote = do
       let revision = maybe "" ("\nRevise the prior proposal in response to: " <>) priorNote
       proposed <- runLLMTurn @DevPlan (proposePrompt st.goal st.budget grounding <> revision)
       case proposalViolation st.budget proposed of
         Just why
-          | attempt == 1 -> proposeAttempt grounding 2 (Just why)
+          | attempt == 1 -> proposeAttempt auditTree grounding 2 (Just why)
           | otherwise -> pure (Left ("Proposed plan remained outside the budget: " <> why))
         Nothing -> do
-          audit <- pathAudit proposed
-          checksBaseline <- checkAudit proposed
+          audit <- pathAudit auditTree proposed
+          checksBaseline <- checkAudit auditTree proposed
           say (audit <> checksBaseline <> renderPlan 0 proposed)
           approval <- askUser @PlanApproval
           if approval.planApproved
@@ -490,7 +492,7 @@ effectivePlan fold st = case choreMode of
               pure (Right proposed)
             else
               if attempt == 1
-                then proposeAttempt grounding 2 (Just approval.revisionNote)
+                then proposeAttempt auditTree grounding 2 (Just approval.revisionNote)
                 else pure (Left ("Plan proposal rejected: " <> approval.revisionNote))
 
 -- | The first structural breach in a proposed plan, if any. Root depth is
@@ -592,10 +594,10 @@ sprintOverlap subtrees = unbounded `orElseMaybe` pairOverlap
 -- it needs — the tracked-file shape and the top of the root docs.  Assembled
 -- via Exec in the source checkout; a command that fails degrades to a note
 -- rather than blocking the proposal.
-groundingPack :: Harness Text
-groundingPack = do
-  files <- groundingCmd 250 [fmt|git -C {sourceRepo} ls-files|]
-  docs <- groundingCmd 40 [fmt|cat {sourceRepo}/CLAUDE.md|]
+groundingPack :: Either Text WorktreeHandle -> Harness Text
+groundingPack auditTree = do
+  files <- auditCmd 250 "git ls-files"
+  docs <- auditCmd 40 "cat CLAUDE.md"
   pure [fmt|  Tracked files (first 250):
 {files}
   Root CLAUDE.md (first 40 lines):
@@ -605,22 +607,15 @@ groundingPack = do
     -- is its last stage's, so `git ... | head` reports success (and empty
     -- stdout) when git itself failed — the planner then silently gets a
     -- blank grounding instead of this loud note.
-    groundingCmd :: Int -> Text -> Harness Text
-    groundingCmd n cmd =
-      runInTry "." cmd <&> \case
-        Left err -> [fmt|  ({cmd} unavailable: {err})|]
-        Right pr
-          | pr.exitCode == 0 -> T.unlines (take n (T.lines pr.stdout))
-          | otherwise -> [fmt|  ({cmd} failed (exit {pr.exitCode}): {diagnose pr})|]
-
--- | Exec's cwd is the managed-worktrees root, NOT the source repo — every
--- grounding/audit command must address the repo via @$TIDEPOOL_SOURCE_REPO@
--- explicitly.  @:?@ makes an UNSET variable a loud shell failure: the old
--- @:-.@ fallback silently grounded the planner (and validated boundaries)
--- against the worktrees directory, which is itself a git repository with a
--- completely different file list.
-sourceRepo :: Text
-sourceRepo = "\"${TIDEPOOL_SOURCE_REPO:?TIDEPOOL_SOURCE_REPO is unset}\""
+    auditCmd :: Int -> Text -> Harness Text
+    auditCmd n cmd = case auditTree of
+      Left err -> pure [fmt|  ({cmd} unavailable: audit worktree could not be created — {err})|]
+      Right tree ->
+        runInTry (treeDir tree) cmd <&> \case
+          Left err -> [fmt|  ({cmd} unavailable: {err})|]
+          Right pr
+            | pr.exitCode == 0 -> T.unlines (take n (T.lines pr.stdout))
+            | otherwise -> [fmt|  ({cmd} failed (exit {pr.exitCode}): {diagnose pr})|]
 
 -- | Baseline-run every distinct proposed check in the SOURCE repo before the
 -- operator sees the approval form.  Sprint 25 shipped two checks that could
@@ -632,29 +627,32 @@ sourceRepo = "\"${TIDEPOOL_SOURCE_REPO:?TIDEPOOL_SOURCE_REPO is unset}\""
 -- approval notes and judgment stays with the operator.  Usage-class exits
 -- (2/126/127) get the sharper flag; a 60s timeout here warns the check may
 -- not fit the 600s in-run budget either.
-checkAudit :: DevPlan -> Harness Text
-checkAudit p = do
+checkAudit :: Either Text WorktreeHandle -> DevPlan -> Harness Text
+checkAudit auditTree p = do
   reports <- traverse probeCheck (nub (concatMap nodeChecks (planSubtree p)))
   pure (T.concat (catMaybes reports))
   where
     quoted cmd = "'" <> T.replace "'" "'\\''" cmd <> "'"
-    probeCheck cmd =
-      let wrapped = "cd " <> sourceRepo <> " && timeout 60 sh -c " <> quoted cmd
-       in runInTry "." wrapped <&> \case
-            -- A probe that could not even be SPAWNED is a loud audit line,
-            -- never a silently-clean baseline for an untested check.
-            Left err -> Just [fmt|CHECK BASELINE: `{cmd}` could not be probed: {err}
+    probeCheck cmd = case auditTree of
+      Left err -> pure (Just [fmt|CHECK BASELINE: `{cmd}` could not be probed — audit worktree could not be created: {err}
+|])
+      Right tree ->
+        let wrapped = "timeout 60 sh -c " <> quoted cmd
+         in runInTry (treeDir tree) wrapped <&> \case
+              -- A probe that could not even be SPAWNED is a loud audit line,
+              -- never a silently-clean baseline for an untested check.
+              Left err -> Just [fmt|CHECK BASELINE: `{cmd}` could not be probed: {err}
 |]
-            Right pr
-              | pr.exitCode == 0 -> Nothing
-              | pr.exitCode == 124 ->
-                  Just [fmt|CHECK BASELINE: `{cmd}` exceeded 60s at baseline — may not fit the in-run budget
+              Right pr
+                | pr.exitCode == 0 -> Nothing
+                | pr.exitCode == 124 ->
+                    Just [fmt|CHECK BASELINE: `{cmd}` exceeded 60s at baseline — may not fit the in-run budget
 |]
-              | pr.exitCode `elem` [2, 126, 127] ->
-                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} (usage/not-found class — likely malformed): {diagnose pr}
+                | pr.exitCode `elem` [2, 126, 127] ->
+                    Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} (usage/not-found class — likely malformed): {diagnose pr}
 |]
-              | otherwise ->
-                  Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} at baseline: {diagnose pr}
+                | otherwise ->
+                    Just [fmt|CHECK BASELINE: `{cmd}` exits {pr.exitCode} at baseline: {diagnose pr}
 |]
 
 -- | Untracked file-shaped boundary/tolerated entries across a whole plan:
@@ -664,9 +662,12 @@ checkAudit p = do
 -- anything).  A directory entry or a genuinely-new file is legitimate, so
 -- this audits — a loud note the operator sees at approval — rather than
 -- refuses.
-pathAudit :: DevPlan -> Harness Text
-pathAudit p =
-  runInTry "." ("git -C " <> sourceRepo <> " -c core.quotePath=false ls-files -z") <&> \case
+pathAudit :: Either Text WorktreeHandle -> DevPlan -> Harness Text
+pathAudit (Left err) _ =
+  pure [fmt|PATH AUDIT UNAVAILABLE: audit worktree could not be created — {err}
+|]
+pathAudit (Right tree) p =
+  runInTry (treeDir tree) "git -c core.quotePath=false ls-files -z" <&> \case
     -- A listing that could not run is a loud audit line, never a silent
     -- absence — a missing audit reads as "all paths verified".
     Left err -> [fmt|PATH AUDIT UNAVAILABLE: {err}
@@ -712,15 +713,33 @@ blocked st reason =
 -- 'allowDirtySnapshot' creates a hidden synthetic commit without touching the
 -- user's branch or index.  Managed worktrees are retained indefinitely in v1.
 rootWorktreeSpec :: State -> WorktreeSpec
-rootWorktreeSpec st
-  | snapshotDirtySource st = allowDirtySnapshot base
+rootWorktreeSpec st = sourceWorktreeSpec (snapshotDirtySource st) "dev-tree/integration"
+
+-- | A worktree off the current source repo, honoring the same dirty-source
+-- policy the run itself does.  Fixed labels: two dev-tree runs launched
+-- concurrently against the same source checkout would collide here. Not a
+-- hazard for the current one-run-at-a-time usage; a real fix needs a
+-- run-scoped uniqueness token this module has no source for today.
+sourceWorktreeSpec :: Bool -> Text -> WorktreeSpec
+sourceWorktreeSpec dirty label
+  | dirty = allowDirtySnapshot base
   | otherwise = base
   where
-    -- Fixed branch name: two dev-tree runs launched concurrently against the
-    -- same source checkout would collide here. Not a hazard for the current
-    -- one-run-at-a-time usage; a real fix needs a run-scoped uniqueness
-    -- token this module has no source for today.
-    base = fromCurrentRepository "dev-tree/integration"
+    base = fromCurrentRepository label
+
+-- | A worktree for READING the source repo during proposal-time audits
+-- (grounding, path/check baselines) — deliberately SEPARATE from the run's
+-- own root worktree, so model-authored shell commands run during these
+-- audits — before the operator has approved anything — never touch the
+-- live dev checkout directly.  Created once per proposal-attempt sequence;
+-- a creation failure degrades every audit to a loud note (below) rather
+-- than blocking the proposal, matching the existing "audit, never a
+-- refusal" contract.
+auditWorktree :: State -> Harness (Either Text WorktreeHandle)
+auditWorktree st =
+  createWorktree (sourceWorktreeSpec (snapshotDirtySource st) "dev-tree/audit") <&> \case
+    Left err -> Left (renderWorktreeError err)
+    Right h -> Right h
 
 -- | The run's root worktree: REBOUND when the fold names it, created when it
 -- does not.

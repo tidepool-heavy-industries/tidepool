@@ -69,6 +69,7 @@ import Tidepool.Prelude hiding (render)
 import Tidepool.QQ (fmt)
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
+import Unfold (escalationBudget)
 import Workers
   ( SnapshotResult (..)
   , boundaryViolations
@@ -143,7 +144,7 @@ integrate (Swarm.PlanF w kids) = case w of
     pure Skipped {outcomeNode = nodeName seed.seedPlan, outcomeTrail = [], skipReason = renderFailure f}
   WorkFailed {workSeed = seed, workFailure = f} ->
     pure (failedOutcome (nodeName seed.seedPlan) f Nothing)
-  WorkReady {workSeed = seed, workKids = wkids, workDenied = denied}
+  WorkReady {workSeed = seed, workScaffold = scaffold, workKids = wkids, workDenied = denied}
     | not (null (childPlans seed.seedPlan)) && null wkids ->
         pure
           ( failedOutcome
@@ -152,7 +153,7 @@ integrate (Swarm.PlanF w kids) = case w of
               Nothing
           )
     | null kids -> leafFold seed
-    | otherwise -> interiorFold seed wkids denied kids
+    | otherwise -> interiorFold seed (isJust scaffold) wkids denied kids
 
 -- | 'Swarm.receipted''s slot, and the whole trust ladder in one place.
 --
@@ -272,10 +273,19 @@ microLeaf = Micro.microLeaf finishFold
 -- integration tier, so the fast-forward question dissolves into it.  The
 -- integration agent is spawned only when the mechanical tier left something
 -- for it: an escalation, or a check that fails at the merged head.
-interiorFold :: NodeSeed -> [NodeSeed] -> [Text] -> [Outcome] -> Harness Outcome
-interiorFold seed workKids denied kids = do
+--
+-- @scaffoldRan@ (whether a scaffold worker actually spawned for this node —
+-- 'Unfold.decompose' can skip it entirely) feeds 'escalationBudget': the one
+-- HARD cap on everything this fold spends beyond what was already reserved
+-- structurally — cascade resolution/retry cycles and the integration
+-- worker.  Before this cap existed, those were recorded in the receipt
+-- after the fact but nothing ever refused them once the subtree's own
+-- allowance ran out.
+interiorFold :: NodeSeed -> Bool -> [NodeSeed] -> [Text] -> [Outcome] -> Harness Outcome
+interiorFold seed scaffoldRan workKids denied kids = do
   before <- worktreeHead tree
-  acc <- foldChildren tree p (zip workKids kids) emptyAcc {accEsc = deniedEsc}
+  let cap = escalationBudget scaffoldRan seed
+  acc <- foldChildren cap tree p (zip workKids kids) emptyAcc {accEsc = deniedEsc}
   checks0 <- runChecks tree p
   -- Only MERGE-class escalations summon the integration agent; a pending
   -- child is resume's problem, never a hand-merge at this head.
@@ -284,17 +294,31 @@ interiorFold seed workKids denied kids = do
     if not needsAgent
       then pure (mechanicalResult acc, 0, False, Nothing)
       else
-        spawnIntegration tree p acc checks0 >>= \case
-          Left err ->
+        if acc.accCycles >= cap
+          then
+            -- The cascade already spent this node's whole escalation
+            -- budget; one more cycle for integration would be exactly the
+            -- silent overspend the cap exists to refuse.  The ladder judges
+            -- the unmerged/unchecked result on its own honest merits.
             pure
               ( mechanicalResult acc
-                  {accEsc = acc.accEsc <> [EscMerge [fmt|integration spawn failed: {renderSpawnError err}|]]}
+                  {accEsc = acc.accEsc <> [EscMerge [fmt|integration not attempted — this node's cascade/integration budget ({cap} cycles) is exhausted|]]}
               , 0
               , False
               , Nothing
               )
-          Right (merged, snapshot) ->
-            pure (merged, 1, True, snapshotFailureMaybe (nodeName p <> "-integration") snapshot)
+          else
+            spawnIntegration tree p acc checks0 >>= \case
+              Left err ->
+                pure
+                  ( mechanicalResult acc
+                      {accEsc = acc.accEsc <> [EscMerge [fmt|integration spawn failed: {renderSpawnError err}|]]}
+                  , 0
+                  , False
+                  , Nothing
+                  )
+              Right (merged, snapshot) ->
+                pure (merged, 1, True, snapshotFailureMaybe (nodeName p <> "-integration") snapshot)
   checks <- if agentRan then runChecks tree p else pure checks0
   after <- worktreeHead tree
   folded <-
@@ -339,28 +363,31 @@ interiorFold seed workKids denied kids = do
 
 -- | Walk the children in PLAN order: merge the ones that are done, cascade the
 -- new parent tip to every sibling still ahead of us, and carry everything else
--- forward as data.
+-- forward as data.  @cap@ is this node's whole escalation budget
+-- ('escalationBudget'), threaded down to every spend point below.
 foldChildren
-  :: WorktreeHandle
+  :: Int
+  -> WorktreeHandle
   -> DevPlan
   -> [(NodeSeed, Outcome)]
   -> FoldAcc
   -> Harness FoldAcc
-foldChildren _ _ [] acc = pure acc
-foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
+foldChildren _ _ _ [] acc = pure acc
+foldChildren cap tree p ((s, o) : rest) acc = case acc.accAbandon of
   Just _ ->
     -- Abandoned: the remaining siblings are not merged, and saying so is the
     -- record.  Their branches survive in retained worktrees either way.
-    foldChildren tree p rest acc {accEsc = acc.accEsc <> [EscChildPending childName "not merged (subtree abandoned)"]}
+    foldChildren cap tree p rest acc {accEsc = acc.accEsc <> [EscChildPending childName "not merged (subtree abandoned)"]}
   Nothing
     | not (outcomeIsDone o) -> do
-        next <- onChildFailure tree p s o rest acc
-        foldChildren tree p rest next
+        next <- onChildFailure cap tree p s o rest acc
+        foldChildren cap tree p rest next
     | otherwise ->
         mergeChild tree p s >>= \case
           Left why -> do
-            next <- escalate p s why acc
-            foldChildren tree p rest next
+            onto <- worktreeHead tree
+            next <- escalate p onto cap s why acc
+            foldChildren cap tree p rest next
           Right note -> do
             newHead <- worktreeHead tree
             -- EAGER: the fold just moved this node's HEAD, so every sibling
@@ -370,12 +397,12 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
             -- resolution cycle on work nobody is going to use.
             let ahead = [sib | (sib, out) <- rest, outcomeIsDone out]
             cascaded <-
-              cascade p newHead ahead acc
+              cascade p newHead cap ahead acc
                 { accNotes = acc.accNotes <> [note]
                 , accMerged = acc.accMerged + 1
                 , accMergedNames = acc.accMergedNames <> [childName]
                 }
-            foldChildren tree p rest cascaded
+            foldChildren cap tree p rest cascaded
   where
     childName = nodeName s.seedPlan
 
@@ -385,8 +412,8 @@ foldChildren tree p ((s, o) : rest) acc = case acc.accAbandon of
 -- planning agent session and JOURNALS the amendment, because re-unfolding a
 -- subtree means re-entering the coalgebra — which is resume's job, not this
 -- fold's.  A non-leaf retry remains the rebase-policy-shaped escalation it was.
-onChildFailure :: WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> [(NodeSeed, Outcome)] -> FoldAcc -> Harness FoldAcc
-onChildFailure tree p s o rest acc = case nodeOnFailure p of
+onChildFailure :: Int -> WorktreeHandle -> DevPlan -> NodeSeed -> Outcome -> [(NodeSeed, Outcome)] -> FoldAcc -> Harness FoldAcc
+onChildFailure cap tree p s o rest acc = case nodeOnFailure p of
   Abandon -> pure acc {accAbandon = Just why, accEsc = acc.accEsc <> [childEsc ""]}
   Replan -> do
     decision <- runLLMTurn @ReplanDecision (replanPrompt p s.seedPlan why)
@@ -415,59 +442,68 @@ onChildFailure tree p s o rest acc = case nodeOnFailure p of
     retryableLeaf = null (childPlans s.seedPlan) && case o of
       Failed {} -> True
       _ -> False
-    retryLeaf operatorNote = do
-      before <- worktreeHead s.seedTree
-      let child = nodeName s.seedPlan
-          retryName = child <> "-retry"
-          -- Real newlines, concatenated OUTSIDE the quoter: the fmt QQ
-          -- passes backslash escapes through as literal characters.
-          retryPrompt =
-            workerPrompt s.seedPlan
-              <> "\n\n"
-              <> [fmt|Previous attempt failed for {child}: {failureText o}. Re-check that failure and complete the task.|]
-              <> operatorAmendment
-          spent = acc {accCycles = acc.accCycles + 1}
-          operatorAmendment
-            | T.null (T.strip operatorNote) = ""
-            | otherwise = [fmt| Operator guidance from triage: {operatorNote}|]
-      runWorker s.seedTree retryName retryPrompt >>= \case
-        Left _err -> pure spent {accEsc = spent.accEsc <> [childEsc " (retry spawn failed)"]}
-        Right (wr, snapshot) -> do
-          after <- worktreeHead s.seedTree
-          checks <- runChecks s.seedTree s.seedPlan
-          retried <-
-            finishFold
-              s
-              wr
-              (before, after)
-              []
-              []
-              1
-              True
-              checks
-              (snapshotFailureMaybe retryName snapshot)
-          -- Match the normal 'stampFold' path: persist the raw receipt before
-          -- applying the ladder, so a later resume sees this retry as the
-          -- latest outcome rather than resurrecting the original failure.
-          journalOutcome retried
-          let judged = foldLadder retried
-          case judged of
-            Done {} ->
-              mergeChild tree p s >>= \case
-                Left mergeWhy -> escalate p s mergeWhy spent
-                Right note -> do
-                  newHead <- worktreeHead tree
-                  let ahead = [sib | (sib, out) <- rest, outcomeIsDone out]
-                  cascade
-                    p
-                    newHead
-                    ahead
-                    spent
-                      { accNotes = spent.accNotes <> [note]
-                      , accMerged = spent.accMerged + 1
-                      , accMergedNames = spent.accMergedNames <> [child]
-                      }
-            _ -> pure spent {accEsc = spent.accEsc <> [childEsc " (retry did not converge)"]}
+    retryLeaf operatorNote
+      -- Drawn from the SAME pool as the cascade's resolution/retry cycles:
+      -- a leaf re-implementation attempt is one more agent cycle this
+      -- node's escalation budget must cover.
+      | acc.accCycles >= cap =
+          pure acc {accEsc = acc.accEsc <> [childEsc [fmt| (retry not attempted — this node's cascade/integration budget ({cap} cycles) is exhausted)|]]}
+      | otherwise = do
+          before <- worktreeHead s.seedTree
+          let child = nodeName s.seedPlan
+              retryName = child <> "-retry"
+              -- Real newlines, concatenated OUTSIDE the quoter: the fmt QQ
+              -- passes backslash escapes through as literal characters.
+              retryPrompt =
+                workerPrompt s.seedPlan
+                  <> "\n\n"
+                  <> [fmt|Previous attempt failed for {child}: {failureText o}. Re-check that failure and complete the task.|]
+                  <> operatorAmendment
+              spent = acc {accCycles = acc.accCycles + 1}
+              operatorAmendment
+                | T.null (T.strip operatorNote) = ""
+                | otherwise = [fmt| Operator guidance from triage: {operatorNote}|]
+          runWorker s.seedTree retryName retryPrompt >>= \case
+            Left _err -> pure spent {accEsc = spent.accEsc <> [childEsc " (retry spawn failed)"]}
+            Right (wr, snapshot) -> do
+              after <- worktreeHead s.seedTree
+              checks <- runChecks s.seedTree s.seedPlan
+              retried <-
+                finishFold
+                  s
+                  wr
+                  (before, after)
+                  []
+                  []
+                  1
+                  True
+                  checks
+                  (snapshotFailureMaybe retryName snapshot)
+              -- Match the normal 'stampFold' path: persist the raw receipt before
+              -- applying the ladder, so a later resume sees this retry as the
+              -- latest outcome rather than resurrecting the original failure.
+              journalOutcome retried
+              let judged = foldLadder retried
+              case judged of
+                Done {} ->
+                  mergeChild tree p s >>= \case
+                    Left mergeWhy -> do
+                      onto <- worktreeHead tree
+                      escalate p onto cap s mergeWhy spent
+                    Right note -> do
+                      newHead <- worktreeHead tree
+                      let ahead = [sib | (sib, out) <- rest, outcomeIsDone out]
+                      cascade
+                        p
+                        newHead
+                        cap
+                        ahead
+                        spent
+                          { accNotes = spent.accNotes <> [note]
+                          , accMerged = spent.accMerged + 1
+                          , accMergedNames = spent.accMergedNames <> [child]
+                          }
+                _ -> pure spent {accEsc = spent.accEsc <> [childEsc " (retry did not converge)"]}
 
 failureText :: Outcome -> Text
 failureText o = case o of
@@ -501,19 +537,34 @@ failureText o = case o of
 --
 -- Convergence: the task is always "rebase onto the parent's CURRENT tip", so
 -- arrival order changes how much work a rebase does, never where it ends up.
-cascade :: DevPlan -> GitOid -> [NodeSeed] -> FoldAcc -> Harness FoldAcc
-cascade p onto seeds acc0 = do
+--
+-- @cap@ (the node's whole 'escalationBudget') gates the one point that
+-- actually spends a cycle: spawning a resolution agent.  Conflicted
+-- siblings are afforded a resolution attempt in PLAN ORDER, up to whatever
+-- budget remains after the broken-machinery escalations above are
+-- accounted for — the rest are escalated directly, budget-exhausted,
+-- WITHOUT ever being spawned.  This is what makes the cap a real refusal
+-- rather than an after-the-fact tally: nothing here can spend past it.
+cascade :: DevPlan -> GitOid -> Int -> [NodeSeed] -> FoldAcc -> Harness FoldAcc
+cascade p onto cap seeds acc0 = do
   attempts <- traverse (mechanicalRebase onto) seeds
   let clean = [note | (_, Right note) <- attempts]
       conflicted = [(s, paths, diag) | (s, Left (BlockConflict paths diag)) <- attempts]
       broken = [(s, why) | (s, Left (BlockInfra why)) <- attempts]
   accB <-
     foldM
-      (\acc (s, why) -> escalate p s [fmt|rebase machinery failed: {why}|] acc)
+      (\acc (s, why) -> escalate p onto cap s [fmt|rebase machinery failed: {why}|] acc)
       acc0 {accNotes = acc0.accNotes <> clean}
       broken
-  handles <- traverse (spawnResolution onto) conflicted
-  awaitResolutions p onto (zip [s | (s, _, _) <- conflicted] handles) accB
+  let remaining = max 0 (cap - accB.accCycles)
+      (affordable, overBudget) = splitAt remaining conflicted
+  handles <- traverse (spawnResolution onto) affordable
+  accC <-
+    foldM
+      (\acc (s, _, _) -> escalate p onto cap s [fmt|cascade budget exhausted for this node ({cap} cycles) — rebase conflict not attempted|] acc)
+      accB
+      overBudget
+  awaitResolutions p onto cap (zip [s | (s, _, _) <- affordable] handles) accC
 
 -- | Why tier 1 did not land this tip: a genuine conflict (tier 2's job,
 -- with the evidence in hand) or broken git machinery (never an agent's job).
@@ -562,11 +613,12 @@ spawnResolution onto (s, paths, diag) =
 awaitResolutions
   :: DevPlan
   -> GitOid
+  -> Int
   -> [(NodeSeed, Either SpawnError (AgentHandle ResolutionResult))]
   -> FoldAcc
   -> Harness FoldAcc
-awaitResolutions _ _ [] acc = pure acc
-awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
+awaitResolutions _ _ _ [] acc = pure acc
+awaitResolutions p onto cap ((s, h) : rest) acc = case acc.accAbandon of
   Just _ -> do
     reapRest
     pure acc {accEsc = acc.accEsc <> [EscMerge [fmt|{name}: rebase abandoned before it was awaited|]]}
@@ -578,8 +630,11 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
         Right (_, rr)
           | rr.resolved ->
               verifyResolved s onto >>= \case
-                Nothing -> step (Right ()) 1
                 Just why -> step (Left [fmt|agent claimed resolved, but {why}|]) 1
+                Nothing ->
+                  recheckAfterRebase s >>= \case
+                    Nothing -> step (Right ()) 1
+                    Just why -> step (Left [fmt|resolved and ancestry-clean, but {why}|]) 1
           | otherwise -> step (Left [fmt|unresolved: {rr.resolutionNotes}|]) 1
   where
     name = nodeName s.seedPlan
@@ -591,11 +646,11 @@ awaitResolutions p onto ((s, h) : rest) acc = case acc.accAbandon of
           recordEvent (RebaseEvent (JournalKey (branchOf s.seedTree)) note)
           pure acc {accNotes = acc.accNotes <> [note], accCycles = acc.accCycles + spent}
         Left why -> do
-          escalated <- escalate p s why acc {accCycles = acc.accCycles + spent}
+          escalated <- escalate p onto cap s why acc {accCycles = acc.accCycles + spent}
           pure escalated
       case next.accAbandon of
-        Just _ -> reapRest >> awaitResolutions p onto rest next
-        Nothing -> awaitResolutions p onto rest next
+        Just _ -> reapRest >> awaitResolutions p onto cap rest next
+        Nothing -> awaitResolutions p onto cap rest next
 
 -- | A resolution agent's @resolved@ is a CLAIM; the receipt is git's.
 -- Resolved means the rebase target is now an ancestor of HEAD (an agent
@@ -613,27 +668,62 @@ verifyResolved s onto =
         Right [] -> pure Nothing
         Right entries -> pure (Just [fmt|the worktree is still dirty ({T.intercalate ", " entries})|])
 
+-- | Re-verify a child's OWN acceptance criteria at its POST-REBASE HEAD.
+-- 'verifyResolved' proves the rebase LANDED (ancestry + clean); it says
+-- nothing about whether the content an agent produced while RESOLVING a
+-- conflict still satisfies the child's own checks and boundary — the SHA
+-- that passed the child's ladder before the cascade is not necessarily the
+-- SHA this recheck now sees, since conflict resolution genuinely edits
+-- files.  A merge that accepted this without re-checking could fold a child
+-- whose own receipt no longer describes what it is merging.
+recheckAfterRebase :: NodeSeed -> Harness (Maybe Text)
+recheckAfterRebase s = do
+  checks <- runChecks s.seedTree p
+  boundary <- boundaryViolations s.seedTree (nodeBoundary p) (nodeTolerated p)
+  pure $ case (filter checkRed checks, boundary) of
+    (failing@(_ : _), _) -> Just [fmt|its own checks now fail post-rebase: {T.intercalate ", " (map checkCommand failing)}|]
+    (_, Left why) -> Just [fmt|its boundary could not be re-checked post-rebase — {why}|]
+    (_, Right (outside@(_ : _), _)) -> Just [fmt|its diff now strays outside its own boundary post-rebase: {T.intercalate ", " outside}|]
+    (_, Right ([], _)) -> Nothing
+  where
+    p = s.seedPlan
+
 -- | Tier 3.  An unresolved conflict is not an exception and does not stop the
 -- fold: the parent's failure policy — an exhaustive case the compiler audits —
 -- turns it into a retry, a planning agent session, an operator form, or an
 -- abandonment, and whatever it decides rides on as data.
-escalate :: DevPlan -> NodeSeed -> Text -> FoldAcc -> Harness FoldAcc
-escalate p s why acc = do
+--
+-- @onto@ is the REAL rebase target — the mechanical tier's own target, or
+-- the parent's current tree head for a merge-conflict escalation (both
+-- callers already have it in scope). Passing 'applyPolicy' the child's own
+-- current HEAD here (as this function used to, before the target was
+-- threaded through) made a policy retry's mechanical verification
+-- tautological: it re-read the child's HEAD, asked an agent to "rebase
+-- onto" that same SHA, then "verified" the SHA was an ancestor of
+-- itself — true by construction, regardless of what the agent did.
+--
+-- @cap@ guards entry: once this node's escalation budget is spent, a policy
+-- retry is refused as data rather than run anyway.
+escalate :: DevPlan -> GitOid -> Int -> NodeSeed -> Text -> FoldAcc -> Harness FoldAcc
+escalate p onto cap s why acc = do
   let note = RebaseNote branch Nothing RebaseEscalation
       base = acc {accNotes = acc.accNotes <> [note]}
   recordEvent (EscalationEvent (JournalKey branch) name why)
-  applyPolicy p s why >>= \case
-    PolicyResolved spent ->
-      pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [EscMerge [fmt|{name}: {why} (resolved on policy retry)|]]}
-    PolicyEscalated detail spent ->
-      pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [EscMerge [fmt|{name}: {detail}|]]}
-    PolicyAbandoned detail spent ->
-      pure
-        base
-          { accCycles = base.accCycles + spent
-          , accEsc = base.accEsc <> [EscMerge [fmt|{name}: {detail}|]]
-          , accAbandon = Just [fmt|{name}: {detail}|]
-          }
+  if base.accCycles >= cap
+    then pure base {accEsc = base.accEsc <> [EscMerge [fmt|{name}: {why} (this node's cascade/integration budget ({cap} cycles) is exhausted — no further retry)|]]}
+    else
+      applyPolicy p onto s why >>= \case
+        PolicyResolved spent ->
+          pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [EscMerge [fmt|{name}: {why} (resolved on policy retry)|]]}
+        PolicyEscalated detail spent ->
+          pure base {accCycles = base.accCycles + spent, accEsc = base.accEsc <> [EscMerge [fmt|{name}: {detail}|]]}
+        PolicyAbandoned detail spent ->
+          pure
+            base
+              { accCycles = base.accCycles + spent
+              , accEsc = base.accEsc <> [EscMerge [fmt|{name}: {detail}|]]
+              , accAbandon = Just [fmt|{name}: {detail}|]
+              }
   where
     name = nodeName s.seedPlan
     branch = branchOf s.seedTree
@@ -641,8 +731,13 @@ escalate p s why acc = do
 -- | The failure-policy sum, applied by deterministic code.  Cognition
 -- enters through exactly two constructors: 'Replan' opens a planning agent session
 -- scoped to the failure, 'AskOperator' presents a typed triage form.
-applyPolicy :: DevPlan -> NodeSeed -> Text -> Harness PolicyOutcome
-applyPolicy p s why = case nodeOnFailure p of
+--
+-- @onto@ is the real target 'escalate' threads through — the actual
+-- rebase/merge target this escalation is trying to land on, never the
+-- child's own current HEAD (which would make 'retryOnce's verification
+-- tautological — see 'escalate').
+applyPolicy :: DevPlan -> GitOid -> NodeSeed -> Text -> Harness PolicyOutcome
+applyPolicy p onto s why = case nodeOnFailure p of
   Abandon -> pure (PolicyAbandoned [fmt|{why} — abandoned by policy|] 0)
   Retry -> retryOnce "Try again; the previous resolution round did not converge."
   Replan -> do
@@ -663,23 +758,28 @@ applyPolicy p s why = case nodeOnFailure p of
       TriageAbandon -> pure (PolicyAbandoned [fmt|{why} — operator abandoned: {t.triageNote}|] 0)
   where
     retryOnce instruction =
-      worktreeHead s.seedTree >>= \h ->
-        spawnAgent @ResolutionResult
-          ( spawnSpecIn
-              (worktreeId s.seedTree)
-              (nodeName s.seedPlan <> "-rebase-retry")
-              (resolutionPrompt s.seedPlan (renderGitOid h) (Just instruction))
-          )
-          >>= \case
-            Left err -> pure (PolicyEscalated [fmt|{why} — retry spawn failed: {renderSpawnError err}|] 1)
-            Right (_, rr)
-              | rr.resolved ->
-                  -- Same discipline as 'awaitResolutions': the claim is
-                  -- verified mechanically before policy treats it as fact.
-                  verifyResolved s h >>= \case
-                    Nothing -> pure (PolicyResolved 1)
-                    Just claimWhy -> pure (PolicyEscalated [fmt|{why} — retry claimed resolved, but {claimWhy}|] 1)
-              | otherwise -> pure (PolicyEscalated [fmt|{why} — retry unresolved: {rr.resolutionNotes}|] 1)
+      spawnAgent @ResolutionResult
+        ( spawnSpecIn
+            (worktreeId s.seedTree)
+            (nodeName s.seedPlan <> "-rebase-retry")
+            (resolutionPrompt s.seedPlan (renderGitOid onto) (Just instruction))
+        )
+        >>= \case
+          Left err -> pure (PolicyEscalated [fmt|{why} — retry spawn failed: {renderSpawnError err}|] 1)
+          Right (_, rr)
+            | rr.resolved ->
+                -- Same discipline as 'awaitResolutions': the claim is
+                -- verified mechanically (against the REAL target, not the
+                -- child's own HEAD) before policy treats it as fact, then
+                -- the child's own checks/boundary are re-run at the
+                -- resolved HEAD before calling it resolved.
+                verifyResolved s onto >>= \case
+                  Just claimWhy -> pure (PolicyEscalated [fmt|{why} — retry claimed resolved, but {claimWhy}|] 1)
+                  Nothing ->
+                    recheckAfterRebase s >>= \case
+                      Nothing -> pure (PolicyResolved 1)
+                      Just recheckWhy -> pure (PolicyEscalated [fmt|{why} — retry resolved and ancestry-clean, but {recheckWhy}|] 1)
+            | otherwise -> pure (PolicyEscalated [fmt|{why} — retry unresolved: {rr.resolutionNotes}|] 1)
 
 -- | Merge one child branch into this node.  Mechanical first — a clean merge
 -- is the whole integration tier at zero tokens — via the canonical typed

@@ -49,6 +49,7 @@ module Resume
 import qualified Data.Text as T
 import DevTreeJournal
   ( JournalEvent (..)
+  , JournalKey (..)
   , JournalKind (..)
   , eventsOfKind
   , lookupEvent
@@ -65,7 +66,7 @@ import Tidepool.QQ (fmt)
 import Tidepool.Resume (ResumeFold (..), isResumed)
 import qualified Tidepool.Swarm as Swarm
 import Tidepool.Worktree
-import Git (isAncestor)
+import Git (isAncestor, renderGitFailure, statusEntries)
 import Workers (boundaryViolations, branchOf, runChecks)
 
 -- | What the coalgebra decided, handed to the algebra unchanged.  The
@@ -103,7 +104,7 @@ data ResumeHooks = ResumeHooks
   { resumeSplitWork      :: NodeSeed -> Maybe WorkerResult -> [NodeSeed] -> [Text] -> NodeWork
   , resumeRefusalWork    :: NodeSeed -> Failure -> NodeWork
   , resumeAdoptedWork    :: NodeSeed -> Outcome -> NodeWork
-  , resumeAllocate       :: NodeSeed -> [DevPlan] -> (DevPlan -> Harness (Either Text WorktreeHandle)) -> Harness ([NodeSeed], [Text])
+  , resumeAllocate       :: JournalKey -> DevPlan -> Text -> [(Text, Text)] -> NodeSeed -> [DevPlan] -> (DevPlan -> Harness (Either Text WorktreeHandle)) -> Harness ([NodeSeed], [Text])
   , resumeRetainedChild  :: NodeSeed -> [(Text, Text)] -> DevPlan -> Harness (Either Text WorktreeHandle)
   , resumeFoldLadder     :: Outcome -> Outcome
   }
@@ -418,9 +419,21 @@ replaySplit hooks fold seed sp = do
         else unfoldChildren
   where
     recorded = seed {seedPlan = sp.splitPlan}
+    -- 'sp.splitChildTrees' is whatever was already durably bound (possibly
+    -- from a prior process's incremental writes) — passed as the replay's
+    -- OWN starting point, so a resumed allocation continues the same
+    -- incremental-journaling discipline a fresh split gets, instead of
+    -- silently batching every remaining child into one deferred write.
     unfoldChildren = do
       (childSeeds, denied) <-
-        hooks.resumeAllocate recorded (childPlans sp.splitPlan) (hooks.resumeRetainedChild recorded sp.splitChildTrees)
+        hooks.resumeAllocate
+          (JournalKey (branchOf seed.seedTree))
+          sp.splitPlan
+          sp.splitScaffoldHead
+          sp.splitChildTrees
+          recorded
+          (childPlans sp.splitPlan)
+          (hooks.resumeRetainedChild recorded sp.splitChildTrees)
       pure (Swarm.PlanF (hooks.resumeSplitWork recorded Nothing childSeeds denied) childSeeds)
 
 -- | Did the crashed process finish folding this node's children into it?
@@ -555,12 +568,21 @@ newtype VerifiedOrphan = VerifiedOrphan Outcome
 
 verifyOrphan :: ResumeFold -> HeadChanged -> Harness VerifiedOrphan
 verifyOrphan fold hc = do
+  dirty <- statusEntries tree
   checks <- runChecks tree p
   boundary <- boundaryViolations tree (nodeBoundary p) (nodeTolerated p)
-  case boundary of
+  case (dirty, boundary) of
+    -- "Verified" means clean: a crash can leave committed progress PLUS
+    -- uncommitted residue on top of it, and adopting the committed part
+    -- while silently carrying the residue forward is exactly the kind of
+    -- unearned trust this whole ladder exists to refuse.
+    (Left f, _) ->
+      pure (VerifiedOrphan (failedOutcome name (Failure InfraFailure [fmt|{name}: adoption status check could not run — {renderGitFailure f}|] []) Nothing))
+    (Right (_ : _), _) ->
+      pure (VerifiedOrphan (failedOutcome name (Failure InfraFailure [fmt|{name}: retained worktree is dirty at adoption — refusing to adopt residue alongside the committed work|] []) Nothing))
     -- An adoption whose boundary cannot be CHECKED is not verified — the
     -- word means something.  Loud typed failure; resume surfaces it.
-    Left why ->
+    (Right [], Left why) ->
       pure
         ( VerifiedOrphan
             ( failedOutcome
@@ -569,7 +591,7 @@ verifyOrphan fold hc = do
                 Nothing
             )
         )
-    Right (outside, tolerated) ->
+    (Right [], Right (outside, tolerated)) ->
       pure
         ( VerifiedOrphan
             ( Done

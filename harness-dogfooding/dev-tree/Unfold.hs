@@ -21,6 +21,7 @@ module Unfold
   , requiredCycles
   , childAllowance
   , childAllowances
+  , escalationBudget
   , fundingShortfall
   , cycleRefusal
   , depthRefusal
@@ -122,18 +123,19 @@ decompose seed
 
 -- | Journal the split and allocate the children from the scaffold head.
 --
--- The split is appended TWICE under the same @(kind, key)@, and the fold keeps
--- the later one (max seq).  That is not redundancy: the two appends close two
--- different crash windows.  The first records the DECISION, so a crash during
--- child allocation replays the plan instead of re-running the scaffold worker.
--- The second adds the child worktrees, which is the only durable record of
--- WHICH retained tree belongs to which child — without it a resumed run would
--- create a second worktree beside a child's orphaned commits and redo its work
--- blind.  Append-only, last-one-wins, no rewrite.
+-- The split is appended at least THREE times under the same @(kind, key)@,
+-- and the fold keeps the later one (max seq): the first records the
+-- DECISION, so a crash during child allocation replays the plan instead of
+-- re-running the scaffold worker; 'allocateChildren' then appends
+-- INCREMENTALLY, once per child worktree as it is created — a crash after
+-- child K exists still finds child K's binding on resume, instead of
+-- orphaning it behind a batch write that never landed; the final append here
+-- closes with the complete picture (harmless even when it repeats the last
+-- incremental one — same content, same max-seq winner).
 emitSplit :: NodeSeed -> Maybe WorkerResult -> GitOid -> Harness (Swarm.PlanF NodeWork NodeSeed)
 emitSplit seed scaffold scaffoldHead = do
   recordEvent (SplitEvent (JournalKey branch) p scaffoldHeadText Nothing)
-  (childSeeds, denied) <- allocateChildren seed kids (freshChild seed)
+  (childSeeds, denied) <- allocateChildren (JournalKey branch) p scaffoldHeadText [] seed kids (freshChild seed)
   recordEvent (SplitEvent (JournalKey branch) p scaffoldHeadText (Just (map childTreeEntry childSeeds)))
   pure (Swarm.PlanF (splitWork seed scaffold childSeeds denied) childSeeds)
   where
@@ -254,24 +256,40 @@ layerGate b layer
 -- commit), while a replayed split REBINDS the retained tree the journal names.
 -- Everything else — the allowance division, the plan ordering, a denial riding
 -- on as data rather than failing the split — is one implementation either way.
+--
+-- The four extra parameters are what let this function CLOSE THE CRASH
+-- WINDOW between allocating child worktrees: as soon as one is created, an
+-- incremental 'SplitEvent' is journaled naming every child bound SO FAR
+-- (@priorBound@ carries whatever a replayed split already recorded before
+-- this call, @[]@ for a fresh split) — so a crash after child K's worktree
+-- exists finds child K's binding on resume, instead of the batch-write gap
+-- where only a completed allocation was ever durable and a crash mid-way
+-- orphaned every worktree created before it.
 allocateChildren
-  :: NodeSeed
+  :: JournalKey
+  -> DevPlan
+  -> Text
+  -> [(Text, Text)]
+  -> NodeSeed
   -> [DevPlan]
   -> (DevPlan -> Harness (Either Text WorktreeHandle))
   -> Harness ([NodeSeed], [Text])
-allocateChildren parent kids obtain = go (zip kids (childAllowances parent.seedCycles parent.seedPlan))
+allocateChildren journalKey plan scaffoldHeadText priorBound parent kids obtain =
+  go priorBound (zip kids (childAllowances parent.seedCycles parent.seedPlan))
   where
     -- Allowances stay POSITIONALLY paired with their plans: keying positional
     -- data by name would silently hand two same-named children the first
     -- one's share.
-    go [] = pure ([], [])
-    go ((k, allowance) : rest) =
+    go _ [] = pure ([], [])
+    go bound ((k, allowance) : rest) =
       obtain k >>= \case
         Left why -> do
-          (seeds, denied) <- go rest
+          (seeds, denied) <- go bound rest
           pure (seeds, [fmt|{nodeName k}: {why}|] : denied)
         Right childTree -> do
-          (seeds, denied) <- go rest
+          let boundNow = bound <> [(nodeName k, branchOf childTree)]
+          recordEvent (SplitEvent journalKey plan scaffoldHeadText (Just boundNow))
+          (seeds, denied) <- go boundNow rest
           let s =
                 NodeSeed
                   { seedPlan = k
@@ -308,6 +326,22 @@ childAllowances cycles p = map allowanceFor asks
     allowanceFor ask
       | totalAsk <= available || totalAsk == 0 = ask
       | otherwise = ask * available `div` totalAsk
+
+-- | What an interior node's OWN fold-time machinery — the eager rebase
+-- cascade's resolution/retry cycles, and the integration worker — may spend,
+-- drawn from nowhere new: it is what remains of the node's own 'seedCycles'
+-- once its scaffold cost and its children's allocated shares are both
+-- subtracted.  Total spend (scaffold + children's shares + this budget) can
+-- therefore never exceed the subtree allowance the node was actually given —
+-- the property "enforced, not advisory" claims but the eager cascade never
+-- checked before now.  A cap of 0 is an honest, typed refusal
+-- ('Fold.escalate'/'Fold.cascade' turn it into 'BudgetSpent' evidence rather
+-- than spending anyway).
+escalationBudget :: Bool -> NodeSeed -> Int
+escalationBudget scaffoldRan seed =
+  max 0 (seed.seedCycles - sum (childAllowances seed.seedCycles seed.seedPlan) - scaffoldCost)
+  where
+    scaffoldCost = if scaffoldRan then 1 else 0
 
 -- | The first node the given allowance cannot fund, if any — the same
 -- reservation-and-division walk the unfold performs, run at PROPOSAL time so
