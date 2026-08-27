@@ -104,9 +104,9 @@
 - **Decoded into:** `Value::Lit(Literal::LitString(vec![]))`
 - **Failure mode on shape mismatch:** `intentional fallback: produces empty LitString`
 - **Bound checks:** None
-- **Mode:** `always-on` — `Addr#` is a legitimate intermediate runtime value emitted by primops (`PlusAddr`, `ShowDoubleAddr`; see `tidepool-codegen/src/emit/primop.rs` for `SsaVal::Raw(_, LIT_TAG_ADDR)` sites).
+- **Mode:** `always-on` — `Addr#` is a legitimate intermediate runtime value emitted by pointer primops such as `PlusAddr`.
 - **Test coverage:** `uncovered`
-- **Notes:** Not a defensive guard against translator bugs. The bridge can't decode a raw pointer back to a typed Haskell value (no length, no type tag), so empty `LitString` is the safe display fallback when an `Addr#` is the top-level result. Programs that compose `Addr#` with `unpackCString#` etc. don't hit this path because they evaluate to a real string before reaching the bridge.
+- **Notes:** Not a defensive guard against translator bugs. The bridge can't decode a raw pointer back to a typed Haskell value (no length, no type tag), so empty `LitString` is the safe display fallback when an `Addr#` is the top-level result. Programs that compose `Addr#` with `unpackCString#` evaluate to a real string before reaching the bridge; Double rendering now allocates managed `Text` directly.
 
 ## LitTag::ByteArray
 

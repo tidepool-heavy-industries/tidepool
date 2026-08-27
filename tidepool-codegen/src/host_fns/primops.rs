@@ -636,48 +636,54 @@ pub extern "C" fn runtime_word_encode_double(mantissa: i64, exp: i64) -> i64 {
     tidepool_bignum::encode_double_word(mantissa as u64, exp).to_bits() as i64
 }
 
-/// Format a Double as a null-terminated C string and return its address.
-/// The CString is leaked (small bounded strings, acceptable).
-pub extern "C" fn runtime_show_double_addr(bits: i64) -> i64 {
-    let d = f64::from_bits(bits as u64);
-    let s = tidepool_bignum::haskell_show_double(d);
-    let c_str = match std::ffi::CString::new(s) {
-        Ok(c) => c,
-        Err(_) => {
-            overwrite_runtime_error(RuntimeError::Undefined);
-            return error_poison_ptr() as i64;
+/// Format a Double and allocate the result as a managed Haskell `Text` value.
+unsafe fn render_double_text(vmctx: *mut VMContext, prec: Option<i64>, bits: i64) -> *mut u8 {
+    let text_id = match machine_state(vmctx).text_con_id() {
+        Some(id) => id,
+        None => {
+            let msg = b"Double rendering: Text constructor not in scope";
+            return runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64);
         }
     };
-    let ptr = c_str.into_raw();
-    ptr as i64
-}
-
-/// Precedence-aware Double show — the `showSignedFloat` behavior the JIT-safe
-/// replacement drops. Parenthesizes a NEGATIVE Double when `prec > 6` (the
-/// constructor-argument precedence), matching GHC: `show (Just (-2.5))` is
-/// `Just (-2.5)`, but top-level `show (-2.5)` (prec 0) is `-2.5`. The magnitude
-/// string already carries the sign (`haskell_show_double`), so only the parens
-/// are added here. Leaked CString, same contract as `runtime_show_double_addr`.
-pub extern "C" fn runtime_show_signed_double_addr(prec: i64, bits: i64) -> i64 {
     let d = f64::from_bits(bits as u64);
     let body = tidepool_bignum::haskell_show_double(d);
-    // Match `showSignedFloat` EXACTLY: it parenthesizes on `x < 0` (not "renders
-    // with a minus"). `-0.0 < 0` is False (IEEE), so GHC shows `Just -0.0`
-    // WITHOUT parens; NaN (`NaN < 0` False) and +Inf never parenthesize; only
-    // -Inf and negative normals (`< 0` True) do, at prec > 6.
-    let s = if prec > 6 && d < 0.0 {
+    let rendered = if prec.is_some_and(|p| p > 6) && d < 0.0 {
         format!("({body})")
     } else {
         body
     };
-    let c_str = match std::ffi::CString::new(s) {
-        Ok(c) => c,
-        Err(_) => {
-            overwrite_runtime_error(RuntimeError::Undefined);
-            return error_poison_ptr() as i64;
+    let value = tidepool_eval::shapes::make_text(&rendered, text_id);
+    let converted = crate::heap_bridge::gc_retry(
+        vmctx,
+        |r: &Result<*mut u8, crate::heap_bridge::BridgeError>| {
+            matches!(r, Err(crate::heap_bridge::BridgeError::NurseryExhausted))
+        },
+        || crate::heap_bridge::value_to_heap(&value, &mut *vmctx),
+    );
+    match converted {
+        Ok(ptr) => ptr,
+        Err(crate::heap_bridge::BridgeError::NurseryExhausted) => runtime_oom(),
+        Err(e) => {
+            let msg = format!("Double rendering failed: {e}");
+            runtime_error_with_msg(2, msg.as_ptr(), msg.len() as u64)
         }
-    };
-    c_str.into_raw() as i64
+    }
+}
+
+/// Render a Double directly into a GC-owned `Text` value.
+#[no_mangle]
+pub unsafe extern "C" fn runtime_render_double_text(vmctx: *mut VMContext, bits: i64) -> *mut u8 {
+    render_double_text(vmctx, None, bits)
+}
+
+/// Precedence-aware sibling of [`runtime_render_double_text`].
+#[no_mangle]
+pub unsafe extern "C" fn runtime_render_double_prec_text(
+    vmctx: *mut VMContext,
+    prec: i64,
+    bits: i64,
+) -> *mut u8 {
+    render_double_text(vmctx, Some(prec), bits)
 }
 
 // --- Double math runtime functions (libm wrappers) ---

@@ -35,6 +35,7 @@ use tidepool_repr::{
 pub fn env_from_datacon_table(table: &DataConTable) -> Env {
     let mut env = Env::new();
     env.set_ids(EvalIds {
+        text: table.get_by_name_arity("Text", 3),
         json: crate::json::JsonConIds::from_table(table).map(std::sync::Arc::new),
         time: crate::time::TimeConIds::from_table(table).map(std::sync::Arc::new),
     });
@@ -403,50 +404,37 @@ fn dispatch_primop_with_intercepts(
     heap: &mut dyn Heap,
 ) -> Result<Value, EvalError> {
     match op {
-        // ShowDoubleAddr/ShowSignedDoubleAddr: the single-field-Con
-        // arms below are a deliberately narrower mirror of
-        // `shapes::unbox_double`/`unbox_int` — this function has no
-        // `&DataConTable` in scope (only `Value`/`Heap`), so they
-        // can't verify the con is actually named `D#`/`I#` and
-        // instead accept ANY single-field Con after forcing its
-        // field. Not a migration candidate without threading a
-        // table through the whole eval_at call chain.
-        PrimOpKind::ShowDoubleAddr => {
-            if arg_vals.len() != 1 {
-                return Err(EvalError::ArityMismatch {
-                    context: ArityContext::Arguments,
-                    expected: 1,
-                    got: arg_vals.len(),
-                });
-            }
-            let d = expect_double(&arg_vals[0], heap)?;
-            let s = tidepool_bignum::haskell_show_double(d);
-            let mut bytes = s.into_bytes();
-            bytes.push(0); // null terminator for IndexCharOffAddr
-            Ok(Value::Lit(Literal::LitString(bytes)))
-        }
-        PrimOpKind::ShowSignedDoubleAddr => {
-            // (prec :: Int, d :: Double) — precedence-aware show; must
-            // match the JIT host fn `runtime_show_signed_double_addr`.
-            if arg_vals.len() != 2 {
-                return Err(EvalError::ArityMismatch {
-                    context: ArityContext::Arguments,
-                    expected: 2,
-                    got: arg_vals.len(),
-                });
-            }
-            let prec = expect_int(&arg_vals[0], heap)?;
-            let d = expect_double(&arg_vals[1], heap)?;
+        PrimOpKind::RenderDoubleText | PrimOpKind::RenderDoublePrecText => {
+            let (prec, value) = if op == PrimOpKind::RenderDoubleText {
+                if arg_vals.len() != 1 {
+                    return Err(EvalError::ArityMismatch {
+                        context: ArityContext::Arguments,
+                        expected: 1,
+                        got: arg_vals.len(),
+                    });
+                }
+                (None, &arg_vals[0])
+            } else {
+                if arg_vals.len() != 2 {
+                    return Err(EvalError::ArityMismatch {
+                        context: ArityContext::Arguments,
+                        expected: 2,
+                        got: arg_vals.len(),
+                    });
+                }
+                (Some(expect_int(&arg_vals[0], heap)?), &arg_vals[1])
+            };
+            let d = expect_double(value, heap)?;
             let body = tidepool_bignum::haskell_show_double(d);
-            // `showSignedFloat`'s `x < 0` test (so -0.0 does NOT parenthesize).
-            let s = if prec > 6 && d < 0.0 {
+            let rendered = if prec.is_some_and(|p| p > 6) && d < 0.0 {
                 format!("({body})")
             } else {
                 body
             };
-            let mut bytes = s.into_bytes();
-            bytes.push(0);
-            Ok(Value::Lit(Literal::LitString(bytes)))
+            let text = ids.text.ok_or_else(|| {
+                EvalError::InternalError("Double rendering: Text constructor not in scope".into())
+            })?;
+            Ok(crate::shapes::make_text(&rendered, text))
         }
         PrimOpKind::JsonDecode => {
             // eitherDecodeValue :: Text -> Either Text Value. Parse the
@@ -1488,13 +1476,8 @@ fn dispatch_primop(
             let (_, exp) = tidepool_bignum::decode_float_int(f);
             Ok(Value::Lit(Literal::LitInt(exp)))
         }
-        PrimOpKind::ShowDoubleAddr => {
-            // Handled in eval_at PrimOp arm (needs heap for deep forcing)
-            unreachable!("ShowDoubleAddr should be intercepted in eval_at")
-        }
-        PrimOpKind::ShowSignedDoubleAddr => {
-            // Handled in eval_at PrimOp arm (needs heap for deep forcing)
-            unreachable!("ShowSignedDoubleAddr should be intercepted in eval_at")
+        PrimOpKind::RenderDoubleText | PrimOpKind::RenderDoublePrecText => {
+            unreachable!("managed Double rendering should be intercepted in eval_at")
         }
         PrimOpKind::JsonDecode => {
             // Handled in eval_at PrimOp arm (needs heap + cached con ids)

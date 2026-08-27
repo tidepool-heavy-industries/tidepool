@@ -43,6 +43,8 @@ import Prelude
 import Data.Char (chr, ord)
 import Data.List (foldl')
 import Data.Ratio ((%))
+import qualified Data.Text as T
+import Tidepool.Double (renderDouble)
 
 -- | An arbitrary-precision decimal: @Scientific c e@ denotes @c * 10 ^ e@.
 -- Opaque, single constructor, arity 2 (coefficient first, exponent second) —
@@ -160,13 +162,11 @@ isFiniteDouble :: Double -> Bool
 isFiniteDouble d = d == d && not (absD > 0.0 && absD * 0.5 == absD)
   where absD = if d < 0 then negate d else d
 
--- Monomorphic core. Uses @show \@Double@ — which the extractor lowers to the
--- @ShowDoubleAddr@ primop (shortest-decimal, JIT-safe) — rather than a local
--- @showDouble@ stub, whose bottoming body GHC can collapse past the interceptor.
+-- Monomorphic core. Uses the stable managed-Text Double intrinsic.
 -- PRECONDITION: @d@ is finite ('isFiniteDouble' d) — callers that may see a
 -- non-finite value must check first (see 'isFiniteDouble').
 fromDouble :: Double -> Scientific
-fromDouble = readDecimalToScientific . show
+fromDouble = readDecimalToScientific . T.unpack . renderDouble
 
 -- Parse a decimal string — fixed (@\"3.14\"@) or scientific (@\"1.79e308\"@),
 -- optional leading @-@ — into an exact 'Scientific'. Inputs come from the

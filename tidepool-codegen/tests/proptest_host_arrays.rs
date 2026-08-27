@@ -29,8 +29,7 @@
 use proptest::prelude::*;
 use serial_test::serial;
 use std::alloc::{dealloc, Layout};
-use std::ffi::CString;
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
 use tidepool_codegen::host_fns::*;
 
 // ---------------------------------------------------------------------------
@@ -912,16 +911,9 @@ fn double_bits_strategy() -> impl Strategy<Value = u64> {
     ]
 }
 
-/// Format a double via the host fn, reclaiming (and freeing) the leaked CString.
+/// Format a double through the shared Haskell-compatible formatter.
 fn host_show_double(bits: u64) -> String {
-    let p = runtime_show_double_addr(bits as i64);
-    if (p as u64) < 0x1000 {
-        return "<poison>".to_string();
-    }
-    // SAFETY: runtime_show_double_addr produced this via CString::into_raw;
-    // from_raw reclaims ownership and frees on drop (round-trip is documented).
-    let cs = unsafe { CString::from_raw(p as *mut c_char) };
-    cs.to_string_lossy().into_owned()
+    tidepool_bignum::haskell_show_double(f64::from_bits(bits))
 }
 
 /// Canonical show outputs we PIN (the recorded mapping for the special set).
@@ -1158,14 +1150,14 @@ fn bug1_repro_minimal() {
     let got_min = host_show_double(1u64);
     assert_eq!(
         got_min, "5.0e-324",
-        "BUG-1: runtime_show_double_addr produced {got_min:?} for the smallest \
+        "BUG-1: Double formatter produced {got_min:?} for the smallest \
          subnormal; Haskell `show` produces \"5.0e-324\""
     );
     // Human-readable witness.
     let got_1e10 = host_show_double(1e10_f64.to_bits());
     assert_eq!(
         got_1e10, "1.0e10",
-        "BUG-1: runtime_show_double_addr produced {got_1e10:?} for 1e10; \
+        "BUG-1: Double formatter produced {got_1e10:?} for 1e10; \
          Haskell `show` produces \"1.0e10\" (scientific mantissa needs a decimal point)"
     );
 }

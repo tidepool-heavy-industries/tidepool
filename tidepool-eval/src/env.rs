@@ -42,6 +42,8 @@ enum EnvKey {
 /// copying the whole struct every time.
 #[derive(Debug, Clone, Default)]
 pub struct EvalIds {
+    /// The `Text` constructor for managed Double rendering.
+    pub text: Option<tidepool_repr::DataConId>,
     /// The aeson-`Value`/`Either`/`Data.Map` ids for `JsonDecode`. `None`
     /// when `Either` (or another required constructor) is not in scope.
     pub json: Option<Arc<JsonConIds>>,

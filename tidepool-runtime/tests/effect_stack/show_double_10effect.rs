@@ -1,4 +1,4 @@
-//! Reproduction test for SIGILL on showDouble through the full 10-effect dispatch path.
+//! Reproduction test for SIGILL on show through the full 10-effect dispatch path.
 //!
 //! The MCP server uses `Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Ask]`.
 //! The bug only manifests through `compile_and_run` (effect dispatch loop), not
@@ -40,7 +40,7 @@ objSz [] acc = acc
 objSz [(k,v)] acc = acc + T.length (KM.toText k) + 4 + valSize v
 objSz ((k,v):rest) acc = objSz rest (acc + T.length (KM.toText k) + 4 + valSize v + 2)"#;
 
-/// Minimal test: showDouble on non-constant through 10-effect dispatch.
+/// Minimal test: show on non-constant through 10-effect dispatch.
 /// The simplest reproduction of the MCP SIGILL bug.
 #[test]
 fn show_double_10_effects_minimal() {
@@ -50,13 +50,13 @@ result = do
   let xs = [10 :: Int, 20, 30]
       n = length xs
       d = fromIntegral n :: Double
-  pure (toJSON (pack (showDouble d)))"#,
+  pure (toJSON (pack (show d)))"#,
     );
     eprintln!("Result: {json}");
     assert!(json.is_string(), "Expected string result, got: {json}");
 }
 
-/// Full MCP reproduction: 10-effect dispatch with KvSet + paginateResult + showDouble.
+/// Full MCP reproduction: 10-effect dispatch with KvSet + paginateResult + show.
 #[test]
 fn show_double_10_effects_with_paginate() {
     let body = format!(
@@ -84,7 +84,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)"#
@@ -125,7 +125,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   pure (toJSON _r)
@@ -149,7 +149,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   pure (toJSON _r)"#,
@@ -174,7 +174,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let sz = valSize (toJSON _r)
@@ -288,7 +288,7 @@ result = do
   kvSet "__sayChars" (toJSON (0 :: Int))
   _r <- do
     let n = length [10 :: Int, 20, 30]
-    pure (showDouble (fromIntegral n))
+    pure (show (fromIntegral n))
   _scV <- kvGet "__sayChars"
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)
@@ -325,7 +325,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)"#
@@ -351,7 +351,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let budget = max 100 (4096 - _sayC)
@@ -377,7 +377,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
@@ -402,7 +402,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   let val = toJSON _r
       sz = valSize val
   if sz <= 4096
@@ -427,7 +427,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
@@ -442,7 +442,7 @@ result = do
     assert!(json.is_string(), "Expected string, got: {json}");
 }
 
-/// Bisection: KvSet + showDouble + valSize comparison + return val. No KvGet.
+/// Bisection: KvSet + show + valSize comparison + return val. No KvGet.
 #[test]
 fn show_double_10_effects_kvset_no_kvget() {
     let body = format!(
@@ -455,7 +455,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   let val = toJSON _r
       sz = valSize val
   if sz <= 4096
@@ -478,7 +478,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   pure (toJSON _r)"#,
@@ -500,7 +500,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of {{ Just b -> case b ^? _Int of {{ Just n -> n; _ -> 0 }}; Nothing -> 0 }}
   let val = toJSON _r
@@ -532,7 +532,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   let sz = valSize (toJSON _r)
@@ -553,7 +553,7 @@ result = do
     let xs = take 3 [1 :: Int ..]
         s = foldl' (+) 0 xs
         d = fromIntegral s :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   pure (toJSON _r)"#,
     );
     eprintln!("Result: {json}");

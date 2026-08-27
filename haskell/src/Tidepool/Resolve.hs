@@ -5,9 +5,8 @@ import GHC.Core.FVs (exprSomeFreeVars)
 import GHC.Core.Subst (substExpr, mkEmptySubst)
 import GHC.Types.Var.Env (mkInScopeSet)
 import GHC.Types.Id (Id, idType, idUnfolding, realIdUnfolding, isGlobalId, isPrimOpId_maybe, isDataConWorkId_maybe, isDataConWrapId_maybe, isDeadEndId, mkSysLocalOrCoVar)
-import GHC.Types.Var (Var, varName, varUnique)
+import GHC.Types.Var (Var, varName)
 import GHC.Types.Var.Set (VarSet, emptyVarSet, unitVarSet, elemVarSet, extendVarSet)
-import GHC.Types.Unique (getKey)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
@@ -302,27 +301,19 @@ resolveExternals varIdFn hscEnv binds = do
     -- | Skip magic functions that Translate.hs handles specially.
     -- unpack* functions: their unfoldings use Addr# primops that we
     -- don't support; Translate desugars them to cons-cell chains.
-    -- showDouble/$fShowDouble_$cshow: their unfoldings use Integer/GMP
-    -- arithmetic; Translate emits a ShowDoubleAddr primop instead.
+    -- Tidepool.Double's OPAQUE bindings are stable extractor intrinsics.
     isMagicUnpackVar :: Var -> Bool
     isMagicUnpackVar v =
-      let name = occNameString (nameOccName (varName v))
+      let n = varName v
+          name = occNameString (nameOccName n)
+          definingModule = case nameModule_maybe n of
+            Just m  -> moduleNameString (moduleName m)
+            Nothing -> ""
       in name `elem` [ "unpackCString#", "unpackCStringUtf8#"
                       , "unpackAppendCString#"
-                      , "unpackFoldrCString#", "unpackFoldrCStringUtf8#"
-                      , "showDouble", "showDouble'"
-                      , "$fShowDouble_$cshow" ]
-         -- Block GHC's specialized showSignedFloat for Double and its
-         -- arguments (pulls in floatToDigits → Integer/GMP pipeline).
-         -- Translate.hs intercepts the call and emits ShowDoubleAddr.
-         || "$fShowDouble_$s" `isPrefixOf` name
-         || name == "$fShowDouble2"
-         -- NB: `minExpt` (GHC.Internal.Float) is NOT blocked. GHC's CSE shares
-         -- it (its body is the bare CAF `minExpt = 0`) as the precedence `0`
-         -- that top-level `show @Double` passes to showSignedFloat; the
-         -- ShowSignedDoubleAddr intercept needs that precedence to resolve.
-         -- Resolving `minExpt` yields `I# 0#` — no floatToDigits (that lives in
-         -- separate bindings that merely USE minExpt, and are never referenced).
+                      , "unpackFoldrCString#", "unpackFoldrCStringUtf8#" ]
+         || (definingModule == "Tidepool.Double"
+             && name `elem` ["renderDouble", "renderDoublePrec"])
 
 -- | Attempt to resolve a specialized Id by deriving its generic parent.
 -- Parses the OccName for $s markers, strips them to get the generic name,

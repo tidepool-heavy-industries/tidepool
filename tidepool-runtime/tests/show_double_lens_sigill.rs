@@ -143,7 +143,7 @@ result =
 
 #[test]
 fn test_show_double_on_lens_sum_via_show_double() {
-    // showDouble returns String, so wrap with pack for Text result
+    // `show` returns Text; `pack` remains as an identity compatibility call.
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
@@ -152,7 +152,7 @@ result =
   let v = object ["x" .= True, "y" .= True]
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case v ^? key "y" . _Bool of { Just True -> 2.0; _ -> 0.0 :: Double }
-  in pack (showDouble (a + b))
+  in pack (show (a + b))
 "#);
     assert_eq!(json, serde_json::json!("3.0"));
 }

@@ -686,12 +686,12 @@ result = length (nub [Null, Null, Bool True, Bool True, Number 1])
 }
 
 // ===========================================================================
-// Tests for showDouble on non-constant-foldable Doubles (SIGILL regression)
+// Tests for show on non-constant-foldable Doubles (SIGILL regression)
 // ===========================================================================
 
 #[test]
 fn show_double_constant() {
-    // Baseline: showDouble on a literal (GHC constant-folds this)
+    // Baseline: show on a literal (GHC constant-folds this)
     let src = r#"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
@@ -699,18 +699,18 @@ import Tidepool.Prelude hiding (error)
 import qualified Data.Text as T
 
 result :: Int
-result = T.length (pack (showDouble 3.14))
+result = T.length (pack (show 3.14))
 "#;
     let val = run(src, "result");
     assert!(
         expect_int(&val) > 0,
-        "showDouble 3.14 should produce non-empty string"
+        "show 3.14 should produce non-empty string"
     );
 }
 
 #[test]
 fn show_double_non_constant_length() {
-    // showDouble on fromIntegral (length xs) — non-constant-foldable
+    // show on fromIntegral (length xs) — non-constant-foldable
     // Note: with a literal list [10,20,30], GHC constant-folds length.
     // Use a list constructed to prevent folding.
     let src = r#"
@@ -724,18 +724,18 @@ result =
   let xs = take 3 [1 :: Int ..]
       n = length xs
       d = fromIntegral n :: Double
-  in T.length (pack (showDouble d))
+  in T.length (pack (show d))
 "#;
     let val = run(src, "result");
     assert!(
         expect_int(&val) > 0,
-        "showDouble on non-constant Double should work"
+        "show on non-constant Double should work"
     );
 }
 
 #[test]
 fn show_double_non_constant_recursive() {
-    // showDouble on result of a recursive function
+    // show on result of a recursive function
     let src = r#"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
@@ -749,13 +749,10 @@ go n = go (n - 1)
 result :: Int
 result =
   let d = fromIntegral (go 3) :: Double
-  in T.length (pack (showDouble d))
+  in T.length (pack (show d))
 "#;
     let val = run(src, "result");
-    assert!(
-        expect_int(&val) > 0,
-        "showDouble on recursive result should work"
-    );
+    assert!(expect_int(&val) > 0, "show on recursive result should work");
 }
 
 #[test]
@@ -811,7 +808,7 @@ result =
 
 #[test]
 fn show_double_from_infinite_list() {
-    // showDouble on a value derived from an infinite list
+    // show on a value derived from an infinite list
     let src = r#"
 {-# LANGUAGE NoImplicitPrelude #-}
 module Test where
@@ -823,12 +820,12 @@ result =
   let xs = take 3 [1 :: Int ..]
       s = foldl' (+) 0 xs
       d = fromIntegral s :: Double
-  in T.length (pack (showDouble d))
+  in T.length (pack (show d))
 "#;
     let val = run(src, "result");
     assert!(
         expect_int(&val) > 0,
-        "showDouble on infinite list sum should work"
+        "show on infinite list sum should work"
     );
 }
 
@@ -896,7 +893,7 @@ result =
 }
 
 // #342 FIXED (Data.Scientific restored as the exact JSON number carrier,
-// b4748de3): showDouble inside the Eff continuation tree works. Active
+// b4748de3): show inside the Eff continuation tree works. Active
 // regression test.
 #[test]
 fn show_double_mcp_preamble_context() {
@@ -904,7 +901,7 @@ fn show_double_mcp_preamble_context() {
     // differently (continuations, effect dispatch). The result is Eff-wrapped
     // but we use run_pure which will see the Leaf/Node continuation tree.
     //
-    // The key insight: when result :: Eff '[...] Value, the showDouble call
+    // The key insight: when result :: Eff '[...] Value, the show call
     // is inside a continuation closure, and GHC may optimize differently.
     // Uses the canonical MCP_PREAMBLE (10-effect GADT stack, kept in lockstep
     // with production in eval_harness.rs) instead of a hand-duplicated copy
@@ -935,7 +932,7 @@ objSz [] acc = acc
 objSz [(k,v)] acc = acc + T.length (KM.toText k) + 4 + valSize v
 objSz ((k,v):rest) acc = objSz rest (acc + T.length (KM.toText k) + 4 + valSize v + 2)
 
--- Eff-wrapped result: the showDouble call is inside the Eff continuation tree.
+-- Eff-wrapped result: the show call is inside the Eff continuation tree.
 -- This matches the MCP paginateResult path.
 result :: Text
 result =
@@ -954,7 +951,7 @@ result =
     }
 }
 
-/// Test showDouble in an effectful context using compile_and_run with actual
+/// Test show in an effectful context using compile_and_run with actual
 /// effect handlers — this is the MCP execution path.
 #[test]
 fn show_double_effectful_paginate() {
@@ -982,7 +979,7 @@ result = do
     let xs = take 3 [1 :: Int ..]
         s = foldl' (+) 0 xs
         d = fromIntegral s :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   let sz = valSize (toJSON _r)
   pure (toJSON sz)
 "#,
@@ -999,7 +996,7 @@ result = do
 }
 
 /// EXACT MCP reproduction: full preamble with all 10 effect types, Library,
-/// pagination helpers, and the showDouble-triggering user code — the same
+/// pagination helpers, and the show-triggering user code — the same
 /// module shape `tidepool-extract` emits for a `.tidepool/lib`-backed eval.
 ///
 /// This `result :: M Value` sends real effects (KvSet/KvGet/Ask), so it must
@@ -1103,7 +1100,7 @@ result = do
     let xs = [10 :: Int, 20, 30]
         n = length xs
         d = fromIntegral n :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   _scV <- send (KvGet "__sayChars")
   let _sayC = case _scV of { Just b -> case b ^? _Int of { Just n -> n; _ -> 0 }; Nothing -> 0 }
   paginateResult (max 100 (4096 - _sayC)) (toJSON _r)
@@ -1123,7 +1120,7 @@ result = do
     );
 }
 
-/// Test showDouble in an Eff-wrapped result binding with Library import.
+/// Test show in an Eff-wrapped result binding with Library import.
 /// This matches what MCP does: module Expr with all effect types, Library,
 /// and the paginateResult wrapper calling show on Value containing Number.
 ///
@@ -1186,7 +1183,7 @@ result = do
     let xs = take 3 [1 :: Int ..]
         s = foldl' (+) 0 xs
         d = fromIntegral s :: Double
-    pure (pack (showDouble d))
+    pure (pack (show d))
   paginateResult 4096 (toJSON _r)
 "#;
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1207,7 +1204,7 @@ result = do
         .into_result();
     assert!(
         result.is_ok(),
-        "Eff+Library showDouble should not crash: {:?}",
+        "Eff+Library show should not crash: {:?}",
         result.err()
     );
 }

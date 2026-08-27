@@ -59,10 +59,10 @@ pub use primops::{
     runtime_double_log1p, runtime_double_power, runtime_double_sin, runtime_double_sinh,
     runtime_double_tan, runtime_double_tanh, runtime_int_encode_double, runtime_json_decode,
     runtime_new_boxed_array, runtime_new_byte_array, runtime_parse_iso8601,
-    runtime_resize_byte_array, runtime_set_byte_array, runtime_show_double_addr,
-    runtime_show_signed_double_addr, runtime_shrink_boxed_array, runtime_shrink_byte_array,
-    runtime_strlen, runtime_text_measure_off, runtime_text_memchr, runtime_text_reverse,
-    runtime_word2_quot, runtime_word2_rem, runtime_word_encode_double,
+    runtime_render_double_prec_text, runtime_render_double_text, runtime_resize_byte_array,
+    runtime_set_byte_array, runtime_shrink_boxed_array, runtime_shrink_byte_array, runtime_strlen,
+    runtime_text_measure_off, runtime_text_memchr, runtime_text_reverse, runtime_word2_quot,
+    runtime_word2_rem, runtime_word_encode_double,
 };
 
 pub(crate) use list_materialize::materialize_cons_list;
@@ -148,6 +148,14 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("runtime_text_memchr", runtime_text_memchr as *const u8),
         ("runtime_text_reverse", runtime_text_reverse as *const u8),
+        (
+            "runtime_render_double_text",
+            runtime_render_double_text as *const u8,
+        ),
+        (
+            "runtime_render_double_prec_text",
+            runtime_render_double_prec_text as *const u8,
+        ),
         ("runtime_word2_quot", runtime_word2_quot as *const u8),
         ("runtime_word2_rem", runtime_word2_rem as *const u8),
         // ghc-bignum Integer->Double FFI (the only mpn-adjacent FFI under the
@@ -181,14 +189,6 @@ pub fn host_fn_symbols() -> Vec<(&'static str, *const u8)> {
             runtime_cas_boxed_array as *const u8,
         ),
         ("runtime_shape_trap", runtime_shape_trap as *const u8),
-        (
-            "runtime_show_double_addr",
-            runtime_show_double_addr as *const u8,
-        ),
-        (
-            "runtime_show_signed_double_addr",
-            runtime_show_signed_double_addr as *const u8,
-        ),
         // Double math (libm wrappers)
         ("runtime_double_exp", runtime_double_exp as *const u8),
         ("runtime_double_expm1", runtime_double_expm1 as *const u8),

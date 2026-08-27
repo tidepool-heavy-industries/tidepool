@@ -555,6 +555,8 @@ pub struct JitEffectMachine {
     nursery: Nursery,
     tags: Result<ConTags, &'static str>,
     func_id: FuncId,
+    /// `Text` constructor used by managed Double-rendering host functions.
+    text_con_id: Option<tidepool_repr::DataConId>,
     /// aeson-`Value` constructor ids for the `JsonDecode` primop, resolved once
     /// at compile from the `DataConTable` and installed into a host-fn
     /// thread-local at each run entry. `None` if the closure isn't in scope.
@@ -839,6 +841,7 @@ type CompiledParts = (
     Nursery,
     Result<ConTags, &'static str>,
     FuncId,
+    Option<tidepool_repr::DataConId>,
     Option<tidepool_eval::json::JsonConIds>,
     Option<tidepool_eval::time::TimeConIds>,
 );
@@ -883,9 +886,18 @@ impl JitEffectMachine {
         // Cache the aeson-`Value` constructor ids for the `JsonDecode` primop's
         // host fn, and the `Either`/`I#`/`Text` ids for `ParseISO8601` (both
         // installed into the machine state before each run).
+        let text_con_id = table.get_by_name_arity("Text", 3);
         let json_con_ids = tidepool_eval::json::JsonConIds::from_table(table);
         let time_con_ids = tidepool_eval::time::TimeConIds::from_table(table);
-        Ok((pipeline, nursery, tags, func_id, json_con_ids, time_con_ids))
+        Ok((
+            pipeline,
+            nursery,
+            tags,
+            func_id,
+            text_con_id,
+            json_con_ids,
+            time_con_ids,
+        ))
     }
 
     /// Compile a CoreExpr for one-shot JIT execution.
@@ -897,13 +909,14 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id, json_con_ids, time_con_ids) =
+        let (pipeline, nursery, tags, func_id, text_con_id, json_con_ids, time_con_ids) =
             Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
             tags,
             func_id,
+            text_con_id,
             json_con_ids,
             time_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -933,13 +946,14 @@ impl JitEffectMachine {
         table: &DataConTable,
         nursery_size: usize,
     ) -> Result<Self, JitError> {
-        let (pipeline, nursery, tags, func_id, json_con_ids, time_con_ids) =
+        let (pipeline, nursery, tags, func_id, text_con_id, json_con_ids, time_con_ids) =
             Self::compile_inner(expr, table, nursery_size)?;
         Ok(Self {
             pipeline,
             nursery,
             tags,
             func_id,
+            text_con_id,
             json_con_ids,
             time_con_ids,
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -1041,6 +1055,7 @@ impl JitEffectMachine {
                 .set_gc_state(self.nursery.start() as *mut u8, self.nursery.size()),
         }
         self.machine_state.set_cancel_flag(cancel_flag);
+        self.machine_state.set_text_con_id(self.text_con_id);
         // Make the aeson-`Value` constructor ids (JsonDecode) and the
         // Either/I#/Text ids (ParseISO8601) visible to those primops' host fns
         // for the duration of this run.
@@ -2512,7 +2527,8 @@ impl JitEffectMachine {
         // or shadowing — see `realm_global_id_isolation.rs` for the pinning
         // test.
         //
-        // ACCUMULATE the primop constructor-id bundles (JsonDecode / ParseISO8601)
+        // Accumulate host-built-value constructor ids as fragments introduce
+        // them.
         // as fragments introduce constructors: upgrade None -> Some, never clobber
         // a resolved bundle. Each turn's table is a SUBSET of the session, so a
         // later turn that merely FORCES a primop-produced thunk — its own Core
@@ -2521,6 +2537,9 @@ impl JitEffectMachine {
         // JsonDecode/ParseISO8601 result in a sparse turn failed with
         // "constructors not in scope".) The machine reads these fields at every
         // run entry via `install_registries`.
+        if let Some(id) = table.get_by_name_arity("Text", 3) {
+            self.text_con_id = Some(id);
+        }
         if let Some(ids) = tidepool_eval::json::JsonConIds::from_table(table) {
             self.json_con_ids = Some(ids);
         }

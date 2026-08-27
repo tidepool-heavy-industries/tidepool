@@ -59,6 +59,7 @@ use crate::stack_map::StackMapRegistry;
 /// rely on — see e.g. `set_first_cause`'s `try_borrow_mut` defense below.
 pub struct MachineState {
     cancel_flag: RefCell<Option<Arc<AtomicBool>>>,
+    text_con_id: Cell<Option<tidepool_repr::DataConId>>,
     json_con_ids: Cell<Option<tidepool_eval::json::JsonConIds>>,
     time_con_ids: Cell<Option<tidepool_eval::time::TimeConIds>>,
     stack_map_registry: RefCell<Option<*const StackMapRegistry>>,
@@ -128,6 +129,7 @@ impl MachineState {
     pub fn new() -> Self {
         Self {
             cancel_flag: RefCell::new(None),
+            text_con_id: Cell::new(None),
             json_con_ids: Cell::new(None),
             time_con_ids: Cell::new(None),
             stack_map_registry: RefCell::new(None),
@@ -199,7 +201,15 @@ impl MachineState {
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
-    // --- JSON decode constructor ids ---------------------------------------
+    // --- Host-built value constructor ids ----------------------------------
+
+    pub(crate) fn set_text_con_id(&self, id: Option<tidepool_repr::DataConId>) {
+        self.text_con_id.set(id);
+    }
+
+    pub(crate) fn text_con_id(&self) -> Option<tidepool_repr::DataConId> {
+        self.text_con_id.get()
+    }
 
     pub(crate) fn set_json_con_ids(&self, ids: Option<tidepool_eval::json::JsonConIds>) {
         self.json_con_ids.set(ids);

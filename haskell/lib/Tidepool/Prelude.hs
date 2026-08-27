@@ -9,8 +9,7 @@ module Tidepool.Prelude
     Int, Integer, Word, Char, Bool(..), Double, Float
   , String, Ordering(..), Maybe(..), Either(..)
   , Generic
-    -- Render(render) (Tidepool.Render, the [fmt|] hole-coercion class) is
-    -- intentionally NOT re-exported here: it collides with any
+    -- Render's method is intentionally NOT re-exported here: it collides with any
     -- author-defined `render` (the harness contract's
     -- `render :: State -> Maybe Text -> Text`), and bare `render` was never
     -- an advertised verb — the canonical coercion instinct is `show`, which
@@ -26,6 +25,7 @@ module Tidepool.Prelude
   , first, second
     -- * Text type (re-exported from Data.Text)
   , Text
+  , Render
   , Pack(..), unpack
     -- * [fmt|...|] format-spec runtime helpers
   , FSign(..), FAlign(..)
@@ -50,7 +50,6 @@ module Tidepool.Prelude
   , (<$>)
     -- * show (Text-returning shadow)
   , show
-  , showDouble
     -- * read (String-based, works on the JIT since native bignum — see
     -- gotcha_registry stale_doc_read_now_works; parseInt/parseDouble are the
     -- Text-first equivalents)
@@ -301,6 +300,8 @@ import Data.Text (Text)
 -- the text-vendor-mechanism-proven memory.
 import qualified Tidepool.Data.Text as T
 import Tidepool.Data.Text (Pack(..), pack)
+import Tidepool.Render (Render)
+import qualified Tidepool.Render as Render
 import Tidepool.FilePath
 import Data.Char (ord, chr)
 import qualified Data.Char as C
@@ -365,18 +366,9 @@ import Witherable (wither, filterA, ordNub)
 -- Total parse (Text.Read). Text-first numeric parsing stays in parseInt/parseDouble.
 import Text.Read (readMaybe)
 
--- Permanent binding-level interception in Translate.hs.
--- GHC's floatToDigits/Integer pipeline is fundamentally incompatible with
--- the JIT, so showDouble is always intercepted and emitted as ShowDoubleAddr.
--- The body is a fallback that should never run.
--- The Double arg must be used to prevent GHC worker-wrapper from dropping it.
-{-# NOINLINE showDouble #-}
-showDouble :: Double -> String
-showDouble d = case d of !_ -> error "showDouble: should be intercepted by Translate"
-
 -- | Text-returning show: @show x@ gives @Text@ instead of @String@.
-show :: Show a => a -> Text
-show = T.pack . P.show
+show :: Render a => a -> Text
+show = Render.render
 
 -- | Polymorphic @pack@ (identity on 'Text', pack on 'String') now lives in
 -- 'Tidepool.Data.Text' so that the qualified @T.pack@ and this unqualified
@@ -712,7 +704,7 @@ parseInt = unsatisfiable
 
 -- | Parse a Double from Text, returning Nothing on failure. Handles optional
 -- sign, integer part, optional decimal part, and an optional @e@\/@E@
--- exponent (so it round-trips 'showDouble', which emits scientific notation
+-- exponent (so it round-trips the Double renderer, which emits scientific notation
 -- for very small\/large magnitudes). Digits accumulate directly as a
 -- 'Double' rather than an 'Int', so a digit run longer than ~19 characters
 -- loses precision the way any Double parse would instead of silently
@@ -769,7 +761,7 @@ parseDoubleM t = case T.uncons t of
 
     -- ONE final multiplication/division against a precomputed power of ten
     -- (not N chained single-digit steps): 'pow10D' itself is exact for the
-    -- exponents 'showDouble' ever emits (powers of ten up to 10^22 are
+    -- exponents the Double renderer emits (powers of ten up to 10^22 are
     -- exactly representable as 'Double'), and IEEE-754 division/
     -- multiplication is correctly-rounded, so this gives the same result a
     -- correctly-rounded decimal parser would -- chaining @/10@ or @*10@ once

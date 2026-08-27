@@ -574,7 +574,7 @@ fn show_int() {
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showInt.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
-    let s = collect_string(&val, &table);
+    let s = collect_text(&val, &table);
     assert_eq!(s, "42", "expected \"42\", got \"{s}\"");
 }
 
@@ -583,7 +583,7 @@ fn show_int_neg() {
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showIntNeg.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
-    let s = collect_string(&val, &table);
+    let s = collect_text(&val, &table);
     assert_eq!(s, "-7", "expected \"-7\", got \"{s}\"");
 }
 
@@ -637,7 +637,7 @@ fn show_double() {
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDouble.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
-    let s = collect_string(&val, &table);
+    let s = collect_text(&val, &table);
     assert_eq!(s, "3.14", "expected \"3.14\", got \"{s}\"");
 }
 
@@ -646,36 +646,36 @@ fn show_double_int() {
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoubleInt.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
-    let s = collect_string(&val, &table);
+    let s = collect_text(&val, &table);
     assert_eq!(s, "42.0", "expected \"42.0\", got \"{s}\"");
 }
 
 #[test]
 fn show_double_text() {
-    // T.pack (showDouble' 3.14) — produces Text, not String
+    // Stable Tidepool intrinsic returns managed Text directly.
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoubleText.cbor");
     let val = eval_fixture(CBOR);
-    // Text is Con("Text", [ByteArray#, Int#, Int#]) — just check it doesn't crash
-    eprintln!("show_double_text result: {:?}", val);
+    let table = table();
+    assert_eq!(collect_text(&val, &table), "3.14");
 }
 
 #[test]
 fn show_double_prelude() {
-    // show (3.14 :: Double) using Prelude's show (not showDouble')
-    // GHC specializes this to $fShowDouble_$sshowSignedFloat — our intercept rewrites it
+    // Precedence-aware intrinsic parenthesizes a negative constructor argument.
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoublePrelude.cbor");
     let val = eval_fixture(CBOR);
     let table = table();
-    let s = collect_string(&val, &table);
-    assert_eq!(s, "3.14");
+    let s = collect_text(&val, &table);
+    assert_eq!(s, "(-2.5)");
 }
 
 #[test]
 fn show_double_prelude_text() {
-    // T.pack (show (3.14 :: Double)) — the MCP use case
+    // Top-level precedence leaves the negative unparenthesized.
     static CBOR: &[u8] = include_bytes!("../../haskell/test/suite_cbor/showDoublePreludeText.cbor");
     let val = eval_fixture(CBOR);
-    eprintln!("show_double_prelude_text result: {:?}", val);
+    let table = table();
+    assert_eq!(collect_text(&val, &table), "-2.5");
 }
 
 // =============================================================================

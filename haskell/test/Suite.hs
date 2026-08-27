@@ -19,6 +19,7 @@ import Tidepool.Patch
 -- Suite.hs cannot import Tidepool.Prelude here (it pulls Control.Lens, which
 -- the --all-closed extract session cannot see), so import render directly.
 import Tidepool.Render (render)
+import Tidepool.Double (renderDouble, renderDoublePrec)
 -- Spec'd [fmt|{expr:spec}|] holes expand to calls into Tidepool.QQ.Fmt.Runtime
 -- (FSign/FAlign + the fmt* helpers). Like render, these live in a lens-free
 -- module so the --all-closed extract session can import them directly.
@@ -568,11 +569,11 @@ prim_quot_rem_word =
 -- Show (7)
 -- ============================================================
 
-showInt :: String
-showInt = show (42 :: Int)
+showInt :: T.Text
+showInt = render (42 :: Int)
 
-showIntNeg :: String
-showIntNeg = show (-7 :: Int)
+showIntNeg :: T.Text
+showIntNeg = render (-7 :: Int)
 
 showCharA :: String
 showCharA = show ('a' :: Char)
@@ -589,28 +590,20 @@ showMaybeNothing = show (Nothing :: Maybe Int)
 showBool :: String
 showBool = show True
 
-showDouble :: String
-showDouble = showDouble' (3.14 :: Double)
+showDouble :: T.Text
+showDouble = renderDouble (3.14 :: Double)
 
-showDoubleInt :: String
-showDoubleInt = showDouble' (42.0 :: Double)
-
--- Fallback body uses `d` so GHC preserves the argument in Core.
--- GHC eta-reduces this to $fShowDouble_$cshow, which resolveExternals
--- skips (isMagicUnpackVar) and Translate.hs intercepts (isShowDoubleVar).
-{-# NOINLINE showDouble' #-}
-showDouble' :: Double -> String
-showDouble' d = show d
+showDoubleInt :: T.Text
+showDoubleInt = renderDouble (42.0 :: Double)
 
 showDoubleText :: T.Text
-showDoubleText = T.pack (showDouble' (3.14 :: Double))
+showDoubleText = renderDouble (3.14 :: Double)
 
--- Use Prelude's show directly (not showDouble') to test the GHC compilation path
-showDoublePrelude :: String
-showDoublePrelude = show (3.14 :: Double)
+showDoublePrelude :: T.Text
+showDoublePrelude = renderDoublePrec 11 (-2.5 :: Double)
 
 showDoublePreludeText :: T.Text
-showDoublePreludeText = T.pack (show (3.14 :: Double))
+showDoublePreludeText = renderDoublePrec 0 (-2.5 :: Double)
 
 -- ============================================================
 -- Lazy thunk tests (8)
@@ -988,7 +981,7 @@ qq_fmt_applied :: T.Text
 qq_fmt_applied = [fmt|shout: {T.toUpper s <> T.pack "!"}|]
   where s = T.pack "hi" :: T.Text
 
--- Double hole (render @Double → ShowDoubleAddr): "val: 3.5"
+-- Double hole (render @Double to managed Text): "val: 3.5"
 qq_fmt_double :: T.Text
 qq_fmt_double = [fmt|val: {d}|]
   where d = 3.5 :: Double
@@ -1085,8 +1078,8 @@ data FmtK a where
 
 useFmtK :: FmtK a -> a -> T.Text
 useFmtK k x = case k of
-  FmtKInt    -> T.pack (show x)   -- show @Int
-  FmtKPrec _ -> T.pack (show x)   -- show @Double
+  FmtKInt    -> render x
+  FmtKPrec _ -> render x
 
 qq_fmt_usek :: T.Text
 qq_fmt_usek = useFmtK (FmtKPrec 1) (1.5 :: Double)

@@ -685,37 +685,49 @@ pub fn emit_primop(
             )?;
             Ok(SsaVal::Raw(result, LIT_TAG_INT))
         }
-        PrimOpKind::ShowDoubleAddr => {
-            check_arity(op, 1, args.len())?;
-            let d = unbox_double(sess.pipeline, builder, sess.vmctx, args[0]);
+        PrimOpKind::RenderDoubleText | PrimOpKind::RenderDoublePrecText => {
+            let expected = if *op == PrimOpKind::RenderDoubleText {
+                1
+            } else {
+                2
+            };
+            check_arity(op, expected, args.len())?;
+            let (prec, double_arg) = if expected == 1 {
+                (None, args[0])
+            } else {
+                (
+                    Some(unbox_int(sess.pipeline, builder, sess.vmctx, args[0])),
+                    args[1],
+                )
+            };
+            let d = unbox_double(sess.pipeline, builder, sess.vmctx, double_arg);
             let bits = builder.ins().bitcast(types::I64, MemFlags::new(), d);
+            let (name, params, call_args) = match prec {
+                Some(prec) => (
+                    "runtime_render_double_prec_text",
+                    vec![
+                        AbiParam::new(types::I64),
+                        AbiParam::new(types::I64),
+                        AbiParam::new(types::I64),
+                    ],
+                    vec![sess.vmctx, prec, bits],
+                ),
+                None => (
+                    "runtime_render_double_text",
+                    vec![AbiParam::new(types::I64), AbiParam::new(types::I64)],
+                    vec![sess.vmctx, bits],
+                ),
+            };
             let result = emit_runtime_call(
                 sess.pipeline,
                 builder,
-                "runtime_show_double_addr",
+                name,
+                &params,
                 &[AbiParam::new(types::I64)],
-                &[AbiParam::new(types::I64)],
-                &[bits],
+                &call_args,
             )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
-        }
-        PrimOpKind::ShowSignedDoubleAddr => {
-            // (prec :: Int, d :: Double) -> C-string addr, parenthesized when
-            // `d < 0 && prec > 6` (the `showParen` the JIT-safe showSignedFloat
-            // replacement drops). All logic is in the host fn — no Core compare.
-            check_arity(op, 2, args.len())?;
-            let prec = unbox_int(sess.pipeline, builder, sess.vmctx, args[0]);
-            let d = unbox_double(sess.pipeline, builder, sess.vmctx, args[1]);
-            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), d);
-            let result = emit_runtime_call(
-                sess.pipeline,
-                builder,
-                "runtime_show_signed_double_addr",
-                &[AbiParam::new(types::I64), AbiParam::new(types::I64)],
-                &[AbiParam::new(types::I64)],
-                &[prec, bits],
-            )?;
-            Ok(SsaVal::Raw(result, LIT_TAG_ADDR))
+            builder.declare_value_needs_stack_map(result);
+            Ok(SsaVal::HeapPtr(result))
         }
         PrimOpKind::JsonDecode => {
             // eitherDecodeValue :: Text -> Either Text Value. The host fn builds

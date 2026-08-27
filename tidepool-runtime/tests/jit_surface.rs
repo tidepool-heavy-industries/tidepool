@@ -485,8 +485,8 @@ fn works_prelude_core_family() {
     );
 }
 
-/// `show` precedence (negative-Double parenthesization) and the
-/// `showDouble` monomorphic shadow. Both compare Haskell `Text` (from
+/// `show` precedence (negative-Double parenthesization) and direct
+/// Double rendering. Both compare Haskell `Text` (from
 /// `show`), not outer JSON numeric encoding — safe to bundle despite
 /// involving Doubles.
 ///

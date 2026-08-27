@@ -308,7 +308,7 @@ unsafe fn heap_to_value_inner(
                 }
                 x if x == LIT_TAG_ADDR as i64 => {
                     // Addr# is a legitimate intermediate runtime value: primops like
-                    // PlusAddr / ShowDoubleAddr (see emit/primop.rs) emit
+                    // PlusAddr (see emit/primop.rs) emits
                     // SsaVal::Raw(_, LIT_TAG_ADDR), and any program that returns the
                     // raw address through the bridge surfaces here. We can't decode
                     // it back to a typed Haskell value (it's a raw pointer with no

@@ -8,7 +8,7 @@
 - **Mode:** `always-on`
 - **Motivation:** GHC's `unpackCString#` unfolding relies on `Addr#` arithmetic which the JIT avoids; this provides a safe runtime implementation for dynamic strings.
 - **Test coverage:** `uncovered` (most strings in tests are static literals)
-- **Notes:** Used as a fallback for `isUnpackCStringVar` and `isShowDoubleVar` intercepts.
+- **Notes:** Used only for genuine dynamic `Addr#` strings; Double rendering no longer passes through this path.
 
 ## emitRuntimeUnpackAppendCString
 
@@ -18,17 +18,17 @@
 - **Mode:** `always-on`
 - **Motivation:** Handles dynamic strings in `(++)` or `show` that GHC optimizes into `unpackAppendCString#`.
 - **Test coverage:** `uncovered`
-- **Notes:** Used by `isShowDoubleSpecVar` to preserve the `ShowS` continuation.
+- **Notes:** This is general string support, independent of Double rendering.
 
-## emitShowDoubleSpecBody
+## Tidepool.Double rendering intrinsics
 
-- **Location:** `haskell/src/Tidepool/Translate.hs:210` (`emitShowDoubleSpecBody`)
-- **Trigger shape:** `$fShowDouble_$sshowSignedFloat` binder (GHC's specialized `show` for `Double`)
-- **Normalized output:** `NLam` chain wrapping `emitRuntimeUnpackAppendCString` using `ShowDoubleAddr` primop
+- **Location:** `haskell/src/Tidepool/Translate.hs` (`isRenderDoubleVar`, `isRenderDoublePrecVar`)
+- **Trigger shape:** Exact qualified references to `Tidepool.Double.renderDouble` or `Tidepool.Double.renderDoublePrec`, fully applied or partially applied
+- **Normalized output:** `RenderDoubleText` or `RenderDoublePrecText`, with lambdas synthesized for missing value arguments
 - **Mode:** `always-on`
-- **Motivation:** GHC's `floatToDigits` / `Integer` pipeline used in standard `show` for `Double` is too complex for the JIT and pulls in incompatible library code.
-- **Test coverage:** `showDoublePrelude` in `haskell/test/Suite.hs`, `test_show_double` in `tidepool-runtime/tests/repro_split.rs`
-- **Notes:** Cited in memory note #17. Essential for `Show` instances on `Double`.
+- **Motivation:** Gives both evaluator and JIT a stable, Tidepool-owned ABI that returns managed `Text`, without matching GHC-generated binder names or leaking C strings.
+- **Test coverage:** Double fixtures in `haskell/test/Suite.hs`; `works_show_family` in `tidepool-runtime/tests/jit_surface.rs`
+- **Notes:** Recognition requires both the defining module and occurrence name, so same-named user functions are unaffected.
 
 ## reachableBinds
 
@@ -39,26 +39,6 @@
 - **Motivation:** Prevents single large `Rec` groups from pulling in the entire transitive closure of a module's bindings, reducing node count and avoiding resolution failures.
 - **Test coverage:** `prelude_length` in `haskell/test/Suite.hs` (exercises reachability into `Tidepool.Prelude`)
 - **Notes:** Uses fine-grained reachability by flattening `Rec` groups into individual pairs for analysis.
-
-## isShowDoubleVar intercept
-
-- **Location:** `haskell/src/Tidepool/Translate.hs:484` (`translate`)
-- **Trigger shape:** `Var showDouble` (or `showDouble'`) applied to 0 or 1 args
-- **Normalized output:** `NPrimOp "ShowDoubleAddr"` followed by `emitRuntimeUnpackCString`
-- **Mode:** `always-on`
-- **Motivation:** Direct interception of `Double` to `String` conversion to bypass GHC's `Integer`-heavy pipeline.
-- **Test coverage:** `show_double` in `tidepool-eval/tests/haskell_suite.rs`, `showDouble` in `haskell/test/Suite.hs`
-- **Notes:** Memory #17. Handles both direct calls and eta-expanded variants.
-
-## isShowDoubleSpecVar intercept
-
-- **Location:** `haskell/src/Tidepool/Translate.hs:503` (`translate`)
-- **Trigger shape:** `Var $fShowDouble_$sshowSignedFloat` (specialized `Double` show)
-- **Normalized output:** `NPrimOp "ShowDoubleAddr"` followed by `emitRuntimeUnpackAppendCString`
-- **Mode:** `always-on`
-- **Motivation:** Intercepts specialized versions produced by GHC -O2 that include the `ShowS` continuation.
-- **Test coverage:** `showDoublePrelude` in `haskell/test/Suite.hs`
-- **Notes:** Memory #17. Crucial for derived `Show` instances on types containing `Double`.
 
 ## isUnpackCStringVar static desugar
 
@@ -97,7 +77,7 @@
 - **Normalized output:** `NLam` wrapper around runtime or static unpack loop
 - **Mode:** `always-on`
 - **Motivation:** Handles eta-reduced applications of the builtin, common in specialized `Show` instances.
-- **Test coverage:** `showDoublePrelude` in `haskell/test/Suite.hs`
+- **Test coverage:** String-specialization cases in `haskell/test/Suite.hs`
 - **Notes:** Line 591 handles the zero-arg case specifically.
 
 ## isUnpackAppendCStringVar static prefix desugar

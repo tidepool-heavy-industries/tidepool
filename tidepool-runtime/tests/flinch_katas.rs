@@ -53,7 +53,7 @@ fn run_pure_kata(body: &str, target: &str) -> serde_json::Value {
 ///       through a constrained polymorphic helper (dictionary passing
 ///       through a helper function, not just at the call site).
 ///   (c1) numerics over `[Int]`: exact integer folds.
-///   (c2) numerics over `[Double]`: exact folds, rendered via `showDouble`
+///   (c2) numerics over `[Double]`: exact folds, rendered via `show`
 ///        (the JSON literal path is Int-first; Double needs the shadow).
 ///   (c3) `P.properFraction`/`P.realToFrac` through the qualified escape
 ///        hatch.
@@ -94,11 +94,11 @@ result = concat
   , check "kata_c1_numerics_int_folds"
       ((sum xs, foldl' (+) 0 xs, product xs) == (15, 15, 120))
   , check "kata_c2_numerics_double_folds"
-      ((pack (showDouble (sum ds)) <> "," <> pack (showDouble (foldl' (+) 0 ds)) <> "," <> pack (showDouble (product ds))) == "7.0,7.0,11.25")
+      ((pack (show (sum ds)) <> "," <> pack (show (foldl' (+) 0 ds)) <> "," <> pack (show (product ds))) == "7.0,7.0,11.25")
   , check "kata_c3_properfraction_realtofrac"
       ((let (i, frac) = P.properFraction (3.75 :: Double) :: (Int, Double)
             back = P.realToFrac (5 :: Int) :: Double
-        in pack (show (i :: Int)) <> "," <> pack (showDouble frac) <> "," <> pack (showDouble back)) == "3,0.75,5.0")
+        in pack (show (i :: Int)) <> "," <> pack (show frac) <> "," <> pack (show back)) == "3,0.75,5.0")
   ]
   where
     check nm ok = if ok then [] else [nm]

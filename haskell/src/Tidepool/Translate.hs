@@ -494,33 +494,6 @@ emitRuntimeUnpackFoldrCString addrIdx fIdx zIdx = do
     appIdx <- emitNode $ NApp goRef2 addrIdx
     emitNode $ NLetRec [(goId, lamA)] appIdx
 
--- | Emit a safe replacement body for $fShowDouble_$sshowSignedFloat.
--- The original body pulls in floatToDigits/Integer arithmetic which the JIT
--- can't handle. We replace it with:
---   \fmt -> \minExpt -> \d -> \rest -> unpackAppendCString# (ShowDoubleAddr d) rest
--- This preserves the ShowS continuation (rest) for correct behavior in
--- composed show expressions like derived Show instances.
--- The second binder (@precId@) is the PRECEDENCE @p@ that @showSignedFloat@
--- takes; feeding it + the Double to @ShowSignedDoubleAddr@ restores the
--- @showParen (p > 6)@ on negatives that this JIT-safe replacement otherwise
--- drops (`show (Just (-2.5))` → `Just (-2.5)`). The parens decision is made in
--- the Rust host fn, so no Core comparison is hand-emitted here.
-emitShowDoubleSpecBody :: Id -> TransM Int
-emitShowDoubleSpecBody _binder = do
-    fmtId      <- freshSynthVarId
-    precId     <- freshSynthVarId
-    dId        <- freshSynthVarId
-    restId     <- freshSynthVarId
-    precRef    <- emitNode $ NVar precId
-    dRef       <- emitNode $ NVar dId
-    addrIdx    <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precRef, dRef]
-    restRef    <- emitNode $ NVar restId
-    resultIdx  <- emitRuntimeUnpackAppendCString addrIdx restRef
-    lam4       <- emitNode $ NLam restId resultIdx
-    lam3       <- emitNode $ NLam dId lam4
-    lam2       <- emitNode $ NLam precId lam3
-    emitNode $ NLam fmtId lam2
-
 -- | A 'TransState' with every accumulator empty and no aux-verb sibling ids
 -- resolved — the starting state for a single-binding translation
 -- ('translateBinds'). 'translateModule' builds its own, seeding
@@ -703,13 +676,6 @@ translateModule allBinds targetName unresolvedIds =
     wrapAllBinds [] target = emitNode (NVar (varId target))
     wrapAllBinds (NonRec b rhs : rest) target
       | isErasedBinder b = wrapAllBinds rest target  -- skip erased (type/coercion) bindings
-      | isShowDoubleSpecVar b = do
-          -- Replace body with safe lambda wrapper instead of compiling the
-          -- original body which pulls in floatToDigits/Integer arithmetic.
-          -- \fmt -> \minExpt -> \d -> \rest -> unpackAppendCString (ShowDoubleAddr d) rest
-          rhsIdx <- emitShowDoubleSpecBody b
-          bodyIdx <- wrapAllBinds rest target
-          emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
       | otherwise = do
           modify' $ \s -> s { tsCurrentBinder = Just (T.pack (occNameString (nameOccName (idName b)))) }
           rhsIdx <- translate rhs
@@ -724,9 +690,7 @@ translateModule allBinds targetName unresolvedIds =
           let recJoins = [varId b | (b, _) <- valPairs, isJoinId b]
           modify' $ \s -> s { tsRecJoinIds = tsRecJoinIds s `Set.union` Set.fromList recJoins }
           pairIdxs <- forM valPairs $ \(b, rhs) -> do
-            rhs' <- if isShowDoubleSpecVar b
-              then emitShowDoubleSpecBody b
-              else case isJoinId_maybe b of
+            rhs' <- case isJoinId_maybe b of
                 Just arity -> do
                   let (params, joinBody) = collectValueBinders arity rhs
                   joinBodyIdx <- translate joinBody
@@ -1554,6 +1518,44 @@ translate expr =
   let (hd, allArgs) = stripNospecSpine (collectArgs expr)
       args = filter isValueArg allArgs
   in case hd of
+    -- Stable Tidepool-owned Double rendering intrinsics. These return managed
+    -- Text directly; no GHC-generated Show binder or CString ABI is involved.
+    Var v | isRenderDoubleVar v
+          , [arg] <- args -> do
+        argIdx <- translate arg
+        emitNode $ NPrimOp (T.pack "RenderDoubleText") [argIdx]
+
+    Var v | isRenderDoubleVar v
+          , null args -> do
+        dId <- freshSynthVarId
+        dRef <- emitNode $ NVar dId
+        body <- emitNode $ NPrimOp (T.pack "RenderDoubleText") [dRef]
+        emitNode $ NLam dId body
+
+    Var v | isRenderDoublePrecVar v
+          , [prec, arg] <- args -> do
+        precIdx <- translate prec
+        argIdx <- translate arg
+        emitNode $ NPrimOp (T.pack "RenderDoublePrecText") [precIdx, argIdx]
+
+    Var v | isRenderDoublePrecVar v
+          , [prec] <- args -> do
+        precIdx <- translate prec
+        dId <- freshSynthVarId
+        dRef <- emitNode $ NVar dId
+        body <- emitNode $ NPrimOp (T.pack "RenderDoublePrecText") [precIdx, dRef]
+        emitNode $ NLam dId body
+
+    Var v | isRenderDoublePrecVar v
+          , null args -> do
+        precId <- freshSynthVarId
+        precRef <- emitNode $ NVar precId
+        dId <- freshSynthVarId
+        dRef <- emitNode $ NVar dId
+        body <- emitNode $ NPrimOp (T.pack "RenderDoublePrecText") [precRef, dRef]
+        inner <- emitNode $ NLam dId body
+        emitNode $ NLam precId inner
+
     -- Intercept eitherDecodeValue :: Text -> Either Text Value. Lower the applied
     -- call to the pure JsonDecode primop (Rust serde_json builds the aeson
     -- Either Text Value ADT). The public `eitherDecode` is a pure Haskell
@@ -1567,7 +1569,7 @@ translate expr =
     -- args. Eta-expand to \t -> JsonDecode t so the value has a valid function body.
     Var v | isEitherDecodeValueVar v
           , null args -> do
-        let paramVarId = varId v .|. 0x01  -- unique param id (matches showDouble scheme)
+        let paramVarId = varId v .|. 0x01  -- synthetic parameter id
         paramRef <- emitNode $ NVar paramVarId
         resultIdx <- emitNode $ NPrimOp (T.pack "JsonDecode") [paramRef]
         emitNode $ NLam paramVarId resultIdx
@@ -1588,51 +1590,6 @@ translate expr =
         paramRef <- emitNode $ NVar paramVarId
         resultIdx <- emitNode $ NPrimOp (T.pack "ParseISO8601") [paramRef]
         emitNode $ NLam paramVarId resultIdx
-
-    -- Intercept showDouble: emit ShowDoubleAddr primop + unpackCString loop
-    Var v | isShowDoubleVar v
-          , [arg] <- args -> do
-        argIdx <- translate arg
-        addrIdx <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [argIdx]
-        emitRuntimeUnpackCString addrIdx
-
-    -- Eta-expanded case: showDouble' = $fShowDouble_$cshow (bare Var, no args)
-    -- Emit \d -> unpackCString# (ShowDoubleAddr d) so the binding has a valid body.
-    Var v | isShowDoubleVar v
-          , null args -> do
-        let paramVarId = varId v .|. 0x01  -- unique param id
-        paramRef <- emitNode $ NVar paramVarId
-        addrIdx <- emitNode $ NPrimOp (T.pack "ShowDoubleAddr") [paramRef]
-        resultIdx <- emitRuntimeUnpackCString addrIdx
-        emitNode $ NLam paramVarId resultIdx
-
-    -- Intercept $fShowDouble_$sshowSignedFloat (GHC's specialized show for Double).
-    -- Args: (fmt, p :: Int PRECEDENCE, d :: Double, rest :: String) — the 2nd is
-    -- `showSignedFloat`'s Int arg (verified from -O2 Core: `showsPrec 11` passes
-    -- `I# 11#`, `show (Just x)` passes `appPrec1`=11, top-level `show` passes
-    -- `minExpt`=0). Feed p + d to ShowSignedDoubleAddr so a negative d is
-    -- parenthesized when p > 6 (the `showParen` this replacement used to drop).
-    -- Match the prefix directly so the precedence argument stays total.
-    Var v | isShowDoubleSpecVar v -> do
-        case args of
-          (_fmtArg : precArg : dArg : restArg : _) -> do
-            precIdx <- translate precArg
-            argIdx <- translate dArg
-            addrIdx <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precIdx, argIdx]
-            restIdx <- translate restArg
-            emitRuntimeUnpackAppendCString addrIdx restIdx
-          [_fmtArg, precArg, dArg] -> do
-            -- 3 args applied (fmt, p, d); returns ShowS = String -> String
-            precIdx <- translate precArg
-            argIdx <- translate dArg
-            addrIdx <- emitNode $ NPrimOp (T.pack "ShowSignedDoubleAddr") [precIdx, argIdx]
-            restParamId <- freshSynthVarId
-            restRef <- emitNode $ NVar restParamId
-            resultIdx <- emitRuntimeUnpackAppendCString addrIdx restRef
-            emitNode $ NLam restParamId resultIdx
-          _ -> do
-            -- Partial application / eta-reduced: emit full lambda wrapper
-            emitShowDoubleSpecBody v
 
     -- Intercept Data.Text.empty
     -- We construct the Text constructor directly: Text ByteArray# 0 0.
@@ -3320,11 +3277,18 @@ isUnpackCStringVar v =
   let name = occNameString (nameOccName (idName v))
   in name == "unpackCString#" || name == "unpackCStringUtf8#"
 
-isShowDoubleVar :: Id -> Bool
-isShowDoubleVar v =
-  let name = occNameString (nameOccName (idName v))
-  in name == "showDouble" || name == "showDouble'"
-     || name == "$fShowDouble_$cshow"
+isQualifiedVar :: String -> String -> Id -> Bool
+isQualifiedVar expectedModule expectedName v =
+  occNameString (nameOccName (idName v)) == expectedName
+    && case nameModule_maybe (idName v) of
+         Just m  -> moduleNameString (moduleName m) == expectedModule
+         Nothing -> False
+
+isRenderDoubleVar :: Id -> Bool
+isRenderDoubleVar = isQualifiedVar "Tidepool.Double" "renderDouble"
+
+isRenderDoublePrecVar :: Id -> Bool
+isRenderDoublePrecVar = isQualifiedVar "Tidepool.Double" "renderDoublePrec"
 
 -- | (occurrence name, defining module) for every intrinsic verb this file
 -- either lowers directly to a primop or head-swaps to a hidden @*Sited@
@@ -3712,15 +3676,6 @@ typeMentionsEffectMonad = goT emptyUniqSet
                                              (dataConOrigArgTys dc)) dcs
                 Nothing -> False
           in newtypeHit || fieldHit
-
--- | Recognize GHC's specialized showSignedFloat for Double.
--- GHC -O2 specializes show @Double into $fShowDouble_$sshowSignedFloat
--- which takes 4 args: (fmt, minExpt, d :: Double, rest :: String).
--- We intercept this to avoid pulling in the floatToDigits/Integer pipeline.
-isShowDoubleSpecVar :: Id -> Bool
-isShowDoubleSpecVar v =
-  let name = occNameString (nameOccName (idName v))
-  in "$fShowDouble_$sshowSignedFloat" `isPrefixOf` name
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]
