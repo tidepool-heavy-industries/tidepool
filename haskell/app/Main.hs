@@ -2,7 +2,7 @@ module Main where
 
 import System.Environment (getArgs, setEnv)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory, setCurrentDirectory)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, setCurrentDirectory, listDirectory, removeFile, doesFileExist)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
@@ -550,6 +550,7 @@ processFile compiler timing args path = do
         -- omits the second-translation 'scanMeta' scan (D1-B) — do not
         -- re-add it here.
         void $ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts closedTargets
+        pruneAllClosedArtifacts outDir (map (\(_, outFileBase, _) -> outFileBase) closedTargets)
 
       (Just targetName, False) ->
         -- Whole-module mode: serialize all bindings as nested lets around the
@@ -664,6 +665,37 @@ cborFileName name = concatMap enc name ++ ".cbor"
     enc '/' = "%2F"
     enc '%' = "%25"
     enc c   = [c]
+
+-- | Make a successful @--all-closed@ write an exact snapshot rather than an
+-- append-only directory. GHC-generated lifted-local names are unstable under
+-- harmless source edits, so leaving files from an earlier run silently grows
+-- the differential corpus with bindings the current module no longer emits.
+--
+-- This is deliberately called only by the @--all-closed@ branch. Explicit
+-- @--target@/@--targets@, session, turn, and per-binding modes may share an
+-- output directory with caller-owned artifacts and must never prune it.
+-- Within an all-closed directory we own only extractor artifacts: @*.cbor@
+-- and @*.asks.json@. Other files are preserved. Pruning happens after the
+-- complete write succeeds, so a failed translation cannot erase the previous
+-- usable corpus.
+pruneAllClosedArtifacts :: FilePath -> [String] -> IO ()
+pruneAllClosedArtifacts outDir outFileBases = do
+  entries <- listDirectory outDir
+  let multi = length outFileBases > 1
+      expected = Set.fromList $
+        ["meta.cbor"]
+        ++ map cborFileName outFileBases
+        ++ if multi
+             then map (++ ".asks.json") outFileBases
+             else if null outFileBases then [] else ["asks.json"]
+      isOwnedArtifact name = ".cbor" `isSuffixOf` name || ".asks.json" `isSuffixOf` name
+      stale = [name | name <- entries, isOwnedArtifact name, name `Set.notMember` expected]
+  forM_ stale $ \name -> do
+    let path = outDir </> name
+    isFile <- doesFileExist path
+    when isFile $ do
+      removeFile path
+      hPutStrLn stderr $ "  Pruned stale all-closed artifact: " ++ path
 
 data TargetWrite = TargetWrite
   { twOutFileBase :: String

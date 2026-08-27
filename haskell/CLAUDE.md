@@ -64,9 +64,12 @@ cabal run tidepool-extract-bin -- test/Suite.hs --all-closed \
   --include lib --target-module-only --output-dir test/suite_cbor
 ```
 
-Do not prune lifted-local `*_t<n>.cbor` fixtures from `test/suite_cbor`; the
-differential suite uses them. New CBOR fixtures are ignored by default and must
-be added explicitly.
+`--all-closed` treats its output directory as an owned fixture corpus: after a
+successful write it removes stale `*.cbor` and `*.asks.json` artifacts from
+earlier runs while preserving unrelated files. Current lifted-local
+`*_t<n>.cbor` fixtures remain part of the differential corpus; do not manually
+omit them. New CBOR fixtures are ignored by default and must be added
+explicitly.
 
 ## Extractor diagnostics
 
