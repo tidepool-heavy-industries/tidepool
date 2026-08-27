@@ -1591,20 +1591,6 @@ impl JitEffectMachine {
     // Threadless suspension at the ask boundary.
     // ----------------------------------------------------------------------
 
-    /// Drive an effectful turn until it COMPLETES or SUSPENDS at `suspend_tag`
-    /// (the `Ask` union tag). Additive sibling of [`Self::run`]: a turn that
-    /// never reaches `suspend_tag` drives byte-identically — the effect loop's
-    /// suspend branch is simply never taken (see [`drive_effect_loop`]).
-    ///
-    /// On suspension the machine's heap is retained through the session
-    /// machinery (`RegistryGuard::drop` → `reclaim_session_heap`) and the
-    /// continuation is stowed inside `self`; the whole `JitEffectMachine` can
-    /// then be moved off this thread and parked as data. Call
-    /// [`Self::resume_suspended`] with the answer to continue on ANY thread.
-    ///
-    /// # Panics
-    /// Panics on a non-session machine — heap retention across the suspension
-    /// requires [`Self::compile_session`].
     fn linear_value(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
         match outcome {
             ParkedOutcome::CompletedValue(value) => SuspendableOutcome::Completed(value),
@@ -1635,6 +1621,12 @@ impl JitEffectMachine {
         })
     }
 
+    /// Drive an effectful turn until it completes or suspends at `suspend_tag`.
+    /// On suspension the session heap and continuation remain owned by this
+    /// movable machine; continue with [`Self::resume_suspended`].
+    ///
+    /// # Panics
+    /// Panics on a non-session machine, or when a continuation is already active.
     pub fn run_suspendable<U, H: DispatchEffect<U>>(
         &mut self,
         table: &DataConTable,
@@ -2427,12 +2419,6 @@ impl JitEffectMachine {
         self.last_bound_root.take()
     }
 
-    /// Take the persistent root slot of a suspended `finalize @T closure`'s
-    /// finalized VALUE (finalize-by-reference), tenured at suspend time. The
-    /// slot stays a registered persistent root for the machine's life (taking
-    /// it here only removes the machine's own handle, not the registration), so
-    /// a subsequent `run_child` that references it by slot address is GC-safe.
-    /// `None` unless the machine suspended on a closure-valued finalize.
     /// Run a pure (non-effectful) program to completion.
     ///
     /// Skips freer-simple effect dispatch entirely — calls the compiled function

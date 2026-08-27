@@ -659,12 +659,18 @@ translateTargetClosed timing hscEnv binds targetName = do
 -- @<target>.cbor@) only ever use caller-chosen target names today; if a
 -- target containing @/@ ever appears there, the Rust side must apply this
 -- same encoding.
-cborFileName :: String -> FilePath
-cborFileName name = concatMap enc name ++ ".cbor"
+artifactFileBase :: String -> FilePath
+artifactFileBase = concatMap enc
   where
     enc '/' = "%2F"
     enc '%' = "%25"
     enc c   = [c]
+
+cborFileName :: String -> FilePath
+cborFileName name = artifactFileBase name ++ ".cbor"
+
+asksFileName :: String -> FilePath
+asksFileName name = artifactFileBase name ++ ".asks.json"
 
 -- | Make a successful @--all-closed@ write an exact snapshot rather than an
 -- append-only directory. GHC-generated lifted-local names are unstable under
@@ -686,7 +692,7 @@ pruneAllClosedArtifacts outDir outFileBases = do
         ["meta.cbor"]
         ++ map cborFileName outFileBases
         ++ if multi
-             then map (++ ".asks.json") outFileBases
+             then map asksFileName outFileBases
              else if null outFileBases then [] else ["asks.json"]
       isOwnedArtifact name = ".cbor" `isSuffixOf` name || ".asks.json" `isSuffixOf` name
       stale = [name | name <- entries, isOwnedArtifact name, name `Set.notMember` expected]
@@ -882,7 +888,7 @@ writeClosedTargets timing outDir binds _tycons mCapturedTy warnTexts targets = d
       BS.writeFile outFile (twCbor w)
       hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (twNodeCount w) ++ " nodes, " ++ show (BS.length (twCbor w)) ++ " bytes)"
       when multi $ do
-        let asksFile = outDir </> twOutFileBase w ++ ".asks.json"
+        let asksFile = outDir </> asksFileName (twOutFileBase w)
         writeFile asksFile (renderAsksJson (twAskSites w))
         hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twAskSites w)) ++ " sites)"
 

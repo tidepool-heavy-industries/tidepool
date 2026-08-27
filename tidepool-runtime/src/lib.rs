@@ -293,7 +293,7 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
     let realm = RealmId(0);
     on_ready(machine.realm_cancel_handle(realm));
-    let handled_prefix = &effect_names[..ask_tag as usize];
+    let handled_prefix = handled_effect_prefix(effect_names, ask_tag);
     match machine.run_suspendable_parked(&table, handlers, user, ask_tag, realm, handled_prefix)? {
         ParkedOutcome::CompletedValue(value) => Ok(SuspendableRun::Completed(EvalResult::new(
             value,
@@ -312,6 +312,10 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
         }),
         other => unreachable!("plain one-shot run returned {other:?}"),
     }
+}
+
+fn handled_effect_prefix(effect_names: &[String], ask_tag: u64) -> &[String] {
+    &effect_names[..effect_names.len().min(ask_tag as usize)]
 }
 
 /// Re-enter a stowed turn (from [`compile_and_run_suspendable`]) with the
@@ -423,6 +427,12 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn short_effect_name_list_is_a_valid_handled_prefix() {
+        let names = ["Only".to_string()];
+        assert_eq!(handled_effect_prefix(&names, 3), names);
+    }
 
     #[test]
     #[serial]
