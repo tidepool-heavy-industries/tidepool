@@ -24,6 +24,9 @@
 //! — so neither resume can coincidentally "coast" on being the most recent
 //! `add_function` call.
 
+mod support;
+use support::SuspensionTestExt;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
     JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
@@ -347,7 +350,7 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
         // Resume B FIRST — the opposite of park order — then A: neither
         // resume gets to coast on being the most recent `add_function` call.
         match machine
-            .resume_parked(
+            .resume_continuation(
                 id_b,
                 &mut NoDispatch,
                 &(),
@@ -383,7 +386,7 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
         assert_eq!(machine.parked_count(), 1);
 
         match machine
-            .resume_parked(
+            .resume_continuation(
                 id_a,
                 &mut NoDispatch,
                 &(),

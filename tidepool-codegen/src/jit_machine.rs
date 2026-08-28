@@ -136,8 +136,8 @@ pub struct HeapStats {
 }
 
 /// Identity of one continuation parked in a machine's continuation registry.
-/// Minted by [`JitEffectMachine::run_suspendable_parked`], consumed by
-/// [`JitEffectMachine::resume_parked`]. Ids are never reused within a machine:
+/// Minted by [`JitEffectMachine::run_until_suspension`], consumed by
+/// [`JitEffectMachine::resume_continuation`]. Ids are never reused within a machine:
 /// a resume that suspends AGAIN mints a fresh id (same runtime resource scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContinuationId(pub u64);
@@ -291,7 +291,7 @@ pub struct ContinuationFrame {
     /// frame itself parked and rooted.
     finalized_root: Option<crate::old_space::RootSlot>,
     /// This frame's runtime resource scope's cancel flag, cloned at park time so
-    /// [`JitEffectMachine::resume_parked`] installs it without a second
+    /// [`JitEffectMachine::resume_continuation`] installs it without a second
     /// per-runtime resource scope cancel-flag lookup.
     cancel_flag: Arc<AtomicBool>,
     /// The [`DataConTable`] this frame's continuation suspended against,
@@ -303,7 +303,7 @@ pub struct ContinuationFrame {
     /// `[0, suspend_tag)`, in position order — checked (and possibly
     /// establishing) at ENTRY to the parked path
     /// ([`JitEffectMachine::enter_parked_path`]), stored here purely so
-    /// [`JitEffectMachine::resume_parked`] can replay it through that same
+    /// [`JitEffectMachine::resume_continuation`] can replay it through that same
     /// entry check on a re-suspension.
     handled_prefix: Arc<[String]>,
 }
@@ -343,7 +343,7 @@ pub enum ParkedOutcome {
         rendered: tidepool_eval::value::Value,
     },
     /// The turn suspended and its continuation was PARKED in the registry as a
-    /// registered GC root. Resume it with [`JitEffectMachine::resume_parked`].
+    /// registered GC root. Resume it with [`JitEffectMachine::resume_continuation`].
     Suspended {
         /// The registry key this continuation parked under.
         id: ContinuationId,
@@ -412,8 +412,8 @@ impl ParkedRaw {
 /// | [`JitEffectMachine::run_child_fragment`] / `_pure` | → `run_with_entry` / `run_pure_with_entry`, wrapped in [`JitEffectMachine::enter_nested_child`] | requires a suspended parent | `Value` |
 ///
 /// The suspend/park family (`run_suspendable*`, `resume_suspended*`,
-/// `run_suspendable_parked`, `run_fragment_suspendable_parked`,
-/// `resume_parked`) is NOT in this table: it funnels through its own shared
+/// `run_until_suspension`, `run_until_suspension`,
+/// `resume_continuation`) is NOT in this table: it funnels through its own shared
 /// setup body ([`JitEffectMachine::run_suspendable_shared`] /
 /// [`JitEffectMachine::resume_applied`]) and one shared epilogue
 /// ([`JitEffectMachine::finish_suspendable`]), which also calls
@@ -2248,7 +2248,7 @@ impl JitEffectMachine {
     /// [`ContinuationFrame`] (A3/A4). Enforced constraint 1 (realm-lanes/B-prefix-
     /// compat) is checked and established at ENTRY to the parked path
     /// ([`Self::enter_parked_path`], called from the public
-    /// `run_fragment_suspendable_parked`/`resume_parked` entries) — by the
+    /// `run_until_suspension`/`resume_continuation` entries) — by the
     /// time this method runs, that check has already passed, regardless of
     /// whether the turn is about to complete or suspend.
     #[allow(clippy::too_many_arguments)]
@@ -2549,7 +2549,7 @@ impl JitEffectMachine {
         // corrupt how an already-parked SIBLING runtime resource scope's continuation gets
         // interpreted on its next resume. What IS guarded, and load-bearing
         // for runtime resource scopes in general, is that a runtime resource scope's OWN domain constructors
-        // never go through this machine-global cache at all: `resume_parked`
+        // never go through this machine-global cache at all: `resume_continuation`
         // decodes exclusively against `ContinuationFrame::table` (A4, cloned
         // once at park time), so two runtime resource scopes may freely reuse the SAME numeric
         // `DataConId`/tag for DIFFERENT domain constructors without collision
@@ -3096,7 +3096,7 @@ impl JitEffectMachine {
     /// established.
     ///
     /// Called at the TOP of every parked-path entry
-    /// ([`Self::run_fragment_suspendable_parked`], [`Self::resume_parked`]),
+    /// ([`Self::run_until_suspension`], [`Self::resume_continuation`]),
     /// before anything is driven — a refusal here leaves the machine
     /// untouched because nothing has run yet, which is a strictly easier
     /// property to hold than checking after a run has already suspended.
@@ -3129,14 +3129,14 @@ impl JitEffectMachine {
     /// Park a suspended continuation into the registry as a registered GC root
     /// and mint its [`ContinuationId`]. The heap-stable `Box` cell is the same
     /// pattern [`Self::enter_nested_child`] uses; the difference is lifetime —
-    /// this registration is released by [`Self::resume_parked`], not by a guard
+    /// this registration is released by [`Self::resume_continuation`], not by a guard
     /// at the end of the next child run.
     ///
     /// The caller has already checked AND established `handled_prefix` via
     /// [`Self::enter_parked_path`] at entry to the parked path — before the
     /// machine was driven at all. This method performs no check or establish
     /// of its own; `handled_prefix` is stored on the new frame purely so a
-    /// later [`Self::resume_parked`] can replay it through that same entry
+    /// later [`Self::resume_continuation`] can replay it through that same entry
     /// check.
     #[allow(clippy::too_many_arguments)]
     fn park_continuation(
@@ -3154,7 +3154,7 @@ impl JitEffectMachine {
         let slot: *mut *mut u8 = &mut *cell;
         // SAFETY: `slot` is the address of the Box's inner cell — a stable heap
         // allocation that does not move when the Box moves into the map or the
-        // machine moves between threads. It stays valid until `resume_parked`
+        // machine moves between threads. It stays valid until `resume_continuation`
         // deregisters it and drops the frame. The GC reads and rewrites `*slot`
         // in place on every collection until then.
         self.machine_state.register_stowed_root(slot);
@@ -3210,60 +3210,6 @@ impl JitEffectMachine {
         .map(ParkedRaw::into_parked)
     }
 
-    #[doc(hidden)]
-    pub fn run_suspendable_parked<U, H: DispatchEffect<U>>(
-        &mut self,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        realm: RealmId,
-        handled_prefix: &[String],
-    ) -> Result<ParkedOutcome, JitError> {
-        let func_id = self.func_id;
-        self.run_fragment_suspendable_parked(
-            func_id,
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            realm,
-            ParkKind::Plain,
-            handled_prefix,
-        )
-    }
-
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn run_fragment_suspendable_parked<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        realm: RealmId,
-        kind: ParkKind,
-        handled_prefix: &[String],
-    ) -> Result<ParkedOutcome, JitError> {
-        let handled_prefix: Arc<[String]> = Arc::from(handled_prefix);
-        self.enter_parked_path(&handled_prefix)?;
-        self.run_suspendable_shared(
-            func_id,
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            kind.materialization(),
-            ParkTarget::Registry {
-                realm,
-                kind,
-                handled_prefix,
-            },
-        )
-        .map(ParkedRaw::into_parked)
-    }
-
     /// Re-enter the continuation parked under `id`, feeding the answer (or an
     /// abort) and driving to the next suspension or completion. The frame's own
     /// `suspend_tag` and [`ParkKind`] are replayed — the caller supplies only
@@ -3274,7 +3220,7 @@ impl JitEffectMachine {
     /// `handled_prefix` — re-checked (and, if still unestablished, re-offered
     /// to establish) via [`Self::enter_parked_path`] at the TOP of this
     /// method, before the continuation is driven at all — same discipline as
-    /// [`Self::run_fragment_suspendable_parked`]'s entry check. The frame's
+    /// [`Self::run_until_suspension`]'s entry check. The frame's
     /// own prefix was already checked EXACTLY EQUAL to the machine's
     /// established one when it first parked, and the established prefix is
     /// monotonic, so this re-check cannot newly disagree — see
@@ -3309,12 +3255,12 @@ impl JitEffectMachine {
             ),
             None => {
                 return Err(JitError::Effect(EffectError::Handler(format!(
-                    "resume_parked: no continuation parked under {id:?}"
+                    "resume_continuation: no continuation parked under {id:?}"
                 ))))
             }
         };
         // Entry check, BEFORE the continuation is driven at all (same
-        // discipline as run_fragment_suspendable_parked). The established
+        // discipline as run_until_suspension). The established
         // prefix is monotonic, so this frame's own prefix — already checked
         // compatible when it first parked — stays compatible forever; this
         // re-confirmation is a no-op in practice, kept for the same
@@ -3375,17 +3321,6 @@ impl JitEffectMachine {
             cancel_flag,
         )
         .map(ParkedRaw::into_parked)
-    }
-
-    #[doc(hidden)]
-    pub fn resume_parked<U, H: DispatchEffect<U>>(
-        &mut self,
-        id: ContinuationId,
-        handlers: &mut H,
-        user: &U,
-        input: ResumeInput,
-    ) -> Result<ParkedOutcome, JitError> {
-        self.resume_continuation(id, handlers, user, input)
     }
 
     /// Frame-scoped sibling of [`Self::take_finalized_root`] for the registry

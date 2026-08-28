@@ -27,6 +27,9 @@
 //! independently. If its numbers disagree with these, that disagreement is a
 //! finding, not something to reconcile away.
 
+mod support;
+use support::SuspensionTestExt;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
     JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
@@ -299,7 +302,7 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
 
     if resume_one {
         let _ = machine
-            .resume_parked(
+            .resume_continuation(
                 first,
                 &mut NoDispatch,
                 &(),
@@ -514,7 +517,7 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
                 }
             };
             match machine
-                .resume_parked(
+                .resume_continuation(
                     id,
                     &mut NoDispatch,
                     &(),

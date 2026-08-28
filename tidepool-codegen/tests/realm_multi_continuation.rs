@@ -14,6 +14,9 @@
 //! receipt that rooting, not luck or timing, protects the parked
 //! continuations.
 
+mod support;
+use support::SuspensionTestExt;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::{
@@ -674,13 +677,13 @@ fn resume_and_verify(
     expect_captured: i64,
 ) {
     match machine
-        .resume_parked(
+        .resume_continuation(
             id,
             &mut NoDispatch,
             &(),
             ResumeInput::Answer(Value::Lit(Literal::LitInt(answer))),
         )
-        .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
+        .unwrap_or_else(|e| panic!("resume_continuation({id:?}) failed: {e}"))
     {
         ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
@@ -959,11 +962,12 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
                 Value::ThunkRef(tidepool_eval::value::ThunkId(0)),
             ],
         );
-        let err = match machine.resume_parked(a, &mut NoDispatch, &(), ResumeInput::Answer(bottom))
-        {
-            Ok(_) => panic!("a bottom answer must be rejected, not accepted"),
-            Err(e) => e,
-        };
+        let err =
+            match machine.resume_continuation(a, &mut NoDispatch, &(), ResumeInput::Answer(bottom))
+            {
+                Ok(_) => panic!("a bottom answer must be rejected, not accepted"),
+                Err(e) => e,
+            };
         assert!(
             format!("{err}").contains("normal form") || format!("{err}").contains("bottom"),
             "rejection must name the NF/bottom cause, got: {err}"
@@ -1052,7 +1056,7 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
 
         let bogus = ContinuationId(9999);
         let err = machine
-            .resume_parked(
+            .resume_continuation(
                 bogus,
                 &mut NoDispatch,
                 &(),
@@ -1068,7 +1072,7 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
         // The id is consumed; resuming it again is the same clean error (ids
         // are never reused, so this can never alias a later park).
         let err = machine
-            .resume_parked(
+            .resume_continuation(
                 a,
                 &mut NoDispatch,
                 &(),
@@ -1162,7 +1166,7 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
         assert_rooting_receipt(&machine, 1);
 
         match machine
-            .resume_parked(
+            .resume_continuation(
                 id,
                 &mut MidEffectDispatch,
                 &(),
@@ -1247,7 +1251,7 @@ fn w2_streamed_response_tail_parks_across_gc() {
         assert_rooting_receipt(&machine, 1);
 
         match machine
-            .resume_parked(
+            .resume_continuation(
                 id,
                 &mut StreamDispatch,
                 &(),
@@ -1350,7 +1354,7 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
         // went through old-space, it is an ordinary value threaded through
         // the parked continuation like every other case in this file.
         match machine
-            .resume_parked(
+            .resume_continuation(
                 id,
                 &mut NoDispatch,
                 &(),
@@ -1437,7 +1441,7 @@ fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
         assert_rooting_receipt(&machine, 1);
 
         match machine
-            .resume_parked(
+            .resume_continuation(
                 id,
                 &mut NoDispatch,
                 &(),

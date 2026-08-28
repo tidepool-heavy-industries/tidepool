@@ -22,6 +22,9 @@
 //! Same scaffolding as `realm_multi_continuation.rs` (poison + verify armed,
 //! tiny nursery, deep result verification).
 
+mod support;
+use support::SuspensionTestExt;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge::CLOSURE_SENTINEL;
 use tidepool_codegen::jit_machine::{
@@ -478,7 +481,7 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
         // continuation applies the delivered identity closure to `C1 99`
         // in compiled code — deep-verified via the Pair result.
         match machine
-            .resume_parked(loop_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
+            .resume_continuation(loop_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
             .expect("resume loop with delivered closure")
         {
             ParkedOutcome::CompletedValue(value)
@@ -504,7 +507,7 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
         // Released ids error cleanly — never a panic, never aliasing.
         assert!(
             machine
-                .resume_parked(
+                .resume_continuation(
                     answerer_id,
                     &mut NoDispatch,
                     &(),
@@ -519,7 +522,7 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
         );
         assert!(
             machine
-                .resume_parked(loop_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
+                .resume_continuation(loop_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
                 .is_err(),
             "delivering a released handle must be a clean error"
         );
@@ -596,7 +599,7 @@ fn h2_close_realm_leaves_sibling_realm_untouched() {
         // The sibling survives more collections and completes correctly.
         force_gc_on(&mut machine, &table, "h2_collapse_2", 200);
         match machine
-            .resume_parked(
+            .resume_continuation(
                 keep_id,
                 &mut NoDispatch,
                 &(),
@@ -659,7 +662,7 @@ fn h3_project_and_render_parks_complete_inline() {
         };
         force_gc_on(&mut machine, &table, "h3_collapse_1", 150);
         match machine
-            .resume_parked(
+            .resume_continuation(
                 pid,
                 &mut NoDispatch,
                 &(),
@@ -710,7 +713,7 @@ fn h3_project_and_render_parks_complete_inline() {
         };
         force_gc_on(&mut machine, &table, "h3_collapse_2", 200);
         match machine
-            .resume_parked(
+            .resume_continuation(
                 rid,
                 &mut NoDispatch,
                 &(),

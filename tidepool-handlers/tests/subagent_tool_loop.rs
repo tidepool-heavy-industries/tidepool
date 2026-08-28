@@ -65,9 +65,10 @@ use tidepool_agent::seam::{
     AgentBackendError, BackendThreadId, CycleResultPayload, CycleSpec, ThreadSpec, ToolOutcome,
     ToolReply, TurnEvent,
 };
-use tidepool_codegen::jit_machine::{JitEffectMachine, ParkedOutcome, RealmId};
+use tidepool_codegen::jit_machine::{JitEffectMachine, ParkedOutcome, RealmId, SuspensionRun};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
+use tidepool_effect::EffectBoundary;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
@@ -378,14 +379,11 @@ impl Session {
     /// failed turn, which is exactly what the refusal gates exist to keep from
     /// happening.
     fn run(&mut self) -> serde_json::Value {
-        let outcome = self.machine.run_suspendable_parked(
-            &self.table,
-            &mut self.stack,
-            &self.captured,
-            self.ask_tag,
-            RealmId(0),
-            &self.handled_prefix,
-        );
+        let boundary = EffectBoundary::new(self.ask_tag, &self.handled_prefix);
+        let run = SuspensionRun::main(&self.table, &boundary, RealmId(0));
+        let outcome = self
+            .machine
+            .run_until_suspension(run, &mut self.stack, &self.captured);
         match outcome {
             Ok(
                 ParkedOutcome::CompletedValue(value)

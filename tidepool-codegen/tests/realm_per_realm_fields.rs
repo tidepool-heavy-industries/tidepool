@@ -21,6 +21,9 @@
 //! `TIDEPOOL_HEAP_VERIFY`, asserting `stowed_roots_count() == parked_count()`
 //! at every quiescent point.
 
+mod support;
+use support::SuspensionTestExt;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::{
@@ -396,7 +399,7 @@ fn park_fragment(
 }
 
 /// Resume a parked continuation with an Int answer and deep-verify its
-/// result. `resume_parked` takes NO table (A4) — the frame's own is what
+/// result. `resume_continuation` takes NO table (A4) — the frame's own is what
 /// decodes it.
 fn resume_and_verify(
     machine: &mut JitEffectMachine,
@@ -405,13 +408,13 @@ fn resume_and_verify(
     expect_captured: i64,
 ) {
     match machine
-        .resume_parked(
+        .resume_continuation(
             id,
             &mut NoDispatch,
             &(),
             ResumeInput::Answer(Value::Lit(Literal::LitInt(answer))),
         )
-        .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
+        .unwrap_or_else(|e| panic!("resume_continuation({id:?}) failed: {e}"))
     {
         ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)
@@ -713,7 +716,7 @@ fn a3_cancel_is_realm_scoped_resuming_a_sibling_realm_is_unaffected() {
 
         // Resuming realm A now observes the cancellation IT requested.
         let err = machine
-            .resume_parked(
+            .resume_continuation(
                 a,
                 &mut NoDispatch,
                 &(),
@@ -740,7 +743,7 @@ fn a3_cancel_is_realm_scoped_resuming_a_sibling_realm_is_unaffected() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// A4 — DataConTable: onto the frame; `resume_parked` no longer accepts one at
+// A4 — DataConTable: onto the frame; `resume_continuation` no longer accepts one at
 // all, so resuming a frame against a foreign row is impossible by
 // construction. The frame's own table (captured at park time) is what
 // decodes the resume.
@@ -748,7 +751,7 @@ fn a3_cancel_is_realm_scoped_resuming_a_sibling_realm_is_unaffected() {
 
 #[test]
 #[serial]
-fn a4_resume_parked_uses_the_frames_own_table() {
+fn a4_resume_continuation_uses_the_frames_own_table() {
     in_test_thread(|| {
         arm_gc_hazards();
         let table = adversarial_table();
@@ -759,7 +762,7 @@ fn a4_resume_parked_uses_the_frames_own_table() {
         let a = park_entry(&mut machine, &table, RealmId(0), 9);
         assert_rooting_receipt(&machine, 1);
 
-        // `resume_and_verify`/`resume_parked` supply no table at all — the
+        // `resume_and_verify`/`resume_continuation` supply no table at all — the
         // frame's own (cloned once at park time) is what the resume decodes
         // against, and the resumed turn behaves exactly as before.
         resume_and_verify(&mut machine, a, 9, 9);

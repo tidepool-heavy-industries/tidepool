@@ -34,6 +34,9 @@
 //! shape (varying only the `handled_prefix` argument), except the two cases
 //! above which use a non-suspending fragment on purpose.
 
+mod support;
+use support::SuspensionTestExt;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
     ContinuationId, JitEffectMachine, JitError, ParkKind, ParkedOutcome, PrefixMismatch, RealmId,
@@ -302,13 +305,13 @@ fn resume_and_verify(
     expect_captured: i64,
 ) {
     match machine
-        .resume_parked(
+        .resume_continuation(
             id,
             &mut NoDispatch,
             &(),
             ResumeInput::Answer(Value::Lit(Literal::LitInt(answer))),
         )
-        .unwrap_or_else(|e| panic!("resume_parked({id:?}) failed: {e}"))
+        .unwrap_or_else(|e| panic!("resume_continuation({id:?}) failed: {e}"))
     {
         ParkedOutcome::CompletedValue(value) | ParkedOutcome::CompletedBinding { value, .. } => {
             assert_pair_result(&value, expect_captured, answer)

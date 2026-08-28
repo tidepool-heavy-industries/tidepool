@@ -31,7 +31,7 @@
 //!
 //! Each turn is compiled into the live machine as a fragment
 //! ([`JitEffectMachine::add_function`]) and driven through
-//! [`JitEffectMachine::run_fragment_suspendable_parked`] — the continuation
+//! [`JitEffectMachine::run_until_suspension`] — the continuation
 //! REGISTRY, not the legacy single slot: a suspension parks a frame as a
 //! registered GC root, and the machine stays fully usable while it waits
 //! (further turns, further parks, resumes of other frames). The session
@@ -1455,11 +1455,11 @@ where
     /// `App(Var, Lit)` synthesis [`Self::apply_finalized`] uses — see that
     /// method for why the argument crosses as a bare unboxed `Lit` and needs no
     /// wrapper-constructor id to match. The difference is the DRIVER: this goes
-    /// through `run_fragment_suspendable_parked` (suspension-capable, registry-
+    /// through `run_until_suspension` (suspension-capable, registry-
     /// parking) rather than the pure entry, because a green thread's whole
     /// purpose is to park.
     ///
-    /// **`realm` is the thread's, and it propagates.** `resume_parked` replays
+    /// **`realm` is the thread's, and it propagates.** `resume_continuation` replays
     /// a frame's OWN realm, so every later suspension of this thread parks under
     /// `realm` too — which is what makes `close_realm(realm)` a complete
     /// cancellation rather than a first-frame one.
@@ -1606,7 +1606,7 @@ where
             });
         };
         // The machine is authoritative on whether the frame was actually
-        // consumed: `resume_parked` NF-forces a data-kinded answer BEFORE
+        // consumed: `resume_continuation` NF-forces a data-kinded answer BEFORE
         // removing the frame (A5), and on a retryable rejection leaves it
         // parked and rooted — this hole must NOT be cleared here, or a
         // retryable failure wedges the session. `classify_parked` (on `Ok`)

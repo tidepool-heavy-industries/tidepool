@@ -12,7 +12,7 @@
 //!
 //! It compiles real Haskell through the real extract, builds a real
 //! `JitEffectMachine`, and drives it on the PARKED path directly —
-//! `run_suspendable_parked` / `resume_parked` — exactly as
+//! `run_suspendable_parked` / `resume_continuation` — exactly as
 //! `tidepool-codegen/tests/realm_per_realm_fields.rs` and
 //! `realm_stream_registry_lifetime.rs` do. It does NOT route through the
 //! resident session or the harness engine, because the thing under test is the
@@ -67,10 +67,11 @@ use tidepool_bridge_effects::{
     WtBranchName, WtGitOid, WtWorktreeId,
 };
 use tidepool_codegen::jit_machine::{
-    ContinuationId, JitEffectMachine, JitError, ParkedOutcome, RealmId, ResumeInput,
+    ContinuationId, JitEffectMachine, JitError, ParkedOutcome, RealmId, ResumeInput, SuspensionRun,
 };
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
+use tidepool_effect::EffectBoundary;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value;
 use tidepool_handlers::{
@@ -492,14 +493,11 @@ impl Session {
     }
 
     fn start(&mut self) -> Result<Step, JitError> {
-        let outcome = self.machine.run_suspendable_parked(
-            &self.table,
-            &mut self.stack,
-            &self.captured,
-            self.ask_tag,
-            RealmId(0),
-            &self.handled_prefix,
-        );
+        let boundary = EffectBoundary::new(self.ask_tag, &self.handled_prefix);
+        let run = SuspensionRun::main(&self.table, &boundary, RealmId(0));
+        let outcome = self
+            .machine
+            .run_until_suspension(run, &mut self.stack, &self.captured);
         self.absorb(outcome)
     }
 
@@ -510,7 +508,7 @@ impl Session {
         let bridged = answer
             .to_value(&self.table)
             .expect("bridging the ask answer");
-        let outcome = self.machine.resume_parked(
+        let outcome = self.machine.resume_continuation(
             id,
             &mut self.stack,
             &self.captured,
