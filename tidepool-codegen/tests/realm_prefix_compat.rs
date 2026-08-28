@@ -30,8 +30,8 @@
 //!
 //! This file does not exercise dispatch itself (that machinery is unchanged
 //! by this lane) — `handled_prefix` here is pure metadata threaded through
-//! the park path, so most fragments reuse the same ASK_TAG=0 suspending
-//! shape (varying only the `handled_prefix` argument), except the two cases
+//! the park path, so every fragment has the same shape and yields at the shared
+//! suspension tag (varying only the handled roster), except the two cases
 //! above which use a non-suspending fragment on purpose.
 
 mod support;
@@ -68,11 +68,10 @@ const NODE_ID: DataConId = DataConId(14);
 const C1: DataConId = DataConId(1);
 const PAIR_ID: DataConId = DataConId(2);
 
-/// The union tag every fragment in this file suspends at. Fixed at 0 because
-/// this lane's check is pure metadata over `handled_prefix` — it does not
-/// depend on `suspend_tag` matching `handled_prefix.len()` (that wiring is
-/// lane §5-mechanical, out of scope here).
-const ASK_TAG: u64 = 0;
+/// Higher than every synthetic handled roster in this file. The boundary
+/// derives its handled prefix from that roster, so tag zero could only
+/// describe an empty prefix and would make incompatibility checks vacuous.
+const ASK_TAG: u64 = 8;
 
 fn adversarial_table() -> DataConTable {
     let mut table = DataConTable::new();
