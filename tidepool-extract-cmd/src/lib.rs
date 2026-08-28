@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 
 mod daemon;
 pub mod exec_check;
+mod request;
 use exec_check::is_readable_executable_file;
+pub use request::ExtractRequest;
 
 /// The bare binary name, used when `$TIDEPOOL_EXTRACT` is unset (resolved
 /// through `PATH` by the OS at spawn time).
@@ -357,15 +359,12 @@ impl ExtractRun {
 // The builder
 // ---------------------------------------------------------------------------
 
-/// A `tidepool-extract` invocation: positional inputs, typed flags, and a
-/// [`Launcher`].
+/// A typed compiler-worker request and a [`Launcher`].
 ///
-/// Flags are emitted in the order they are set, after all positional inputs.
-/// The extractor's own `parseArgs` (`haskell/app/Main.hs`) folds each flag
-/// independently and accumulates positional files, `--include` dirs,
-/// `--inject-val` modules, `--bind-name`s and `--turn-template`s in
-/// occurrence order — so relative order WITHIN each of those lists is
-/// preserved here and everything else is order-independent.
+/// Request fields retain their types through [`ExtractRequest::encode`]. A
+/// legacy argv rendering remains available for cache compatibility and is
+/// included in direct launches so temporary wrapper scripts can still inspect
+/// invocations; the Haskell worker consumes the versioned request payload.
 ///
 /// Reusable: [`run`](ExtractCmd::run) borrows, so the same built argv can be
 /// launched twice (that is exactly what `tidepool-macro`'s nix fallback does).
@@ -373,8 +372,7 @@ impl ExtractRun {
 pub struct ExtractCmd {
     launcher: Launcher,
     bin_source: BinSource,
-    inputs: Vec<OsString>,
-    flags: Vec<OsString>,
+    request: ExtractRequest,
 }
 
 impl ExtractCmd {
@@ -384,8 +382,7 @@ impl ExtractCmd {
         Ok(ExtractCmd {
             launcher: Launcher::Direct(resolved.path.into_os_string()),
             bin_source: resolved.source,
-            inputs: Vec::new(),
-            flags: Vec::new(),
+            request: ExtractRequest::default(),
         })
     }
 
@@ -401,8 +398,7 @@ impl ExtractCmd {
         ExtractCmd {
             launcher: Launcher::Direct(bin.into_os_string()),
             bin_source: BinSource::Explicit,
-            inputs: Vec::new(),
-            flags: Vec::new(),
+            request: ExtractRequest::default(),
         }
     }
 
@@ -416,32 +412,23 @@ impl ExtractCmd {
         &self.launcher
     }
 
-    fn flag(&mut self, name: &str, value: impl AsRef<OsStr>) -> &mut Self {
-        self.flags.push(OsString::from(name));
-        self.flags.push(value.as_ref().to_os_string());
-        self
-    }
-
-    fn bare_flag(&mut self, name: &str) -> &mut Self {
-        self.flags.push(OsString::from(name));
-        self
-    }
-
     /// A positional input file. Repeatable; order is preserved (the classify
     /// mode's verdict list is positional).
     pub fn input(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
-        self.inputs.push(path.as_ref().to_os_string());
+        self.request.input(path);
         self
     }
 
     /// `--output-dir <dir>`.
     pub fn output_dir(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--output-dir", dir)
+        self.request.output_dir(dir);
+        self
     }
 
     /// `--target <name>` — compile one named top-level binder.
     pub fn target(&mut self, name: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--target", name)
+        self.request.target(name);
+        self
     }
 
     /// `--targets a,b,c` — compile N named binders in ONE spawn against a
@@ -451,17 +438,14 @@ impl ExtractCmd {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let joined = names
-            .into_iter()
-            .map(|s| s.as_ref().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        self.flag("--targets", joined)
+        self.request.targets(names);
+        self
     }
 
     /// `--include <dir>`. Repeatable; order preserved.
     pub fn include(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--include", dir)
+        self.request.include(dir);
+        self
     }
 
     /// `--include <dir>` for each entry, in order.
@@ -479,33 +463,39 @@ impl ExtractCmd {
     /// `--turn` — the session-turn mode (extract classifies, picks its own
     /// wrapper template, compiles, and writes the `TurnOut` sidecar).
     pub fn turn(&mut self) -> &mut Self {
-        self.bare_flag("--turn")
+        self.request.turn();
+        self
     }
 
     /// `--turn-template <kind>=<path>`. Repeatable; order preserved.
     pub fn turn_template(&mut self, kind: &str, path: &Path) -> &mut Self {
-        self.flag("--turn-template", format!("{kind}={}", path.display()))
+        self.request.turn_template(kind, path);
+        self
     }
 
     /// `--turn-out <path>` — where the `TurnOut` CBOR sidecar is written.
     pub fn turn_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--turn-out", path)
+        self.request.turn_out(path);
+        self
     }
 
     /// `--turn-verdict <kind[:binders]>` — a caller-supplied verdict, which
     /// skips the extract's internal re-parse.
     pub fn turn_verdict(&mut self, verdict: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--turn-verdict", verdict)
+        self.request.turn_verdict(verdict);
+        self
     }
 
     /// `--classify` — the parse-only batch classification mode.
     pub fn classify(&mut self) -> &mut Self {
-        self.bare_flag("--classify")
+        self.request.classify();
+        self
     }
 
     /// `--classify-out <path>` — where the verdict JSON is written.
     pub fn classify_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--classify-out", path)
+        self.request.classify_out(path);
+        self
     }
 
     /// `--build-products-dir <dir>` — a persistent, shared `-fwrite-interface`
@@ -516,18 +506,21 @@ impl ExtractCmd {
     /// bucket as `--output-dir`: it changes nothing about the OUTPUT bytes,
     /// only whether GHC's frontend can skip work to produce them.
     pub fn build_products_dir(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--build-products-dir", dir)
+        self.request.build_products_dir(dir);
+        self
     }
 
     /// `--session-root <dir>` — where `Tidepool.Session.Val.G<g>` ifaces are
     /// written and where `--inject-val` ifaces are looked up.
     pub fn session_root(&mut self, dir: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--session-root", dir)
+        self.request.session_root(dir);
+        self
     }
 
     /// `--inject-val <module>`. Repeatable; order preserved.
     pub fn inject_val(&mut self, module: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--inject-val", module)
+        self.request.inject_val(module);
+        self
     }
 
     /// `--inject-val <module>` for each entry, in order.
@@ -545,23 +538,27 @@ impl ExtractCmd {
     /// `--session-bind` — this turn binds a name, so write the thin session
     /// iface and emit the bound-binder sidecar.
     pub fn session_bind(&mut self) -> &mut Self {
-        self.bare_flag("--session-bind")
+        self.request.session_bind();
+        self
     }
 
     /// `--bind-name <name>`. Repeatable; order preserved.
     pub fn bind_name(&mut self, name: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--bind-name", name)
+        self.request.bind_name(name);
+        self
     }
 
     /// `--bind-gen <n>` — the session generation this turn binds into.
     pub fn bind_gen(&mut self, gen: u64) -> &mut Self {
-        self.flag("--bind-gen", gen.to_string())
+        self.request.bind_gen(gen);
+        self
     }
 
     /// `--emit-bound-binders <path>` — where the bound-binder JSON sidecar is
     /// written.
     pub fn emit_bound_binders(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
-        self.flag("--emit-bound-binders", path)
+        self.request.emit_bound_binders(path);
+        self
     }
 
     /// `--probe-only` — this bind is an ephemeral type probe (`:t`), read
@@ -570,21 +567,26 @@ impl ExtractCmd {
     /// row-mentioning type — the guard protects real binds from crossing
     /// into a later fragment, which a discard-immediately probe never does.
     pub fn probe_only(&mut self) -> &mut Self {
-        self.bare_flag("--probe-only")
+        self.request.probe_only();
+        self
     }
 
     /// The full argv (positional inputs first, then flags in the order they
     /// were set), without the program. Exposed for tests and diagnostics.
     pub fn argv(&self) -> Vec<OsString> {
-        let mut argv = self.inputs.clone();
-        argv.extend(self.flags.iter().cloned());
-        argv
+        self.request.legacy_argv()
+    }
+
+    /// Versioned worker request bytes. Unlike [`Self::argv`], this preserves
+    /// field types and cannot reinterpret an unknown option as an input file.
+    pub fn request_bytes(&self) -> Vec<u8> {
+        self.request.encode()
     }
 
     /// Spawn, wait, and classify — through this command's own [`Launcher`].
     ///
     /// If `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a working daemon, send the
-    /// current directory and argv over it. Any unavailable-daemon error falls
+    /// current directory and worker request over it. Any unavailable-daemon error falls
     /// back to the configured launcher for this request. The spawn counter
     /// increments once for either route.
     pub fn run(&self) -> Result<ExtractRun, SpawnError> {
@@ -601,7 +603,7 @@ impl ExtractCmd {
     }
 
     /// As [`run`](ExtractCmd::run), but through a caller-supplied
-    /// [`Launcher`] over the same argv — `tidepool-macro`'s nix fallback, and
+    /// [`Launcher`] over the same request — `tidepool-macro`'s nix fallback, and
     /// (internally) [`run`](ExtractCmd::run)'s own Direct fallback.
     /// [`Launcher::Daemon`] is handled here too, for a caller that
     /// deliberately wants to target a specific daemon socket rather than
@@ -618,8 +620,7 @@ impl ExtractCmd {
         }
 
         let mut cmd = launcher.command();
-        cmd.args(&self.inputs);
-        cmd.args(&self.flags);
+        cmd.args(self.request.worker_argv());
 
         let start = Instant::now();
         let output = cmd.output().map_err(|source| SpawnError {
@@ -635,8 +636,8 @@ impl ExtractCmd {
         Ok(ExtractRun { output, elapsed })
     }
 
-    /// Connect to `socket_path` and serve this command's `argv()` over the
-    /// daemon transport (see the `daemon` module). The current working
+    /// Connect to `socket_path` and serve this command's versioned worker
+    /// request over the daemon transport (see the `daemon` module). The current working
     /// directory is forwarded exactly as a spawned process would have
     /// inherited it (`std::env::current_dir`) — the daemon's single worker
     /// `setCurrentDirectory`s to it before compiling (safe: one worker,
@@ -644,7 +645,8 @@ impl ExtractCmd {
     /// spawned process exactly.
     fn run_via_daemon(&self, socket_path: &Path) -> Result<ExtractRun, daemon::DaemonError> {
         let cwd = std::env::current_dir().map_err(daemon::DaemonError::Io)?;
-        let (output, elapsed) = daemon::run_over_daemon(socket_path, &cwd, &self.argv())?;
+        let (output, elapsed) =
+            daemon::run_over_daemon(socket_path, &cwd, &self.request.worker_argv())?;
         // Counts "a tidepool-extract invocation was served" — true whether
         // the transport was a process or a socket (module doc, §5.2).
         EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);

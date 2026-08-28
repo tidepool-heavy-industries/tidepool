@@ -18,6 +18,7 @@ library tidepool-extract-internal
     Tidepool.DaemonServer
     Tidepool.DiagJson
     Tidepool.ExtractUtil
+    Tidepool.ExtractRequest
     Tidepool.FatIface
     Tidepool.GhcPipeline
     Tidepool.Json
@@ -268,6 +269,7 @@ test-suite extract-fidelity-test
     Fidelity.ClosureTier
     Fidelity.TopoRecovery
     Fidelity.DaemonCodec
+    Fidelity.ExtractRequest
     Fidelity.MissingFields
   build-depends:
     tidepool-extract-internal,

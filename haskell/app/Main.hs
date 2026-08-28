@@ -46,6 +46,7 @@ import Tidepool.GhcPipeline
 import qualified Tidepool.DaemonServer as DaemonServer
 import Tidepool.DiagJson (Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson, renderDiag)
 import Tidepool.ExtractUtil (capitalize)
+import Tidepool.ExtractRequest (RequestField(..), workerRequestFromArgv)
 import Tidepool.Json (jsonString)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
@@ -108,20 +109,25 @@ parseConnectArgs ("--connect" : socketPath : requestArgv) =
   Just (Right (ConnectArgs socketPath requestArgv))
 parseConnectArgs (_ : rest) = parseConnectArgs rest
 
--- | One invocation's worth of work: parse argv, seed the build-products-dir
--- env (per 'argBuildProductsDir'), splice the harness-compilation-profile
--- pragma when requested, then 'dispatch'. This is exactly what @main@ did
--- directly before the daemon existed — split out so both the CLI entry
--- point (@compiler = 'runPipelineSession'@, byte-identical to historical
--- behaviour) and a daemon-served request ('runDaemonMode', @compiler@ =
--- 'withResidentPipeline'\'s resident closure) run through the SAME
--- argv-to-diagnostics logic, with 'System.Exit.exitWith' turned into a
--- returned 'ExitCode' rather than a real process exit.
+-- | Decode a Rust worker request, or temporarily accept the legacy CLI
+-- surface, then run one compilation request. Direct and daemon transports use
+-- the same versioned payload and therefore the same dispatch path.
 runOneInvocation
   :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
   -> [String] -> IO ExitCode
 runOneInvocation compiler rawArgs = do
-  let parsedArgs = parseArgs rawArgs
+  parsedArgs <- case workerRequestFromArgv rawArgs of
+    Left err -> hPutStrLn stderr err >> pure Nothing
+    Right (Just fields) -> pure (Just (requestArgs fields))
+    Right Nothing -> pure (Just (parseArgs rawArgs))
+  case parsedArgs of
+    Nothing -> pure (ExitFailure 2)
+    Just request -> runParsedInvocation compiler request
+
+runParsedInvocation
+  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
+  -> Args -> IO ExitCode
+runParsedInvocation compiler parsedArgs = do
   -- Set BEFORE any GhcPipeline call, which is what actually reads it (see
   -- 'Tidepool.GhcPipeline.withBuildProductsFromEnv') — see 'argBuildProductsDir'.
   -- Under the daemon this env var was already read once at RESIDENT SESSION
@@ -404,14 +410,7 @@ data Args = Args
   }
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args Nothing Nothing [] False False False [] []
-                     False [] Nothing Nothing [] Nothing
-                     False
-                     False [] Nothing Nothing
-                     False Nothing
-                     Nothing Nothing
-                     False
-                     Nothing)
+parseArgs = go defaultArgs
   where
     go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
     go a ("--target" : name : rest) = go a { argTarget = Just name } rest
@@ -439,6 +438,46 @@ parseArgs = go (Args Nothing Nothing [] False False False [] []
     go a ("--build-products-dir" : dir : rest) = go a { argBuildProductsDir = Just dir } rest
     go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
     go a [] = a
+
+defaultArgs :: Args
+defaultArgs = Args Nothing Nothing [] False False False [] []
+                   False [] Nothing Nothing [] Nothing
+                   False
+                   False [] Nothing Nothing
+                   False Nothing
+                   Nothing Nothing
+                   False
+                   Nothing
+
+requestArgs :: [RequestField] -> Args
+requestArgs = foldl apply defaultArgs
+  where
+    apply a field = case field of
+      Input path -> a { argFiles = argFiles a ++ [path] }
+      OutputDir path -> a { argOutDir = Just path }
+      Target name -> a { argTarget = Just name }
+      Targets names -> a { argTargets = argTargets a ++ names }
+      DumpCore -> a { argDumpCore = True }
+      AllClosed -> a { argAllClosed = True }
+      TargetModuleOnly -> a { argTargetModuleOnly = True }
+      Include path -> a { argIncludes = argIncludes a ++ [path] }
+      SessionBind -> a { argSessionBind = True }
+      BindName name -> a { argBindNames = argBindNames a ++ [name] }
+      BindGen generation -> a { argBindGen = Just generation }
+      SessionRoot path -> a { argSessionRoot = Just path }
+      InjectVal name -> a { argInjectVals = argInjectVals a ++ [name] }
+      EmitBoundBinders path -> a { argEmitBoundBinders = Just path }
+      ProbeOnly -> a { argProbeOnly = True }
+      Turn -> a { argTurn = True }
+      TurnTemplate kind path -> a { argTurnTemplates = argTurnTemplates a ++ [kind ++ "=" ++ path] }
+      TurnOut path -> a { argTurnOut = Just path }
+      TurnVerdict verdict -> a { argTurnVerdict = Just verdict }
+      Classify -> a { argClassify = True }
+      ClassifyOut path -> a { argClassifyOut = Just path }
+      TurnBatch path -> a { argTurnBatch = Just path }
+      BatchOut path -> a { argBatchOut = Just path }
+      HarnessProfile -> a { argHarnessProfile = True }
+      BuildProductsDir path -> a { argBuildProductsDir = Just path }
 
 processFile
   :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)

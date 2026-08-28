@@ -65,10 +65,10 @@ impl std::fmt::Display for DaemonError {
 
 impl std::error::Error for DaemonError {}
 
-/// Connect to `socket_path`, send `(cwd, argv)` as one request, and return
-/// the synthesized [`Output`] the daemon's response describes. `argv` is
-/// exactly [`ExtractCmd::argv`](crate::ExtractCmd::argv) — the same bytes a
-/// spawned process would have received as its arguments.
+/// Connect to `socket_path`, send `(cwd, worker argv)` as one request, and
+/// return the synthesized [`Output`] the daemon's response describes. The
+/// worker argv includes the versioned typed request payload used by a direct
+/// spawn, so both transports reach the same Haskell dispatch path.
 pub(crate) fn run_over_daemon(
     socket_path: &Path,
     cwd: &Path,

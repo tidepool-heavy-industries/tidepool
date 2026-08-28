@@ -1,7 +1,7 @@
 # tidepool-extract-cmd — the ONE `tidepool-extract` invocation builder
 
 **Charter.** Belongs: binary resolution (the strict `$TIDEPOOL_EXTRACT`
-policy), typed argument construction (`ExtractCmd`), and the spawn + spawn
+policy), typed request construction and encoding (`ExtractCmd`), and the spawn + spawn
 counter — a std-only leaf with zero dependencies. Parsing extractor output
 belongs to callers; the compile cache belongs to `tidepool-toolchain`, which
 uses this crate's `argv()` in its cache key.
@@ -11,7 +11,7 @@ uses this crate's `argv()` in its cache key.
 `ExtractCmd::run()` (never `run_with` — see below) transparently tries the
 resident compile daemon before falling back
 to a direct spawn: when `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a path, it
-connects, sends `(cwd, argv())` over the wire the `daemon` module owns
+connects, sends `(cwd, worker request)` over the wire the `daemon` module owns
 (length-prefixed frames — see that module's doc for the exact byte shape,
 mirrored byte-for-byte by `haskell/src/Tidepool/DaemonServer.hs`), and
 synthesizes the daemon's response into the same `ExtractRun{output, elapsed}`

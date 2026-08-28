@@ -17,6 +17,7 @@ import qualified Fidelity.TurnBatchJsonBugs as TurnBatchJsonBugs
 import qualified Fidelity.ClosureTier as ClosureTier
 import qualified Fidelity.TopoRecovery as TopoRecovery
 import qualified Fidelity.DaemonCodec as DaemonCodec
+import qualified Fidelity.ExtractRequest as ExtractRequest
 import qualified Fidelity.MissingFields as MissingFields
 
 import Control.Monad (forM_)
@@ -33,6 +34,7 @@ groups =
   , ("closure-tier classification (higher-kinded arrow instantiation)", ClosureTier.checks)
   , ("GHC diagnostic-recovery topological order (Known Limits cascade)", TopoRecovery.checks)
   , ("resident compile daemon: frame codec round-trip (compile-daemon-design.md)", DaemonCodec.checks)
+  , ("Rust-to-Haskell extractor request protocol", ExtractRequest.checks)
   , ("fatal missing record fields", MissingFields.checks)
   ]
 
