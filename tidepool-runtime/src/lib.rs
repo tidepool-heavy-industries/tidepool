@@ -18,8 +18,11 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
 pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
-use tidepool_codegen::jit_machine::{ContinuationId, JitEffectMachine, ParkedOutcome, RealmId};
+use tidepool_codegen::jit_machine::{
+    ContinuationId, JitEffectMachine, ParkedOutcome, RealmId, SuspensionRun,
+};
 pub use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_effect::EffectBoundary;
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -293,8 +296,9 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
     let realm = RealmId(0);
     on_ready(machine.realm_cancel_handle(realm));
-    let handled_prefix = handled_effect_prefix(effect_names, ask_tag);
-    match machine.run_suspendable_parked(&table, handlers, user, ask_tag, realm, handled_prefix)? {
+    let boundary = EffectBoundary::new(ask_tag, effect_names);
+    let run = SuspensionRun::main(&table, &boundary, realm);
+    match machine.run_until_suspension(run, handlers, user)? {
         ParkedOutcome::CompletedValue(value) => Ok(SuspendableRun::Completed(EvalResult::new(
             value,
             table,
@@ -314,10 +318,6 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     }
 }
 
-fn handled_effect_prefix(effect_names: &[String], ask_tag: u64) -> &[String] {
-    &effect_names[..effect_names.len().min(ask_tag as usize)]
-}
-
 /// Re-enter a stowed turn (from [`compile_and_run_suspendable`]) with the
 /// answer or an abort, driving to the next suspension or completion. Runs on
 /// ANY thread — the machine re-installs its per-thread reach and re-points GC
@@ -334,7 +334,7 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<ResumedRun, RuntimeError> {
     on_ready(machine.realm_cancel_handle(RealmId(0)));
-    match machine.resume_parked(continuation, handlers, user, input)? {
+    match machine.resume_continuation(continuation, handlers, user, input)? {
         ParkedOutcome::CompletedValue(value) => {
             // No recompile happens on resume (the JIT machine is reused as-is),
             // so there are no new warnings to report here — they were already
@@ -427,12 +427,6 @@ pub fn compile_and_run<U, H: DispatchEffect<U>>(
 mod tests {
     use super::*;
     use serial_test::serial;
-
-    #[test]
-    fn short_effect_name_list_is_a_valid_handled_prefix() {
-        let names = ["Only".to_string()];
-        assert_eq!(handled_effect_prefix(&names, 3), names);
-    }
 
     #[test]
     #[serial]

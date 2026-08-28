@@ -36,11 +36,12 @@ use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
     CancelHandle, ContinuationId, FuncId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId,
-    ResumeInput, Suspendable, SuspendableOutcome,
+    ResumeInput, Suspendable, SuspendableOutcome, SuspensionRun,
 };
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
 use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_effect::EffectBoundary;
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
@@ -100,11 +101,8 @@ pub struct PersistentSession {
     scopes: ScopeTree,
     /// Monotonic per-turn counter → unique fragment function names.
     turn_counter: u64,
-    /// The `Ask` union tag intercepted at the suspend boundary.
-    ask_tag: u64,
-    /// Effect names below `ask_tag`, supplied to the registry's positional
-    /// handler-prefix check.
-    handled_prefix: Vec<String>,
+    /// The suspension tag and its derived handled-effect prefix.
+    effect_boundary: EffectBoundary,
     /// Capacity-one façade state for the REPL/linear session surface.
     active_continuation: Option<ContinuationId>,
     /// A bind root completed through the registry and carried home inside the
@@ -124,7 +122,7 @@ impl PersistentSession {
         effect_names: Vec<String>,
         nursery_size: usize,
     ) -> Self {
-        let handled_prefix = effect_names.into_iter().take(ask_tag as usize).collect();
+        let effect_boundary = EffectBoundary::new(ask_tag, &effect_names);
         PersistentSession {
             machine: None,
             session_table: DataConTable::new(),
@@ -133,8 +131,7 @@ impl PersistentSession {
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
             turn_counter: 0,
-            ask_tag,
-            handled_prefix,
+            effect_boundary,
             active_continuation: None,
             last_bound_root: LinearRootStash(None),
             nursery_size,
@@ -192,7 +189,11 @@ impl PersistentSession {
     }
     /// The `Ask` union tag this session suspends on.
     pub fn ask_tag(&self) -> u64 {
-        self.ask_tag
+        self.effect_boundary.suspend_tag()
+    }
+
+    pub fn effect_boundary(&self) -> &EffectBoundary {
+        &self.effect_boundary
     }
     /// Whether the resident machine has been bootstrapped (first turn run).
     pub fn is_bootstrapped(&self) -> bool {
@@ -497,7 +498,7 @@ impl PersistentSession {
             .machine
             .as_mut()
             .expect("machine present before resume");
-        machine.resume_parked(id, handlers, captured, input)
+        machine.resume_continuation(id, handlers, captured, input)
     }
 
     /// Run the resident machine's ORIGINAL entry (the seed compiled by
@@ -519,21 +520,14 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let ask_tag = self.ask_tag;
-        let prefix = self.handled_prefix.clone();
+        let boundary = self.effect_boundary.clone();
         #[allow(clippy::expect_used, reason = "machine bootstrapped before run_entry")]
         let machine = self
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_entry");
-        let outcome = machine.run_suspendable_parked(
-            run_table,
-            handlers,
-            captured,
-            ask_tag,
-            RealmId(0),
-            &prefix,
-        )?;
+        let run = SuspensionRun::main(run_table, &boundary, RealmId(0));
+        let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
 
@@ -555,8 +549,7 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let ask_tag = self.ask_tag;
-        let prefix = self.handled_prefix.clone();
+        let boundary = self.effect_boundary.clone();
         #[allow(
             clippy::expect_used,
             reason = "machine bootstrapped before run_funcid_with_table"
@@ -565,16 +558,9 @@ impl PersistentSession {
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_with_table");
-        let outcome = machine.run_fragment_suspendable_parked(
-            func_id,
-            run_table,
-            handlers,
-            captured,
-            ask_tag,
-            RealmId(0),
-            ParkKind::Plain,
-            &prefix,
-        )?;
+        let run =
+            SuspensionRun::fragment(func_id, run_table, &boundary, RealmId(0), ParkKind::Plain);
+        let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
 
@@ -614,11 +600,10 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let prefix = self.handled_prefix.clone();
+        let boundary = self.effect_boundary.clone();
         let PersistentSession {
             machine,
             session_table,
-            ask_tag,
             ..
         } = self;
         #[allow(
@@ -628,16 +613,14 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_session");
-        let outcome = machine.run_fragment_suspendable_parked(
+        let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            handlers,
-            captured,
-            *ask_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Plain,
-            &prefix,
-        )?;
+        );
+        let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
 
@@ -694,11 +677,10 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let prefix = self.handled_prefix.clone();
+        let boundary = self.effect_boundary.clone();
         let PersistentSession {
             machine,
             session_table,
-            ask_tag,
             ..
         } = self;
         #[allow(
@@ -708,16 +690,14 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid");
-        let outcome = machine.run_fragment_suspendable_parked(
+        let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            handlers,
-            captured,
-            *ask_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Binding { forced },
-            &prefix,
-        )?;
+        );
+        let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_binding_outcome(outcome))
     }
 
@@ -761,12 +741,11 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let prefix = self.handled_prefix.clone();
+        let boundary = self.effect_boundary.clone();
         let n_fields = NonZeroUsize::new(n_fields).expect("a projected bind needs fields");
         let PersistentSession {
             machine,
             session_table,
-            ask_tag,
             ..
         } = self;
         #[allow(
@@ -776,16 +755,14 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_projected");
-        let outcome = machine.run_fragment_suspendable_parked(
+        let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            handlers,
-            captured,
-            *ask_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Project { n_fields },
-            &prefix,
-        )?;
+        );
+        let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_project_outcome(outcome))
     }
 
@@ -827,11 +804,10 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let prefix = self.handled_prefix.clone();
+        let boundary = self.effect_boundary.clone();
         let PersistentSession {
             machine,
             session_table,
-            ask_tag,
             ..
         } = self;
         #[allow(
@@ -841,16 +817,14 @@ impl PersistentSession {
         let machine = machine
             .as_mut()
             .expect("machine bootstrapped before bind_funcid_render");
-        let outcome = machine.run_fragment_suspendable_parked(
+        let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            handlers,
-            captured,
-            *ask_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Render { field0_forced },
-            &prefix,
-        )?;
+        );
+        let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_render_outcome(outcome))
     }
 

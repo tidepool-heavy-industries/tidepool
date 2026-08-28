@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use cranelift_module::FuncId;
-use tidepool_effect::{DispatchEffect, EffectContext, EffectError};
+use tidepool_effect::{DispatchEffect, EffectBoundary, EffectContext, EffectError};
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConTable};
 
@@ -200,6 +200,58 @@ pub enum ParkKind {
     /// (aliasing-safe ordering, see [`ResultMaterialization::Render`]), then
     /// field 0 optionally forced + tenured; both products returned inline.
     Render { field0_forced: bool },
+}
+
+/// Which compiled function a suspendable run starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspensionEntry {
+    /// The function supplied when the machine was compiled.
+    Main,
+    /// A function subsequently added to a session machine.
+    Fragment(FuncId),
+}
+
+/// Everything the machine needs to start one suspendable run.
+///
+/// Keeping the boundary and completion policy in this value prevents the
+/// family of positional `run_*_suspendable_*` methods from encoding lifecycle
+/// policy in method names and argument order.
+pub struct SuspensionRun<'a> {
+    pub entry: SuspensionEntry,
+    pub table: &'a DataConTable,
+    pub boundary: &'a EffectBoundary,
+    pub realm: RealmId,
+    pub completion: ParkKind,
+}
+
+impl<'a> SuspensionRun<'a> {
+    #[must_use]
+    pub fn main(table: &'a DataConTable, boundary: &'a EffectBoundary, realm: RealmId) -> Self {
+        Self {
+            entry: SuspensionEntry::Main,
+            table,
+            boundary,
+            realm,
+            completion: ParkKind::Plain,
+        }
+    }
+
+    #[must_use]
+    pub fn fragment(
+        func_id: FuncId,
+        table: &'a DataConTable,
+        boundary: &'a EffectBoundary,
+        realm: RealmId,
+        completion: ParkKind,
+    ) -> Self {
+        Self {
+            entry: SuspensionEntry::Fragment(func_id),
+            table,
+            boundary,
+            realm,
+            completion,
+        }
+    }
 }
 
 impl ParkKind {
@@ -1638,8 +1690,9 @@ impl JitEffectMachine {
             self.linear_continuation.is_none(),
             "resume the active continuation first"
         );
-        let outcome =
-            self.run_suspendable_parked(table, handlers, user, suspend_tag, RealmId(0), &[])?;
+        let boundary = EffectBoundary::new(suspend_tag, &[]);
+        let run = SuspensionRun::main(table, &boundary, RealmId(0));
+        let outcome = self.run_until_suspension(run, handlers, user)?;
         Ok(self.linear_value(outcome))
     }
 
@@ -1668,16 +1721,9 @@ impl JitEffectMachine {
             self.linear_continuation.is_none(),
             "resume the active continuation first"
         );
-        let outcome = self.run_fragment_suspendable_parked(
-            func_id,
-            table,
-            handlers,
-            user,
-            suspend_tag,
-            RealmId(0),
-            ParkKind::Plain,
-            &[],
-        )?;
+        let boundary = EffectBoundary::new(suspend_tag, &[]);
+        let run = SuspensionRun::fragment(func_id, table, &boundary, RealmId(0), ParkKind::Plain);
+        let outcome = self.run_until_suspension(run, handlers, user)?;
         Ok(self.linear_value(outcome))
     }
 
@@ -1701,16 +1747,15 @@ impl JitEffectMachine {
             self.linear_continuation.is_none(),
             "resume the active continuation first"
         );
-        let outcome = self.run_fragment_suspendable_parked(
+        let boundary = EffectBoundary::new(suspend_tag, &[]);
+        let run = SuspensionRun::fragment(
             func_id,
             table,
-            handlers,
-            user,
-            suspend_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Binding { forced },
-            &[],
-        )?;
+        );
+        let outcome = self.run_until_suspension(run, handlers, user)?;
         Ok(self.linear_value(outcome))
     }
 
@@ -1752,16 +1797,15 @@ impl JitEffectMachine {
             self.linear_continuation.is_none(),
             "resume the active continuation first"
         );
-        let outcome = self.run_fragment_suspendable_parked(
+        let boundary = EffectBoundary::new(suspend_tag, &[]);
+        let run = SuspensionRun::fragment(
             func_id,
             table,
-            handlers,
-            user,
-            suspend_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Project { n_fields },
-            &[],
-        )?;
+        );
+        let outcome = self.run_until_suspension(run, handlers, user)?;
         match outcome {
             ParkedOutcome::CompletedProject { roots } => Ok(Suspendable::Completed(roots)),
             ParkedOutcome::Suspended {
@@ -1813,16 +1857,15 @@ impl JitEffectMachine {
             self.linear_continuation.is_none(),
             "resume the active continuation first"
         );
-        let outcome = self.run_fragment_suspendable_parked(
+        let boundary = EffectBoundary::new(suspend_tag, &[]);
+        let run = SuspensionRun::fragment(
             func_id,
             table,
-            handlers,
-            user,
-            suspend_tag,
+            &boundary,
             RealmId(0),
             ParkKind::Render { field0_forced },
-            &[],
-        )?;
+        );
+        let outcome = self.run_until_suspension(run, handlers, user)?;
         match outcome {
             ParkedOutcome::CompletedRender { root, rendered } => {
                 Ok(Suspendable::Completed((root, rendered)))
@@ -1932,7 +1975,7 @@ impl JitEffectMachine {
         input: ResumeInput,
     ) -> Result<SuspendableOutcome, JitError> {
         let id = self.take_linear_continuation()?;
-        let outcome = self.resume_parked(id, handlers, user, input)?;
+        let outcome = self.resume_continuation(id, handlers, user, input)?;
         self.linear_continuation = None;
         Ok(self.linear_value(outcome))
     }
@@ -1953,7 +1996,7 @@ impl JitEffectMachine {
     ) -> Result<SuspendableOutcome, JitError> {
         let _ = forced;
         let id = self.take_linear_continuation()?;
-        let outcome = self.resume_parked(id, handlers, user, input)?;
+        let outcome = self.resume_continuation(id, handlers, user, input)?;
         self.linear_continuation = None;
         Ok(self.linear_value(outcome))
     }
@@ -1986,7 +2029,7 @@ impl JitEffectMachine {
         let _ = NonZeroUsize::new(n_fields)
             .expect("resume_suspended_projected requires at least one field");
         let id = self.take_linear_continuation()?;
-        let outcome = self.resume_parked(id, handlers, user, input)?;
+        let outcome = self.resume_continuation(id, handlers, user, input)?;
         self.linear_continuation = None;
         match outcome {
             ParkedOutcome::CompletedProject { roots } => Ok(Suspendable::Completed(roots)),
@@ -2023,7 +2066,7 @@ impl JitEffectMachine {
     ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
         let _ = field0_forced;
         let id = self.take_linear_continuation()?;
-        let outcome = self.resume_parked(id, handlers, user, input)?;
+        let outcome = self.resume_continuation(id, handlers, user, input)?;
         self.linear_continuation = None;
         match outcome {
             ParkedOutcome::CompletedRender { root, rendered } => {
@@ -3134,20 +3177,40 @@ impl JitEffectMachine {
         id
     }
 
-    /// Drive the machine's entry and park any suspension in the continuation
-    /// registry under `realm`. Further fragments, parked turns, and resumes of
-    /// other continuations can run while this one waits.
+    /// Start a suspendable run and register any resulting continuation.
     ///
-    /// `handled_prefix` must be EXACTLY EQUAL to every other non-empty
-    /// prefix already on this machine, or empty — see
-    /// [`Self::check_prefix_compatible`] for why that is the sound check
-    /// (not merely agreement up to a shared length) and its residual (it
-    /// enforces agreement AMONG runtime resource scopes, not verification against the
-    /// actual, opaque `H`).
-    ///
-    /// # Panics
-    /// Panics on a non-session machine — heap retention across the suspension
-    /// requires [`Self::compile_session`].
+    /// This is the canonical suspension entry point. The returned continuation
+    /// id is explicit, so multiple realms and multiple parked turns can safely
+    /// share one machine. Resume with [`Self::resume_continuation`].
+    pub fn run_until_suspension<U, H: DispatchEffect<U>>(
+        &mut self,
+        run: SuspensionRun<'_>,
+        handlers: &mut H,
+        user: &U,
+    ) -> Result<ParkedOutcome, JitError> {
+        let func_id = match run.entry {
+            SuspensionEntry::Main => self.func_id,
+            SuspensionEntry::Fragment(func_id) => func_id,
+        };
+        let handled_prefix = run.boundary.handled_prefix_arc();
+        self.enter_parked_path(&handled_prefix)?;
+        self.run_suspendable_shared(
+            func_id,
+            run.table,
+            handlers,
+            user,
+            run.boundary.suspend_tag(),
+            run.completion.materialization(),
+            ParkTarget::Registry {
+                realm: run.realm,
+                kind: run.completion,
+                handled_prefix,
+            },
+        )
+        .map(ParkedRaw::into_parked)
+    }
+
+    #[doc(hidden)]
     pub fn run_suspendable_parked<U, H: DispatchEffect<U>>(
         &mut self,
         table: &DataConTable,
@@ -3170,33 +3233,7 @@ impl JitEffectMachine {
         )
     }
 
-    /// Parked sibling of [`Self::run_fragment_suspendable`] /
-    /// [`Self::run_fragment_suspendable_binding`]: drive an
-    /// [`Self::add_function`]-minted fragment through the suspend path, parking
-    /// a suspension in the registry under `realm`. `kind` picks the completion
-    /// discipline — [`ParkKind::Plain`] bridges the `Done` pointer,
-    /// [`ParkKind::Binding`] tenures it as a persistent-binding-store bind.
-    ///
-    /// `handled_prefix` is this runtime resource scope's handled prefix — the effect names for
-    /// tags `[0, suspend_tag)`, in position order (the caller builds the
-    /// decls row, so it has the names). Checked against the machine's
-    /// established prefix, and established if this is the first non-empty
-    /// prefix to enter, BEFORE the machine is driven at all
-    /// ([`Self::enter_parked_path`]) — an incompatible runtime resource scope never executes a
-    /// single effect against a foreign handler stack, whether or not it
-    /// would go on to suspend or complete. Two non-empty prefixes must be
-    /// EXACTLY EQUAL to be compatible — a strict extension of the
-    /// established prefix is REFUSED, not accepted, because the established
-    /// prefix is caller-supplied metadata, not a read of the machine's
-    /// actual (opaque) handler stack (see
-    /// [`Self::check_prefix_compatible`] for the full argument and its
-    /// residual: this enforces agreement AMONG runtime resource scopes, not verification
-    /// against the real `H`). A disagreement refuses with
-    /// `JitError::IncompatibleHandledPrefix` and leaves the machine
-    /// untouched (nothing has run yet).
-    ///
-    /// # Panics
-    /// Panics on a non-session machine.
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn run_fragment_suspendable_parked<U, H: DispatchEffect<U>>(
         &mut self,
@@ -3255,7 +3292,7 @@ impl JitEffectMachine {
     /// method no longer accepts a caller-supplied table at all, so resuming a
     /// frame against a foreign row is impossible by construction.
     ///
-    pub fn resume_parked<U, H: DispatchEffect<U>>(
+    pub fn resume_continuation<U, H: DispatchEffect<U>>(
         &mut self,
         id: ContinuationId,
         handlers: &mut H,
@@ -3338,6 +3375,17 @@ impl JitEffectMachine {
             cancel_flag,
         )
         .map(ParkedRaw::into_parked)
+    }
+
+    #[doc(hidden)]
+    pub fn resume_parked<U, H: DispatchEffect<U>>(
+        &mut self,
+        id: ContinuationId,
+        handlers: &mut H,
+        user: &U,
+        input: ResumeInput,
+    ) -> Result<ParkedOutcome, JitError> {
+        self.resume_continuation(id, handlers, user, input)
     }
 
     /// Frame-scoped sibling of [`Self::take_finalized_root`] for the registry

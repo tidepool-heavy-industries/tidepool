@@ -61,7 +61,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{
     ContinuationId, FuncId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
-    ValueHandle,
+    SuspensionRun, ValueHandle,
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
@@ -923,14 +923,6 @@ where
         self.reenter(cont_id, ResumeInput::Handle(handle), HoleSeed::Plain, None)
     }
 
-    /// This session's handled-effect prefix, DERIVED from its own
-    /// `effect_names` and ask tag (the names below the suspend threshold, in
-    /// position order) — the parking contract's "derive, don't declare".
-    fn handled_prefix(&self) -> Vec<String> {
-        let n = (self.core.ask_tag() as usize).min(self.effect_names.len());
-        self.effect_names[..n].to_vec()
-    }
-
     /// Whether the resident machine has been bootstrapped yet. `false` from
     /// [`Self::unbootstrapped`] until the session's first real turn brings the
     /// machine up (`run`/`run_bind`/`run_child`/`run_child_pure`); always
@@ -1127,22 +1119,13 @@ where
             0,
         );
 
-        let ask_tag = self.core.ask_tag();
+        let boundary = self.core.effect_boundary().clone();
         let realm = self.realm;
-        let prefix = self.handled_prefix();
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain);
             machine
-                .run_fragment_suspendable_parked(
-                    func_id,
-                    table,
-                    handlers,
-                    captured,
-                    ask_tag,
-                    realm,
-                    ParkKind::Plain,
-                    &prefix,
-                )
+                .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
         })?;
         timing::record_stage(
@@ -1193,25 +1176,22 @@ where
             0,
         );
 
-        let ask_tag = self.core.ask_tag();
+        let boundary = self.core.effect_boundary().clone();
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
         let realm = self.realm;
-        let prefix = self.handled_prefix();
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            let run = SuspensionRun::fragment(
+                func_id,
+                table,
+                &boundary,
+                realm,
+                ParkKind::Binding { forced },
+            );
             machine
-                .run_fragment_suspendable_parked(
-                    func_id,
-                    table,
-                    handlers,
-                    captured,
-                    ask_tag,
-                    realm,
-                    ParkKind::Binding { forced },
-                    &prefix,
-                )
+                .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
         })?;
         timing::record_stage(
@@ -1271,20 +1251,12 @@ where
         // closed) rather than parked. Suspension-capable turns are `run`'s
         // job. High-bit-tagged so it can never collide with a caller realm.
         let child_realm = RealmId((1 << 63) | self.cont_id_issuer.next_raw());
-        let ask_tag = self.core.ask_tag();
-        let prefix = self.handled_prefix();
+        let boundary = self.core.effect_boundary().clone();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            let run =
+                SuspensionRun::fragment(func_id, table, &boundary, child_realm, ParkKind::Plain);
             machine
-                .run_fragment_suspendable_parked(
-                    func_id,
-                    table,
-                    handlers,
-                    captured,
-                    ask_tag,
-                    child_realm,
-                    ParkKind::Plain,
-                    &prefix,
-                )
+                .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, child_realm))
         })?;
         match outcome {
@@ -1558,25 +1530,16 @@ where
             .add_fragment_session(name_hint, &expr, &env)
             .map_err(ResidentError::AddFunction)?;
 
-        let ask_tag = self.core.ask_tag();
-        let prefix = self.handled_prefix();
+        let boundary = self.core.effect_boundary().clone();
         // Handle ownership on completion is the SESSION's realm, deliberately:
         // a result must outlive the thread realm that produced it, since
         // cancelling or retiring a thread closes that realm while a waiter may
         // still be holding the value.
         let owning_realm = self.realm;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain);
             machine
-                .run_fragment_suspendable_parked(
-                    func_id,
-                    table,
-                    handlers,
-                    captured,
-                    ask_tag,
-                    realm,
-                    ParkKind::Plain,
-                    &prefix,
-                )
+                .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, owning_realm))
         })?;
         Ok(self.classify_parked(outcome, None, HoleSeed::Plain))
@@ -1654,7 +1617,7 @@ where
         let realm = self.realm;
         let outcome = self.on_eval_thread(move |machine, _table, handlers, captured| {
             machine
-                .resume_parked(frame_id, handlers, captured, input)
+                .resume_continuation(frame_id, handlers, captured, input)
                 .map(|o| project_parked(machine, o, realm))
         });
         let outcome = match outcome {

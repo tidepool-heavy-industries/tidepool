@@ -4,12 +4,14 @@
 //! handler composition for dispatching algebraic effects at runtime.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+pub mod boundary;
 pub mod dispatch;
 pub mod error;
 pub mod freer_names;
 pub mod machine;
 pub mod pause;
 
+pub use boundary::*;
 pub use dispatch::*;
 pub use error::*;
 pub use machine::*;
