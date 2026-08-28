@@ -18,6 +18,9 @@
 //! supposed to guarantee: an aliased `(x, x)` result is intact after a
 //! suspension, a resume, and a later collection.
 
+mod support;
+use support::LinearMachine;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, Suspendable};
@@ -282,9 +285,11 @@ fn session_with_fragment(
     table: &DataConTable,
     name: &str,
     expr: &CoreExpr,
-) -> (JitEffectMachine, tidepool_codegen::jit_machine::FuncId) {
-    let mut machine = JitEffectMachine::compile_session(&build_val_fragment(0), table, 1 << 16)
-        .expect("compile_session");
+) -> (LinearMachine, tidepool_codegen::jit_machine::FuncId) {
+    let mut machine = LinearMachine::new(
+        JitEffectMachine::compile_session(&build_val_fragment(0), table, 1 << 16)
+            .expect("compile_session"),
+    );
     let func_id = machine
         .add_function(name, expr, table, &ExternalEnv::new())
         .expect("add suspending fragment");
@@ -356,10 +361,6 @@ fn projected_turn_suspends_then_tenures_every_field_on_resume() {
         assert!(!machine.is_suspended());
 
         assert_eq!(slots.len(), 2, "one root per projected field");
-        assert!(
-            machine.take_last_bound_root().is_none(),
-            "the single-root stash belongs to Bind, not Project"
-        );
         assert_ne!(
             slots[0].addr(),
             slots[1].addr(),
@@ -416,10 +417,6 @@ fn render_turn_suspends_then_returns_render_and_field0_root() {
             .expect("render suspendable run");
         expect_suspended(outcome, 7);
         assert!(machine.is_suspended());
-        assert!(
-            machine.take_last_bound_root().is_none(),
-            "a suspended render turn must not have tenured field 0 yet"
-        );
 
         // The completion carries BOTH products: field 0's tenured root (`it`
         // itself) and field 1's render, together.
@@ -441,10 +438,6 @@ fn render_turn_suspends_then_returns_render_and_field0_root() {
             expect_int(&rendered),
             222,
             "the completion's rendered half is field 1"
-        );
-        assert!(
-            machine.take_last_bound_root().is_none(),
-            "Render returns its root inline — nothing is stashed on the machine"
         );
         let bound = unsafe { heap_bridge::heap_to_value(slot.current()) }.expect("bridge field 0");
         assert_eq!(

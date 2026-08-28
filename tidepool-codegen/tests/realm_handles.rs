@@ -323,10 +323,6 @@ fn assert_receipts(machine: &JitEffectMachine, parked: usize, handles: usize) {
         "every parked continuation must be a registered GC root for its whole parked lifetime"
     );
     assert_eq!(machine.value_handle_count(), handles, "live handle count");
-    assert!(
-        !machine.is_suspended(),
-        "the parked path must leave the single slot empty"
-    );
 }
 
 fn force_gc_on(machine: &mut JitEffectMachine, table: &DataConTable, name: &str, depth: usize) {

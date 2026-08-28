@@ -501,8 +501,6 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
             ParkedOutcome::Suspended { .. } => panic!("realm A's bind fragment never asks"),
         };
         assert_eq!(expect_int(&value_a), 111);
-        // Nothing was stashed on the machine to race on — the whole point.
-        assert!(machine.take_last_bound_root().is_none());
         assert_rooting_receipt(&machine, 0);
 
         let frag_b = machine
@@ -538,7 +536,6 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
             ParkedOutcome::Suspended { .. } => panic!("realm B's bind fragment never asks"),
         };
         assert_eq!(expect_int(&value_b), 222);
-        assert!(machine.take_last_bound_root().is_none());
         assert_rooting_receipt(&machine, 0);
 
         // Distinct slots, EACH STILL bridging to its own realm's value — A's

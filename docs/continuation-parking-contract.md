@@ -6,10 +6,11 @@ change without notice.
 
 ## Public model
 
-`ContinuationId`, `RealmId`, and `ValueHandle` are opaque identifiers minted by
-the machine. Consumers may store and compare them but must not synthesize
-them. Continuation identifiers are never reused: resuspension creates a fresh
-identifier in the same runtime resource scope.
+The machine mints `ContinuationId` and `ValueHandle` values; callers assign
+`RealmId` values to identify their runtime resource scopes. Continuation
+identifiers are never reused: resuspension creates a fresh identifier in the
+same scope. Unknown or spent continuation and value-handle identifiers are
+rejected rather than aliased to live resources.
 
 `ParkKind` selects one of the four completion policies:
 
@@ -27,7 +28,7 @@ its `ContinuationId`, request value, and finalized-closure flag.
 - A parked continuation is a registered GC root from parking until resume or
   scope closure. At every quiescent point,
   `stowed_roots_count() == parked_count()`.
-- `resume_parked` takes an identifier and `ResumeInput`. The frame supplies its
+- `resume_continuation` takes an identifier and `ResumeInput`. The frame supplies its
   own constructor table, suspension tag, materialization policy, cancellation
   flag, and handled prefix, so a caller cannot resume it against a foreign
   effect row.
@@ -54,16 +55,11 @@ The machine checks this before executing the incoming fragment and returns
 `JitError::IncompatibleHandledPrefix` without mutating the machine.
 
 The check compares callers with each other; the concrete handler stack `H` is
-not runtime data and cannot be inspected. Internal callers must derive the
-prefix from the same effect-list value used to construct `H` rather than
-restating it at the parking call.
-
-### Capacity-one façade
-
-The linear `run_suspendable*`/`resume_suspended*` API is a capacity-one façade
-over the same registry. It remembers one active `ContinuationId` for callers
-that do not need explicit IDs. Its continuation is registered and may coexist
-with continuations parked explicitly by realm.
+not runtime data and cannot be inspected. Callers construct one
+`EffectBoundary` from the effect-list value used to construct `H` and pass
+that boundary in `SuspensionRun`. Capacity limits, such as a session that
+permits one outstanding turn, belong above the JIT and retain the returned
+`ContinuationId` explicitly.
 
 ### Bounded lifetime
 
@@ -80,11 +76,8 @@ machine must not grow without a rotation bound.
 All methods are on `JitEffectMachine`:
 
 ```rust
-run_suspendable_parked(table, handlers, user, suspend_tag, realm, handled_prefix)
-run_fragment_suspendable_parked(
-    func_id, table, handlers, user, suspend_tag, realm, kind, handled_prefix,
-)
-resume_parked(id, handlers, user, input)
+run_until_suspension(run: SuspensionRun, handlers, user)
+resume_continuation(id, handlers, user, input)
 
 parked_count()
 parked_ids()

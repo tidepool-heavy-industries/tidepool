@@ -15,7 +15,7 @@
 //! continuations.
 
 mod support;
-use support::SuspensionTestExt;
+use support::{LinearMachine, SuspensionTestExt};
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
@@ -998,9 +998,10 @@ fn parked_bottom_answer_leaves_the_frame_parked_and_rooted() {
 fn linear_facade_and_explicit_park_are_rooted_together() {
     in_test_thread(|| {
         let table = adversarial_table();
-        let mut machine =
+        let mut machine = LinearMachine::new(
             JitEffectMachine::compile_session(&build_suspending_parent(11, 2), &table, 1 << 14)
-                .expect("compile_session");
+                .expect("compile_session"),
+        );
 
         // Park one explicit continuation first.
         let parked = park_fragment(&mut machine, &table, RealmId(0), "registry_park", 22, 3);

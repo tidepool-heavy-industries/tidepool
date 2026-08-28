@@ -9,15 +9,9 @@ and session orchestration belongs to `tidepool-runtime`.
 
 ## Suspension paths
 
-There are two suspension mechanisms:
-
-- a single slot used by one-shot eval and the REPL;
-- a parked-continuation registry used by the resident harness.
-
-They must never coexist on one machine. The single slot is protected by the
-rule that the machine does not run while suspended; parked continuations are
-registered GC roots and may be resumed in any order. Mixing them would let a
-collection free the unregistered slot continuation.
+Every suspended continuation lives in the parked-continuation registry as a
+registered GC root. Callers that permit only one active continuation enforce
+that policy above the JIT while still carrying its `ContinuationId` explicitly.
 
 The public parked-path contract is
 `docs/continuation-parking-contract.md`. Keep frame layout and helper plumbing
@@ -38,10 +32,8 @@ alias-sensitive: bridge the rendered field before tenuring the bound field.
 
 ## Nested runs
 
-A suspended parent may run sequential child fragments through
-`run_child_fragment*`; its continuation remains registry-rooted throughout.
-Registry-native consumers can run child work as an ordinary fragment while
-other frames remain parked.
+A parked continuation remains registry-rooted while ordinary fragments run or
+other continuations resume. There is no separate child-run mode in the JIT.
 
 ## Root accounting
 

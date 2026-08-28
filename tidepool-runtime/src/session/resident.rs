@@ -15,7 +15,7 @@
 //! # Why turns can run on a fresh thread each time
 //!
 //! Nothing about a suspended session is pinned to the thread that suspended it:
-//! [`JitEffectMachine::resume_suspended`] re-installs the machine's
+//! [`JitEffectMachine::resume_continuation`] re-installs the machine's
 //! per-thread reach (`CURRENT_MACHINE`, stack-map/lambda registry, cancel
 //! flag) and re-points GC state at the RETAINED session heap on ANY thread.
 //! So a resident session drives each turn on a fresh eval thread and moves
@@ -27,12 +27,11 @@
 //! session slot when idle/suspended, moved onto the eval thread for the
 //! duration of a turn.
 //!
-//! # Fragment × suspend — the PARKED path
+//! # Fragment suspension
 //!
 //! Each turn is compiled into the live machine as a fragment
 //! ([`JitEffectMachine::add_function`]) and driven through
-//! [`JitEffectMachine::run_until_suspension`] — the continuation
-//! REGISTRY, not the legacy single slot: a suspension parks a frame as a
+//! [`JitEffectMachine::run_until_suspension`]. A suspension parks a frame as a
 //! registered GC root, and the machine stays fully usable while it waits
 //! (further turns, further parks, resumes of other frames). The session
 //! tracks its parked holes as an insertion-ordered `(hole, ContinuationId)`
@@ -1221,19 +1220,17 @@ where
         Ok(resident_outcome)
     }
 
-    /// Run a NESTED CHILD turn against this SUSPENDED session (segment 40): add
+    /// Run a nested child turn against this suspended session: add
     /// `expr` as a fragment referencing the suspended parent's session bindings
     /// (via `external_env`, zero-copy against the same retained heap), then drive
-    /// it through [`JitEffectMachine::run_child_fragment`] while the parent's
+    /// it through an ordinary fragment run while the parent's
     /// stowed continuation is GC-rooted. The session STAYS suspended on the same
     /// hole afterward — the child does not consume the parent's continuation.
     ///
     /// Requires the session to be suspended (a child needs a suspended parent);
     /// an idle session is rejected with [`ResidentError::NotSuspended`]. A child
-    /// that itself suspends is rejected ([`ResidentError::ChildSuspended`]) —
-    /// the machine holds exactly one stowed continuation, so a child cannot
-    /// suspend while the parent is already suspended (R0 is sequential-isolated,
-    /// single-level nesting).
+    /// that itself suspends is rejected ([`ResidentError::ChildSuspended`])
+    /// because this value-returning API has no continuation handle to return.
     pub fn run_child(
         &mut self,
         name_hint: &str,
@@ -1280,20 +1277,8 @@ where
         }
     }
 
-    /// PURE sibling of [`Self::run_child`]: drives `expr` through
-    /// [`JitEffectMachine::run_child_fragment_pure`] instead of
-    /// [`JitEffectMachine::run_child_fragment`] — no freer-simple `Val`/`E`
-    /// decode, no effect dispatch. `run_child`'s effect-driving path REQUIRES
-    /// its fragment to be an `Eff` computation (its compiled result is
-    /// classified as the `Val`/`E` union the JIT's calling convention expects
-    /// for every effectful entry); a bare, non-monadic function application
-    /// — like the `App(Var, arg)` fragment [`Self::apply_finalized`]
-    /// synthesizes to apply a finalized closure — produces neither, so
-    /// `run_child_fragment`'s classification misreads the plain boxed result's
-    /// own constructor tag as an unrecognized `Val`/`E` tag and errors. This is
-    /// the PURE run family already used by the machine's own entry
-    /// (`run_pure`/`run_fragment_pure`) — [`ResidentSession`] simply did not
-    /// expose the child-run sibling before.
+    /// Pure sibling of [`Self::run_child`]. Use it for fragments that produce a
+    /// boxed value directly rather than an `Eff` `Val`/`E` tree.
     pub fn run_child_pure(
         &mut self,
         name_hint: &str,

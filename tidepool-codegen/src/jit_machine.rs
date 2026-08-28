@@ -5,21 +5,12 @@
 //! registered GC root from park until resume. This permits unrelated fragment
 //! runs and collections while one or more continuations wait.
 //!
-//! # Completion policies on the suspend/park family
-//!
-//! A suspendable turn completes under one of the SAME four
-//! [`ResultMaterialization`] policies the plain routes use, through one shared
-//! implementation ([`JitEffectMachine::materialize`]):
-//!
-//! | policy | run entry | resume entry | completion type | products |
-//! |---|---|---|---|---|
-//! | `Value` | [`JitEffectMachine::run_fragment_suspendable`] | [`JitEffectMachine::resume_suspended`] | [`SuspendableOutcome`] | the bridged value |
-//! | `Bind { forced }` | [`JitEffectMachine::run_fragment_suspendable_binding`] | [`JitEffectMachine::resume_suspended_binding`] | [`SuspendableOutcome`] | bridged value, plus one tenured root stashed for [`JitEffectMachine::take_last_bound_root`] |
-//! | `Project { n_fields }` | [`JitEffectMachine::run_fragment_suspendable_projected`] | [`JitEffectMachine::resume_suspended_projected`] | `Suspendable<Vec<RootSlot>>` | the N tenured roots, IN the completion |
-//! | `Render { field0_forced }` | [`JitEffectMachine::run_fragment_suspendable_render`] | [`JitEffectMachine::resume_suspended_render`] | `Suspendable<(RootSlot, Value)>` | field 0's tenured root + field 1's render, IN the completion |
-//!
-//! [`ParkKind`] carries the completion policy on each frame, so resume cannot
-//! accidentally choose a different materialization path.
+//! Suspendable execution has one start operation
+//! ([`JitEffectMachine::run_until_suspension`]) and one resume operation
+//! ([`JitEffectMachine::resume_continuation`]). [`SuspensionRun`] selects the
+//! entry function, effect boundary, realm, and completion policy. A parked
+//! frame retains that policy, so resume cannot change how completion is
+//! materialized.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -349,7 +340,8 @@ pub enum ParkedOutcome {
         id: ContinuationId,
         /// The bridged suspend request.
         request: tidepool_eval::value::Value,
-        /// See [`SuspendableOutcome::Suspended::has_finalized_closure`].
+        /// Whether the request contains a closure-valued finalize payload
+        /// retained by reference in this continuation frame.
         has_finalized_closure: bool,
     },
 }
@@ -409,11 +401,8 @@ impl ParkedRaw {
 /// | [`JitEffectMachine::run_fragment_and_bind`] | effectful | REQUIRED | `Bind { forced: <caller> }` |
 /// | [`JitEffectMachine::run_fragment_and_bind_projected`] | effectful | REQUIRED | `Project { n_fields }` |
 /// | [`JitEffectMachine::run_fragment_and_bind_render`] | effectful | REQUIRED | `Render { field0_forced }` |
-/// | [`JitEffectMachine::run_child_fragment`] / `_pure` | → `run_with_entry` / `run_pure_with_entry`, wrapped in [`JitEffectMachine::enter_nested_child`] | requires a suspended parent | `Value` |
 ///
-/// The suspend/park family (`run_suspendable*`, `resume_suspended*`,
-/// `run_until_suspension`, `run_until_suspension`,
-/// `resume_continuation`) is NOT in this table: it funnels through its own shared
+/// Suspendable execution is not in this table: it funnels through its own shared
 /// setup body ([`JitEffectMachine::run_suspendable_shared`] /
 /// [`JitEffectMachine::resume_applied`]) and one shared epilogue
 /// ([`JitEffectMachine::finish_suspendable`]), which also calls
@@ -630,25 +619,6 @@ pub struct JitEffectMachine {
     /// `(*vmctx).machine_state`, pointed at this field by
     /// `install_registries`/the run entries.
     machine_state: MachineState,
-    /// Capacity-one compatibility façade over the continuation registry.
-    /// New code carries continuation ids explicitly; legacy linear callers
-    /// use this field, but the continuation itself is always registry-rooted.
-    linear_continuation: Option<ContinuationId>,
-    /// A persistent-binding-store bind whose fragment ran through the SUSPENDABLE
-    /// path (`run_fragment_suspendable_binding`/`resume_suspended_binding`) tenures
-    /// its `Done` result into old-space and stashes the persistent [`RootSlot`]
-    /// here, for the caller to read out AFTER the machine moves back off the eval
-    /// thread. A `RootSlot` (`*mut *mut u8`) is `!Send`, so it cannot cross the
-    /// eval-thread scope boundary as a bare value — it rides home INSIDE the
-    /// machine (already `Send` under stowed-XOR-running; see the module docs).
-    /// `None` except in the gap between a bind fragment completing and the
-    /// caller taking it via [`Self::take_last_bound_root`]. A fork bind lands
-    /// here on the eventual `resume`, not the initial (suspending) run.
-    ///
-    /// Registry-native callers receive the root inline in
-    /// `ParkedOutcome::CompletedBinding`; only the capacity-one façade uses
-    /// this transport slot.
-    last_bound_root: Option<crate::old_space::RootSlot>,
     /// Every suspended continuation, keyed by [`ContinuationId`] and tagged
     /// with its owning [`RealmId`].
     ///
@@ -974,8 +944,6 @@ impl JitEffectMachine {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
             machine_state: MachineState::new(),
-            linear_continuation: None,
-            last_bound_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
@@ -1015,8 +983,6 @@ impl JitEffectMachine {
                 old_space: crate::old_space::OldSpace::new(),
             }),
             machine_state: MachineState::new(),
-            linear_continuation: None,
-            last_bound_root: None,
             continuations: HashMap::new(),
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
@@ -1632,7 +1598,7 @@ impl JitEffectMachine {
                 },
                 ResultMaterialization::Value,
                 "run/run_fragment called while a continuation is suspended — \
-                 resume_suspended it first",
+                 resume_continuation it first",
                 "stepping main function",
                 "",
             )?
@@ -1642,248 +1608,6 @@ impl JitEffectMachine {
     // ----------------------------------------------------------------------
     // Threadless suspension at the ask boundary.
     // ----------------------------------------------------------------------
-
-    fn linear_value(&mut self, outcome: ParkedOutcome) -> SuspendableOutcome {
-        match outcome {
-            ParkedOutcome::CompletedValue(value) => SuspendableOutcome::Completed(value),
-            ParkedOutcome::CompletedBinding { value, root } => {
-                self.last_bound_root = Some(root);
-                SuspendableOutcome::Completed(value)
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_finalized_closure,
-            } => {
-                self.linear_continuation = Some(id);
-                SuspendableOutcome::Suspended {
-                    request,
-                    has_finalized_closure,
-                }
-            }
-            other => panic!("linear value façade received {other:?}"),
-        }
-    }
-
-    fn take_linear_continuation(&self) -> Result<ContinuationId, JitError> {
-        self.linear_continuation.ok_or_else(|| {
-            JitError::Effect(EffectError::Handler(
-                "machine has no active linear continuation".to_string(),
-            ))
-        })
-    }
-
-    /// Drive an effectful turn until it completes or suspends at `suspend_tag`.
-    /// On suspension the session heap and continuation remain owned by this
-    /// movable machine; continue with [`Self::resume_suspended`].
-    ///
-    /// # Panics
-    /// Panics on a non-session machine, or when a continuation is already active.
-    pub fn run_suspendable<U, H: DispatchEffect<U>>(
-        &mut self,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError> {
-        assert!(
-            self.linear_continuation.is_none(),
-            "resume the active continuation first"
-        );
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::main(table, &boundary, RealmId(0));
-        let outcome = self.run_until_suspension(run, handlers, user)?;
-        Ok(self.linear_value(outcome))
-    }
-
-    /// Suspend-capable sibling of [`Self::run_fragment`]: drive an
-    /// [`Self::add_function`]-minted fragment through the same threadless
-    /// suspend path [`Self::run_suspendable`] uses for the machine's original
-    /// entry. A fragment that reaches `suspend_tag` (an `Ask`) mid-computation
-    /// stows its continuation on `self` exactly as the entry path does; the
-    /// binding it was computing lands on [`Self::resume_suspended`] to
-    /// completion. This is the composition of the fragment plane (C2 session
-    /// re-entry) with E2 threadless suspension — same shared
-    /// [`drive_effect_loop`], only the entry `func_id` differs.
-    ///
-    /// # Panics
-    /// Panics on a non-session machine — heap retention across the suspension
-    /// requires [`Self::compile_session`].
-    pub fn run_fragment_suspendable<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-    ) -> Result<SuspendableOutcome, JitError> {
-        assert!(
-            self.linear_continuation.is_none(),
-            "resume the active continuation first"
-        );
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::fragment(func_id, table, &boundary, RealmId(0), ParkKind::Plain);
-        let outcome = self.run_until_suspension(run, handlers, user)?;
-        Ok(self.linear_value(outcome))
-    }
-
-    /// Persistent-binding-store BIND sibling of [`Self::run_fragment_suspendable`]: drive a
-    /// bind fragment (`x <- e`) through the same threadless suspend path, and — on
-    /// `Done` — tenure the result into old-space, stashing its [`RootSlot`] on the
-    /// machine (read via [`Self::take_last_bound_root`] after the machine moves off
-    /// the eval thread). `forced` deep-forces the result to NF first (Tier0 data)
-    /// vs tenuring a Tier1 closure as-is. A fork bind SUSPENDS here (no tenure yet);
-    /// its value is bound on the eventual [`Self::resume_suspended_binding`].
-    pub fn run_fragment_suspendable_binding<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        forced: bool,
-    ) -> Result<SuspendableOutcome, JitError> {
-        assert!(
-            self.linear_continuation.is_none(),
-            "resume the active continuation first"
-        );
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::fragment(
-            func_id,
-            table,
-            &boundary,
-            RealmId(0),
-            ParkKind::Binding { forced },
-        );
-        let outcome = self.run_until_suspension(run, handlers, user)?;
-        Ok(self.linear_value(outcome))
-    }
-
-    /// MULTI-binder sibling of [`Self::run_fragment_suspendable_binding`], and
-    /// the suspendable sibling of [`Self::run_fragment_and_bind_projected`]:
-    /// drive a multi-bind fragment (`(a, b) <- e`) through the threadless
-    /// suspend path, and — on `Done` — deep-force the WHOLE result tuple and
-    /// tenure each of its `n_fields` fields into old-space.
-    ///
-    /// Completion IS the tenured roots, in field order: the caller zips them
-    /// with its binder metadata. A projection has no result value of its own —
-    /// no bridge of the bound fields (which would import the bridge's
-    /// depth/size failure modes into a path that cannot fail after a successful
-    /// tenure), and nothing invented to fill a `Value`-shaped hole either,
-    /// because [`Suspendable`] is generic over what the policy produces. A turn
-    /// that suspends at an ask tenures NOTHING yet — its fields are bound on the
-    /// eventual [`Self::resume_suspended_projected`].
-    ///
-    /// # Panics
-    /// Panics on a non-session machine, on `n_fields == 0` (same precondition
-    /// as [`Self::run_fragment_and_bind_projected`]), or if a continuation is
-    /// already suspended.
-    pub fn run_fragment_suspendable_projected<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        n_fields: usize,
-    ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
-        #[allow(
-            clippy::expect_used,
-            reason = "run_fragment_suspendable_projected requires at least one field"
-        )]
-        let n_fields = NonZeroUsize::new(n_fields)
-            .expect("run_fragment_suspendable_projected requires at least one field");
-        assert!(
-            self.linear_continuation.is_none(),
-            "resume the active continuation first"
-        );
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::fragment(
-            func_id,
-            table,
-            &boundary,
-            RealmId(0),
-            ParkKind::Project { n_fields },
-        );
-        let outcome = self.run_until_suspension(run, handlers, user)?;
-        match outcome {
-            ParkedOutcome::CompletedProject { roots } => Ok(Suspendable::Completed(roots)),
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_finalized_closure,
-            } => {
-                self.linear_continuation = Some(id);
-                Ok(Suspendable::Suspended {
-                    request,
-                    has_finalized_closure,
-                })
-            }
-            other => panic!("linear project façade received {other:?}"),
-        }
-    }
-
-    /// BIND-AND-RENDER sibling of [`Self::run_fragment_suspendable_binding`],
-    /// and the suspendable sibling of [`Self::run_fragment_and_bind_render`]:
-    /// drive the repl's bare-expression fragment — a wrapped
-    /// `pure (it, toWire it)` — through the threadless suspend path, binding
-    /// field 0 and rendering field 1 in ONE run. Completion carries BOTH
-    /// products together — field 0's tenured root and field 1's render — the
-    /// same pair `run_fragment_and_bind_render` returns directly.
-    ///
-    /// `field0_forced` mirrors the bind flag: `true` (Tier0 data) deep-forces
-    /// field 0 to NF before tenuring, `false` (Tier1 closure) tenures as-is.
-    ///
-    /// The aliasing discipline — bridge field 1 BEFORE tenuring field 0,
-    /// because an identity `toWire` makes them the SAME heap object and the
-    /// bridge is the owned deep copy that survives the tenure — is not
-    /// restated here: this route reaches the one copy of it inside
-    /// [`Self::materialize`], so it holds identically whether the turn
-    /// completed in its first run or after any number of suspensions.
-    ///
-    /// # Panics
-    /// Panics on a non-session machine, or if a continuation is already
-    /// suspended.
-    pub fn run_fragment_suspendable_render<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        suspend_tag: u64,
-        field0_forced: bool,
-    ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
-        assert!(
-            self.linear_continuation.is_none(),
-            "resume the active continuation first"
-        );
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::fragment(
-            func_id,
-            table,
-            &boundary,
-            RealmId(0),
-            ParkKind::Render { field0_forced },
-        );
-        let outcome = self.run_until_suspension(run, handlers, user)?;
-        match outcome {
-            ParkedOutcome::CompletedRender { root, rendered } => {
-                Ok(Suspendable::Completed((root, rendered)))
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_finalized_closure,
-            } => {
-                self.linear_continuation = Some(id);
-                Ok(Suspendable::Suspended {
-                    request,
-                    has_finalized_closure,
-                })
-            }
-            other => panic!("linear render façade received {other:?}"),
-        }
-    }
 
     /// Shared suspendable run body, parametrized by the entry `func_id` and
     /// registry parking policy.
@@ -1951,140 +1675,6 @@ impl JitEffectMachine {
             _guard.arm_reclaim(&mut self.session as *mut _, machine.vmctx_mut() as *const _);
         }
         finished
-    }
-
-    /// Re-enter a turn suspended by [`Self::run_suspendable`], feeding the
-    /// (already schema-validated, bridged) answer — or an abort — into the
-    /// stowed ask and driving to the next suspension or completion.
-    ///
-    /// Runs on ANY thread: [`Self::install_registries`] re-installs this
-    /// machine's per-thread reach (`CURRENT_MACHINE`, stack-map/lambda
-    /// registry, cancel flag) and re-points the GC state at the RETAINED
-    /// session heap. It must NOT reset the nursery — the session heap-retention
-    /// path (heap `Some` → `install_session_buffer`, or `None` → nursery at the
-    /// preserved cursor) preserves the mid-ask heap; a nursery reset would
-    /// silently discard it.
-    ///
-    /// Errors if the machine is not currently suspended.
-    pub fn resume_suspended<U, H: DispatchEffect<U>>(
-        &mut self,
-        _table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        _suspend_tag: u64,
-        input: ResumeInput,
-    ) -> Result<SuspendableOutcome, JitError> {
-        let id = self.take_linear_continuation()?;
-        let outcome = self.resume_continuation(id, handlers, user, input)?;
-        self.linear_continuation = None;
-        Ok(self.linear_value(outcome))
-    }
-
-    /// Persistent-binding-store BIND sibling of [`Self::resume_suspended`]: re-enter a suspended
-    /// bind turn (`x <- e` that stowed at a fork) and, on `Done`, tenure the bound
-    /// result — stashing its [`RootSlot`] on the machine
-    /// ([`Self::take_last_bound_root`]). `forced` deep-forces to NF (Tier0) vs
-    /// tenuring a Tier1 closure as-is.
-    pub fn resume_suspended_binding<U, H: DispatchEffect<U>>(
-        &mut self,
-        _table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        _suspend_tag: u64,
-        input: ResumeInput,
-        forced: bool,
-    ) -> Result<SuspendableOutcome, JitError> {
-        let _ = forced;
-        let id = self.take_linear_continuation()?;
-        let outcome = self.resume_continuation(id, handlers, user, input)?;
-        self.linear_continuation = None;
-        Ok(self.linear_value(outcome))
-    }
-
-    /// MULTI-binder sibling of [`Self::resume_suspended_binding`]: re-enter a
-    /// suspended multi-bind turn (`(a, b) <- e` that stowed at an ask) and, on
-    /// `Done`, deep-force the whole result tuple and tenure each of its
-    /// `n_fields` fields — completing with those roots. `n_fields` is supplied
-    /// by the caller (which is holding the binder metadata across the
-    /// suspension), exactly as `forced` is on the binding resume. See
-    /// [`Self::run_fragment_suspendable_projected`] for why the completion
-    /// carries slots rather than a value.
-    ///
-    /// # Panics
-    /// Panics on `n_fields == 0`. Errors (does not panic) if the machine is
-    /// not currently suspended.
-    pub fn resume_suspended_projected<U, H: DispatchEffect<U>>(
-        &mut self,
-        _table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        _suspend_tag: u64,
-        input: ResumeInput,
-        n_fields: usize,
-    ) -> Result<Suspendable<Vec<crate::old_space::RootSlot>>, JitError> {
-        #[allow(
-            clippy::expect_used,
-            reason = "resume_suspended_projected requires at least one field"
-        )]
-        let _ = NonZeroUsize::new(n_fields)
-            .expect("resume_suspended_projected requires at least one field");
-        let id = self.take_linear_continuation()?;
-        let outcome = self.resume_continuation(id, handlers, user, input)?;
-        self.linear_continuation = None;
-        match outcome {
-            ParkedOutcome::CompletedProject { roots } => Ok(Suspendable::Completed(roots)),
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_finalized_closure,
-            } => {
-                self.linear_continuation = Some(id);
-                Ok(Suspendable::Suspended {
-                    request,
-                    has_finalized_closure,
-                })
-            }
-            other => panic!("linear project façade received {other:?}"),
-        }
-    }
-
-    /// BIND-AND-RENDER sibling of [`Self::resume_suspended_binding`]: re-enter
-    /// a suspended bare-expression turn (`pure (it, toWire it)` that stowed at
-    /// an ask) and, on `Done`, complete with field 0's tenured root paired with
-    /// field 1's bridged render. The field1-before-field0-tenure ordering that
-    /// makes an aliased `(it, toWire it)` safe lives in [`Self::materialize`]
-    /// and is therefore identical on this path and on the non-suspending
-    /// [`Self::run_fragment_and_bind_render`].
-    pub fn resume_suspended_render<U, H: DispatchEffect<U>>(
-        &mut self,
-        _table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-        _suspend_tag: u64,
-        input: ResumeInput,
-        field0_forced: bool,
-    ) -> Result<Suspendable<(crate::old_space::RootSlot, Value)>, JitError> {
-        let _ = field0_forced;
-        let id = self.take_linear_continuation()?;
-        let outcome = self.resume_continuation(id, handlers, user, input)?;
-        self.linear_continuation = None;
-        match outcome {
-            ParkedOutcome::CompletedRender { root, rendered } => {
-                Ok(Suspendable::Completed((root, rendered)))
-            }
-            ParkedOutcome::Suspended {
-                id,
-                request,
-                has_finalized_closure,
-            } => {
-                self.linear_continuation = Some(id);
-                Ok(Suspendable::Suspended {
-                    request,
-                    has_finalized_closure,
-                })
-            }
-            other => panic!("linear render façade received {other:?}"),
-        }
     }
 
     /// Apply an already-acquired continuation to a resume `input` and drive to
@@ -2219,24 +1809,6 @@ impl JitEffectMachine {
     /// under `materialization` (via the same [`Self::materialize`] the plain
     /// routes use — see the completion-policy table in the module docs), or
     /// stow the continuation on `self` and surface the suspension.
-    ///
-    /// What stays HERE, because it is the suspendable path's own concern, in
-    /// this order:
-    ///
-    /// 1. the compatibility façade's machine-level stash: a `Bind`'s tenured
-    ///    root goes to `self.last_bound_root`, because
-    ///    [`SuspendableOutcome::Completed`] is fixed at a bare `Value` and
-    ///    cannot carry it. Registry-native calls return it inline via
-    ///    `ParkedOutcome::CompletedBinding::root` instead, so that two runtime resource scopes'
-    ///    binds completing before either is drained cannot overwrite one
-    ///    machine-level slot. `Project`/`Render` never stash: they complete
-    ///    as `Suspendable<T>` and return their roots in the outcome. `Bind`
-    ///    is slated to join them once `SuspendableOutcome` is widened;
-    /// 2. the bridge that turns a tenured root into the `Value` a
-    ///    [`SuspendableOutcome::Completed`] must carry — for `Bind`, that is
-    ///    the bridge of `slot.current()` (the TENURED, rooted pointer, not
-    ///    `done_ptr`). `Render` needs no bridge here (field 1 was already
-    ///    bridged inside `materialize`) and `Project` needs none at all.
     ///
     /// ORDERING: [`Self::materialize`] touches `self.session` via `tenure`, so
     /// a caller MUST NOT have armed reclaim before this call — the guard's
@@ -2453,15 +2025,6 @@ impl JitEffectMachine {
         Ok(slot)
     }
 
-    /// Take the [`RootSlot`] a persistent-binding-store bind tenured on its last suspendable
-    /// completion (`run_fragment_suspendable_binding`/`resume_suspended_binding`),
-    /// clearing it. `None` if the last run was not a bind or has already been
-    /// taken. The caller reads this AFTER the machine moves back off the eval
-    /// thread and records the `BindingEntry` against it.
-    pub fn take_last_bound_root(&mut self) -> Option<crate::old_space::RootSlot> {
-        self.last_bound_root.take()
-    }
-
     /// Run a pure (non-effectful) program to completion.
     ///
     /// Skips freer-simple effect dispatch entirely — calls the compiled function
@@ -2482,7 +2045,7 @@ impl JitEffectMachine {
                 RunTarget::Pure,
                 ResultMaterialization::Value,
                 "run_pure/run_fragment_pure called while a continuation is suspended — \
-                 resume_suspended it first",
+                 resume_continuation it first",
                 "running pure computation",
                 "",
             )?
@@ -2673,7 +2236,7 @@ impl JitEffectMachine {
                 RunTarget::Pure,
                 ResultMaterialization::Bind { forced: true },
                 "run_pure_and_bind called while a continuation is suspended — \
-                 resume_suspended it first",
+                 resume_continuation it first",
                 "running pure computation (bind)",
                 "",
             )?
@@ -2721,7 +2284,7 @@ impl JitEffectMachine {
                 },
                 ResultMaterialization::Bind { forced },
                 "run_fragment_and_bind called while a continuation is suspended — \
-                 resume_suspended it first",
+                 resume_continuation it first",
                 "stepping effectful computation (bind)",
                 "",
             )?
@@ -2768,7 +2331,7 @@ impl JitEffectMachine {
                 },
                 ResultMaterialization::Project { n_fields },
                 "run_fragment_and_bind_projected called while a continuation is \
-                 suspended — resume_suspended it first",
+                 suspended — resume_continuation it first",
                 "stepping effectful computation (multi-bind)",
                 " (multi-bind)",
             )?
@@ -2823,7 +2386,7 @@ impl JitEffectMachine {
                 },
                 ResultMaterialization::Render { field0_forced },
                 "run_fragment_and_bind_render called while a continuation is \
-                 suspended — resume_suspended it first",
+                 suspended — resume_continuation it first",
                 "stepping effectful computation (bind-render)",
                 " (bind-render)",
             )?
@@ -2882,12 +2445,6 @@ impl JitEffectMachine {
             .as_ref()
             .map(|s| s.old_space.bytes_used())
             .unwrap_or(0)
-    }
-
-    /// Whether this machine is currently suspended at a typed yield (`Ask`),
-    /// holding a stowed continuation awaiting `resume_suspended`.
-    pub fn is_suspended(&self) -> bool {
-        self.linear_continuation.is_some()
     }
 
     /// Number of parked-continuation GC roots currently registered.
@@ -2959,46 +2516,6 @@ impl JitEffectMachine {
         unsafe {
             guard.arm_reclaim(&mut self.session as *mut _, vmctx_ptr as *const _);
         }
-    }
-
-    /// Run a fragment as a CHILD against this suspended parent, dispatching
-    /// effects through the handler HList exactly as [`Self::run_fragment`] does.
-    /// The parent's continuation remains registry-rooted; a child collection,
-    /// including heap doubling, evacuates it so the parent resumes correctly.
-    ///
-    /// The child fragment reads the parent's session bindings zero-copy through
-    /// its `external_env` (resolved when the fragment was `add_function`-minted),
-    /// against the SAME retained session heap. Module accretion is inert for the
-    /// parent: adding a child fragment does not perturb the parent's stowed
-    /// continuation.
-    ///
-    /// # Panics
-    /// Panics if the machine is not currently suspended.
-    pub fn run_child_fragment<U, H: DispatchEffect<U>>(
-        &mut self,
-        func_id: FuncId,
-        table: &DataConTable,
-        handlers: &mut H,
-        user: &U,
-    ) -> Result<Value, JitError> {
-        assert!(
-            self.linear_continuation.is_some(),
-            "run_child_fragment requires a suspended parent"
-        );
-        self.run_with_entry(func_id, table, handlers, user)
-    }
-
-    /// Pure sibling of [`Self::run_child_fragment`] — run an `add_function`-minted
-    /// pure fragment as a child against the suspended parent's retained heap.
-    ///
-    /// # Panics
-    /// Panics if the machine is not currently suspended.
-    pub fn run_child_fragment_pure(&mut self, func_id: FuncId) -> Result<Value, JitError> {
-        assert!(
-            self.linear_continuation.is_some(),
-            "run_child_fragment_pure requires a suspended parent"
-        );
-        self.run_pure_with_entry(func_id)
     }
 
     // ----------------------------------------------------------------------
@@ -3228,7 +2745,7 @@ impl JitEffectMachine {
     /// its residual (agreement AMONG runtime resource scopes, not verification against the
     /// real `H`).
     ///
-    /// A5 discipline, same as [`Self::resume_suspended`]: the answer is
+    /// A5 discipline, same as [`Self::resume_continuation`]: the answer is
     /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
     /// answer leaves the frame PARKED and still ROOTED and the caller can retry
     /// with a corrected answer.
@@ -3298,11 +2815,8 @@ impl JitEffectMachine {
         // frame exists for.
         let cancel_flag = frame.cancel_flag.clone();
         let table = frame.table.clone();
-        // Any finalized root never taken via `take_parked_finalized_root` is
-        // dropped here with the frame; its persistent-root registration lives
-        // independently for the machine's life regardless (same as
-        // `take_finalized_root`'s doc), so this is not a leak — just an
-        // explicit acknowledgment rather than a silent field drop.
+        // A finalized payload not claimed before resume is no longer
+        // externally reachable, so discard the frame's root with the frame.
         let _ = frame.finalized_root.take();
         drop(frame);
         self.resume_applied(
@@ -3323,14 +2837,10 @@ impl JitEffectMachine {
         .map(ParkedRaw::into_parked)
     }
 
-    /// Frame-scoped sibling of [`Self::take_finalized_root`] for the registry
-    /// path: take the persistent root of a PARKED frame's closure-valued
-    /// `finalize` payload, tenured at park time. The frame stays parked and
-    /// rooted — only the frame's own handle to the slot is cleared, not its
-    /// persistent-root registration, which lives for the machine's life
-    /// regardless (same as `take_finalized_root`'s doc). `None` unless `id`
-    /// names a frame that parked while suspended on a closure-valued
-    /// finalize, or its slot was already taken.
+    /// Take the root of a parked frame's closure-valued `finalize` payload.
+    ///
+    /// The continuation itself stays parked and rooted. Returns `None` when
+    /// the frame has no such payload or the payload was already taken.
     pub fn take_parked_finalized_root(
         &mut self,
         id: ContinuationId,
@@ -3375,14 +2885,14 @@ impl JitEffectMachine {
     /// handle is `Send`, releasable, and deliverable via
     /// [`ResumeInput::Handle`]; a raw `RootSlot` is none of those.
     ///
-    /// Raw [`ValueHandle`] on purpose, not [`RootCustody`]: this machine-level
+    /// Raw [`ValueHandle`] on purpose, not the runtime's linear custody type:
+    /// this machine-level
     /// primitive is also exercised directly by tests that read a handle
     /// non-linearly (`observe_handle`, `handle_realm`, repeated
     /// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
     /// session layer (`tidepool_runtime`'s `ResidentSession::finalized_handle`)
     /// is where a caller-visible consume-once obligation actually begins — see
-    /// [`RootCustody`]'s doc — and that is where the linear wrapper is
-    /// applied.
+    /// the runtime session boundary is where the linear wrapper is applied.
     pub fn handle_from_finalized(&mut self, id: ContinuationId) -> Option<ValueHandle> {
         let frame = self.continuations.get_mut(&id)?;
         let realm = frame.realm;
@@ -3741,22 +3251,17 @@ fn request_carries_closure_sentinel(request: &tidepool_eval::value::Value) -> bo
     }
 }
 
-/// A suspendable turn's outcome, generic over what its
-/// result-materialization policy actually PRODUCES on completion. The
-/// projected/render entries return their real product — N tenured roots, or
-/// a root paired with a render — rather than inventing a `Value` to satisfy
-/// a fixed shape.
+/// Capacity-one session outcome used above the JIT registry API.
 pub enum Suspendable<T> {
     /// The turn ran to completion, producing `T`.
     Completed(T),
-    /// The turn suspended at the ask boundary; the machine holds the
-    /// continuation internally.
+    /// The turn suspended at the configured effect boundary.
     Suspended {
         request: tidepool_eval::value::Value,
         /// Finalize-by-reference: `true` when the suspend request was a
         /// `finalize @T closure` — the finalized VALUE (field 1 of the request
-        /// Con) has been tenured into old-space and its persistent root slot
-        /// stashed on the machine ([`JitEffectMachine::take_finalized_root`]).
+        /// Con) has been tenured into old-space and retained by the parked
+        /// continuation frame.
         /// The bridged `request` carries a [`heap_bridge::CLOSURE_SENTINEL`] in
         /// that field's place. `false` for an ordinary `Ask`/`RunLLMTurn`
         /// suspension (or a `finalize` of a plain DATA value, which bridges
@@ -3765,16 +3270,11 @@ pub enum Suspendable<T> {
     },
 }
 
-/// Result of a suspendable turn ([`JitEffectMachine::run_suspendable`] /
-/// [`JitEffectMachine::resume_suspended`]): the turn produced a bridged
-/// `Value`, or it suspended at the ask boundary carrying the bridged request
-/// (the continuation is stowed inside the machine, ready for
-/// `resume_suspended`). The `T = Value` specialization of [`Suspendable`],
-/// kept as its own name because it predates the generic and has consumers
-/// matching on it.
+/// `Value`-completing specialization of [`Suspendable`], used by linear
+/// session orchestration above the machine layer.
 pub type SuspendableOutcome = Suspendable<tidepool_eval::value::Value>;
 
-/// How a suspended turn is re-entered ([`JitEffectMachine::resume_suspended`]).
+/// Input supplied to [`JitEffectMachine::resume_continuation`].
 pub enum ResumeInput {
     /// Feed the (already-validated, bridged) answer value into the suspended
     /// ask and continue driving.
@@ -3825,7 +3325,7 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
     let yield_result = initial_step(machine, exec_start);
     // suspend_tag = None: the ask-suspend branch is never taken, so this drives
     // the plain non-suspend path. Threadless suspension is opt-in via
-    // `JitEffectMachine::run_suspendable`, which passes `Some(ask_tag)`.
+    // `JitEffectMachine::run_until_suspension`, which passes `Some(ask_tag)`.
     match drive_effect_loop(
         machine,
         cancel_flag,
@@ -3845,7 +3345,7 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
 
 /// The initial `machine.step()` for a fresh drive: reset call depth, set the
 /// exec-context label, step under signal protection. Shared by
-/// [`drive_to_done`] and [`JitEffectMachine::run_suspendable`].
+/// [`drive_to_done`] and [`JitEffectMachine::run_until_suspension`].
 fn initial_step(machine: &mut CompiledEffectMachine, exec_start: &str) -> Yield {
     // SAFETY: machine.vmctx_mut()'s machine_state was set by the caller before
     // entering the effect loop.
@@ -3965,7 +3465,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 // `_cont_root` drops as we return, releasing the run-scoped root;
                 // the raw pointer stays valid because the session heap buffer is
                 // retained across the suspension (no GC runs while stowed), and
-                // `resume_suspended` re-roots it before its answer materialization
+                // `resume_continuation` re-roots it before its answer materialization
                 // can collect.
                 if suspend_tag.is_some_and(|t| tag >= t) {
                     return Ok(DriveOutcome::Suspended {
@@ -4002,7 +3502,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 }
 
                 // Materialize the handler response and resume the continuation.
-                // Extracted so `resume_suspended` re-enters a stowed turn
+                // Extracted so `resume_continuation` re-enters a stowed turn
                 // through the identical path (see the helper's doc).
                 yield_result = materialize_response_and_resume(
                     machine,
@@ -4030,7 +3530,7 @@ enum ResumePayload {
 /// Materialize a resume payload into a heap pointer and resume the machine's
 /// `continuation` with it, returning the next [`Yield`].
 ///
-/// Shared so [`JitEffectMachine::resume_suspended`] re-enters a stowed turn
+/// Shared so [`JitEffectMachine::resume_continuation`] re-enters a stowed turn
 /// through the EXACT same materialization path (lazy `Stream` park,
 /// long-spine re-park, eager `value_to_heap`) — one body, no drift-prone
 /// second copy. A [`ResumePayload::HeapPtr`] skips materialization entirely

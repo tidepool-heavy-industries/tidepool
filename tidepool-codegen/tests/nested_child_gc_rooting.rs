@@ -19,6 +19,9 @@
 //!   plus the value-plane tenure-across-suspend: a parent binds a value, suspends,
 //!   a child forces GC, the parent resumes and reads the binding.
 
+mod support;
+use support::LinearMachine;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, SuspendableOutcome};
 use tidepool_effect::dispatch::DispatchEffect;
@@ -217,10 +220,11 @@ fn suspend_parent(
     nursery: usize,
     captured_n: i64,
     req: i64,
-) -> JitEffectMachine {
+) -> LinearMachine {
     let entry = build_suspending_parent(captured_n, req);
-    let mut machine =
-        JitEffectMachine::compile_session(&entry, table, nursery).expect("compile_session parent");
+    let mut machine = LinearMachine::new(
+        JitEffectMachine::compile_session(&entry, table, nursery).expect("compile_session parent"),
+    );
     let mut handler = NoDispatch;
     let outcome = machine
         .run_suspendable(table, &mut handler, &(), ASK_TAG)
@@ -569,8 +573,9 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
             // 1. Bootstrap a session machine with the SUSPENDING entry (so its
             //    ConTags seed and its run is the suspendable one).
             let entry = build_suspending_parent(9090, 6);
-            let mut machine =
-                JitEffectMachine::compile_session(&entry, &table, 2048).expect("compile_session");
+            let mut machine = LinearMachine::new(
+                JitEffectMachine::compile_session(&entry, &table, 2048).expect("compile_session"),
+            );
 
             // 2. BEFORE suspending, bind a value into old-space via the value
             //    plane (tenure → RootSlot → persistent root).

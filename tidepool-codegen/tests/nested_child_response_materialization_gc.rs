@@ -42,6 +42,9 @@
 //! `perform_gc`'s doubling cannot satisfy the request; or a distinct failure
 //! upstream of response materialization presenting with the same signature.
 
+mod support;
+use support::LinearMachine;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, SuspendableOutcome};
 use tidepool_effect::dispatch::DispatchEffect;
@@ -164,10 +167,11 @@ impl DispatchEffect<()> for NoDispatch {
     }
 }
 
-fn suspend_parent(table: &DataConTable, nursery: usize, req: i64) -> JitEffectMachine {
+fn suspend_parent(table: &DataConTable, nursery: usize, req: i64) -> LinearMachine {
     let entry = build_suspending_parent(req);
-    let mut machine =
-        JitEffectMachine::compile_session(&entry, table, nursery).expect("compile_session parent");
+    let mut machine = LinearMachine::new(
+        JitEffectMachine::compile_session(&entry, table, nursery).expect("compile_session parent"),
+    );
     let mut handler = NoDispatch;
     let outcome = machine
         .run_suspendable(table, &mut handler, &(), ASK_TAG)

@@ -59,6 +59,9 @@
 
 use tidepool_codegen::datacon_env::wrap_with_datacon_env;
 use tidepool_codegen::effect_machine::ConTags;
+mod support;
+use support::LinearMachine;
+
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, SuspendableOutcome};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
@@ -262,10 +265,11 @@ fn expect_int(v: &Value) -> i64 {
 }
 
 /// Bootstrap a session machine on `table` and drive it to its suspension.
-fn suspend_parent(table: &DataConTable, captured_n: i64, req: i64) -> JitEffectMachine {
+fn suspend_parent(table: &DataConTable, captured_n: i64, req: i64) -> LinearMachine {
     let entry = build_suspending_parent(captured_n, req);
-    let mut machine =
-        JitEffectMachine::compile_session(&entry, table, 1 << 16).expect("compile_session parent");
+    let mut machine = LinearMachine::new(
+        JitEffectMachine::compile_session(&entry, table, 1 << 16).expect("compile_session parent"),
+    );
     let outcome = machine
         .run_suspendable(table, &mut NoDispatch, &(), ASK_TAG)
         .expect("parent run_suspendable");
