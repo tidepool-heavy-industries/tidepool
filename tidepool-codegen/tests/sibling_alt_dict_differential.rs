@@ -1,7 +1,7 @@
 //! Ledger #39(a) regression guard: sibling-alt refined-dictionary methods.
 //!
 //! A GADT whose alternatives refine the type index (`KInt :: K Int`,
-//! `KPrec :: Int -> K Double`) and use a class method (`show`) at the refined
+//! `KPrec :: Int -> K Double`) and use a class method (`render`) at the refined
 //! type in EACH sibling alternative was reported to SIGSEGV on the JIT (the
 //! "sibling-alt refined-dict" crash). This test replays the exact program
 //! (fixture source: `haskell/test/SibDict.hs`) plus controls through both the
@@ -9,7 +9,7 @@
 //!
 //! Outcome at commit 7f8dfaf: GREEN. The emit is correct — no case-trap, no
 //! unfilled Con field, no dict-dispatch shape error. `progBoth` combines both
-//! sibling `show`s ("5 | 1.5") and matches the oracle exactly. The original
+//! sibling `render`s ("5 | 1.5") and matches the oracle exactly. The original
 //! crash was NOT an emit bug; its signature matches a `DataConTable`
 //! `stableVarId` hash collision that silently evicted a constructor entry (the
 //! freer-simple `Union` eviction class), which is table-population-sensitive
@@ -23,12 +23,7 @@
 //! real per-alt dictionary Core survives to runtime). `*.cbor` is gitignored;
 //! the fixtures were force-added.
 
-use tidepool_codegen::context::VMContext;
-use tidepool_codegen::emit::expr::compile_expr;
-use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::host_fns;
-use tidepool_codegen::machine_state::MachineState;
-use tidepool_codegen::pipeline::CodegenPipeline;
+use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_eval::{deep_force, env_from_datacon_table, eval, VecHeap};
 use tidepool_repr::serial::read::{read_cbor, read_metadata};
 use tidepool_testing::compare;
@@ -54,30 +49,11 @@ fn diff_one(name: &str) -> Option<String> {
         .and_then(|v| deep_force(v, &mut heap))
         .unwrap_or_else(|e| panic!("[{name}] eval failed: {e:?}"));
 
-    // JIT.
-    let mut pipeline = CodegenPipeline::new(&host_fns::host_fn_symbols()).unwrap();
-    let func_id = compile_expr(&mut pipeline, &expr, "sib_test", &ExternalEnv::new()).unwrap();
-    pipeline.finalize().unwrap();
-
-    let mut nursery = vec![0u8; 1 << 20];
-    let start = nursery.as_mut_ptr();
-    let end = unsafe { start.add(nursery.len()) };
-    let mut vmctx = VMContext::new(start, end, host_fns::gc_trigger);
-    let machine_state = Box::new(MachineState::new());
-    vmctx.machine_state = machine_state.as_ref() as *const MachineState as *mut MachineState;
-    machine_state.set_gc_state(start, nursery.len());
-    machine_state.set_stack_map_registry(&pipeline.stack_maps);
-
-    let ptr = pipeline.get_function_ptr(func_id);
-    let func: unsafe extern "C" fn(*mut VMContext) -> i64 = unsafe { std::mem::transmute(ptr) };
-    let result_ptr = unsafe { func(&mut vmctx as *mut VMContext) } as *const u8;
-    let jit_val = unsafe {
-        tidepool_codegen::heap_bridge::heap_to_value_forcing(
-            result_ptr,
-            &mut vmctx as *mut VMContext,
-        )
-    }
-    .unwrap_or_else(|e| panic!("[{name}] jit bridge failed: {e:?}"));
+    // JIT through the production entry point, which installs the constructor
+    // registries required by managed-value host functions.
+    let jit_val = JitEffectMachine::compile(&expr, &table, 1 << 20)
+        .and_then(|mut machine| machine.run_pure())
+        .unwrap_or_else(|e| panic!("[{name}] JIT failed: {e:?}"));
 
     assert!(
         compare::values_equal(&eval_val, &jit_val),
@@ -118,12 +94,12 @@ fn sibling_alt_refined_dict_matches_oracle() {
         .stack_size(64 << 20)
         .spawn(|| {
             // (fixture, expected Text) — the crux is `progBoth`: BOTH sibling
-            // `show`s (Int and Double) elaborated per-alt in one function.
+            // `render`s (Int and Double) elaborated per-alt in one function.
             let cases = [
-                ("progInt", "5"),        // GADT KInt alt: show @Int
-                ("progPrec", "1.5"),     // GADT KPrec alt: show @Double
-                ("progBoth", "5 | 1.5"), // both sibling shows together (the repro)
-                ("progPackInt", "5"),    // control: plain T.pack (show n), no GADT
+                ("progInt", "5"),        // GADT KInt alt: render @Int
+                ("progPrec", "1.5"),     // GADT KPrec alt: render @Double
+                ("progBoth", "5 | 1.5"), // both sibling renders together (the repro)
+                ("progPackInt", "5"),    // control: plain render, no GADT
                 ("progSingle", "1.5"),   // control: single-alt GADT dict use
                 ("progEitherL", "5"),    // control: Either sibling (non-GADT)
                 ("progEitherR", "1.5"),  // control: Either sibling (non-GADT)

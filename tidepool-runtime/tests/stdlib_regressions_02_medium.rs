@@ -289,7 +289,7 @@ fn works_patch_apply_marker_new_side_loses_trailing_newline() {
     // Original "line1\nline2\n" (trailing newline); the hunk's new side is
     // the SAME text but marked no-newline -> output must lose it.
     works(
-        r#"pure (case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "+line2", "\\ No newline at end of file"]) of { Right (fp:_) -> (case Patch.applyFilePatch fp (Just (T.intercalate "\n" ["line1", "line2", ""])) of { Right (out, _) -> out; Left _ -> "CONFLICT" }); Left _ -> "PARSE-FAIL" })"#,
+        r#"pure (case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "+line2", "\\ No newline at end of file"]) of { Right (fp:_) -> (case Patch.applyFilePatch fp (Just (T.intercalate "\n" ["line1", "line2", ""])) of { Right (out, _) -> out; Left _ -> "CONFLICT" }); Right [] -> "PARSE-FAIL"; Left _ -> "PARSE-FAIL" })"#,
         serde_json::json!("line1\nline2"),
     );
 }
@@ -299,7 +299,7 @@ fn works_patch_apply_marker_new_side_gains_trailing_newline() {
     // Original "line1\nline2" (no trailing newline); the old side is marked
     // no-newline, the new side is not -> output must GAIN a trailing newline.
     works(
-        r#"pure (case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "\\ No newline at end of file", "+line2"]) of { Right (fp:_) -> (case Patch.applyFilePatch fp (Just (T.intercalate "\n" ["line1", "line2"])) of { Right (out, _) -> out; Left _ -> "CONFLICT" }); Left _ -> "PARSE-FAIL" })"#,
+        r#"pure (case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "\\ No newline at end of file", "+line2"]) of { Right (fp:_) -> (case Patch.applyFilePatch fp (Just (T.intercalate "\n" ["line1", "line2"])) of { Right (out, _) -> out; Left _ -> "CONFLICT" }); Right [] -> "PARSE-FAIL"; Left _ -> "PARSE-FAIL" })"#,
         serde_json::json!("line1\nline2\n"),
     );
 }

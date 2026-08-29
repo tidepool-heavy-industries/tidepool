@@ -5,17 +5,18 @@ module SibDict where
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import Tidepool.Render (render)
 
 data K a where
   KInt  :: K Int
   KPrec :: Int -> K Double
 
--- The sibling-alt refined-dict function: `show` at Int in one alt,
--- `show` at Double in the sibling alt. Each alt uses a dictionary
+-- The sibling-alt refined-dict function: `render` at Int in one alt,
+-- `render` at Double in the sibling alt. Each alt uses a dictionary
 -- refined by the GADT equality evidence.
 useK :: K a -> a -> Text
-useK KInt       n = T.pack (show n)
-useK (KPrec _p) d = T.pack (show (d + 0.0))
+useK KInt       n = render n
+useK (KPrec _p) d = render (d + 0.0)
 
 -- NOINLINE opaque seeds defeat -O2 constant folding so the real
 -- per-alt dictionary Core survives to runtime.
@@ -42,25 +43,25 @@ progPrec = useK seedKP seedD
 progBoth :: Text
 progBoth = useK seedKI seedN <> " | " <> useK seedKP seedD
 
--- CONTROL 1: plain pack . show, no GADT, no sibling.
+-- CONTROL 1: plain render, no GADT, no sibling.
 packOnly :: Int -> Text
-packOnly n = T.pack (show n)
+packOnly n = render n
 
 progPackInt :: Text
 progPackInt = packOnly seedN
 
 -- CONTROL 2: single-alt GADT dict use (only the Double branch).
 useKP :: K a -> a -> Text
-useKP (KPrec _p) d = T.pack (show (d + 0.0))
+useKP (KPrec _p) d = render (d + 0.0)
 useKP KInt      _ = T.empty
 
 progSingle :: Text
 progSingle = useKP seedKP seedD
 
--- CONTROL 3: Either sibling (non-GADT) control — show at Int vs Double.
+-- CONTROL 3: Either sibling (non-GADT) control — render at Int vs Double.
 useE :: Either Int Double -> Text
-useE (Left n)  = T.pack (show n)
-useE (Right d) = T.pack (show (d + 0.0))
+useE (Left n)  = render n
+useE (Right d) = render (d + 0.0)
 
 {-# NOINLINE seedEL #-}
 seedEL :: Either Int Double
@@ -77,8 +78,8 @@ progEitherR = useE seedER
 
 -- CONTROL 4: sibling-alt but show at Double in BOTH branches (same dict).
 useKPP :: K a -> Double -> Text
-useKPP KInt       d = T.pack (show (d + 1.0))
-useKPP (KPrec _p) d = T.pack (show (d + 0.0))
+useKPP KInt       d = render (d + 1.0)
+useKPP (KPrec _p) d = render (d + 0.0)
 
 progSameDict :: Text
 progSameDict = useKPP seedKP seedD

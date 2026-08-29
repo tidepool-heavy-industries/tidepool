@@ -53,7 +53,7 @@ const CHECK_B: &str = r#"check "b"
 /// The no-newline-marker apply check: the hunk's new side is marked
 /// no-newline, so the output must lose its trailing newline.
 const CHECK_C: &str = r#"check "c"
-        ((case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "+line2", "\\ No newline at end of file"]) of { Right (fp3:_) -> (case Patch.applyFilePatch fp3 (Just (T.intercalate "\n" ["line1", "line2", ""])) of { Right (out3, _) -> out3; Left _ -> "CONFLICT" }); Left _ -> "PARSE-FAIL" }) == "line1\nline2")"#;
+        ((case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "+line2", "\\ No newline at end of file"]) of { Right (fp3:_) -> (case Patch.applyFilePatch fp3 (Just (T.intercalate "\n" ["line1", "line2", ""])) of { Right (out3, _) -> out3; Left _ -> "CONFLICT" }); Right [] -> "PARSE-FAIL"; Left _ -> "PARSE-FAIL" }) == "line1\nline2")"#;
 
 /// Build the check-list probe from an ordered list of check expressions.
 /// `check nm ok` yields `[]` when the check holds and `[nm]` when it does
@@ -192,7 +192,7 @@ fn on_probe_thread<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) ->
 /// out of a raw byte-array primop, which is the one thing in the original
 /// check the interpreter cannot execute (see `ORACLE_LITSTRING_GAP`).
 const CHECK_C_ORACLE_SAFE: &str = r#"check "c"
-        ((case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "+line2", "\\ No newline at end of file"]) of { Right (fp3:_) -> (case Patch.applyFilePatch fp3 (Just (T.append (T.intercalate "\n" ["line1", "line2"]) "\n")) of { Right (out3, _) -> out3; Left _ -> "CONFLICT" }); Left _ -> "PARSE-FAIL" }) == "line1\nline2")"#;
+        ((case Patch.parsePatch (T.intercalate "\n" ["--- a/f.txt", "+++ b/f.txt", "@@ -1,2 +1,2 @@", " line1", "-line2", "+line2", "\\ No newline at end of file"]) of { Right (fp3:_) -> (case Patch.applyFilePatch fp3 (Just (T.append (T.intercalate "\n" ["line1", "line2"]) "\n")) of { Right (out3, _) -> out3; Left _ -> "CONFLICT" }); Right [] -> "PARSE-FAIL"; Left _ -> "PARSE-FAIL" }) == "line1\nline2")"#;
 
 /// The interpreter's known gap on `CHECK_C`, allowed by name rather than by
 /// a blanket "ignore oracle errors": `tidepool-eval`'s `expect_byte_array`
