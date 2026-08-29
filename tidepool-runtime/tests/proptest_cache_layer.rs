@@ -7,9 +7,9 @@
 //!
 //!   - `XDG_CACHE_HOME` -> per-test tempdir (the real `~/.cache/tidepool` is
 //!     never touched),
-//!   - `TIDEPOOL_EXTRACT` -> a stub shell script that "compiles" by copying
-//!     fabricated CBOR fixtures into the output dir and appending one line to
-//!     an invocation-count file.
+//!   - `TIDEPOOL_EXTRACT` -> a stub worker that consumes the current typed
+//!     request protocol, copies fabricated CBOR fixtures into the requested
+//!     output dir, and records each invocation.
 //!
 //! Oracle: the invocation-count delta distinguishes cache HIT (0 new runs)
 //! from cache MISS (1 new run). Key equality is therefore observable: if a
@@ -51,6 +51,12 @@ impl EnvGuard {
     fn new(key: &'static str, new_value: impl AsRef<std::ffi::OsStr>) -> Self {
         let old_value = std::env::var_os(key);
         std::env::set_var(key, new_value);
+        Self { key, old_value }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let old_value = std::env::var_os(key);
+        std::env::remove_var(key);
         Self { key, old_value }
     }
 }
@@ -112,13 +118,17 @@ impl Harness {
         fs::write(r.join("fx/b.cbor"), write_cbor(&lit_expr(43)).unwrap()).unwrap();
         fs::write(r.join("fx/meta.cbor"), empty_meta_bytes()).unwrap();
 
-        // Stub extractor. Arg layout fixed by lib.rs:
-        //   $1=input.hs $2=--output-dir $3=<dir> $4=--target $5=<target> ...
+        // The wrapper preserves an executable file for the cache key while
+        // delegating worker behavior back to this integration-test binary.
+        // That helper decodes the real typed request; no deleted CLI layout is
+        // duplicated here.
         let stub = r.join("bin/extract-stub");
+        let test_binary = std::env::current_exe().unwrap();
         let script = format!(
-            "#!/bin/sh\necho run >> '{count}'\ncp '{fx}/a.cbor' \"$3/$5.cbor\"\ncp '{fx}/meta.cbor' \"$3/meta.cbor\"\n",
+            "#!/bin/sh\necho run >> '{count}'\nTIDEPOOL_FAKE_EXTRACT_REQUEST=\"$2\" \\\n             TIDEPOOL_FAKE_EXTRACT_EXPR='{fx}/a.cbor' \\\n             TIDEPOOL_FAKE_EXTRACT_META='{fx}/meta.cbor' \\\n             exec '{test_binary}' --exact fake_extract_worker --nocapture\n",
             count = r.join("count").display(),
             fx = r.join("fx").display(),
+            test_binary = test_binary.display(),
         );
         fs::write(&stub, script).unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
@@ -126,6 +136,7 @@ impl Harness {
         let guards = vec![
             EnvGuard::new("XDG_CACHE_HOME", r.join("cache")),
             EnvGuard::new("TIDEPOOL_EXTRACT", &stub),
+            EnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET"),
         ];
 
         Self {
@@ -214,6 +225,40 @@ impl Harness {
         self._guards
             .push(EnvGuard::new("TIDEPOOL_EXTRACT", &wrapper));
     }
+}
+
+/// Child-process entry point used by [`Harness`]. A normal test invocation has
+/// no request environment and returns immediately; the wrapper above invokes
+/// this exact test with the typed payload in the environment.
+#[test]
+fn fake_extract_worker() {
+    let Some(payload) = std::env::var_os("TIDEPOOL_FAKE_EXTRACT_REQUEST") else {
+        return;
+    };
+    let bytes = decode_hex(payload.to_str().expect("typed request is ASCII hex"));
+    let request = tidepool_extract_cmd::ExtractRequest::decode(&bytes).unwrap();
+    let output_dir = PathBuf::from(request.output_directory().unwrap());
+    let expr = PathBuf::from(std::env::var_os("TIDEPOOL_FAKE_EXTRACT_EXPR").unwrap());
+    let meta = PathBuf::from(std::env::var_os("TIDEPOOL_FAKE_EXTRACT_META").unwrap());
+    for target in request.target_names() {
+        fs::copy(&expr, output_dir.join(format!("{target}.cbor"))).unwrap();
+    }
+    fs::copy(meta, output_dir.join("meta.cbor")).unwrap();
+}
+
+fn decode_hex(hex: &str) -> Vec<u8> {
+    assert_eq!(hex.len() % 2, 0, "odd-length typed request");
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte| match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => panic!("non-hex typed request"),
+            };
+            digit(pair[0]) << 4 | digit(pair[1])
+        })
+        .collect()
 }
 
 /// Rewrite a file with `new_bytes` and restore its original mtime, simulating

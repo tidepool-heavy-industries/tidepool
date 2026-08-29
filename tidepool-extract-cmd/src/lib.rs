@@ -27,7 +27,7 @@ pub mod exec_check;
 pub mod frontend;
 mod request;
 use exec_check::is_readable_executable_file;
-pub use request::ExtractRequest;
+pub use request::{ExtractRequest, ProtocolError};
 
 /// The bare binary name, used when `$TIDEPOOL_EXTRACT` is unset (resolved
 /// through `PATH` by the OS at spawn time).

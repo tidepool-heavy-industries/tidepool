@@ -1277,6 +1277,38 @@ fn parse_one_binder(v: &serde_json::Value) -> Result<BoundBinder, CompileError> 
 mod tests {
     use super::*;
 
+    /// Force tests that replace `TIDEPOOL_EXTRACT` to exercise that process
+    /// boundary even when the surrounding test runner owns a compile daemon.
+    /// Each nextest case has its own process, but it still inherits the
+    /// runner's daemon socket.
+    struct TestEnvGuard {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     /// [`PREAMBLE_DEFAULT_MARKER`] is duplicated (not depended-on) from
     /// `tidepool_mcp::PREAMBLE_DEFAULT_DECL` to avoid a circular crate
     /// dependency — this pins the two from drifting apart silently.
@@ -1297,7 +1329,8 @@ mod tests {
         let fake = dir.path().join("fake-extract");
         std::fs::write(&fake, "#!/bin/sh\necho not-a-diag-report\nexit 1\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
         let err = classify_block(&["x <- pure 1"]).unwrap_err();
         assert!(
             matches!(err, CompileError::MalformedDiagnostics(_)),
@@ -1325,7 +1358,8 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
         let err = classify_block(&["x <- pure 1"]).unwrap_err();
         let CompileError::MalformedDiagnostics(msg) = &err else {
             panic!("a parseable report from a stale extract must be MalformedDiagnostics (version skew), got {err:?}");
@@ -1353,7 +1387,8 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
 
         let result = classify_block(&[]).unwrap();
         assert!(result.is_empty());
@@ -1597,7 +1632,7 @@ mod tests {
     /// before any process is invoked).
     #[test]
     fn run_turn_missing_template_is_clean_error_not_panic() {
-        std::env::set_var("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
         let req = TurnRequest {
             turn_text: "1 + 1",
             templates: &[],
@@ -1618,13 +1653,12 @@ mod tests {
         );
     }
 
-    /// `run_turn` must spawn the extractor EXACTLY ONCE, carrying `--turn`,
-    /// never a deleted classify/binder flag. The fake extractor logs its argv
-    /// and exits non-zero (the compile is allowed to fail; only the spawn
-    /// count and arguments matter here). Env mutation is safe: nextest runs
-    /// each test in its own process.
+    /// `run_turn` must spawn the extractor exactly once through the typed
+    /// worker protocol. Field encoding is covered by `tidepool-extract-cmd`;
+    /// this boundary test only owns process count and transport selection.
+    /// The fake worker logs its argv and exits non-zero.
     #[test]
-    fn run_turn_spawns_extract_exactly_once_with_turn_flag() {
+    fn run_turn_spawns_extract_exactly_once_with_typed_request() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let log_path = dir.path().join("calls.log");
@@ -1635,7 +1669,8 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::env::set_var("TIDEPOOL_EXTRACT", &fake);
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
 
         let session_root = dir.path().join("session");
         std::fs::create_dir_all(&session_root).unwrap();
@@ -1665,10 +1700,9 @@ mod tests {
             "expected exactly one extract spawn, got:\n{calls}"
         );
         let call = calls.lines().next().unwrap_or_default();
-        assert!(call.contains("--turn"), "spawn missing --turn:\n{call}");
         assert!(
-            !call.contains("--emit-stmt-binders") && !call.contains("--emit-binders"),
-            "spawn carried a deleted classify/binder flag:\n{call}"
+            call.starts_with("--worker-request-v1 5450524551303031"),
+            "spawn did not use the versioned typed worker protocol:\n{call}"
         );
     }
 
@@ -2138,7 +2172,7 @@ mod tests {
                 }
                 _ => {
                     let result = run_turn(req)
-                        .unwrap_or_else(|e| panic!("{}: run_turn failed: {e}", case.name));
+                        .unwrap_or_else(|e| panic!("{}: run_turn failed: {e:?}", case.name));
                     match (case.kind, result) {
                         (TurnKind::Decl, TurnResult::Decl { binders, items }) => {
                             let (want_binders, want_heads) = decl_expectations(case.name);

@@ -121,6 +121,81 @@ impl ExtractRequest {
         Ok(request)
     }
 
+    /// Decode the versioned worker payload emitted by [`Self::encode`].
+    ///
+    /// This is the Rust-side protocol boundary for test workers and tooling
+    /// that need to inspect a request rather than forward it opaquely. Invalid
+    /// headers, truncated fields, unknown tags, and trailing bytes are errors.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let mut decoder = Decoder::new(bytes)?;
+        let field_count = decoder.u32()? as usize;
+        let mut fields = Vec::with_capacity(field_count);
+        for _ in 0..field_count {
+            let tag = decoder.byte()?;
+            let field = match tag {
+                1 => Field::Input(decoder.os_string()?),
+                2 => Field::OutputDir(decoder.os_string()?),
+                3 => Field::Target(decoder.os_string()?),
+                4 => {
+                    let count = decoder.u32()? as usize;
+                    let mut values = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        values.push(decoder.string()?);
+                    }
+                    Field::Targets(values)
+                }
+                5 => Field::DumpCore,
+                6 => Field::AllClosed,
+                7 => Field::TargetModuleOnly,
+                8 => Field::Include(decoder.os_string()?),
+                9 => Field::SessionBind,
+                10 => Field::BindName(decoder.os_string()?),
+                11 => Field::BindGen(decoder.u64()?),
+                12 => Field::SessionRoot(decoder.os_string()?),
+                13 => Field::InjectVal(decoder.os_string()?),
+                14 => Field::EmitBoundBinders(decoder.os_string()?),
+                15 => Field::ProbeOnly,
+                16 => Field::Turn,
+                17 => Field::TurnTemplate {
+                    kind: decoder.string()?,
+                    path: PathBuf::from(decoder.os_string()?),
+                },
+                18 => Field::TurnOut(decoder.os_string()?),
+                19 => Field::TurnVerdict(decoder.os_string()?),
+                20 => Field::Classify,
+                21 => Field::ClassifyOut(decoder.os_string()?),
+                22 => Field::TurnBatch(decoder.os_string()?),
+                23 => Field::BatchOut(decoder.os_string()?),
+                24 => Field::HarnessProfile,
+                25 => Field::BuildProductsDir(decoder.os_string()?),
+                other => return Err(ProtocolError::new(format!("unknown field tag {other}"))),
+            };
+            fields.push(field);
+        }
+        decoder.finish()?;
+        Ok(Self { fields })
+    }
+
+    /// Requested output directory, if this request carries one.
+    pub fn output_directory(&self) -> Option<&OsStr> {
+        self.fields.iter().find_map(|field| match field {
+            Field::OutputDir(value) => Some(value.as_os_str()),
+            _ => None,
+        })
+    }
+
+    /// Logical target names in request order.
+    pub fn target_names(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .flat_map(|field| match field {
+                Field::Target(value) => vec![value.to_string_lossy().into_owned()],
+                Field::Targets(values) => values.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
     pub(crate) fn input(&mut self, value: impl AsRef<OsStr>) {
         self.fields.push(Field::Input(value.as_ref().to_owned()));
     }
@@ -274,6 +349,98 @@ impl ExtractRequest {
     }
 }
 
+struct Decoder<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> Decoder<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
+        if bytes.get(..MAGIC.len()) != Some(MAGIC) {
+            return Err(ProtocolError::new("invalid worker request header"));
+        }
+        Ok(Self {
+            bytes,
+            cursor: MAGIC.len(),
+        })
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], ProtocolError> {
+        let end = self
+            .cursor
+            .checked_add(len)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or_else(|| ProtocolError::new("truncated worker request"))?;
+        let value = &self.bytes[self.cursor..end];
+        self.cursor = end;
+        Ok(value)
+    }
+
+    fn byte(&mut self) -> Result<u8, ProtocolError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, ProtocolError> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| ProtocolError::new("invalid u32 frame"))?,
+        ))
+    }
+
+    fn u64(&mut self) -> Result<u64, ProtocolError> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?
+                .try_into()
+                .map_err(|_| ProtocolError::new("invalid u64 frame"))?,
+        ))
+    }
+
+    fn frame(&mut self) -> Result<&'a [u8], ProtocolError> {
+        let len = self.u32()? as usize;
+        self.take(len)
+    }
+
+    fn string(&mut self) -> Result<String, ProtocolError> {
+        String::from_utf8(self.frame()?.to_vec())
+            .map_err(|_| ProtocolError::new("worker request text is not UTF-8"))
+    }
+
+    fn os_string(&mut self) -> Result<OsString, ProtocolError> {
+        Ok(self.string()?.into())
+    }
+
+    fn finish(self) -> Result<(), ProtocolError> {
+        if self.cursor == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(ProtocolError::new("trailing worker request bytes"))
+        }
+    }
+}
+
+/// A malformed versioned worker request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolError {
+    message: String,
+}
+
+impl ProtocolError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
 fn flag(out: &mut Vec<OsString>, name: &str, value: &OsStr) {
     out.push(name.into());
     out.push(value.to_owned());
@@ -416,6 +583,63 @@ mod tests {
         let argv = request.worker_argv();
         assert_eq!(argv.len(), 2);
         assert_eq!(argv[0], WORKER_REQUEST_FLAG);
+    }
+
+    #[test]
+    fn typed_protocol_round_trips_every_field_shape() {
+        let args = vec![
+            "Expr.hs".into(),
+            "--output-dir".into(),
+            "/tmp/out".into(),
+            "--targets".into(),
+            "a,b".into(),
+            "--include".into(),
+            "/tmp/include".into(),
+            "--turn".into(),
+            "--turn-template".into(),
+            "expr=/tmp/template.hs".into(),
+            "--turn-out".into(),
+            "/tmp/turn.cbor".into(),
+            "--turn-verdict".into(),
+            "expr".into(),
+            "--build-products-dir".into(),
+            "/tmp/build".into(),
+            "--session-root".into(),
+            "/tmp/session".into(),
+            "--inject-val".into(),
+            "M".into(),
+            "--session-bind".into(),
+            "--bind-name".into(),
+            "x".into(),
+            "--bind-gen".into(),
+            "7".into(),
+            "--emit-bound-binders".into(),
+            "/tmp/binders.json".into(),
+            "--probe-only".into(),
+            "--harness-profile".into(),
+        ];
+        let request = ExtractRequest::from_cli(&args).unwrap();
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+    }
+
+    #[test]
+    fn typed_protocol_rejects_unknown_and_truncated_fields() {
+        let mut unknown = MAGIC.to_vec();
+        unknown.extend_from_slice(&1u32.to_le_bytes());
+        unknown.push(255);
+        assert_eq!(
+            ExtractRequest::decode(&unknown).unwrap_err().to_string(),
+            "unknown field tag 255"
+        );
+
+        let request = ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap();
+        let mut truncated = request.encode();
+        truncated.pop();
+        assert_eq!(
+            ExtractRequest::decode(&truncated).unwrap_err().to_string(),
+            "truncated worker request"
+        );
     }
 
     #[test]
