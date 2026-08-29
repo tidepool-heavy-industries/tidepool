@@ -11,3 +11,4 @@ use crate::tree::HoleId;
 pub type SessionRegistry<M> = tidepool_runtime::session::registry::SessionRegistry<M, HoleId>;
 pub type Checkout<'r, M> = tidepool_runtime::session::registry::Checkout<'r, M, HoleId>;
 pub type CheckoutError = tidepool_runtime::session::registry::CheckoutError<HoleId>;
+pub type CheckoutRequest<'a> = tidepool_runtime::session::registry::CheckoutRequest<'a, HoleId>;

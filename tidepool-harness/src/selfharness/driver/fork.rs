@@ -334,8 +334,7 @@ impl BranchAgentSessionGuard {
     /// discipline). Consumes the window.
     pub(crate) async fn finalize_fork_data(mut self) -> Result<(Value, String), HarnessError> {
         let node = self.node;
-        let (value, rendered) =
-            retry_on_turn_in_flight(|| self.agent.take_finalized_value_keep_open(node)).await?;
+        let (value, rendered) = self.agent.take_finalized_value_keep_open(node).await?;
         let _ = self
             .agent
             .tree()
@@ -564,13 +563,6 @@ impl SelfHarnessDriver {
         )?;
         self.agent.force_attached(node, Actor::Operator, sid)?;
         self.agent.set_node_realm(node, self.mint_resource_scope());
-        // Sibling fanout children share this ONE session's machine — a
-        // checkout race against another child's turn is expected, benign
-        // contention (not a real conflict), so this node's checkouts WAIT
-        // instead of failing fast. See `Harness::checkout_run_retrying`'s
-        // doc for why `drive_turn` itself is never retried as a whole.
-        self.agent.set_retry_checkout_on_contention(node, true);
-
         let result = self
             .finalize_fanout_child(node, site, idx, prompt, element_ty, modules, table)
             .await;
@@ -653,8 +645,7 @@ impl SelfHarnessDriver {
                  answer must be plain data in this driver (v1 scope)"
             )));
         }
-        let (value, rendered) =
-            retry_on_turn_in_flight(|| self.agent.take_finalized_value_keep_open(node)).await?;
+        let (value, rendered) = self.agent.take_finalized_value_keep_open(node).await?;
         self.emit(Event::Finalize {
             node,
             value: rendered,
@@ -1025,10 +1016,9 @@ impl SelfHarnessDriver {
                                             Some(g) => self.sweep_green_round(node, g).await,
                                             None => 0,
                                         };
-                                        retry_on_turn_in_flight(|| {
-                                            self.agent.refuse_pending_suspension(node, msg.clone())
-                                        })
-                                        .await?;
+                                        self.agent
+                                            .refuse_pending_suspension(node, msg.clone())
+                                            .await?;
                                         let warn = if dropped > 0 {
                                             format!("\n\n{}", dropped_threads_warning(dropped))
                                         } else {
@@ -1051,11 +1041,9 @@ impl SelfHarnessDriver {
                                              session continues and earlier rounds' \
                                              definitions/bindings persist. Problem: {msg}."
                                         );
-                                        retry_on_turn_in_flight(|| {
-                                            self.agent
-                                                .refuse_pending_suspension(node, corrective.clone())
-                                        })
-                                        .await?;
+                                        self.agent
+                                            .refuse_pending_suspension(node, corrective.clone())
+                                            .await?;
                                         let warn = if dropped > 0 {
                                             format!("\n\n{}", dropped_threads_warning(dropped))
                                         } else {
@@ -1080,10 +1068,9 @@ impl SelfHarnessDriver {
                                             Some(g) => self.sweep_green_round(node, g).await,
                                             None => 0,
                                         };
-                                        retry_on_turn_in_flight(|| {
-                                            self.agent.refuse_pending_suspension(node, msg.clone())
-                                        })
-                                        .await?;
+                                        self.agent
+                                            .refuse_pending_suspension(node, msg.clone())
+                                            .await?;
                                         let warn = if dropped > 0 {
                                             format!("\n\n{}", dropped_threads_warning(dropped))
                                         } else {
@@ -1406,10 +1393,9 @@ impl SelfHarnessDriver {
             let cost = ForkBudget::cost(&classified.routing);
             if matches!(classified.routing, SuspensionRouting::Fork { .. }) {
                 if let Some(msg) = self.check_fork_budgets(budget, cost, fork_subtree, ty_label) {
-                    retry_on_turn_in_flight(|| {
-                        self.agent.refuse_pending_suspension(node, msg.clone())
-                    })
-                    .await?;
+                    self.agent
+                        .refuse_pending_suspension(node, msg.clone())
+                        .await?;
                     self.agent.push_user_turn(node, &msg)?;
                     return Ok(None);
                 }
@@ -1443,20 +1429,16 @@ impl SelfHarnessDriver {
                         .await?
                     {
                         Ok(answer) => {
-                            retry_on_turn_in_flight_async(|| {
-                                self.agent.resume_with_value(node, &hole, answer.clone())
-                            })
-                            .await?;
+                            self.agent.resume_with_value(node, &hole, answer).await?;
                         }
                         // A child ended in `InvocationExit`: abort this
                         // block with the corrective, the same shape the
                         // budget-refusal branch above uses — the WINDOW
                         // survives, only the parked continuation dies.
                         Err(msg) => {
-                            retry_on_turn_in_flight(|| {
-                                self.agent.refuse_pending_suspension(node, msg.clone())
-                            })
-                            .await?;
+                            self.agent
+                                .refuse_pending_suspension(node, msg.clone())
+                                .await?;
                             self.agent.push_user_turn(node, &msg)?;
                             return Ok(None);
                         }
@@ -1616,13 +1598,6 @@ impl SelfHarnessDriver {
         }
         let realm = self.mint_resource_scope();
         self.agent.set_node_realm(node, realm);
-        // F4: a fork child's window can run concurrently against a sibling
-        // fanout child (or another fork subtree entirely) on the SAME
-        // shared outer session — opt in so its very first checkout (the
-        // scope mint below, then every turn `drive_agent_session_to_finalize`
-        // drives) waits instead of failing fast on what is "expected, benign
-        // contention" everywhere else on this plane.
-        self.agent.set_retry_checkout_on_contention(node, true);
         // Scope minted from the LIVE parent's scope: this is what makes the
         // parent's declarations (and its ancestors') readable and sibling
         // declarations invisible — the same scope-tree ancestry the branch
@@ -1630,7 +1605,7 @@ impl SelfHarnessDriver {
         let parent_scope = self.agent.node_scope(parent);
         let child_scope = match self
             .agent
-            .with_session_retrying(node, sid, |s| s.mint_scope(parent_scope))
+            .with_session_waiting(sid, |s| s.mint_scope(parent_scope))
             .await
         {
             Ok(Some(scope)) => scope,

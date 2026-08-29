@@ -130,16 +130,14 @@ impl SelfHarnessDriver {
         // it is delivered verbatim into the loop's parked continuation on the
         // shared heap); data keeps the bridged-value path.
         let answer = if self.agent.finalize_is_closure(node) {
-            let handle =
-                retry_on_turn_in_flight(|| self.agent.take_finalized_handle_keep_open(node))
-                    .await?;
+            let handle = self.agent.take_finalized_handle_keep_open(node).await?;
             self.emit(Event::Finalize {
                 node,
                 value: "\"<closure>\"".to_string(),
             });
             FinalAnswer::Handle(handle)
         } else {
-            let (value, rendered) = self.agent.take_finalized_value_keep_open(node)?;
+            let (value, rendered) = self.agent.take_finalized_value_keep_open(node).await?;
             self.emit(Event::Finalize {
                 node,
                 value: rendered,
@@ -194,8 +192,7 @@ impl SelfHarnessDriver {
             let submission = self
                 .present_askuser_form(&mut reprompts, FormSource::Answerer { node }, &shape)
                 .await?;
-            retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, submission.clone()))
-                .await?;
+            self.agent.answer_dialog(node, submission).await?;
 
             let Some((hole, classified, _table)) = self.agent.pending_suspension_full(node) else {
                 // The resume completed the node with no further suspension.
@@ -385,8 +382,7 @@ impl SelfHarnessDriver {
                     // Immediate resume with the cycle's entry state — no
                     // operator, no model round (note's service shape).
                     let state = self.loop_state_snapshot();
-                    retry_on_turn_in_flight_async(|| self.agent.answer_dialog(node, state.clone()))
-                        .await?;
+                    self.agent.answer_dialog(node, state).await?;
                 }
                 // A branch-node window's own `delegate` call
                 // lowers to a real `Subagent` send (`Tidepool.Agent.Delegate.
@@ -410,11 +406,9 @@ impl SelfHarnessDriver {
                     let value = self
                         .service_outer_subagent(&request, &table, FormSource::Answerer { node })
                         .await?;
-                    retry_on_turn_in_flight_async(|| {
-                        self.agent
-                            .resume_with_value(node, &pending_suspension, value.clone())
-                    })
-                    .await?;
+                    self.agent
+                        .resume_with_value(node, &pending_suspension, value)
+                        .await?;
                 }
                 // An interpreter around an answerer-local effect may use a
                 // driver-owned outer capability without exposing that
@@ -433,11 +427,9 @@ impl SelfHarnessDriver {
                             ))
                         })?;
                     let value = self.service_outer_effect(kind, &request, &table)?;
-                    retry_on_turn_in_flight_async(|| {
-                        self.agent
-                            .resume_with_value(node, &pending_suspension, value.clone())
-                    })
-                    .await?;
+                    self.agent
+                        .resume_with_value(node, &pending_suspension, value)
+                        .await?;
                 }
                 _ => break,
             }

@@ -303,21 +303,19 @@ pub(crate) struct GreenResumeSite<'a> {
 }
 
 impl SelfHarnessDriver {
-    /// [`Harness::with_session_retrying`] when `host` names a real answerer
-    /// node (F4: the answerer-plane green scheduler, whose host node may have
-    /// opted into contention retry via
-    /// [`Harness::set_retry_checkout_on_contention`]), else plain
+    /// [`Harness::with_session_waiting`] when `host` names a real answerer
+    /// node whose work shares a machine with sibling windows, else plain
     /// [`Harness::with_session`] — the AUTHORED outer loop's own green
     /// servicing (`run_loop_fragment_inner`) runs against the node-LESS
-    /// outer session and has no node to look a retry flag up on.
-    pub(crate) async fn with_session_maybe_retrying<T>(
+    /// outer session and does not contend with attached windows here.
+    pub(crate) async fn with_session_for_host<T>(
         &self,
         host: Option<NodeId>,
         sid: tidepool_repr::SessionId,
         f: impl FnOnce(&mut Session) -> T,
     ) -> Result<T, HarnessError> {
         match host {
-            Some(node) => self.agent.with_session_retrying(node, sid, f).await,
+            Some(_) => self.agent.with_session_waiting(sid, f).await,
             None => self.agent.with_session(sid, f),
         }
     }
@@ -334,7 +332,7 @@ impl SelfHarnessDriver {
         match site.delivery {
             GreenDelivery::Raw => {
                 let next = self
-                    .with_session_maybe_retrying(site.host, site.sid, |s| match answer {
+                    .with_session_for_host(site.host, site.sid, |s| match answer {
                         GreenAnswer::Value(v) => s.resume(ResidentHole::plain(site.hole), v),
                         GreenAnswer::BorrowedRoot(h) => s.resume_handle_borrowed(site.hole, h),
                     })
@@ -348,14 +346,10 @@ impl SelfHarnessDriver {
                 Ok(())
             }
             GreenDelivery::Node { node, hole } => match answer {
-                GreenAnswer::Value(v) => Ok(retry_on_turn_in_flight_async(|| {
-                    self.agent.resume_with_value(*node, hole, v.clone())
-                })
-                .await?),
-                GreenAnswer::BorrowedRoot(h) => Ok(retry_on_turn_in_flight_async(|| {
-                    self.agent.resume_with_borrowed_root(*node, hole, h)
-                })
-                .await?),
+                GreenAnswer::Value(v) => Ok(self.agent.resume_with_value(*node, hole, v).await?),
+                GreenAnswer::BorrowedRoot(h) => {
+                    Ok(self.agent.resume_with_borrowed_root(*node, hole, h).await?)
+                }
             },
         }
     }
@@ -388,14 +382,12 @@ impl SelfHarnessDriver {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn service_green_hole(
         &self,
-        // The HOST answerer node — the node whose `retry_checkout_on_contention`
-        // opt-in (F4) governs every raw `with_session` this call makes against
-        // the shared session, regardless of whether `delivery` targets this
+        // The HOST answerer node selects waiting admission for every session
+        // access in this call, regardless of whether `delivery` targets this
         // same node's own hole (`GreenDelivery::Node`) or a raw thread chain
         // (`GreenDelivery::Raw`): a thread belongs to this host's own window,
         // so it contends on exactly the same checkout races its host does.
-        // `None` for the AUTHORED outer loop's own node-less green servicing
-        // (`run_loop_fragment_inner`), which has no node to opt in with.
+        // `None` selects the authored outer loop's node-less session access.
         host: Option<NodeId>,
         chain: GreenChain,
         hole: &str,
@@ -442,18 +434,14 @@ impl SelfHarnessDriver {
                 // succeeded, so there is no fallible step between mint and
                 // consume for an early return to land on.
                 let thread_start = self
-                    .with_session_maybe_retrying(
-                        host,
-                        sid,
-                        |s| -> Result<ResidentOutcome, String> {
-                            let body = s.finalized_handle(hole).ok_or_else(|| {
-                                "AsyncSpawnWith: spawner frame carries no untaken body closure"
-                                    .to_string()
-                            })?;
-                            s.run_forked("async_thread", body, realm, Some(table))
-                                .map_err(|e| format!("run_forked failed: {e}"))
-                        },
-                    )
+                    .with_session_for_host(host, sid, |s| -> Result<ResidentOutcome, String> {
+                        let body = s.finalized_handle(hole).ok_or_else(|| {
+                            "AsyncSpawnWith: spawner frame carries no untaken body closure"
+                                .to_string()
+                        })?;
+                        s.run_forked("async_thread", body, realm, Some(table))
+                            .map_err(|e| format!("run_forked failed: {e}"))
+                    })
                     .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
                     .map_err(DriverError::Session)?;
@@ -544,7 +532,7 @@ impl SelfHarnessDriver {
                     // thread must not invalidate a waiter's already-delivered
                     // handle.
                     let handle = self
-                        .with_session_maybe_retrying(host, sid, |s| {
+                        .with_session_for_host(host, sid, |s| {
                             s.finalized_handle_owned_by(hole, OUTER_REALM)
                         })
                         .await
@@ -736,7 +724,7 @@ impl SelfHarnessDriver {
                     if matches!(entry.state, GreenThreadState::Running) {
                         let realm = entry.realm;
                         entry.state = GreenThreadState::Cancelled;
-                        self.with_session_maybe_retrying(host, sid, |s| {
+                        self.with_session_for_host(host, sid, |s| {
                             s.close_realm(realm);
                         })
                         .await
@@ -798,7 +786,7 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(format!("green wake tid box: {e}")))?;
         for (wchain, whole) in parked {
             let next = self
-                .with_session_maybe_retrying(host, sid, |s| {
+                .with_session_for_host(host, sid, |s| {
                     s.resume(ResidentHole::plain(whole.clone()), tid_value.clone())
                 })
                 .await
@@ -1124,7 +1112,7 @@ impl SelfHarnessDriver {
                 Ok(Ok(answer)) => {
                     let next = self
                         .agent
-                        .with_session_retrying(node, sid, |s| {
+                        .with_session_waiting(sid, |s| {
                             s.resume(ResidentHole::plain(a.hole.clone()), answer)
                         })
                         .await
@@ -1218,7 +1206,7 @@ impl SelfHarnessDriver {
         {
             let next = self
                 .agent
-                .with_session_retrying(node, sid, |s| s.resume(ResidentHole::plain(hole), value))
+                .with_session_waiting(sid, |s| s.resume(ResidentHole::plain(hole), value))
                 .await
                 .map_err(|e| DriverError::Session(e.to_string()))?
                 .map_err(|e| DriverError::Session(format!("async subagent resume failed: {e}")))?;
@@ -1309,7 +1297,7 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("note () bridge: {e}")))?;
                 let next = self
                     .agent
-                    .with_session_retrying(node, sid, |s| {
+                    .with_session_waiting(sid, |s| {
                         s.resume(ResidentHole::plain(hole.cont_id()), unit)
                     })
                     .await
@@ -1327,7 +1315,7 @@ impl SelfHarnessDriver {
                     .map_err(|e| DriverError::Session(format!("getStateJson bridge: {e}")))?;
                 let next = self
                     .agent
-                    .with_session_retrying(node, sid, |s| {
+                    .with_session_waiting(sid, |s| {
                         s.resume(ResidentHole::plain(hole.cont_id()), value)
                     })
                     .await
@@ -1385,7 +1373,7 @@ impl SelfHarnessDriver {
     /// the corrective prompt can say so.
     pub(crate) async fn sweep_green_round(
         &self,
-        node: NodeId,
+        _node: NodeId,
         green: &mut ModelRoundGreenThreadScheduler,
     ) -> usize {
         let mut dropped = 0usize;
@@ -1395,14 +1383,14 @@ impl SelfHarnessDriver {
                     GreenThreadState::Running => {
                         let _ = self
                             .agent
-                            .with_session_retrying(node, sid, |s| s.close_realm(entry.realm))
+                            .with_session_waiting(sid, |s| s.close_realm(entry.realm))
                             .await;
                         dropped += 1;
                     }
                     GreenThreadState::Settled(_) => {
                         let _ = self
                             .agent
-                            .with_session_retrying(node, sid, |s| s.close_realm(entry.realm))
+                            .with_session_waiting(sid, |s| s.close_realm(entry.realm))
                             .await;
                     }
                     GreenThreadState::Cancelled => {}

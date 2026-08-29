@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use tidepool_repr::SessionId;
+use tokio::sync::Notify;
 
 /// Why a machine checkout was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +34,12 @@ pub enum CheckoutError<H> {
     /// whatever kind of turn it is.
     #[error("session {0} is already running a turn")]
     Running(SessionId),
+    /// A notification-driven checkout wait reached its caller-supplied bound.
+    #[error("timed out after {waited:?} waiting to check out session {session}")]
+    WaitTimeout {
+        session: SessionId,
+        waited: std::time::Duration,
+    },
     /// A child-run checkout was attempted on a session with no parked hole
     /// (a child reads a suspended parent's world by construction).
     #[error("session {0} has no parked hole; a child run requires a suspended parent")]
@@ -102,6 +109,14 @@ pub enum SlotKind {
     Wedged,
 }
 
+/// The structural checkout a caller wants notification-driven admission for.
+#[derive(Debug, Clone, Copy)]
+pub enum CheckoutRequest<'h, H> {
+    Run,
+    Resume(&'h H),
+    Child,
+}
+
 impl<M, H> Slot<M, H> {
     pub fn kind(&self) -> SlotKind {
         match self {
@@ -141,6 +156,7 @@ struct Entry<M, H> {
 pub struct SessionRegistry<M, H> {
     slots: Mutex<HashMap<SessionId, Entry<M, H>>>,
     next_epoch: AtomicU64,
+    availability: Notify,
 }
 
 impl<M, H> Default for SessionRegistry<M, H> {
@@ -148,6 +164,7 @@ impl<M, H> Default for SessionRegistry<M, H> {
         SessionRegistry {
             slots: Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(1),
+            availability: Notify::new(),
         }
     }
 }
@@ -165,7 +182,8 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// id (every consumer today) never needs to think about epochs at all.
     pub fn insert_idle(&self, id: SessionId, machine: M) -> Option<Slot<M, H>> {
         let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
-        self.slots
+        let previous = self
+            .slots
             .lock()
             .insert(
                 id,
@@ -174,7 +192,9 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
                     slot: Slot::Idle(machine),
                 },
             )
-            .map(|e| e.slot)
+            .map(|e| e.slot);
+        self.availability.notify_waiters();
+        previous
     }
 
     /// Remove a session entirely, returning its slot (drops the machine when
@@ -182,7 +202,11 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// checkout still outstanding for `id` finds its epoch stale on
     /// settlement and drops its machine instead of resurrecting this entry.
     pub fn remove(&self, id: SessionId) -> Option<Slot<M, H>> {
-        self.slots.lock().remove(&id).map(|e| e.slot)
+        let removed = self.slots.lock().remove(&id).map(|e| e.slot);
+        if removed.is_some() {
+            self.availability.notify_waiters();
+        }
+        removed
     }
 
     /// Read-only access to the machine WITHOUT checking it out — only
@@ -254,6 +278,40 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
                     })
                 }
             },
+        }
+    }
+
+    /// Wait until `id`'s machine can be checked out for a run.
+    ///
+    /// Only [`CheckoutError::Running`] waits. Unknown, terminal, and other
+    /// structural refusals return immediately. Settlement wakes one waiter;
+    /// no polling interval or caller-maintained retry flag is involved.
+    pub async fn checkout_wait(
+        &self,
+        id: SessionId,
+        request: CheckoutRequest<'_, H>,
+        max_wait: std::time::Duration,
+    ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
+        let wait = async {
+            loop {
+                let available = self.availability.notified();
+                let checkout = match request {
+                    CheckoutRequest::Run => self.checkout_run(id),
+                    CheckoutRequest::Resume(hole) => self.checkout_resume(id, hole),
+                    CheckoutRequest::Child => self.checkout_child(id),
+                };
+                match checkout {
+                    Err(CheckoutError::Running(_)) => available.await,
+                    result => return result,
+                }
+            }
+        };
+        match tokio::time::timeout(max_wait, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(CheckoutError::WaitTimeout {
+                session: id,
+                waited: max_wait,
+            }),
         }
     }
 
@@ -349,6 +407,8 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
             }
             _ => drop(machine),
         }
+        drop(slots);
+        self.availability.notify_one();
     }
 
     /// Settle a checked-out machine as `Wedged{since}` — the turn never gave
@@ -364,6 +424,8 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
                 entry.slot = Slot::Wedged { since };
             }
         }
+        drop(slots);
+        self.availability.notify_waiters();
     }
 }
 
@@ -605,6 +667,8 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         if slots.get(&id).is_some_and(|e| e.epoch == epoch) {
             slots.remove(&id);
         }
+        drop(slots);
+        self.availability.notify_waiters();
     }
 }
 
@@ -970,6 +1034,48 @@ mod tests {
         reg.remove(id);
         reg.insert_idle(id, FakeMachine { turns: 0 });
         assert!(is_idle(&reg, id), "reinstalling reclaims the slot");
+    }
+
+    #[tokio::test]
+    async fn waiting_checkout_wakes_when_the_running_owner_settles() {
+        let reg: std::sync::Arc<SessionRegistry<FakeMachine, Hole>> =
+            std::sync::Arc::new(SessionRegistry::new());
+        let id = SessionId(31);
+        reg.insert_idle(id, FakeMachine { turns: 7 });
+        let running = reg.checkout_run(id).expect("first owner");
+
+        let waiter_registry = std::sync::Arc::clone(&reg);
+        let waiter = tokio::spawn(async move {
+            let mut checkout = waiter_registry
+                .checkout_wait(id, CheckoutRequest::Run, std::time::Duration::from_secs(1))
+                .await
+                .expect("settlement wakes the waiter");
+            assert_eq!(checkout.machine().turns, 7);
+            checkout.restore_suspended(Vec::new());
+        });
+
+        tokio::task::yield_now().await;
+        running.restore_suspended(Vec::new());
+        waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn waiting_checkout_reports_its_timeout_distinctly() {
+        let reg: SessionRegistry<FakeMachine, Hole> = SessionRegistry::new();
+        let id = SessionId(32);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        let running = reg.checkout_run(id).expect("hold the machine");
+        let waited = std::time::Duration::from_millis(1);
+
+        let error = err(reg.checkout_wait(id, CheckoutRequest::Run, waited).await);
+        assert_eq!(
+            error,
+            CheckoutError::WaitTimeout {
+                session: id,
+                waited
+            }
+        );
+        running.restore_suspended(Vec::new());
     }
 
     #[test]

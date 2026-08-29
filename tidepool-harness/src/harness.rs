@@ -58,7 +58,7 @@ use crate::engine::{
 use crate::forcing::{NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
 use crate::provider::{DynModelProvider, Message, Role, Usage};
-use crate::registry::{Checkout, CheckoutError};
+use crate::registry::{Checkout, CheckoutError, CheckoutRequest};
 use crate::timing;
 use crate::tree::{HoleId, NodeId};
 
@@ -95,6 +95,12 @@ pub enum HarnessError {
     },
     #[error("node {0:?} already has a turn in flight")]
     TurnInFlight(NodeId),
+    #[error("node {node:?}: {source}")]
+    CheckoutTimeout {
+        node: NodeId,
+        #[source]
+        source: CheckoutError,
+    },
     /// A registry checkout landed on a state mismatch that is neither "no
     /// session" nor "busy" — a resume aimed at a non-member hole, or a child
     /// checkout on a holeless session (see
@@ -141,6 +147,10 @@ impl HarnessError {
         match err {
             CheckoutError::Unknown(_) => HarnessError::NoSession(node),
             CheckoutError::Running(_) => HarnessError::TurnInFlight(node),
+            timeout @ CheckoutError::WaitTimeout { .. } => HarnessError::CheckoutTimeout {
+                node,
+                source: timeout,
+            },
             // `NoSession` (the `SingleSlot` facade's "nothing installed") and
             // `Terminal` (the REPL-only `Wedged` slot) are never produced by
             // this crate's keyed registry usage — this crate never installs
@@ -239,19 +249,6 @@ struct NodeConvo {
     /// Cleared by `TurnLease::drop`, so every exit path (success, `?`, panic
     /// unwind) releases it.
     turn_lease: bool,
-    /// When `true`, [`Harness::run_block`]'s checkout attempts for THIS node
-    /// retry (short backoff) instead of failing fast on
-    /// [`HarnessError::TurnInFlight`] — set via
-    /// [`Harness::set_retry_checkout_on_contention`] for a node whose
-    /// contention is EXPECTED and benign: a concurrently-driven sibling
-    /// realm on the SAME shared session
-    /// (`SelfHarnessDriver::drive_fanout_child`), never a re-entrant/manually
-    /// held conflict. `false` by default for every node — the existing
-    /// fail-fast contract (`tests/turn_lease.rs`) is unchanged unless a
-    /// caller explicitly opts in. Read fresh per checkout attempt (not
-    /// snapshotted), so it can be set right after node creation and take
-    /// effect on that node's very first turn.
-    retry_checkout_on_contention: bool,
 }
 
 /// An RAII hold on [`NodeConvo::turn_lease`], returned by
@@ -1094,7 +1091,6 @@ impl Harness {
                 framing,
                 last_turn_source: None,
                 turn_lease: false,
-                retry_checkout_on_contention: false,
             },
         );
         Ok(())
@@ -1126,49 +1122,24 @@ impl Harness {
         Ok(self.run_with_checkout(sid, co, f))
     }
 
-    /// [`Self::with_session`], but — ONLY when `node` opted in via
-    /// [`Self::set_retry_checkout_on_contention`] — retries a checkout
-    /// contention refusal with a short backoff instead of failing fast, the
-    /// SAME idiom [`Self::checkout_run_retrying`] applies to a node-keyed
-    /// checkout (F4: a raw `with_session` call against an attached answerer's
-    /// SHARED session has no contention retry at all today, so a concurrently
-    /// -driven sibling holding the machine turns "expected, benign
-    /// contention" into a mechanism failure that hard-fails the whole
-    /// fanout). `node` is used solely to look up that opt-in flag — the
-    /// checkout itself is still against `sid`, exactly like `with_session`.
-    /// A node that never opts in gets EXACTLY `with_session`'s behavior.
-    pub async fn with_session_retrying<T>(
+    /// Wait for the shared session and run `f` under the same settlement
+    /// discipline as [`Self::with_session`]. Intended for attached windows,
+    /// where another actor legitimately owns the machine for a turn.
+    pub async fn with_session_waiting<T>(
         &self,
-        node: NodeId,
         sid: tidepool_repr::SessionId,
         f: impl FnOnce(&mut Session) -> T,
     ) -> Result<T, HarnessError> {
-        let retry = self
-            .convos
-            .lock()
-            .get(&node)
-            .map(|c| c.retry_checkout_on_contention)
-            .unwrap_or(false);
-        if !retry {
-            return self.with_session(sid, f);
-        }
-        let deadline = tokio::time::Instant::now() + Self::CONTENTION_RETRY_BUDGET;
-        loop {
-            match self.tree.registry().checkout_run(sid) {
-                Ok(co) => return Ok(self.run_with_checkout(sid, co, f)),
-                Err(CheckoutError::Running(_)) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Self::CONTENTION_RETRY_BACKOFF).await;
-                }
-                Err(e) => {
-                    return Err(HarnessError::Resident(format!(
-                        "outer session checkout: {e}"
-                    )));
-                }
-            }
-        }
+        let co = self
+            .tree
+            .registry()
+            .checkout_wait(sid, CheckoutRequest::Run, Self::CHECKOUT_WAIT_BUDGET)
+            .await
+            .map_err(|e| HarnessError::Resident(format!("outer session checkout: {e}")))?;
+        Ok(self.run_with_checkout(sid, co, f))
     }
 
-    /// Shared tail of [`Self::with_session`]/[`Self::with_session_retrying`]:
+    /// Shared tail of [`Self::with_session`]/[`Self::with_session_waiting`]:
     /// given an already-successful checkout, drain queued window exits,
     /// reset the ambient realm/scope, run `f`, and restore with the
     /// session's own reported hole set — the one place this sequence is
@@ -1773,7 +1744,7 @@ impl Harness {
 
         match outcome {
             TurnResult::Decl { .. } => {
-                let checkout = self.checkout_run_retrying(node).await?;
+                let checkout = self.checkout_run_waiting(node).await?;
                 // Into the node's OWN scope: the definition joins that scope's
                 // decl tip (which already re-exports its ancestors'), so it is
                 // visible to this window and its descendants and to nobody
@@ -1849,7 +1820,7 @@ impl Harness {
 
                 // Run the compiled fragment against the session (move it onto
                 // the blocking pool and back — the resident session is `Send`).
-                let checkout = self.checkout_run_retrying(node).await?;
+                let checkout = self.checkout_run_waiting(node).await?;
                 let run_table = table.clone();
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
@@ -2058,7 +2029,7 @@ impl Harness {
                     decl_texts[0] = format!("{decl_import_prefix}\n{}", decl_texts[0]);
                 }
 
-                let checkout = self.checkout_run_retrying(node).await?;
+                let checkout = self.checkout_run_waiting(node).await?;
                 let res = self
                     .run_checked_out(node, checkout, move |mut session| {
                         let refs: Vec<&str> = decl_texts.iter().map(String::as_str).collect();
@@ -2270,7 +2241,7 @@ impl Harness {
                     let asks = AsksSidecar::from_entries(compiled.asks);
                     let table = compiled.table;
                     let expr = compiled.expr;
-                    let checkout = self.checkout_run_retrying(node).await?;
+                    let checkout = self.checkout_run_waiting(node).await?;
                     let run_table = table.clone();
                     let run_outcome = self
                         .run_checked_out(node, checkout, move |mut session| {
@@ -2485,7 +2456,7 @@ impl Harness {
         let table = compiled.table;
         let expr = compiled.expr;
 
-        let checkout = self.checkout_run_retrying(node).await?;
+        let checkout = self.checkout_run_waiting(node).await?;
         let binder_for_run = binder.clone();
         let run_table = table.clone();
         let outcome = self
@@ -2806,7 +2777,7 @@ impl Harness {
     /// continuation does not lose it) alongside its rendered JSON text — what
     /// the answer actually WAS, for the driver's `Finalize` narration event
     /// (dogfood-observability deliverable 4).
-    pub(crate) fn take_finalized_value_keep_open(
+    pub(crate) async fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
     ) -> Result<(Value, String), HarnessError> {
@@ -2824,7 +2795,7 @@ impl Harness {
         // then surfaces the abort as a terminal error outcome — that Err IS the
         // expected "continuation discarded" signal, not a failure, so it is
         // deliberately ignored. What matters is the session is now idle.
-        let mut co = self.checkout_resume(node, &hole)?;
+        let mut co = self.checkout_resume_waiting(node, &hole).await?;
         let _ = co
             .machine()
             .abort(&hole.0, "finalize consumed (answerer reused)".to_string());
@@ -2854,7 +2825,7 @@ impl Harness {
     /// set, `hole_consumed` the tree). The caller delivers custody into
     /// the awaiting hole via `ResidentSession::resume_handle`. The node and
     /// its session stay live and reusable.
-    pub(crate) fn take_finalized_handle_keep_open(
+    pub(crate) async fn take_finalized_handle_keep_open(
         &self,
         node: NodeId,
     ) -> Result<tidepool_runtime::session::RootCustody, HarnessError> {
@@ -2876,7 +2847,7 @@ impl Harness {
             });
         }
         let hole = pending.hole;
-        let mut co = self.checkout_resume(node, &hole)?;
+        let mut co = self.checkout_resume_waiting(node, &hole).await?;
         let handle = co.machine().finalized_handle(&hole.0);
         let handle = match handle {
             Some(h) => h,
@@ -2921,7 +2892,7 @@ impl Harness {
     /// OTHER parked frames (a green thread's) survive via the same
     /// restore-with-reported-holes discipline the finalize-consume paths
     /// use.
-    pub(crate) fn refuse_pending_suspension(
+    pub(crate) async fn refuse_pending_suspension(
         &self,
         node: NodeId,
         reason: String,
@@ -2934,7 +2905,7 @@ impl Harness {
             .node_pending(node)
             .ok_or(HarnessError::NotSuspended(node))?;
         let hole = pending.hole;
-        let mut co = self.checkout_resume(node, &hole)?;
+        let mut co = self.checkout_resume_waiting(node, &hole).await?;
         // The abort's Err outcome IS the expected "continuation discarded"
         // signal (see `take_finalized_value_keep_open`), not a failure.
         let _ = co.machine().abort(&hole.0, reason);
@@ -3005,7 +2976,7 @@ impl Harness {
         // accumulated session table (see `ResidentSession::apply_finalized`'s
         // doc for why no `I#`-id matching is needed here).
         let suspend_table = self.node_pending(node).map(|p| p.suspend_table);
-        let checkout = self.checkout_child(node)?;
+        let checkout = self.checkout_child_waiting(node).await?;
         let out = self
             .run_checked_out(node, checkout, move |mut session| {
                 let out = session.apply_finalized(arg, suspend_table.as_ref());
@@ -3188,7 +3159,7 @@ impl Harness {
         {
             return Err(HarnessError::BorrowedRootOnBindingHole(node));
         }
-        let checkout = self.checkout_resume(node, hole)?;
+        let checkout = self.checkout_resume_waiting(node, hole).await?;
         // ONE consuming resume: `resident_hole` already carries its own
         // completion obligation (`ResidentHole::Binding` materializes on
         // completion; `ResidentHole::Plain` needs nothing extra) — no
@@ -3447,76 +3418,31 @@ impl Harness {
             .unwrap_or_default()
     }
 
-    /// Check `node`'s machine out for a NEW TOP-LEVEL turn (`Idle ->
-    /// Running`). Maps a registry refusal through [`HarnessError::from_checkout`]
-    /// (the one place a `CheckoutError` becomes a node-scoped `HarnessError`).
-    fn checkout_run(&self, node: NodeId) -> Result<Checkout<'_, Session>, HarnessError> {
+    /// Maximum time an attached/shared-session operation may wait for the
+    /// current turn to settle. Same-node concurrency is rejected earlier by
+    /// the turn lease; this bound protects against a genuinely wedged owner.
+    const CHECKOUT_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+    async fn checkout_run_waiting(
+        &self,
+        node: NodeId,
+    ) -> Result<Checkout<'_, Session>, HarnessError> {
         let sid = self
             .tree
             .session_of(node)
             .ok_or(HarnessError::NoSession(node))?;
-        self.tree
-            .registry()
-            .checkout_run(sid)
-            .map_err(|e| HarnessError::from_checkout(node, e))
+        if self.tree.node_owns_session(node) {
+            self.tree.registry().checkout_run(sid)
+        } else {
+            self.tree
+                .registry()
+                .checkout_wait(sid, CheckoutRequest::Run, Self::CHECKOUT_WAIT_BUDGET)
+                .await
+        }
+        .map_err(|error| HarnessError::from_checkout(node, error))
     }
 
-    /// How long [`Self::checkout_run_retrying`] backs off between checkout
-    /// attempts while contested by a sibling realm.
-    const CONTENTION_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(3);
-
-    /// Bound on contention retries, as an ELAPSED-TIME budget (~2 minutes)
-    /// rather than an iteration count — a fanout child contending behind
-    /// several siblings' multi-second JIT turns across rounds can
-    /// legitimately need to wait longer than a fixed attempt count assuming
-    /// zero-cost checkouts would allow — so a genuinely wedged machine still
-    /// fails loud, just bounded by wall-clock time instead.
-    const CONTENTION_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
-
-    /// [`Self::checkout_run`], but — ONLY when `node` opted in via
-    /// [`Self::set_retry_checkout_on_contention`] — retries with a short
-    /// backoff instead of failing fast on [`HarnessError::TurnInFlight`].
-    ///
-    /// This is the ONE place [`Self::run_block`] checks a machine out, so it
-    /// is where a concurrently-driven sibling realm's checkout race against
-    /// this SAME shared session gets resolved by WAITING rather than
-    /// erroring: unlike retrying [`Self::drive_turn`] as a
-    /// whole (NOT safe — it has already called the provider and appended
-    /// the assistant reply to the transcript by the time a checkout could
-    /// contend), retrying just this checkout is safe because nothing
-    /// observable has happened yet at this point — `f` (the actual resident
-    /// call) is invoked at most once, only after a checkout succeeds.
-    ///
-    /// A node that never opts in (every existing caller) gets EXACTLY
-    /// [`Self::checkout_run`]'s behavior — fail fast, no retry — so
-    /// `tests/turn_lease.rs`'s fail-fast contract is unchanged.
-    async fn checkout_run_retrying(
-        &self,
-        node: NodeId,
-    ) -> Result<Checkout<'_, Session>, HarnessError> {
-        let retry = self
-            .convos
-            .lock()
-            .get(&node)
-            .map(|c| c.retry_checkout_on_contention)
-            .unwrap_or(false);
-        if !retry {
-            return self.checkout_run(node);
-        }
-        let deadline = tokio::time::Instant::now() + Self::CONTENTION_RETRY_BUDGET;
-        loop {
-            match self.checkout_run(node) {
-                Err(HarnessError::TurnInFlight(_)) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Self::CONTENTION_RETRY_BACKOFF).await;
-                }
-                other => return other,
-            }
-        }
-    }
-
-    /// Check `node`'s machine out to resume/abort its pending `hole`
-    /// (`Suspended{hole} -> Running`), validating the hole matches.
-    fn checkout_resume(
+    async fn checkout_resume_waiting(
         &self,
         node: NodeId,
         hole: &HoleId,
@@ -3525,26 +3451,38 @@ impl Harness {
             .tree
             .session_of(node)
             .ok_or(HarnessError::NoSession(node))?;
-        self.tree
-            .registry()
-            .checkout_resume(sid, hole)
-            .map_err(|e| HarnessError::from_checkout(node, e))
+        if self.tree.node_owns_session(node) {
+            self.tree.registry().checkout_resume(sid, hole)
+        } else {
+            self.tree
+                .registry()
+                .checkout_wait(
+                    sid,
+                    CheckoutRequest::Resume(hole),
+                    Self::CHECKOUT_WAIT_BUDGET,
+                )
+                .await
+        }
+        .map_err(|error| HarnessError::from_checkout(node, error))
     }
 
-    /// Check `node`'s machine out for a CHILD run over its parked frames
-    /// (`Suspended{holes} -> Running{holes}`) — the `run_child` discipline:
-    /// an answer value crosses via a child run against the suspended
-    /// TARGET's own session, never consuming its parked continuations
-    /// (which stay rooted in the machine's registry throughout).
-    fn checkout_child(&self, node: NodeId) -> Result<Checkout<'_, Session>, HarnessError> {
+    async fn checkout_child_waiting(
+        &self,
+        node: NodeId,
+    ) -> Result<Checkout<'_, Session>, HarnessError> {
         let sid = self
             .tree
             .session_of(node)
             .ok_or(HarnessError::NoSession(node))?;
-        self.tree
-            .registry()
-            .checkout_child(sid)
-            .map_err(|e| HarnessError::from_checkout(node, e))
+        if self.tree.node_owns_session(node) {
+            self.tree.registry().checkout_child(sid)
+        } else {
+            self.tree
+                .registry()
+                .checkout_wait(sid, CheckoutRequest::Child, Self::CHECKOUT_WAIT_BUDGET)
+                .await
+        }
+        .map_err(|error| HarnessError::from_checkout(node, error))
     }
 
     /// Run `f` against `checkout`'s machine on the blocking pool, then
@@ -3734,20 +3672,6 @@ impl Harness {
             .get(&node)
             .and_then(|c| c.scope)
             .unwrap_or(ScopeId::ROOT)
-    }
-
-    /// Opt `node` into retrying (rather than failing fast) a
-    /// [`Self::run_block`] checkout contested by [`HarnessError::TurnInFlight`]
-    /// — see [`NodeConvo::retry_checkout_on_contention`]'s doc for the exact
-    /// contract and why this is safe to enable ONLY for a node whose
-    /// contention is a concurrently-driven sibling realm on the SAME shared
-    /// session. `false` by default; every existing caller
-    /// (which never calls this) keeps today's fail-fast behavior unchanged.
-    pub fn set_retry_checkout_on_contention(&self, node: NodeId, retry: bool) {
-        let mut convos = self.convos.lock();
-        if let Some(convo) = convos.get_mut(&node) {
-            convo.retry_checkout_on_contention = retry;
-        }
     }
 
     /// Replace `node`'s transcript with a single summary message IN PLACE,
@@ -4334,7 +4258,6 @@ mod tests {
                 framing: None,
                 last_turn_source: None,
                 turn_lease: false,
-                retry_checkout_on_contention: false,
             },
         );
     }
