@@ -26,6 +26,7 @@ library tidepool-extract-internal
     Tidepool.Identity
     Tidepool.IR
     Tidepool.Metadata
+    Tidepool.PrimOps
     Tidepool.Json
     Tidepool.Resolve
     Tidepool.Session
