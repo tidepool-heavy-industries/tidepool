@@ -367,10 +367,8 @@ fn runllmturn_rejects_polymorphic_site() {
 
 #[test]
 fn runllmturn_accepts_pure_function_typed_site() {
-    // `checkRunLLMTurnType` does not reject every function arrow: a pure
-    // function-typed answer
-    // compiles past the gate (it may still fail LATER for unrelated
-    // reasons; this only asserts the old blanket rejection is gone).
+    // Function-valued answers are valid when the closure does not capture
+    // the compile-local effect row.
     let src_result = try_compile_runllmturn("runLLMTurn @(Int -> Int) \"fn\"", "");
     assert!(
         src_result.is_ok(),
@@ -382,19 +380,13 @@ fn runllmturn_accepts_pure_function_typed_site() {
 
 #[test]
 fn runllmturn_rejects_effectful_function_typed_site() {
-    // The narrower TASK 1 rejection: an answer type that itself mentions the
-    // effect monad (here `M Int` inside the arrow's result) is still a hard
-    // compile-time error — the generated `M`/`Eff` is nominal PER FRAGMENT
-    // and cannot unify across a suspend boundary.
+    // An answer type containing the current program's effect monad cannot
+    // cross the separately compiled suspension boundary.
     let err = try_compile_runllmturn("runLLMTurn @(Int -> M Int) \"fn\"", "")
         .expect_err("an effectful function-typed runLLMTurn site must fail extract");
     assert!(
-        err.contains("effectful function answers not supported (the row varies per compile)"),
-        "expected the new effectful-function-typed-site error text, got:\n{err}"
-    );
-    assert!(
-        err.contains("the M inside cannot unify across turns/windows compiling a different row"),
-        "expected the new error text's explanation clause, got:\n{err}"
+        err.contains("runLLMTurn answer captures a compile-local effect row"),
+        "expected the cross-compile effect-row diagnostic, got:\n{err}"
     );
 }
 
@@ -536,8 +528,8 @@ fn forkmap_rejects_polymorphic_answer_type() {
     let err = try_compile_forkmap("polyForkMap (\\x -> T.pack (show x)) [1, 2, 3]", helpers)
         .expect_err("a polymorphic forkMap site must fail extract");
     assert!(
-        err.contains("polymorphic runLLMTurn site"),
-        "expected the (shared) polymorphic-site error text, got:\n{err}"
+        err.contains("polymorphic forkMap site"),
+        "expected the forkMap polymorphic-site diagnostic, got:\n{err}"
     );
 }
 
