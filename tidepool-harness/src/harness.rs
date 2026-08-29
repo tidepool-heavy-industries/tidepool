@@ -45,8 +45,8 @@ use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, SessionLib, TemplateSelector, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ResidentOutcome, ResidentSession, SessionLib, SessionRunContext, TemplateSelector, TurnKind,
+    TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -575,7 +575,7 @@ fn pick_render_opts<'a>(
 /// be owned by (and accidentally closed with) whichever answerer realm ran
 /// last. Attached answerer realms are minted per loop from 1 upward.
 pub const OUTER_REALM: tidepool_codegen::suspension::RealmId =
-    tidepool_codegen::suspension::RealmId(0);
+    tidepool_codegen::suspension::RealmId::ROOT;
 
 /// A queued window exit: the two halves of an attached node's retirement that
 /// need the machine in hand. Either half may be absent (a node with a realm and
@@ -1181,13 +1181,11 @@ impl Harness {
         f: impl FnOnce(&mut Session) -> T,
     ) -> T {
         self.drain_pending_session_exits(sid, co.machine());
-        co.machine().set_realm(OUTER_REALM);
-        // Same reset, name side: the shared session's own runs are ROOT-scoped,
-        // never sticky on whichever answerer window ran last. ROOT is always
-        // live (`ScopeTree::is_live`), so this can never be refused.
+        // Shared-session work always re-enters at the root context, never in
+        // the context left by the last attached window.
         #[allow(clippy::expect_used, reason = "ScopeId::ROOT is always live")]
         co.machine()
-            .set_scope(ScopeId::ROOT)
+            .set_run_context(SessionRunContext::ROOT)
             .expect("ScopeId::ROOT is always live");
         let r = f(co.machine());
         let holes: Vec<HoleId> = co
@@ -3592,27 +3590,18 @@ impl Harness {
         self.drain_pending_session_exits(sid, &mut machine);
         match tokio::task::spawn_blocking(move || {
             let mut machine = machine;
-            machine.set_realm(realm);
-            // The NAME-side half of the same "this window's turn" statement:
-            // a node without a scope runs at ROOT, never at whatever scope the
-            // last turn on this shared machine left behind (the same ambient-
-            // stickiness hazard the realm reset above answers).
-            //
-            // A dead `scope` here means the node's own recorded scope was
+            // A dead `scope` here means the node's recorded scope was
             // retired out from under it (e.g. a queued window exit for this
-            // node drained just above, in `drain_pending_session_exits`) — a
-            // harness invariant violation, not a normal path. Force back to
-            // ROOT rather than let `set_scope` silently no-op and leave
-            // whatever scope the machine was last left at (the exact
-            // ambient-stickiness hazard this reset exists to prevent).
-            if let Err(e) = machine.set_scope(scope) {
+            // node drained just above). Fall back to the complete root context
+            // rather than retaining either half of a previous caller's context.
+            if let Err(e) = machine.set_run_context(SessionRunContext::new(realm, scope)) {
                 tracing::error!(
                     "run_checked_out: node {node:?}'s recorded scope {scope:?} is dead ({e}); \
                      falling back to ROOT"
                 );
                 #[allow(clippy::expect_used, reason = "ScopeId::ROOT is always live")]
                 machine
-                    .set_scope(ScopeId::ROOT)
+                    .set_run_context(SessionRunContext::ROOT)
                     .expect("ScopeId::ROOT is always live");
             }
             f(machine)

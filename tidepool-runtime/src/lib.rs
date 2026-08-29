@@ -294,7 +294,7 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     }
     table.populate_siblings_from_expr(&expr);
     let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
-    let realm = RealmId(0);
+    let realm = RealmId::ROOT;
     on_ready(machine.realm_cancel_handle(realm));
     let boundary = EffectBoundary::new(ask_tag, effect_names);
     let run = SuspensionRun::main(&table, &boundary, realm);
@@ -333,7 +333,7 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
     input: ResumeInput,
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<ResumedRun, RuntimeError> {
-    on_ready(machine.realm_cancel_handle(RealmId(0)));
+    on_ready(machine.realm_cancel_handle(RealmId::ROOT));
     match machine.resume_continuation(continuation, handlers, user, input)? {
         ParkedOutcome::CompletedValue(value) => {
             // No recompile happens on resume (the JIT machine is reused as-is),

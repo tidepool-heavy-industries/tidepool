@@ -15,6 +15,11 @@ pub struct ContinuationId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RealmId(pub u64);
 
+impl RealmId {
+    /// The machine's root resource scope.
+    pub const ROOT: Self = Self(0);
+}
+
 /// Opaque identity of a rooted value in a machine's retained heap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ValueHandle(pub u64);

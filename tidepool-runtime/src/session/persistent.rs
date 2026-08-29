@@ -213,7 +213,7 @@ impl PersistentSession {
     pub fn cancel_handle(&mut self) -> Option<CancelHandle> {
         self.machine
             .as_mut()
-            .map(|m| m.realm_cancel_handle(RealmId(0)))
+            .map(|m| m.realm_cancel_handle(RealmId::ROOT))
     }
 
     // -- table accumulation ------------------------------------------------
@@ -540,7 +540,7 @@ impl PersistentSession {
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_entry");
-        let run = SuspensionRun::main(run_table, &boundary, RealmId(0));
+        let run = SuspensionRun::main(run_table, &boundary, RealmId::ROOT);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
@@ -572,8 +572,13 @@ impl PersistentSession {
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_funcid_with_table");
-        let run =
-            SuspensionRun::fragment(func_id, run_table, &boundary, RealmId(0), ParkKind::Plain);
+        let run = SuspensionRun::fragment(
+            func_id,
+            run_table,
+            &boundary,
+            RealmId::ROOT,
+            ParkKind::Plain,
+        );
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
@@ -631,7 +636,7 @@ impl PersistentSession {
             func_id,
             session_table,
             &boundary,
-            RealmId(0),
+            RealmId::ROOT,
             ParkKind::Plain,
         );
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
@@ -708,7 +713,7 @@ impl PersistentSession {
             func_id,
             session_table,
             &boundary,
-            RealmId(0),
+            RealmId::ROOT,
             ParkKind::Binding { forced },
         );
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
@@ -773,7 +778,7 @@ impl PersistentSession {
             func_id,
             session_table,
             &boundary,
-            RealmId(0),
+            RealmId::ROOT,
             ParkKind::Project { n_fields },
         );
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
@@ -835,7 +840,7 @@ impl PersistentSession {
             func_id,
             session_table,
             &boundary,
-            RealmId(0),
+            RealmId::ROOT,
             ParkKind::Render { field0_forced },
         );
         let outcome = machine.run_until_suspension(run, handlers, captured)?;

@@ -40,7 +40,9 @@ pub use engine::{
 
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
-pub use resident::{ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody};
+pub use resident::{
+    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, SessionRunContext,
+};
 
 pub use turn::{
     assemble_bind_module, classify_block, compile_session_turn, insert_preamble_imports,

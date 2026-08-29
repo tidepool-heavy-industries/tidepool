@@ -36,9 +36,9 @@
 //! (further turns, further parks, resumes of other frames). The session
 //! tracks its parked holes as an insertion-ordered `(hole, ContinuationId)`
 //! list; [`ResidentSession::resume`] resumes ANY member hole by identity
-//! (the machine imposes no order). The realm every park is owned by is
-//! [`ResidentSession::set_realm`]-scoped (per-node realms arrive with the
-//! collapse); the handled prefix is DERIVED from the session's own
+//! (the machine imposes no order). Each entry runs in an explicit
+//! [`SessionRunContext`] that pairs its heap-resource and lexical scopes; the
+//! handled prefix is derived from the session's own
 //! `effect_names[..ask_tag]` — one source of truth, per the parking
 //! contract's "derive, don't declare" guidance.
 //!
@@ -79,6 +79,40 @@ use super::engine::OutputSink;
 use super::persistent::{PersistentSession, ScopeRetirement};
 use super::turn::{BoundBinder, ValueTier};
 use super::{SessionError, SessionLib};
+
+/// Runtime context applied to every entry into a resident session.
+///
+/// These two scopes describe one logical execution window: `resource_scope`
+/// owns parked frames and live handles, while `lexical_scope` selects the
+/// declarations and bindings visible to compilation. Keeping them in one
+/// value prevents a shared session from accidentally combining one caller's
+/// heap ownership with another caller's lexical environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionRunContext {
+    pub resource_scope: RealmId,
+    pub lexical_scope: ScopeId,
+}
+
+impl SessionRunContext {
+    pub const ROOT: Self = Self {
+        resource_scope: RealmId::ROOT,
+        lexical_scope: ScopeId::ROOT,
+    };
+
+    #[must_use]
+    pub const fn new(resource_scope: RealmId, lexical_scope: ScopeId) -> Self {
+        Self {
+            resource_scope,
+            lexical_scope,
+        }
+    }
+}
+
+impl Default for SessionRunContext {
+    fn default() -> Self {
+        Self::ROOT
+    }
+}
 
 /// A LINEAR custody token over a [`ValueHandle`] between the moment it enters
 /// Rust-side custody — minted by [`ResidentSession::finalized_handle`] — and
@@ -439,16 +473,9 @@ pub struct ResidentSession<H, O> {
     /// registry is the ground truth; these are the string identities callers
     /// resume/abort against (atomic validate-before-consume). Top = last.
     parked: Vec<(String, ContinuationId)>,
-    /// The realm every park this session initiates is owned by. `RealmId(0)`
-    /// until [`ResidentSession::set_realm`] — per-node realms arrive with the
-    /// one-session collapse.
-    realm: RealmId,
-    /// The scope tree node every turn this session runs is compiled and bound
-    /// in ([`ScopeId::ROOT`] until [`ResidentSession::set_scope`]). The realm
-    /// field above is the HEAP-side lifetime (parked frames, handles); this is
-    /// the NAME-side one (decl tips, value-plane frames). A window carries
-    /// both, and retiring it exits both — see `Harness::terminate_node`.
-    scope: ScopeId,
+    /// The resource and lexical scopes for the next session entry. Callers
+    /// sharing a machine replace this atomically at checkout boundaries.
+    run_context: SessionRunContext,
 }
 
 impl<H, O> ResidentSession<H, O>
@@ -506,8 +533,7 @@ where
             include,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
-            realm: RealmId(0),
-            scope: ScopeId::ROOT,
+            run_context: SessionRunContext::ROOT,
         })
     }
 
@@ -538,8 +564,7 @@ where
             include,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
-            realm: RealmId(0),
-            scope: ScopeId::ROOT,
+            run_context: SessionRunContext::ROOT,
         }
     }
 
@@ -636,36 +661,23 @@ where
         self.parked.is_empty()
     }
 
-    /// Scope every subsequent park under `realm`: the
-    /// driver assigns per-answerer-node realms; scope exit is the machine's
-    /// `close_realm`.
-    pub fn set_realm(&mut self, realm: RealmId) {
-        self.realm = realm;
-    }
-
-    /// Compile and bind every subsequent turn in `scope`: the
-    /// turn imports `scope`'s decl tip and the `Val.G<g>` modules VISIBLE from
-    /// it, and a value-plane bind lands in `scope`'s own frame. The harness
-    /// applies a node's scope here at the same site it applies its realm, so a
-    /// node without one keeps compiling and binding at [`ScopeId::ROOT`] —
-    /// exactly its behavior before scope trees existed.
+    /// Select the resource ownership and lexical environment for subsequent
+    /// work on this checkout.
     ///
-    /// Rejects a dead `scope` (never minted, or already retired) with a typed
-    /// [`ResidentError`] and leaves [`Self::current_scope`] unchanged — a
-    /// failed assignment must not silently rebind subsequent turns to a
-    /// dead frame. [`ScopeId::ROOT`] is always live, so selecting it is always
-    /// a no-op.
-    pub fn set_scope(&mut self, scope: ScopeId) -> Result<(), ResidentError> {
-        if !self.core.scope_tree().is_live(scope) {
-            return Err(SessionError::DeadScope(scope).into());
+    /// Validation happens before assignment, so a dead lexical scope leaves
+    /// both halves of the previous context unchanged.
+    pub fn set_run_context(&mut self, context: SessionRunContext) -> Result<(), ResidentError> {
+        if !self.core.scope_tree().is_live(context.lexical_scope) {
+            return Err(SessionError::DeadScope(context.lexical_scope).into());
         }
-        self.scope = scope;
+        self.run_context = context;
         Ok(())
     }
 
-    /// The scope this session's turns currently compile and bind in.
-    pub fn current_scope(&self) -> ScopeId {
-        self.scope
+    /// The context currently selected for resident-session entries.
+    #[must_use]
+    pub fn run_context(&self) -> SessionRunContext {
+        self.run_context
     }
 
     /// Scope exit for `realm`: close the realm
@@ -1114,7 +1126,7 @@ where
         );
 
         let boundary = self.core.effect_boundary().clone();
-        let realm = self.realm;
+        let realm = self.run_context.resource_scope;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain);
@@ -1174,7 +1186,7 @@ where
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
-        let realm = self.realm;
+        let realm = self.run_context.resource_scope;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run = SuspensionRun::fragment(
@@ -1515,7 +1527,7 @@ where
         // a result must outlive the thread realm that produced it, since
         // cancelling or retiring a thread closes that realm while a waiter may
         // still be holding the value.
-        let owning_realm = self.realm;
+        let owning_realm = self.run_context.resource_scope;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain);
             machine
@@ -1594,7 +1606,7 @@ where
         // replays its own kind/table/tag, so bind-vs-plain needs no
         // re-declaration here (`bind` is only used for materialization
         // below).
-        let realm = self.realm;
+        let realm = self.run_context.resource_scope;
         let outcome = self.on_eval_thread(move |machine, _table, handlers, captured| {
             machine
                 .resume_continuation(frame_id, handlers, captured, input)
@@ -1642,13 +1654,13 @@ where
     /// construction, the core owns the plane. Evicts any same-name decl (the
     /// one-plane invariant — a value bind wins over an earlier decl head).
     ///
-    /// Checks `self.scope`'s liveness FIRST, before `handle` is resolved and
+    /// Checks the current lexical scope's liveness first, before `handle` is resolved and
     /// released from the machine's handle registry — same ordering reason as
     /// [`Self::mount_handle_in`]: once `release_handle` runs, only a
     /// successful bind gives the root a new owner, so a dead scope caught
     /// only by [`PersistentSession::bind_in`]'s backstop would leave it
     /// untracked by every accounting class at once. In ordinary operation
-    /// `self.scope` cannot go dead mid-turn ([`Self::set_scope`] already
+    /// the selected scope cannot go dead mid-turn ([`Self::set_run_context`] already
     /// refuses a dead scope), so this guards a defensive precondition rather
     /// than a reachable steady-state path.
     fn materialize_binder(
@@ -1657,8 +1669,9 @@ where
         gen: Generation,
         bound: Option<ValueHandle>,
     ) -> Result<(), ResidentError> {
-        if !self.core.scope_tree().is_live(self.scope) {
-            return Err(SessionError::DeadScope(self.scope).into());
+        let scope = self.run_context.lexical_scope;
+        if !self.core.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope).into());
         }
         // The tenured root rode out of the eval thread as a `Send` handle
         // (pillar-B laundering); resolve it back to its slot HERE, on the
@@ -1693,9 +1706,9 @@ where
         // OWN scope — a child binding `helper` retracts the child's decl head,
         // never the parent's, because nothing in this tree ever walks downward.
         // Root-scope bindings use this same scoped path.
-        self.core.retract_in(self.scope, &binder.name)?;
+        self.core.retract_in(scope, &binder.name)?;
         self.core.bind_in(
-            self.scope,
+            scope,
             BindingEntry {
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
@@ -1703,7 +1716,7 @@ where
                 value,
                 type_display: Some(binder.type_display.clone()),
                 defining_expr: None,
-                scope: self.scope,
+                scope,
             },
         )?;
         self.core.set_val_gen(gen);
@@ -2017,25 +2030,20 @@ mod tests {
         assert_eq!(ok.unwrap(), 7);
     }
 
-    /// [`ResidentSession::set_scope`] on a dead scope (never minted, or
-    /// already retired) must return a typed error and leave
-    /// [`ResidentSession::current_scope`] exactly where it was — the exact
-    /// gap the 2026-08-19 review flagged (a dead-scope assignment used to
-    /// silently succeed, so a later turn compiled and bound against a scope
-    /// no lookup chain could ever see again).
     #[test]
-    fn set_scope_rejects_a_dead_scope_and_leaves_current_scope_unchanged() {
+    fn run_context_rejects_a_dead_scope_atomically() {
         let mut session = bootstrap_trivial_session();
         let live = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
+        let live_context = SessionRunContext::new(RealmId(41), live);
         session
-            .set_scope(live)
+            .set_run_context(live_context)
             .expect("freshly-minted scope is live");
-        assert_eq!(session.current_scope(), live);
+        assert_eq!(session.run_context(), live_context);
 
         session.retire_scope(live);
         let now_dead = live;
 
-        let result = session.set_scope(now_dead);
+        let result = session.set_run_context(SessionRunContext::new(RealmId(42), now_dead));
         assert!(
             matches!(
                 result,
@@ -2044,23 +2052,21 @@ mod tests {
             "expected a typed DeadScope error, got {result:?}"
         );
         assert_eq!(
-            session.current_scope(),
-            live,
-            "a rejected assignment must not move the session off its last live scope"
+            session.run_context(),
+            live_context,
+            "a rejected assignment must change neither resource nor lexical scope"
         );
 
-        // A never-minted, always-invalid id is rejected the same way.
         let never_minted = ScopeId(999_999);
         assert!(matches!(
-            session.set_scope(never_minted),
+            session.set_run_context(SessionRunContext::new(RealmId(43), never_minted)),
             Err(ResidentError::Session(SessionError::DeadScope(s))) if s == never_minted
         ));
 
-        // ROOT stays byte-identical: always live, never refused.
         session
-            .set_scope(ScopeId::ROOT)
+            .set_run_context(SessionRunContext::ROOT)
             .expect("ROOT is always live");
-        assert_eq!(session.current_scope(), ScopeId::ROOT);
+        assert_eq!(session.run_context(), SessionRunContext::ROOT);
     }
 
     /// [`ResidentSession::mount_handle_in`] on a dead scope must reject with
