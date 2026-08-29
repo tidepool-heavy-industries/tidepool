@@ -36,8 +36,6 @@ data RequestField
   | TurnVerdict String
   | Classify
   | ClassifyOut FilePath
-  | TurnBatch FilePath
-  | BatchOut FilePath
   | HarnessProfile
   | BuildProductsDir FilePath
   deriving (Eq, Show)
@@ -97,8 +95,6 @@ encodeField field = case field of
   TurnVerdict value -> taggedText 19 value
   Classify -> BS.singleton 20
   ClassifyOut value -> taggedText 21 value
-  TurnBatch value -> taggedText 22 value
-  BatchOut value -> taggedText 23 value
   HarnessProfile -> BS.singleton 24
   BuildProductsDir value -> taggedText 25 value
 
@@ -155,8 +151,6 @@ pField bytes = do
     19 -> mapParser TurnVerdict pText rest
     20 -> Right (Classify, rest)
     21 -> mapParser ClassifyOut pText rest
-    22 -> mapParser TurnBatch pText rest
-    23 -> mapParser BatchOut pText rest
     24 -> Right (HarnessProfile, rest)
     25 -> mapParser BuildProductsDir pText rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)

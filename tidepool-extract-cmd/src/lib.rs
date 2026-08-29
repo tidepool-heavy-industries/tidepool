@@ -6,9 +6,7 @@
 //!   policy as the default for everyone: a SET-but-unreadable
 //!   `$TIDEPOOL_EXTRACT` is a hard error, never a silent fall-through to
 //!   `PATH`; an UNSET one falls back to the bare `tidepool-extract` name.
-//! - [`ExtractCmd`] — typed argument construction for every mode the tree
-//!   drives (`--target`/`--targets`/`--turn`/`--classify`/`--session-*`/
-//!   `--include`/`--output-dir`/…).
+//! - [`ExtractCmd`] — construction and encoding of typed compiler requests.
 //! - CLI/daemon infrastructure and the process-global [`extract_spawn_count`].
 //!
 //! This is a std-only leaf because proc-macro crates depend on it. Parsing JSON

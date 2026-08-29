@@ -1,52 +1,49 @@
-# tidepool-extract-cmd — the ONE `tidepool-extract` invocation builder
+# tidepool-extract-cmd — compiler-worker boundary
 
-**Charter.** This crate is the public extractor boundary. It owns the CLI,
-binary resolution (the strict `$TIDEPOOL_EXTRACT` policy), typed request
-construction and encoding (`ExtractCmd`), resident-daemon transport and
-lifecycle, and the spawn counter. The Haskell executable is a compiler worker
-behind this boundary. Parsing extractor output
-belongs to callers; the compile cache belongs to `tidepool-toolchain`, which
-uses this crate's `argv()` in its cache key.
+## Charter
 
-## Resident compile daemon
+This crate is the public process boundary for extraction. It owns:
 
-`ExtractCmd::run()` (never `run_with` — see below) transparently tries the
-resident compile daemon before falling back
-to a direct spawn: when `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a path, it
-connects and sends `(cwd, worker request)` over the length-prefixed wire owned
-by the `daemon` module. The Rust daemon forwards the typed request to a
-resident Haskell worker over its private framed stdin/stdout protocol, then
-synthesizes the daemon's response into the same `ExtractRun{output, elapsed}`
-shape a spawned process produces (`std::os::unix::process::ExitStatusExt::
-from_raw` over a wait(2)-style status, NOT a bare exit code — see
-`daemon::encode_wait_status`'s doc for the exact encoding and its
-`exit_status_round_trips_0_1_2`/`..._negative_code_truncates...` unit tests).
+- the human-facing CLI;
+- strict extractor binary resolution;
+- typed request construction and encoding;
+- direct and resident-worker transport;
+- process lifecycle and invocation accounting.
 
-**At-most-once semantics, never a hang.** Every daemon-unavailable signal —
-the env var unset, connect failure, an I/O timeout, or an unexpected EOF
-mid-response (`daemon::DaemonError::Crashed` — the daemon crashed or was
-killed mid-request) — causes `run()` to fall back to `self.launcher`
-(`Direct`, the same launcher every existing caller already had) for that ONE
-request, never a retry against the same daemon and never surfaced as this
-call's own error. The spawn counter (`extract_spawn_count`) increments
-exactly once per logical request either way — on the daemon's own success,
-or on the Direct fallback's — see `run`'s own doc for why `run_via_daemon`
-counts a daemon-served request as a real spawn: the counter means "an
-invocation was served," not "a process was forked."
+The Haskell executable behind this crate is a compiler worker. It receives a
+versioned domain request, runs GHC, and returns compiler artifacts or
+diagnostics. Do not put command-line grammar, JSON control planes, daemon
+policy, or caller workflow orchestration in the worker.
 
-**`Launcher::Daemon(PathBuf)`** is the third launcher variant, structurally
-not `Command`-shaped (no process to build — `Launcher::command()` panics on
-it; `ExtractCmd::run_with` special-cases it before ever reaching
-`command()`). It exists for a caller that wants to target a SPECIFIC daemon
-socket explicitly rather than `run()`'s own env-gated discovery; unlike
-`run()`, `run_with(&Launcher::Daemon(path))` reports a daemon failure as this
-call's own `SpawnError` — an explicit launcher is an explicit request, so a
-failure is reported honestly rather than silently retried through Direct.
-No caller does this today; it exists so the type is total rather than a
-landmine.
+Artifact decoding belongs to callers. Content-addressed compilation caching
+and toolchain validation belong to `tidepool-toolchain`.
 
-**Zero dependencies** (the charter above still holds): the wire codec is
-hand-rolled (`u32`-LE length-prefixed frames), never `serde`/`serde_json`,
-even for the response's small `{exit_code, stdout, stderr}` shape — see
-`daemon`'s module doc for why the frame boundaries alone are enough
-structure that no interchange format is needed (both endpoints are in-repo).
+## Execution contract
+
+`ExtractCmd::run()` uses the resident daemon when
+`$TIDEPOOL_EXTRACT_DAEMON_SOCKET` is set and falls back to a direct worker
+spawn when the daemon is unavailable. A logical request is attempted at most
+once through each transport: daemon failure may trigger one direct attempt,
+but never a daemon retry.
+
+`run_with(&Launcher::Daemon(path))` is different by design: the caller chose a
+specific transport, so daemon failure is returned rather than hidden behind a
+fallback.
+
+The spawn counter counts logical extractor invocations, including requests
+served by a resident worker. It is an observability API, not a process-fork
+counter.
+
+## Wire boundary
+
+The crate is a std-only leaf because proc-macro crates depend on it. Its wire
+formats are small, versioned, and implemented in-repo. Keep framing and field
+validation here; keep compiler interpretation in the Haskell worker.
+
+When adding a request field:
+
+1. add it to the typed Rust request;
+2. update the versioned encoder and Haskell decoder together;
+3. make invalid combinations unrepresentable in Rust where practical;
+4. test the round trip and the worker behavior;
+5. avoid adding a second textual protocol for the same operation.

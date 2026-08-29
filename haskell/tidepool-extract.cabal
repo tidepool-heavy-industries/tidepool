@@ -262,8 +262,6 @@ test-suite extract-fidelity-test
     Fidelity.Recognizers
     Fidelity.PrimopArity
     Fidelity.D1Defense
-    Fidelity.TurnBatch
-    Fidelity.TurnBatchJsonBugs
     Fidelity.ClosureTier
     Fidelity.TopoRecovery
     Fidelity.ExtractRequest

@@ -28,8 +28,6 @@ enum Field {
     BindGen(u64),
     EmitBoundBinders(OsString),
     ProbeOnly,
-    TurnBatch(OsString),
-    BatchOut(OsString),
     HarnessProfile,
 }
 
@@ -94,12 +92,6 @@ impl ExtractRequest {
                     request.emit_bound_binders(value(&mut args, "--emit-bound-binders")?)
                 }
                 Some("--probe-only") => request.probe_only(),
-                Some("--turn-batch") => request.fields.push(Field::TurnBatch(
-                    value(&mut args, "--turn-batch")?.to_owned(),
-                )),
-                Some("--batch-out") => request
-                    .fields
-                    .push(Field::BatchOut(value(&mut args, "--batch-out")?.to_owned())),
                 Some("--harness-profile") => request.fields.push(Field::HarnessProfile),
                 Some(option) if option.starts_with('-') => {
                     return Err(CliError::new(format!("unknown option: {option}")));
@@ -111,12 +103,8 @@ impl ExtractRequest {
             .fields
             .iter()
             .any(|field| matches!(field, Field::Input(_)));
-        let has_batch_plan = request
-            .fields
-            .iter()
-            .any(|field| matches!(field, Field::TurnBatch(_)));
-        if !has_input && !has_batch_plan {
-            return Err(CliError::new("an input file or --turn-batch is required"));
+        if !has_input {
+            return Err(CliError::new("an input file is required"));
         }
         Ok(request)
     }
@@ -164,8 +152,6 @@ impl ExtractRequest {
                 19 => Field::TurnVerdict(decoder.os_string()?),
                 20 => Field::Classify,
                 21 => Field::ClassifyOut(decoder.os_string()?),
-                22 => Field::TurnBatch(decoder.os_string()?),
-                23 => Field::BatchOut(decoder.os_string()?),
                 24 => Field::HarnessProfile,
                 25 => Field::BuildProductsDir(decoder.os_string()?),
                 other => return Err(ProtocolError::new(format!("unknown field tag {other}"))),
@@ -326,8 +312,6 @@ impl ExtractRequest {
                 }
                 Field::EmitBoundBinders(value) => flag(&mut flags, "--emit-bound-binders", value),
                 Field::ProbeOnly => flags.push("--probe-only".into()),
-                Field::TurnBatch(value) => flag(&mut flags, "--turn-batch", value),
-                Field::BatchOut(value) => flag(&mut flags, "--batch-out", value),
                 Field::HarnessProfile => flags.push("--harness-profile".into()),
             }
         }
@@ -498,8 +482,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         }
         Field::EmitBoundBinders(value) => tagged_frame(out, 14, value),
         Field::ProbeOnly => out.push(15),
-        Field::TurnBatch(value) => tagged_frame(out, 22, value),
-        Field::BatchOut(value) => tagged_frame(out, 23, value),
         Field::HarnessProfile => out.push(24),
     }
 }
@@ -655,11 +637,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_requires_an_input_or_batch_plan() {
+    fn cli_requires_an_input() {
         let error = ExtractRequest::from_cli(&["--target".into(), "answer".into()]).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "an input file or --turn-batch is required"
-        );
+        assert_eq!(error.to_string(), "an input file is required");
     }
 }

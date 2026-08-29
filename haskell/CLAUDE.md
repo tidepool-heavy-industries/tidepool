@@ -100,14 +100,15 @@ The Rust frontend owns CLI parsing, Unix sockets, daemon configuration, and
 process lifecycle. It either starts this worker for one typed request or keeps
 one worker alive with `--worker-loop-v1`. `Tidepool.WorkerServer` owns only the
 framed stdin/stdout loop; `Tidepool.GhcPipeline` owns the resident compiler
-state. Request-local target
-and `Tidepool.Session.*` modules are removed from the shared memo after each
+state. `Main` decodes a typed request and dispatches compiler operations; it is
+not a second CLI or workflow engine. Request-local target and
+`Tidepool.Session.*` modules are removed from the shared memo after each
 request; reusable library interfaces remain warm. Requests are serialized and
-carry their own CWD and extractor argv.
+carry their own CWD and compiler options.
 
-The worker process environment is fixed at startup. Restart the daemon after changing
-extractor diagnostic variables, GHC configuration, or its watched toolchain
-stamp.
+The worker process environment is fixed at startup. Restart the daemon after
+changing extractor diagnostic variables, GHC configuration, or its watched
+toolchain stamp.
 
 ## Eval library
 
