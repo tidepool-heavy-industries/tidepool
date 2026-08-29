@@ -107,13 +107,13 @@ data FlatNode
   | NJoin !Word64 ![Word64] !Int !Int
   | NJump !Word64 ![Int]
   | NPrimOp !Text ![Int]
-  deriving (Show)
+  deriving (Eq, Show)
 
 data FlatAlt = FlatAlt !FlatAltCon ![Word64] !Int
-  deriving (Show)
+  deriving (Eq, Show)
 
 data FlatAltCon = FDataAlt !Word64 | FLitAlt !LitEnc | FDefault
-  deriving (Show)
+  deriving (Eq, Show)
 
 data LitEnc
   = LEInt !Int64
@@ -123,7 +123,7 @@ data LitEnc
   | LEByteArray !ByteString  -- raw ByteArray# contents (e.g. BigNat# payload)
   | LEFloat !Word64    -- IEEE 754 bits
   | LEDouble !Word64   -- IEEE 754 bits
-  deriving (Show)
+  deriving (Eq, Show)
 
 data TransState = TransState
   { tsNodes :: !(Seq FlatNode)
@@ -549,13 +549,19 @@ translateBinds binds = concatMap translateBind binds
 translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text, [Text]), Map.Map Word64 Word64)
 translateModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
-      neededBinds = reachableBinds allBinds targetId
+      -- Canonicalize local identities only after pruning. Compiler sessions
+      -- may present unreachable bindings in different orders; allowing those
+      -- bindings to consume ordinals makes an identical emitted program
+      -- serialize differently on cold and warm builds.
+      neededBinds = stabilizeLocalUniques (reachableBinds allBinds targetId)
       -- Built with RECORD syntax off 'emptyTransState', never positionally:
       -- 'TransState' carries several same-typed fields, and a positional
       -- constructor application over them type-checks with any two
       -- transposed.
       initState = emptyTransState
         { tsUnresolvedIds = unresolvedIds
+        -- Sited helpers are generated siblings, not syntactic dependencies of
+        -- the surface call that translation rewrites to use them.
         , tsSitedIds = resolveSitedIds allBinds
         }
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
@@ -739,7 +745,9 @@ translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO ClosedModule
 translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds0, unresolved) <- resolveExternals varId hscEnv allBinds
   dedupedBinds <- uniquifyDuplicateBinders closedBinds0
-  let closedBinds = stabilizeLocalUniques dedupedBinds
+  let unresolvedIds = Set.fromList (map uvKey unresolved)
+      (nodes, usedDCs, reachBinds, runLLMTurnSites, poisonSlots) =
+        translateModule dedupedBinds targetName unresolvedIds
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
   -- name contains the needle (post-resolveExternals Core — what the JIT
   -- actually compiles; can differ from --dump-core's module view).
@@ -751,19 +759,17 @@ translateModuleClosed hscEnv allBinds targetName = do
       -- the Rust runtime on success).
       let pairs = concatMap (\cb -> case cb of
             NonRec b rhs -> [(b, rhs)]
-            Rec ps       -> ps) closedBinds
+            Rec ps       -> ps) dedupedBinds
           matches = [ p | p@(b, _) <- pairs
                     , needle `Data.List.isInfixOf` occNameString (nameOccName (idName b)) ]
       in mapM_ (\(b, rhs) -> hPutStrLn stderr
            ("=== CLOSED BIND " ++ occNameString (nameOccName (idName b)) ++ "\n"
             ++ Tidepool.GhcPipeline.dumpCore [NonRec b rhs])) matches
     Nothing -> pure ()
-  -- THE VarId index for this extraction: binding sites AND reference sites,
-  -- one describe ('describeVarId'). Every forensic consumer below reads it —
-  -- the VARID_AUDIT knob, the DANGLING_DEBUG knob, the dangling-NVar hard
-  -- failure, and meta.cbor's var_names table. Lazy: unforced unless one of
-  -- them actually needs a name.
-  let varIdSites = varIdSiteIndex closedBinds
+  -- Index the canonicalized reachable graph: this is the graph whose ids are
+  -- serialized, so diagnostics and runtime names must describe it rather than
+  -- the larger pre-pruning closure.
+  let varIdSites = varIdSiteIndex reachBinds
       nameVarId = describeVarId varIdSites
       -- Binding sites only — a reference is not a second BINDING, so it must
       -- not read as a collision.
@@ -785,9 +791,8 @@ translateModuleClosed hscEnv allBinds targetName = do
         ++ " binding sites, " ++ show (Map.size collisions) ++ " collisions")
       -- TIDEPOOL_VARID_AUDIT=<hex>,<hex>,...: additionally resolve specific
       -- VarIds (e.g. lam_binder values from TIDEPOOL_TRACE=calls) to names.
-      -- Resolves through the FULL index, so a dangling id — one with only
-      -- reference sites, which this knob used to answer "<not a binding
-      -- site>" for — now names itself here too.
+      -- The index includes both binding and reference sites, so a dangling id
+      -- can still name itself even though it has no binding site.
       case auditEnv of
         Just spec | spec /= "1" -> do
           let parseHex h = case Numeric.readHex (dropWhile (== 'x') (dropWhile (== '0') h)) of
@@ -803,16 +808,10 @@ translateModuleClosed hscEnv allBinds targetName = do
                 wanted
         _ -> pure ()
     Nothing -> pure ()
-  let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs, reachBinds, runLLMTurnSites, poisonSlots) =
-        translateModule closedBinds targetName unresolvedIds
-      referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
-      -- Item 20 defect (b): READ THE PROGRAM. Every poison node carries the
-      -- identity slot of the external it replaced, so "what did this
-      -- extraction poison" is a scan of the emitted nodes for kind-4
-      -- sentinels — no side set threaded through the translation, and no
-      -- masking filter keyed on the ORIGINAL id (the one the poison node
-      -- REPLACES, so such a filter structurally never matches a poison).
+  let referencedIds = foldl' (\acc n -> case n of { NVar v -> Set.insert v acc; _ -> acc }) Set.empty nodes
+      -- A poison is relevant only when its sentinel reaches the emitted
+      -- program. Derive that set from the nodes rather than carrying a second
+      -- bookkeeping channel through translation.
       emittedPoisonSlots =
         Set.fromList (Data.Maybe.mapMaybe poisonSentinelSlot (Set.toList referencedIds))
       -- slot -> qualified name: the meta.cbor @poisoned@ table, which is what
@@ -891,10 +890,7 @@ translateModuleClosed hscEnv allBinds targetName = do
   -- collectTransitiveDCons) run over this, so they harvest only constructors
   -- the emitted program references — quoter-internal Tidepool.QQ.* AST cons and
   -- other compile-time-only binds on the include path are no longer collected.
-  -- (The TIDEPOOL_DUMP_CLOSED / TIDEPOOL_VARID_AUDIT diagnostics above keep
-  -- scanning the FULL closedBinds: they are forensics over the whole compiled
-  -- graph, independent of what reaches the table.)
-  -- varId → human name map for RUNTIME error naming (friction #12): every id
+  -- varId → human name map for runtime error naming: every id
   -- that can surface as a runtime "unresolved variable" — the 0x45-poisoned
   -- unresolved externals plus any dangling reference (session vals are the
   -- legit class) — shipped in meta.cbor so the JIT names the symbol instead
@@ -1014,76 +1010,15 @@ uniquifyDuplicateBinders binds = do
           (env'', bs') <- goBs env' bs
           Alt c bs' <$> goE env'' rhs
 
--- | Assign every NESTED (non-top-level, non-erased) 'Id' in the closed graph
--- a deterministic, CONTENT-DERIVED 'Unique' — a pure function of this pass's
--- own traversal position, never of GHC's session-wide Unique allocator — so
--- that 'localVarId'\'s existing formula (hash the OccName together with
--- @varUnique@) receives a STABLE input across two structurally-identical
--- compiles of the same source. 'localVarId' itself is UNCHANGED; this is a
--- normalization pass that runs before it, not a parallel numbering scheme.
+-- | Replace session-dependent uniques on nested value binders with ordinals
+-- from a deterministic structural walk. Occurrences are renamed through the
+-- same lexical environment; erased and top-level binders are unchanged.
 --
--- THE PROBLEM this closes (plans/turn-latency-state-injection.md's
--- "Build-products dir: as-built" section; see also this file's own
--- 'localVarId' doc): a cold compile (GHC's @load'@ fully typechecks every
--- module) and a warm compile (a populated build-products dir lets @load'@
--- skip unchanged modules via @checkOldIface@) consume a DIFFERENT quantity
--- of session Uniques before reaching any given module's own translation —
--- so the same logical nested binder gets a different raw 'varUnique' each
--- time, and 'localVarId' (which hashes that raw unique) produces a
--- different VarId. A structural CBOR diff confirmed node COUNT and SHAPE
--- are identical cold vs warm, and only VarIds at Case-binder positions
--- differ — the bug is squarely "the numbering scheme", not the shape of
--- what gets numbered.
---
--- THE FIX: strip the session Unique out of the picture entirely, BEFORE
--- 'localVarId' ever sees it. This pass walks the closed graph via a plain
--- structural recursion — 'App' function-then-argument, 'Lam'/'Let'/'Case'
--- binder-then-body/scrutinee-then-alts, always in the same fixed order for
--- the same input shape — and assigns each newly-encountered nested binder
--- the next ordinal from a pure monotonic counter, threaded via 'State' (no
--- 'UniqSupply', no GHC session interaction of any kind — that IO-backed
--- allocator is the thing whose consumption trajectory differs cold vs warm;
--- a plain 'Word64' counter seeded at 0 cannot diverge, since it depends on
--- nothing but the shape of THIS tree). Given the already-established
--- invariant that a cold and a warm compile of the same source produce
--- identical Core shape, this walk visits — and therefore numbers — every
--- nested binder in the SAME order both times, so two separate compiles of
--- identical source now produce byte-identical nested VarIds.
---
--- Two structurally-identical SIBLING binders (e.g. the same pattern match
--- compiled twice, or shadowing: @\\x -> \\x -> x@) are still distinguished
--- automatically — no special-casing needed: they occupy different positions
--- in the walk (different Lam/Case/Let nodes), so they get different
--- ordinals regardless of sharing an OccName or an original GHC unique.
---
--- The freshly-minted 'Unique' is tagged with the @\'V\'@ domain character
--- (see 'GHC.Types.Unique.mkUnique'): GHC's own unique-domain scheme
--- guarantees any two DISTINCT domain characters produce disjoint Unique
--- sets no matter what numeric ordinal each uses (the character occupies its
--- own high bits; equality requires both the tag AND the low bits to match)
--- — so this cannot alias a wired-in constructor/tycon unique (those use
--- their own reserved characters: @0@-@9@,
--- b/B/c/C/d/E/f/i/j/k/L/m/P/Q/R/s/S/v/X/z — see 'GHC.Builtin.Uniques') or
--- anything a GHC unique-supply domain mints ('uniquifyDuplicateBinders'
--- included, which uses supply domain @\'k\'@).
---
--- Runs AFTER 'uniquifyDuplicateBinders' — that pass (#313 t11) and this one
--- are DELIBERATELY kept separate rather than merged, even though this
--- pass's unconditional per-position renumbering happens to subsume #313
--- t11's own concern too (every walked position gets its own fresh ordinal
--- regardless of the input unique, so two binders that originally shared a
--- unique via cross-site template duplication end up numbered apart here
--- regardless): merging would put #313 t11's tested, historically-load-
--- bearing fix at risk for zero behavioral gain, since this pass alone
--- already produces collision-free output.
---
--- Binding occurrences propagate to every lexical reference via a 'VarEnv'
--- substitution, mirroring 'uniquifyDuplicateBinders'\'s own walk shape
--- exactly (same five 'CoreExpr' arms, same env-threading pattern). Top-
--- level binders are never touched here (unaffected, exactly as in
--- 'uniquifyDuplicateBinders': they are already 'isExternalName' post-#313's
--- 'externalizeInternalTops', hence already routed through 'stableVarId').
--- Contract pinned by @test-varid/VarIdMechanismTest.hs@.
+-- The input must be the reachable program, not the compiler's full closure:
+-- otherwise irrelevant bindings can consume ordinals and perturb serialized
+-- VarIds. Run this after 'uniquifyDuplicateBinders'; the passes have separate
+-- contracts (duplicate repair versus deterministic serialization). The @V@
+-- unique domain is reserved for this pass.
 stabilizeLocalUniques :: [CoreBind] -> [CoreBind]
 stabilizeLocalUniques binds = evalState (mapM goTop binds) 0
   where

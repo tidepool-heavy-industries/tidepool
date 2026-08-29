@@ -68,7 +68,7 @@ fn double_literal_and_fromintegral_family() {
       -- case scrutinee, so it evaluated the CAF at LetRec setup and raised
       -- the error regardless of the (correct) case dispatch. Fix: the
       -- error-call walkers follow the case scrutinee (tidepool-codegen emit).
-    , check "from_integral_to_double" (show (fromIntegral (2 ^ (100 :: Int) :: Integer) :: Double) == "1.2676506002282294e30")
+    , check "from_integral_to_double" ((fromIntegral (2 ^ (100 :: Int) :: Integer) :: Double) == 1.2676506002282294e30)
     ]"#,
     );
     assert_eq!(v, json!([]), "failed checks: {v}");

@@ -93,10 +93,23 @@ fn build_products_dir_cold_warm_identical_output() {
             .expect("warm compile failed")
     };
 
-    assert_eq!(
-        cold.expr, warm.expr,
-        "a warm build-products dir must not change the compiled Core"
-    );
+    if cold.expr != warm.expr {
+        let first = cold
+            .expr
+            .nodes
+            .iter()
+            .zip(&warm.expr.nodes)
+            .position(|(cold, warm)| cold != warm);
+        panic!(
+            "a warm build-products dir changed the compiled Core: \
+             cold_nodes={} warm_nodes={} first_differing_node={first:?} \
+             cold={:?} warm={:?}",
+            cold.expr.nodes.len(),
+            warm.expr.nodes.len(),
+            first.and_then(|index| cold.expr.nodes.get(index)),
+            first.and_then(|index| warm.expr.nodes.get(index)),
+        );
+    }
     assert_eq!(
         cold.table, warm.table,
         "a warm build-products dir must not change the DataConTable"

@@ -24,7 +24,7 @@
 -- PATH; same toolchain as @session-c-test@).
 module Main (main) where
 
-import GHC.Types.Name (mkExternalName)
+import GHC.Types.Name (mkExternalName, mkInternalName)
 import GHC.Types.Name.Occurrence (mkRecFieldOccFS, mkVarOccFS)
 import GHC.Types.Unique (mkUniqueGrimily)
 import GHC.Unit.Types (mkModule, stringToUnit)
@@ -32,17 +32,18 @@ import GHC.Unit.Module (mkModuleName)
 import GHC.Data.FastString (fsLit)
 import GHC.Types.SrcLoc (noSrcSpan)
 import GHC.Types.Var (Var)
-import GHC.Types.Id (mkSysLocal)
+import GHC.Types.Id (mkLocalId, mkSysLocal)
 import GHC.Core.Multiplicity (pattern ManyTy)
 import GHC.Builtin.Types (intTy)
 import GHC.Core (Bind(..), Expr(..), CoreBind)
 
-import Tidepool.Translate (stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx, varId, stabilizeLocalUniques)
+import Tidepool.Translate (stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx, varId, stabilizeLocalUniques, translateModule)
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM_, unless)
 import Data.Word (Word64)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Exit (exitFailure, exitSuccess)
 
@@ -122,6 +123,10 @@ main = do
   -- Unique a particular compile session happened to assign it.
   let mkLocalVar :: Word64 -> String -> Var
       mkLocalVar u nm = mkSysLocal (fsLit nm) (mkUniqueGrimily u) ManyTy intTy
+      mkTopVar u nm = mkLocalId
+        (mkInternalName (mkUniqueGrimily u) (mkVarOccFS (fsLit nm)) noSrcSpan)
+        ManyTy
+        intTy
 
       -- \x -> x, built twice with DIFFERENT starting uniques for `x` —
       -- standing in for a cold vs. a warm compile's differing session-wide
@@ -163,6 +168,19 @@ main = do
 
       [stabSibling] = stabilizeLocalUniques [siblingBind]
 
+      targetBind =
+        let x = mkLocalVar 30 "x"
+            topB = mkTopVar 998 "target"
+        in NonRec topB (Lam x (Var x))
+      unusedBind =
+        let x = mkLocalVar 40 "unusedX"
+            topB = mkTopVar 997 "unused"
+        in NonRec topB (Lam x (Var x))
+      (withUnused, _, _, _, _) =
+        translateModule [unusedBind, targetBind] "target" Set.empty
+      (withoutUnused, _, _, _, _) =
+        translateModule [targetBind] "target" Set.empty
+
       stabChecks :: [(String, Bool)]
       stabChecks =
         [ ("stabilizeLocalUniques: binder and occurrence agree post-stabilization (cold)",
@@ -175,6 +193,8 @@ main = do
             case siblingVarIds stabSibling of
               Just (v1, v2) -> v1 /= v2
               Nothing -> False)
+        , ("translateModule: unreachable bindings do not perturb emitted VarIds",
+            withUnused == withoutUnused)
         ]
 
   forM_ stabChecks $ \(label, ok) ->
