@@ -12,7 +12,6 @@
 //! frame retains that policy, so resume cannot change how completion is
 //! materialized.
 
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,6 +28,8 @@ use crate::heap_bridge;
 use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
+use crate::resource_ledger::{ContinuationFrame, ResourceLedger};
+pub use crate::resource_ledger::ResourceCounts;
 use crate::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionEntry, SuspensionRun,
     ValueHandle,
@@ -106,13 +107,6 @@ pub struct HeapStats {
     pub fragments: u64,
 }
 
-/// One live [`ValueHandle`]'s machine-side entry: the persistent-rooted slot
-/// and the runtime resource scope that owns (and will release) it.
-struct HandleEntry {
-    slot: crate::old_space::RootSlot,
-    realm: RealmId,
-}
-
 impl ParkKind {
     /// Project to the shared epilogue's [`ResultMaterialization`].
     fn materialization(self) -> ResultMaterialization {
@@ -133,32 +127,6 @@ impl ParkKind {
 /// the `stowed_roots` registration (the cell's address) stays valid across the
 /// move. The GC reads and rewrites `*cell` in place on every collection, so the
 /// pointer read back out at resume is the GC-current one.
-pub struct ContinuationFrame {
-    /// Heap-stable cell holding the (GC-current) continuation pointer.
-    cell: Box<*mut u8>,
-    /// The runtime resource scope this park belongs to.
-    realm: RealmId,
-    /// Effect-dispatch/suspension policy, replayed on resume.
-    boundary: EffectBoundary,
-    /// Plain park vs persistent-binding-store binding park.
-    kind: ParkKind,
-    /// The persistent root of a closure-valued `finalize`'s finalized value,
-    /// tenured at park time. `Some` only for a frame parked while
-    /// suspended on a closure-valued finalize; taken via
-    /// [`JitEffectMachine::take_parked_finalized_root`], which leaves the
-    /// frame itself parked and rooted.
-    finalized_root: Option<crate::old_space::RootSlot>,
-    /// This frame's runtime resource scope's cancel flag, cloned at park time so
-    /// [`JitEffectMachine::resume_continuation`] installs it without a second
-    /// per-runtime resource scope cancel-flag lookup.
-    cancel_flag: Arc<AtomicBool>,
-    /// The [`DataConTable`] this frame's continuation suspended against,
-    /// cloned once at park time (not per collection, not per resume) so a
-    /// resume decodes exclusively against the row it was compiled for — a
-    /// caller cannot resume a frame against a foreign table.
-    table: Arc<DataConTable>,
-}
-
 /// Where the shared suspendable epilogue puts a continuation when a turn
 /// suspends. Internal: the public entries pick one and project the result.
 #[derive(Debug, Clone)]
@@ -430,8 +398,7 @@ pub struct JitEffectMachine {
     /// `(*vmctx).machine_state`, pointed at this field by
     /// `install_registries`/the run entries.
     machine_state: MachineState,
-    /// Every suspended continuation, keyed by [`ContinuationId`] and tagged
-    /// with its owning [`RealmId`].
+    /// Runtime-resource identities and scope ownership.
     ///
     /// THE INVARIANT: a frame's `cell` is registered in `stowed_roots` from the
     /// moment it is parked until the moment it is resumed. Any
@@ -439,28 +406,9 @@ pub struct JitEffectMachine {
     /// runtime resource scope's resume, or a heap doubling in any of them — evacuates its
     /// continuation tree and rewrites `*cell` in place.
     ///
-    /// Consequently `stowed_roots_count()` equals `continuations.len()` at
+    /// Consequently `stowed_roots_count()` equals the ledger's parked count at
     /// every quiescent point.
-    continuations: HashMap<ContinuationId, ContinuationFrame>,
-    /// Monotonic source of [`ContinuationId`]s for `continuations`. Never
-    /// rewound — a resumed id is not reused, so a stale id from a caller is a
-    /// clean "unknown continuation" error rather than a silent aliasing of some
-    /// later park.
-    next_continuation_id: u64,
-    /// Cancel flags scoped by realm. A parked run installs its realm's flag in
-    /// [`MachineState`], so cancellation cannot leak to a sibling realm.
-    /// [`Self::close_realm`] removes the entry.
-    realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
-    /// Value-handle registry: process-unique, sendable ids over machine-side
-    /// persistent roots, so upper layers pass
-    /// heap values — closures included — WITHOUT eagerly bridging them into a
-    /// Rust [`Value`] (the eager bridge substitutes `CLOSURE_SENTINEL` and is
-    /// the closure-killer on delivery paths; it remains only in
-    /// [`Self::observe_handle`], where an opaque view of an opaque value is
-    /// honest). A handle registry owns its root until the handle is adopted,
-    /// discarded, or released by [`Self::close_realm`]. Observing and
-    /// delivering borrow that ownership without consuming it.
-    value_handles: HashMap<u64, HandleEntry>,
+    resources: ResourceLedger,
     /// Monotonic count of fragments compiled into the JITModule (its
     /// executable memory is never reclaimed) — [`HeapStats::fragments`].
     fragments_added: u64,
@@ -735,10 +683,7 @@ impl JitEffectMachine {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             session: None,
             machine_state: MachineState::new(),
-            continuations: HashMap::new(),
-            next_continuation_id: 0,
-            realm_cancel_flags: HashMap::new(),
-            value_handles: HashMap::new(),
+            resources: ResourceLedger::default(),
             fragments_added: 0,
             established_prefix: None,
         })
@@ -773,10 +718,7 @@ impl JitEffectMachine {
                 old_space: crate::old_space::OldSpace::new(),
             }),
             machine_state: MachineState::new(),
-            continuations: HashMap::new(),
-            next_continuation_id: 0,
-            realm_cancel_flags: HashMap::new(),
-            value_handles: HashMap::new(),
+            resources: ResourceLedger::default(),
             fragments_added: 0,
             established_prefix: None,
         })
@@ -812,10 +754,7 @@ impl JitEffectMachine {
     /// [`ContinuationFrame`] cloning it at park time and a later
     /// [`Self::realm_cancel_handle`] call always observe the same flag.
     fn realm_cancel_flag(&mut self, realm: RealmId) -> Arc<AtomicBool> {
-        self.realm_cancel_flags
-            .entry(realm)
-            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-            .clone()
+        self.resources.cancel_flag(realm)
     }
 
     /// Drain this machine's accumulated diagnostics. This is the
@@ -1508,7 +1447,7 @@ impl JitEffectMachine {
             ResumeInput::Answer(val) => {
                 ResumePayload::Response(tidepool_effect::Response::Complete(val))
             }
-            ResumeInput::Handle(h) => match self.value_handles.get(&h.0) {
+            ResumeInput::Handle(h) => match self.resources.handle(h) {
                 // SAFETY: the slot is persistent-rooted until released, and a
                 // released handle is absent from the map — so `current()`
                 // reads the GC-current pointer of a still-rooted value.
@@ -2339,7 +2278,7 @@ impl JitEffectMachine {
     fn assert_rooting_receipt(&self) {
         debug_assert_eq!(
             self.machine_state.stowed_roots_count(),
-            self.continuations.len(),
+            self.resources.counts().parked_continuations,
             "rooting receipt violated: stowed_roots_count() must equal the parked \
              continuation count at every quiescent point"
         );
@@ -2373,20 +2312,15 @@ impl JitEffectMachine {
         // deregisters it and drops the frame. The GC reads and rewrites `*slot`
         // in place on every collection until then.
         self.machine_state.register_stowed_root(slot);
-        let id = ContinuationId(self.next_continuation_id);
-        self.next_continuation_id += 1;
-        self.continuations.insert(
-            id,
-            ContinuationFrame {
-                cell,
-                realm,
-                boundary,
-                kind,
-                finalized_root,
-                cancel_flag,
-                table,
-            },
-        );
+        let id = self.resources.park(ContinuationFrame {
+            cell,
+            realm,
+            boundary,
+            kind,
+            finalized_root,
+            cancel_flag,
+            table,
+        });
         self.assert_rooting_receipt();
         id
     }
@@ -2446,7 +2380,7 @@ impl JitEffectMachine {
     ) -> Result<ParkedOutcome, JitError> {
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
-        let (realm, kind, boundary) = match self.continuations.get(&id) {
+        let (realm, kind, boundary) = match self.resources.continuation(id) {
             Some(frame) => (frame.realm, frame.kind, frame.boundary.clone()),
             None => {
                 return Err(JitError::Effect(EffectError::Handler(format!(
@@ -2473,8 +2407,8 @@ impl JitEffectMachine {
             reason = "frame present (peeked above, &mut self held throughout)"
         )]
         let mut frame = self
-            .continuations
-            .remove(&id)
+            .resources
+            .take_continuation(id)
             .expect("frame present (peeked above, &mut self held throughout)");
         let slot: *mut *mut u8 = &mut *frame.cell;
         self.machine_state.deregister_stowed_root(slot);
@@ -2516,8 +2450,8 @@ impl JitEffectMachine {
         &mut self,
         id: ContinuationId,
     ) -> Option<crate::old_space::RootSlot> {
-        self.continuations
-            .get_mut(&id)
+        self.resources
+            .continuation_mut(id)
             .and_then(|frame| frame.finalized_root.take())
     }
 
@@ -2525,21 +2459,19 @@ impl JitEffectMachine {
     /// [`Self::stowed_roots_count`] at every quiescent point on the parked path
     /// — that equality IS the rooting receipt.
     pub fn parked_count(&self) -> usize {
-        self.continuations.len()
+        self.resources.counts().parked_continuations
     }
 
     /// The ids currently parked, ascending. Ordering is imposed here (a
     /// `HashMap` has none) purely so callers and tests can enumerate
     /// deterministically.
     pub fn parked_ids(&self) -> Vec<ContinuationId> {
-        let mut ids: Vec<ContinuationId> = self.continuations.keys().copied().collect();
-        ids.sort_unstable();
-        ids
+        self.resources.parked_ids()
     }
 
     /// The runtime resource scope owning the continuation parked under `id`, if any.
     pub fn parked_realm(&self, id: ContinuationId) -> Option<RealmId> {
-        self.continuations.get(&id).map(|f| f.realm)
+        self.resources.continuation(id).map(|frame| frame.realm)
     }
 
     // --- value handles + scope exit ---------------------------------------
@@ -2565,18 +2497,16 @@ impl JitEffectMachine {
     /// is where a caller-visible consume-once obligation actually begins — see
     /// the runtime session boundary is where the linear wrapper is applied.
     pub fn handle_from_finalized(&mut self, id: ContinuationId) -> Option<ValueHandle> {
-        let frame = self.continuations.get_mut(&id)?;
+        let frame = self.resources.continuation_mut(id)?;
         let realm = frame.realm;
         let slot = frame.finalized_root.take()?;
-        let h = ValueHandle::fresh();
-        self.value_handles.insert(h.0, HandleEntry { slot, realm });
-        Some(h)
+        Some(self.resources.insert_handle(slot, realm))
     }
 
     /// The runtime resource scope owning `handle`, if it is live (minted and not yet released
     /// by [`Self::close_realm`]).
     pub fn handle_realm(&self, handle: ValueHandle) -> Option<RealmId> {
-        self.value_handles.get(&handle.0).map(|e| e.realm)
+        self.resources.handle(handle).map(|entry| entry.realm)
     }
 
     /// Mint a [`ValueHandle`] over an ALREADY-ROOTED slot (a tenured bind
@@ -2592,14 +2522,12 @@ impl JitEffectMachine {
         slot: crate::old_space::RootSlot,
         realm: RealmId,
     ) -> ValueHandle {
-        let h = ValueHandle::fresh();
-        self.value_handles.insert(h.0, HandleEntry { slot, realm });
-        h
+        self.resources.insert_handle(slot, realm)
     }
 
     /// Borrow the rooted slot behind a live handle without changing ownership.
     pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
-        self.value_handles.get(&handle.0).map(|e| e.slot)
+        self.resources.handle(handle).map(|entry| entry.slot)
     }
 
     /// Adopt a handle's rooted slot into another ownership discipline.
@@ -2608,22 +2536,18 @@ impl JitEffectMachine {
     /// remains active; the caller must install the returned slot in a root-owning
     /// structure such as the persistent binding table.
     pub fn take_handle_root(&mut self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
-        self.value_handles.remove(&handle.0).map(|entry| entry.slot)
+        self.resources.take_handle(handle).map(|entry| entry.slot)
     }
 
     /// Move a live handle to another runtime resource scope without changing
     /// the root or numeric handle identity.
     pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> bool {
-        let Some(entry) = self.value_handles.get_mut(&handle.0) else {
-            return false;
-        };
-        entry.realm = owner;
-        true
+        self.resources.rehome_handle(handle, owner)
     }
 
     /// Drop a live handle and its persistent-root registration immediately.
     pub fn discard_handle(&mut self, handle: ValueHandle) -> bool {
-        let Some(entry) = self.value_handles.remove(&handle.0) else {
+        let Some(entry) = self.resources.take_handle(handle) else {
             return false;
         };
         self.machine_state
@@ -2633,7 +2557,13 @@ impl JitEffectMachine {
 
     /// Number of live value handles (test/diagnostic accessor).
     pub fn value_handle_count(&self) -> usize {
-        self.value_handles.len()
+        self.resources.counts().value_handles
+    }
+
+    /// Snapshot the machine-owned runtime resources without exposing ledger
+    /// entries or GC root addresses.
+    pub fn resource_counts(&self) -> ResourceCounts {
+        self.resources.counts()
     }
 
     /// OBSERVE a handle's payload: bridge its GC-current heap value through
@@ -2657,7 +2587,7 @@ impl JitEffectMachine {
         &mut self,
         handle: ValueHandle,
     ) -> Result<tidepool_eval::value::Value, JitError> {
-        let entry = match self.value_handles.get(&handle.0) {
+        let entry = match self.resources.handle(handle) {
             Some(e) => e,
             None => {
                 return Err(JitError::Effect(EffectError::Handler(format!(
@@ -2718,48 +2648,22 @@ impl JitEffectMachine {
     /// owns nothing is a no-op `(0, 0)` — idempotent by construction, so a
     /// retirement path that can race a wholesale teardown stays safe.
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
-        let ids: Vec<ContinuationId> = self
-            .continuations
-            .iter()
-            .filter(|(_, f)| f.realm == realm)
-            .map(|(&id, _)| id)
-            .collect();
-        for id in &ids {
-            #[allow(
-                clippy::expect_used,
-                reason = "id collected from the map above; &mut self held throughout"
-            )]
-            let mut frame = self
-                .continuations
-                .remove(id)
-                .expect("id collected from the map above; &mut self held throughout");
+        let closed = self.resources.close_realm(realm);
+        let frames_dropped = closed.frames.len();
+        let handles_released = closed.handles.len();
+        for mut frame in closed.frames {
             let slot: *mut *mut u8 = &mut *frame.cell;
             self.machine_state.deregister_stowed_root(slot);
             if let Some(root) = frame.finalized_root.take() {
                 self.machine_state.deregister_persistent_root(root.addr());
             }
         }
-        let hids: Vec<u64> = self
-            .value_handles
-            .iter()
-            .filter(|(_, e)| e.realm == realm)
-            .map(|(&k, _)| k)
-            .collect();
-        for k in &hids {
-            #[allow(
-                clippy::expect_used,
-                reason = "key collected from the map above; &mut self held throughout"
-            )]
-            let entry = self
-                .value_handles
-                .remove(k)
-                .expect("key collected from the map above; &mut self held throughout");
+        for entry in closed.handles {
             self.machine_state
                 .deregister_persistent_root(entry.slot.addr());
         }
-        self.realm_cancel_flags.remove(&realm);
         self.assert_rooting_receipt();
-        (ids.len(), hids.len())
+        (frames_dropped, handles_released)
     }
 
     /// SCOPE RETIREMENT: deregister one persistent-binding-store binding's
@@ -2809,9 +2713,7 @@ impl JitEffectMachine {
     /// which is the state retirement must not act on.
     #[must_use]
     pub fn handle_holds_root(&self, slot: crate::old_space::RootSlot) -> bool {
-        self.value_handles
-            .values()
-            .any(|e| std::ptr::eq(e.slot.addr(), slot.addr()))
+        self.resources.handle_holds_root(slot)
     }
 }
 
@@ -2823,7 +2725,7 @@ impl Drop for JitEffectMachine {
         // roots, but only on a session machine — doing it here makes the
         // "registered from park until resume, and no longer" invariant hold on
         // every drop path.
-        for (_, mut frame) in self.continuations.drain() {
+        for mut frame in self.resources.drain_continuations() {
             let slot: *mut *mut u8 = &mut *frame.cell;
             self.machine_state.deregister_stowed_root(slot);
         }
