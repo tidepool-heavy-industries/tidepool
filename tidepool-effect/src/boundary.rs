@@ -1,5 +1,21 @@
 use std::sync::Arc;
 
+/// How two non-empty handled-effect prefixes disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixMismatch {
+    Length,
+    Position(usize),
+}
+
+impl std::fmt::Display for PrefixMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Length => write!(f, "differing lengths"),
+            Self::Position(position) => write!(f, "position {position}"),
+        }
+    }
+}
+
 /// The point where runtime effect dispatch gives way to suspension.
 ///
 /// Effect tags below `suspend_tag` are handled locally. Their names form a
@@ -43,6 +59,29 @@ impl EffectBoundary {
     pub fn handled_prefix_arc(&self) -> Arc<[String]> {
         self.handled_prefix.clone()
     }
+
+    /// Check this boundary against the prefix already established by a shared
+    /// machine. An empty prefix dispatches no effects and is compatible with
+    /// any layout. Otherwise positional dispatch requires exact equality.
+    pub fn check_compatible_prefix(
+        &self,
+        established: Option<&[String]>,
+    ) -> Result<(), PrefixMismatch> {
+        if self.handled_prefix.is_empty() {
+            return Ok(());
+        }
+        let Some(established) = established else {
+            return Ok(());
+        };
+        if established.len() != self.handled_prefix.len() {
+            return Err(PrefixMismatch::Length);
+        }
+        established
+            .iter()
+            .zip(self.handled_prefix.iter())
+            .position(|(left, right)| left != right)
+            .map_or(Ok(()), |position| Err(PrefixMismatch::Position(position)))
+    }
 }
 
 #[cfg(test)]
@@ -62,5 +101,21 @@ mod tests {
         let names = ["State".to_string()];
         let boundary = EffectBoundary::new(3, &names);
         assert_eq!(boundary.handled_prefix(), names);
+    }
+
+    #[test]
+    fn compatibility_is_exact_for_non_empty_prefixes() {
+        let names = ["State".to_string(), "Error".to_string()];
+        let boundary = EffectBoundary::new(2, &names);
+        assert_eq!(boundary.check_compatible_prefix(Some(&names)), Ok(()));
+        assert_eq!(
+            boundary.check_compatible_prefix(Some(&names[..1])),
+            Err(super::PrefixMismatch::Length)
+        );
+        let different = ["State".to_string(), "Reader".to_string()];
+        assert_eq!(
+            boundary.check_compatible_prefix(Some(&different)),
+            Err(super::PrefixMismatch::Position(1))
+        );
     }
 }

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use cranelift_module::FuncId;
+pub use tidepool_effect::PrefixMismatch;
 use tidepool_effect::{DispatchEffect, EffectBoundary, EffectContext, EffectError};
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -29,29 +30,6 @@ use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
 use crate::yield_type::Yield;
-
-/// Why an incoming handled prefix was refused against the machine's
-/// established one ([`JitEffectMachine::check_prefix_compatible`]). Two
-/// non-empty prefixes must be EXACTLY EQUAL, so a disagreement is either a
-/// length difference (not reducible to any shared position — naming one
-/// would be misleading) or, at equal length, a content disagreement at a
-/// specific position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrefixMismatch {
-    /// Both prefixes are non-empty but of different lengths.
-    Length,
-    /// Same length, but the prefixes disagree at this 0-based position.
-    Position(usize),
-}
-
-impl std::fmt::Display for PrefixMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PrefixMismatch::Length => write!(f, "differing lengths"),
-            PrefixMismatch::Position(position) => write!(f, "position {position}"),
-        }
-    }
-}
 
 /// Error type for JIT compilation/execution failures.
 #[derive(Debug, thiserror::Error)]
@@ -83,15 +61,9 @@ pub enum JitError {
         "VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression."
     )]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
-    /// Refused at ENTRY to the parked path, before the machine is driven at
-    /// all (never a machine invariant violation — a caller/configuration
-    /// error, so `Err`, not a panic): the runtime resource scope's handled-effect prefix
-    /// disagrees with the prefix the machine already established from an
-    /// earlier entry. Two non-empty prefixes must be EXACTLY EQUAL — an
-    /// empty prefix never produces this error, it is compatible with
-    /// anything. See [`JitEffectMachine::check_prefix_compatible`] for why
-    /// exact equality is the sound check and what it does, and does not,
-    /// verify.
+    /// A run's handled-effect layout disagrees with the non-empty layout
+    /// already established by this machine. Positional effect dispatch requires
+    /// exact agreement; an empty prefix dispatches nothing and is compatible.
     #[error(
         "realm handled-effect prefix disagrees with the machine's established prefix \
          ({mismatch}): established {established:?}, incoming {incoming:?}"
@@ -274,9 +246,8 @@ pub struct ContinuationFrame {
     cell: Box<*mut u8>,
     /// The runtime resource scope this park belongs to.
     realm: RealmId,
-    /// The union tag the turn suspended at, replayed on resume so the caller
-    /// does not have to remember it per-park.
-    suspend_tag: u64,
+    /// Effect-dispatch/suspension policy, replayed on resume.
+    boundary: EffectBoundary,
     /// Plain park vs persistent-binding-store binding park.
     kind: ParkKind,
     /// The persistent root of a closure-valued `finalize`'s finalized value,
@@ -294,13 +265,6 @@ pub struct ContinuationFrame {
     /// resume decodes exclusively against the row it was compiled for — a
     /// caller cannot resume a frame against a foreign table.
     table: Arc<DataConTable>,
-    /// This runtime resource scope's handled prefix — the effect names for tags
-    /// `[0, suspend_tag)`, in position order — checked (and possibly
-    /// establishing) at ENTRY to the parked path
-    /// ([`JitEffectMachine::enter_parked_path`]), stored here purely so
-    /// [`JitEffectMachine::resume_continuation`] can replay it through that same
-    /// entry check on a re-suspension.
-    handled_prefix: Arc<[String]>,
 }
 
 /// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
@@ -358,10 +322,8 @@ enum ParkTarget {
     Registry {
         realm: RealmId,
         kind: ParkKind,
-        /// This runtime resource scope's handled prefix, already checked (and possibly
-        /// established) at entry to the parked path — carried here only to
-        /// be stored on the frame if this run suspends.
-        handled_prefix: Arc<[String]>,
+        /// Already checked at entry; retained if the run suspends.
+        boundary: EffectBoundary,
     },
 }
 
@@ -668,7 +630,7 @@ pub struct JitEffectMachine {
     /// discipline as `next_continuation_id` (a released handle's id is a
     /// clean "unknown handle" error, never a silent alias).
     next_value_handle: u64,
-    /// The machine's ESTABLISHED handled-effect prefix: the machine cannot
+    /// The machine's established handled-effect prefix: the machine cannot
     /// introspect its own handler stack (`H` is a compile-time monomorphized
     /// type parameter, not runtime data), so this is the machine's runtime
     /// record of what `H` is, in its stead. Set from the first NON-EMPTY
@@ -680,7 +642,7 @@ pub struct JitEffectMachine {
     /// overwritten afterward, including on resume: every runtime resource scope on a machine
     /// is driven through the same single `H` for the machine's whole life,
     /// so a runtime resource scope that resumed and completed does not release the
-    /// constraint. See [`Self::check_prefix_compatible`].
+    /// constraint. Compatibility is defined by [`EffectBoundary`].
     established_prefix: Option<Arc<[String]>>,
 }
 
@@ -1622,7 +1584,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
+        boundary: &EffectBoundary,
         materialization: ResultMaterialization,
         park: ParkTarget,
     ) -> Result<ParkedRaw, JitError> {
@@ -1657,7 +1619,7 @@ impl JitEffectMachine {
             handlers,
             user,
             "",
-            Some(suspend_tag),
+            Some(boundary.suspend_tag()),
             yield_result,
         ) {
             Ok(outcome) => self.finish_suspendable(
@@ -1665,7 +1627,6 @@ impl JitEffectMachine {
                 outcome,
                 materialization,
                 park,
-                suspend_tag,
                 table,
                 park_cancel_flag,
             ),
@@ -1692,7 +1653,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
+        boundary: &EffectBoundary,
         input: ResumeInput,
         materialization: ResultMaterialization,
         park: ParkTarget,
@@ -1775,7 +1736,7 @@ impl JitEffectMachine {
             &mut machine,
             continuation,
             payload,
-            suspend_tag,
+            boundary.suspend_tag(),
             "",
         ) {
             Ok(yield_result) => match drive_effect_loop(
@@ -1785,7 +1746,7 @@ impl JitEffectMachine {
                 handlers,
                 user,
                 "",
-                Some(suspend_tag),
+                Some(boundary.suspend_tag()),
                 yield_result,
             ) {
                 Ok(outcome) => self.finish_suspendable(
@@ -1793,7 +1754,6 @@ impl JitEffectMachine {
                     outcome,
                     materialization,
                     park,
-                    suspend_tag,
                     table,
                     cancel_flag,
                 ),
@@ -1821,8 +1781,8 @@ impl JitEffectMachine {
     /// returns, on every exit path.
     ///
     /// `park` supplies the registry metadata for a newly suspended
-    /// [`ContinuationFrame`] (A3/A4). Enforced constraint 1 (realm-lanes/B-prefix-
-    /// compat) is checked and established at ENTRY to the parked path
+    /// [`ContinuationFrame`]. Boundary compatibility is checked and established
+    /// at entry to the parked path
     /// ([`Self::enter_parked_path`], called from the public
     /// `run_until_suspension`/`resume_continuation` entries) — by the
     /// time this method runs, that check has already passed, regardless of
@@ -1834,7 +1794,6 @@ impl JitEffectMachine {
         outcome: DriveOutcome,
         materialization: ResultMaterialization,
         park: ParkTarget,
-        suspend_tag: u64,
         table: &DataConTable,
         park_cancel_flag: Arc<AtomicBool>,
     ) -> Result<ParkedRaw, JitError> {
@@ -1953,17 +1912,16 @@ impl JitEffectMachine {
                 let ParkTarget::Registry {
                     realm,
                     kind,
-                    handled_prefix,
+                    boundary,
                 } = park;
                 let id = self.park_continuation(
                     continuation,
                     realm,
                     kind,
-                    suspend_tag,
                     park_cancel_flag,
                     Arc::new(table.clone()),
                     parked_finalized_root,
-                    handled_prefix,
+                    boundary,
                 );
                 Ok(ParkedRaw::Suspended {
                     request,
@@ -2525,105 +2483,24 @@ impl JitEffectMachine {
     // Parked-continuation registry.
     // ----------------------------------------------------------------------
 
-    /// Check `incoming` — a runtime resource scope's handled prefix, the effect names for tags
-    /// `[0, suspend_tag)` in position order — against the machine's
-    /// established prefix. `DispatchEffect` is positional over an `HList`
-    /// and the suspend test is `tag >= suspend_tag`; both are correct only
-    /// relative to one effect row whose handled effects occupy a contiguous
-    /// low prefix, so two runtime resource scopes sharing a machine must agree on that prefix
-    /// exactly, not merely where they happen to overlap.
-    ///
-    /// An EMPTY `incoming` prefix is compatible with anything — this is the
-    /// outer driver's threshold-zero row (`vec![runllmturn_decl()]`, handled
-    /// prefix empty: nothing handled, nothing ever dispatched, so it cannot
-    /// misroute). If the machine has not established a prefix yet, any
-    /// `incoming` prefix is compatible (it may go on to become the
-    /// establishing one). Otherwise, two non-empty prefixes must be EXACTLY
-    /// EQUAL: a length difference is refused as [`PrefixMismatch::Length`]
-    /// (a strict EXTENSION, e.g. `[FileIO, Proc]` established against
-    /// `[FileIO, Proc, Memory]` incoming, is REFUSED, not accepted — see
-    /// below for why); equal length but disagreeing content is refused as
-    /// [`PrefixMismatch::Position`] at the first differing index.
-    ///
-    /// **Why exact equality, not agreement-up-to-the-shorter-length.** The
-    /// established prefix is CALLER-SUPPLIED metadata, not something read off
-    /// the machine's actual (compile-time monomorphized, runtime-opaque) `H`.
-    /// A runtime resource scope declaring a shorter prefix says nothing about how many
-    /// handlers `H` really has — it may simply use a lower suspend
-    /// threshold. So accepting an extension is unsound: if `H` really does
-    /// have a handler at the extended position, the extending runtime resource scope's tag
-    /// there is BELOW ITS OWN threshold (dispatched, not suspended), and it
-    /// reaches that handler — a silent misroute, exactly what this check
-    /// exists to prevent.
-    ///
-    /// **Why exact equality IS sound.** With every non-empty established
-    /// prefix on a machine equal to every other, and an empty prefix
-    /// dispatching nothing, every tag that is ever DISPATCHED (as opposed to
-    /// suspended) is strictly below the one common prefix length, and every
-    /// runtime resource scope agrees on what sits at every position below that length. No
-    /// dispatched tag can therefore reach a position two runtime resource scopes disagree
-    /// about.
-    ///
-    /// **The residual, stated rather than glossed.** This check enforces
-    /// agreement AMONG runtime resource scopes sharing a machine; it cannot verify a declared
-    /// prefix against the actual, opaque `H` — a single runtime resource scope parking alone,
-    /// or every runtime resource scope agreeing with each other while all of them are wrong
-    /// about `H`, is not caught here. A wrong declared prefix, undetected by
-    /// any other runtime resource scope's disagreement, remains the caller's responsibility.
-    fn check_prefix_compatible(&self, incoming: &[String]) -> Result<(), JitError> {
-        if incoming.is_empty() {
-            return Ok(());
+    /// Validate and establish the handled-effect layout before a parked-path
+    /// run starts. Establishment happens at entry, even if the run completes:
+    /// dispatch may occur without a suspension.
+    fn enter_parked_path(&mut self, boundary: &EffectBoundary) -> Result<(), JitError> {
+        if let Err(mismatch) = boundary.check_compatible_prefix(self.established_prefix.as_deref())
+        {
+            return Err(JitError::IncompatibleHandledPrefix {
+                established: self
+                    .established_prefix
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_vec(),
+                incoming: boundary.handled_prefix().to_vec(),
+                mismatch,
+            });
         }
-        if let Some(established) = &self.established_prefix {
-            if established.len() != incoming.len() {
-                return Err(JitError::IncompatibleHandledPrefix {
-                    established: established.to_vec(),
-                    incoming: incoming.to_vec(),
-                    mismatch: PrefixMismatch::Length,
-                });
-            }
-            for (position, (e, i)) in established.iter().zip(incoming.iter()).enumerate() {
-                if e != i {
-                    return Err(JitError::IncompatibleHandledPrefix {
-                        established: established.to_vec(),
-                        incoming: incoming.to_vec(),
-                        mismatch: PrefixMismatch::Position(position),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Enter the parked path with `incoming` — a runtime resource scope's handled prefix.
-    /// Checks it against the machine's established prefix
-    /// ([`Self::check_prefix_compatible`]) and, if compatible, ESTABLISHES it
-    /// when this is the first non-empty prefix to enter. Two non-empty
-    /// prefixes must be EXACTLY EQUAL to be compatible — see
-    /// [`Self::check_prefix_compatible`] for why that is sound (every
-    /// dispatched tag sits below the one common prefix length every runtime resource scope
-    /// agrees on) and its residual (agreement AMONG runtime resource scopes, not verification
-    /// against the actual opaque `H`).
-    ///
-    /// `H` is fixed for the machine's life regardless of whether the
-    /// entering turn goes on to suspend or complete, so establishing must
-    /// happen HERE — at entry, before the machine is driven at all — not at
-    /// park: a runtime resource scope that runs a turn to completion without ever suspending
-    /// dispatches every one of its effects through `H` exactly the same as
-    /// one that suspends, so establishing only on suspension would leave
-    /// such a runtime resource scope's non-empty prefix never recorded, after which an
-    /// incompatible runtime resource scope could park successfully because nothing was
-    /// established.
-    ///
-    /// Called at the TOP of every parked-path entry
-    /// ([`Self::run_until_suspension`], [`Self::resume_continuation`]),
-    /// before anything is driven — a refusal here leaves the machine
-    /// untouched because nothing has run yet, which is a strictly easier
-    /// property to hold than checking after a run has already suspended.
-    fn enter_parked_path(&mut self, incoming: &Arc<[String]>) -> Result<(), JitError> {
-        self.check_prefix_compatible(incoming)?;
-        if self.established_prefix.is_none() && !incoming.is_empty() {
-            self.established_prefix = Some(incoming.clone());
+        if self.established_prefix.is_none() && !boundary.handled_prefix().is_empty() {
+            self.established_prefix = Some(boundary.handled_prefix_arc());
         }
         Ok(())
     }
@@ -2652,23 +2529,19 @@ impl JitEffectMachine {
     /// this registration is released by [`Self::resume_continuation`], not by a guard
     /// at the end of the next child run.
     ///
-    /// The caller has already checked AND established `handled_prefix` via
-    /// [`Self::enter_parked_path`] at entry to the parked path — before the
-    /// machine was driven at all. This method performs no check or establish
-    /// of its own; `handled_prefix` is stored on the new frame purely so a
-    /// later [`Self::resume_continuation`] can replay it through that same entry
-    /// check.
+    /// The caller has already checked and established `boundary` via
+    /// [`Self::enter_parked_path`]. It is stored on the frame so resume uses
+    /// the same dispatch and suspension policy.
     #[allow(clippy::too_many_arguments)]
     fn park_continuation(
         &mut self,
         continuation: *mut u8,
         realm: RealmId,
         kind: ParkKind,
-        suspend_tag: u64,
         cancel_flag: Arc<AtomicBool>,
         table: Arc<DataConTable>,
         finalized_root: Option<crate::old_space::RootSlot>,
-        handled_prefix: Arc<[String]>,
+        boundary: EffectBoundary,
     ) -> ContinuationId {
         let mut cell = Box::new(continuation);
         let slot: *mut *mut u8 = &mut *cell;
@@ -2685,12 +2558,11 @@ impl JitEffectMachine {
             ContinuationFrame {
                 cell,
                 realm,
-                suspend_tag,
+                boundary,
                 kind,
                 finalized_root,
                 cancel_flag,
                 table,
-                handled_prefix,
             },
         );
         self.assert_rooting_receipt();
@@ -2712,19 +2584,18 @@ impl JitEffectMachine {
             SuspensionEntry::Main => self.func_id,
             SuspensionEntry::Fragment(func_id) => func_id,
         };
-        let handled_prefix = run.boundary.handled_prefix_arc();
-        self.enter_parked_path(&handled_prefix)?;
+        self.enter_parked_path(run.boundary)?;
         self.run_suspendable_shared(
             func_id,
             run.table,
             handlers,
             user,
-            run.boundary.suspend_tag(),
+            run.boundary,
             run.completion.materialization(),
             ParkTarget::Registry {
                 realm: run.realm,
                 kind: run.completion,
-                handled_prefix,
+                boundary: run.boundary.clone(),
             },
         )
         .map(ParkedRaw::into_parked)
@@ -2732,21 +2603,9 @@ impl JitEffectMachine {
 
     /// Re-enter the continuation parked under `id`, feeding the answer (or an
     /// abort) and driving to the next suspension or completion. The frame's own
-    /// `suspend_tag` and [`ParkKind`] are replayed — the caller supplies only
-    /// the id and the input.
-    ///
-    /// Resumes in ANY order: the registry imposes none. A re-suspension parks
-    /// again under a FRESH id in the same runtime resource scope, replaying the frame's own
-    /// `handled_prefix` — re-checked (and, if still unestablished, re-offered
-    /// to establish) via [`Self::enter_parked_path`] at the TOP of this
-    /// method, before the continuation is driven at all — same discipline as
-    /// [`Self::run_until_suspension`]'s entry check. The frame's
-    /// own prefix was already checked EXACTLY EQUAL to the machine's
-    /// established one when it first parked, and the established prefix is
-    /// monotonic, so this re-check cannot newly disagree — see
-    /// [`Self::check_prefix_compatible`] for why exact equality is sound and
-    /// its residual (agreement AMONG runtime resource scopes, not verification against the
-    /// real `H`).
+    /// effect boundary and [`ParkKind`] are replayed — the caller supplies only
+    /// the id and input. Resumes may occur in any order. A re-suspension mints a
+    /// fresh id in the same realm and retains the frame's boundary.
     ///
     /// A bridged answer is checked for normal form BEFORE the frame is taken
     /// out of the map. A bottom-bearing answer therefore leaves the frame
@@ -2765,13 +2624,8 @@ impl JitEffectMachine {
     ) -> Result<ParkedOutcome, JitError> {
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
-        let (realm, kind, suspend_tag, handled_prefix) = match self.continuations.get(&id) {
-            Some(frame) => (
-                frame.realm,
-                frame.kind,
-                frame.suspend_tag,
-                frame.handled_prefix.clone(),
-            ),
+        let (realm, kind, boundary) = match self.continuations.get(&id) {
+            Some(frame) => (frame.realm, frame.kind, frame.boundary.clone()),
             None => {
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "resume_continuation: no continuation parked under {id:?}"
@@ -2785,7 +2639,7 @@ impl JitEffectMachine {
         // re-confirmation is a no-op in practice, kept for the same
         // before-anything-runs discipline rather than because it can newly
         // disagree.
-        self.enter_parked_path(&handled_prefix)?;
+        self.enter_parked_path(&boundary)?;
         if let ResumeInput::Answer(val) = &input {
             if let Err(reason) = answer_force_nf(val) {
                 // Reject without consuming. The frame stays parked and rooted,
@@ -2825,13 +2679,13 @@ impl JitEffectMachine {
             &table,
             handlers,
             user,
-            suspend_tag,
+            &boundary,
             input,
             kind.materialization(),
             ParkTarget::Registry {
                 realm,
                 kind,
-                handled_prefix,
+                boundary: boundary.clone(),
             },
             cancel_flag,
         )
