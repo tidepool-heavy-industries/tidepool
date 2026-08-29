@@ -1,25 +1,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE PatternSynonyms #-}
 
--- | Option-C session type-carrier — PRODUCTIONIZED from the proven spikes.
+-- | Session type metadata for values retained by the resident JIT.
 --
--- This is the haskell-extract half of the @tidepool-repl@ TYPE plane. A
+-- A
 -- value binding produced by one turn (e.g. @x <- compute@) has a GHC-inferred
 -- type we must carry to later turns so references typecheck — WITHOUT GHC ever
 -- holding the value (the value lives in the persistent JIT machine's heap,
 -- resolved at codegen via the @ExternalEnv@ override keyed on the binder's
 -- @stableVarId@; see Resolve.isSessionValVar + emit/expr.rs).
 --
--- The mechanism (proven in @spike-optionc/Spike.hs@ + @spike-extract/Spike.hs@,
--- and re-proven from a bare 'TyThing' before this module was written):
+-- The boundary has three operations:
 --
 --   * 'mkThinSessionIface' — synthesize a THIN 'ModIface' for a session module
 --     @Tidepool.Session.Val.G<g>@ carrying ONLY the binder's type 'IfaceDecl'.
 --     NO @mi_extra_decls@ (we never set @Opt_WriteIfSimplifiedCore@ here) and NO
 --     @ifIdUnfolding@ — so the front-end typechecker sees the type but GHC has
---     no body to inline (kimi B1). Built directly from @(OccName, Type)@ pairs,
+--     no body to inline. Built directly from @(OccName, Type)@ pairs,
 --     NOT by rendering the type back to source (avoids the ppr round-trip that
---     Option C exists to eliminate).
+--     would make pretty-printed syntax part of the type transport contract).
 --
 --   * 'writeSessionIface' — 'writeBinIface' it to the session @.hi@.
 --
@@ -29,7 +28,8 @@
 --     'initIfaceCheck' to reconstruct the 'TyThing's, then inject as a NORMAL
 --     HPT home module ('addHomeModInfoToHpt' + 'addHomeModuleToFinder' with
 --     @ml_hs_file = Nothing@). This sidesteps the @interactive:GhciN@ package
---     and the finder-exclusion blocker.
+--     namespace and source-file lookup, neither of which describes these
+--     synthetic type-only modules.
 --
 -- GATING: nothing here runs on the normal one-shot eval path. 'SessionScope'
 -- with an empty 'ssValIfaces' is inert; 'GhcPipeline.runPipeline' calls the
@@ -46,7 +46,7 @@
 -- 'GHC.Iface.Load.loadInterface' ties; manual injection of such a module is
 -- unsupported and fails when the dfun thunk is forced.
 module Tidepool.Session
-  ( -- * Identifiers (mirror the Rust domain model §1–2)
+  ( -- * Session identities
     Generation(..)
   , SessionModuleKind(..)
   , SessionModule(..)
@@ -55,18 +55,18 @@ module Tidepool.Session
   , parseSessionModule
   , isSessionValModule
   , sessionHiPath
-    -- * Session scope (what a turn injects; empty = inert)
+    -- * Injected session scope
   , SessionScope(..)
   , emptySessionScope
   , isSessionScopeActive
-    -- * The Option-C write/inject mechanism
+    -- * Type-only interface transport
   , mkThinSessionIface
   , writeSessionIface
   , injectSessionIface
   , injectSessionScope
-    -- * Binder identity (for the persistent-binding-store stableVarId)
+    -- * Persistent binder identity
   , sessionBinderName
-    -- * Scaffold binder-name protocol (the eval-wrapper's reserved names)
+    -- * Reserved scaffold binders
   , scaffoldTargetName
   , scaffoldOutputBase
   , evalUserBinder
@@ -211,7 +211,7 @@ isSessionScopeActive = not . null . ssValIfaces
 -- | Build a THIN 'ModIface' for a session module carrying ONLY the given
 -- binders' type 'IfaceDecl's. No @mi_extra_decls@, no unfoldings: there is
 -- nothing for GHC to inline, so a reference to a session binder survives to
--- Core as a bare external @Var@ (the contract; kimi B1).
+-- Core as a bare external @Var@.
 --
 -- The binders are minted as external 'Name's IN the session module
 -- (@mkExternalName … modl occ@) with the supplied 'Type'. The 'Unique' is a
@@ -302,7 +302,7 @@ injectSessionIface root sm hsc0 = liftIO $ do
       pure hsc1
   where
     injectDetails :: HscEnv -> ModuleName -> ModIface -> IO ModDetails
-    injectDetails hsc modNm iface =
+    injectDetails hsc _ iface =
       initIfaceCheck (text "tidepool session inject") hsc (typecheckIface iface)
 
 -- | A source-less 'ModLocation' anchored at the session @.hi@ — the load-bearing

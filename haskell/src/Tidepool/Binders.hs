@@ -31,12 +31,7 @@ module Tidepool.Binders
   ) where
 
 import GHC
-import GHC.Hs
-  ( HsDecl(..), TyClDecl(..), HsDataDefn(..), ConDecl(..)
-  , Sig(..), LSig, hsmodDecls )
-import GHC.Hs.Expr (StmtLR(..))
-import GHC.Hs.Utils (collectHsBindBinders, collectLStmtBinders, CollectFlag(..))
-import GHC.Driver.Session (DynFlags, importPaths, xopt_set)
+import GHC.Driver.Session (xopt_set)
 import GHC.LanguageExtensions (Extension(..))
 import GHC.Parser (parseStatement, parseDeclaration)
 import qualified GHC.Parser (parseModule)
@@ -45,13 +40,12 @@ import GHC.Driver.Config.Parser (initParserOpts)
 import GHC.Data.StringBuffer (stringToStringBuffer)
 import GHC.Data.FastString (mkFastString)
 import GHC.Types.SrcLoc (mkRealSrcLoc)
-import GHC.Types.Name.Reader (RdrName, rdrNameOcc)
+import GHC.Types.Name.Reader (rdrNameOcc)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.SrcLoc (unLoc)
 import Control.Exception (evaluate)
 import Control.Monad.IO.Class (liftIO)
 import Data.Foldable (toList)
-import Data.List (intercalate, foldl', nub)
+import Data.List (intercalate, nub)
 import Data.Maybe (catMaybes, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -126,7 +120,6 @@ tyClItems = \case
   SynDecl  { tcdLName = n } -> [ EType (occStr (unLoc n)) [] ]
   ClassDecl{ tcdLName = n, tcdSigs = sigs } -> [ EClass (occStr (unLoc n)) (classMethodNames sigs) ]
   FamDecl  { tcdFam = FamilyDecl { fdLName = n } } -> [ EType (occStr (unLoc n)) [] ]
-  _ -> []
 
 -- | Method names of a class declaration (parse-only: uses 'ClassOpSig' from
 -- 'tcdSigs', not the typechecked 'classMethods').
