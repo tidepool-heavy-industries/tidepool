@@ -139,7 +139,7 @@ checkBinder libdir targetName occ = do
              ++ sessionModuleString g1 ++ "." ++ occ ++ ") ---"
   let scope = SessionScope { ssRoot = workDir, ssValIfaces = [g1] }
   r <- try $ do
-    res <- runPipelineSession (Just scope) usePath []
+    res <- runPipelineSession (Just scope) usePath [] Nothing
     let hsc   = prHscEnv res
         binds = prBinds res
         want  = expectedId hsc g1 occ

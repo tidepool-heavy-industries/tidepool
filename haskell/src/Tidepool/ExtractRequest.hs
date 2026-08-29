@@ -3,6 +3,7 @@
 -- options; CLI compatibility is owned by the launcher layer.
 module Tidepool.ExtractRequest
   ( RequestField(..)
+  , WorkerRequest(..)
   , workerRequestFromArgv
   , workerArgv
   ) where
@@ -40,6 +41,91 @@ data RequestField
   | BuildProductsDir FilePath
   deriving (Eq, Show)
 
+-- | A decoded compiler-worker invocation. This is the Haskell boundary's
+-- domain request; the executable never reconstructs or parses CLI syntax.
+data WorkerRequest = WorkerRequest
+  { requestOutDir :: Maybe FilePath
+  , requestTarget :: Maybe String
+  , requestTargets :: [String]
+  , requestDumpCore :: Bool
+  , requestAllClosed :: Bool
+  , requestTargetModuleOnly :: Bool
+  , requestIncludes :: [FilePath]
+  , requestFiles :: [FilePath]
+  , requestSessionBind :: Bool
+  , requestBindNames :: [String]
+  , requestBindGen :: Maybe Word64
+  , requestSessionRoot :: Maybe FilePath
+  , requestInjectVals :: [String]
+  , requestEmitBoundBinders :: Maybe FilePath
+  , requestProbeOnly :: Bool
+  , requestTurn :: Bool
+  , requestTurnTemplates :: [(String, FilePath)]
+  , requestTurnOut :: Maybe FilePath
+  , requestTurnVerdict :: Maybe String
+  , requestClassify :: Bool
+  , requestClassifyOut :: Maybe FilePath
+  , requestHarnessProfile :: Bool
+  , requestBuildProductsDir :: Maybe FilePath
+  }
+  deriving (Eq, Show)
+
+emptyWorkerRequest :: WorkerRequest
+emptyWorkerRequest = WorkerRequest
+  { requestOutDir = Nothing
+  , requestTarget = Nothing
+  , requestTargets = []
+  , requestDumpCore = False
+  , requestAllClosed = False
+  , requestTargetModuleOnly = False
+  , requestIncludes = []
+  , requestFiles = []
+  , requestSessionBind = False
+  , requestBindNames = []
+  , requestBindGen = Nothing
+  , requestSessionRoot = Nothing
+  , requestInjectVals = []
+  , requestEmitBoundBinders = Nothing
+  , requestProbeOnly = False
+  , requestTurn = False
+  , requestTurnTemplates = []
+  , requestTurnOut = Nothing
+  , requestTurnVerdict = Nothing
+  , requestClassify = False
+  , requestClassifyOut = Nothing
+  , requestHarnessProfile = False
+  , requestBuildProductsDir = Nothing
+  }
+
+requestFromFields :: [RequestField] -> WorkerRequest
+requestFromFields = foldl apply emptyWorkerRequest
+  where
+    apply request field = case field of
+      Input path -> request { requestFiles = requestFiles request ++ [path] }
+      OutputDir path -> request { requestOutDir = Just path }
+      Target name -> request { requestTarget = Just name }
+      Targets names -> request { requestTargets = requestTargets request ++ names }
+      DumpCore -> request { requestDumpCore = True }
+      AllClosed -> request { requestAllClosed = True }
+      TargetModuleOnly -> request { requestTargetModuleOnly = True }
+      Include path -> request { requestIncludes = requestIncludes request ++ [path] }
+      SessionBind -> request { requestSessionBind = True }
+      BindName name -> request { requestBindNames = requestBindNames request ++ [name] }
+      BindGen generation -> request { requestBindGen = Just generation }
+      SessionRoot path -> request { requestSessionRoot = Just path }
+      InjectVal name -> request { requestInjectVals = requestInjectVals request ++ [name] }
+      EmitBoundBinders path -> request { requestEmitBoundBinders = Just path }
+      ProbeOnly -> request { requestProbeOnly = True }
+      Turn -> request { requestTurn = True }
+      TurnTemplate kind path -> request
+        { requestTurnTemplates = requestTurnTemplates request ++ [(kind, path)] }
+      TurnOut path -> request { requestTurnOut = Just path }
+      TurnVerdict verdict -> request { requestTurnVerdict = Just verdict }
+      Classify -> request { requestClassify = True }
+      ClassifyOut path -> request { requestClassifyOut = Just path }
+      HarnessProfile -> request { requestHarnessProfile = True }
+      BuildProductsDir path -> request { requestBuildProductsDir = Just path }
+
 workerRequestFlag :: String
 workerRequestFlag = "--worker-request-v1"
 
@@ -48,11 +134,11 @@ workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
 
 -- | Decode the worker's complete argv. The compiler boundary deliberately has
 -- no command-line grammar: exactly one versioned payload is accepted.
-workerRequestFromArgv :: [String] -> Either String (Maybe [RequestField])
+workerRequestFromArgv :: [String] -> Either String (Maybe WorkerRequest)
 workerRequestFromArgv [] = Right Nothing
 workerRequestFromArgv [flag] | flag == workerRequestFlag = Left (workerRequestFlag ++ ": payload is required")
 workerRequestFromArgv [flag, payload]
-  | flag == workerRequestFlag = Just <$> (decodeHex payload >>= decodeRequest)
+  | flag == workerRequestFlag = Just . requestFromFields <$> (decodeHex payload >>= decodeRequest)
 workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 
 type Parser a = BS.ByteString -> Either String (a, BS.ByteString)

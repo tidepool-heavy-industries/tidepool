@@ -1,6 +1,6 @@
 module Main where
 
-import System.Environment (getArgs, setEnv)
+import System.Environment (getArgs)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
@@ -42,7 +42,7 @@ import Tidepool.GhcPipeline
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
 import Tidepool.ExtractUtil (capitalize)
-import Tidepool.ExtractRequest (RequestField(..), workerRequestFromArgv)
+import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, parseSessionModule, sessionBinderName
@@ -56,15 +56,19 @@ import Tidepool.Translate
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 
--- | Every dispatch arm below prints exactly ONE JSON diagnostics report to
--- stdout before exiting (see 'Tidepool.DiagJson') — empty @diagnostics@ on
--- success, one entry per compile diagnostic on failure. stdout is the
--- authoritative machine contract; stderr carries a human-readable debug copy
--- only.
+type Compiler =
+  Maybe SessionScope
+  -> FilePath
+  -> [FilePath]
+  -> Maybe FilePath
+  -> IO PipelineResult
+
+-- | Serve one typed request. Stdout contains exactly one diagnostics document;
+-- stderr is the human-readable channel.
 main :: IO ()
 main = do
-  rawArgs <- getArgs
-  if rawArgs == ["--worker-loop-v1"]
+  rawWorkerRequest <- getArgs
+  if rawWorkerRequest == ["--worker-loop-v1"]
     then do
       hSetBinaryMode stdin True
       hSetBinaryMode stdout True
@@ -73,35 +77,24 @@ main = do
           (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler argv)
     else do
       hSetEncoding stdout utf8
-      runWorkerInvocation runPipelineSession rawArgs >>= exitWith
+      runWorkerInvocation runPipelineSession rawWorkerRequest >>= exitWith
 
 -- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.
 runWorkerInvocation
-  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
-  -> [String] -> IO ExitCode
-runWorkerInvocation compiler rawArgs = do
-  parsedArgs <- case workerRequestFromArgv rawArgs of
+  :: Compiler -> [String] -> IO ExitCode
+runWorkerInvocation compiler rawWorkerRequest = do
+  parsedWorkerRequest <- case workerRequestFromArgv rawWorkerRequest of
     Left err -> hPutStrLn stderr err >> pure Nothing
-    Right (Just fields) -> pure (Just (requestArgs fields))
+    Right (Just request) -> pure (Just request)
     Right Nothing -> hPutStrLn stderr "worker requires a versioned request" >> pure Nothing
-  case parsedArgs of
+  case parsedWorkerRequest of
     Nothing -> pure (ExitFailure 2)
     Just request -> runParsedInvocation compiler request
 
 runParsedInvocation
-  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
-  -> Args -> IO ExitCode
-runParsedInvocation compiler parsedArgs = do
-  -- Set BEFORE any GhcPipeline call, which is what actually reads it (see
-  -- 'Tidepool.GhcPipeline.withBuildProductsFromEnv') — see 'argBuildProductsDir'.
-  -- Under the resident worker this env var was already read once at session
-  -- boot, so a later request's own field has no further
-  -- effect — the same "process-wide setting" framing 'argBuildProductsDir'
-  -- already documents, just pinned earlier under a resident session.
-  case argBuildProductsDir parsedArgs of
-    Just dir -> setEnv "TIDEPOOL_BUILD_PRODUCTS_DIR" dir
-    Nothing  -> pure ()
+  :: Compiler -> WorkerRequest -> IO ExitCode
+runParsedInvocation compiler parsedWorkerRequest = do
   -- Read once per invocation (see Tidepool.Timing) and thread down;
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there and tidepool-harness/src/timing.rs.
@@ -111,40 +104,25 @@ runParsedInvocation compiler parsedArgs = do
   -- dispatch below, so every mode (one-shot, session, turn) sees a plain
   -- file with no pragma-block requirement of its own. See
   -- 'spliceHarnessProfilePragma'.
-  args <- if argHarnessProfile parsedArgs
-            then spliceHarnessProfilePragma parsedArgs
-            else pure parsedArgs
+  args <- if requestHarnessProfile parsedWorkerRequest
+            then spliceHarnessProfilePragma parsedWorkerRequest
+            else pure parsedWorkerRequest
   dispatch compiler timing args
 
 -- | Dispatch one decoded worker request.
 dispatch
-  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
-  -> Bool -> Args -> IO ExitCode
+  :: Compiler -> Bool -> WorkerRequest -> IO ExitCode
 dispatch compiler timing args =
-  case argFiles args of
+  case requestFiles args of
     [] -> reportDiags (Left (toException (userError "worker request contains no input")))
     (file : _)
-        -- Block classify mode: every positional file is one item, classified
-        -- in ONE GHC session boot. Checked before '--turn' since it reads the
-        -- FULL 'argFiles' list rather than just the head.
-        | argClassify args                    -> runClassifyMode timing args
-        -- Turn mode (one-spawn-per-turn protocol): classify + splice + compile
-        -- + rich-result emission, in one process. Checked before 'isSessionMode'
-        -- since a bind/expr turn also carries --session-root/--inject-val.
-        | argTurn args                        -> runTurnMode compiler args file
-        -- Explicit multi-target mode (--targets a,b) ALWAYS wins over
-        -- 'isSessionMode', whether or not session flags are ALSO present —
-        -- checked before it since 'processSessionFile' below has no
-        -- '--targets' handling at all (it compiles exactly one target,
-        -- 'argTarget'). This is what lets a caller combine `--targets a,b`
-        -- with `--session-root <dir> --inject-val <mod>` in one spawn (the
-        -- harness driver's fused outer render/loop compile injecting its
-        -- stable-value context):
-        -- 'processFile' itself is session-scope-aware now (see
-        -- 'scopeFromArgs'), so this still resolves the injected module for a
-        -- multi-target compile; a plain multi-target caller with no session
-        -- flags is byte-identical to before (`scope = Nothing` there).
-        | not (null (argTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
+        -- Classification consumes every input; all other modes use the first.
+        | requestClassify args                    -> runClassifyMode timing args
+        -- A turn may also carry session fields, so it precedes session dispatch.
+        | requestTurn args                        -> runTurnMode compiler args file
+        -- Multi-target compilation may carry a session scope and therefore
+        -- precedes the single-target session operation.
+        | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
         -- Session mode: bind/reference turn with iface injection +
         -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
         -- file is processed (matching the two guards above) — one invocation,
@@ -154,64 +132,23 @@ dispatch compiler timing args =
         | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
 
 
--- | Rewrites the FIRST target file (`argFiles`'s head) to a scratch copy
--- with 'harnessProfilePragmaLine' prepended — the harness compilation
--- profile. A no-op when 'argFiles'
--- is empty (the usage-banner path handles that separately).
---
--- Splice source text rather than toggling GHC extension flags on the
--- original file's DynFlags: a compilation-request cache
--- (@tidepool_runtime::cache@, see @cache.rs@'s @cache_key_salted@) keys on
--- rendered SOURCE BYTES, the target binder, include-directory content
--- fingerprints, and the extract binary's own fingerprint — NOT on CLI
--- flags. A flags-based profile is therefore invisible to any future cached
--- caller: a with-profile and a without-profile compile of the byte-identical
--- source hash to the SAME key and could serve each other's stale CBOR.
--- Splicing the pragma into what actually gets compiled makes the profile a
--- property of the rendered source, cache-safe by construction — the same
--- reason the eval preamble's own LANGUAGE pragma block
--- (@EVAL_PRAGMAS@, tidepool-mcp/src/preamble.rs) is prepended to source
--- text rather than ever applied as a flag. It also collapses what used to
--- be a two-part mechanism (a per-module 'ms_hspp_opts' patch PLUS a
--- downsweep-level module-graph splice — 'depanal' bakes an implicit-Prelude
--- import edge into a module's dependency list using whatever flags were
--- ambient at DOWNSWEEP time, before any later per-module patch can affect
--- it) into this one function: the pragma line is part of the source
--- 'depanal' itself parses, so there is no "downswept under the wrong
--- flags" case to work around.
---
--- The scratch file lands under the resolved output dir, named identically
--- to the original (GHC derives the module name from the filename), so
--- @import@s of it from elsewhere still resolve by the expected name.
--- Diagnostics from a harness-profile compile report line numbers ONE
--- greater than the author's own file (the single prepended pragma line) —
--- a caller wiring this flag into a diagnostics-surfacing path (e.g.
--- tidepool-harness) is responsible for that rebasing, the same way
--- tidepool-mcp's own eval preamble rebases its (much larger) prepended
--- header today.
-spliceHarnessProfilePragma :: Args -> IO Args
-spliceHarnessProfilePragma args = case argFiles args of
+-- | Prepend the harness language profile to a scratch copy of the first input.
+-- Putting the profile in source keeps it visible to GHC downsweep and to
+-- source-based cache keys. The caller's file is never modified; diagnostics
+-- are shifted by the inserted line.
+spliceHarnessProfilePragma :: WorkerRequest -> IO WorkerRequest
+spliceHarnessProfilePragma args = case requestFiles args of
   [] -> pure args
   (file : rest) -> do
     src <- readFile file
-    let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (argOutDir args)
+    let outDir = fromMaybe (takeDirectory file </> takeBaseName file ++ "_cbor") (requestOutDir args)
         scratchPath = outDir </> takeFileName file
     createDirectoryIfMissing True outDir
     writeFile scratchPath (harnessProfilePragmaLine ++ "\n" ++ src)
-    pure args { argFiles = scratchPath : rest }
+    pure args { requestFiles = scratchPath : rest }
 
--- | The harness compilation profile's standard extension set, rendered as
--- ONE @{-# LANGUAGE ... #-}@ line — what 'spliceHarnessProfilePragma'
--- prepends to an authored harness module's source, so the author's own file
--- on disk needs no pragma block of its own.
---
--- Mirrors @tidepool_mcp::preamble::EVAL_PRAGMAS@
--- (@tidepool-mcp\/src\/preamble.rs@) — the canonical extension list for "one
--- dialect everywhere" (repo CLAUDE.md). A Haskell string literal and a Rust
--- string constant cannot literally share a source across the language
--- boundary, so keep the two in sync BY HAND on any future change to either;
--- this is deliberately not a third independent copy — see EVAL_PRAGMAS's own
--- haddock for the two Rust-side copies already reconciled into one.
+-- | Harness language extensions. A cross-language consistency test pins this
+-- to @tidepool_mcp::preamble::EVAL_PRAGMAS@.
 harnessProfilePragmaLine :: String
 harnessProfilePragmaLine =
   "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DataKinds, TypeOperators, FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, ViewPatterns, BangPatterns, TypeApplications, BlockArguments, NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
@@ -238,155 +175,28 @@ reportDiags (Right ()) = putStrLn (renderDiagsJson []) >> pure ExitSuccess
 
 -- | A session-aware turn: any of the @--session-*@ flags are present. Reference
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
-isSessionMode :: Args -> Bool
-isSessionMode args = argSessionBind args || isJust (argSessionRoot args)
+isSessionMode :: WorkerRequest -> Bool
+isSessionMode args = requestSessionBind args || isJust (requestSessionRoot args)
 
--- | Build the 'SessionScope' a session-aware compile injects, from the raw
--- @--session-root@/@--inject-val@ args. The ONE place this construction
--- happens — 'processFile' (multi-target compiles that also carry session
--- flags, e.g. the harness driver's stable-value injection),
--- 'processSessionFile', and
--- 'runTurnMode' all build the SAME scope from the SAME two args, so this
--- used to be three copies kept in sync by hand. Unconditional — the caller
--- decides whether to wrap it in 'Just' (only when 'isSessionMode' holds) or
--- pass 'Nothing'; an inert scope (@argInjectVals = []@) is harmless either
--- way ('isSessionScopeActive' routes it straight back to 'normalVariant').
-scopeFromArgs :: Args -> SessionScope
-scopeFromArgs args = SessionScope
-  { ssRoot      = fromMaybe "" (argSessionRoot args)
-  , ssValIfaces = mapMaybe parseValModule (argInjectVals args)
+-- | Project the session portion of a worker request. Callers decide whether
+-- the resulting scope is active.
+scopeFromWorkerRequest :: WorkerRequest -> SessionScope
+scopeFromWorkerRequest args = SessionScope
+  { ssRoot      = fromMaybe "" (requestSessionRoot args)
+  , ssValIfaces = mapMaybe parseValModule (requestInjectVals args)
   }
-
-data Args = Args
-  { argOutDir :: Maybe FilePath
-  , argTarget :: Maybe String
-  -- --targets mode: several
-  -- explicitly-named targets, one merged meta.cbor. Deliberately a SEPARATE
-  -- field from 'argTarget' (never sharing its Maybe-String slot) so the
-  -- existing --target contract (single name, last flag wins) cannot be
-  -- perturbed by this mode's parsing.
-  , argTargets :: [String]
-  , argDumpCore :: Bool
-  , argAllClosed :: Bool
-  , argTargetModuleOnly :: Bool
-  , argIncludes :: [FilePath]
-  , argFiles :: [String]
-  -- Session-eval value binding:
-  , argSessionBind :: Bool
-  , argBindNames :: [String]
-  , argBindGen :: Maybe Word64
-  , argSessionRoot :: Maybe FilePath
-  , argInjectVals :: [String]
-  , argEmitBoundBinders :: Maybe FilePath
-  -- Ephemeral type-probe bind (`:t`): the same session-bind machinery,
-  -- but the captured binder is read-and-discarded, never a real session
-  -- binding — so the cross-row bind guard in 'mkBoundBinders' must not
-  -- reject a row-mentioning type here.
-  , argProbeOnly :: Bool
-  -- --turn mode (one-spawn-per-turn protocol):
-  , argTurn :: Bool
-  , argTurnTemplates :: [String]
-  , argTurnOut :: Maybe FilePath
-  , argTurnVerdict :: Maybe String
-  -- --classify mode (block classification):
-  , argClassify :: Bool
-  , argClassifyOut :: Maybe FilePath
-  -- Harness compilation profile: the
-  -- standard extension set applied to the target module by prepending one
-  -- LANGUAGE pragma line to a SCRATCH COPY of its source (see
-  -- 'spliceHarnessProfilePragma') — never the author's own file on disk,
-  -- and never a GHC FLAG (a compilation-request cache keys on rendered
-  -- source bytes, not CLI flags; splicing the extensions into what actually
-  -- gets compiled is cache-safe by construction, a flags-based toggle is
-  -- not). See Tidepool.Harness.Prelude.
-  , argHarnessProfile :: Bool
-  -- Persistent build-products dir (module-granular GHC recompilation
-  -- avoidance across spawns): 'main' sets
-  -- $TIDEPOOL_BUILD_PRODUCTS_DIR from this BEFORE any 'GhcPipeline' call,
-  -- which is what actually reads it (see 'Tidepool.GhcPipeline.withBuildProductsFromEnv') —
-  -- a process-wide setting, not threaded as a function parameter, to avoid
-  -- rippling into every 'GhcPipeline' call site and test suite. Never part
-  -- of the compile MEMO key (`tidepool_runtime::cache::invocation_key`
-  -- drops it, like `--output-dir`): it changes nothing about the OUTPUT
-  -- bytes, only whether GHC's own `checkOldIface` can skip an unchanged
-  -- home module.
-  , argBuildProductsDir :: Maybe FilePath
-  }
-
-defaultArgs :: Args
-defaultArgs = Args
-  { argOutDir = Nothing
-  , argTarget = Nothing
-  , argTargets = []
-  , argDumpCore = False
-  , argAllClosed = False
-  , argTargetModuleOnly = False
-  , argIncludes = []
-  , argFiles = []
-  , argSessionBind = False
-  , argBindNames = []
-  , argBindGen = Nothing
-  , argSessionRoot = Nothing
-  , argInjectVals = []
-  , argEmitBoundBinders = Nothing
-  , argProbeOnly = False
-  , argTurn = False
-  , argTurnTemplates = []
-  , argTurnOut = Nothing
-  , argTurnVerdict = Nothing
-  , argClassify = False
-  , argClassifyOut = Nothing
-  , argHarnessProfile = False
-  , argBuildProductsDir = Nothing
-  }
-
-requestArgs :: [RequestField] -> Args
-requestArgs = foldl apply defaultArgs
-  where
-    apply a field = case field of
-      Input path -> a { argFiles = argFiles a ++ [path] }
-      OutputDir path -> a { argOutDir = Just path }
-      Target name -> a { argTarget = Just name }
-      Targets names -> a { argTargets = argTargets a ++ names }
-      DumpCore -> a { argDumpCore = True }
-      AllClosed -> a { argAllClosed = True }
-      TargetModuleOnly -> a { argTargetModuleOnly = True }
-      Include path -> a { argIncludes = argIncludes a ++ [path] }
-      SessionBind -> a { argSessionBind = True }
-      BindName name -> a { argBindNames = argBindNames a ++ [name] }
-      BindGen generation -> a { argBindGen = Just generation }
-      SessionRoot path -> a { argSessionRoot = Just path }
-      InjectVal name -> a { argInjectVals = argInjectVals a ++ [name] }
-      EmitBoundBinders path -> a { argEmitBoundBinders = Just path }
-      ProbeOnly -> a { argProbeOnly = True }
-      Turn -> a { argTurn = True }
-      TurnTemplate kind path -> a { argTurnTemplates = argTurnTemplates a ++ [kind ++ "=" ++ path] }
-      TurnOut path -> a { argTurnOut = Just path }
-      TurnVerdict verdict -> a { argTurnVerdict = Just verdict }
-      Classify -> a { argClassify = True }
-      ClassifyOut path -> a { argClassifyOut = Just path }
-      HarnessProfile -> a { argHarnessProfile = True }
-      BuildProductsDir path -> a { argBuildProductsDir = Just path }
 
 processFile
-  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
-  -> Bool -> Args -> FilePath -> IO ExitCode
+  :: Compiler -> Bool -> WorkerRequest -> FilePath -> IO ExitCode
 processFile compiler timing args path = do
-  let mOutDir = argOutDir args
-      mTarget = argTarget args
+  let mOutDir = requestOutDir args
+      mTarget = requestTarget args
   hPutStrLn stderr $ "Processing: " ++ path
   res <- try $ do
-    -- Session-scope-aware ONLY when the caller actually set session flags
-    -- (`isSessionMode`) — every other caller keeps `scope = Nothing`, byte-
-    -- identical to the unconditional `runPipeline` this replaces
-    -- (`runPipelineSession Nothing == runPipeline`; an inert scope routes to
-    -- the same `normalVariant` path — see `scopeFromArgs`'s doc). This is
-    -- what lets `--targets a,b --session-root <dir> --inject-val <mod>`
-    -- (the harness driver's stable-value injection) reach a multi-target compile
-    -- at all: `main`'s dispatch sends a BARE `--session-root` to
-    -- `processSessionFile` instead, which has no `--targets` handling.
-    let scope = if isSessionMode args then Just (scopeFromArgs args) else Nothing
-    result <- compiler scope path (argIncludes args)
+    -- Multi-target extraction can inject stable session values without
+    -- becoming a session bind/reference operation.
+    let scope = if isSessionMode args then Just (scopeFromWorkerRequest args) else Nothing
+    result <- compiler scope path (requestIncludes args) (requestBuildProductsDir args)
     let binds = prBinds result
         tycons = prTyCons result
         hscEnv = prHscEnv result
@@ -399,7 +209,7 @@ processFile compiler timing args path = do
         warnTexts = map T.pack (prWarnings result)
     hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
 
-    if argDumpCore args
+    if requestDumpCore args
       then hPutStrLn stderr (dumpCore binds)
       else return ()
 
@@ -408,13 +218,13 @@ processFile compiler timing args path = do
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
 
-    if not (null (argTargets args))
+    if not (null (requestTargets args))
       -- Explicit multi-target mode (--targets a,b): takes priority over
       -- --target/--all-closed, which stay untouched below for every other
       -- caller. One runPipeline invocation (already run, above), several
       -- named targets, one merged meta.cbor — see 'runMultiTargetClosed'.
-      then runMultiTargetClosed timing outDir hscEnv binds mCapturedTy warnTexts (argTargets args)
-      else case (mTarget, argAllClosed args) of
+      then runMultiTargetClosed timing outDir hscEnv binds mCapturedTy warnTexts (requestTargets args)
+      else case (mTarget, requestAllClosed args) of
       (_, True) -> do
         -- All-closed mode: translate each binding independently via translateModuleClosed
         -- Use original names (not deduped) since translateModuleClosed looks up by name.
@@ -432,7 +242,7 @@ processFile compiler timing args path = do
         -- user-authored bindings.
         let targetModName = capitalize (takeBaseName path)
             keepBinder b
-              | not (argTargetModuleOnly args) = True
+              | not (requestTargetModuleOnly args) = True
               | otherwise = case nameModule_maybe (idName b) of
                   Just m  -> moduleNameString (moduleName m) == targetModName
                   Nothing -> True
@@ -541,35 +351,34 @@ processFile compiler timing args path = do
 -- bind turn — capture the bound value's type, write the thin session iface, and
 -- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
 processSessionFile
-  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
-  -> Args -> FilePath -> IO ExitCode
+  :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 processSessionFile compiler args path = do
   -- The self-iterating harness's fused outer render/loop compile never
   -- reaches this session-mode path even though it now DOES carry
   -- --session-root/--inject-val for stable-value injection: 'dispatch' checks
-  -- `not (null (argTargets args))` (which its multi-target --targets
+  -- `not (null (requestTargets args))` (which its multi-target --targets
   -- result,__selfHarnessLoopEntry always is) BEFORE 'isSessionMode', so it
   -- always lands on 'processFile' instead. This read is here purely so
   -- 'writeWholeModuleClosed' (shared with 'processFile') behaves identically
   -- regardless of caller.
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (session): " ++ path
-  let scope = scopeFromArgs args
+  let scope = scopeFromWorkerRequest args
       -- The repl wrapper's own compile-target binding is scaffold-reserved
       -- (@__result@, not @result@) so it can never collide with a user's own
       -- chosen bind name promoted into a later turn's session-lib import —
       -- see 'writeWholeModuleClosed''s doc for why the CBOR file it's
       -- written to stays named @result.cbor@ regardless.
-      targetName = fromMaybe scaffoldTargetName (argTarget args)
+      targetName = fromMaybe scaffoldTargetName (requestTarget args)
   res <- try $ do
-    result <- compiler (Just scope) path (argIncludes args)
+    result <- compiler (Just scope) path (requestIncludes args) (requestBuildProductsDir args)
     let binds  = prBinds result
         hscEnv = prHscEnv result
         mCapturedTy = fmap T.pack (prCapturedType result)
         warnTexts = map T.pack (prWarnings result)
     hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
-    if argDumpCore args then hPutStrLn stderr (dumpCore binds) else return ()
-    let outDir = case argOutDir args of
+    if requestDumpCore args then hPutStrLn stderr (dumpCore binds) else return ()
+    let outDir = case requestOutDir args of
           Just dir -> dir
           Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
     createDirectoryIfMissing True outDir
@@ -578,7 +387,7 @@ processSessionFile compiler args path = do
     -- expects result.cbor regardless of the (scaffold-reserved) lookup name.
     void $ writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName scaffoldOutputBase
     -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
-    when (argSessionBind args) (emitBindArtifacts args result)
+    when (requestSessionBind args) (emitBindArtifacts args result)
   reportDiags res
 
 -- | Turn mode (@--turn@): classify the raw
@@ -602,22 +411,21 @@ processSessionFile compiler args path = do
 -- so it reaches 'TBind' with empty binders and an empty bound-binder list,
 -- same shape a caller already handles for any other zero-binder bind.
 runTurnMode
-  :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
-  -> Args -> FilePath -> IO ExitCode
+  :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
 runTurnMode compiler args path = do
   timing <- readTimingEnabled
   hPutStrLn stderr $ "Processing (turn): " ++ path
   res <- timePhase timing "total" $ try $ do
     turnSrc   <- readFile path
-    templates <- mapM parseTurnTemplate (argTurnTemplates args)
-    mVerdict  <- traverse parseTurnVerdictArg (argTurnVerdict args)
+    let templates = requestTurnTemplates args
+    mVerdict  <- traverse parseTurnVerdictArg (requestTurnVerdict args)
     -- 'extractStmtBinders' emits no phases of its own. This mode times it as
     -- the single @classify@ phase, emitted
     -- only on the branch that actually classifies. With @--turn-verdict@
     -- supplied nothing is parsed, and an absent @classify@ row is the
     -- honest report rather than a phantom 0ms line.
     sb        <- maybe (timePhase timing "classify" (extractStmtBinders turnSrc)) return mVerdict
-    let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (argOutDir args)
+    let outDir     = fromMaybe (takeDirectory path </> takeBaseName path ++ "_cbor") (requestOutDir args)
         bindersStr = intercalate ", " (sbBinders sb)
         -- Splice @tmplFile@ against the turn text, write the spliced module
         -- to a scratch file under 'outDir', and return it alongside the
@@ -642,7 +450,7 @@ runTurnMode compiler args path = do
           Just f  -> return f
           Nothing -> error "--turn: no --turn-template for kind decl"
         (_spliced, modName, modulePath) <- spliceInto tmplFile
-        items <- extractBindersNamed modulePath (argIncludes args) modName
+        items <- extractBindersNamed modulePath (requestIncludes args) modName
         let binders = if null (sbBinders sb)
                         then map (T.pack . exportItemName) items
                         else map T.pack (sbBinders sb)
@@ -658,8 +466,8 @@ runTurnMode compiler args path = do
           Just f  -> return f
           Nothing -> error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
         (spliced, _modName, modulePath) <- spliceInto tmplFile
-        let scope = scopeFromArgs args
-        result <- compiler (Just scope) modulePath (argIncludes args)
+        let scope = scopeFromWorkerRequest args
+        result <- compiler (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
         let binds       = prBinds result
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
@@ -668,32 +476,32 @@ runTurnMode compiler args path = do
         -- caller whose template names its own target says so with --target
         -- (the same knob 'processSessionFile' honours). The output file base
         -- stays "result" regardless — every Rust caller reads result.cbor.
-        let targetName = fromMaybe scaffoldTargetName (argTarget args)
+        let targetName = fromMaybe scaffoldTargetName (requestTarget args)
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName scaffoldOutputBase
         let wrapped = T.pack spliced
         case selector of
           SBind -> do
-            g    <- requireArg "--bind-gen"     (argBindGen args)
-            root <- requireArg "--session-root" (argSessionRoot args)
+            g    <- requireArg "--bind-gen"     (requestBindGen args)
+            root <- requireArg "--session-root" (requestSessionRoot args)
             bbs  <- mkBoundBinders False (sbBinders sb) g root result
             return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
           SBindDiscard -> return (TBind [] 0 [] asksSites wrapped)
           SExpr -> return (TExpr 0 asksSites wrapped)
           SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
-    outFile <- requireArg "--turn-out" (argTurnOut args)
+    outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut
     BS.writeFile outFile cbor
     hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (BS.length cbor) ++ " bytes)"
   reportDiags res
 
 -- | Block classify mode (@--classify@):
--- classify EVERY positional file in 'argFiles' with ONE GHC session boot
+-- classify EVERY positional file in 'requestFiles' with ONE GHC session boot
 -- ('classifyBlock'), in argv order, and write the verdicts to
 -- @--classify-out@. Serves @tidepool-repl@'s block runner, which segments a
 -- block into decl runs before compiling any item and so needs every verdict
 -- up front — one spawn for the whole block instead of one classify spawn per
 -- item.
-runClassifyMode :: Bool -> Args -> IO ExitCode
+runClassifyMode :: Bool -> WorkerRequest -> IO ExitCode
 runClassifyMode timing args =
   -- No live GHC session exists in this parse-only mode, so the caught
   -- exception below always takes 'reportDiags''s 'Nothing' branch (never a
@@ -701,19 +509,13 @@ runClassifyMode timing args =
   timePhase timing "total" $
     try
       ( do
-          out      <- requireArg "--classify-out" (argClassifyOut args)
-          srcs     <- mapM readFile (argFiles args)
+          out      <- requireArg "--classify-out" (requestClassifyOut args)
+          srcs     <- mapM readFile (requestFiles args)
           verdicts <- classifyBlock timing srcs
           writeFile out (renderVerdictsJson verdicts)
           hPutStrLn stderr $ "  Wrote: " ++ out ++ " (" ++ show (length verdicts) ++ " verdicts)"
       )
       >>= reportDiags
-
--- | Validate one template selected by the typed request.
-parseTurnTemplate :: String -> IO (String, FilePath)
-parseTurnTemplate kv = case break (== '=') kv of
-  (kind, '=' : file) | not (null kind), not (null file) -> return (kind, file)
-  _ -> error ("--turn: malformed --turn-template (expected kind=file): " ++ kv)
 
 -- | Parse one raw @--turn-verdict kind[:name,name…]@ argument into the same
 -- 'StmtBinders' shape 'extractStmtBinders' would have produced, so the rest of
@@ -882,15 +684,15 @@ eitherBindHint cty = case splitTyConApp_maybe cty of
 
 -- | The @--session-bind@ artifacts: mint the 'BoundBinder' records via
 -- 'mkBoundBinders' and, when requested, write the standalone JSON sidecar.
-emitBindArtifacts :: Args -> PipelineResult -> IO ()
+emitBindArtifacts :: WorkerRequest -> PipelineResult -> IO ()
 emitBindArtifacts args result = do
-  bindNames <- case argBindNames args of
+  bindNames <- case requestBindNames args of
     []  -> error "session-bind requires at least one --bind-name"
     ns  -> return ns
-  g       <- requireArg "--bind-gen"    (argBindGen args)
-  root    <- requireArg "--session-root" (argSessionRoot args)
-  binders <- mkBoundBinders (argProbeOnly args) bindNames g root result
-  case argEmitBoundBinders args of
+  g       <- requireArg "--bind-gen"    (requestBindGen args)
+  root    <- requireArg "--session-root" (requestSessionRoot args)
+  binders <- mkBoundBinders (requestProbeOnly args) bindNames g root result
+  case requestEmitBoundBinders args of
     Just out -> do
       writeFile out (renderBoundBindersJson binders)
       hPutStrLn stderr $ "  Wrote bound-binder sidecar: " ++ out

@@ -143,6 +143,16 @@ fn write_fixture(dir: &Path, name: &str, contents: &str) -> PathBuf {
     path
 }
 
+fn contains_extension(dir: &Path, extension: &str) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            (path.is_dir() && contains_extension(&path, extension))
+                || path.extension().is_some_and(|ext| ext == extension)
+        })
+    })
+}
+
 fn env_socket(socket: &Path) -> (&'static str, OsString) {
     ("TIDEPOOL_EXTRACT_DAEMON_SOCKET", socket.as_os_str().into())
 }
@@ -201,12 +211,39 @@ fn daemon_integration() {
     check_d_relative_target_and_distinct_cwd(&bin, &dir, &lib, &socket);
     check_f_spawn_row_warm_second_request(&bin, &dir, &lib, &socket);
     check_g_shim_dependent_module_warm_second_request(&bin, &dir, &lib, &socket);
+    check_h_request_build_products_dir(&bin, &dir, &lib, &socket);
     check_a_byte_identical_transport(&bin, &dir, &lib, &socket);
 
     drop(daemon);
     let _ = fs::remove_dir_all(&dir);
 
     check_e_rotation_then_fallback(&bin, &lib);
+}
+
+/// A resident request applies its own build-products directory after daemon
+/// startup; the setting is request data, not worker-process environment.
+fn check_h_request_build_products_dir(bin: &Path, dir: &Path, lib: &Path, socket: &Path) {
+    write_fixture(
+        dir,
+        "HBuildProducts.hs",
+        "module HBuildProducts where\nresult :: Int\nresult = 42\n",
+    );
+    let products = dir.join("build-products-h");
+    fs::create_dir_all(&products).unwrap();
+
+    let mut cmd = cmd_for(bin, dir, "out-h", "HBuildProducts.hs", lib);
+    cmd.build_products_dir(&products);
+    let output = run_via_env_socket(&cmd, socket);
+    assert!(
+        output.status.success(),
+        "resident build-products request failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        contains_extension(&products, "hi"),
+        "resident request did not write interfaces under {}",
+        products.display()
+    );
 }
 
 /// (a) Same fixture via daemon vs. direct spawn → byte-identical CBOR +

@@ -101,7 +101,7 @@ data PipelineResult = PipelineResult
 -- @runPipelineSession Nothing@, so no session
 -- machinery (iface injection, source-less home modules) ever touches this path.
 runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
-runPipeline = runPipelineSession Nothing
+runPipeline path includes = runPipelineSession Nothing path includes Nothing
 
 -- ---------------------------------------------------------------------------
 -- The shared compile loop and its two seams
@@ -187,8 +187,8 @@ data ModuleFront = ModuleFront
   , mfResultType :: Maybe Type
   }
 
-runCompile :: PipelineVariant -> FilePath -> [FilePath] -> IO PipelineResult
-runCompile variant path includes = do
+runCompile :: PipelineVariant -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
+runCompile variant path includes buildProductsDir = do
   timing <- readTimingEnabled
   (libdir, startupMs) <- timeSection getLibdir
   emitPhase timing "startup" startupMs
@@ -212,7 +212,8 @@ runCompile variant path includes = do
     -- runs GHC's own expression parser inside the splice; those modules import
     -- GHC.Parser.* / GHC.Types.* etc. Without this, compiling Tidepool.QQ
     -- fails with "member of the hidden package ghc-9.12.2".
-    dflags' <- liftIO (withBuildProductsFromEnv (extractionDynFlags dflags includes))
+    let extracted = extractionDynFlags dflags includes
+        dflags' = configureBuildProducts extracted buildProductsDir extracted
     setSessionDynFlags dflags'
     -- One cycle, no cache, no memo — 'sessionT0' is captured BEFORE this
     -- DynFlags bootstrap (above) so the default-on per-compile summary's
@@ -220,20 +221,13 @@ runCompile variant path includes = do
     -- 'runCompileCycle''s haddock for what each argument controls.
     runCompileCycle Nothing Nothing timing sessionT0 variant path
 
--- | Extraction with optional tidepool-repl SESSION scope (Option-C type plane).
---
--- @Nothing@ (or an inert 'SessionScope') → 'normalVariant', the ordinary
--- @depanal@/@load@ downsweep path. @Just@ an ACTIVE scope → 'sessionVariant',
--- which injects the live session @Val.G<g>@ ifaces into the HPT and compiles
--- every home module. Both run the SAME 'runCompile' skeleton; the variant is
--- the only difference.
---
--- The gate is the guard below: the session arm runs ONLY for an active scope.
-runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult
-runPipelineSession mscope path includes
+-- | Compile with an optional active session scope and an optional persistent
+-- build-products directory. Inert scopes use the normal pipeline.
+runPipelineSession :: Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult
+runPipelineSession mscope path includes buildProductsDir
   | Just scope <- mscope, isSessionScopeActive scope =
-      runCompile (sessionVariant scope path) path includes
-  | otherwise = runCompile (normalVariant path) path includes
+      runCompile (sessionVariant scope path) path includes buildProductsDir
+  | otherwise = runCompile (normalVariant path) path includes buildProductsDir
 
 -- ---------------------------------------------------------------------------
 -- Resident compilation state
@@ -687,27 +681,13 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
 -- in with no other change to its own call sites.
 -- ---------------------------------------------------------------------------
 
--- | Boot ONE GHC session (session 'DynFlags' set once, from @baseIncludes@ —
--- the stdlib root), and hand the caller back a 'runPipelineSession'-shaped IO
--- closure that reuses this session's warm 'ModIfaceCache' + per-module
--- 'GutsMemo' across every call, for as long as @useCompiler@'s action runs.
---
--- Isolation (design doc §2.3): the returned closure's own target/session
--- module is compiled fresh on every call, and its guts never survive in the
--- shared memo afterward — see 'sanitizeMemo'. The shared memo therefore only
--- ever accumulates entries for the fixed, cross-request-invariant stdlib/
--- preamble tree (whatever a call's own import closure touches; warmed
--- lazily, "on first use" rather than an explicit up-front sweep — the design
--- doc's own "once at boot or on first use" allowance, §2.3).
---
--- @extraIncludes@ on each call (the request's own @--include@ dirs) apply
--- PER CYCLE, not just at boot: patched directly onto the live session's
--- 'DynFlags' via 'hscUpdateFlags' (NOT 'setSessionDynFlags', which re-runs
--- unit-state initialization — far too expensive to pay every request, and
--- exactly the cost this design exists to amortize away).
+-- | Boot one GHC session and provide a compiler closure that reuses stable
+-- dependency interfaces and Core. Request-local targets and session modules
+-- are removed from the memo after each cycle. Include paths and build-product
+-- paths are applied per request without reinitializing the unit state.
 withResidentPipeline
   :: [FilePath]
-  -> ((Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult) -> IO a)
+  -> ((Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath -> IO PipelineResult) -> IO a)
   -> IO a
 withResidentPipeline baseIncludes useCompiler = do
   timing <- readTimingEnabled
@@ -715,15 +695,15 @@ withResidentPipeline baseIncludes useCompiler = do
   emitPhase timing "startup" startupMs
   runGhc (Just libdir) $ do
     dflags <- getSessionDynFlags
-    dflags' <- liftIO (withBuildProductsFromEnv (extractionDynFlags dflags baseIncludes))
+    let dflags' = extractionDynFlags dflags baseIncludes
     _ <- setSessionDynFlags dflags'
     cache   <- liftIO newIfaceCache
     memoRef <- liftIO (newIORef Map.empty)
     let baseImportPaths = importPaths dflags'
     reifyGhc $ \session ->
-      useCompiler $ \mscope path extraIncludes ->
+      useCompiler $ \mscope path extraIncludes buildProductsDir ->
         reflectGhc
-          (residentCompileOne cache memoRef baseImportPaths timing mscope path extraIncludes)
+          (residentCompileOne cache memoRef dflags' baseImportPaths timing mscope path extraIncludes buildProductsDir)
           session
 
 -- | One resident-session compile cycle, against the ALREADY-OPEN session
@@ -732,28 +712,20 @@ withResidentPipeline baseIncludes useCompiler = do
 -- 'GutsMemo', then sanitizes the memo before returning (see 'sanitizeMemo').
 -- Captures a fresh start time so every request gets its own compile summary.
 --
--- Use the same variant choice as 'runPipelineSession':
--- 'sessionVariant' for an active scope, 'normalVariant' otherwise — so a
--- daemon-served request always selects the identical TIER a direct spawn of
--- the same argv would have, which 'OptimizeCoreReachable'-vs-
--- 'OptimizeEveryModule' proved is NOT an interchangeable choice: the two
--- tiers can compile a validation-only (non-reachable) dependency module
--- into differently-shaped Core (raw desugared vs. fully core2core'd), and
--- 'writeClosedTargets''s metadata merge walks that Core, so swapping tiers
--- changes @meta.cbor@'s byte content because metadata still walks that Core.
--- See 'runCompileCycle''s @OptimizeCoreReachable@
--- arm below for the memo integration that makes THIS gate — matching a
--- direct spawn's tier exactly — still get the warm-cache win for a plain,
--- non-session request: both tiers now consult @mMemoRef@, so either choice
--- here reuses the shared stdlib memo.
+-- The resident and direct paths select the same pipeline variant. This is an
+-- output contract: optimization tier affects validation-only dependency Core
+-- and therefore can affect merged metadata.
 residentCompileOne
-  :: ModIfaceCache -> IORef GutsMemo -> [FilePath]
-  -> Bool -> Maybe SessionScope -> FilePath -> [FilePath] -> Ghc PipelineResult
-residentCompileOne cache memoRef baseImportPaths timing mscope path extraIncludes = do
+  :: ModIfaceCache -> IORef GutsMemo -> DynFlags -> [FilePath]
+  -> Bool -> Maybe SessionScope -> FilePath -> [FilePath] -> Maybe FilePath
+  -> Ghc PipelineResult
+residentCompileOne cache memoRef baseDFlags baseImportPaths timing mscope path extraIncludes buildProductsDir = do
   sessionT0 <- monotonicTime
   hsc0 <- getSession
   setSession (hscUpdateFlags
-    (\df -> df { importPaths = nub (baseImportPaths ++ extraIncludes) }) hsc0)
+    (configureBuildProducts baseDFlags buildProductsDir .
+      (\df -> df { importPaths = nub (baseImportPaths ++ extraIncludes) }))
+    hsc0)
   let variant = case mscope of
         Just scope | isSessionScopeActive scope -> sessionVariant scope path
         _                                        -> normalVariant path
@@ -827,25 +799,23 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
   , avx512pf = False
   }
 
--- | Apply the shared, persistent build-products directory from
--- @$TIDEPOOL_BUILD_PRODUCTS_DIR@, if
--- set. Points @hiDir@\/@objectDir@ at it and turns on @-fwrite-interface@ so
--- GHC's own @checkOldIface@ recompilation checking can skip an unchanged
--- home module (typically 49 of ~51 modules on a companion turn — every
--- stdlib module the compiled target doesn't itself edit) instead of
--- redoing parse\/typecheck\/desugar for it every single spawn.
---
--- The environment variable is process-wide because the resident GHC session
--- reads this setting at startup. With no value, the transform is a no-op.
-withBuildProductsFromEnv :: DynFlags -> IO DynFlags
-withBuildProductsFromEnv dflags = do
-  mDir <- lookupEnv "TIDEPOOL_BUILD_PRODUCTS_DIR"
-  pure $ case mDir of
-    Nothing  -> dflags
+-- | Direct compiler outputs to a request-owned persistent directory so GHC's
+-- recompilation checker can reuse unchanged interfaces. A missing directory
+-- leaves the caller's baseline flags unchanged.
+configureBuildProducts :: DynFlags -> Maybe FilePath -> DynFlags -> DynFlags
+configureBuildProducts baseline mDir dflags = case mDir of
+    Nothing  -> resetWriteInterface
+      { hiDir = hiDir baseline
+      , objectDir = objectDir baseline
+      }
     Just dir -> (`gopt_set` Opt_WriteInterface) dflags
       { hiDir = Just dir
       , objectDir = Just dir
       }
+  where
+    resetWriteInterface
+      | gopt Opt_WriteInterface baseline = gopt_set dflags Opt_WriteInterface
+      | otherwise = gopt_unset dflags Opt_WriteInterface
 
 -- | The normal (non-session) variant: no injection, and E6's Core-reachability
 -- tier. Everything else is 'runCompile'.

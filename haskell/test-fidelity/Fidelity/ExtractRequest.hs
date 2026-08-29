@@ -1,7 +1,7 @@
 module Fidelity.ExtractRequest (checks) where
 
 import Fidelity.Harness (Check, check)
-import Tidepool.ExtractRequest (RequestField(..), workerRequestFromArgv)
+import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
 
 checks :: IO [Check]
 checks = pure
@@ -12,9 +12,9 @@ checks = pure
   ]
 
 typedRequestDecodes :: Bool
-typedRequestDecodes =
-  workerRequestFromArgv ["--worker-request-v1", payload]
-    == Right (Just [Input "x", BindGen 42])
+typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v1", payload] of
+  Right (Just request) -> requestFiles request == ["x"] && requestBindGen request == Just 42
+  _ -> False
   where
     payload = "5450524551303031020000000101000000780b2a00000000000000"
 
