@@ -493,11 +493,15 @@ impl PersistentSession {
     {
         let id = self
             .active_continuation
-            .expect("resume requires an active continuation");
+            .ok_or(JitError::InvalidSuspensionState(
+                "resume requires an active continuation",
+            ))?;
         let machine = self
             .machine
             .as_mut()
-            .expect("machine present before resume");
+            .ok_or(JitError::InvalidSuspensionState(
+                "resident machine is absent during resume",
+            ))?;
         machine.resume_continuation(id, handlers, captured, input)
     }
 
@@ -742,7 +746,7 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
-        let n_fields = NonZeroUsize::new(n_fields).expect("a projected bind needs fields");
+        let n_fields = NonZeroUsize::new(n_fields).ok_or(JitError::EmptyProjection)?;
         let PersistentSession {
             machine,
             session_table,

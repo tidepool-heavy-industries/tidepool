@@ -1393,7 +1393,7 @@ mod tests {
         assert_eq!(a[9], "Ask");
         assert_eq!(a.last(), Some(&"RunLLMTurn"));
         assert_eq!(a.len(), 11);
-        // SG was cut (friction #37); the stack must NOT contain it.
+        // SG is not part of the supported effect stack.
         assert!(
             !a.contains(&"SG"),
             "SG should have been removed from the stack"
@@ -1405,7 +1405,7 @@ mod tests {
         // quoter tokens
         assert!(uses_qq("pure [fmt|hi {x}|]"));
         assert!(uses_qq("case v of [j|{\"k\": $x}|] -> pure x"));
-        // wave-4 quoters: patch + the validators (glob omitted — see Validate.hs)
+        // Supported patch and validation quoters (glob is deliberately absent).
         assert!(uses_qq("apply [patch|--- a/x|]"));
         assert!(uses_qq("pure [uri|https://x|]"));
         // dropped quoters are NOT special: glob (removed), sg (cut with the

@@ -75,6 +75,10 @@ pub enum JitError {
     Signal(#[from] crate::signal_safety::SignalError),
     #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
     EffectResponseTooLarge { nodes: usize, limit: usize },
+    #[error("invalid suspension state: {0}")]
+    InvalidSuspensionState(&'static str),
+    #[error("a projected bind requires at least one field")]
+    EmptyProjection,
     #[error(
         "VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression."
     )]
@@ -681,7 +685,7 @@ pub struct JitEffectMachine {
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
-// it is either stowed as data (E2 suspension) or running on exactly one eval
+// it is either stowed as data or running on exactly one eval
 // thread, never both. This mirrors the existing `unsafe impl Send` on
 // `CompiledEffectMachine`/`MachineState`/`GcState`: the JIT executable mappings
 // and heap buffers are process-global address space and valid on any thread.
@@ -844,7 +848,7 @@ impl Drop for RegistryGuard {
             let _ = (*self.machine_state).drain_diagnostics();
             (*self.machine_state).reset_call_depth();
         }
-        // D7: this drops only the thread-local's Rc *handle* to the lambda
+        // This drops only the thread-local's Rc *handle* to the lambda
         // registry this run installed — the accumulated registry itself lives
         // in `self.pipeline` (an `Rc<LambdaRegistry>` field) and is untouched.
         // Dropping the handle here is what lets the NEXT `install_registries`
@@ -876,7 +880,7 @@ impl JitEffectMachine {
         nursery_size: usize,
     ) -> Result<CompiledParts, JitError> {
         crate::debug::init_logging();
-        // #313 defense: a duplicate VarId on the top-level Let spine means two
+        // A duplicate VarId on the top-level Let spine means two
         // distinct top-level bindings silently shadow each other — fail loudly
         // at load instead. Runs on the raw deserialized tree (the wrapAllBinds
         // Let-nest), before normalize/datacon wrapping reshape it.
@@ -1029,9 +1033,9 @@ impl JitEffectMachine {
             .clone()
     }
 
-    /// Drain this machine's accumulated diagnostics. The machine-scoped
-    /// sibling of the ambient `host_fns::drain_diagnostics` free-fn shim
-    /// (per #340).
+    /// Drain this machine's accumulated diagnostics. This is the
+    /// machine-scoped sibling of the ambient
+    /// `host_fns::drain_diagnostics` free-function shim.
     pub fn drain_diagnostics(&self) -> Vec<String> {
         self.machine_state.drain_diagnostics()
     }
@@ -1678,9 +1682,9 @@ impl JitEffectMachine {
     }
 
     /// Apply an already-acquired continuation to a resume `input` and drive to
-    /// the next suspension or completion. The caller has already run the A5
-    /// NF-force, so by the time control reaches here the continuation is
-    /// committed.
+    /// the next suspension or completion. The caller has already validated a
+    /// bridged answer to normal form, so the continuation is committed by the
+    /// time control reaches here.
     #[allow(clippy::too_many_arguments)]
     fn resume_applied<U, H: DispatchEffect<U>>(
         &mut self,
@@ -1692,8 +1696,8 @@ impl JitEffectMachine {
         input: ResumeInput,
         materialization: ResultMaterialization,
         park: ParkTarget,
-        // A3: the frame's already-cloned cancellation flag, so resume never
-        // does a second `realm_cancel_flags` lookup.
+        // Stored on the frame so resume never needs a second
+        // `realm_cancel_flags` lookup.
         cancel_flag: Arc<AtomicBool>,
     ) -> Result<ParkedRaw, JitError> {
         let tags = self.tags.map_err(JitError::MissingConTags)?;
@@ -2089,7 +2093,7 @@ impl JitEffectMachine {
         // fragment's table (see compile_inner). Runtime-inert — read only during
         // emission — so refreshing it does not perturb already-compiled code.
         self.pipeline.lit_wrappers = crate::emit::LitWrapperIds::from_table(table);
-        // GLOBAL-ID INVARIANT (codex-review-2026-08-08.md item 3): `json_con_ids`,
+        // GLOBAL-ID INVARIANT: `json_con_ids`,
         // `time_con_ids`, and `tags` (`ConTags`) below are MACHINE-GLOBAL —
         // one slot each on `JitEffectMachine`/`MachineState`, not one per
         // runtime resource scope or per parked frame. Every `add_function` call on this
@@ -2113,7 +2117,7 @@ impl JitEffectMachine {
         // interpreted on its next resume. What IS guarded, and load-bearing
         // for runtime resource scopes in general, is that a runtime resource scope's OWN domain constructors
         // never go through this machine-global cache at all: `resume_continuation`
-        // decodes exclusively against `ContinuationFrame::table` (A4, cloned
+        // decodes exclusively against `ContinuationFrame::table` (cloned
         // once at park time), so two runtime resource scopes may freely reuse the SAME numeric
         // `DataConId`/tag for DIFFERENT domain constructors without collision
         // or shadowing — see `realm_global_id_isolation.rs` for the pinning
@@ -2477,9 +2481,8 @@ impl JitEffectMachine {
     /// code, mid-allocation (`gc_trigger`). This exists to close that gap for
     /// diagnosing whether a collection LANDING BETWEEN a suspend-time tenure
     /// (`Self::tenure_finalized_payload`) and a later resume corrupts a parked
-    /// frame's own reference into what tenuring evacuated (the tenure-then-
-    /// resume rooting family — see `tidepool-codegen/CLAUDE.md`'s diagnostics
-    /// table). Calling it while frames are parked is exactly the intended use.
+    /// frame's own reference into what tenuring evacuated. Calling it while
+    /// frames are parked is exactly the intended use.
     ///
     /// Installs registries and builds an ordinary session `VMContext` (the
     /// same construction `with_active_run` uses), calls
@@ -2745,15 +2748,13 @@ impl JitEffectMachine {
     /// its residual (agreement AMONG runtime resource scopes, not verification against the
     /// real `H`).
     ///
-    /// A5 discipline, same as [`Self::resume_continuation`]: the answer is
-    /// NF-forced BEFORE the frame is taken out of the map, so a bottom-bearing
-    /// answer leaves the frame PARKED and still ROOTED and the caller can retry
-    /// with a corrected answer.
+    /// A bridged answer is checked for normal form BEFORE the frame is taken
+    /// out of the map. A bottom-bearing answer therefore leaves the frame
+    /// parked and rooted, and the caller can retry with a corrected answer.
     ///
-    /// A4: the frame's own `table` (cloned at park time, see
-    /// [`ContinuationFrame::table`]) is what gets decoded against — this
-    /// method no longer accepts a caller-supplied table at all, so resuming a
-    /// frame against a foreign row is impossible by construction.
+    /// Decoding uses the frame's own table, cloned at park time (see
+    /// [`ContinuationFrame::table`]). This method accepts no caller-supplied
+    /// table, so a frame cannot be resumed against a foreign constructor row.
     ///
     pub fn resume_continuation<U, H: DispatchEffect<U>>(
         &mut self,
@@ -2762,7 +2763,8 @@ impl JitEffectMachine {
         user: &U,
         input: ResumeInput,
     ) -> Result<ParkedOutcome, JitError> {
-        // PEEK the frame — do NOT remove it yet (A5).
+        // Inspect without removing: validation failures must leave the frame
+        // parked and rooted so the caller can retry.
         let (realm, kind, suspend_tag, handled_prefix) = match self.continuations.get(&id) {
             Some(frame) => (
                 frame.realm,
@@ -2786,8 +2788,8 @@ impl JitEffectMachine {
         self.enter_parked_path(&handled_prefix)?;
         if let ResumeInput::Answer(val) = &input {
             if let Err(reason) = answer_force_nf(val) {
-                // A5: rejected WITHOUT consuming — the frame stays parked and
-                // still rooted, so the rooting receipt must still hold.
+                // Reject without consuming. The frame stays parked and rooted,
+                // so the rooting receipt must still hold.
                 self.assert_rooting_receipt();
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "resume answer is not in normal form (bottom in the answer): {reason}"
@@ -2810,9 +2812,8 @@ impl JitEffectMachine {
         // Read the GC-CURRENT pointer out of the cell: collections since the
         // park rewrote it in place through the registered slot.
         let continuation = *frame.cell;
-        // A3/A4: the frame's own cancel flag and table — no `realm_cancel_flags`
-        // or caller lookup needed, this IS the second-lookup avoidance the
-        // frame exists for.
+        // Cancellation and constructor metadata belong to the frame; resume
+        // neither re-derives them nor accepts substitutes from the caller.
         let cancel_flag = frame.cancel_flag.clone();
         let table = frame.table.clone();
         // A finalized payload not claimed before resume is no longer
@@ -3102,9 +3103,7 @@ impl JitEffectMachine {
     /// across collections. It does **not** touch `OldSpace::slots` — the `Box`
     /// cell stays allocated for the machine's life, so an already-compiled
     /// fragment that `iconst`ed that address still `load`s. What is released
-    /// is the root's place in the GC TRACE LIST, not its bytes; see
-    /// `tidepool-codegen/CLAUDE.md`'s root-accounting section for the honest
-    /// bound.
+    /// is the root's place in the GC trace list, not its bytes.
     ///
     /// Idempotent (the underlying deregistration is a `Vec::remove` by
     /// position, a no-op if absent), but a caller relying on that is a caller
@@ -3236,9 +3235,9 @@ enum DriveOutcome {
 /// 1 of `FinalizeWith`, and no other suspend request (`Ask`/`RunLLMTurn`) can
 /// legally contain a closure, so a nested sentinel would itself be a bug.
 ///
-/// DEEP scan (codex review 2026-08-12, finding 3): a closure NESTED inside a
-/// finalized product — a record of functions, a pair of lenses — must trigger
-/// by-reference tenure exactly like a top-level closure, or the payload takes
+/// A closure nested inside a finalized product — a record of functions or a
+/// pair of lenses — must trigger by-reference tenure exactly like a top-level
+/// closure, or the payload takes
 /// the lossy bridge path and its nested closures arrive as sentinels. The
 /// request's own Con head is skipped (only its FIELDS can carry the payload);
 /// everything below is walked by [`heap_bridge::contains_closure_sentinel`].
@@ -3284,7 +3283,7 @@ pub enum ResumeInput {
     /// [`tidepool_eval::value::Value`] into the heap: the handle's GC-current
     /// pointer is the response, verbatim. This is how a closure (or any
     /// opaque value) is DELIVERED into a sibling continuation on the same
-    /// heap. No A5 NF-force applies: the payload
+    /// heap. The bridged-answer normal-form check does not apply: the payload
     /// is already a real heap value whose thunks are ordinary lazy structure,
     /// not a bridged answer that could smuggle a bottom past validation. The
     /// handle is NOT consumed (scope-owned borrow; released by
@@ -3293,8 +3292,7 @@ pub enum ResumeInput {
     Handle(ValueHandle),
     /// Abort the suspended ask WITHOUT running the continuation (a stowed
     /// machine has no thread) — returns `JitError::Effect(EffectError::
-    /// Handler("ask aborted by caller: {reason}"))` directly, the same
-    /// terminal outcome a pre-E2 caller-abort produced. This does NOT touch
+    /// Handler("ask aborted by caller: {reason}"))` directly. This does not touch
     /// the first-cause cell / record `RuntimeError::Cancelled` — that cause
     /// is reserved for the gate/timeout abort path, not a caller-supplied
     /// abort reason.
@@ -3778,7 +3776,7 @@ fn signal_error_to_yield(e: crate::signal_safety::SignalError) -> Yield {
     Yield::Error(runtime_error_or_signal(e.0))
 }
 
-/// A5 — the deepseq-style NF check on a data-kinded resume answer.
+/// Validate that a data-kinded resume answer is in normal form.
 ///
 /// A bridged answer `Value` is produced by `heap_to_value_forcing`, which forces
 /// each node to WHNF as it walks — so a genuine bottom (`undefined`/`⊥`, a lazy

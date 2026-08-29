@@ -1576,7 +1576,7 @@ mod tests {
         );
     }
 
-    /// #335 Exec wave: the generated decl threads `Either ExecError` through
+    /// The generated decl threads `Either ExecError` through
     /// every verb (Run/RunIn/RunArgv), the Try* constructors are gone, and the
     /// error ADT lands in type_defs.
     #[test]
@@ -1632,7 +1632,7 @@ mod tests {
         assert!(d.helpers[0].ends_with("metaConstructors = send MetaConstructors"));
     }
 
-    /// #335 mechanism: the `errors` grammar renders an `Either`-wrapped result
+    /// The `errors` grammar renders an `Either`-wrapped result
     /// for tagged verbs and a `data <Err> = …` decl for the block.
     #[test]
     fn errors_grammar_ctor_sig_and_data_decl() {
@@ -1655,7 +1655,7 @@ mod tests {
         );
     }
 
-    /// #335 Fs wave: the generated `fs_decl()` threads `Either FsError` through
+    /// The generated `fs_decl()` threads `Either FsError` through
     /// the tagged verbs, leaves the untagged ones bare. `stable_errors true`
     /// (fs_stable.rs) means NEITHER `FileRead` nor `FsError` lands in
     /// `type_defs` — both live in the stable `Tidepool.Records.Stable` module
@@ -1689,7 +1689,7 @@ mod tests {
         assert!(d.type_defs.is_empty());
     }
 
-    /// #335 Git wave: every verb threads `Either GitError`. `stable_errors
+    /// Every Git verb threads `Either GitError`. `stable_errors
     /// true` (fs_stable.rs precedent) means the error ADT does NOT land in
     /// `type_defs` — it lives in `Tidepool.Records.Stable` instead, so a bare
     /// `x <- gitLog n` bind (no `Right x <-` destructuring) survives a
@@ -1715,7 +1715,7 @@ mod tests {
         assert!(d.type_defs.is_empty());
     }
 
-    /// #335 Http wave: HttpGet/HttpPost thread `Either HttpError`,
+    /// HttpGet/HttpPost thread `Either HttpError`,
     /// `HttpStatus` carries the status CODE as a field, and Try* is gone.
     /// JSON parsing is pure (`eitherDecode` over the JsonDecode primop) — the
     /// Http effect carries no parse verb and no bad-JSON error. `stable_errors
@@ -1734,7 +1734,7 @@ mod tests {
         assert!(d.type_defs.is_empty());
     }
 
-    /// #335 Llm wave: LlmStructured threads `Either LlmError`, `LlmBudget` is
+    /// LlmStructured threads `Either LlmError`, `LlmBudget` is
     /// a nullary constructor (budget exhaustion is DATA, not an abort), and
     /// TryLlmStructured is gone. `stable_errors true` means the error ADT
     /// does not land in `type_defs` (same as Git).

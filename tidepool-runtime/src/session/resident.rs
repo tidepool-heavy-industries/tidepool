@@ -155,9 +155,8 @@ impl RootCustody {
     /// [`ResidentSession::finalized_handle_owned_by`]) and every consumer
     /// live in this crate, so scoping construction to the crate is enough to
     /// turn fabrication into a reviewable, visible-intent act rather than a
-    /// call any external dependent is one line away from making (codex
-    /// review 2026-08-19, HIGH: "`RootCustody::new` is pub and one call from
-    /// forging custody"). Production code never reaches for this directly —
+    /// call any external dependent is one line away from making. Production
+    /// code never reaches for this directly —
     /// `finalized_handle`/`finalized_handle_owned_by` never hand out a bare
     /// [`ValueHandle`] at the finalize seam in the first place.
     pub(crate) fn new(handle: ValueHandle) -> Self {
@@ -350,11 +349,6 @@ pub enum ResidentOutcome {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
-    /// LEGACY (parked path): retained for callers that still match on it; the
-    /// parked path never raises it — a new top-level `run` while frames are
-    /// parked is the POINT of the registry.
-    #[error("session is suspended on continuation {0}; resume, abort, or run a child before a new top-level run")]
-    Suspended(String),
     /// A `run_child`/`apply_finalized` was attempted with no parked frame — a
     /// child run reads a suspended parent's world by construction.
     #[error("session has no parked continuation; a child run requires a suspended parent")]
@@ -625,9 +619,9 @@ where
         self.core.current_val_modules_in(scope)
     }
 
-    /// The MOST RECENT parked hole (top of the stack), if any — the
-    /// single-hole compatibility view; multi-hole callers use
-    /// [`Self::parked_holes`].
+    /// The most recently parked hole (top of the stack), if any.
+    ///
+    /// Use [`Self::parked_holes`] when the caller needs the complete registry.
     pub fn pending_continuation(&self) -> Option<&str> {
         self.parked.last().map(|(h, _)| h.as_str())
     }
@@ -657,10 +651,10 @@ where
     /// exactly its behavior before scope trees existed.
     ///
     /// Rejects a dead `scope` (never minted, or already retired) with a typed
-    /// [`ResidentError`] and leaves [`Self::current_scope`] UNCHANGED — a
+    /// [`ResidentError`] and leaves [`Self::current_scope`] unchanged — a
     /// failed assignment must not silently rebind subsequent turns to a
-    /// dead frame. [`ScopeId::ROOT`] is always live, so this is a no-op
-    /// widening for every pre-C2 caller.
+    /// dead frame. [`ScopeId::ROOT`] is always live, so selecting it is always
+    /// a no-op.
     pub fn set_scope(&mut self, scope: ScopeId) -> Result<(), ResidentError> {
         if !self.core.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
@@ -808,8 +802,9 @@ where
     /// A scoped mount is what [`Self::retire_scope`] later releases: the
     /// handle registry hands ownership of the tenured root to this frame
     /// (`value_handle_count` drops as the frame's count rises), and the frame
-    /// hands it to the GC root ledger's `retire_scope_root` at retirement —
-    /// three named owners in sequence, never two at once. `custody` is the
+    /// releases it through `retire_scope_root` at retirement. Ownership moves
+    /// through those three locations in sequence and is never duplicated.
+    /// `custody` is the
     /// [`RootCustody`] token minted by [`Self::finalized_handle`]; consumed
     /// exactly once, here, at the moment ownership hands off to the frame.
     ///
@@ -1697,7 +1692,7 @@ where
         // shadow: a name lives in at most one plane). SCOPED to the binding's
         // OWN scope — a child binding `helper` retracts the child's decl head,
         // never the parent's, because nothing in this tree ever walks downward.
-        // At ROOT this is byte-for-byte the pre-C2 retraction.
+        // Root-scope bindings use this same scoped path.
         self.core.retract_in(self.scope, &binder.name)?;
         self.core.bind_in(
             self.scope,
@@ -1716,8 +1711,8 @@ where
     }
 
     /// Move the machine onto a stack-sized eval thread, run `body`, and move the
-    /// machine back. E2 lets `body` run on this fresh thread — the threadless
-    /// mechanism's `run_fragment`/`resume` re-install the machine's per-thread
+    /// machine back. The threadless mechanism's `run_fragment`/`resume`
+    /// re-install the machine's per-thread
     /// reach and re-point GC state at the retained heap. Only the machine (and
     /// the accumulated table) crosses to the thread; the rest of the session
     /// core is `!Send` (raw-pointer roots) and stays here.
@@ -1835,12 +1830,11 @@ where
     }
 }
 
-/// The kernel's generalized suspension seam (`super::kernel::
-/// SuspendableSession`, #22 design doc §5.B step 2), implemented directly
-/// against this session's own [`Self::resume`]/[`Self::abort`] — the
-/// smallest possible diff, since this type is already exactly the shape the
-/// kernel generalizes (one obligation-carrying [`ResidentHole`] token, one
-/// resume/abort entry point per token). `Context = ()`: this session owns
+/// The kernel's generalized suspension seam
+/// ([`super::kernel::SuspendableSession`]), implemented directly against this
+/// session's own [`Self::resume`]/[`Self::abort`]. This type already has the
+/// shape the kernel requires: one obligation-carrying [`ResidentHole`] token
+/// and one resume/abort entry point per token. `Context = ()`: this session owns
 /// its captured-output buffer and handler stack as fields, so a call needs
 /// nothing extra beyond the hole and the answer.
 impl<H, O> super::kernel::SuspendableSession for ResidentSession<H, O>

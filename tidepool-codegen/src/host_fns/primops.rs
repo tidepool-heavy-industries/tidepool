@@ -671,12 +671,22 @@ unsafe fn render_double_text(vmctx: *mut VMContext, prec: Option<i64>, bits: i64
 }
 
 /// Render a Double directly into a GC-owned `Text` value.
+///
+/// # Safety
+///
+/// `vmctx` must point to the live VM context for the calling JIT machine. Its
+/// machine state, constructor registry, nursery, and stack maps must remain
+/// installed for the duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn runtime_render_double_text(vmctx: *mut VMContext, bits: i64) -> *mut u8 {
     render_double_text(vmctx, None, bits)
 }
 
 /// Precedence-aware sibling of [`runtime_render_double_text`].
+///
+/// # Safety
+///
+/// The same contract as [`runtime_render_double_text`] applies.
 #[no_mangle]
 pub unsafe extern "C" fn runtime_render_double_prec_text(
     vmctx: *mut VMContext,
