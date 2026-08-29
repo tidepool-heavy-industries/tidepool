@@ -348,10 +348,9 @@ impl SelfHarnessDriver {
 
     /// A `getStateJson` hole's response: the current loop iteration's entry
     /// state, or `Null` when there is none (the general Agent path, which
-    /// carries no cycle state at all). The ONE construction both
+    /// carries no cycle state at all). Both
     /// [`Self::drain_note_holes`]'s node-level resume and
-    /// [`Self::service_thread_ready`]'s raw-thread resume read from (sol
-    /// cross-family review finding 9c) — delivery differs (a node-level
+    /// [`Self::service_thread_ready`]'s raw-thread resume read from it. Delivery differs (a node-level
     /// `answer_dialog` vs. a raw in-machine `resume`), the value doesn't.
     pub(crate) fn loop_state_snapshot(&self) -> Json {
         self.loop_state_json.clone().unwrap_or(Json::Null)

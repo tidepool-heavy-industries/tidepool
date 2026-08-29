@@ -1015,8 +1015,7 @@ impl PersistentSession {
     /// Scoped [`Self::retract`]: retract `name` from `scope`'s decl tip only.
     /// `retract(n) == retract_in(ScopeId::ROOT, n)`.
     ///
-    /// This is the cross-plane rule (design doc §1.3) made scope-correct: a
-    /// name lives in at most one plane *per scope*, so a CHILD binding
+    /// A name lives in at most one plane per scope, so a CHILD binding
     /// `helper` on the value plane must not retract the PARENT's decl-plane
     /// `helper` — the parent's name is still the parent's, and nothing ever
     /// walks downward.

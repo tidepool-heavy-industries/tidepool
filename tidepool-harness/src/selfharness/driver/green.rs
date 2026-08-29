@@ -108,12 +108,7 @@ pub(crate) enum GreenAnswer {
 /// response — the classified-hole dispatcher's return value instead of each
 /// arm independently pushing to `ready`/breaking the loop. A new arm that
 /// computes a next outcome and forgets to hand it back through one of these
-/// is a compile error: it has nothing else to return. (The motivating
-/// incident this subsumes: a merge brought in arms written against an older
-/// loop shape whose `outcome = ...` fed the next iteration; the resume was
-/// computed correctly and then silently dropped, the only signal a `value
-/// assigned to outcome is never read` warning that adding `mut` would have
-/// shipped past.)
+/// is a compile error: it has nothing else to return.
 ///
 /// [`SuspensionRouting::Green`] is the deliberate exception, checked and rejected
 /// before this was written for the rest: a single Green suspension can
@@ -239,8 +234,7 @@ pub(crate) enum GreenRoundExit {
     /// Carries the ACTUAL refusal text `check_fork_budgets` built —
     /// `fork_subtree_refusal` when the tree-wide cap fired,
     /// `fork_budget_refusal` when the per-window pool did — never rebuilt
-    /// downstream (F8: rebuilding always guessed `fork_budget_refusal`,
-    /// misreporting a subtree exhaustion as a per-window one).
+    /// downstream. Rebuilding it here would lose which budget was exhausted.
     ForkBudgetRefused {
         msg: String,
     },
@@ -278,7 +272,7 @@ pub(crate) enum GreenHoleServiced {
 pub(crate) enum ThreadServiced {
     Continue,
     /// The ACTUAL refusal text `check_fork_budgets` built — see
-    /// [`GreenRoundExit::ForkBudgetRefused`]'s doc (F8).
+    /// [`GreenRoundExit::ForkBudgetRefused`]'s documentation.
     BudgetRefused {
         msg: String,
     },
@@ -416,23 +410,9 @@ impl SelfHarnessDriver {
                         state: GreenThreadState::Running,
                     },
                 );
-                // Mint the spawner's body custody AND start the thread in ONE
-                // checkout (F5): the mint (`finalized_handle`) and the
-                // consume (`run_forked`) used to be two SEPARATE
-                // `with_session` calls, with the minted `RootCustody` moved
-                // into the second call's closure. If that second checkout
-                // ever refused (a concurrent sibling holding the machine —
-                // the F4 contention class — or the session slot gone),
-                // `with_session` returns `Err` BEFORE ever calling the
-                // closure, so the closure — and the `RootCustody` it
-                // captured — drops unconsumed, and `RootCustody::Drop`
-                // panics by design (a leak detector), unwinding the whole
-                // driver task instead of surfacing an ordinary
-                // `DriverError`. Folding both steps into ONE closure of ONE
-                // `with_session` call removes the window entirely: the
-                // custody is minted only AFTER the checkout has already
-                // succeeded, so there is no fallible step between mint and
-                // consume for an early return to land on.
+                // Mint custody and start the thread under one checkout. This
+                // makes ownership transfer atomic with respect to session
+                // admission; a failed checkout never creates custody.
                 let thread_start = self
                     .with_session_for_host(host, sid, |s| -> Result<ResidentOutcome, String> {
                         let body = s.finalized_handle(hole).ok_or_else(|| {
@@ -699,7 +679,7 @@ impl SelfHarnessDriver {
                     .await
                 {
                     Ok(()) => Ok(GreenHoleServiced::Proceed(false)),
-                    // F9: a bind-shaped block (`h <- async (…closure-valued…);
+                    // A bind-shaped block (`h <- async (…closure-valued…);
                     // wait h`) parks its OWN turn on a Binding hole, which
                     // cannot honor a borrowed-root resume — model-attributable
                     // (the block bound a closure result), not a mechanism
@@ -1403,16 +1383,15 @@ impl SelfHarnessDriver {
         dropped
     }
 
-    /// F6: sweep `green`'s still-open thread realms before an early exit out
+    /// Sweep `green`'s still-open thread realms before an early exit out
     /// of [`Self::drive_agent_session_to_finalize`]'s inner round-servicing loop —
     /// that loop's NORMAL exits already sweep (the post-loop code, and the
     /// `ForkBudgetRefused`/`AsyncMisuse` arms' own inline sweeps before their
     /// `continue 'round`), but a `?`-propagated mechanism error from any of
     /// `drain_note_holes`/`service_askuser_hole`/`drain_answerer_fork`/
-    /// `service_green_round` used to skip straight past all of them,
-    /// leaking every thread realm the round had open. Wrapping the loop
-    /// itself in a `?`-catching scope (the shape `run_loop_fragment_inner`'s
-    /// own sweep uses) does not fit here: several arms `continue 'round` — a
+    /// `service_green_round` may propagate an error before normal cleanup.
+    /// Wrapping the loop itself in a `?`-catching scope does not fit here:
+    /// several arms `continue 'round` — a
     /// jump to the OUTER round loop — which cannot cross an intervening
     /// async-block boundary, so each unswept `?`/`return` site is wrapped
     /// individually instead. A no-op when `result` is `Ok` or `green` is

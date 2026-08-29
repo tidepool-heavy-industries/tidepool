@@ -59,11 +59,8 @@ impl ForkBudget {
 }
 
 /// What [`SelfHarnessDriver::drive_agent_session_to_finalize`] does when its node
-/// suspends on something other than `finalize` — the one axis the sol
-/// cross-family review's finding 4 confirmed genuinely differs between the
-/// driver's model-session pumps (everything else — round caps, provider
-/// handling, compile correctives, finalize detection, event emission — is
-/// now the ONE shared loop).
+/// suspends on something other than `finalize`. Round caps, provider handling,
+/// compile correction, finalization, and event emission share one loop.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AgentSessionExitPolicy {
     /// The reused single-hole answerer, a sequential branch/branch-fanout
@@ -84,8 +81,7 @@ pub(crate) enum AgentSessionExitPolicy {
 /// Put ONE child answer into the shape the parked fork continuation
 /// expects, against the caller-supplied round table (unlike
 /// `Harness::wrap_fork_answer`, which derives its table from node-pending
-/// state) — a thin `DriverError` wrapper over the ONE shared implementation,
-/// [`engine::wrap_fork_answer`] (sol cross-family review finding 9d).
+/// state) — a thin `DriverError` wrapper over [`engine::wrap_fork_answer`].
 pub(crate) fn wrap_fork_value(
     source: engine::ForkSource,
     value: Value,
@@ -165,8 +161,8 @@ impl SelfHarnessDriver {
     /// one moment children are about to exist. `Some(corrective)` = refused,
     /// nothing spent; `None` = both budgets debited, spawn may proceed.
     ///
-    /// The subtree reservation is a compare-exchange loop, not a
-    /// check-then-act (F10): two concurrent sharers of one `fork_subtree`
+    /// The subtree reservation is a compare-exchange loop: two concurrent
+    /// sharers of one `fork_subtree`
     /// counter (a window driving its own fork children concurrently) can no
     /// longer both observe headroom and both add past the cap — each
     /// attempt re-reads the counter on a lost race and re-checks against the
@@ -276,13 +272,8 @@ pub(crate) fn dropped_threads_warning(dropped: usize) -> String {
     )
 }
 
-/// A one-shot fork child window's transaction — the deeper, ownership-tracked
-/// treatment of [`AgentSessionMode::OneShotBranch`] alone (P3.2's typestate
-/// opportunity). Retiring used to be a hand-written four-site discipline per
-/// caller (a mechanism error, a non-finalize exit, a closure rejection, and
-/// success), linked only by sequencing and a bare `NodeId` a reader had to
-/// trust every future error arm would remember to terminate. This guard
-/// makes retiring exactly once, on every exit, structural instead:
+/// A one-shot fork child window's ownership transaction. This guard makes
+/// retiring exactly once, on every exit, structural:
 /// [`Self::finalize_fork_data`] retires on success, [`Self::fold_exit`]
 /// retires then produces the exit, and `Drop` retires an unfinished window —
 /// the mechanism-failure `?` early return that used to need its OWN
@@ -663,8 +654,7 @@ impl SelfHarnessDriver {
     /// `finalize` — rather than accepted, since the answerer's contract is to
     /// resolve the hole via `finalize`, not return a plain value.
     ///
-    /// THE ONE PUMP (sol cross-family review finding 4): this is the ONLY
-    /// model-session round loop in this driver — the reused single-hole
+    /// This is the only model-session round loop in this driver: the reused single-hole
     /// answerer, a sequential branch/branch-fanout child, a recursive fork
     /// child, and a concurrent `runLLMTurnFork`/`runLLMTurnFanout` child
     /// ([`Self::drive_fanout_child`]) all drive through here. What genuinely
@@ -697,7 +687,7 @@ impl SelfHarnessDriver {
     /// siblings and no position — still hard-fails, exactly as before;
     /// [`Self::drive_fork_child_agent_session`] — a recursive fork/async-fork
     /// child, also with no branch position — turns it into a plain-language
-    /// corrective instead of either of those (operator decision, 2026-08-24):
+    /// corrective instead of either of those:
     /// the child's own node still retires and reports `node_failed`, but the
     /// caller aborts only the block that was consuming this child, not the
     /// parent's whole turn.
@@ -713,12 +703,11 @@ impl SelfHarnessDriver {
         let ty_label = ty.unwrap_or("A");
         let max_rounds = self.answerer_max_rounds;
         let nudge_rounds = self.answerer_nudge_rounds;
-        // The glide: at `max_rounds`, ONE explicit ultimatum ("your next
+        // At `max_rounds`, issue one explicit ultimatum ("your next
         // reply must be the minimal honest finalize") and two grace rounds
         // before the hard fail — a window that wedges on an expressible
-        // answer (the live 2026-08-14 incident burned 32 rounds on a
-        // spelling it was never told) gets a direct instruction first, and
-        // only a window that cannot even comply takes the loop down.
+        // answer gets a direct instruction first; only a window that cannot
+        // comply takes the loop down.
         let hard_rounds = max_rounds.saturating_add(2);
         let mut rounds: u32 = 0;
         let mut nudged = false;
@@ -1109,9 +1098,7 @@ impl SelfHarnessDriver {
                     // Completed turn below, and it must say the same thing:
                     // this is the EXPECTED batch-per-round idiom the suffix
                     // teaches (fork a wave, wait, end the round), not a
-                    // failure to scold (companion dogfood, 2026-08-13's
-                    // Completed-arm fix, mirrored here — see that arm's
-                    // comment). Servicing resumes are NOT model rounds:
+                    // failure to scold. Servicing resumes are not model rounds:
                     // `rounds` stays untouched, only this outer loop repeats.
                     self.agent.reopen_node(node)?;
                     let ty_disp = display_ty(ty_label);
@@ -1141,9 +1128,7 @@ impl SelfHarnessDriver {
                 Ok(TurnOutcome::Completed { rendered }) => {
                     // A completed non-finalize round is a VALID explore/define
                     // round, not a failure — the window is multi-round by
-                    // design, and scolding here taught the model that only
-                    // `finalize` is admitted (companion dogfood, 2026-08-13:
-                    // it reported exactly that, accurately). Acknowledge, SHOW
+                    // design. Acknowledge and show
                     // the block's value (GHCi parity — the wave-per-round
                     // idiom needs the model to SEE what it bound, see
                     // `rendered_result_snippet`), and keep the request
@@ -1189,9 +1174,7 @@ impl SelfHarnessDriver {
                     // unparenthesized `finalize @State -> State` is itself
                     // ill-typed advice. And do NOT teach single-shot: the
                     // window stays multi-round; a fixed block may be another
-                    // define/explore round, with `finalize` whenever ready
-                    // (the companion learned "declarations are forbidden"
-                    // from the old wording — dogfood, 2026-08-13). For a
+                    // define/explore round, with `finalize` whenever ready. For a
                     // multi-block reply, `msg` already leads with the sequence
                     // context (which blocks ran/persist, where to resume —
                     // `engine::sequence_failure_context`).
@@ -1251,13 +1234,11 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// F11: the shared shape of driving one classified `Fork` hole's
-    /// children to completion and assembling their answer —
+    /// Shared implementation for driving one classified `Fork` hole's
+    /// children to completion and assembling their answer.
     /// [`Self::drain_answerer_fork`] (direct `fork`/`forkAll`) and
     /// [`Self::service_thread_ready`]'s Fork arm (a thread's own
-    /// `async (fork …)`) used to carry this ~30-line sequence as
-    /// near-verbatim twins (the same drift shape that produced F3's
-    /// round-loop divergence): brief normalization, the fanout element type,
+    /// `async (fork …)`) both use this sequence: brief normalization, the fanout element type,
     /// per-child title, sequential [`Self::drive_fork_child_agent_session`] drive,
     /// per-child [`wrap_fork_value`], then single-vs-fanout assembly. The two
     /// callers differ only in the per-child title wording (plain vs
@@ -1489,11 +1470,10 @@ impl SelfHarnessDriver {
 
     /// Cleanup for a mechanism failure between a fork/branch child's GUI +
     /// tree-path registration and its [`BranchAgentSessionGuard`] guard coming into
-    /// existence (F7): those registrations predate the guard, so nothing
+    /// existence. Those registrations predate the guard, so nothing
     /// else retires them on an early `?` between them and
     /// `BranchAgentSessionGuard::from_lease` — `force_attached`/`mint_scope` are both
-    /// fallible there (a checkout race is the F4 contention class; a dead
-    /// parent scope is `ok_or_else`'d). Removes the `node_labels` entry and
+    /// fallible there. Removes the `node_labels` entry and
     /// retires the GUI panel (when a label was registered), then retires the
     /// tree/session node itself through the ONE retirement path — safe
     /// whether or not `force_attached` ever ran: [`Harness::terminate_node`]
@@ -1534,7 +1514,7 @@ impl SelfHarnessDriver {
     /// so a mechanism-error `?` before the pump starts can never leak the
     /// label/path registrations or skip retirement.
     ///
-    /// Exit semantics (operator decision, 2026-08-24): a child that exits
+    /// A child that exits
     /// without finalizing is reported via `node_failed` and retired exactly
     /// like a success, but only a MECHANISM problem still hard-fails
     /// through as `Err` — a finalized CLOSURE (v1 scope cannot carry it), a
@@ -1666,8 +1646,7 @@ impl SelfHarnessDriver {
         // This node retires here regardless of outcome below — purge its
         // own fork-child-label counter (it may have spawned children of its
         // own) at the same point its other per-node bookkeeping goes, so
-        // `fork_child_seq` does not grow without bound across a long-running
-        // companion tree (sol cross-family review finding 11).
+        // `fork_child_seq` does not grow without bound.
         self.fork_child_seq.lock().remove(&node);
 
         match outcome {
@@ -1710,8 +1689,8 @@ impl SelfHarnessDriver {
                 window.fold_exit(&reason);
                 Err(DriverError::Session(reason))
             }
-            // Operator decision (2026-08-24): a child ending in
-            // `InvocationExit` no longer kills the parent's turn — the
+            // A child ending in `InvocationExit` does not kill the parent's
+            // turn. The
             // child's own node still retires and reports `node_failed`
             // (unchanged), but instead of hard-failing through as `Err`
             // this returns `Ok(Err(corrective))`, a plain-language message

@@ -1,18 +1,13 @@
 //! Implements `tidepool_runtime::session::SuspendableSession` for this
-//! crate's slot-path [`Session`] (#22 design doc §5.B step 3) — a
-//! THROWAWAY adapter: it exists only to let repl consume the kernel's
-//! error taxonomy and admission-hook shape ahead of Phase 6 (repl/one-shot
-//! conversion + slot deletion, parked behind a production-soak gate), and
-//! is deleted the moment Phase 6 converts repl onto
+//! crate's slot-path [`Session`]. This adapter lets the REPL consume the
+//! shared error taxonomy and admission shape until it moves to
 //! `tidepool_runtime::session::ResidentSession` directly (at
-//! which point repl uses the exact same trait impl the harness already
-//! does — see `tidepool-runtime/src/session/resident.rs`'s own impl — no
-//! adapter needed).
+//! which point the resident session's implementation replaces it).
 //!
 //! [`Session`] is single-hole by construction (`Session::is_suspended`) and
-//! has no per-hole identity of its own — that lives one layer up, in
-//! `manager.rs`'s [`ContinuationId`] bookkeeping (repl's own policy, design
-//! doc §3.3). So [`SlotHole`] carries the id purely for API symmetry with
+//! has no per-hole identity of its own — that lives one layer up in
+//! `manager.rs`'s [`ContinuationId`] bookkeeping. So [`SlotHole`] carries the
+//! id purely for API symmetry with
 //! the harness's `ResidentHole` (logging, routing) — it is never consulted
 //! by this adapter to pick which of the five `PendingTail` variants to
 //! resume. Presenting that five-way split as ONE token variant is exactly
@@ -53,9 +48,7 @@ pub struct SlotContext {
 /// [`Session::resume_turn`]/[`Session::abort_turn`] do today: a "no
 /// suspended turn" call there folds into a stringly-typed
 /// `TurnOutcome::Error` inside a `Completed` outcome; here it is a real
-/// variant a caller can match on without string-sniffing, matching the
-/// structural (never-flattened-to-`String`) discipline the design doc's
-/// §3.2 item 3 / OQ4 asks of the shared resume-rejection space.
+/// variant a caller can match on without string-sniffing.
 #[derive(Debug, thiserror::Error)]
 pub enum SlotKernelError {
     #[error("session has no suspended turn to resume/abort")]

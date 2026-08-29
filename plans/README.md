@@ -12,22 +12,12 @@ charter / glossary and the plan file is deleted (git is the archive).
   candidate/review/revision interpreter. The current runnable slice uses a
   thin compatibility `State` while node-scoped workspace/store, durable owner
   re-entry, and a no-State entrypoint remain the platform gaps.
-- [Resident-session kernel design](resident-session-kernel-design.md):
-  decision-complete (operator answers recorded inline 2026-08-24);
-  implementation lane in flight against it.
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
   merged, turn-count top-5 lane in flight.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): live process doc
   for autonomous fresh-session dogfood rounds driven by the root + native
   subagents while the operator is offline; robot-operator form answering,
   per-round analysis reports, scenario battery.
-- [Session crate design](session-crate-design.md): design-only, awaiting
-  operator picks (crate name, mounting model, multi-mount sequencing).
-  Proposes promoting `tidepool-runtime/src/session/*` into its own
-  `tidepool-session` crate, with multi-frontend session mounting as a
-  first-class design input; plans to retire
-  [resident-session-kernel-design.md](resident-session-kernel-design.md)
-  once the promotion lands.
 
 ## Carried-forward one-liners
 

@@ -1,14 +1,7 @@
-//! The operator listen channel (swarm plan P3): a durable outbound message
-//! feed from this resident harness process to an operator's terminal.
-//!
-//! Ported from exomonad's `exo-node::listen`
-//! (`rust/exo-node/src/listen/{mod,server,client}.rs`), collapsed to a single
-//! self-contained server-half module: exomonad splits a connection-local
-//! ack-sequenced socket protocol from a SEPARATE durable inbox bus that lives
-//! elsewhere in that codebase. This module owns both halves instead — the
-//! durable frame queue ([`queue::FrameQueue`]) mints the `seq` carried on the
-//! wire, so an acked `seq` durably advances the queue's own cursor with no
-//! second bookkeeping layer to keep in sync.
+//! A durable outbound message feed from the resident harness to an operator's
+//! terminal. The durable frame queue ([`queue::FrameQueue`]) mints the `seq`
+//! carried on the wire, so an acknowledgement advances the queue's own cursor
+//! without a second bookkeeping layer.
 //!
 //! Delivery is **print-then-ack**: a frame is written to the client and
 //! flushed there BEFORE the client acks, and this server only advances its

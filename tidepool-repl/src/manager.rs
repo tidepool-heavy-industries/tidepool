@@ -105,16 +105,11 @@ struct SuspensionPayload {
     expected_schema: Option<serde_json::Value>,
 }
 
-/// A pending suspension paired with its age via the kernel's abandonment-
-/// liveness primitive (`tidepool_runtime::session::Aged`, #22 design doc
-/// §3.2 item 5) — this crate's own TTL reaper (`server.rs`'s `reap_once`,
+/// A pending suspension paired with its age via the kernel's [`Aged`]
+/// primitive. This crate's TTL reaper (`server.rs`'s `reap_once`,
 /// driven by [`SessionManager::suspension_since`]/[`SessionManager::
 /// refresh_suspension_since`] below) is the SWEEP POLICY that reads
-/// [`Aged::age`]; the kernel itself drives no timer and reclaims nothing on
-/// its own (OQ3). This replaces a hand-rolled `since: Instant` field with
-/// the shared primitive so a second consumer (`tidepool-harness`'s
-/// `PendingSuspension`) can reuse the same "value + mint time + age query"
-/// shape instead of re-deriving its own.
+/// [`Aged::age`]; the kernel itself drives no timer or reclamation policy.
 type Suspension = Aged<SuspensionPayload>;
 
 /// The single implicit session's manager: holds AT MOST one resident
@@ -255,7 +250,7 @@ impl SessionManager {
     ///
     /// Enforced by taking the checkout for real (the SAME atomic operation
     /// the registry itself uses — no separate check-then-checkout race) via
-    /// the kernel's [`admit_checkout`] hook (#22 design doc §3.2 item 4):
+    /// the kernel's [`admit_checkout`] hook:
     /// this crate supplies the "refuse anything non-empty" policy the
     /// kernel itself declines to have an opinion on, rather than
     /// hand-rolling the checkout-then-restore-if-refused dance inline.

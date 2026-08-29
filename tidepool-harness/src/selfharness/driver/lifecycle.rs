@@ -201,8 +201,9 @@ impl SelfHarnessDriver {
         // The PURE-OR-STABLE-EFFECTFUL decl env, not `standalone_default`: the
         // plane validates under the same ambient pure names a turn has
         // (`Text`, `object`, the Prelude) PLUS the stable Core effect surface,
-        // minus the per-window shim modules its include excludes. The minimal
-        // env failed `data X = X Text` — companion dogfood 2026-08-14.
+        // minus the per-window shim modules its include excludes. A minimal
+        // environment is insufficient because authored declarations may use
+        // ambient types such as `Text`.
         tidepool_runtime::session::SessionLib::open(
             tidepool_repr::SessionId(0),
             &root,
@@ -829,7 +830,7 @@ impl SelfHarnessDriver {
     /// was `Some` (a restored or prior-cycle state, not the very first cycle)
     /// is retried EXACTLY ONCE from fresh `initialState` rather than
     /// propagated — logged loudly first. If the retry ALSO fails, that is an
-    /// ordinary cycle error and takes the existing F3 (`Failed`/`Poisoned`)
+    /// ordinary cycle error and takes the normal `Failed`/`Poisoned`
     /// path, same as any other error; this is a single retry, not a new
     /// ladder rung. A `StateDecode` when `state_json` is already `None` means
     /// the harness source's own `initialState`/`FromJSON State` disagree —
@@ -932,21 +933,11 @@ impl SelfHarnessDriver {
         self.ask_id_counter
             .store(checkpoint.ask_id_high_water(), Ordering::SeqCst);
         if checkpoint.harness_source != source.fingerprint {
-            // CARRY the state forward anyway (revised 2026-08-15, with the
-            // operator). History matters here: restore once returned the
-            // stale state unconditionally and a shape-incompatible decode
-            // CRASHED the process on boot (the live-dogfood defect the
-            // discard branch was added for). The discard fixed the crash by
-            // making EVERY harness edit lossy — a prompt tweak wiped
-            // threads/scratch. What makes carry-forward safe NOW is
-            // [`Self::run_loop`]'s `DriverError::StateDecode` retry (added
-            // after the discard): a genuinely incompatible state fails the
-            // first cycle's decode LEGIBLY and the loop retries once from
-            // `initialState` — the crash cannot recur, and a
-            // shape-compatible edit keeps its accumulated state.
-            // `last_compaction` still drops (it narrates the old source's
-            // loop); iteration carries with the state and is zeroed by the
-            // retry arm if the state falls back.
+            // Carry state forward across source changes. `run_loop` retries a
+            // genuinely incompatible state once from `initialState`, while a
+            // prompt-only or shape-compatible change retains accumulated
+            // state. `last_compaction` belongs to the old source and is always
+            // discarded; iteration is reset only if state decoding falls back.
             tracing::info!(
                 restored_fingerprint = %checkpoint.harness_source,
                 current_fingerprint = %source.fingerprint,
@@ -1166,13 +1157,11 @@ impl SelfHarnessDriver {
         let mut next_tid: i64 = 1;
 
         // EVERY branch below hands back a `ServicedSuspension` instead of directly
-        // pushing to `ready`/breaking the loop — see that type's doc for why:
-        // a servicing arm that computed a next outcome and merely assigned it
-        // to a dead local, rather than returning it, is the incident this
-        // subsumes into the type. `SuspensionRouting::Green` is the one exception,
+        // pushing to `ready`/breaking the loop. This makes forgetting a
+        // computed outcome a type error. `SuspensionRouting::Green` is the exception,
         // documented at `ServicedSuspension` and at `Self::service_green_hole`.
         //
-        // F6: wrapped in a bare (non-`move`) `async` block so every `?`
+        // Wrapped in a bare (non-`move`) `async` block so every `?`
         // inside the loop body (`classify_hole`, each `service_*().await?`,
         // every resume's `map_err(...)?`) returns from THIS block instead of
         // from the whole function — `?` always targets the nearest enclosing

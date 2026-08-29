@@ -111,8 +111,7 @@ pub enum HarnessError {
     /// programmatically ask "what *was* pending" (e.g.
     /// `CheckoutError::WrongHole`'s `attempted`/`parked` fields) the way
     /// `tidepool-repl`'s `SessionManager::suspension_for` already lets a
-    /// caller do without a second read — see the resident-session kernel
-    /// design doc §1.5/§2, Open Question 4.
+    /// caller do without a second read.
     #[error("node {node:?}: {source}")]
     SessionMismatch {
         node: NodeId,
@@ -120,7 +119,7 @@ pub enum HarnessError {
         source: CheckoutError,
     },
     /// [`Self::resume_with_borrowed_root`] landed on a
-    /// [`crate::tree`]-suspended [`ResidentHole::Binding`] hole (F9: a
+    /// [`crate::tree`]-suspended [`ResidentHole::Binding`] hole. A
     /// bind-shaped answerer turn, `h <- async (…closure-valued…); wait h`,
     /// carries the Binding obligation through every resume of that
     /// continuation) — the raw `resume_handle_borrowed` seam carries no
@@ -597,8 +596,8 @@ pub struct Harness {
     run_id: String,
     provider: Arc<dyn DynModelProvider>,
     convos: Mutex<HashMap<NodeId, NodeConvo>>,
-    /// Item 5 of the session-ownership capstone: the ONE suspension-metadata
-    /// truth, keyed by `(SessionId, HoleId)` rather than bare `HoleId` — the
+    /// The suspension-metadata authority, keyed by `(SessionId, HoleId)`
+    /// rather than bare `HoleId` — the
     /// JIT's `scont_N` continuation ids are minted per-machine, so two
     /// independent sessions can legitimately produce the same string. See
     /// [`PendingSuspension`]'s doc for why the map is node-scannable without a
@@ -606,15 +605,9 @@ pub struct Harness {
     /// for the one place transitions happen (mutations of this map are what
     /// drive the tree's `hole_published`/`hole_consumed` log events, not the
     /// other way around).
-    /// Each entry is [`Aged`]-wrapped (#22 design doc §3.2 item 5): the
-    /// kernel's abandonment-liveness primitive, giving [`Self::
-    /// pending_hole_age`] a hole's age for FREE at the cost of one `Instant`
-    /// per entry. No sweep reads it today — the kernel drives no timer and
-    /// this crate constructs no reaper (OQ3: hook exposed, no default) — an
-    /// unanswered hole still sits suspended forever exactly as before; the
-    /// age is simply now a query away instead of undiscoverable, ready for
-    /// a future harness that wants to opt into a TTL the way `tidepool-repl`
-    /// already does.
+    /// Each entry is [`Aged`]-wrapped so frontends can observe abandonment.
+    /// This harness intentionally installs no default TTL or reaper: an
+    /// unanswered hole waits until an explicit answer or cancellation.
     pending_suspensions: Mutex<HashMap<(SessionId, HoleId), Aged<PendingSuspension>>>,
     /// Window exits QUEUED because the attached node's retirement found the
     /// shared machine out on a turn — drained by the next path holding the
@@ -680,11 +673,9 @@ impl Harness {
             .map(|p| p.get().clone())
     }
 
-    /// How long `node`'s pending hole (if any) has been parked — the
-    /// abandonment-liveness hook's read side (#22 design doc §3.2 item 5,
-    /// OQ3). `None` when `node` has no pending suspension. Nothing calls
-    /// this today; it exists so a future harness reaper can be built
-    /// without first inventing where a hole's age would even come from.
+    /// How long `node`'s pending hole has been parked. `None` means the node
+    /// has no pending suspension. This is policy-free observability; callers
+    /// decide whether age should trigger reclamation.
     pub fn pending_hole_age(&self, node: NodeId) -> Option<std::time::Duration> {
         self.pending_suspensions
             .lock()
@@ -993,17 +984,9 @@ impl Harness {
         self.tree.adopt_session(session)
     }
 
-    /// Retire a node-LESS adopted session (F6: [`Self::adopt_session`]'s own
-    /// doc names the caller as owning retirement, but until this existed
-    /// nothing actually called it — the driver's own
-    /// `discard_resident_state` dropped only its own `sid` handle on a cycle
-    /// error, never removing the machine from the registry, so the session
-    /// — heap, code arena, every still-parked frame — stayed alive there
-    /// forever; the next `bootstrap` adopts a FRESH session under a NEW
-    /// `sid`, so the old one becomes unreachable garbage that is never
-    /// collected). This is [`Self::terminate_node`]'s sibling for a session
-    /// that was never forced onto the tree at all, so there is no [`NodeId`]
-    /// to route a removal through.
+    /// Retire a node-less adopted session. This is
+    /// [`Self::terminate_node`]'s sibling for a session that was never forced
+    /// onto the tree, so there is no [`NodeId`] through which to remove it.
     pub fn retire_adopted_session(&self, sid: tidepool_repr::SessionId) {
         self.tree.registry().remove(sid);
     }
@@ -1102,8 +1085,7 @@ impl Harness {
     /// reported hole set. Synchronous by design (the driver's outer calls
     /// always were); the machine mutation happens on the caller's thread.
     ///
-    /// Two realm disciplines live here (codex review 2026-08-12, both Highs):
-    /// the session's ambient realm is RESET to the reserved outer realm
+    /// The session's ambient realm is reset to the reserved outer realm
     /// before `f` (an outer frame parked by a re-suspension must never be
     /// owned by whichever answerer realm ran last — ambient stickiness would
     /// let an answerer's retirement close an OUTER frame), and any QUEUED
@@ -1445,10 +1427,8 @@ impl Harness {
                 .join("\n\n")
         };
         self.tree.turn_start(node, joined.clone(), None)?;
-        // INFO, not DEBUG: a person watching the console must see the exact
-        // source every compile ran (dogfood-observability deliverable 1) —
-        // full text, never truncated (a pathologically large source is
-        // itself signal worth seeing).
+        // Compile source is operator-visible at INFO and intentionally not
+        // truncated; unusually large generated input is itself diagnostic.
         tracing::info!(node = node.0, source = %joined, "compiled turn source");
         if let Some(convo) = self.convos.lock().get_mut(&node) {
             convo.last_turn_source = Some(joined);
@@ -1767,9 +1747,7 @@ impl Harness {
                     }
                     // A failed decl validation is a COMPILE-class error — the
                     // caller's corrective-retry loop feeds it back as another
-                    // round, exactly like a failed turn compile. Surfacing it
-                    // as `Resident` killed the whole driver on the model's
-                    // first bad decl (companion dogfood, 2026-08-14).
+                    // round, exactly like a failed turn compile.
                     Err(e) => Err(HarnessError::Compile(e.to_string())),
                 }
             }
@@ -2094,9 +2072,7 @@ impl Harness {
                     // typed window exit when rounds run out. Returning
                     // `Resident` here escalated a stray trailing
                     // declaration into a turn-killing mechanism failure
-                    // (dogfood crash, 2026-08-20 — the very first
-                    // exploratory window of the interaction-surface run
-                    // died on it). No `push_user_turn` here: the retry
+                    // No `push_user_turn` here: the retry
                     // protocol is the DRIVER's, one corrective message per
                     // failed round, not two.
                     let msg = "This block's last item is a declaration, not something \
@@ -2775,8 +2751,7 @@ impl Harness {
     /// same session. Returns the finalized value (already read out of the
     /// suspended request by `take_finalized_value_core`, so aborting the
     /// continuation does not lose it) alongside its rendered JSON text — what
-    /// the answer actually WAS, for the driver's `Finalize` narration event
-    /// (dogfood-observability deliverable 4).
+    /// the answer actually was, for the driver's `Finalize` event.
     pub(crate) async fn take_finalized_value_keep_open(
         &self,
         node: NodeId,
@@ -2936,9 +2911,8 @@ impl Harness {
         ) {
             return false;
         }
-        // DEEP scan via the one exported predicate (mirrors the machine's
-        // request_carries_closure_sentinel, codex review 2026-08-12, finding
-        // 3): a closure nested inside the finalized product — a record of
+        // Deep scan via the one exported predicate: a closure nested inside
+        // the finalized product — a record of
         // functions — must route through the handle-delivery path exactly
         // like a top-level closure.
         tidepool_codegen::heap_bridge::field_contains_closure_sentinel(&pending.raw_request, 1)
@@ -3119,7 +3093,7 @@ impl Harness {
     /// A borrowed-root resume is refused on a [`ResidentHole::Binding`] hole:
     /// the raw `resume_handle_borrowed` seam carries no binder/generation
     /// obligation, so honoring it here would silently drop the binding the
-    /// hole owes. Reachable from the answerer green lane (F9): a bind-shaped
+    /// hole owes. A bind-shaped
     /// turn (`h <- async (…closure-valued…); wait h`) carries the Binding
     /// obligation through every resume of that continuation, so a settled
     /// closure-valued thread result delivered here lands on exactly this
@@ -3302,9 +3276,8 @@ impl Harness {
 
     /// Log what extract said the just-compiled turn's holes and binds ARE —
     /// the `asks.json` site → type table plus a value-plane bind's bound
-    /// name/type, if either is non-empty — to console INFO and `log.jsonl`
-    /// (dogfood-observability deliverable 2). A no-op (no console line, no
-    /// event) when the turn has neither: most turns don't.
+    /// name/type, if either is non-empty — to console INFO and `log.jsonl`.
+    /// A no-op when the turn has neither; most turns do not.
     fn log_turn_extracted(
         &self,
         node: NodeId,
@@ -3511,9 +3484,8 @@ impl Harness {
         // Apply the node's realm to the session before the turn — ONE site
         // covering every run/resume/child path, so an attached answerer
         // node's parks are always owned by ITS realm on the shared machine,
-        // and a node WITHOUT a realm parks under the reserved outer realm
-        // (never whatever ambient realm the last turn left behind — codex
-        // review 2026-08-12, High 2). Queued realm closes for this session
+        // and a node WITHOUT a realm parks under the reserved outer realm,
+        // never whatever ambient realm the last turn left behind. Queued realm closes for this session
         // drain first, while the machine is in hand.
         let (realm, scope) = {
             let convos = self.convos.lock();
@@ -3764,8 +3736,8 @@ mod tests {
         EngineConfig::inert(vec!["Console".to_string()])
     }
 
-    /// OQ4: `HarnessError::from_checkout` must preserve `CheckoutError::
-    /// WrongHole`'s structured `{session, attempted, parked}` data rather
+    /// `HarnessError::from_checkout` preserves `CheckoutError::WrongHole`'s
+    /// structured `{session, attempted, parked}` data rather
     /// than flattening it into a display string — a caller matching on
     /// `HarnessError::SessionMismatch { source: CheckoutError::WrongHole {
     /// attempted, parked, .. }, .. }` must be able to read the actual
@@ -3839,10 +3811,7 @@ mod tests {
         }
     }
 
-    /// The abandonment-liveness hook's read side (#22 design doc §3.2 item
-    /// 5): a published hole's age is discoverable via `pending_hole_age`
-    /// without this crate ever having built a reaper — the hook is exposed,
-    /// nothing sweeps it.
+    /// A published hole's age is observable without installing a reaper.
     #[tokio::test]
     async fn pending_hole_age_reads_a_published_holes_age() {
         let harness = test_harness();

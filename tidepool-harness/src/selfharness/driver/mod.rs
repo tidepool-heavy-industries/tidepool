@@ -294,8 +294,7 @@ const LOOP_INFERENCE_CALL_CAP: u32 = 1024;
 /// child is a real multi-round model window, so this is a genuine resource
 /// budget, not a style preference; the refusal on the (N+1)th is loud
 /// (block aborted, corrective naming the budget), never a silent drop.
-/// How deep model-driven forking may nest (fork-subsumes-split step 2,
-/// operator numbers 2026-08-22: 8/32): a session at depth 8 may not fork
+/// How deep model-driven forking may nest: a session at depth 8 may not fork
 /// further. Depth alone is not the real bound — the subtree budget below
 /// is — but it caps pathological chains.
 const DEFAULT_MAX_FORK_DEPTH: u32 = 8;
@@ -305,11 +304,8 @@ const DEFAULT_MAX_FORK_DEPTH: u32 = 8;
 /// fork styles (direct + green-thread). The real resource bound.
 const DEFAULT_FORK_SUBTREE_CAP: u32 = 32;
 
-/// Operator decision 2026-08-22: total-per-node, matching the companion's
-/// own `maxFanOut`-shaped budgeting one level up; raised 8 → 32 the same
-/// day when multi-WAVE forking (fork, fold, fork again within one window)
-/// became the taught idiom — two or three waves of a handful of children
-/// each must fit without tuning.
+/// This is a total-per-node budget. Multi-wave forking (fork, fold, then fork
+/// again within one window) should fit without per-harness tuning.
 const DEFAULT_FORK_BUDGET_PER_SESSION: u32 = 32;
 
 /// Default cap on how many `RunLLMTurn` fanout/fork children
@@ -588,8 +584,7 @@ pub struct SelfHarnessDriver {
     /// `drive_fork_child_agent_session`'s exit, `retire_typed_request_agent`)
     /// — a node with no entry here is a harmless no-op remove, so purging
     /// unconditionally at every retirement point is exactly as cheap as
-    /// checking first (sol cross-family review finding 11: this map was
-    /// previously append-only for the harness's whole life).
+    /// checking first.
     fork_child_seq: Mutex<HashMap<NodeId, u32>>,
     /// The operator listen channel's publisher handle, wired by the
     /// composition root via [`Self::set_listen_server`] — `None` until then
@@ -620,8 +615,7 @@ struct OuterHandlers {
     journal: Option<tidepool_handlers::JournalHandler>,
 }
 
-/// Which of the two answerer-window modes a node is running under — the
-/// path review's own negative evidence (P2.2/P3 typestate opportunity):
+/// Which of the two answerer-window modes a node is running under:
 /// [`Self::run_loop_fragment`]'s per-loop answerer (kept open across every
 /// ordinary `runLLMTurn` hole, its cumulative transcript IS the specified
 /// context window) and [`Self::drive_fork_child_agent_session`]'s fork child
@@ -776,17 +770,10 @@ impl SelfHarnessDriver {
     /// rebuilds it from the harness source the next time it is called, since
     /// it only no-ops while `outer` is `Some`.
     ///
-    /// F6: retiring means removing the session from the registry
-    /// ([`crate::harness::Harness::retire_adopted_session`]), not just
-    /// dropping this struct's own `sid` handle — the session was `adopt_session`'d
-    /// into the registry at bootstrap, and the registry is the only place
-    /// its machine actually lives (heap, code arena, every still-parked
-    /// frame). Dropping only the handle left it there forever: the NEXT
-    /// `bootstrap` after a `Failed` cycle adopts a FRESH session under a NEW
-    /// `sid`, so the old one was never reachable again — one whole leaked
-    /// JIT machine per `Failed`→recovered cycle. (`run_loop` exits on the
-    /// first error, so this matters mainly to an embedder/acceptance driver
-    /// that keeps calling `run_one_loop_iteration` across a recovered `Failed`.)
+    /// Retiring means removing the session from the registry through
+    /// [`crate::harness::Harness::retire_adopted_session`], not merely dropping
+    /// this struct's `sid`. The registry owns the machine, heap, code arena,
+    /// and parked frames; a later bootstrap creates a different session id.
     fn discard_resident_state(&mut self) {
         self.retire_typed_request_agent();
         self.answerer_framing = None;
@@ -1146,8 +1133,8 @@ mod tests {
             )),
             "the fork budget must be stated in the framing, got:\n{framing}"
         );
-        // The tree-wide descendant budget is stated too — not left to be
-        // discovered only by a refusal (F10, prompt-surface review).
+        // State the tree-wide descendant budget up front rather than waiting
+        // for a refusal to reveal it.
         assert!(
             framing.contains(&format!(
                 "descendant budget of {} across all depths",
@@ -1267,17 +1254,13 @@ mod tests {
         );
     }
 
-    /// H1 (test-architecture review, 2026-08-23): `fork_child_path_segment`
-    /// slugs a MODEL-AUTHORED fork brief into a GUI/DOM node id segment —
+    /// `fork_child_path_segment` slugs a model-authored fork brief into a
+    /// GUI/DOM node id segment —
     /// `tidepool-web`'s loopback trust model rests on "`node_id` is always a
     /// substrate identifier, never model-produced text"
     /// (`tidepool-web/src/lib.rs` interpolates `id="panel-<node_id>"` into
-    /// the DOM). Recovers the deleted `row_11_node_ids_are_containment_safe`'s
-    /// hostile corpus (git show
-    /// `bdfc334a^:tidepool-harness/tests/companion_recursive_slice.rs`,
-    /// `HOSTILE_TITLE`/`HOSTILE_FRAGMENTS`) as a pure, zero-GHC pin directly
-    /// on the slugging function, in place of the deleted full companion-tree
-    /// run.
+    /// the DOM). The hostile corpus pins containment directly on the pure
+    /// slugging function.
     #[test]
     fn fork_child_path_segment_contains_hostile_briefs() {
         const HOSTILE_TITLE: &str = "Beta!! <b>risk</b> ünïcode";
