@@ -55,6 +55,9 @@
 //! bind's tenured root riding out as a [`ValueHandle`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
@@ -121,12 +124,16 @@ impl Default for SessionRunContext {
 /// to another resource scope, discard it, or turn it into a repeatable
 /// [`RootedValueRef`]. Raw [`ValueHandle`] access stays inside this module, so
 /// external callers cannot duplicate an ownership token through a numeric ID.
+/// Dropping custody queues its root for release at the next mutable entry into
+/// its originating session; resource-scope or machine teardown remains the
+/// final cleanup backstop if the session is never entered again.
 ///
-/// Dropping live custody indicates a missing ownership decision. Debug builds
-/// report that mistake; the owning resource scope remains the cleanup
-/// backstop.
+#[must_use = "custody must be delivered, mounted, retained, or deliberately discarded"]
 #[derive(Debug)]
-pub struct RootCustody(Option<ValueHandle>);
+pub struct RootCustody {
+    handle: Option<ValueHandle>,
+    cleanup: Arc<CustodyCleanup>,
+}
 
 // Custody must remain exclusive.
 static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
@@ -142,44 +149,80 @@ pub struct RootedValueRef(ValueHandle);
 
 impl RootCustody {
     /// Wrap a handle minted by the resident session.
-    pub(crate) fn new(handle: ValueHandle) -> Self {
-        RootCustody(Some(handle))
+    fn new(handle: ValueHandle, cleanup: Arc<CustodyCleanup>) -> Self {
+        RootCustody {
+            handle: Some(handle),
+            cleanup,
+        }
     }
 
-    /// Consume custody for an internal machine operation.
-    fn into_handle(mut self) -> ValueHandle {
-        #[allow(
-            clippy::expect_used,
-            reason = "RootCustody always holds a handle until into_handle consumes it"
-        )]
-        self.0
-            .take()
-            .expect("RootCustody always holds a handle until into_handle consumes it")
+    fn into_transfer(mut self) -> CustodyTransfer {
+        let Some(handle) = self.handle.take() else {
+            unreachable!("live custody always contains its handle");
+        };
+        CustodyTransfer {
+            handle,
+            cleanup: Arc::clone(&self.cleanup),
+            committed: false,
+        }
     }
 
     /// Convert exclusive custody into a repeatable reference while leaving
     /// cleanup responsibility with the handle's current resource scope.
     #[must_use]
     pub fn into_rooted_ref(self) -> RootedValueRef {
-        RootedValueRef(self.into_handle())
+        let transfer = self.into_transfer();
+        let rooted = RootedValueRef(transfer.handle);
+        transfer.commit();
+        rooted
     }
 }
 
 impl Drop for RootCustody {
     fn drop(&mut self) {
-        let Some(handle) = self.0 else { return };
-        let detail = format!(
-            "RootCustody dropped without being consumed — {handle:?}'s custody was lost \
-             (never delivered via resume_handle, never mounted). The machine-side root is \
-             unaffected (it releases at the owning realm's close_realm regardless), but the \
-             value silently never reached wherever it was headed."
-        );
-        // Preserve an existing panic; this detector is secondary evidence.
-        if std::thread::panicking() {
-            tracing::error!("{detail} (reported during an active unwind, so not raised)");
-            return;
+        if let Some(handle) = self.handle.take() {
+            self.cleanup.enqueue(handle);
         }
-        debug_assert!(false, "{}", detail);
+    }
+}
+
+#[derive(Debug, Default)]
+struct CustodyCleanup {
+    abandoned: Mutex<Vec<ValueHandle>>,
+}
+
+impl CustodyCleanup {
+    fn enqueue(&self, handle: ValueHandle) {
+        self.abandoned.lock().push(handle);
+    }
+
+    fn take_all(&self) -> Vec<ValueHandle> {
+        std::mem::take(&mut *self.abandoned.lock())
+    }
+}
+
+struct CustodyTransfer {
+    handle: ValueHandle,
+    cleanup: Arc<CustodyCleanup>,
+    committed: bool,
+}
+
+impl CustodyTransfer {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+
+    fn into_custody(mut self) -> RootCustody {
+        self.committed = true;
+        RootCustody::new(self.handle, Arc::clone(&self.cleanup))
+    }
+}
+
+impl Drop for CustodyTransfer {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.cleanup.enqueue(self.handle);
+        }
     }
 }
 
@@ -403,6 +446,9 @@ pub struct ResidentSession<H, O> {
     /// The resource and lexical scopes for the next session entry. Callers
     /// sharing a machine replace this atomically at checkout boundaries.
     run_context: SessionRunContext,
+    /// Deferred releases produced when affine custody is dropped away from a
+    /// machine checkout. The next mutable session entry settles them.
+    custody_cleanup: Arc<CustodyCleanup>,
 }
 
 impl<H, O> ResidentSession<H, O>
@@ -461,6 +507,7 @@ where
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
             run_context: SessionRunContext::ROOT,
+            custody_cleanup: Arc::new(CustodyCleanup::default()),
         })
     }
 
@@ -492,6 +539,7 @@ where
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
             run_context: SessionRunContext::ROOT,
+            custody_cleanup: Arc::new(CustodyCleanup::default()),
         }
     }
 
@@ -616,6 +664,7 @@ where
     /// `(0, 0)` when the machine is not yet booted or the realm owns
     /// nothing (idempotent).
     pub fn close_realm(&mut self, realm: RealmId) -> (usize, usize) {
+        self.settle_dropped_custody();
         let Some(machine) = self.core.machine_mut() else {
             return (0, 0);
         };
@@ -634,11 +683,12 @@ where
     /// when `hole` is not parked or its frame holds no (untaken) finalized
     /// payload.
     pub fn finalized_handle(&mut self, hole: &str) -> Option<RootCustody> {
+        self.settle_dropped_custody();
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
         self.core
             .machine_mut()?
             .handle_from_finalized(id)
-            .map(RootCustody::new)
+            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup)))
     }
 
     /// [`Self::finalized_handle`]'s sibling for a result that must outlive
@@ -651,10 +701,14 @@ where
     /// does: minting under a different realm changes WHO owns the root, never
     /// whether the handle needs consuming exactly once.
     pub fn finalized_handle_owned_by(&mut self, hole: &str, realm: RealmId) -> Option<RootCustody> {
+        self.settle_dropped_custody();
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
         let machine = self.core.machine_mut()?;
         let slot = machine.take_parked_finalized_root(id)?;
-        Some(RootCustody::new(machine.mint_handle_from_root(slot, realm)))
+        Some(RootCustody::new(
+            machine.mint_handle_from_root(slot, realm),
+            Arc::clone(&self.custody_cleanup),
+        ))
     }
 
     /// Transfer a rooted value to another runtime resource scope.
@@ -668,7 +722,9 @@ where
         custody: RootCustody,
         owner: RealmId,
     ) -> Result<RootCustody, ResidentError> {
-        let handle = custody.into_handle();
+        self.settle_dropped_custody();
+        let transfer = custody.into_transfer();
+        let handle = transfer.handle;
         let moved = self
             .core
             .machine_mut()
@@ -680,15 +736,21 @@ where
                 )),
             ))));
         }
-        Ok(RootCustody::new(handle))
+        Ok(transfer.into_custody())
     }
 
     /// Abandon a rooted value deliberately, releasing its root immediately.
     pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
-        let handle = custody.into_handle();
-        self.core
+        self.settle_dropped_custody();
+        let transfer = custody.into_transfer();
+        let discarded = self
+            .core
             .machine_mut()
-            .is_some_and(|machine| machine.discard_handle(handle))
+            .is_some_and(|machine| machine.discard_handle(transfer.handle));
+        if discarded {
+            transfer.commit();
+        }
+        discarded
     }
 
     /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
@@ -710,12 +772,18 @@ where
         cont_id: &str,
         custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(
+        self.settle_dropped_custody();
+        let transfer = custody.into_transfer();
+        let result = self.reenter(
             cont_id,
-            ResumeInput::Handle(custody.into_handle()),
+            ResumeInput::Handle(transfer.handle),
             HoleSeed::Plain,
             None,
-        )
+        );
+        if result.is_ok() {
+            transfer.commit();
+        }
+        result
     }
 
     /// Scoped read-only query: the binding `name` resolves to as seen FROM
@@ -771,6 +839,7 @@ where
         name: &str,
         custody: RootCustody,
     ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
         if !self.core.scope_tree().is_live(scope) {
             self.discard_custody(custody);
             return Err(SessionError::DeadScope(scope).into());
@@ -793,7 +862,8 @@ where
                 .into());
             }
         };
-        let handle = custody.into_handle();
+        let transfer = custody.into_transfer();
+        let handle = transfer.handle;
         let slot = self
             .core
             .machine_mut()
@@ -804,6 +874,7 @@ where
                         .into(),
                 ))))
             })?;
+        transfer.commit();
         let value = match tier {
             ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
             ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
@@ -883,7 +954,8 @@ where
     /// accounting read: a handle minted over a finalize payload
     /// ([`Self::finalized_handle`]) counts here until [`Self::mount_handle`]
     /// (or an ordinary bind completion / realm close) releases it.
-    pub fn value_handle_count(&self) -> usize {
+    pub fn value_handle_count(&mut self) -> usize {
+        self.settle_dropped_custody();
         self.core.machine().map_or(0, |m| m.value_handle_count())
     }
 
@@ -951,7 +1023,8 @@ where
     /// parked_count()`) and 2 ([`Self::value_handle_count`]), which a scope
     /// retirement leaves untouched — folding them together is what makes a
     /// leak invisible.
-    pub fn persistent_roots_count(&self) -> usize {
+    pub fn persistent_roots_count(&mut self) -> usize {
+        self.settle_dropped_custody();
         self.core.persistent_roots_count()
     }
 
@@ -1391,11 +1464,13 @@ where
         realm: RealmId,
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.settle_dropped_custody();
         // Forking CONSUMES the body's custody: the thread that runs it is the
         // handle's new owner, and there is no second consumer. Taking the
         // token by value is what makes that a compile-time fact rather than a
         // convention.
-        let body = body.into_handle();
+        let transfer = body.into_transfer();
+        let body = transfer.handle;
         let slot = self
             .core
             .machine_mut()
@@ -1408,7 +1483,6 @@ where
                     ),
                 ))))
             })?;
-
         // `App(Var(FORKED_BODY_VAR), 0)`. Same shape and same reasoning as
         // `apply_finalized`: the Var-miss arm keys the external override on
         // ExternalEnv MEMBERSHIP, and the argument rides as a bare `Lit` whose
@@ -1458,6 +1532,7 @@ where
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, owning_realm))
         })?;
+        transfer.commit();
         Ok(self.classify_parked(outcome, None, HoleSeed::Plain))
     }
 
@@ -1671,6 +1746,7 @@ where
         T: Send,
         F: FnOnce(&mut JitEffectMachine, &DataConTable, &mut H, &O) -> Result<T, JitError> + Send,
     {
+        self.settle_dropped_custody();
         let mut lease = self.core.lease_machine();
         let (machine_ref, table) = lease.parts();
         let handlers = &mut self.handlers;
@@ -1712,6 +1788,19 @@ where
             EvalThreadOutcome::Panicked(payload) => Err(panic_to_run_error(payload)),
             EvalThreadOutcome::SpawnFailed(e) => Err(ResidentError::EvalThread(e)),
         }
+    }
+
+    /// Release affine roots whose custody was dropped while the machine was
+    /// checked into a registry or otherwise unavailable to the token itself.
+    fn settle_dropped_custody(&mut self) -> usize {
+        let handles = self.custody_cleanup.take_all();
+        let count = handles.len();
+        if let Some(machine) = self.core.machine_mut() {
+            for handle in handles {
+                machine.discard_handle(handle);
+            }
+        }
+        count
     }
 
     /// Classify a projected parked outcome into a [`ResidentOutcome`]:
@@ -1986,7 +2075,7 @@ mod tests {
         // An arbitrary handle id: the liveness check must short-circuit
         // before this is ever resolved against the machine's handle
         // registry, so it need not be a real, live-minted handle.
-        let custody = RootCustody::new(ValueHandle(0));
+        let custody = RootCustody::new(ValueHandle(0), Arc::clone(&session.custody_cleanup));
         let result = session.mount_handle_in(scope, "escapee", custody);
 
         assert!(
@@ -2011,7 +2100,7 @@ mod tests {
 
         // Arbitrary, need not be live-minted — resolution fails before the
         // handle registry is ever consulted.
-        let custody = RootCustody::new(ValueHandle(0));
+        let custody = RootCustody::new(ValueHandle(0), Arc::clone(&session.custody_cleanup));
         let result = session.mount_handle_in(scope, "nope", custody);
 
         assert!(
@@ -2027,5 +2116,17 @@ mod tests {
             Vec::<String>::new(),
             "a rejected mount must not have written a binding"
         );
+    }
+
+    #[test]
+    fn dropped_custody_is_queued_and_settled_without_panicking() {
+        let mut session = bootstrap_trivial_session();
+        let custody = RootCustody::new(ValueHandle(u64::MAX), Arc::clone(&session.custody_cleanup));
+
+        drop(custody);
+
+        assert_eq!(session.custody_cleanup.abandoned.lock().len(), 1);
+        assert_eq!(session.settle_dropped_custody(), 1);
+        assert!(session.custody_cleanup.abandoned.lock().is_empty());
     }
 }

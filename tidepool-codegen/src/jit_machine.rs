@@ -28,8 +28,8 @@ use crate::heap_bridge;
 use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
-use crate::resource_ledger::{ContinuationFrame, ResourceLedger};
 pub use crate::resource_ledger::ResourceCounts;
+use crate::resource_ledger::{ContinuationFrame, ResourceLedger};
 use crate::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionEntry, SuspensionRun,
     ValueHandle,
