@@ -24,4 +24,5 @@ pub mod pipeline;
 pub mod scope;
 pub mod signal_safety;
 pub mod stack_map;
+pub mod suspension;
 pub mod yield_type;

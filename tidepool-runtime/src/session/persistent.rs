@@ -502,7 +502,16 @@ impl PersistentSession {
             .ok_or(JitError::InvalidSuspensionState(
                 "resident machine is absent during resume",
             ))?;
-        machine.resume_continuation(id, handlers, captured, input)
+        let resumed = machine.resume_continuation(id, handlers, captured, input);
+        // Some errors reject the input before consuming the frame (for example
+        // a non-NF bridged answer); those remain retryable. Abort and failures
+        // after re-entry consume the frame, so keep the capacity-one façade in
+        // sync with the registry even though there is no successful outcome to
+        // pass through `track_*_outcome`.
+        if resumed.is_err() && machine.parked_realm(id).is_none() {
+            self.active_continuation = None;
+        }
+        resumed
     }
 
     /// Run the resident machine's ORIGINAL entry (the seed compiled by

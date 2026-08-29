@@ -29,6 +29,10 @@ use crate::heap_bridge;
 use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
+pub use crate::suspension::{
+    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
+    SuspensionEntry, SuspensionRun, ValueHandle,
+};
 use crate::yield_type::Yield;
 
 /// Error type for JIT compilation/execution failures.
@@ -102,123 +106,11 @@ pub struct HeapStats {
     pub fragments: u64,
 }
 
-/// Identity of one continuation parked in a machine's continuation registry.
-/// Minted by [`JitEffectMachine::run_until_suspension`], consumed by
-/// [`JitEffectMachine::resume_continuation`]. Ids are never reused within a machine:
-/// a resume that suspends AGAIN mints a fresh id (same runtime resource scope).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ContinuationId(pub u64);
-
-/// Identity of a runtime resource scope — the ownership scope a parked continuation belongs to
-/// (an outer loop turn, one answerer subtree, …). Carried on the frame so a
-/// caller can group, cancel, or drain a runtime resource scope's parks without tracking ids
-/// externally. The machine itself attaches no semantics to it beyond
-/// ownership: [`JitEffectMachine::close_realm`] is scope exit — every frame
-/// and [`ValueHandle`] the runtime resource scope owns is released together, structured-
-/// concurrency style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RealmId(pub u64);
-
-/// Opaque, `Send`-able identity of a machine-side rooted heap value. Minted by
-/// [`JitEffectMachine::handle_from_finalized`], observed via
-/// [`JitEffectMachine::observe_handle`], delivered via
-/// [`ResumeInput::Handle`], released by [`JitEffectMachine::close_realm`] of
-/// the owning runtime resource scope. The `!Send` [`crate::old_space::RootSlot`] underneath
-/// never crosses an API layer.
-///
-/// Stays `Copy`/freely re-usable at THIS layer on purpose: this machine-level
-/// primitive is also exercised directly by tests that read a handle
-/// non-linearly (`observe_handle`, `handle_realm`, repeated
-/// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
-/// session layer (`tidepool_runtime::session::resident::RootCustody`) wraps
-/// this type in a linear, non-`Clone` lease at the ONE boundary where a
-/// caller-visible obligation to consume-exactly-once actually exists
-/// (`ResidentSession::finalized_handle` → `resume_handle`/`mount_handle`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ValueHandle(pub u64);
-
 /// One live [`ValueHandle`]'s machine-side entry: the persistent-rooted slot
 /// and the runtime resource scope that owns (and will release) it.
 struct HandleEntry {
     slot: crate::old_space::RootSlot,
     realm: RealmId,
-}
-
-/// What kind of turn parked a continuation — the registry's spelling of the
-/// completion policy, covering all four [`ResultMaterialization`] policies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParkKind {
-    /// A plain suspendable turn: on completion the `Done` pointer is bridged
-    /// and returned (`ResultMaterialization::Value`).
-    Plain,
-    /// A persistent-binding-store BIND turn: on completion the result is tenured into
-    /// old-space and its [`crate::old_space::RootSlot`] returned inline
-    /// (`ResultMaterialization::Bind`). `forced` deep-forces to NF before
-    /// tenuring (Tier0 data) vs tenuring a Tier1 closure as-is.
-    Binding { forced: bool },
-    /// A multi-binder BIND turn: on completion the `Done` tuple is
-    /// deep-forced and each of `n_fields` fields is tenured in order, the
-    /// roots returned inline (`ResultMaterialization::Project`). `n_fields`
-    /// is a [`NonZeroUsize`] — a zero-field projection is meaningless (there
-    /// is no product to bind) and is rejected once, at the public-method
-    /// boundary, rather than asserted on every route that carries it.
-    Project { n_fields: NonZeroUsize },
-    /// The single-compile `it`-binding epilogue: field 1 is bridged FIRST
-    /// (aliasing-safe ordering, see [`ResultMaterialization::Render`]), then
-    /// field 0 optionally forced + tenured; both products returned inline.
-    Render { field0_forced: bool },
-}
-
-/// Which compiled function a suspendable run starts from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SuspensionEntry {
-    /// The function supplied when the machine was compiled.
-    Main,
-    /// A function subsequently added to a session machine.
-    Fragment(FuncId),
-}
-
-/// Everything the machine needs to start one suspendable run.
-///
-/// Keeping the boundary and completion policy in this value prevents the
-/// family of positional `run_*_suspendable_*` methods from encoding lifecycle
-/// policy in method names and argument order.
-pub struct SuspensionRun<'a> {
-    pub entry: SuspensionEntry,
-    pub table: &'a DataConTable,
-    pub boundary: &'a EffectBoundary,
-    pub realm: RealmId,
-    pub completion: ParkKind,
-}
-
-impl<'a> SuspensionRun<'a> {
-    #[must_use]
-    pub fn main(table: &'a DataConTable, boundary: &'a EffectBoundary, realm: RealmId) -> Self {
-        Self {
-            entry: SuspensionEntry::Main,
-            table,
-            boundary,
-            realm,
-            completion: ParkKind::Plain,
-        }
-    }
-
-    #[must_use]
-    pub fn fragment(
-        func_id: FuncId,
-        table: &'a DataConTable,
-        boundary: &'a EffectBoundary,
-        realm: RealmId,
-        completion: ParkKind,
-    ) -> Self {
-        Self {
-            entry: SuspensionEntry::Fragment(func_id),
-            table,
-            boundary,
-            realm,
-            completion,
-        }
-    }
 }
 
 impl ParkKind {
@@ -265,53 +157,6 @@ pub struct ContinuationFrame {
     /// resume decodes exclusively against the row it was compiled for — a
     /// caller cannot resume a frame against a foreign table.
     table: Arc<DataConTable>,
-}
-
-/// Outcome of a run/resume on the parked path — [`SuspendableOutcome`] plus the
-/// [`ContinuationId`] a suspension parked under.
-#[derive(Debug)]
-pub enum ParkedOutcome {
-    /// A [`ParkKind::Plain`] turn ran to completion: just the bridged result.
-    CompletedValue(tidepool_eval::value::Value),
-    /// A [`ParkKind::Binding`] turn ran to completion: the bridged result
-    /// plus the tenured root of its persistent-binding-store BIND, returned INLINE in the
-    /// same call that observed completion. A completed park leaves no frame
-    /// in the registry (a frame exists only while parked), so there is
-    /// nowhere for a machine-level stash to live between write and read — no
-    /// gap for a second runtime resource scope's completion to overwrite it before the
-    /// caller reads it.
-    CompletedBinding {
-        /// The bridged result.
-        value: tidepool_eval::value::Value,
-        /// The tenured root of the persistent-binding-store BIND's result.
-        root: crate::old_space::RootSlot,
-    },
-    /// A [`ParkKind::Project`] park ran to completion: the tenured field
-    /// roots, in field order, returned INLINE (same no-machine-stash argument
-    /// as [`Self::CompletedBinding`]'s `root`).
-    CompletedProject {
-        /// The tenured roots of each projected field, in field order.
-        roots: Vec<crate::old_space::RootSlot>,
-    },
-    /// A [`ParkKind::Render`] park ran to completion: field 0's tenured root
-    /// plus field 1's already-bridged render, returned INLINE.
-    CompletedRender {
-        /// Field 0's tenured root.
-        root: crate::old_space::RootSlot,
-        /// Field 1's bridged render.
-        rendered: tidepool_eval::value::Value,
-    },
-    /// The turn suspended and its continuation was PARKED in the registry as a
-    /// registered GC root. Resume it with [`JitEffectMachine::resume_continuation`].
-    Suspended {
-        /// The registry key this continuation parked under.
-        id: ContinuationId,
-        /// The bridged suspend request.
-        request: tidepool_eval::value::Value,
-        /// Whether the request contains a closure-valued finalize payload
-        /// retained by reference in this continuation frame.
-        has_finalized_closure: bool,
-    },
 }
 
 /// Where the shared suspendable epilogue puts a continuation when a turn
@@ -3102,55 +2947,6 @@ fn request_carries_closure_sentinel(request: &tidepool_eval::value::Value) -> bo
         }
         _ => false,
     }
-}
-
-/// Capacity-one session outcome used above the JIT registry API.
-pub enum Suspendable<T> {
-    /// The turn ran to completion, producing `T`.
-    Completed(T),
-    /// The turn suspended at the configured effect boundary.
-    Suspended {
-        request: tidepool_eval::value::Value,
-        /// Finalize-by-reference: `true` when the suspend request was a
-        /// `finalize @T closure` — the finalized VALUE (field 1 of the request
-        /// Con) has been tenured into old-space and retained by the parked
-        /// continuation frame.
-        /// The bridged `request` carries a [`heap_bridge::CLOSURE_SENTINEL`] in
-        /// that field's place. `false` for an ordinary `Ask`/`RunLLMTurn`
-        /// suspension (or a `finalize` of a plain DATA value, which bridges
-        /// fully and needs no by-reference handoff).
-        has_finalized_closure: bool,
-    },
-}
-
-/// `Value`-completing specialization of [`Suspendable`], used by linear
-/// session orchestration above the machine layer.
-pub type SuspendableOutcome = Suspendable<tidepool_eval::value::Value>;
-
-/// Input supplied to [`JitEffectMachine::resume_continuation`].
-pub enum ResumeInput {
-    /// Feed the (already-validated, bridged) answer value into the suspended
-    /// ask and continue driving.
-    Answer(tidepool_eval::value::Value),
-    /// Feed a machine-side rooted heap value — a [`ValueHandle`] minted on
-    /// THIS machine — as the answer, WITHOUT materializing a bridged
-    /// [`tidepool_eval::value::Value`] into the heap: the handle's GC-current
-    /// pointer is the response, verbatim. This is how a closure (or any
-    /// opaque value) is DELIVERED into a sibling continuation on the same
-    /// heap. The bridged-answer normal-form check does not apply: the payload
-    /// is already a real heap value whose thunks are ordinary lazy structure,
-    /// not a bridged answer that could smuggle a bottom past validation. The
-    /// handle is NOT consumed (scope-owned borrow; released by
-    /// [`JitEffectMachine::close_realm`]). An unknown/released handle is a
-    /// clean typed error before anything runs.
-    Handle(ValueHandle),
-    /// Abort the suspended ask WITHOUT running the continuation (a stowed
-    /// machine has no thread) — returns `JitError::Effect(EffectError::
-    /// Handler("ask aborted by caller: {reason}"))` directly. This does not touch
-    /// the first-cause cell / record `RuntimeError::Cancelled` — that cause
-    /// is reserved for the gate/timeout abort path, not a caller-supplied
-    /// abort reason.
-    Abort(String),
 }
 
 /// Drive the freer-simple effect step loop to `Yield::Done`: step the machine,
