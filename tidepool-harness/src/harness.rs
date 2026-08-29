@@ -3588,26 +3588,19 @@ impl Harness {
         let sid = checkout.session_id();
         let mut machine = checkout.take();
         self.drain_pending_session_exits(sid, &mut machine);
-        match tokio::task::spawn_blocking(move || {
-            let mut machine = machine;
-            // A dead `scope` here means the node's recorded scope was
-            // retired out from under it (e.g. a queued window exit for this
-            // node drained just above). Fall back to the complete root context
-            // rather than retaining either half of a previous caller's context.
-            if let Err(e) = machine.set_run_context(SessionRunContext::new(realm, scope)) {
-                tracing::error!(
-                    "run_checked_out: node {node:?}'s recorded scope {scope:?} is dead ({e}); \
-                     falling back to ROOT"
-                );
-                #[allow(clippy::expect_used, reason = "ScopeId::ROOT is always live")]
-                machine
-                    .set_run_context(SessionRunContext::ROOT)
-                    .expect("ScopeId::ROOT is always live");
-            }
-            f(machine)
-        })
-        .await
-        {
+        if let Err(error) = machine.set_run_context(SessionRunContext::new(realm, scope)) {
+            let holes = machine
+                .parked_holes()
+                .into_iter()
+                .map(|hole| HoleId(hole.to_string()))
+                .collect();
+            checkout.put(machine);
+            checkout.restore_suspended(holes);
+            return Err(HarnessError::Resident(format!(
+                "node {node:?} has an invalid resident run context: {error}"
+            )));
+        }
+        match tokio::task::spawn_blocking(move || f(machine)).await {
             Ok((session, result)) => {
                 let holes: Vec<HoleId> = session
                     .parked_holes()
