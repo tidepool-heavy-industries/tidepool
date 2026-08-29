@@ -431,47 +431,12 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
                     (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
           cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
           pure (simplified, (externalizeInternalTops simplified, mfUserType mf, mfResultType mf))
-    -- A memo hit is trusted only if the cached entry's own 'ModSummary' has
-    -- the SAME content fingerprint ('ms_hs_hash', already computed by
-    -- 'depanal' for every summary — GHC's own signal for "this source
-    -- changed", the same field 'invalidateModSummaryCache' resets to force a
-    -- miss) as the summary THIS cycle just downswept for the same
-    -- 'ModuleName'. This is required because a 'ModuleName' is not always a
-    -- stable proxy for stable CONTENT: a generated module can be a pure
-    -- function of the request's own effect vocabulary
-    -- (@Tidepool.Effects.Core@ — content-addressed into a distinct include
-    -- dir per vocabulary on the Rust side, tidepool-mcp/CLAUDE.md's
-    -- "Generated effects modules" section) while always resolving under the SAME
-    -- fixed module name, so two independent requests with different
-    -- vocabularies can populate/consult the shared memo under one key with
-    -- genuinely different bindings (e.g. one row lacking
-    -- @Tidepool.Agent.Spawn@'s @spawnSpec@) — exactly the "module names are
-    -- not globally unique across independent requests" hazard. This extends
-    -- the target\/@Tidepool.Session.*@ exclusion in 'sanitizeMemo'. A hash
-    -- mismatch is treated as an ordinary miss: compiled fresh
-    -- below, and the memo entry is overwritten with the new content via the
-    -- existing 'Map.insert'. Costs nothing when content is unchanged (the
-    -- overwhelmingly common case — same vocabulary, same hash, hit as
-    -- before).
-    -- Dependency-closure memo validity (daemon-shim-identity-fix, one step
-    -- past the 'ms_hs_hash' self-check above): a module whose OWN source
-    -- text is byte-identical across two independent requests
-    -- (@Tidepool.Orchestrate@, which spells only the bare @M@ alias and
-    -- never mentions a pinned @Finalize \<T\>@ literally) can still have a
-    -- request-VARYING compiled MEANING when it imports a fixed-name/
-    -- varying-content sibling (the per-window @Tidepool.Effects@ shim,
-    -- co-generated into the SAME content-addressed staging dir but not
-    -- co-hashed at the single-module level, tidepool-mcp/CLAUDE.md's
-    -- "Generated effects modules" section). A self-hash match is necessary but
-    -- not sufficient — the compiled TcGblEnv/Core also nominally reference
-    -- whatever THAT module's own home-module imports resolved to, so a memo
-    -- hit is trusted only when every direct home import ALSO validated
-    -- (hit, not freshly recompiled) THIS cycle. Modules are visited in
-    -- dependency order ('cpSummaries' always returns a topological sort —
-    -- see 'normalVariant'/'sessionVariant'), so an import's own verdict is
-    -- already recorded in 'validThisCycleRef' by the time a dependent
-    -- module is checked — this generalizes to any depth/shape of
-    -- fixed-name/varying-content chain; no module is named here.
+    -- Module names do not identify generated content across independent
+    -- requests. A memo hit therefore requires both the current source hash
+    -- and valid direct home-module imports. Summaries are visited in
+    -- dependency order, so import validity has already been recorded when a
+    -- dependent is checked. A mismatch is an ordinary miss and overwrites the
+    -- cached entry after recompilation.
     let cycleModNames = Set.fromList (map ms_mod_name summaries)
         directHomeDeps modSum =
           [ mn | (_, lmn) <- ms_textual_imps modSum
@@ -1290,18 +1255,14 @@ promoteConfigSafetyWarning :: WarningFlag -> DynFlags -> DynFlags
 promoteConfigSafetyWarning warning =
   (`wopt_set_fatal` warning) . (`wopt_set` warning)
 
--- | #313 fix: disambiguate top-level simplifier floats across modules.
+-- | Give internal top-level simplifier floats stable module-qualified names.
 --
 -- Top-level binders with INTERNAL names (floats like @k_X1@, @$wk_snOX@) keep
 -- per-module uniques. `runPipeline` concatenates several modules' bindings for
 -- translation, so (occName, unique-key) pairs collide across modules — and
 -- @Identity.varId@ hashes exactly that pair. Two distinct floats can
 -- then receive the same VarId and shadow each other in the serialized program.
--- Observed as #313: Probe's tuple-unpacking continuation @k_X1@ resolved to
--- the preamble's unrelated @k_X1 :: [Text] -> ...@, sending the raw effect
--- tuple into a list case → CASE TRAP.
---
--- Fix: give every internal top-level binder an EXTERNAL name qualified by its
+-- Give every internal top-level binder an EXTERNAL name qualified by its
 -- defining module, with a STABLE disambiguator baked into the OccName
 -- (@k@ → @Probe.k_t3@, where @3@ is @k@'s ordinal position among this
 -- module's own top-level binders), so @Identity.stableVarId@ yields a
@@ -1310,11 +1271,9 @@ promoteConfigSafetyWarning warning =
 -- of the same source: 'mg_binds'\'s order is a pure function of this
 -- module's own source and simplifier passes, never of how many Uniques the
 -- surrounding GHC session happened to consume before reaching this module
--- (which a warm build-products-dir compile perturbs — see
--- 'Tidepool.Translate.stabilizeLocalUniques'\'s doc, the companion fix for
--- NESTED binders; this function only ever rewrites TOP-LEVEL ones, and
--- together the two close plans/turn-latency-state-injection.md's
--- build-products-dir determinism gap). Internal names cannot be referenced
+-- (which a warm build-products-dir compile perturbs). This function handles
+-- top-level binders; 'Tidepool.Translate.stabilizeLocalUniques' handles nested
+-- binders. Internal names cannot be referenced
 -- from other modules' ModGuts, so substituting binder + occurrences within
 -- the module is complete. Nested binders are untouched: their uniques cannot
 -- collide with top-level uniques of the same module, and cross-module nested

@@ -33,21 +33,18 @@
 --
 -- GATING: nothing here runs on the normal one-shot eval path. 'SessionScope'
 -- with an empty 'ssValIfaces' is inert; 'GhcPipeline.runPipeline' calls the
--- session machinery only when a scope is supplied. See
--- @plans/ghci-implementation-plan.md@ §2 + §5.3.
+-- session machinery only when a scope is supplied.
 --
--- INSTANCE REPLAY (kimi #6): 'typecheckIface' faithfully reconstructs an
+-- 'typecheckIface' reconstructs an
 -- iface's @mi_insts@ into @md_insts@ (verified), so a session module that
 -- carries instances makes them available to importing reference modules via the
--- HPT. For Wave 3a's actual cases — binders whose types mention only
+-- HPT. For ordinary value bindings whose types mention only
 -- library classes/types — NO replay is needed: the reference module imports
 -- @base@ and resolves @Ord Int@/@Num Int@/… at the use site (spike-extract R4).
 -- Replaying a USER/orphan instance whose dfun is DEFINED in the injected module
 -- requires the self-reference knot ('if_rec_types') that GHC's real
--- 'GHC.Iface.Load.loadInterface' ties; manual injection of such a module fails
--- with "module … which is not loaded" when the dfun thunk is forced. That only
--- arises with Lib-kind session types, so it is a documented Wave-3b follow-on
--- (NOT swept under the rug — see plans/ghci-implementation-plan.md §7.2).
+-- 'GHC.Iface.Load.loadInterface' ties; manual injection of such a module is
+-- unsupported and fails when the dfun thunk is forced.
 module Tidepool.Session
   ( -- * Identifiers (mirror the Rust domain model §1–2)
     Generation(..)

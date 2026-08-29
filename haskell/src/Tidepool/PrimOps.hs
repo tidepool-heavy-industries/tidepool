@@ -368,5 +368,3 @@ splitUnaryMultiReturnPrimOp = \case
 
 primOpArity :: PrimOp -> Int
 primOpArity op = let (_, _, _, a, _) = primOpSig op in a
-
-
