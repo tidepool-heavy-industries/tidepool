@@ -1,25 +1,10 @@
-//! The old-corpus replay test: every fixture under `tests/fixtures/persistence-corpus/<kind>/` is a
-//! FROZEN, NEVER-REGENERATED artifact standing in for a real operator's
-//! on-disk state at some past version — the inverse of `tidepool-repr`'s
-//! `golden_wire_contract.rs` corpus, which IS regenerated on every breaking
-//! bump because a `.cbor` fixture is a reproducible build artifact and a
-//! `Checkpoint`/journal fixture is not.
+//! Replay fixtures for persistence formats that still support their original
+//! unstamped representation. Each fixture is decoded through the production
+//! reader and checked for preserved data, not merely successful parsing.
 //!
-//! Each kind's directory currently holds exactly one fixture, `v0.*` — the
-//! UNSTAMPED shape every one of the six persistence-versioning kinds had
-//! before this design landed (no `"version"` key at all, reading as version
-//! `0` by the unstamped-file convention — see
-//! `tidepool_repr::version_ladder`'s module doc). Landing the very first
-//! real, non-identity migration on any kind adds exactly one more fixture
-//! to that kind's directory: the shape immediately BEFORE that migration
-//! lands, captured the same way this one was (see each fixture's sibling
-//! `.txt` note, or this file's own history, for how). This test walks each
-//! kind's directory generically — a new fixture needs no new test
-//! function — decodes every file through that kind's real versioned
-//! reader, and asserts specific known-good fields land at their expected
-//! value, not merely that decoding succeeded (a migration that silently
-//! dropped a field would still parse cleanly into the current struct's
-//! defaults).
+//! Formats whose compatibility floor has advanced beyond v0 do not belong in
+//! this corpus. Their below-floor behavior is covered by the reader's own
+//! boundary tests.
 
 use std::fs;
 use std::path::PathBuf;
@@ -73,34 +58,6 @@ fn checkpoint_corpus_migrates_to_current() {
             "{path:?}: state.mode must survive migration"
         );
         assert_eq!(checkpoint.generation().get(), 1, "{path:?}: generation");
-    }
-}
-
-/// Kind 3: the harness log `Event`/`LogHeader` — see `log::version`.
-#[test]
-fn harness_log_corpus_migrates_to_current() {
-    use tidepool_harness::log::{Event, LogReader};
-    for path in fixtures("harness-log") {
-        let (header, iter) =
-            LogReader::open(&path).unwrap_or_else(|e| panic!("{path:?}: must load, got {e}"));
-        assert_eq!(header.prelude_hash, "prelude-legacy", "{path:?}: header");
-        let records: Vec<_> = iter
-            .collect::<Result<_, _>>()
-            .unwrap_or_else(|e| panic!("{path:?}: every event must decode, got {e}"));
-        assert!(
-            !records.is_empty(),
-            "{path:?}: must carry at least one event"
-        );
-        let node_done = records
-            .iter()
-            .find_map(|r| match &r.event {
-                Event::NodeDone {
-                    result_rendered, ..
-                } => Some(result_rendered.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("{path:?}: must carry a NodeDone event"));
-        assert_eq!(node_done, "42", "{path:?}: NodeDone.result_rendered");
     }
 }
 
@@ -168,14 +125,11 @@ fn selfharness_transcript_corpus_reads_as_unstamped() {
     }
 }
 
-/// Every kind's corpus directory actually exists and holds the floor (v0,
-/// unstamped) fixture — a sanity check that the walker above isn't
-/// vacuously passing because a directory went missing.
+/// Every format covered here has an unstamped fixture.
 #[test]
 fn every_kind_has_a_v0_fixture() {
     for kind in [
         "checkpoint",
-        "harness-log",
         "worktree-journal",
         "handlers-journal",
         "selfharness-transcript",
