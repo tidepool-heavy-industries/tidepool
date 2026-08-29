@@ -322,7 +322,7 @@ emitUtf8NByteBranch aId goRef b0Int n leadMask combine = do
     combine charBox goNext
 
 -- | Emit a runtime unpackCString# loop for a non-static Addr# value,
--- UTF-8-decoding multi-byte sequences (not one byte per Char# — see H1).
+-- decoding UTF-8 into code points.
 -- Produces: letrec go = \a -> case indexCharOffAddr# a 0# of
 --             { '\0'# -> []; _ -> <decode step> }
 --           in go addrIdx
@@ -698,9 +698,8 @@ translateModuleClosed hscEnv allBinds targetName = do
       -- Binding sites only — a reference is not a second BINDING, so it must
       -- not read as a collision.
       bindSitesOf ss = [ s | s@BoundAt{} <- ss ]
-  -- TIDEPOOL_VARID_AUDIT=1: report VarId collisions — distinct binding
-  -- sites whose varId hashes coincide. The JIT's emit env is a flat map
-  -- keyed by VarId; a collision aliases two closures (#313 t11 class).
+  -- TIDEPOOL_VARID_AUDIT=1 reports distinct binding sites whose VarIds
+  -- collide. The JIT emit environment is keyed by VarId.
   auditEnv <- System.Environment.lookupEnv "TIDEPOOL_VARID_AUDIT"
   case auditEnv of
     Just _ -> do
@@ -846,17 +845,12 @@ translateModuleClosed hscEnv allBinds targetName = do
 
 -- | Globally freshen duplicate binder uniques.
 --
--- GHC's rapier-style simplifier clones a binder only when it clashes with
--- the enclosing in-scope set, so identical uniques legitimately recur in
--- DISJOINT sibling scopes (an unfolding template inlined at N sites keeps
--- its binder uniques in every copy — observed: one @$j2@ bound at 20
--- sites, 1491 duplicated binders in a single closed graph). Lexically
--- harmless — but the serialized program keys everything by
+-- GHC's simplifier may reuse binder uniques in disjoint sibling scopes when
+-- it clones an unfolding. This is lexically harmless, but the serialized
+-- program keys everything by
 -- @VarId = hash(occName, unique)@: the JIT's flat emit env, the global
--- rec-join registry ('tsRecJoinIds'), closure capture resolution. Two
--- binding sites sharing a VarId alias each other's closures at runtime
--- (#313 t11: the second T.breakOn's SpecConstr'd join @$j3@ aliased the
--- first's — same code pointer, different captures → CASE TRAP).
+-- rec-join registry ('tsRecJoinIds'), and closure capture resolution. Two
+-- binding sites sharing a VarId would alias at runtime.
 --
 -- Walk the whole program threading a global set of seen unique keys; a
 -- repeat binder gets a fresh unique, substituted through its scope via a
@@ -1532,13 +1526,8 @@ translate expr =
     -- whose unfolding uses plusAddr#/indexCharOffAddr# (Addr# pointer arithmetic).
     -- We intercept and expand statically to avoid needing Addr# primops.
     --
-    -- `extraArgs`: some fusion instantiations (e.g. length's `a ~ Int -> Int`
-    -- continuation-accumulator trick) apply the (lit, f, z) result to further
-    -- value args beyond the syntactic triple (REPRODUCED: `T.length "héllo"`
-    -- lowers to `unpackFoldrCStringUtf8# lit lengthFB (id \@Int) (I# 0#)` — 4
-    -- value args, not 3). An exact-length `[litArg, fArg, zArg]` match misses
-    -- this and falls through to a dangling NVar (H2). Re-apply any such extras
-    -- to the expanded result.
+    -- Some fusion instantiations apply the (lit, f, z) result to additional
+    -- accumulator arguments. Re-apply those arguments to the expanded result.
     Var v | isUnpackFoldrCStringVar v
           , (litArg : fArg : zArg : extraArgs) <- args
           , Just bytes <- extractAddrLitBytes litArg -> do
@@ -2833,17 +2822,12 @@ showHex' w = "0x" ++ Numeric.showHex w ""
 -- When this is true, compiling the join point as a Cranelift block won't work
 -- because the lambda gets compiled as a separate function with its own context.
 --
--- CRUCIALLY (#313), "lambda" must include CONVERSION-INDUCED lambdas, not
--- just source-level ones: Rec joinrecs are ALWAYS translated as LetRec
+-- "Lambda" includes conversion-induced lambdas, not only source-level ones:
+-- recursive joins are translated as LetRec
 -- lambdas (separate Cranelift functions), and a NonRec join that itself
 -- converts becomes a lambda too. A jump to an outer join from inside any
 -- such body crosses a function boundary that did not exist in the source
--- Core. Without this closure, the outer join compiles as a block in one
--- function while its jump sites live in another — the observed result was
--- a converted-join closure occupying an Eff continuation slot (case trap:
--- expected I#, got Text). Conversion is always SAFE (a lambda+NApp is
--- semantically a superset of a block+jump), so the predicate may be
--- conservative.
+-- Core. Conversion is safe, so the predicate may be conservative.
 jumpCrossesLam :: Word64 -> CoreExpr -> Bool
 jumpCrossesLam vid = go False
   where

@@ -415,10 +415,10 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
                            , mfDesugared  = desugared
                            , mfUserType   = mCapTy
                            , mfResultType = mResTy }
-        -- The ONE per-module back half: the optimized-Core pass, the
+        -- The per-module back half: the optimized-Core pass, the
         -- variant's post-compile hook (session: HPT registration of a
         -- deferred module, which is why it sees the PRE-externalize guts and
-        -- the module's own typechecked env), then #313's name
+        -- the module's own typechecked env), then stable name
         -- externalization. Returns the pre-externalize 'simplified' guts so a
         -- resident session can repeat HPT registration on later requests;
         -- direct compilation discards it.
@@ -619,7 +619,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     -- typechecker and are never touched by 'core2core' (which transforms
     -- 'mg_binds' only — the back half never re-derives 'mg_tcs'), so reading
     -- them off the DESUGARED guts costs nothing extra and keeps a
-    -- validation-only module's data types available to D1's metadata walk.
+    -- validation-only module's data types available to metadata validation.
     -- Order is summary order, which on the session variant (topologically
     -- sorted over the target's own import closure, so the target is last) is
     -- the dependencies-then-target order it used to build by hand.
@@ -1188,8 +1188,7 @@ externalVarModules known = go
 -- re-uses. Without re-canonicalizing, extraction of any module in a
 -- quasi-quote dependency graph emits UNOPTIMIZED Core — e.g.
 -- @negate \@Double $fNumDouble (D# 2.5##)@ instead of a folded @D# -2.5##@,
--- which then chases Integer machinery and dies with
--- "Unsupported primop: clz#". Repro matrix M1-M8 lives in scratch/qq-spike/.
+-- which then requires runtime machinery the optimized program did not.
 --
 -- Surgical: backend/opt-level/gopt only — exactly the fields the TH
 -- downgrade touches. Per-module LANGUAGE pragmas already merged into
@@ -1197,15 +1196,10 @@ externalVarModules known = go
 -- session-setup-only (see runPipeline): re-pinning bare genericPlatform
 -- here would strip the platform constants populated at session init.
 --
--- Flag notes (history, do not weaken):
+-- Flag contracts:
 --   * FullLaziness conflicts with eager eval.
---   * WARNING (2026-06-10, #313 forensics): Opt_CprAnal is a NO-OP in GHC
---     9.12 — `-fno-cpr-anal` changes nothing (Cpr=1 signatures appear
---     regardless; verified empirically). The unset is kept for
---     documentation, but the protection it was believed to provide does
---     not exist. Disabling Opt_WorkerWrapper was tried and did NOT fix
---     #313 (the bug is join-closure wiring in translation, not w/w), so
---     it stays enabled.
+--   * Opt_CprAnal is ineffective for this GHC version, but keeping it unset
+--     records the intended extraction profile. Worker-wrapper remains enabled.
 --   * Opt_ShowErrorContext / maxRelevantBinds (this change): every repl/eval
 --     turn typechecks the user's expression inside harness scaffolding
 --     (@__user@, @__b@, @it@, @toWire@ wrapper bindings). An ambiguity in

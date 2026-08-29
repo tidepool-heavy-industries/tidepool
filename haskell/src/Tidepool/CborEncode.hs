@@ -158,10 +158,8 @@ encodeMetaEntry DCMeta{dcmId, dcmName, dcmTag, dcmArity, dcmBangs, dcmQualName, 
         then error "encodeMetaEntry: negative constructor tag"
         else fromIntegral dcmTag
   in
-  -- 9-element entry: the Rust reader (tidepool-repr/src/serial/read.rs)
-  -- requires EXACTLY 9 elements — a shorter entry (e.g. the legacy 8-element
-  -- shape) is a hard InvalidStructure error, not a backward-compatible short
-  -- form. Positional constructors carry an empty labels array. The 8th
+  -- The Rust reader requires exactly nine elements. Positional constructors
+  -- carry an empty labels array. The 8th
   -- element is the rendered name of the constructor's parent TyCon (e.g.
   -- "Verdict"), always present — every DataCon has a parent type. The 9th
   -- element is the constructor's field types, rendered in declaration order

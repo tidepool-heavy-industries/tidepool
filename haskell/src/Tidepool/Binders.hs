@@ -225,11 +225,9 @@ templateSelectorWireName SExpr        = "expr"
 -- because there is exactly one place the parse happens.
 --
 -- DECLARATION CONTEXT FIRST, then statement context. A top-level declaration
--- (@f x = e@, a signature @f :: T@, a bare @x = 5@) parses as a decl but FAILS
--- as a statement, so a statement-only parse would misreport it as @"expr"@
--- (the old behavior — the ambiguity then leaked into Rust, where a trailing
--- call in a "define then call" block poisoned the decl batch). Trying the decl
--- parse first also disambiguates the genuinely two-faced @f :: T@: in decl
+-- (@f x = e@, a signature @f :: T@, a bare @x = 5@) parses as a decl but fails
+-- as a statement. Trying the declaration parse first also disambiguates
+-- the genuinely two-faced @f :: T@: in decl
 -- context GHC reads it as a signature (@"decl"@), not an annotated expression.
 -- Order of precedence:
 --
@@ -408,8 +406,7 @@ renderVerdictsJson sbs =
 
 -- | One bound-value record from a BIND turn: the mint'd 'stableVarId', the
 -- thin session iface module it was written under, its closure/data tier, and
--- its rendered type. Shared by the legacy @--emit-bound-binders@ sidecar and
--- the 'Bind' variant below — one record shape, two call sites.
+-- its rendered type. Shared by the binder sidecar and the 'Bind' variant.
 data BoundBinder = BoundBinder
   { bbName        :: String
   , bbVarId       :: Word64
@@ -418,8 +415,7 @@ data BoundBinder = BoundBinder
   , bbTypeDisplay :: String
   } deriving (Eq, Show)
 
--- | The rich result of a @--turn@ run: a tagged variant over the verdict
--- (see @plans/one-spawn-turn-protocol.md@). 'TDecl' never compiles — its
+-- | The rich result of a @--turn@ run. 'TDecl' never compiles — its
 -- 'toDeclItems' come from a whole-module parse ('extractBindersNamed' over
 -- the @--turn@ decl turn's own spliced scratch module), not this module's
 -- statement parse, because a decl-batch caller (@--turn-verdict decl@ over N
@@ -455,9 +451,8 @@ data TurnOut
       }
   deriving (Eq, Show)
 
--- | One 'BoundBinder' as JSON. @varId@ is a DECIMAL STRING of the u64 (an f64
--- would lose precision) — same shape the legacy @--emit-bound-binders@
--- sidecar always used.
+-- | One 'BoundBinder' as JSON. @varId@ is a decimal string because JSON
+-- numbers cannot represent every u64 exactly.
 renderBoundBinderJson :: BoundBinder -> String
 renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
   "{\"name\":" ++ jsonString name
