@@ -16,8 +16,8 @@
 //! [`Harness::take_finalized_value_keep_open`] (bridged, as before); a
 //! `finalize`d CLOSURE crosses via
 //! [`Harness::take_finalized_handle_keep_open`] — a
-//! [`tidepool_codegen::suspension::ValueHandle`] over the payload's own
-//! machine-side root, never deep-forced or serialized — delivered straight
+//! custody of the payload's own machine-side root, never deep-forced or
+//! serialized — delivered straight
 //! into the OUTER session's parked `runLLMTurn` continuation via
 //! [`ResidentSession::resume`] (data) or [`ResidentSession::resume_handle`]
 //! (handle). This is what makes `runLLMTurn @(State -> State)` work
@@ -429,14 +429,6 @@ const DEFAULT_FRAGMENT_CEILING: u64 = 4096;
 pub struct SelfHarnessDriver {
     /// The Harness-monad resident session. `None` before bootstrap.
     outer: Option<OuterSession>,
-    /// Monotonic per-loop realm counter: each loop's answerer node gets its
-    /// own realm on the SHARED machine (structured-concurrency scope; closed
-    /// at retirement). Distinct from `iteration` (which restarts restore).
-    /// Atomic (not a plain `u64`) because concurrent fanout/fork children
-    /// (S1-L4, [`Self::service_outer_fanout`]) each mint their OWN realm
-    /// from `&self`, one per window, alongside the single reused
-    /// [`Self::answerer`]'s realm.
-    iteration_realm: AtomicU64,
     /// The living session values the LAST machine rotation lost — surfaced
     /// once in the next render as a legible-loss note, then cleared.
     last_rotation_losses: Option<Vec<String>>,
@@ -801,7 +793,6 @@ impl SelfHarnessDriver {
     pub fn new(agent: Arc<Harness>, observer: Arc<dyn Observer>) -> Self {
         SelfHarnessDriver {
             outer: None,
-            iteration_realm: AtomicU64::new(0),
             last_rotation_losses: None,
             pending_operator_input: None,
             loop_state_json: None,

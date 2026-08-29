@@ -451,23 +451,19 @@ pub struct JitEffectMachine {
     /// [`MachineState`], so cancellation cannot leak to a sibling realm.
     /// [`Self::close_realm`] removes the entry.
     realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
-    /// Value-handle registry: opaque,
-    /// Send-able ids over machine-side persistent roots, so upper layers pass
+    /// Value-handle registry: process-unique, sendable ids over machine-side
+    /// persistent roots, so upper layers pass
     /// heap values — closures included — WITHOUT eagerly bridging them into a
     /// Rust [`Value`] (the eager bridge substitutes `CLOSURE_SENTINEL` and is
     /// the closure-killer on delivery paths; it remains only in
     /// [`Self::observe_handle`], where an opaque view of an opaque value is
-    /// honest). Handles are SCOPE-OWNED BORROWS: minting does not consume the
-    /// underlying root, observing and delivering do not consume the handle,
-    /// and [`Self::close_realm`] releases every handle its runtime resource scope minted.
+    /// honest). A handle registry owns its root until the handle is adopted,
+    /// discarded, or released by [`Self::close_realm`]. Observing and
+    /// delivering borrow that ownership without consuming it.
     value_handles: HashMap<u64, HandleEntry>,
     /// Monotonic count of fragments compiled into the JITModule (its
     /// executable memory is never reclaimed) — [`HeapStats::fragments`].
     fragments_added: u64,
-    /// Monotonic source of [`ValueHandle`] ids — same never-rewound
-    /// discipline as `next_continuation_id` (a released handle's id is a
-    /// clean "unknown handle" error, never a silent alias).
-    next_value_handle: u64,
     /// Non-empty handled-effect layout established by the first parked-path
     /// entry. It is monotonic because every realm uses the same monomorphized
     /// handler stack for the machine's lifetime. Compatibility is defined by
@@ -743,7 +739,6 @@ impl JitEffectMachine {
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
             value_handles: HashMap::new(),
-            next_value_handle: 0,
             fragments_added: 0,
             established_prefix: None,
         })
@@ -782,7 +777,6 @@ impl JitEffectMachine {
             next_continuation_id: 0,
             realm_cancel_flags: HashMap::new(),
             value_handles: HashMap::new(),
-            next_value_handle: 0,
             fragments_added: 0,
             established_prefix: None,
         })
@@ -2574,8 +2568,7 @@ impl JitEffectMachine {
         let frame = self.continuations.get_mut(&id)?;
         let realm = frame.realm;
         let slot = frame.finalized_root.take()?;
-        let h = ValueHandle(self.next_value_handle);
-        self.next_value_handle += 1;
+        let h = ValueHandle::fresh();
         self.value_handles.insert(h.0, HandleEntry { slot, realm });
         Some(h)
     }
@@ -2599,26 +2592,43 @@ impl JitEffectMachine {
         slot: crate::old_space::RootSlot,
         realm: RealmId,
     ) -> ValueHandle {
-        let h = ValueHandle(self.next_value_handle);
-        self.next_value_handle += 1;
+        let h = ValueHandle::fresh();
         self.value_handles.insert(h.0, HandleEntry { slot, realm });
         h
     }
 
-    /// The rooted slot behind a live handle — for the session layer's OWN
-    /// bookkeeping (a persistent-binding-store `BindingTable` stores `RootSlot`s on the
-    /// session thread, same as it always has). The handle stays live; pairing
-    /// this with [`Self::release_handle`] transfers ownership to the caller.
+    /// Borrow the rooted slot behind a live handle without changing ownership.
     pub fn handle_slot(&self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
         self.value_handles.get(&handle.0).map(|e| e.slot)
     }
 
-    /// Release ONE handle without closing its runtime resource scope — for a caller that
-    /// consumed the underlying slot into its own lifetime discipline (the
-    /// persistent binding store). Does NOT deregister the persistent root (ownership
-    /// transferred, not dropped); a later `close_realm` no longer sees it.
-    pub fn release_handle(&mut self, handle: ValueHandle) -> bool {
-        self.value_handles.remove(&handle.0).is_some()
+    /// Adopt a handle's rooted slot into another ownership discipline.
+    ///
+    /// The handle is removed atomically and the persistent-root registration
+    /// remains active; the caller must install the returned slot in a root-owning
+    /// structure such as the persistent binding table.
+    pub fn take_handle_root(&mut self, handle: ValueHandle) -> Option<crate::old_space::RootSlot> {
+        self.value_handles.remove(&handle.0).map(|entry| entry.slot)
+    }
+
+    /// Move a live handle to another runtime resource scope without changing
+    /// the root or numeric handle identity.
+    pub fn rehome_handle(&mut self, handle: ValueHandle, owner: RealmId) -> bool {
+        let Some(entry) = self.value_handles.get_mut(&handle.0) else {
+            return false;
+        };
+        entry.realm = owner;
+        true
+    }
+
+    /// Drop a live handle and its persistent-root registration immediately.
+    pub fn discard_handle(&mut self, handle: ValueHandle) -> bool {
+        let Some(entry) = self.value_handles.remove(&handle.0) else {
+            return false;
+        };
+        self.machine_state
+            .deregister_persistent_root(entry.slot.addr());
+        true
     }
 
     /// Number of live value handles (test/diagnostic accessor).
@@ -2792,8 +2802,8 @@ impl JitEffectMachine {
     /// handle-registry half of [`Self::retire_scope_root`]'s sole-ownership
     /// clause, so a retirement site can debug-assert it rather than assume it.
     ///
-    /// A mount transfers ownership out of the handle registry
-    /// (`release_handle`) before the persistent binding store records the binding, so this
+    /// A mount adopts the root out of the handle registry before the
+    /// persistent binding store records the binding, so this
     /// answers `false` for every properly-mounted root; a `true` means the
     /// handle registry and the persistent binding store both believe they own the slot,
     /// which is the state retirement must not act on.

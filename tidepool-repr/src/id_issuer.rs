@@ -45,10 +45,7 @@ impl MonotonicIdIssuer {
         format!("{}_{}", self.prefix, self.next_raw())
     }
 
-    /// The next raw counter value, with no prefix formatting — for a caller
-    /// that mints OTHER ids off the same monotonic sequence (e.g.
-    /// `ResidentSession` also derives throwaway runtime-resource-scope ids
-    /// from its continuation-id counter).
+    /// The next raw counter value, with no prefix formatting.
     pub fn next_raw(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }

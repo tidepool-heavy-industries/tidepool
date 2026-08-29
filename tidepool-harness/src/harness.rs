@@ -45,8 +45,8 @@ use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, SessionLib, SessionRunContext, TemplateSelector, TurnKind,
-    TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ResidentOutcome, ResidentSession, RootedValueRef, SessionLib, SessionRunContext,
+    TemplateSelector, TurnKind, TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -322,7 +322,7 @@ struct PendingSuspension {
 /// session-owned heap root (a green thread's settled handle result).
 enum ResumeParentInput {
     Answer(Value),
-    BorrowedRoot(tidepool_codegen::suspension::ValueHandle),
+    BorrowedRoot(RootedValueRef),
 }
 
 /// A just-created node's staged opening context, held between node creation
@@ -2685,7 +2685,7 @@ impl Harness {
         &self,
         node: NodeId,
         hole: &HoleId,
-        handle: tidepool_codegen::suspension::ValueHandle,
+        handle: RootedValueRef,
     ) -> Result<(), HarnessError> {
         let _lease = self.acquire_turn_lease(node)?;
         self.resume_parent_input(node, hole, ResumeParentInput::BorrowedRoot(handle))
@@ -2848,10 +2848,10 @@ impl Harness {
     /// Closure sibling of [`Self::take_finalized_value_keep_open`]:
     /// the finalize payload is a live closure, so
     /// instead of bridging a data `Value` (which would sentinel it), MINT a
-    /// [`ValueHandle`] over the parked frame's payload, then consume the
+    /// custody of a rooted handle over the parked frame's payload, then consume the
     /// finalize hole exactly like the value path (abort the frame — the
-    /// handle owns the payload root now — restore with the surviving hole
-    /// set, `hole_consumed` the tree). The caller delivers the handle into
+    /// resource scope owns the payload root now — restore with the surviving hole
+    /// set, `hole_consumed` the tree). The caller delivers custody into
     /// the awaiting hole via `ResidentSession::resume_handle`. The node and
     /// its session stay live and reusable.
     pub(crate) fn take_finalized_handle_keep_open(

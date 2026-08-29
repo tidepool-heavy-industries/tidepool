@@ -1,62 +1,22 @@
-//! The resident-session suspension kernel (#22) — the generalized "park on a
-//! typed hole, resolve externally, resume through one entry point" seam both
-//! `tidepool-repl` and `tidepool-harness` reimplement independently today.
-//! See `plans/resident-session-kernel-design.md` for the full survey; this
-//! module is the operative artifact of that design's §3.2/§5.B.
+//! Policy-free primitives shared by resident-session frontends.
 //!
-//! # Packaging: a module here, not a new crate
+//! [`SuspendableSession`] describes sessions that park on typed obligations
+//! and resume or abort through one entry point. [`Aged`] records how long an
+//! obligation has waited. [`admit_checkout`] lets a frontend apply its own
+//! admission rule without weakening the registry's atomic checkout protocol.
 //!
-//! Open Question 2 left the crate-vs-module call to implementation judgment,
-//! binding only on three goals: one shared mechanism, cleanly factored
-//! components, and abstraction boundaries expressed through the type system.
-//! A module wins on the concrete argument the design doc's §4.3 already
-//! made: [`super::resident::ResidentSession`]'s encapsulation (`HoleSeed`,
-//! `PlainHole`/`BindingHole`'s absent public constructors) is deliberately
-//! tight, and a crate outside `tidepool-runtime` would need real `pub`
-//! promotions to reach it — a module needs none. The precedent (the
-//! `session::registry` promotion) also landed as a module, not a crate, for
-//! the identical shape of sharing problem.
-//!
-//! # What the kernel owns vs. what stays a consumer's own policy
-//!
-//! Per §3.2/§3.3: the kernel owns the SHAPE of "one obligation-carrying hole
-//! token, one resume/abort entry point per token" ([`SuspendableSession`])
-//! and the abandonment-liveness primitive ([`Aged`]) — never the domain
-//! meaning of a hole (harness's `SuspensionRouting`), never a consumer's own
-//! admission policy (repl's `admit_run`), never a background reaper.
-//!
-//! The kernel does NOT introduce a new shared error-taxonomy TYPE distinct
-//! from what already exists: `tidepool_runtime::session::registry::
-//! CheckoutError<H>` already IS repl's structural three-way distinction
-//! (`Unknown`/`NoSession` ~ "no suspension at all", `WrongHole{attempted,
-//! parked}` ~ "suspended on a different hole", `Running`/`Terminal` for the
-//! busy/terminal cases) plus harness's breadth, carried as STRUCTURED data
-//! all the way to a caller since the OQ4 fix
-//! (`HarnessError::SessionMismatch` no longer flattens it to a `String`).
-//! Inventing a second, kernel-owned error enum here would be exactly the
-//! "third shape" the one-mechanism rule forbids — `CheckoutError<H>` is
-//! already the shared taxonomy for the resume-rejection space; a consumer's
-//! own `Error` associated type ([`SuspendableSession::Error`]) is free to
-//! wrap it (as [`super::resident::ResidentError`] already does not, but
-//! could) rather than re-deriving it.
+//! Hole meaning, timeout policy, reaping, and user-facing errors remain with
+//! the frontend. Structural checkout failures are represented by
+//! [`super::registry::CheckoutError`].
 
 use std::time::{Duration, Instant};
 
 use super::registry::Checkout;
 
-/// A value paired with the [`Instant`] it was minted — the one home for "how
-/// long has this been sitting unanswered" (§3.2 item 5: the abandonment-
-/// liveness contract). Generalizes `tidepool-repl`'s hand-rolled
-/// `Suspension.since` field (`tidepool-repl/src/manager.rs`) into something
-/// a second consumer (`tidepool-harness`'s `PendingSuspension`) can reuse
-/// instead of re-deriving its own copy of "value + mint time + age query".
+/// A value paired with the instant at which it began waiting.
 ///
-/// This is the WHOLE of the kernel's abandonment-liveness surface: hole age
-/// is visible via [`Self::age`], and a consumer wires whatever sweep/TTL
-/// policy it wants on top (repl's periodic reaper; a harness that later
-/// wants one). The kernel drives no timer and reclaims nothing on its own —
-/// per Open Question 3, indefinite park stays the default for every
-/// consumer that never reads [`Self::age`] at all.
+/// Consumers may inspect or reset the clock to implement their own timeout or
+/// retry policy. This type starts no timer and performs no reclamation.
 #[derive(Debug, Clone)]
 pub struct Aged<T> {
     value: T,
@@ -77,19 +37,13 @@ impl<T> Aged<T> {
         self.since.elapsed()
     }
 
-    /// The raw mint/touch instant — for a caller comparing against a
-    /// snapshot `now` rather than calling [`Self::age`] twice at slightly
-    /// different instants (mirrors repl's reaper, which reads `Instant::now()`
-    /// once per sweep and compares every pending clock against it).
+    /// The raw mint/touch instant, useful when comparing several values to one
+    /// snapshot of the current time.
     pub fn since(&self) -> Instant {
         self.since
     }
 
-    /// Reset the age clock without touching the value — repl's anti-
-    /// starvation move: "a retrying continuation must not become the
-    /// reaper's oldest-first eviction victim while its caller fixes an
-    /// invalid reply" (`tidepool-repl/src/manager.rs`'s
-    /// `refresh_suspension_since`).
+    /// Reset the age clock without changing the value.
     pub fn touch(&mut self) {
         self.since = Instant::now();
     }
@@ -107,34 +61,11 @@ impl<T> Aged<T> {
     }
 }
 
-/// The kernel's generalized suspension seam (§3.2 items 1-2, §5.B step 1): a
-/// session that either runs a turn to completion or parks on an obligation-
-/// carrying [`Self::Hole`] token, resumed or aborted through exactly one
-/// entry point per operation — never a second, externally-dispatched family
-/// the way repl's five parallel `resume_*` functions are today.
+/// A session that can resume or abort an obligation-carrying parked hole.
 ///
-/// # Why `Hole` is an opaque associated type, not a kernel-defined enum
-///
-/// §6.3's constraint: the token design must not hard-code one payload per
-/// hole kind, so a future materialization policy (or #20 step 3's
-/// polymorphic fork/finalize answer types) never forces a second migration.
-/// An associated type lets each implementor own its own token shape —
-/// [`super::resident::ResidentHole`] for the harness (already a real sum
-/// over completion obligations, `Plain`/`Binding`), and a session that needs
-/// a THIRD obligation kind later widens its own `Hole` type, never this
-/// trait.
-///
-/// # Why `resume`/`abort` take a `Context`
-///
-/// [`super::resident::ResidentSession`] owns its captured-output buffer and
-/// handler stack as FIELDS, so its impl needs nothing extra per call
-/// (`Context = ()`). `tidepool-repl`'s slot-path `Session` takes its abort
-/// gate and output buffer as PER-CALL arguments instead (`run_turn`/
-/// `resume_turn`/`abort_turn`'s existing signatures) — a structural
-/// difference between the two mechanisms this trait must not paper over by
-/// forcing repl to start storing per-request state on itself. `Context`
-/// carries exactly that per-call context through the ONE entry point rather
-/// than smuggling it into `Hole`/`Answer`, which stay pure domain data.
+/// Implementors define their own hole and answer types. `Context` carries any
+/// per-call runtime inputs that do not belong in either value; sessions that
+/// own all such state use `()`.
 pub trait SuspendableSession {
     /// The obligation-carrying continuation token a suspension hands back,
     /// and the thing [`Self::resume`]/[`Self::abort`] consume to re-enter.
@@ -146,16 +77,11 @@ pub trait SuspendableSession {
     type Context;
     /// What a completed-or-re-suspended turn produces.
     type Outcome;
-    /// Why a resume/abort was refused or failed. A consumer's own error type
-    /// — this trait does not mandate one shared enum (see the module doc);
-    /// a consumer wrapping [`super::registry::CheckoutError`] gets the
-    /// shared structural taxonomy for free.
+    /// Why a resume or abort was refused or failed.
     type Error;
 
-    /// The ONE resume entry point: `hole`'s own variant decides what
-    /// re-entering it requires and what completing it must still do (e.g. a
-    /// value-plane materialization) — never a second, caller-chosen
-    /// function for a different obligation shape.
+    /// Resume `hole` with `answer`. The hole carries any completion obligation
+    /// needed after the machine runs.
     fn resume(
         &mut self,
         hole: Self::Hole,
@@ -163,9 +89,7 @@ pub trait SuspendableSession {
         cx: Self::Context,
     ) -> Result<Self::Outcome, Self::Error>;
 
-    /// Abort the turn parked on `hole` WITHOUT running the continuation —
-    /// the `ask` itself fails, the turn unwinds, and the session comes back
-    /// usable with everything already accumulated intact.
+    /// Abort the turn parked on `hole` without running its continuation.
     fn abort(
         &mut self,
         hole: Self::Hole,
@@ -174,22 +98,10 @@ pub trait SuspendableSession {
     ) -> Result<Self::Outcome, Self::Error>;
 }
 
-/// The admission-policy hook (§3.2 item 4): a caller-supplied opinion on
-/// whether a FRESH checkout may proceed, given the pre-checkout hole set
-/// [`Checkout::holes_at_checkout`] reports. The kernel's own registry
-/// (`checkout_run`) has no opinion here by design — a run over parked holes
-/// is ordinary on the harness's multi-hole path — so this is a HOOK, not a
-/// policy: nothing calls it unless a consumer opts in.
+/// Apply a frontend admission rule to a completed checkout.
 ///
-/// On refusal, the checkout is handed straight back UNTOUCHED (restored
-/// with the exact hole set it carried out, before anyone else can observe
-/// it as checked out) and the pre-checkout hole set is returned as the
-/// refusal's payload, so a caller can build its own "busy" message the same
-/// way `tidepool-repl`'s `SessionManager::admit_run` already does — this
-/// function replaces that method's hand-rolled checkout-then-restore-if-
-/// refused dance with the shared primitive, so a future consumer (a
-/// harness node that wants repl's stricter contract) does not have to
-/// re-derive it.
+/// Refusal restores the machine with its original hole set before returning
+/// that set to the caller. No refused checkout remains observable as running.
 pub fn admit_checkout<'r, M, H>(
     checkout: Checkout<'r, M, H>,
     admits: impl FnOnce(&[H]) -> bool,

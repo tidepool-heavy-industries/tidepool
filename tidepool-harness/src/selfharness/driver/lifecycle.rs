@@ -1071,7 +1071,7 @@ impl SelfHarnessDriver {
         // loop; retirement is that realm's scope exit via terminate_node.
         let sid = self.outer_sid()?;
         self.agent.force_attached(answerer, Actor::Operator, sid)?;
-        let realm = self.mint_realm();
+        let realm = self.mint_resource_scope();
         self.agent.set_node_realm(answerer, realm);
         self.answerer = Some(AgentSessionMode::ReusableLoop {
             node: answerer,
@@ -1094,14 +1094,9 @@ impl SelfHarnessDriver {
         }
     }
 
-    /// Mint a fresh, globally-unique (within this driver) realm id — `&self`
-    /// so concurrent fanout/fork children ([`Self::service_outer_fanout`])
-    /// can each mint their OWN realm alongside the single reused
-    /// [`Self::answerer`]'s, without contending for `&mut self`.
-    pub(crate) fn mint_realm(&self) -> tidepool_codegen::suspension::RealmId {
-        tidepool_codegen::suspension::RealmId(
-            self.iteration_realm.fetch_add(1, Ordering::SeqCst) + 1,
-        )
+    /// Mint a resource scope for one answerer window.
+    pub(crate) fn mint_resource_scope(&self) -> tidepool_codegen::suspension::RealmId {
+        tidepool_codegen::suspension::RealmId::fresh()
     }
 
     /// The body of [`Self::run_loop_fragment`] — run `loop`, service each
@@ -1169,7 +1164,6 @@ impl SelfHarnessDriver {
         let mut threads: HashMap<i64, GreenThread> = HashMap::new();
         let mut waiters: HashMap<i64, Vec<(GreenChain, String)>> = HashMap::new();
         let mut next_tid: i64 = 1;
-        let mut next_thread_realm: u64 = 1;
 
         // EVERY branch below hands back a `ServicedSuspension` instead of directly
         // pushing to `ready`/breaking the loop — see that type's doc for why:
@@ -1185,8 +1179,8 @@ impl SelfHarnessDriver {
         // fn/closure/async-block, and an `async {}` block counts. Without
         // this, an early `?` skipped the structured-concurrency sweep below
         // entirely, leaking every still-open thread realm this fragment
-        // spawned. No `move`: `threads`/`waiters`/`ready`/`next_tid`/
-        // `next_thread_realm` (and `self`) stay borrowed for the block's
+        // spawned. No `move`: `threads`/`waiters`/`ready`/`next_tid` and
+        // `self` stay borrowed for the block's
         // span and are still owned by this function afterward, which is what
         // the sweep below needs.
         let outcome_result: Result<(Value, DataConTable), DriverError> = async {
@@ -1526,7 +1520,6 @@ impl SelfHarnessDriver {
                                     &mut threads,
                                     &mut waiters,
                                     &mut next_tid,
-                                    &mut next_thread_realm,
                                     &mut ready,
                                     GreenDelivery::Raw,
                                 )

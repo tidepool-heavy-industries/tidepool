@@ -537,8 +537,8 @@ impl SelfHarnessDriver {
     /// `tokio::spawn` tasks would need `'static` ownership of driver state
     /// this borrow-based shape avoids entirely. Every `Harness` call this
     /// makes is `&self` too (`agent: Arc<Harness>`); the two pieces of
-    /// driver state a round loop mutates (`loop_inference_calls`,
-    /// `iteration_realm`) are atomics for exactly this reason.
+    /// driver state a round loop mutates (`loop_inference_calls`) is atomic
+    /// for exactly this reason.
     ///
     /// The nesting of the return type is the contract: the OUTER `Result` is
     /// the MECHANISM (a hard failure of this driver, which fails the turn),
@@ -563,7 +563,7 @@ impl SelfHarnessDriver {
             self.answerer_framing.clone(),
         )?;
         self.agent.force_attached(node, Actor::Operator, sid)?;
-        self.agent.set_node_realm(node, self.mint_realm());
+        self.agent.set_node_realm(node, self.mint_resource_scope());
         // Sibling fanout children share this ONE session's machine — a
         // checkout race against another child's turn is expected, benign
         // contention (not a real conflict), so this node's checkouts WAIT
@@ -1614,7 +1614,7 @@ impl SelfHarnessDriver {
             self.abort_unguarded_child(node, Some(&label), &reason);
             return Err(e.into());
         }
-        let realm = self.mint_realm();
+        let realm = self.mint_resource_scope();
         self.agent.set_node_realm(node, realm);
         // F4: a fork child's window can run concurrently against a sibling
         // fanout child (or another fork subtree entirely) on the SAME

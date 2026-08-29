@@ -114,96 +114,40 @@ impl Default for SessionRunContext {
     }
 }
 
-/// A LINEAR custody token over a [`ValueHandle`] between the moment it enters
-/// Rust-side custody — minted by [`ResidentSession::finalized_handle`] — and
-/// the moment it is consumed: delivered into a sibling continuation
-/// ([`ResidentSession::resume_handle`]) or mounted into a named binding
-/// ([`ResidentSession::mount_handle`]/[`ResidentSession::mount_handle_in`]).
+/// Exclusive custody of one machine-rooted value.
 ///
-/// Deliberately NOT `Clone`/`Copy`, unlike [`ValueHandle`] itself (which stays
-/// freely copyable at the machine layer — `tidepool_codegen::jit_machine`
-/// tests read a handle non-linearly on purpose: `observe_handle`,
-/// `handle_realm`, repeated `ResumeInput::Handle`, all borrows). At THIS
-/// layer, the three-owner chain documented at [`ResidentSession::mount_handle_in`]'s
-/// doc — handle registry, scope frame, GC root ledger, never two at once — used
-/// to be enforced only by caller discipline plus the machine's debug-mode
-/// `handle_holds_root` assert at scope retirement: a caller that mistakenly
-/// handed the SAME live [`ValueHandle`] to both `resume_handle` and
-/// `mount_handle_in` would not be caught until that assert fired, if it ever
-/// ran (a resume delivery does not consume its handle from the machine's own
-/// registry — see [`ResidentSession::resume_handle`]'s doc — so nothing at the
-/// machine layer stops a second use of the same numeric id). Wrapping the
-/// crossing here moves the check to COMPILE TIME: the only way to recover the
-/// raw handle is [`Self::into_handle`], which consumes `self` by value, so a
-/// second consumer has nothing left to consume — a use-after-move `rustc`
-/// error, not a runtime race. See the compile-fail example below.
+/// The session creates custody when a finalized value leaves a parked frame.
+/// Consuming operations may deliver it once, adopt it into a binding, move it
+/// to another resource scope, discard it, or turn it into a repeatable
+/// [`RootedValueRef`]. Raw [`ValueHandle`] access stays inside this module, so
+/// external callers cannot duplicate an ownership token through a numeric ID.
 ///
-/// Dropping an unconsumed token means custody was LOST — a finalized value was
-/// taken out of the machine and never delivered or mounted, so nothing will
-/// ever explicitly release it (it still dies at the owning realm's
-/// `close_realm`, exactly as before this token existed — this is a lint on
-/// Rust-side bookkeeping, not a memory-safety backstop). Loud in debug builds
-/// so the mistake surfaces at the call site that dropped it; silent in
-/// release, matching every other debug-only assert in this custody chain.
-///
-/// # On an error path, dispose of custody BEFORE `?`
-///
-/// **A `Drop` panic is a leak DETECTOR, not an error channel.** An arm holding
-/// live custody that hits `?` converts a perfectly recoverable `Err` into this
-/// type's `Drop` panic: the token correctly notices the leak, but it REPLACES
-/// the diagnosis — the caller sees "custody was lost" and never sees the error
-/// that caused the early return. So on any fallible path, consume or
-/// deliberately abandon custody before propagating.
-///
-/// The structural fix is usually better than the careful one: order the work
-/// so nothing fallible sits between the mint and the consume. Two windows in
-/// the green-thread driver taught this (`SelfHarnessDriver`'s `AsyncSpawnWith`
-/// and `AsyncDoneWith` arms) — one had two `?`s between minting a thread body
-/// and forking it, the other minted a result and then consumed it only inside
-/// a state guard. Both were fixed by moving the fallible work out of the
-/// window rather than by adding cleanup to each exit.
-///
-/// The use-after-move contract is pinned by a trybuild case, not a
-/// `compile_fail` doctest: `tests/compile_fail/root_custody_double_consume.rs`
-/// (harness: `tests/compile_fail.rs`), with a committed `.stderr` golden
-/// showing the SAME use-after-move `rustc` diagnostic that
-/// [`Self::into_handle`] describes below — a bare `compile_fail` doctest
-/// calling `RootCustody::new` directly would actually fail on `new`'s privacy
-/// (see its own doc) before ever reaching that error, so it would pass for
-/// the wrong reason. The trybuild fixture sidesteps this by taking a
-/// `RootCustody` as a function parameter (never calling the private `new`)
-/// and calling [`Self::into_handle`] on it twice.
+/// Dropping live custody indicates a missing ownership decision. Debug builds
+/// report that mistake; the owning resource scope remains the cleanup
+/// backstop.
 #[derive(Debug)]
 pub struct RootCustody(Option<ValueHandle>);
 
-// Whole point of this type: custody of a `ValueHandle` is provably exclusive
-// only if `RootCustody` cannot be duplicated. A future `#[derive(Clone)]`
-// would let two custody tokens both claim the same handle and both pass their
-// `into_handle()` — silently reviving the double-consume bug this type exists
-// to make a compile error.
+// Custody must remain exclusive.
 static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
 
+/// Copyable reference to a live value whose root remains owned by a runtime
+/// resource scope.
+///
+/// This may be delivered repeatedly, but cannot be adopted, discarded, or
+/// passed to raw machine APIs. Those ownership transitions require
+/// [`RootCustody`] and a [`ResidentSession`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RootedValueRef(ValueHandle);
+
 impl RootCustody {
-    /// Mint a custody token over `handle`. `pub(crate)`, not `pub`: the two
-    /// real mint sites ([`ResidentSession::finalized_handle`],
-    /// [`ResidentSession::finalized_handle_owned_by`]) and every consumer
-    /// live in this crate, so scoping construction to the crate is enough to
-    /// turn fabrication into a reviewable, visible-intent act rather than a
-    /// call any external dependent is one line away from making. Production
-    /// code never reaches for this directly —
-    /// `finalized_handle`/`finalized_handle_owned_by` never hand out a bare
-    /// [`ValueHandle`] at the finalize seam in the first place.
+    /// Wrap a handle minted by the resident session.
     pub(crate) fn new(handle: ValueHandle) -> Self {
         RootCustody(Some(handle))
     }
 
-    /// Consume the token, releasing the raw handle to the caller — the ONLY
-    /// way out. Every legitimate custody transfer (a mount, a resume
-    /// delivery) goes through this exactly once. Takes `self` by value, so a
-    /// second attempt to consume the SAME token is a compile-time
-    /// use-after-move error (see the compile-fail example above) rather than
-    /// a runtime double-custody bug.
-    pub fn into_handle(mut self) -> ValueHandle {
+    /// Consume custody for an internal machine operation.
+    fn into_handle(mut self) -> ValueHandle {
         #[allow(
             clippy::expect_used,
             reason = "RootCustody always holds a handle until into_handle consumes it"
@@ -211,6 +155,13 @@ impl RootCustody {
         self.0
             .take()
             .expect("RootCustody always holds a handle until into_handle consumes it")
+    }
+
+    /// Convert exclusive custody into a repeatable reference while leaving
+    /// cleanup responsibility with the handle's current resource scope.
+    #[must_use]
+    pub fn into_rooted_ref(self) -> RootedValueRef {
+        RootedValueRef(self.into_handle())
     }
 }
 
@@ -223,23 +174,7 @@ impl Drop for RootCustody {
              unaffected (it releases at the owning realm's close_realm regardless), but the \
              value silently never reached wherever it was headed."
         );
-        // NEVER panic while an unwind is already in flight. Two reasons, and
-        // the second is why this guard exists at all:
-        //
-        // 1. A panic during unwinding is an immediate ABORT — no backtrace for
-        //    the original fault, no test-harness failure report, nothing.
-        // 2. The original panic is the INTERESTING one. This type is a leak
-        //    detector; a leak observed while something else is already failing
-        //    is almost always a CONSEQUENCE of that failure (the servicing path
-        //    unwound past a delivery), not an independent bug. Eating the real
-        //    diagnosis to report the consequence is exactly backwards, and it
-        //    has already happened once here: a case trap surfaced as a custody
-        //    panic, sending the reader after the wrong defect.
-        //
-        // Note this does NOT cover the `?`-on-a-fallible-path case in this
-        // type's doc — an `Err` return is not an unwind, so `panicking()` is
-        // false and the assert below still fires. That case is a real leak and
-        // must stay loud; it is fixed by ordering, not by suppression.
+        // Preserve an existing panic; this detector is secondary evidence.
         if std::thread::panicking() {
             tracing::error!("{detail} (reported during an active unwind, so not raised)");
             return;
@@ -255,15 +190,9 @@ impl Drop for RootCustody {
 /// binder into the value plane on completion, using the SAME binder/generation
 /// its initiating `run_bind` carried.
 ///
-/// Both `PlainHole`/`BindingHole` have no public constructor and no public
-/// field — the only way to obtain one is a suspension surfaced by this
-/// session's own `run*`/`resume` methods. This is what makes
-/// [`ResidentSession::resume`] a single, unconditional entry point: the
-/// obligation travels WITH the token, so there is no second, external
-/// "is this pending a bind" flag a caller must remember to consult before
-/// picking which method to call — the old split (`resume` vs `resume_bind`)
-/// let a binding hole silently resolve through the plain path, completing the
-/// machine side while the value-plane bind it owed never materialized.
+/// `PlainHole` and `BindingHole` have no public constructors or fields. The
+/// session creates them at suspension time, keeping each completion obligation
+/// inseparable from the token consumed by [`ResidentSession::resume`].
 #[derive(Clone, Debug)]
 pub struct PlainHole {
     id: String,
@@ -464,9 +393,7 @@ pub struct ResidentSession<H, O> {
     #[allow(dead_code)]
     include: Vec<PathBuf>,
     /// Monotonic continuation-id counter (prefix `scont` for the resident
-    /// surface). Also the source of throwaway child-realm ids
-    /// ([`ResidentSession::run_child`]) via [`MonotonicIdIssuer::next_raw`] —
-    /// one shared sequence, not a second counter.
+    /// surface).
     cont_id_issuer: MonotonicIdIssuer,
     /// The parked holes, insertion-ordered: `(hole string, machine
     /// ContinuationId)` per live parked frame. The machine's continuation
@@ -730,6 +657,40 @@ where
         Some(RootCustody::new(machine.mint_handle_from_root(slot, realm)))
     }
 
+    /// Transfer a rooted value to another runtime resource scope.
+    ///
+    /// This is the ownership operation used when a live value outlives the
+    /// scope that produced it, such as a queued message or detached child.
+    /// The value and handle identity are unchanged; only the scope responsible
+    /// for eventual cleanup changes.
+    pub fn rehome_custody(
+        &mut self,
+        custody: RootCustody,
+        owner: RealmId,
+    ) -> Result<RootCustody, ResidentError> {
+        let handle = custody.into_handle();
+        let moved = self
+            .core
+            .machine_mut()
+            .is_some_and(|machine| machine.rehome_handle(handle, owner));
+        if !moved {
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(format!(
+                    "cannot transfer {handle:?}: handle is not live on this machine"
+                )),
+            ))));
+        }
+        Ok(RootCustody::new(handle))
+    }
+
+    /// Abandon a rooted value deliberately, releasing its root immediately.
+    pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
+        let handle = custody.into_handle();
+        self.core
+            .machine_mut()
+            .is_some_and(|machine| machine.discard_handle(handle))
+    }
+
     /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
     /// rooted value — the handle's payload feeds the continuation verbatim,
     /// no materialization, closures included. The authored loop receives
@@ -793,55 +754,17 @@ where
     /// never needs to see the real value — only its type, which the
     /// throwaway bind already established correctly.
     ///
-    /// `custody`'s handle is consumed exactly like an ordinary bind
-    /// completion ([`Self::materialize_binder`]): its slot is read, the
-    /// handle released from the machine's handle registry (ownership
-    /// transfers to the value plane — a live [`BindingTable`] entry, ended
-    /// only by the session machine dropping, never by a realm scope exit),
-    /// and re-registered under the SAME `SessionVarId`/module the resolved
-    /// binding already carried. No new `Val.G<g>` iface is minted here and
-    /// the GHC-side type binding is unchanged — only WHICH heap object it
-    /// points at moves.
+    /// The handle's root is adopted into the value plane under the existing
+    /// `SessionVarId` and module identity. No new interface is generated; only
+    /// the heap object behind the binding changes.
     pub fn mount_handle(&mut self, name: &str, custody: RootCustody) -> Result<(), ResidentError> {
         self.mount_handle_in(ScopeId::ROOT, name, custody)
     }
 
-    /// Scoped [`Self::mount_handle`]: install the mount in `scope`'s frame
-    /// instead of the flat session's. `mount_handle(..) ==
-    /// mount_handle_in(ScopeId::ROOT, ..)`, so the flat mount path is
-    /// bit-for-bit what it was.
-    ///
-    /// A scoped mount is what [`Self::retire_scope`] later releases: the
-    /// handle registry hands ownership of the tenured root to this frame
-    /// (`value_handle_count` drops as the frame's count rises), and the frame
-    /// releases it through `retire_scope_root` at retirement. Ownership moves
-    /// through those three locations in sequence and is never duplicated.
-    /// `custody` is the
-    /// [`RootCustody`] token minted by [`Self::finalized_handle`]; consumed
-    /// exactly once, here, at the moment ownership hands off to the frame.
-    ///
-    /// **Liveness is checked FIRST, before `custody` is touched.** A dead
-    /// `scope` (never minted, or already retired) is rejected with a typed
-    /// [`ResidentError`] and `custody` is disposed deliberately (its handle
-    /// is taken and dropped, never mounted) — RootCustody's own doc requires
-    /// consuming or deliberately abandoning custody before propagating an
-    /// error, so its leak-detecting `Drop` never fires. The raw machine-side
-    /// handle is left exactly as it was: still registered, released only at
-    /// the owning realm's eventual `close_realm`, same as any other
-    /// never-mounted finalize. Checking BEFORE `release_handle` also matters
-    /// operationally: once the handle registry releases a root, only a
-    /// successful bind gives it a new owner — a dead scope caught only by
-    /// [`PersistentSession::bind_in`]'s own backstop check would otherwise
-    /// leave that root untracked by every accounting class at once.
-    ///
-    /// **`(scope, name)` is resolved SECOND, still before `custody` is
-    /// touched.** A `name` with no live binding in `scope` (the placeholder
-    /// bind never ran, or ran under a different name/scope) is rejected with
-    /// a typed [`ResidentError`] (`SessionError::UnknownBinding`), and
-    /// `custody` is disposed deliberately exactly as in the dead-scope case
-    /// — resolving the target before touching the machine's handle registry
-    /// means a missing binding can never leave a released-but-unmounted
-    /// handle behind.
+    /// Scoped [`Self::mount_handle`]. The target scope and binding are
+    /// validated before the handle root is adopted. On either validation
+    /// failure, custody is discarded immediately; no root waits for eventual
+    /// resource-scope cleanup and no unowned root can escape the registry.
     pub fn mount_handle_in(
         &mut self,
         scope: ScopeId,
@@ -849,7 +772,7 @@ where
         custody: RootCustody,
     ) -> Result<(), ResidentError> {
         if !self.core.scope_tree().is_live(scope) {
-            let _ = custody.into_handle();
+            self.discard_custody(custody);
             return Err(SessionError::DeadScope(scope).into());
         }
         let resolved = self.core.resolve_in(scope, name).map(|entry| {
@@ -862,7 +785,7 @@ where
         let (id, module, tier, type_display) = match resolved {
             Some(v) => v,
             None => {
-                let _ = custody.into_handle();
+                self.discard_custody(custody);
                 return Err(SessionError::UnknownBinding {
                     scope,
                     name: name.to_string(),
@@ -874,11 +797,7 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| {
-                let slot = m.handle_slot(handle);
-                m.release_handle(handle);
-                slot
-            })
+            .and_then(|machine| machine.take_handle_root(handle))
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "mount: handle is unknown to the machine (already released or never minted)"
@@ -924,9 +843,14 @@ where
     pub fn resume_handle_borrowed(
         &mut self,
         cont_id: &str,
-        handle: ValueHandle,
+        handle: RootedValueRef,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Handle(handle), HoleSeed::Plain, None)
+        self.reenter(
+            cont_id,
+            ResumeInput::Handle(handle.0),
+            HoleSeed::Plain,
+            None,
+        )
     }
 
     /// Whether the resident machine has been bootstrapped yet. `false` from
@@ -1253,8 +1177,8 @@ where
         // A THROWAWAY realm: this API's value-shaped signature cannot carry a
         // hole, so a child that suspends is ABORTED wholesale (its realm
         // closed) rather than parked. Suspension-capable turns are `run`'s
-        // job. High-bit-tagged so it can never collide with a caller realm.
-        let child_realm = RealmId((1 << 63) | self.cont_id_issuer.next_raw());
+        // job. The shared issuer keeps it distinct from every caller scope.
+        let child_realm = RealmId::fresh();
         let boundary = self.core.effect_boundary().clone();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run =
@@ -1654,15 +1578,9 @@ where
     /// construction, the core owns the plane. Evicts any same-name decl (the
     /// one-plane invariant — a value bind wins over an earlier decl head).
     ///
-    /// Checks the current lexical scope's liveness first, before `handle` is resolved and
-    /// released from the machine's handle registry — same ordering reason as
-    /// [`Self::mount_handle_in`]: once `release_handle` runs, only a
-    /// successful bind gives the root a new owner, so a dead scope caught
-    /// only by [`PersistentSession::bind_in`]'s backstop would leave it
-    /// untracked by every accounting class at once. In ordinary operation
-    /// the selected scope cannot go dead mid-turn ([`Self::set_run_context`] already
-    /// refuses a dead scope), so this guards a defensive precondition rather
-    /// than a reachable steady-state path.
+    /// The lexical scope is validated before the handle root is adopted. A
+    /// failed adoption therefore cannot leave the root outside both the
+    /// handle registry and the binding table.
     fn materialize_binder(
         &mut self,
         binder: &BoundBinder,
@@ -1687,11 +1605,7 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| {
-                let slot = m.handle_slot(handle);
-                m.release_handle(handle);
-                slot
-            })
+            .and_then(|machine| machine.take_handle_root(handle))
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "value-plane bind completed but its handle was unknown to the machine".into(),
@@ -1992,16 +1906,8 @@ mod tests {
         .expect("a trivial Lit expression over an empty table compiles")
     }
 
-    /// The exact regression the external review flagged
-    /// (`tidepool-runtime/src/session/resident.rs:1113-1141` in the review):
-    /// `spawn_scoped(...).expect(...)` used to run AFTER the machine was taken
-    /// and panic BEFORE it was restored, permanently leaving the session
-    /// machineless past that unwind. This forces the spawn to fail
-    /// deterministically — a stack size that vastly exceeds any real address
-    /// space, so `pthread_create` rejects it outright, no actual thread-limit
-    /// exhaustion needed — and asserts: no panic, a typed
-    /// `ResidentError::EvalThread`, and the machine is back in the session's
-    /// slot afterward, still genuinely usable.
+    /// A deterministic thread-spawn failure must return a typed error and
+    /// restore the leased machine to the session.
     #[test]
     fn a_forced_eval_thread_spawn_failure_restores_the_machine_and_returns_a_typed_error() {
         let mut session = bootstrap_trivial_session();
@@ -2069,18 +1975,8 @@ mod tests {
         assert_eq!(session.run_context(), SessionRunContext::ROOT);
     }
 
-    /// [`ResidentSession::mount_handle_in`] on a dead scope must reject with
-    /// a typed error WITHOUT leaking the [`RootCustody`] token — the HIGH
-    /// finding from the 2026-08-19 review: a stale/forged scope id used to
-    /// unconditionally transfer a persistent root into a frame no
-    /// `retire_scope` could ever drain (a permanent GC root by construction).
-    ///
-    /// The liveness check runs before `custody` is touched, so a dead-scope
-    /// rejection must consume it deliberately (`RootCustody::into_handle`)
-    /// rather than dropping it unconsumed — an unconsumed drop is this
-    /// type's own loud leak detector (`debug_assert!` in `Drop`), so a test
-    /// process that panics here would prove the opposite of what this test
-    /// asserts. No panic is therefore itself the "custody not leaked" proof.
+    /// A dead target scope rejects the mount and consumes custody without
+    /// creating a binding.
     #[test]
     fn mount_handle_in_rejects_a_dead_scope_without_leaking_custody() {
         let mut session = bootstrap_trivial_session();
@@ -2100,10 +1996,6 @@ mod tests {
             ),
             "expected a typed DeadScope error, got {result:?}"
         );
-        // `custody`'s Drop already ran as part of returning from
-        // `mount_handle_in` (it was consumed by value); reaching this line
-        // at all — rather than a debug_assert panic mid-call — is the leak
-        // proof. Nothing was bound under the dead scope either.
         assert_eq!(
             session.binding_names_in(scope),
             Vec::<String>::new(),
@@ -2111,14 +2003,7 @@ mod tests {
         );
     }
 
-    /// [`ResidentSession::mount_handle_in`] resolves `(scope, name)`
-    /// internally now, so a live scope with NO binding under `name` (the
-    /// placeholder bind never ran, or ran under a different name) must
-    /// reject with a typed error WITHOUT leaking `custody` — same shape as
-    /// [`mount_handle_in_rejects_a_dead_scope_without_leaking_custody`], one
-    /// step later: liveness passes, resolution fails, and `custody` is
-    /// disposed deliberately before the machine's handle registry is ever
-    /// touched.
+    /// A missing target binding rejects the mount and consumes custody.
     #[test]
     fn mount_handle_in_rejects_a_missing_binding_without_leaking_custody() {
         let mut session = bootstrap_trivial_session();

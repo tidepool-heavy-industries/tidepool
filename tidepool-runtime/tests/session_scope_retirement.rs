@@ -2,11 +2,7 @@
 //! roots FOR REAL, witnessed by the fourth counted root class rather than
 //! asserted about.
 //!
-//! The claim the mount seam alone could not make: a mounted root lived until
-//! the session machine dropped, because `release_handle` deliberately does
-//! not deregister the underlying persistent root and nothing downstream ever
-//! gave that ownership back. This suite pins the closure of that leak, and
-//! pins it as COUNTS:
+//! This suite verifies scope-root accounting with exact counts:
 //!
 //! - `persistent_roots_count()` (class 4, the GC root ledger) drops by exactly
 //!   the receipt's `roots_released` — never "some" roots, never zero-with-a-
@@ -45,6 +41,7 @@ use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::scope::ScopeId;
+use tidepool_codegen::suspension::RealmId;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::types::{DataConId, Literal, VarId};
 use tidepool_repr::{
@@ -107,17 +104,36 @@ fn tenure(core: &mut PersistentSession, label: &str, n: i64) -> RootSlot {
 }
 
 /// The mount transit, spelled out: a handle is minted over a tenured root,
-/// then its slot is read and the handle RELEASED — ownership moving from the
+/// then its root is adopted — ownership moving from the
 /// handle registry (class 2) to the value plane (class 3). This is exactly
 /// what `ResidentSession::mount_handle_in` does; done by hand here because a
 /// test cannot reach the machine through `ResidentSession`.
 fn mount(core: &mut PersistentSession, scope: ScopeId, name: &str, raw: u64, slot: RootSlot) {
     let machine = core.machine_mut().expect("bootstrapped");
-    let handle = machine.mint_handle_from_root(slot, tidepool_codegen::suspension::RealmId(0));
-    let mounted = machine.handle_slot(handle).expect("handle is live");
-    assert!(machine.release_handle(handle), "handle released once");
+    let handle = machine.mint_handle_from_root(slot, RealmId::ROOT);
+    let mounted = machine.take_handle_root(handle).expect("handle is live");
     core.bind_in(scope, entry(name, raw, mounted))
         .expect("scope is live");
+}
+
+#[test]
+fn rehoming_a_handle_moves_its_cleanup_scope() {
+    let mut core = session();
+    let slot = tenure(&mut core, "transferred", 9);
+    let roots_before = core.persistent_roots_count();
+    let source = RealmId::fresh();
+    let destination = RealmId::fresh();
+    let machine = core.machine_mut().expect("bootstrapped");
+    let handle = machine.mint_handle_from_root(slot, source);
+
+    assert!(machine.rehome_handle(handle, destination));
+    assert_eq!(machine.handle_realm(handle), Some(destination));
+    assert_eq!(machine.close_realm(source), (0, 0));
+    assert!(machine.handle_slot(handle).is_some());
+
+    assert_eq!(machine.close_realm(destination), (0, 1));
+    assert!(machine.handle_slot(handle).is_none());
+    assert_eq!(core.persistent_roots_count(), roots_before - 1);
 }
 
 fn entry(name: &str, raw: u64, slot: RootSlot) -> BindingEntry {
@@ -162,7 +178,7 @@ fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports() {
     let outstanding = core
         .machine_mut()
         .expect("bootstrapped")
-        .mint_handle_from_root(handle_slot, tidepool_codegen::suspension::RealmId(0));
+        .mint_handle_from_root(handle_slot, RealmId::ROOT);
 
     let baseline_roots = core.persistent_roots_count();
     let baseline_root_frame = core.scope_binding_count(ScopeId::ROOT);
@@ -226,7 +242,7 @@ fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports() {
     assert!(
         core.machine_mut()
             .expect("bootstrapped")
-            .release_handle(outstanding),
+            .discard_handle(outstanding),
         "the outstanding handle survived the retirement intact"
     );
 
@@ -389,10 +405,8 @@ fn a_retired_scopes_sibling_and_the_flat_session_are_untouched() {
 
 /// `bind_in` on a dead scope (never minted, or already retired) must reject
 /// with a typed [`SessionError::DeadScope`] rather than writing a binding no
-/// lookup chain can ever see and no `retire_scope` can ever drain — the
-/// 2026-08-19 review's HIGH finding, at the layer `PersistentSession` owns
-/// the `ScopeTree` from. Covers both shapes of "dead": an id that was live
-/// and is now retired, and one that was never minted at all.
+/// lookup chain can ever see and no `retire_scope` can ever drain. Covers both
+/// a retired id and an id that was never minted.
 #[test]
 fn bind_in_rejects_a_dead_scope_and_touches_nothing() {
     let mut core = session();

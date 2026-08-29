@@ -1,55 +1,15 @@
-//! `SessionRegistry` — tidepool's ONE resident-machine ownership/lifecycle
-//! registry (see the root `CLAUDE.md` Mechanism Index: "session
-//! checkout/ownership").
+//! Atomic ownership and lifecycle registry for resident machines.
 //!
-//! A `HashMap<SessionId, Entry<M, H>>` where [`Slot`] is `Idle(M) |
-//! Running{holes} | Suspended{machine,holes} | Wedged{since}`, generic over
-//! the machine handle `M` (so this module stays free of any concrete JIT/
-//! session dependency) AND the hole/continuation identity type `H` (so a
-//! keyed, multi-hole consumer — `tidepool-harness`'s `HoleId` — and a
-//! single-hole consumer — `tidepool-repl`'s `ContinuationId` — share the same
-//! mechanism without unifying those two newtypes, which is a separate,
-//! not-yet-proposed duplicate). Every machine access goes through this map —
-//! the stowed-XOR-running discipline that justifies `unsafe impl Send` on a
-//! resident machine maps directly onto the slot variants: a machine is in
-//! EXACTLY one slot, and `Running` means it is out on a turn (no side-channel
-//! access while running).
+//! A session is idle, checked out and running, suspended with one or more
+//! parked holes, or terminally wedged. Checkout moves the machine out under a
+//! short lock; compilation and execution happen after the lock is released.
+//! Settlement restores the machine together with the hole set reported by the
+//! session itself.
 //!
-//! MULTI-HOLE: a suspended session carries a SET of parked holes, each
-//! resumable by identity in ANY order (the machine's own continuation
-//! registry imposes none), and a NEW top-level run over parked frames is an
-//! ordinary checkout, not a refusal. The SESSION is the ground truth for its
-//! own hole set; the slot mirrors it at restore time — a caller restores with
-//! the hole set the session actually reports, never a guess from a turn's
-//! domain result.
-//!
-//! # Lifecycle transitions are atomic at the dispatch boundary
-//!
-//! The transition — inspect the slot, decide, move the owned machine out —
-//! happens under one short lock; the TURN itself (compile + run, which
-//! blocks) runs with the lock RELEASED (the machine owned on the caller's
-//! stack), then a second short lock restores the machine as `Idle`,
-//! `Suspended`, or `Wedged`. The `parking_lot::Mutex` is NEVER held across the
-//! turn.
-//!
-//! A [`Checkout`] is the RAII proof that a machine is out on a turn: it owns
-//! the machine and, on settlement, moves it back under the lock. Dropping a
-//! `Checkout` without settling is a bug (the session is left `Running`
-//! forever) — the `#[must_use]` and the panic-safety `Drop` (which restores
-//! the CARRIED hole set, not a bare `Idle`) make the exit explicit.
-//!
-//! # Epoch guard — stale-checkout-after-replace
-//!
-//! Every entry carries a monotonic epoch, minted fresh on
-//! [`SessionRegistry::insert_idle`]; a [`Checkout`] carries the epoch it read
-//! at checkout time. A settlement (`restore_suspended`/`mark_wedged`, or the
-//! panic-safety `Drop`) against an entry whose CURRENT epoch does not match —
-//! because [`SessionRegistry::remove`] deleted it (a wedged/crashed turn
-//! never coming back, or a caller retiring the session out from under an
-//! in-flight checkout) — DROPS the machine instead of resurrecting or
-//! clobbering whatever now occupies (or no longer occupies) that id. Harness
-//! `SessionId`s and `SingleSlot`'s minted ids are never reused, so this is
-//! belt-and-suspenders on top of that invariant, not a substitute for it.
+//! [`Checkout`] is the RAII proof of exclusive machine ownership. Each
+//! checkout also carries the entry's monotonic epoch. If an entry is removed
+//! or replaced while work is in flight, stale settlement drops the returned
+//! machine instead of resurrecting or overwriting the newer entry.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -563,15 +523,12 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> Drop for Checkout<'_, M, H> {
     }
 }
 
-/// An OWNED, lifetime-free proof that a session's machine is checked out —
-/// [`Checkout::into_parts`]'s non-borrowed half, for a caller that must
-/// settle from a task the original `Checkout`'s borrow could not survive
-/// into. Settle it via [`SessionRegistry::settle_suspended`]/
-/// [`SessionRegistry::settle_wedged`] (or the [`SingleSlot`] equivalents) —
-/// exactly once. Unlike `Checkout`, there is no automatic panic-safety
-/// restore on drop (the receipt carries no machine to restore); an
-/// unconsumed receipt is a leaked checkout, caught loudly in debug builds —
-/// mirrors `tidepool-runtime::session::resident::RootCustody`'s idiom.
+/// Owned, lifetime-free proof that a session machine is checked out.
+///
+/// [`Checkout::into_parts`] returns this when work must outlive the borrowed
+/// checkout. It must be settled exactly once through the registry. A receipt
+/// cannot restore on drop because it does not own the machine; an unconsumed
+/// receipt is reported loudly in debug builds.
 #[must_use = "a checkout receipt must be settled, or the session is left Running forever"]
 pub struct CheckoutReceipt {
     id: SessionId,
@@ -584,8 +541,7 @@ impl CheckoutReceipt {
         self.id
     }
 
-    /// Consume the receipt, releasing its epoch — the ONLY way out. Every
-    /// legitimate settlement goes through this exactly once.
+    /// Consume the receipt and return its fencing epoch.
     fn into_epoch(mut self) -> u64 {
         #[allow(
             clippy::expect_used,
@@ -607,10 +563,7 @@ impl Drop for CheckoutReceipt {
              check the session back out.",
             self.id
         );
-        // Never panic while already unwinding — see `RootCustody`'s Drop impl
-        // for why: an abort loses the original diagnosis, and a leak
-        // observed mid-unwind is almost always a CONSEQUENCE of that unwind,
-        // not an independent bug.
+        // Preserve the original diagnosis if another failure is unwinding.
         if std::thread::panicking() {
             tracing::error!("{detail} (reported during an active unwind, so not raised)");
             return;
@@ -619,8 +572,7 @@ impl Drop for CheckoutReceipt {
     }
 }
 
-// Mirrors `Checkout`'s own pin: a Clone would let two settlement calls each
-// believe they hold the epoch this receipt must be settled against.
+// A clone would permit two settlements for one checkout.
 static_assertions::assert_not_impl_any!(CheckoutReceipt: Clone, Copy);
 
 impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {

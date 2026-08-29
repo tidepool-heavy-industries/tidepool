@@ -66,7 +66,7 @@ use crate::harness::AnswerContract;
 /// serviced through [`SelfHarnessDriver::service_outer_effect`]'s mechanical
 /// decode-dispatch-convert shape the way `Console`/`Worktree`/`RepoEvent`/
 /// `Exec`/`Journal` are: an `async` suspension needs the spawned thread
-/// body's `ValueHandle` taken off the spawner's parked frame and a NEW
+/// body's rooted-value custody taken off the spawner's parked frame and a NEW
 /// suspension-capable top-level run started under its own realm — driver
 /// machinery in the `RunLLMTurn`/`AskUser` class ([`engine::classify_hole`]/
 /// [`SuspensionRouting`]), not the `OuterEffectKind`/`dispatch_outer_effect` class.

@@ -68,7 +68,7 @@ pub(crate) enum GreenThreadState {
 /// is how this distinction was found.
 pub(crate) enum GreenResult {
     Value(Value),
-    Root(tidepool_codegen::suspension::ValueHandle),
+    Root(tidepool_runtime::session::RootedValueRef),
 }
 
 /// One already-produced suspension (or completion) waiting to be classified
@@ -101,7 +101,7 @@ pub(crate) enum GreenDelivery<'a> {
 /// session-owned root (a settled thread's in-heap result).
 pub(crate) enum GreenAnswer {
     Value(Value),
-    BorrowedRoot(tidepool_codegen::suspension::ValueHandle),
+    BorrowedRoot(tidepool_runtime::session::RootedValueRef),
 }
 
 /// What one popped ready item resolved to, and what the scheduler owes it in
@@ -209,17 +209,7 @@ pub(crate) struct ModelRoundGreenThreadScheduler {
     waiters: HashMap<i64, Vec<(GreenChain, String)>>,
     ready: VecDeque<GreenReady>,
     next_tid: i64,
-    next_thread_realm: u64,
 }
-
-/// Answerer-plane thread realms mint their low bits from this process-wide
-/// sequence, starting at `1 << 32` — disjoint by construction from the outer
-/// scheduler's per-fragment counters (which start at 1 and stay tiny), so an
-/// answerer window's threads can never collide with the authored loop's own
-/// live threads on the one shared session. Each round grabs a `1 << 20`
-/// block; no round comes near exhausting one.
-static GREEN_ROUND_REALM_SEQ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1 << 32);
 
 impl ModelRoundGreenThreadScheduler {
     pub(crate) fn new() -> Self {
@@ -228,8 +218,6 @@ impl ModelRoundGreenThreadScheduler {
             waiters: HashMap::new(),
             ready: VecDeque::new(),
             next_tid: 1,
-            next_thread_realm: GREEN_ROUND_REALM_SEQ
-                .fetch_add(1 << 20, std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -416,7 +404,6 @@ impl SelfHarnessDriver {
         threads: &mut HashMap<i64, GreenThread>,
         waiters: &mut HashMap<i64, Vec<(GreenChain, String)>>,
         next_tid: &mut i64,
-        next_realm: &mut u64,
         ready: &mut VecDeque<GreenReady>,
         delivery: GreenDelivery<'_>,
     ) -> Result<GreenHoleServiced, DriverError> {
@@ -429,12 +416,7 @@ impl SelfHarnessDriver {
             Some("AsyncSpawnWith") => {
                 let tid = *next_tid;
                 *next_tid += 1;
-                // Tagged with a high bit so a thread realm can never collide
-                // with `OUTER_REALM` (0), a per-loop answerer realm
-                // (`iteration_realm`, small increasing ints), or
-                // `ResidentSession::run_child`'s throwaway realms (bit 63).
-                let realm = tidepool_codegen::suspension::RealmId((1u64 << 61) | *next_realm);
-                *next_realm += 1;
+                let realm = tidepool_codegen::suspension::RealmId::fresh();
                 threads.insert(
                     tid,
                     GreenThread {
@@ -596,7 +578,9 @@ impl SelfHarnessDriver {
                         // The ONE custody transfer: out of the thread's
                         // finalize frame and into the table, which owns it for
                         // the rest of the session realm's life.
-                        FinalAnswer::Handle(custody) => GreenResult::Root(custody.into_handle()),
+                        FinalAnswer::Handle(custody) => {
+                            GreenResult::Root(custody.into_rooted_ref())
+                        }
                     });
                     // Wake any `WatchAsync tid` subscriber exactly once — the
                     // `Tidepool.Event.waitEvent`/`Tidepool.Event` completion
@@ -870,7 +854,6 @@ impl SelfHarnessDriver {
                     &mut green.threads,
                     &mut green.waiters,
                     &mut green.next_tid,
-                    &mut green.next_thread_realm,
                     &mut green.ready,
                     GreenDelivery::Node { node, hole: &hole },
                 )
@@ -1298,7 +1281,6 @@ impl SelfHarnessDriver {
                         &mut green.threads,
                         &mut green.waiters,
                         &mut green.next_tid,
-                        &mut green.next_thread_realm,
                         &mut green.ready,
                         GreenDelivery::Raw,
                     )
