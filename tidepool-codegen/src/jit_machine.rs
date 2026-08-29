@@ -447,16 +447,9 @@ pub struct JitEffectMachine {
     /// clean "unknown continuation" error rather than a silent aliasing of some
     /// later park.
     next_continuation_id: u64,
-    /// Per-runtime resource scope cancel flags, lazily minted on first park-path run/resume
-    /// entry for a runtime resource scope ([`Self::realm_cancel_flag`]). The parked entries
-    /// install a runtime resource scope's own flag into [`MachineState`] instead of
-    /// `cancel_flag`, so cancelling one runtime resource scope cannot abort a sibling runtime resource scope's
-    /// run — cancellation is scoped per runtime resource scope, not machine-scoped, because a
-    /// runtime resource scope's continuation ids change on every re-suspension and cannot live
-    /// only on the frame. Never shrinks during a runtime resource scope's life: a cancelled
-    /// runtime resource scope's flag is not removed, only cleared (see
-    /// [`Self::realm_cancel_handle`]'s doc for whether a completed run clears
-    /// it); [`Self::close_realm`] removes the closed runtime resource scope's entry.
+    /// Cancel flags scoped by realm. A parked run installs its realm's flag in
+    /// [`MachineState`], so cancellation cannot leak to a sibling realm.
+    /// [`Self::close_realm`] removes the entry.
     realm_cancel_flags: HashMap<RealmId, Arc<AtomicBool>>,
     /// Value-handle registry: opaque,
     /// Send-able ids over machine-side persistent roots, so upper layers pass
@@ -475,19 +468,10 @@ pub struct JitEffectMachine {
     /// discipline as `next_continuation_id` (a released handle's id is a
     /// clean "unknown handle" error, never a silent alias).
     next_value_handle: u64,
-    /// The machine's established handled-effect prefix: the machine cannot
-    /// introspect its own handler stack (`H` is a compile-time monomorphized
-    /// type parameter, not runtime data), so this is the machine's runtime
-    /// record of what `H` is, in its stead. Set from the first NON-EMPTY
-    /// handled prefix any runtime resource scope ENTERS the parked path with
-    /// ([`Self::enter_parked_path`], called before the machine is driven —
-    /// deliberately not deferred to an actual park, since a runtime resource scope whose turn
-    /// completes without ever suspending still dispatches every effect
-    /// through `H`); `None` until then. MONOTONIC — never cleared or
-    /// overwritten afterward, including on resume: every runtime resource scope on a machine
-    /// is driven through the same single `H` for the machine's whole life,
-    /// so a runtime resource scope that resumed and completed does not release the
-    /// constraint. Compatibility is defined by [`EffectBoundary`].
+    /// Non-empty handled-effect layout established by the first parked-path
+    /// entry. It is monotonic because every realm uses the same monomorphized
+    /// handler stack for the machine's lifetime. Compatibility is defined by
+    /// [`EffectBoundary`].
     established_prefix: Option<Arc<[String]>>,
 }
 
@@ -2477,13 +2461,7 @@ impl JitEffectMachine {
                 ))))
             }
         };
-        // Entry check, BEFORE the continuation is driven at all (same
-        // discipline as run_until_suspension). The established
-        // prefix is monotonic, so this frame's own prefix — already checked
-        // compatible when it first parked — stays compatible forever; this
-        // re-confirmation is a no-op in practice, kept for the same
-        // before-anything-runs discipline rather than because it can newly
-        // disagree.
+        // Validate before consuming the frame or running the continuation.
         self.enter_parked_path(&boundary)?;
         if let ResumeInput::Answer(val) = &input {
             if let Err(reason) = answer_force_nf(val) {

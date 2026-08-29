@@ -227,9 +227,7 @@ recordRunLLMTurnSite siteId typeStr modules = modify' $ \s ->
 -- unpackCString#/unpackAppendCString#, an @f charBox goNext@ application for
 -- unpackFoldrCString#). Handles 1-4 byte UTF-8 sequences (RFC 3629); an
 -- unexpected lead byte (a stray continuation byte, or 0xF8+) falls back to
--- treating it as one raw byte — best-effort, never traps, matching the
--- pre-fix behavior for that byte. Shared by all three runtime Addr# loops so
--- H1's decode fix and H2's fallback arms use exactly one decoder.
+-- treating it as one raw byte. Shared by all three runtime Addr# loops.
 emitUtf8DecodeStep :: Word64 -> Int -> Int -> (Int -> Int -> TransM Int) -> TransM Int
 emitUtf8DecodeStep aId goRef byte0 combine = do
     let charId = varId (dataConWorkId charDataCon)
@@ -2601,32 +2599,10 @@ isNospecVar v =
   && maybe False ((== "GHC.Magic") . normalizeMod . moduleNameString . moduleName)
            (nameModule_maybe (idName v))
 
--- | Recognize GHC type-representation metadata vars ($tc*, $trModule*, krep$*, $krep*).
--- These have no runtime semantics and no unfoldings; emit as error VarId.
--- These vars can appear deep inside resolved unfoldings (e.g. Typeable infrastructure)
--- and are not reported by resolveExternals as unresolved.
---
--- The name prefix ALONE is not sufficient: GHC's float-out/CSE can name a
--- perfectly ordinary, LOAD-BEARING top-level binding with the same
--- convention. Confirmed case (2026-08-09, `formShape @Two == literal`
--- reproduction): a `deriving (Generic)` type's `Datatype`/`Constructor`
--- `KnownSymbol` dictionaries (what `datatypeName`/`conName` read) are built
--- from plain `Addr#` string-literal constants for the type/constructor/
--- module name; GHC's simplifier floats those literals out under binder names
--- like `$tcTwo_u...`/`$trModule_u...` — reusing the EXACT prefix convention
--- genuine (and genuinely dead here) `Typeable` `TyCon`/`Module` bindings use,
--- because both are synthesized by the same desugaring machinery. Poisoning
--- that binder replaces a real string literal with an error sentinel; forcing
--- it later (e.g. via `unpackCString#`) reaches a runtime bad-pointer trap
--- instead of returning "Two".
---
--- A genuine `$tc<T>`/`$trModule`/`$krep...`/`$trName...` binding always has
--- a BOXED, LIFTED type (`TyCon`, `Module`, `KindRep`, `TrName`, ...) — never
--- an unlifted primitive. The floated-literal case above has type `Addr#`.
--- Requiring the type NOT be unlifted is a shape check on what the binding
--- structurally CAN be (not a tighter name regex, which is the same class of
--- fix as the bug: still deciding purely from the name), so it holds
--- regardless of the exact unique/counter GHC's float-out picks.
+-- | Recognize boxed GHC type-representation metadata. The name prefix alone
+-- is insufficient because the simplifier may give floated runtime constants
+-- the same prefix; requiring a lifted type distinguishes metadata objects from
+-- load-bearing primitives such as @Addr#@.
 isTypeMetadataVar :: Id -> Bool
 isTypeMetadataVar v =
   let name = occNameString (nameOccName (idName v))
@@ -2834,9 +2810,7 @@ extractAddrLitBytes _ = Nothing
 
 -- | Decode the raw bytes GHC embeds for a String literal's Addr# (always
 -- well-formed UTF-8, whatever the unpackCString#/unpackCStringUtf8# variant)
--- into Unicode code points. One entry per 'Char', not one per byte — feeding
--- raw bytes straight into 'LEChar' (as the pre-fix code did) corrupts any
--- literal with a non-ASCII character (H1/H2).
+-- into Unicode code points. One entry per 'Char', not one per byte.
 utf8CodepointsOf :: [Word8] -> [Int]
 utf8CodepointsOf = map ord . T.unpack . TE.decodeUtf8 . BS.pack
 
