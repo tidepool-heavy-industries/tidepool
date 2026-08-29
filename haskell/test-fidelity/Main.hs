@@ -11,7 +11,7 @@ import Fidelity.Harness (Check)
 import qualified Fidelity.Erasure as Erasure
 import qualified Fidelity.PrimopArity as PrimopArity
 import qualified Fidelity.Recognizers as Recognizers
-import qualified Fidelity.D1Defense as D1Defense
+import qualified Fidelity.MetadataCoverage as MetadataCoverage
 import qualified Fidelity.ClosureTier as ClosureTier
 import qualified Fidelity.TopoRecovery as TopoRecovery
 import qualified Fidelity.ExtractRequest as ExtractRequest
@@ -25,7 +25,7 @@ groups =
   [ ("coercion-binder erasure", Erasure.checks)
   , ("intrinsic recognizers",   Recognizers.checks)
   , ("pipeline barriers + unboxed-tuple arity", PrimopArity.checks)
-  , ("D1 hard-fail metadata-subset defense (mutation test)", D1Defense.checks)
+  , ("artifact metadata coverage (mutation test)", MetadataCoverage.checks)
   , ("closure-tier classification (higher-kinded arrow instantiation)", ClosureTier.checks)
   , ("GHC diagnostic-recovery topological order (Known Limits cascade)", TopoRecovery.checks)
   , ("Rust-to-Haskell extractor request protocol", ExtractRequest.checks)

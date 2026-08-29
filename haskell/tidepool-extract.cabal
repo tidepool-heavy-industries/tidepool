@@ -14,6 +14,7 @@ library tidepool-extract-internal
   hs-source-dirs:   src
   exposed-modules:
     Tidepool.Binders
+    Tidepool.Artifacts
     Tidepool.CborEncode
     Tidepool.WorkerServer
     Tidepool.DiagJson
@@ -261,7 +262,7 @@ test-suite extract-fidelity-test
     Fidelity.Erasure
     Fidelity.Recognizers
     Fidelity.PrimopArity
-    Fidelity.D1Defense
+    Fidelity.MetadataCoverage
     Fidelity.ClosureTier
     Fidelity.TopoRecovery
     Fidelity.ExtractRequest
