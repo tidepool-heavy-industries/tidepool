@@ -149,8 +149,8 @@ pure (1 + 2 :: Int)
 ```bash
 git clone https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
-nix develop          # Provides GHC 9.12 (fat interfaces) + Rust toolchain
-cargo nextest run    # Quick tier: pure-Rust crates only (see CONTRIBUTING.md for the full test tiers)
+nix develop --command just quick  # First run; supplies Just and the toolchain
+just check           # Format, strict clippy, and the default test tier
 cargo install --path tidepool
 ```
 
@@ -461,9 +461,10 @@ This MCP server requires GHC (it uses GHC's intermediate representation Core, in
 ## Development
 
 ```bash
-nix develop              # Enter dev shell
-cargo check --workspace  # Type check
-cargo nextest run        # Quick tier: pure-Rust crates only (see CONTRIBUTING.md for the full test tiers)
+just --list  # Discover development workflows
+just quick   # Fast process-isolated unit tests
+just check   # Format, strict clippy, and the default test tier
+just verify  # Pre-review gate, including fixture freshness
 ```
 
 ## Known Limitations

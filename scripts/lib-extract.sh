@@ -23,18 +23,14 @@ resolve_tidepool_extract() {
 
   if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
     echo "==> TIDEPOOL_EXTRACT not set — building the Rust frontend and Haskell worker"
-    # The locally-built binary needs the with-packages GHC (supplying lens/
-    # freer-simple) on PATH at runtime, or extraction fails with "Could not
-    # find module Control.Lens". The deployed nix wrapper hard-codes that
-    # GHC's path; reuse it so a bare `nix develop` run works without manual
-    # PATH surgery.
-    _w="$HOME/.nix-profile/bin/tidepool-extract"
-    if [ -x "$_w" ]; then
-      _ghc="$(grep -oE '/nix/store/[^:"]*-with-packages/bin' "$_w" | head -1)"
-      if [ -n "${_ghc:-}" ] && [ -d "$_ghc" ]; then
-        export PATH="$_ghc:$PATH"
-        echo "==> prepended with-packages GHC to PATH ($_ghc)"
-      fi
+    # The worker loads Tidepool modules at runtime, so it needs the repository
+    # with-packages compiler rather than a bare GHC. The Just recipes enter the
+    # Nix shell that provides it; refuse an incomplete ambient shell instead of
+    # scraping a separately installed extractor wrapper for a store path.
+    if ! command -v ghc-pkg >/dev/null 2>&1 \
+      || ! ghc-pkg list 2>/dev/null | grep -qE '\blens-[0-9]'; then
+      echo "error: the active GHC does not expose lens; run through 'just' or enter 'nix develop'" >&2
+      exit 1
     fi
     ( cd haskell && cabal build tidepool-extract-bin )
     cargo build -p tidepool-extract-cmd --bin tidepool-extract
@@ -113,6 +109,47 @@ resolve_tidepool_extract() {
 BATTERY_DAEMON_PID=""
 BATTERY_DAEMON_SOCKET_DIR=""
 BATTERY_DAEMON_OWNED=0
+BATTERY_ARTIFACT_DIR=""
+BATTERY_NEXTEST_LOG=""
+
+# Failure artifacts for battery entry points. Successful runs leave nothing;
+# failed runs retain the exact command, nextest output, toolchain report, and
+# compile-daemon log under target/tidepool-test-runs/.
+prepare_battery_artifacts() {
+  local label="$1"
+  shift
+  local root="${TIDEPOOL_TEST_ARTIFACT_ROOT:-$PWD/target/tidepool-test-runs}"
+  local stamp
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  BATTERY_ARTIFACT_DIR="$root/$stamp-$$-$label"
+  BATTERY_NEXTEST_LOG="$BATTERY_ARTIFACT_DIR/nextest.log"
+  mkdir -p "$BATTERY_ARTIFACT_DIR"
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\ncd %q\n' "$PWD"
+    printf 'nix develop --command'
+    printf ' %q' "$@"
+    printf '\n'
+  } >"$BATTERY_ARTIFACT_DIR/reproduce.sh"
+  chmod +x "$BATTERY_ARTIFACT_DIR/reproduce.sh"
+  : >"$BATTERY_NEXTEST_LOG"
+}
+
+finalize_battery_artifacts() {
+  local status="$1"
+  [[ -n "$BATTERY_ARTIFACT_DIR" ]] || return 0
+  if [[ "$status" -eq 0 ]]; then
+    rm -rf "$BATTERY_ARTIFACT_DIR"
+    return 0
+  fi
+
+  local daemon_log="${TIDEPOOL_EXTRACT_DAEMON_LOG:-}"
+  if [[ -n "$daemon_log" && -f "$daemon_log" ]]; then
+    cp "$daemon_log" "$BATTERY_ARTIFACT_DIR/daemon.log"
+  fi
+  scripts/toolchain-doctor.sh >"$BATTERY_ARTIFACT_DIR/toolchain-doctor.log" 2>&1 || true
+  echo "==> test failure artifacts: $BATTERY_ARTIFACT_DIR" >&2
+  echo "==> reproduce: $BATTERY_ARTIFACT_DIR/reproduce.sh" >&2
+}
 
 # Best-effort liveness check for an inherited $TIDEPOOL_EXTRACT_DAEMON_SOCKET
 # (outer-wrapper respect: a chain script that already started a daemon for
@@ -211,6 +248,7 @@ start_battery_daemon() {
   BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
   local sock="$BATTERY_DAEMON_SOCKET_DIR/extract.sock"
   local log="$BATTERY_DAEMON_SOCKET_DIR/daemon.log"
+  export TIDEPOOL_EXTRACT_DAEMON_LOG="$log"
 
   local stamp
   stamp="$(_battery_daemon_stamp_path)"
@@ -299,4 +337,5 @@ teardown_battery_daemon() {
   fi
   BATTERY_DAEMON_SOCKET_DIR=""
   BATTERY_DAEMON_OWNED=0
+  unset TIDEPOOL_EXTRACT_DAEMON_LOG
 }

@@ -38,25 +38,14 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # not a bypass of it.
 default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool) & binary(crash_recovery)))'
 
-# GHC-compile-heavy tests run capped, not at full core count: at full
-# parallelism the concurrent `extract` compiles oversubscribe CPU+memory and
-# thrash. This is a PROCESS-LOCAL cap sitting UNDER the host-wide semaphore
-# (scripts/ghc-slots.sh, shared across every worktree on the box) — the
-# box-wide ceiling is their PRODUCT, not either number alone (the 2026-08-08
-# load-92 incident reached 7+ concurrent extracts with every lane individually
-# compliant). 4 (operator, 2026-08-24): the old tighter cap was sized for the
-# massively-parallel-lane era; with runs now mostly sequential the per-run cap
-# carries the parallelism. The product is still the budget — a return to many
-# concurrent battery runs on one box means revisiting cap × slot count
-# together, not either alone.
+# GHC-heavy tests run below full core count so concurrent extractor requests do
+# not oversubscribe CPU and memory. This is a per-run limit; callers running
+# several batteries concurrently must budget their aggregate load.
 [test-groups.ghc-heavy]
 max-threads = 4
 
 # Default-deny: everything is GHC-heavy unless it appears in the exemption
-# filter below, so a new crate/binary/rename lands in the capped group with
-# no edit here. The 2026-08-09 load-159 incident was the allowlist version of
-# this (GHC-heavy binaries named one by one) failing open as the list lagged
-# behind new binaries. An entry is removed from the cap only after showing
+# filter below. An entry is removed from the cap only after showing
 # its tests do no `extract` work (no tidepool-extract spawn, no
 # EvalHarness/Harness turn, no haskell_eval!/haskell_inline! expansion).
 [[profile.default.overrides]]

@@ -69,33 +69,32 @@ Small support crates have short local charters describing their exact scope.
 ## Build and test
 
 ```bash
-nix develop
-cargo check --workspace
-cargo nextest run
-cargo clippy --workspace
-cargo fmt --all -- --check
+just quick
+just check
+just test tidepool-runtime 'test(<name>)'
+just suite tidepool-runtime
+just changed
+just verify
 ```
 
-`cargo nextest run` is the quick tier. The default filter skips GHC-heavy test
-processes, although macro expansion can still invoke the extractor during a
-fresh build.
+The Justfile is the development entry point and enters the Nix shell itself.
+`just --list` describes every supported workflow. `just quick` runs workspace
+library tests under nextest process isolation. `just check` adds formatting,
+strict clippy, and nextest's broader default-filter tier; macro expansion may
+still invoke the extractor on a fresh build.
 
-For a targeted GHC-heavy test, use:
+`just test` accepts an ordinary nextest filter expression. `just suite` runs
+the checked partitions in `dev/test-suites.json` sequentially with one shared
+compile daemon. `just changed` is a conservative inner-loop selection, not the
+pre-review gate; `just verify` is the gate.
 
-```bash
-scripts/battery.sh -p <crate> -E 'test(<name>)'
-```
+Do not add a separate extractor compile when an existing family bundle can
+carry another assertion. Expensive and known-bug ignored tests remain explicit
+opt-ins rather than part of `just verify`.
 
-For a full GHC-heavy crate, use `scripts/battery-shard.sh <crate>`. Some large
-crates require the binary sub-shards listed in that script. Expensive ignored
-tests additionally require `TIDEPOOL_EXPENSIVE_TESTS=1`.
-
-Do not run an unfiltered workspace battery expecting it to complete in a
-short-lived environment. Do not add a separate extractor compile when an
-existing family bundle can carry another assertion.
-
-After changing `haskell/`, follow `haskell/CLAUDE.md` to rebuild fixtures or
-deploy the extractor and stdlib.
+After changing extractor translation or serialization, run
+`just fixtures-check` or `just fixtures-update`. Follow `haskell/CLAUDE.md`
+for deployment of the extractor and standard library.
 
 ## Architectural invariants
 

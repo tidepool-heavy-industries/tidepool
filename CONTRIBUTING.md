@@ -13,21 +13,24 @@ To enter the development environment, run:
 nix develop
 ```
 
-This will provide you with the correct versions of Rust, GHC, and other dependencies.
+This provides the correct versions of Rust, GHC, Just, and other dependencies.
+If `just` is not installed outside Nix, bootstrap any recipe with
+`nix develop --command just <recipe>`; recipes avoid re-entering an existing
+Nix shell.
 
 ## Build and Test Commands
 
 ```bash
-cargo check --workspace   # Type check the entire workspace
-cargo nextest run         # Quick tier: pure-Rust crates only (the normal local command)
-cargo clippy --workspace  # Run lints
+just --list               # Discover supported workflows
+just quick                # Fast process-isolated unit tests
+just check                # Format + strict clippy + default test tier
+just changed              # Inner-loop checks for current changes
+just verify               # Pre-review gate
 ```
 
-For anything beyond the quick tier — GHC-heavy crates, targeted vs.
-sharded-full vs. expensive test runs, and why bare `scripts/battery.sh`
-should not be your default — see the **Test tiers** subsection of the root
-`CLAUDE.md`'s Build & Test section. That table is the canonical matrix; it
-is not duplicated here so the two cannot drift apart.
+The Justfile enters the Nix shell itself. Use `just test <crate> '<filter>'`
+for one GHC-heavy slice and `just suite <crate>` for a large crate's complete,
+sequentially partitioned suite. The root `CLAUDE.md` owns the test policy.
 
 ## MCP Server
 

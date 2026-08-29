@@ -3,7 +3,9 @@
 
   nixConfig = {
     extra-substituters = [ "https://tidepool.cachix.org" ];
-    extra-trusted-public-keys = [ "tidepool.cachix.org-1:jnYeaWymP+9/MeAECROfi4+/l7X1ilkOqM5Nrr5Lo1w=" ];
+    extra-trusted-public-keys = [
+      "tidepool.cachix.org-1:jnYeaWymP+9/MeAECROfi4+/l7X1ilkOqM5Nrr5Lo1w="
+    ];
   };
 
   inputs = {
@@ -15,8 +17,15 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      rust-overlay,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         # Overlay: rebuild GHC 9.12 with fat interface files for boot libraries.
         # -fwrite-if-simplified-core writes ALL Core (including workers, loop-breakers)
@@ -24,44 +33,48 @@
         # -fexpose-all-unfoldings + high threshold retained as secondary defense.
         # Targets: ghc-internal (stdlib impl) + ghc-bignum (Integer/Natural).
         # base is just re-exports; ghc-prim has no Haskell Core.
-        ghcInternalOverlay = final: prev:
+        ghcInternalOverlay =
+          final: prev:
           let
-            patchedGhc = (prev.haskell.compiler.ghc912.override {
-              # Native (pure-Haskell) ghc-bignum backend: Integer/Natural ops desugar
-              # to pure Core over Word#/ByteArray# primops (no __gmpn_*/integer_gmp_*
-              # FFI), which the JIT compiles directly — correct by construction.
-              enableNativeBignum = true;
-            }).overrideAttrs (old: {
-              postPatch = (old.postPatch or "") + ''
-                TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
+            patchedGhc =
+              (prev.haskell.compiler.ghc912.override {
+                # Native (pure-Haskell) ghc-bignum backend: Integer/Natural ops desugar
+                # to pure Core over Word#/ByteArray# primops (no __gmpn_*/integer_gmp_*
+                # FFI), which the JIT compiles directly — correct by construction.
+                enableNativeBignum = true;
+              }).overrideAttrs
+                (old: {
+                  postPatch = (old.postPatch or "") + ''
+                    TIDEPOOL_GHC_OPTS="-fexpose-all-unfoldings -funfolding-creation-threshold=100000 -fwrite-if-simplified-core"
 
-                # Inject fat interface flags via OPTIONS_GHC into boot libraries.
-                # ghc-internal, ghc-bignum, ghc-prim: safe to prepend (no exotic extensions).
-                for dir in libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim; do
-                  if [ -d "$dir" ]; then
-                    find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
-                    echo "tidepool: injected OPTIONS_GHC into $dir"
-                  fi
-                done
+                    # Inject fat interface flags via OPTIONS_GHC into boot libraries.
+                    # ghc-internal, ghc-bignum, ghc-prim: safe to prepend (no exotic extensions).
+                    for dir in libraries/ghc-internal/src libraries/ghc-bignum/src libraries/ghc-prim; do
+                      if [ -d "$dir" ]; then
+                        find "$dir" -name '*.hs' -exec sed -i "1s/^/{-# OPTIONS_GHC $TIDEPOOL_GHC_OPTS #-}\n/" {} +
+                        echo "tidepool: injected OPTIONS_GHC into $dir"
+                      fi
+                    done
 
-                # For ALL other boot libraries (containers, bytestring, array, text, etc.),
-                # inject OPTIONS_GHC AFTER existing pragmas by appending before the module line.
-                # This avoids breaking files that start with {-# LANGUAGE MagicHash #-} etc.
-                for lib in libraries/containers libraries/bytestring libraries/array \
-                           libraries/deepseq libraries/directory libraries/filepath \
-                           libraries/process libraries/unix libraries/parsec \
-                           libraries/mtl libraries/transformers libraries/stm \
-                           libraries/template-haskell libraries/binary \
-                           libraries/exceptions libraries/time libraries/hpc \
-                           libraries/Cabal libraries/Cabal-syntax libraries/text; do
-                  if [ -d "$lib" ]; then
-                    find "$lib" -name '*.hs' -exec sed -i '/^module /i {-# OPTIONS_GHC '"$TIDEPOOL_GHC_OPTS"' #-}' {} +
-                    echo "tidepool: injected OPTIONS_GHC before module decl in $lib"
-                  fi
-                done
-              '';
-            });
-          in {
+                    # For ALL other boot libraries (containers, bytestring, array, text, etc.),
+                    # inject OPTIONS_GHC AFTER existing pragmas by appending before the module line.
+                    # This avoids breaking files that start with {-# LANGUAGE MagicHash #-} etc.
+                    for lib in libraries/containers libraries/bytestring libraries/array \
+                               libraries/deepseq libraries/directory libraries/filepath \
+                               libraries/process libraries/unix libraries/parsec \
+                               libraries/mtl libraries/transformers libraries/stm \
+                               libraries/template-haskell libraries/binary \
+                               libraries/exceptions libraries/time libraries/hpc \
+                               libraries/Cabal libraries/Cabal-syntax libraries/text; do
+                      if [ -d "$lib" ]; then
+                        find "$lib" -name '*.hs' -exec sed -i '/^module /i {-# OPTIONS_GHC '"$TIDEPOOL_GHC_OPTS"' #-}' {} +
+                        echo "tidepool: injected OPTIONS_GHC before module decl in $lib"
+                      fi
+                    done
+                  '';
+                });
+          in
+          {
             haskell = prev.haskell // {
               compiler = prev.haskell.compiler // {
                 ghc912 = patchedGhc;
@@ -81,23 +94,65 @@
             };
           };
 
-        overlays = [ (import rust-overlay) ghcInternalOverlay ];
+        overlays = [
+          (import rust-overlay)
+          ghcInternalOverlay
+        ];
         pkgs = import nixpkgs { inherit system overlays; };
         # rust-toolchain.toml is the single source of truth for the Rust
         # version + components; the flake reads it rather than pinning
         # `stable.latest` (which drifts silently on every flake.lock update).
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-      in {
+        # One Haskell package universe for both development and the deployed
+        # extractor. The worker loads Tidepool modules at runtime, so a bare
+        # compiler is not a usable development toolchain even when it can
+        # compile the worker executable itself.
+        hsPkgs = pkgs.haskell.packages.ghc912.override {
+          overrides = self': super': {
+            mkDerivation =
+              args:
+              super'.mkDerivation (
+                args
+                // {
+                  configureFlags = (args.configureFlags or [ ]) ++ [
+                    "--ghc-options=-fwrite-if-simplified-core"
+                    "--ghc-options=-fexpose-all-unfoldings"
+                  ];
+                }
+              );
+            freer-simple =
+              (pkgs.haskell.lib.unmarkBroken (pkgs.haskell.lib.doJailbreak super'.freer-simple)).overrideAttrs
+                (old: {
+                  postPatch = (old.postPatch or "") + ''
+                    sed -i 's/instance (MonadBase b m, LastMember m effs) => MonadBase b (Eff effs)/instance (MonadBase b m, LastMember m effs, Applicative b, Monad b) => MonadBase b (Eff effs)/' src/Control/Monad/Freer/Internal.hs
+                  '';
+                });
+          };
+        };
+        ghcEnv = hsPkgs.ghcWithPackages (
+          ps: with ps; [
+            freer-simple
+            lens
+            errors
+            witherable
+            safe
+            random
+            splitmix
+          ]
+        );
+      in
+      {
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = [
             pkgs.pkg-config
           ];
           buildInputs = [
             rust
-            pkgs.haskell.compiler.ghc912
+            ghcEnv
             pkgs.cabal-install
             pkgs.openssl
             pkgs.jq
+            pkgs.just
             # No sccache here, deliberately. It IS active for every build on
             # this box, but via `build.rustc-wrapper` in ~/.cargo/config.toml
             # (host-global, outside this flake), naming an absolute store path
@@ -112,6 +167,7 @@
           ];
 
           shellHook = ''
+            export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
             echo "tidepool dev shell"
             echo "  Rust: $(rustc --version)"
             echo "  GHC:  $(ghc --version)"
@@ -119,68 +175,43 @@
           '';
         };
 
-        packages.tidepool-extract = let
-          # The overlay already wires patchedGhc into pkgs.haskell.packages.ghc912,
-          # so this package set has fat interfaces AND rebuilds all deps from source.
-          #
-          # freer-simple 1.2.1.2 needs a patch for GHC 9.12: MonadBase instance
-          # requires explicit Applicative+Monad constraints due to superclass changes.
-          # Every library package must be built with fat interface flags so that
-          # mi_extra_decls is populated. Without this, the fat interface fallback
-          # hits the PIT panic for non-boot-library packages (containers, aeson, etc.).
-          # Override mkDerivation to inject flags globally into ALL packages.
-          hsPkgs = pkgs.haskell.packages.ghc912.override {
-            overrides = self': super': {
-              mkDerivation = args: super'.mkDerivation (args // {
-                configureFlags = (args.configureFlags or []) ++ [
-                  "--ghc-options=-fwrite-if-simplified-core"
-                  "--ghc-options=-fexpose-all-unfoldings"
-                ];
-              });
-              freer-simple = (pkgs.haskell.lib.unmarkBroken (
-                pkgs.haskell.lib.doJailbreak super'.freer-simple
-              )).overrideAttrs (old: {
-                postPatch = (old.postPatch or "") + ''
-                  sed -i 's/instance (MonadBase b m, LastMember m effs) => MonadBase b (Eff effs)/instance (MonadBase b m, LastMember m effs, Applicative b, Monad b) => MonadBase b (Eff effs)/' src/Control/Monad/Freer/Internal.hs
-                '';
-              });
+        packages.tidepool-extract =
+          let
+            # The overlay already wires patchedGhc into pkgs.haskell.packages.ghc912,
+            # so this package set has fat interfaces AND rebuilds all deps from source.
+            #
+            # freer-simple 1.2.1.2 needs a patch for GHC 9.12: MonadBase instance
+            # requires explicit Applicative+Monad constraints due to superclass changes.
+            # Every library package must be built with fat interface flags so that
+            # mi_extra_decls is populated. Without this, the fat interface fallback
+            # hits the PIT panic for non-boot-library packages (containers, aeson, etc.).
+            # Fidelity tests exercise the worker protocol directly. The build
+            # sandbox has no cabal, so point their worker override at the
+            # executable this same derivation just produced.
+            harness =
+              pkgs.haskell.lib.overrideCabal (hsPkgs.callCabal2nix "tidepool-extract" ./haskell { })
+                (old: {
+                  preCheck = (old.preCheck or "") + ''
+                    export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
+                  '';
+                });
+            # This crate has an independent zero-dependency lockfile so Nix
+            # vendors its actual graph rather than the whole workspace graph.
+            frontend = pkgs.rustPlatform.buildRustPackage {
+              pname = "tidepool-extract-frontend";
+              version = "0.1.0";
+              src = ./tidepool-extract-cmd;
+              cargoLock.lockFile = ./tidepool-extract-cmd/Cargo.lock;
+              # The daemon integration test needs the separately packaged GHC
+              # worker; the final wrapper is exercised by the repository battery.
+              cargoTestFlags = [ "--lib" ];
             };
-          };
-          ghcEnv = hsPkgs.ghcWithPackages (ps: with ps; [
-            freer-simple
-            lens
-            errors
-            witherable
-            safe
-            random
-            splitmix
-          ]);
-          # Fidelity tests exercise the worker protocol directly. The build
-          # sandbox has no cabal, so point their worker override at the
-          # executable this same derivation just produced.
-          harness = pkgs.haskell.lib.overrideCabal
-            (hsPkgs.callCabal2nix "tidepool-extract" ./haskell {})
-            (old: {
-              preCheck = (old.preCheck or "") + ''
-                export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
-              '';
-            });
-          # This crate has an independent zero-dependency lockfile so Nix
-          # vendors its actual graph rather than the whole workspace graph.
-          frontend = pkgs.rustPlatform.buildRustPackage {
-            pname = "tidepool-extract-frontend";
-            version = "0.1.0";
-            src = ./tidepool-extract-cmd;
-            cargoLock.lockFile = ./tidepool-extract-cmd/Cargo.lock;
-            # The daemon integration test needs the separately packaged GHC
-            # worker; the final wrapper is exercised by the repository battery.
-            cargoTestFlags = [ "--lib" ];
-          };
-        in pkgs.writeShellScriptBin "tidepool-extract" ''
-          export PATH="${ghcEnv}/bin:$PATH"
-          export TIDEPOOL_EXTRACT_WORKER="${harness}/bin/tidepool-extract-bin"
-          exec ${frontend}/bin/tidepool-extract "$@"
-        '';
+          in
+          pkgs.writeShellScriptBin "tidepool-extract" ''
+            export PATH="${ghcEnv}/bin:$PATH"
+            export TIDEPOOL_EXTRACT_WORKER="${harness}/bin/tidepool-extract-bin"
+            exec ${frontend}/bin/tidepool-extract "$@"
+          '';
 
         packages.default = self.packages.${system}.tidepool-extract;
 

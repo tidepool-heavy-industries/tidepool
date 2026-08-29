@@ -7,7 +7,7 @@
 # the hazard-audit note and repo-root CLAUDE.md's Build & Test section.
 #
 # WARNING: this runs the ENTIRE workspace in one process and is HOURS long
-# here (every GHC-heavy crate's test forks a real GHC extract, capped at 2
+# here (every GHC-heavy crate's test forks a real GHC extract, capped at 4
 # concurrent per run via .config/nextest.toml's ghc-heavy test group) — this
 # environment hard-kills background processes at ~380s,
 # well short of that. Do not invoke this bare and walk away expecting it to
@@ -65,10 +65,13 @@ resolve_tidepool_extract
 # before it's set. (start_battery_daemon is always called — it's a no-op
 # when the daemon is disabled.)
 nextest_pid=""
-tmp_log="$(mktemp)"
+prepare_battery_artifacts battery scripts/battery.sh "$@"
+tmp_log="$BATTERY_NEXTEST_LOG"
 cleanup_exit() {
-  rm -f "$tmp_log"
+  local status=$?
+  finalize_battery_artifacts "$status"
   teardown_battery_daemon
+  return "$status"
 }
 trap cleanup_exit EXIT
 # A signal sent directly to this script's pid (as opposed to a terminal
@@ -108,7 +111,9 @@ set +e
 # Backgrounded + waited (rather than run directly in the foreground) so a
 # signal sent to this script's own pid interrupts promptly — see on_signal
 # above.
-cargo nextest run --ignore-default-filter --no-fail-fast "$@" 2> >(tee "$tmp_log" >&2) &
+cargo nextest run --ignore-default-filter --no-fail-fast \
+  --status-level fail --final-status-level fail \
+  "$@" 2> >(tee "$tmp_log" >&2) &
 nextest_pid=$!
 wait "$nextest_pid"
 run_status=$?

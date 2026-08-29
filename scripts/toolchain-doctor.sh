@@ -93,6 +93,16 @@ else
 fi
 
 echo
+echo "== developer tools =="
+for tool in cargo cargo-nextest just jq; do
+  if tool_path="$(command -v "$tool" 2>/dev/null)"; then
+    note "$tool: $tool_path"
+  else
+    fail "$tool not found; enter the repository Nix shell"
+  fi
+done
+
+echo
 if [ "$status" -eq 0 ]; then
   echo "== toolchain-doctor: OK =="
 else

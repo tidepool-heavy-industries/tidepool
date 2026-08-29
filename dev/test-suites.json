@@ -1,0 +1,35 @@
+{
+  "tidepool-harness": [
+    ["acceptance_askuser", "acceptance_boot_compile_count", "acceptance_cross_turn", "acceptance_finalize", "acceptance_lazy_boot", "acceptance_multi_target", "acceptance_selfharness"],
+    ["selfharness_budget", "selfharness_compaction_fixes", "selfharness_compaction", "selfharness_context_window", "selfharness_framing", "selfharness_lifecycle", "selfharness_spine", "companion_mount_spike", "companion_scope_trees"],
+    ["selfharness_persistence", "selfharness_fn_finalize_spike", "persistence_migration_corpus"],
+    ["companion_collapsed_slice", "answerer_async_fork", "fork_child_decl_plane_type", "listen_channel"],
+    ["agent_stack_scoping", "decl_plane_run_scoping", "dogfood_harness_typecheck", "dogfood_observability", "operator_gate_lifecycle", "finalize_type_pinning", "outer_effects", "outer_fanout", "outer_subagent", "timing_emission_pin", "turn_lease", "provider_behavior"],
+    ["compile_fail", "delegate_positive_path", "delegate_type_pinning"],
+    ["minimal_watch_list", "nested_async_repro", "node_mailboxes", "reinterpret_rowchange_repro", "selfharness_decl_plane_replay", "stable_effects_core_decl_plane", "state_injection_memo_hit"]
+  ],
+  "tidepool-runtime": [
+    ["proptest_cache_layer", "proptest_gc_pressure", "proptest_haskell_pipeline", "proptest_jit_vs_eval", "proptest_letrec", "proptest_render_json"],
+    ["agent_mode_encoding", "bignum_native", "bridged_records_extract", "cache_tests", "captured_real_core", "case_trap_graceful", "constructors_of_type", "cross_mode_existing", "cross_mode_targeted", "cross_mode_tests", "eager_list_responses", "extract_poison_diagnostic", "extract_spawn_counted", "flinch_katas", "gc_and_errors", "gc_stress_text_fold"],
+    ["prelude_coverage", "generic_deriving_337", "generic_form_diagnostics", "generic_recursive_sums", "generic_form_wire", "generic_form_roundtrip"],
+    ["jit_surface", "resident_session", "nullary_sum_generic_deriving", "patch_crosscheck_differential", "multi_module_datacon", "harness_profile_generic_surface", "realm_varid_pinning", "nested_mapm_tag255"],
+    ["user_library", "show_double_lens_sigill", "run_llm_turn_sidecar", "session_scope_retirement", "sweep_repoint_smoke", "session_decl_scope_tree", "session_table_qualified_identity", "session_decl_accum"],
+    ["text_filter_gc", "vendor_text_functions", "stdlib_regressions_02_medium", "stdlib_regressions_02", "test_error_msg", "validator_reject"],
+    ["build_products_dir_differential", "compile_fail", "green_thread_representation", "tenure_resume_gc_repro", "word64_primops_random_probe"],
+    ["cancel"],
+    ["effect_stack"],
+    ["misc"],
+    ["render"],
+    ["repro"],
+    ["verbs"]
+  ],
+  "tidepool-repl": [
+    ["decl_plane"],
+    ["do_block_invariant", "effects_smoke", "cancel_lifecycle", "block_value_semantics", "bare_expr_retry_census", "ask_resume", "auto_verdict_dispatch"],
+    ["batch_turns_spawn_census"],
+    ["lifecycle_meta", "it_binding", "error_recovery"],
+    ["multi_binder", "info_introspect", "lifecycle_state", "lost_session", "gc_heap_verify_stress", "gc_field_replay"],
+    ["value_fidelity", "shadow_rebind", "bindings_dedup"],
+    ["text_bind", "stub_fetch", "session_acceptance", "repro_decl_library_import", "value_binding_acceptance", "repro_t_multiline_sig", "name_shadowing"]
+  ]
+}

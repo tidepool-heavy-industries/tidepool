@@ -58,18 +58,20 @@ default handshake.
 
 ## Regenerate fixtures
 
-After changing translation or serialization, build both halves and invoke the
-Rust frontend:
+After changing translation or serialization, regenerate through the canonical
+development entry point:
 
 ```bash
-cd haskell
-WORKER=$(cabal list-bin tidepool-extract-bin)
-cd ..
-cargo build -p tidepool-extract-cmd --bin tidepool-extract
-TIDEPOOL_EXTRACT_WORKER="$WORKER" target/debug/tidepool-extract \
-  haskell/test/Suite.hs --all-closed \
-  --include haskell/lib --target-module-only --output-dir haskell/test/suite_cbor
+just fixtures-check
+just fixtures-update
 ```
+
+The check verifies a fingerprint of every extractor/library/suite source that
+can affect the corpus, then runs the committed fixtures through the semantic
+suite. Raw CBOR is not compared across fresh GHC environments because internal
+compiler identities are environment-sensitive. The update builds both
+worktree extractor halves, owns the complete output directory, and records the
+new source fingerprint.
 
 `--all-closed` treats its output directory as an owned fixture corpus: after a
 successful write it removes stale `*.cbor` and `*.asks.json` artifacts from

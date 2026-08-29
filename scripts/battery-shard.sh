@@ -25,40 +25,9 @@
 #   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh tidepool-codegen \
 #     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
 #
-# SUB-SHARDING: a bare `-p <crate>` invocation runs well over this script's
-# ~380s budget for tidepool-harness/runtime/repl (only tidepool-handlers fits
-# whole). The `-E 'binary(...) or binary(...)'` groups below replace the
-# single `-p <crate>` shard for those three. Each group is its own
-# `scripts/battery-shard.sh <crate> -E '...'` invocation — run them as a
-# sequence, not concurrently. Re-measure and re-bucket
-# before trusting these groups against a renamed/added test binary.
-#
-# tidepool-harness (7 shards):
-#   -E 'binary(acceptance_askuser) or binary(acceptance_boot_compile_count) or binary(acceptance_cross_turn) or binary(acceptance_finalize) or binary(acceptance_lazy_boot) or binary(acceptance_multi_target) or binary(acceptance_selfharness)'
-#   -E 'binary(selfharness_budget) or binary(selfharness_compaction_fixes) or binary(selfharness_compaction) or binary(selfharness_context_window) or binary(selfharness_framing) or binary(selfharness_lifecycle) or binary(selfharness_spine) or binary(companion_mount_spike) or binary(companion_scope_trees)'
-#   -E 'binary(selfharness_persistence) or binary(selfharness_fn_finalize_spike) or binary(persistence_migration_corpus)'
-#   -E 'binary(companion_collapsed_slice) or binary(answerer_async_fork) or binary(fork_child_decl_plane_type) or binary(listen_channel)'
-#   -E 'binary(agent_stack_scoping) or binary(decl_plane_run_scoping) or binary(dogfood_harness_typecheck) or binary(dogfood_observability) or binary(operator_gate_lifecycle) or binary(finalize_type_pinning) or binary(outer_effects) or binary(outer_fanout) or binary(outer_subagent) or binary(timing_emission_pin) or binary(turn_lease) or binary(provider_behavior)'
-#   -E 'binary(compile_fail) or binary(delegate_positive_path) or binary(delegate_type_pinning)'
-#   -E 'binary(minimal_watch_list) or binary(nested_async_repro) or binary(node_mailboxes) or binary(reinterpret_rowchange_repro) or binary(selfharness_decl_plane_replay) or binary(stable_effects_core_decl_plane) or binary(state_injection_memo_hit)'
-#
-# tidepool-runtime (7 shards):
-#   -E 'binary(proptest_cache_layer) or binary(proptest_gc_pressure) or binary(proptest_haskell_pipeline) or binary(proptest_jit_vs_eval) or binary(proptest_letrec) or binary(proptest_render_json)'
-#   -E 'binary(agent_mode_encoding) or binary(bignum_native) or binary(bridged_records_extract) or binary(cache_tests) or binary(captured_real_core) or binary(case_trap_graceful) or binary(constructors_of_type) or binary(cross_mode_existing) or binary(cross_mode_targeted) or binary(cross_mode_tests) or binary(eager_list_responses) or binary(extract_poison_diagnostic) or binary(extract_spawn_counted) or binary(flinch_katas) or binary(gc_and_errors) or binary(gc_stress_text_fold)'
-#   -E 'binary(prelude_coverage) or binary(generic_deriving_337) or binary(generic_form_diagnostics) or binary(generic_recursive_sums) or binary(generic_form_wire) or binary(generic_form_roundtrip)'
-#   -E 'binary(jit_surface) or binary(resident_session) or binary(nullary_sum_generic_deriving) or binary(patch_crosscheck_differential) or binary(multi_module_datacon) or binary(harness_profile_generic_surface) or binary(realm_varid_pinning) or binary(nested_mapm_tag255)'
-#   -E 'binary(user_library) or binary(show_double_lens_sigill) or binary(run_llm_turn_sidecar) or binary(session_scope_retirement) or binary(sweep_repoint_smoke) or binary(session_decl_scope_tree) or binary(session_table_qualified_identity) or binary(session_decl_accum)'
-#   -E 'binary(text_filter_gc) or binary(vendor_text_functions) or binary(stdlib_regressions_02_medium) or binary(stdlib_regressions_02) or binary(test_error_msg) or binary(validator_reject)'
-#   -E 'binary(build_products_dir_differential) or binary(compile_fail) or binary(green_thread_representation) or binary(tenure_resume_gc_repro) or binary(word64_primops_random_probe)'
-#
-# tidepool-repl (7 shards):
-#   -E 'binary(decl_plane)'
-#   -E 'binary(do_block_invariant) or binary(effects_smoke) or binary(cancel_lifecycle) or binary(block_value_semantics) or binary(bare_expr_retry_census) or binary(ask_resume) or binary(auto_verdict_dispatch)'
-#   -E 'binary(batch_turns_spawn_census)'
-#   -E 'binary(lifecycle_meta) or binary(it_binding) or binary(error_recovery)'
-#   -E 'binary(multi_binder) or binary(info_introspect) or binary(lifecycle_state) or binary(lost_session) or binary(gc_heap_verify_stress) or binary(gc_field_replay)'
-#   -E 'binary(value_fidelity) or binary(shadow_rebind) or binary(bindings_dedup)'
-#   -E 'binary(text_bind) or binary(stub_fetch) or binary(session_acceptance) or binary(repro_decl_library_import) or binary(value_binding_acceptance) or binary(repro_t_multiline_sig) or binary(name_shadowing)'
+# Large crates are partitioned by the checked `dev/test-suites.json` manifest.
+# Run every partition sequentially, with one shared compile daemon, via
+# `just suite <crate>`.
 #
 # Resident compile daemon: same
 # per-run daemon scripts/battery.sh can start — see its header for the full
@@ -95,10 +64,13 @@ resolve_tidepool_extract
 # for tidepool-harness/runtime/repl), a daemon already started by an earlier
 # leg or an enclosing script is reused, not restarted or torn down here.
 nextest_pid=""
-tmp_log="$(mktemp)"
+prepare_battery_artifacts "battery-$crate" scripts/battery-shard.sh "$crate" "$@"
+tmp_log="$BATTERY_NEXTEST_LOG"
 cleanup_exit() {
-  rm -f "$tmp_log"
+  local status=$?
+  finalize_battery_artifacts "$status"
   teardown_battery_daemon
+  return "$status"
 }
 trap cleanup_exit EXIT
 # See scripts/battery.sh's on_signal comment: a signal sent directly to this
@@ -127,7 +99,9 @@ echo "==> shard: -p ${crate} (--ignore-default-filter, TIDEPOOL_EXPENSIVE_TESTS=
 # process substitution so a caller piping/redirecting stderr still sees the
 # identical live stream.
 set +e
-cargo nextest run --ignore-default-filter --no-fail-fast -p "$crate" "$@" 2> >(tee "$tmp_log" >&2) &
+cargo nextest run --ignore-default-filter --no-fail-fast \
+  --status-level fail --final-status-level fail \
+  -p "$crate" "$@" 2> >(tee "$tmp_log" >&2) &
 nextest_pid=$!
 wait "$nextest_pid"
 run_status=$?
