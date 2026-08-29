@@ -7,22 +7,18 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, SomeException, fromException, toException)
-import Data.Char (isAlphaNum, isSpace)
-import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate)
-import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
-import Control.Monad (foldM, when, forM_, void)
+import Data.List (isPrefixOf, intercalate)
+import Data.Maybe (fromMaybe, mapMaybe, isJust)
+import Control.Monad (foldM, when, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 
 import GHC.Types.SourceError (SourceError)
-import GHC (moduleName, moduleNameString, Type)
+import GHC (moduleName, moduleNameString)
 import GHC.Core (Bind(..))
-import GHC.Core.Type (splitTyConApp_maybe)
-import GHC.Core.TyCon (tyConName)
-import GHC.Types.Name (nameOccName, nameModule_maybe, getOccString)
+import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Id (idName)
-import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
-import Data.Word (Word64)
+import GHC.Types.Name.Occurrence (occNameString)
 import qualified Data.Text as T
 
 import Tidepool.Binders
@@ -30,33 +26,29 @@ import Tidepool.Binders
   , extractStmtBinders, classifyBlock, exportItemName
   , TurnKind(..), parseTurnKind
   , TemplateSelector(..), templateSelectorForVerdict, templateSelectorWireName
-  , StmtBinders(..), TurnOut(..), BoundBinder(..)
-  , renderBoundBinderJson, renderVerdictsJson )
+  , StmtBinders(..), TurnOut(..), renderVerdictsJson )
 import Tidepool.Artifacts
   ( cborFileName, pruneAllClosedArtifacts, writeClosedTargets
   , writeWholeModuleClosed, runMultiTargetClosed, renderAsksJson )
 import Tidepool.GhcPipeline
   ( runPipelineSession, PipelineResult(..), dumpCore
-  , stripMonadHead, isClosureType, renderType, splitTupleType
   , withResidentPipeline )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
-import Tidepool.Identity (stableVarId)
 import Tidepool.Session
-  ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
-  , sessionModuleString, parseSessionModule, sessionBinderName
-  , mkThinSessionIface, writeSessionIface
-  , scaffoldTargetName, scaffoldOutputBase )
+  ( SessionScope(..), scaffoldTargetName, scaffoldOutputBase )
+import Tidepool.SessionArtifacts
+  ( emitBindArtifacts, mkBoundBinders, parseValModule )
 import Tidepool.Translate
   ( ClosedModule(..), UnresolvedVar(..), collectDataCons
   , collectTransitiveDCons, collectUsedDataCons, mergeMetaPreserving
   , targetBindingHasIO, translateBinds, translateModuleClosed
   , wiredInDataCons )
-import Tidepool.TypePolicy (typeMentionsEffectMonad)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
+import Tidepool.TurnSource (extractModuleName, spliceTemplate)
 
 type Compiler =
   Maybe SessionScope
@@ -536,168 +528,8 @@ splitComma s = case break (== ',') s of
   (a, [])       -> [a]
   (a, _ : rest) -> a : splitComma rest
 
--- | Splice a turn template: literal replacement of @{{TURN}}@ (the raw turn
--- text, verbatim), @{{TURN_STMT}}@ (the turn text placed as a @do@-block
--- statement — see 'placeTurnStmt'), and @{{BINDERS}}@ (the harvested binder
--- names, comma-joined) against the ORIGINAL template text only — a single
--- left-to-right scan, never re-scanning already-spliced text, so a
--- @{{TURN}}@\/@{{TURN_STMT}}@\/@{{BINDERS}}@ marker occurring verbatim inside
--- the turn text itself is never mistaken for a second substitution point.
--- @{{TURN}}@ is not a string prefix of @{{TURN_STMT}}@ (they diverge at the
--- 7th character, @}@ vs @_@), so checking both at every position is
--- unambiguous regardless of order.
-spliceTemplate :: String -> String -> String -> String
-spliceTemplate tmpl turnText bindersStr = go tmpl
-  where
-    go s
-      | "{{TURN_STMT}}" `isPrefixOf` s = placeTurnStmt turnText ++ go (drop 13 s)
-      | "{{TURN}}" `isPrefixOf` s      = turnText ++ go (drop 8 s)
-      | "{{BINDERS}}" `isPrefixOf` s   = bindersStr ++ go (drop 11 s)
-    go (c : cs) = c : go cs
-    go []       = []
-
--- | Place @turnText@ as a @do@-block statement — the @{{TURN_STMT}}@
--- placement mode. Mirrors Rust's @place_turn_stmt@
--- (@tidepool-runtime/src/session/turn.rs@) and the repl's
--- @push_braced_stmt@ (@tidepool-repl/src/session.rs@) byte for byte: a
--- @let@ turn (at column 1, since a raw turn has no leading indentation)
--- needs explicit decl braces there (a layout @let@ swallows the following
--- @;@), so it is rewritten to @let { <rest> }@; anything else is placed
--- verbatim. Both branches guarantee a trailing newline so a template's own
--- following text always starts on a fresh line.
-placeTurnStmt :: String -> String
-placeTurnStmt turnText = case letRest of
-  Just rest | not ("{" `isPrefixOf` dropWhile isSpace rest) ->
-    "let {" ++ rest ++ (if "\n" `isSuffixOf` rest then "" else "\n") ++ " }\n"
-  _ ->
-    turnText ++ (if "\n" `isSuffixOf` turnText then "" else "\n")
-  where
-    trimmed = dropWhile isSpace turnText
-    letRest = case stripPrefix "let" trimmed of
-      Just rest@(c : _) | isSpace c -> Just rest
-      _                             -> Nothing
-
--- | Extract the name from a source's @module X where@ (or @module X (@
--- export-list) header — mirrors @tidepool_runtime::extract_module_name@
--- exactly, so the scratch file this mode writes lands under the SAME name the
--- existing session compile path already derives from a wrap_* template's
--- header.
-extractModuleName :: String -> Maybe String
-extractModuleName src = listToMaybe
-  [ name
-  | line <- lines src
-  , Just rest <- [stripPrefix "module " (dropWhile (== ' ') line)]
-  , let name = takeWhile (\c -> isAlphaNum c || c == '.' || c == '_') (dropWhile (== ' ') rest)
-  , not (null name)
-  ]
-
--- | The BIND-turn binder records: the bound value's type @T@ (stripped from
--- @result :: Eff stack T@), the thin @Tidepool.Session.Val.G<g>@ iface carrying
--- all N binders, and one 'BoundBinder' per bound name. For a single name the
--- type @T@ is used directly; for N>1 names @T@ must be an N-tuple and is split
--- into per-component types via 'splitTupleType'. The iface + ids are computed
--- the SAME way a later reference turn recomputes them, so the value plane and
--- type plane agree on one key. Shared by @--session-bind@ ('emitBindArtifacts')
--- and @--turn@'s bind path — one computation, three callers.
---
--- @probeOnly@ exempts the cross-row bind guard below: an ephemeral
--- type-probe bind (@:t@) reads the captured type and is discarded, never
--- registered as a session binding, so a row-mentioning type cannot "cross
--- fragments" here — there is no later fragment. A genuine session bind
--- passes 'False' and stays guarded.
-mkBoundBinders :: Bool -> [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
-mkBoundBinders probeOnly bindNames g root result = do
-  effTy <- case prResultType result of
-    Just t  -> return t
-    Nothing -> error "session-bind: could not capture the type of `result` \
-                     \(no such top-level binder typechecked)"
-  let hsc   = prHscEnv result
-      sm    = SessionModule ValMod (Generation g)
-      t     = stripMonadHead effTy          -- Eff stack T -> T
-  componentTypes <- case bindNames of
-    [_] -> return [t]
-    _   -> case splitTupleType t of
-      Nothing  -> error $ "multi-binder: bound type is not a tuple: " ++ renderType t
-      Just tys ->
-        if length tys /= length bindNames
-          then error $ "multi-binder: " ++ show (length bindNames) ++ " binders but "
-                     ++ "type is a " ++ show (length tys) ++ "-tuple: " ++ renderType t
-          else return tys
-  -- A materialized value keeps the type it had in this compilation; unlike a
-  -- declaration signature, it cannot be stripped and inferred again later.
-  -- Therefore a concrete Eff row cannot cross into a later compilation with
-  -- a different row. Vocabulary GADTs are allowed because their definitions
-  -- live in the stable Tidepool.Effects.Core module. A type probe is exempt:
-  -- it reports a type but never registers a value for a later turn.
-  when (not probeOnly) $
-    forM_ (zip bindNames componentTypes) $ \(name, cty) ->
-      when (typeMentionsEffectMonad cty) $
-        error $ "session bind '" ++ name ++ "' captures the effect row in its type ("
-              ++ renderType cty ++ "); row-typed values cannot cross turns/windows compiling a different row — "
-              ++ "bind a pure value or inline the effectful part" ++ eitherBindHint cty
-  let mkEntry name cty =
-        let occ    = mkVarOcc name
-            varid  = stableVarId (sessionBinderName hsc sm occ)
-            modStr = sessionModuleString sm
-            tier   = if isClosureType cty then "Tier1Closure" else "Tier0Data"
-            tdisp  = renderType cty
-        in (BoundBinder name varid modStr tier tdisp, occ, cty)
-      built   = zipWith mkEntry bindNames componentTypes
-      binders = [ b | (b, _, _) <- built ]
-  iface <- mkThinSessionIface hsc sm [(occ, cty) | (_, occ, cty) <- built]
-  writeSessionIface hsc root sm iface
-  forM_ binders $ \(BoundBinder name varid modStr tier tdisp) ->
-    hPutStrLn stderr $ "  Wrote session iface: " ++ modStr ++ " (" ++ name
-             ++ " :: " ++ tdisp ++ ", " ++ tier ++ ", varId " ++ show varid ++ ")"
-  return binders
-
--- | Extra cross-row-bind-guard suggestion for an @Either e t@ reject: the
--- idiom that actually works is destructuring AT the bind (@Right x <- expr@
--- peels the success value off before the row-typed 'Either' ever needs to
--- cross a fragment), which the guard's generic "inline the effectful part"
--- text doesn't name. Empty string for any other shape, so it's safe to
--- append unconditionally.
-eitherBindHint :: Type -> String
-eitherBindHint cty = case splitTyConApp_maybe cty of
-  Just (tc, [_e, _t]) | getOccString (tyConName tc) == "Either" ->
-    " or destructure at the bind: `Right x <- <expr>` binds the success value"
-  _ -> ""
-
--- | The @--session-bind@ artifacts: mint the 'BoundBinder' records via
--- 'mkBoundBinders' and, when requested, write the standalone JSON sidecar.
-emitBindArtifacts :: WorkerRequest -> PipelineResult -> IO ()
-emitBindArtifacts args result = do
-  bindNames <- case requestBindNames args of
-    []  -> error "session-bind requires at least one --bind-name"
-    ns  -> return ns
-  g       <- requireArg "--bind-gen"    (requestBindGen args)
-  root    <- requireArg "--session-root" (requestSessionRoot args)
-  binders <- mkBoundBinders (requestProbeOnly args) bindNames g root result
-  case requestEmitBoundBinders args of
-    Just out -> do
-      writeFile out (renderBoundBindersJson binders)
-      hPutStrLn stderr $ "  Wrote bound-binder sidecar: " ++ out
-    Nothing -> return ()
-
--- | Parse a @--inject-val@ module name (@Tidepool.Session.Val.G<n>@) back into a
--- 'SessionModule'. 'Nothing' for any other string — including a well-formed
--- @Lib@ module, since only @Val@ modules are ever passed to @--inject-val@
--- (silently dropped, matching the prior behavior: the runtime only ever
--- passes well-formed Val module names).
-parseValModule :: String -> Maybe SessionModule
-parseValModule s = case parseSessionModule s of
-  Just sm@(SessionModule ValMod _) -> Just sm
-  _ -> Nothing
-
 requireArg :: String -> Maybe a -> IO a
 requireArg flag = maybe (error ("required argument missing: " ++ flag)) return
-
--- | The BoundBinder JSON sidecar — one record per binder ('renderBoundBinderJson',
--- shared with the 'TBind' rich-result rendering). Handles both single and
--- multi-binder turns (the runtime always reads a @binders@ array).
-renderBoundBindersJson :: [BoundBinder] -> String
-renderBoundBindersJson binders =
-  "{\"binders\":[" ++ intercalate "," (map renderBoundBinderJson binders) ++ "]}"
 
 -- | Deduplicate binding names by appending _1, _2, etc. for collisions.
 dedup :: Map.Map String Int -> [(String, a)] -> [(String, a)]

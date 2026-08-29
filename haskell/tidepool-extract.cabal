@@ -29,9 +29,11 @@ library tidepool-extract-internal
     Tidepool.Json
     Tidepool.Resolve
     Tidepool.Session
+    Tidepool.SessionArtifacts
     Tidepool.Timing
     Tidepool.Translate
     Tidepool.TypePolicy
+    Tidepool.TurnSource
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
