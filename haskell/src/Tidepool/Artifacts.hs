@@ -33,11 +33,11 @@ import GHC.Driver.Env (HscEnv)
 
 import Tidepool.Binders (renderAskJson)
 import Tidepool.CborEncode (encodeMetadata, encodeTree)
+import Tidepool.IR (FlatNode)
+import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Timing (emitPhase, timeSection)
 import Tidepool.Translate
   ( ClosedModule(..)
-  , DCMeta(..)
-  , FlatNode
   , UnresolvedVar(..)
   , collectReachableConDCs
   , collectReachableConDCsRaw

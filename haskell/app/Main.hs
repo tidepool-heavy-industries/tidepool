@@ -43,6 +43,7 @@ import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
+import Tidepool.Identity (stableVarId)
 import Tidepool.Session
   ( SessionScope(..), SessionModule(..), SessionModuleKind(..), Generation(..)
   , sessionModuleString, parseSessionModule, sessionBinderName
@@ -51,7 +52,7 @@ import Tidepool.Session
 import Tidepool.Translate
   ( ClosedModule(..), UnresolvedVar(..), collectDataCons
   , collectTransitiveDCons, collectUsedDataCons, mergeMetaPreserving
-  , stableVarId, targetBindingHasIO, translateBinds, translateModuleClosed
+  , targetBindingHasIO, translateBinds, translateModuleClosed
   , typeMentionsEffectMonad, wiredInDataCons )
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)

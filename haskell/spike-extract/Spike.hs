@@ -32,7 +32,7 @@
 --                pipeline, dodging downsweep (which rejects the source-less
 --                session module, per spike-optionc).
 --   5. RESOLVE : run that Core through tidepool's REAL @translateModuleClosed@
---                (varId / resolveExternals / translateModule) and assert the
+--                (varId / resolveExternals / lowerModule) and assert the
 --                emitted session-binder reference == @stableVarId(name)@, is
 --                0xFE-tagged (external), is NOT 0x45-sentineled, and is NOT in
 --                the unresolved set.
@@ -74,7 +74,9 @@ import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (Id)
 
 import Tidepool.Translate
-  ( translateModuleClosed, ClosedModule(..), FlatNode(..), UnresolvedVar(..), varId, stableVarId )
+  ( translateModuleClosed, ClosedModule(..), UnresolvedVar(..) )
+import Tidepool.Identity (stableVarId, varId)
+import Tidepool.IR (FlatNode(..))
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (try, SomeException)

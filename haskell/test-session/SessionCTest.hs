@@ -50,7 +50,9 @@ import Tidepool.Session
   , mkThinSessionIface, writeSessionIface )
 import Tidepool.GhcPipeline (runPipelineSession, PipelineResult(..))
 import Tidepool.Translate
-  ( translateModuleClosed, ClosedModule(..), FlatNode(..), UnresolvedVar(..), stableVarId )
+  ( translateModuleClosed, ClosedModule(..), UnresolvedVar(..) )
+import Tidepool.Identity (stableVarId)
+import Tidepool.IR (FlatNode(..))
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Exception (try, SomeException)

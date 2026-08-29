@@ -9,7 +9,8 @@ import qualified Data.Text as T
 import Data.Word
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
-import Tidepool.Translate (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..), DCMeta(..))
+import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
+import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 3.0.

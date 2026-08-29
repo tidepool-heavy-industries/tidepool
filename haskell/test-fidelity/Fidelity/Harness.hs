@@ -22,7 +22,8 @@ module Fidelity.Harness
   ) where
 
 import Tidepool.GhcPipeline (runPipeline, PipelineResult(..), isClosureType)
-import Tidepool.Translate (translateModuleClosed, ClosedModule(..), FlatNode(..))
+import Tidepool.Translate (translateModuleClosed, ClosedModule(..))
+import Tidepool.IR (FlatNode(..))
 
 import Control.Exception (try, SomeException, evaluate)
 import Data.Foldable (toList)

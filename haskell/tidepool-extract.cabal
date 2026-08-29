@@ -22,6 +22,9 @@ library tidepool-extract-internal
     Tidepool.ExtractRequest
     Tidepool.FatIface
     Tidepool.GhcPipeline
+    Tidepool.Identity
+    Tidepool.IR
+    Tidepool.Metadata
     Tidepool.Json
     Tidepool.Resolve
     Tidepool.Session

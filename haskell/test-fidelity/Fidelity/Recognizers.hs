@@ -11,7 +11,8 @@
 module Fidelity.Recognizers (checks) where
 
 import Fidelity.Harness (Check, check, extractBinding, nodeList, nvarIds)
-import Tidepool.Translate (ClosedModule, FlatNode(..))
+import Tidepool.Translate (ClosedModule)
+import Tidepool.IR (FlatNode(..))
 
 import Data.Bits (shiftR)
 import Data.Word (Word64)

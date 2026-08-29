@@ -1,9 +1,9 @@
 module Tidepool.Translate
   ( translateBinds
-  , translateModule
+  , lowerModule
+  , LoweredModule(..)
   , translateModuleClosed
   , ClosedModule(..)
-  , DCMeta(..)
   , collectDataCons
   , collectUsedDataCons
   , collectTransitiveDCons
@@ -17,21 +17,11 @@ module Tidepool.Translate
   , valueRepArity
   , mapBang
   , targetBindingHasIO
-  , FlatNode(..)
-  , FlatAlt(..)
-  , FlatAltCon(..)
-  , LitEnc(..)
   , UnresolvedVar(..)
   , errorSentinelVar
   , poisonSentinelSlot
-  , varId
-  , stableVarId
   , modulesOfType
   , stabilizeLocalUniques
-  , fieldParentDisamb
-  , normalizeMod
-  , binderQualName
-  , checkedKeyToIdx
   , typeMentionsEffectMonad
   ) where
 
@@ -51,10 +41,9 @@ import GHC.Builtin.Names (ioTyConKey)
 import GHC.Builtin.PrimOps
 import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isSystemName, nameModule_maybe)
-import GHC.Types.Name.Occurrence (occNameString, fieldOcc_maybe)
+import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Data.FastString (unpackFS)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
-import GHC.Utils.Fingerprint (fingerprintString, Fingerprint(..))
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
@@ -70,12 +59,10 @@ import Data.Char (ord)
 import Data.List (isPrefixOf, isInfixOf)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Word
-import Data.Int
 import Data.Text (Text)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
@@ -86,6 +73,10 @@ import Control.Monad (foldM, forM, replicateM, when)
 import System.IO (hPutStrLn, stderr)
 
 import Tidepool.Resolve (resolveExternals, UnresolvedVar(..))
+import Tidepool.IR (FlatNode(..), FlatAlt(..), FlatAltCon(..), LitEnc(..))
+import Tidepool.Identity
+  ( binderQualName, checkedKeyToIdx, normalizeMod, qualifiedName, varId )
+import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Session (isSessionValModule)
 import qualified System.Environment
 import qualified Data.List
@@ -94,36 +85,6 @@ import qualified Numeric
 import qualified Tidepool.GhcPipeline
 import qualified Debug.Trace
 import System.IO.Unsafe (unsafePerformIO)
-
-data FlatNode
-  = NVar !Word64
-  | NLit !LitEnc
-  | NApp !Int !Int
-  | NLam !Word64 !Int
-  | NLetNonRec !Word64 !Int !Int
-  | NLetRec ![(Word64, Int)] !Int
-  | NCase !Int !Word64 ![FlatAlt]
-  | NCon !Word64 ![Int]
-  | NJoin !Word64 ![Word64] !Int !Int
-  | NJump !Word64 ![Int]
-  | NPrimOp !Text ![Int]
-  deriving (Eq, Show)
-
-data FlatAlt = FlatAlt !FlatAltCon ![Word64] !Int
-  deriving (Eq, Show)
-
-data FlatAltCon = FDataAlt !Word64 | FLitAlt !LitEnc | FDefault
-  deriving (Eq, Show)
-
-data LitEnc
-  = LEInt !Int64
-  | LEWord !Word64
-  | LEChar !Word32
-  | LEString !ByteString
-  | LEByteArray !ByteString  -- raw ByteArray# contents (e.g. BigNat# payload)
-  | LEFloat !Word64    -- IEEE 754 bits
-  | LEDouble !Word64   -- IEEE 754 bits
-  deriving (Eq, Show)
 
 data TransState = TransState
   { tsNodes :: !(Seq FlatNode)
@@ -149,7 +110,7 @@ data TransState = TransState
   , tsPoisonSlots :: !(Map.Map Word64 Word64)
   -- Typed-yield pass (#R0 and its widenings): the varId of each sited verb's
   -- hidden @*Sited@ sibling, keyed by the SURFACE verb's occurrence name
-  -- ('vsName'). Seeded once per 'translateModule' run by 'resolveSitedIds',
+  -- ('vsName'). Seeded once per 'lowerModule' run by 'resolveSitedIds',
   -- which walks 'sitedVerbs' — so this map's key set is exactly the table's,
   -- minus any verb whose sibling isn't in the closed program.
   --
@@ -230,7 +191,7 @@ recordDC dc
       s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
 -- | Fresh site id for a runLLMTurn/runLLMTurnFork call site (#R0):
--- a plain per-'translateModule'-run counter, distinct from 'freshSynthVarId'
+-- a plain per-'lowerModule'-run counter, distinct from 'freshSynthVarId'
 -- (this counter's values travel as literal 'Int' payload data, not VarIds).
 freshSiteId :: TransM Word64
 freshSiteId = do
@@ -241,7 +202,7 @@ freshSiteId = do
 
 -- | The identity slot for one poisoned unresolved external, assigned on first
 -- reference and reused for every later reference to the same original id.
--- Slots are per-'translateModule'-run and monotonic from 1 (0 is reserved for
+-- Slots are per-'lowerModule'-run and monotonic from 1 (0 is reserved for
 -- "no identity recorded"), the same shape 'freshSiteId' uses for runLLMTurn
 -- call sites.
 poisonSlotFor :: Word64 -> TransM Word64
@@ -496,7 +457,7 @@ emitRuntimeUnpackFoldrCString addrIdx fIdx zIdx = do
 
 -- | A 'TransState' with every accumulator empty and no aux-verb sibling ids
 -- resolved — the starting state for a single-binding translation
--- ('translateBinds'). 'translateModule' builds its own, seeding
+-- ('translateBinds'). 'lowerModule' builds its own, seeding
 -- 'tsUnresolvedIds' and the sibling ids.
 emptyTransState :: TransState
 emptyTransState = TransState
@@ -532,6 +493,15 @@ translateBinds binds = concatMap translateBind binds
            else error "Root index mismatch in Rec"
       ) pairs
 
+-- | The output of reachability pruning and Core-to-IR lowering.
+data LoweredModule = LoweredModule
+  { lmNodes :: Seq FlatNode
+  , lmUsedDCs :: Map.Map (Word64, Text) DataCon
+  , lmReachBinds :: [CoreBind]
+  , lmRunLLMTurnSites :: Seq (Word64, Text, [Text])
+  , lmPoisonSlots :: Map.Map Word64 Word64
+  }
+
 -- | Translate an entire module's bindings into a single self-contained tree.
 -- All bindings become nested Let expressions wrapping a Var reference to the
 -- target binding. This eliminates cross-binding Var references since all
@@ -546,8 +516,8 @@ translateBinds binds = concatMap translateBind binds
 -- The fifth component is the poison-slot table (original varId -> identity
 -- slot) for the unresolved externals this run replaced with sentinels; see
 -- 'tsPoisonSlots'.
-translateModule :: [CoreBind] -> String -> Set.Set Word64 -> (Seq FlatNode, Map.Map (Word64, Text) DataCon, [CoreBind], Seq (Word64, Text, [Text]), Map.Map Word64 Word64)
-translateModule allBinds targetName unresolvedIds =
+lowerModule :: [CoreBind] -> String -> Set.Set Word64 -> LoweredModule
+lowerModule allBinds targetName unresolvedIds =
   let targetId = findTargetId targetName allBinds
       -- Canonicalize local identities only after pruning. Compiler sessions
       -- may present unreachable bindings in different orders; allowing those
@@ -565,8 +535,13 @@ translateModule allBinds targetName unresolvedIds =
         , tsSitedIds = resolveSitedIds allBinds
         }
       (_, finalState) = runState (wrapAllBinds neededBinds targetId) initState
-  in ( tsNodes finalState, tsUsedDCs finalState, neededBinds
-     , tsRunLLMTurnSites finalState, tsPoisonSlots finalState )
+  in LoweredModule
+      { lmNodes = tsNodes finalState
+      , lmUsedDCs = tsUsedDCs finalState
+      , lmReachBinds = neededBinds
+      , lmRunLLMTurnSites = tsRunLLMTurnSites finalState
+      , lmPoisonSlots = tsPoisonSlots finalState
+      }
   where
     findTargetId name binds =
       case filter isTarget (concatMap localBindersOf binds) of
@@ -575,7 +550,7 @@ translateModule allBinds targetName unresolvedIds =
         -- (GHC may mark user bindings as Internal after optimization)
         []    -> case filter isNameMatch (concatMap localBindersOf binds) of
                    (b:_) -> b
-                   []    -> error $ "translateModule: exported top-level binding '" ++ name ++ "' not found"
+                   []    -> error $ "lowerModule: exported top-level binding '" ++ name ++ "' not found"
       where
         isTarget b =
           occNameString (nameOccName (idName b)) == name
@@ -709,15 +684,8 @@ translateModule allBinds targetName unresolvedIds =
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetRec pairIdxs bodyIdx)
 
--- | Like translateModule, but first resolves cross-module references
--- by inlining unfoldings from the GHC environment. Returns the
--- translated tree, used DataCons, any variables that could not be
--- resolved (no unfolding available), and the REACHABLE binds that were
--- actually compiled (the target's transitive closure, NOT the full closed
--- graph) — the meta walks consume this so the DataConTable only ever sees
--- constructors the emitted program references.
--- | Result of resolving + translating a module closed around one target
--- binding — the unit `writeWholeModuleClosed` serializes.
+-- | A target after external resolution, reachability pruning, lowering, and
+-- emitted-program validation.
 data ClosedModule = ClosedModule
   { cmNodes      :: Seq FlatNode
     -- ^ The emitted flat node tree (the JIT-able program).
@@ -728,17 +696,13 @@ data ClosedModule = ClosedModule
   , cmReachBinds :: [CoreBind]
     -- ^ The reachable binds actually compiled — the meta walks run over this.
   , cmVarNames   :: [(Word64, Text)]
-    -- ^ varId → human name for runtime unresolved-error naming (friction #12).
+    -- ^ varId → human name for runtime unresolved-error naming.
   , cmRunLLMTurnSites :: [(Word64, Text, [Text])]
-    -- ^ runLLMTurn/runLLMTurnFork {site, type, modules} triples (#R0), for
-    -- the asks.json sidecar 'writeWholeModuleClosed' writes next to
-    -- meta.cbor. 'modules' ('modulesOfType's result) is the defining-module
-    -- set a shim must import to resolve 'type' by name.
+    -- ^ Ask sites and the defining modules needed to resolve their types.
   , cmPoisoned   :: [(Word64, Text)]
     -- ^ Sentinel identity slot → qualified name, for every unresolved external
     -- the emitted program replaced with a @0x45@ kind-4 poison node. Shipped
-    -- as meta.cbor's optional @poisoned@ key (wire 2.1) so the JIT can NAME
-    -- the symbol when one is forced, instead of reporting a bare kind=4.
+    -- in metadata so a forced poison can name the missing symbol.
   }
 
 translateModuleClosed :: HscEnv -> [CoreBind] -> String -> IO ClosedModule
@@ -746,8 +710,13 @@ translateModuleClosed hscEnv allBinds targetName = do
   (closedBinds0, unresolved) <- resolveExternals varId hscEnv allBinds
   dedupedBinds <- uniquifyDuplicateBinders closedBinds0
   let unresolvedIds = Set.fromList (map uvKey unresolved)
-      (nodes, usedDCs, reachBinds, runLLMTurnSites, poisonSlots) =
-        translateModule dedupedBinds targetName unresolvedIds
+      LoweredModule
+        { lmNodes = nodes
+        , lmUsedDCs = usedDCs
+        , lmReachBinds = reachBinds
+        , lmRunLLMTurnSites = runLLMTurnSites
+        , lmPoisonSlots = poisonSlots
+        } = lowerModule dedupedBinds targetName unresolvedIds
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
   -- name contains the needle (post-resolveExternals Core — what the JIT
   -- actually compiles; can differ from --dump-core's module view).
@@ -885,7 +854,7 @@ translateModuleClosed hscEnv allBinds targetName = do
                  | vid <- vids ]
       ++ "This is an extract-pipeline bug (a binding was renamed, culled, or "
       ++ "missed by reachability) — not a user error."
-  -- Return the REACHABLE binds (what 'translateModule' actually compiled), not
+  -- Return the reachable binds (what 'lowerModule' compiled), not
   -- the full closed graph. The meta walks (collectUsedDataCons /
   -- collectTransitiveDCons) run over this, so they harvest only constructors
   -- the emitted program references — quoter-internal Tidepool.QQ.* AST cons and
@@ -1204,29 +1173,6 @@ isGhcCompilerDC = isGhcCompilerName . dataConName
 
 isGhcCompilerTyCon :: TyCon -> Bool
 isGhcCompilerTyCon = isGhcCompilerName . tyConName
-
--- | One DataCon's serializable metadata (the per-entry shape
--- 'Tidepool.CborEncode.encodeMetaEntry' writes to meta.cbor).
-data DCMeta = DCMeta
-  { dcmId         :: !Word64
-  , dcmName       :: !Text
-  , dcmTag        :: !Int
-  , dcmArity      :: !Int
-  , dcmBangs      :: ![Text]
-  , dcmQualName   :: !Text
-  , dcmFieldLabels :: ![Text]
-  -- | Rendered name of the constructor's parent TyCon (e.g. "Verdict"),
-  -- unqualified — lets Rust resolve a rendered type name to its constructor
-  -- set ('DataConTable::constructors_of_type').
-  , dcmTypeName   :: !Text
-  -- | Rendered field types, in field (declaration) order — same @ppr@
-  -- convention as 'dcParentTypeName' / the asks.json sidecar. Sourced from
-  -- 'dataConOrigArgTys' (source-level types), so its length always matches
-  -- 'dcmFieldLabels' for a record constructor. Lets Rust render a full
-  -- GHC-style @data@ declaration ('tidepool_harness::synopsis::type_document')
-  -- instead of a names-only synopsis.
-  , dcmFieldTypes :: ![Text]
-  }
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
@@ -1970,7 +1916,7 @@ translate expr =
     -- the verb's leading @Type@ arguments plus its own trailing value args,
     -- which are translated like any other Core expression. The ONLY Core
     -- synthesis permitted is the head-swap to the hidden @*Sited@ sibling
-    -- (its varId resolved once, by name, in 'translateModule') with a fresh
+    -- (its varId resolved once, by name, in 'lowerModule') with a fresh
     -- site-id literal prepended — the sibling's REAL body (which builds the
     -- "typedSite"-tagged payload) then runs normally at JIT runtime; we
     -- never construct that payload ourselves.
@@ -1993,7 +1939,7 @@ translate expr =
         sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
         case sitedIdM of
           -- The sibling's varId is resolved ONCE, by name, by a scan over
-          -- the FULL closed bind pool ('translateModule's 'resolveSitedIds')
+          -- the full closed bind pool ('lowerModule'/'resolveSitedIds')
           -- — always populated on the real writeWholeModuleClosed pass (the
           -- effect's helper text is always present). This branch instead
           -- fires when OTHER callers re-run 'translate' with a throwaway,
@@ -2410,134 +2356,6 @@ mapAltCon = \case
     return $ FDataAlt (varId (dataConWorkId dc))
   LitAlt l   -> return $ FLitAlt (mapLit l)
   DEFAULT    -> return FDefault
-
-varId :: Var -> Word64
-varId v = case isDataConId_maybe v of
-  Just dc -> stableVarId (varName (dataConWorkId dc))
-  Nothing
-    | isExternalName (varName v) -> stableVarId (varName v)
-    | otherwise                  -> localVarId v
-
--- | For local (non-external) variables, hash the OccName together with the
--- GHC unique to produce a disambiguated ID. Raw GHC uniques collide across
--- modules after cross-module inlining: e.g., unique (X, 12) may appear in
--- 63 different inlined bindings with names like exit_Xc, ww_Xc, ds_Xc.
--- Including the OccName in the hash disambiguates them.
-localVarId :: Var -> Word64
-localVarId v =
-  let k = getKey (varUnique v)
-      occ = occNameString (nameOccName (varName v))
-      combined = occ ++ "#" ++ show k
-      Fingerprint h1 _ = fingerprintString combined
-  in h1 .&. 0x00FFFFFFFFFFFFFF
-
--- | Alias an exact module name to its canonical spelling, so the same
--- entity reached through two module paths gets ONE 'stableVarId'. Every
--- module name NOT in this table passes through unchanged — no prefix or
--- infix matching.
---
--- 'Data.Text.Internal' -> 'Data.Text': the @text@ package defines 'Text'
--- and its primitives in @Data.Text.Internal@ and re-exports them from
--- @Data.Text@; 'isDataTextEmptyVar' already special-cases both spellings
--- for @empty@, direct evidence both are observed as the defining module
--- for the same binding.
---
--- 'GHC.Internal.Maybe' -> 'GHC.Maybe': GHC's base-library split
--- (GHC >= 9.10) moved 'Maybe'\'s definition into the @ghc-internal@
--- package's @GHC.Internal.Maybe@, re-exported from @base@'s @GHC.Maybe@;
--- both are real, separately-exposed modules in this toolchain
--- (@ghc-pkg field ghc-internal\/base exposed-modules@). This alias was
--- introduced alongside the Maybe-unboxing fix in 805099c3.
-moduleAliasTable :: [(String, String)]
-moduleAliasTable =
-  [ ("Data.Text.Internal", "Data.Text")
-  , ("GHC.Internal.Maybe", "GHC.Maybe")
-  ]
-
--- | Normalize a module name via 'moduleAliasTable', an exact-match lookup.
-normalizeMod :: String -> String
-normalizeMod s = Data.Maybe.fromMaybe s (lookup s moduleAliasTable)
-
--- | Module-qualified name for a DataCon (e.g. "Data.Map.Bin").
--- Falls back to just the OccName for wired-in names without a module.
-qualifiedName :: Name -> Text
-qualifiedName name = case nameModule_maybe name of
-  Just m  -> T.pack (normalizeMod (moduleNameString (moduleName m)) ++ "." ++ occNameString (nameOccName name))
-  Nothing -> T.pack (occNameString (nameOccName name))
-
--- | Diagnostic label for a binder, mirroring 'varId'\'s own case split so the
--- label always names the identity 'varId' actually hashed. A local binder
--- has no stable module-qualified name, so it falls back to its occurrence
--- name tagged @(local)@ — still actionable in a collision error.
-binderQualName :: Id -> Text
-binderQualName v = case isDataConId_maybe v of
-  Just dc -> qualifiedName (varName (dataConWorkId dc))
-  Nothing
-    | isExternalName (varName v) -> qualifiedName (varName v)
-    | otherwise -> T.pack (occNameString (nameOccName (varName v))
-                           ++ "#" ++ show (getKey (varUnique v)) ++ " (local)")
-
--- | Build a varId -> list-position map from ordered (varId, qualified-name)
--- pairs. Errors loudly when two entries share a varId but carry DIFFERENT
--- qualified names — a genuine 'stableVarId' collision, which would
--- otherwise silently drop one binding from a reachability DFS keyed on this
--- map. Repeated entries for the SAME qualified name (the same entity
--- reached more than once) are not a collision.
---
--- The names compared here come from 'qualifiedName', which applies
--- 'moduleAliasTable'. Two bindings the table deliberately aliases therefore
--- compare EQUAL and pass — which is the point for a correct alias (one
--- entity, two spellings), and is why a wrong entry in that table is the one
--- collision class this guard cannot see. Keep the table minimal.
-checkedKeyToIdx :: [(Word64, Text)] -> Map.Map Word64 Int
-checkedKeyToIdx pairs = Map.map fst (foldl' step Map.empty (zip [0 :: Int ..] pairs))
-  where
-    step acc (i, (k, qn)) = case Map.lookup k acc of
-      Just (_, qn') | qn' /= qn ->
-        error $ "varId collision: 0x" ++ Numeric.showHex k ""
-          ++ " maps to both " ++ T.unpack qn' ++ " and " ++ T.unpack qn
-      _ -> Map.insert k (i, qn) acc
-
-stableVarId :: Name -> Word64
-stableVarId name = stableVarIdWith (fieldParentDisamb name) name
-
--- | Record fields live in their own 'NameSpace' ('FldName', GHC ≥9.6) carrying
--- the parent type/constructor; fold it into the fingerprint so two records
--- sharing a field label ('DuplicateRecordFields') get DISTINCT ids.
---
--- Supersedes b4e0f8c's @recSelParentKey@, which read 'idDetails' to find the
--- 'RecSelId' parent. Deriving the disambiguator from the 'Name' makes it a pure
--- function of the reference, independent of how the 'Id' was reconstructed: it
--- cannot silently degrade to 'Nothing' on a binder that has lost its 'RecSelId'
--- details (anything rebuilt from fat-interface Core via 'tcTopIfaceBindings'
--- gets vanilla 'idDetails'). This is a simplification-plus-hardening, NOT a fix
--- for a collision reproduced on current source: every dup-field configuration
--- constructible in-tree (home source, and records as a compiled-package
--- dependency, with or without exposed unfoldings) already carried 'RecSelId', so
--- b4e0f8c and this mechanism agree on all of them. The historically-observed
--- collision (0xfea90eccc07baa0f, two TOP @path@ sites in Tidepool.Records) came
--- from a STALE deployed extract binary predating b4e0f8c, not from current
--- source. Contract pinned by @test-varid/VarIdMechanismTest.hs@. Non-field names
--- get @""@ (byte-identical to the original 'stableVarId'), so the DataConTable \/
--- fixture meta is unperturbed.
-fieldParentDisamb :: Name -> String
-fieldParentDisamb n = case fieldOcc_maybe (nameOccName n) of
-  Just parent -> '@' : unpackFS parent
-  Nothing     -> ""
-
--- | 'stableVarId' with an explicit disambiguator folded into the fingerprinted
--- string.  @'stableVarIdWith' "" name@ is byte-identical to the original scheme.
--- Callers outside 'varId' (e.g. 'sessionBinderName') are in the 'VarName'
--- namespace so 'fieldParentDisamb' returns @""@ for them — no change.
-stableVarIdWith :: String -> Name -> Word64
-stableVarIdWith disamb name =
-  let modStr = case nameModule_maybe name of
-        Just m  -> normalizeMod (moduleNameString (moduleName m))
-        Nothing -> "WiredIn"
-      occStr = occNameString (nameOccName name)
-      fullStr = modStr ++ ":" ++ occStr ++ disamb
-      Fingerprint h1 _ = fingerprintString fullStr
-  in (0xFE `shiftL` 56) .|. (h1 .&. 0x00FFFFFFFFFFFFFF)
 
 stripTicksAndCasts :: CoreExpr -> CoreExpr
 stripTicksAndCasts (Tick _ e) = stripTicksAndCasts e
@@ -3463,7 +3281,7 @@ leadingTypes n as
 -- seed. The siblings are ordinary home-module bindings (Tidepool.Effects,
 -- spliced via the effect defs' helper text, or Tidepool.Fork's own
 -- @forkMapSited@\/@forkCataSited@), so a name lookup over the top binders
--- finds their real Ids — mirroring 'translateModule's own 'findTargetId'.
+-- finds their real Ids, mirroring 'lowerModule''s target lookup.
 -- @translate@ can't do an HscEnv lookup itself (TransM is pure State, no
 -- IO), which is why resolution happens once, here.
 --

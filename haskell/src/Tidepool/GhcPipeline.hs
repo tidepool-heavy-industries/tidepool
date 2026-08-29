@@ -1295,7 +1295,7 @@ promoteConfigSafetyWarning warning =
 -- Top-level binders with INTERNAL names (floats like @k_X1@, @$wk_snOX@) keep
 -- per-module uniques. `runPipeline` concatenates several modules' bindings for
 -- translation, so (occName, unique-key) pairs collide across modules — and
--- @Translate.localVarId@ hashes exactly that pair. Two distinct floats can
+-- @Identity.varId@ hashes exactly that pair. Two distinct floats can
 -- then receive the same VarId and shadow each other in the serialized program.
 -- Observed as #313: Probe's tuple-unpacking continuation @k_X1@ resolved to
 -- the preamble's unrelated @k_X1 :: [Text] -> ...@, sending the raw effect
@@ -1304,7 +1304,7 @@ promoteConfigSafetyWarning warning =
 -- Fix: give every internal top-level binder an EXTERNAL name qualified by its
 -- defining module, with a STABLE disambiguator baked into the OccName
 -- (@k@ → @Probe.k_t3@, where @3@ is @k@'s ordinal position among this
--- module's own top-level binders), so @Translate.stableVarId@ yields a
+-- module's own top-level binders), so @Identity.stableVarId@ yields a
 -- globally unique, deterministic VarId. The ordinal — not the binder's raw
 -- GHC 'Unique' — is what makes this deterministic ACROSS separate compiles
 -- of the same source: 'mg_binds'\'s order is a pure function of this

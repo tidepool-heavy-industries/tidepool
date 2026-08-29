@@ -37,7 +37,9 @@ import GHC.Core.Multiplicity (pattern ManyTy)
 import GHC.Builtin.Types (intTy)
 import GHC.Core (Bind(..), Expr(..), CoreBind)
 
-import Tidepool.Translate (stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx, varId, stabilizeLocalUniques, translateModule)
+import Tidepool.Identity
+  ( stableVarId, fieldParentDisamb, normalizeMod, checkedKeyToIdx, varId )
+import Tidepool.Translate (LoweredModule(..), lowerModule, stabilizeLocalUniques)
 
 import Control.Exception (SomeException, evaluate, try)
 import Control.Monad (forM_, unless)
@@ -176,10 +178,10 @@ main = do
         let x = mkLocalVar 40 "unusedX"
             topB = mkTopVar 997 "unused"
         in NonRec topB (Lam x (Var x))
-      (withUnused, _, _, _, _) =
-        translateModule [unusedBind, targetBind] "target" Set.empty
-      (withoutUnused, _, _, _, _) =
-        translateModule [targetBind] "target" Set.empty
+      withUnused = lmNodes
+        (lowerModule [unusedBind, targetBind] "target" Set.empty)
+      withoutUnused = lmNodes
+        (lowerModule [targetBind] "target" Set.empty)
 
       stabChecks :: [(String, Bool)]
       stabChecks =
@@ -193,7 +195,7 @@ main = do
             case siblingVarIds stabSibling of
               Just (v1, v2) -> v1 /= v2
               Nothing -> False)
-        , ("translateModule: unreachable bindings do not perturb emitted VarIds",
+        , ("lowerModule: unreachable bindings do not perturb emitted VarIds",
             withUnused == withoutUnused)
         ]
 
