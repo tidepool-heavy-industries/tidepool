@@ -12,7 +12,7 @@
 //! 1. **P** (a `Finalize Mounted`-contracted answerer node, attached to a
 //!    session it shares with every other node in this test) finalizes
 //!    `Mounted { applyMounted = \x -> x + 1 }` and suspends. The runtime
-//!    mints a [`tidepool_codegen::jit_machine::ValueHandle`] over the
+//!    mints a [`tidepool_codegen::suspension::ValueHandle`] over the
 //!    payload ([`ResidentSession::finalized_handle`]) — the SAME primitive
 //!    the fn-finalize-spike suite uses to deliver a closure into a parked
 //!    continuation, reached here directly rather than through the driver.
@@ -59,7 +59,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::json;
-use tidepool_codegen::jit_machine::RealmId;
+use tidepool_codegen::suspension::RealmId;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::harness::{AnswerContract, Session};
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};

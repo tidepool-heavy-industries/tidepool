@@ -17,10 +17,10 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 pub use tidepool_codegen::host_fns::{drain_diagnostics, push_diagnostic};
-pub use tidepool_codegen::jit_machine::{CancelHandle, JitError, ResumeInput};
-use tidepool_codegen::jit_machine::{
-    ContinuationId, JitEffectMachine, ParkedOutcome, RealmId, SuspensionRun,
-};
+use tidepool_codegen::jit_machine::JitEffectMachine;
+pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
+pub use tidepool_codegen::suspension::ResumeInput;
+use tidepool_codegen::suspension::{ContinuationId, ParkedOutcome, RealmId, SuspensionRun};
 pub use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::EffectBoundary;
 pub use tidepool_eval::value::Value;

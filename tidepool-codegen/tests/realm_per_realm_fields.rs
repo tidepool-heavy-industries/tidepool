@@ -26,9 +26,8 @@ use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
-use tidepool_codegen::jit_machine::{
-    ContinuationId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
-};
+use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::suspension::{ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;

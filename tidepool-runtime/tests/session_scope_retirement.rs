@@ -113,7 +113,7 @@ fn tenure(core: &mut PersistentSession, label: &str, n: i64) -> RootSlot {
 /// test cannot reach the machine through `ResidentSession`.
 fn mount(core: &mut PersistentSession, scope: ScopeId, name: &str, raw: u64, slot: RootSlot) {
     let machine = core.machine_mut().expect("bootstrapped");
-    let handle = machine.mint_handle_from_root(slot, tidepool_codegen::jit_machine::RealmId(0));
+    let handle = machine.mint_handle_from_root(slot, tidepool_codegen::suspension::RealmId(0));
     let mounted = machine.handle_slot(handle).expect("handle is live");
     assert!(machine.release_handle(handle), "handle released once");
     core.bind_in(scope, entry(name, raw, mounted))
@@ -162,7 +162,7 @@ fn retiring_a_scope_releases_exactly_the_roots_its_receipt_reports() {
     let outstanding = core
         .machine_mut()
         .expect("bootstrapped")
-        .mint_handle_from_root(handle_slot, tidepool_codegen::jit_machine::RealmId(0));
+        .mint_handle_from_root(handle_slot, tidepool_codegen::suspension::RealmId(0));
 
     let baseline_roots = core.persistent_roots_count();
     let baseline_root_frame = core.scope_binding_count(ScopeId::ROOT);

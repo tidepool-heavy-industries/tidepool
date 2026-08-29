@@ -26,9 +26,9 @@ use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{ResumeInput, Suspendable, SuspendableOutcome};
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::scope::ScopeId;
+use tidepool_codegen::suspension::{ResumeInput, Suspendable, SuspendableOutcome};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;

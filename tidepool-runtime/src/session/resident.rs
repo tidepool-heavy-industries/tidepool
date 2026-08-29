@@ -58,9 +58,9 @@ use std::path::{Path, PathBuf};
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{
-    ContinuationId, FuncId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
-    SuspensionRun, ValueHandle,
+use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine};
+use tidepool_codegen::suspension::{
+    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionRun, ValueHandle,
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
@@ -1891,7 +1891,7 @@ enum ParkedRun {
 fn project_parked(
     machine: &mut JitEffectMachine,
     outcome: ParkedOutcome,
-    realm: tidepool_codegen::jit_machine::RealmId,
+    realm: RealmId,
 ) -> ParkedRun {
     match outcome {
         ParkedOutcome::CompletedValue(value) => ParkedRun::Completed { value, bound: None },

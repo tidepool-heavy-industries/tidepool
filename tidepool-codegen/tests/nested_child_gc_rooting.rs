@@ -23,7 +23,8 @@ mod support;
 use support::LinearMachine;
 
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{JitEffectMachine, ResumeInput, SuspendableOutcome};
+use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::suspension::{ResumeInput, SuspendableOutcome};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;

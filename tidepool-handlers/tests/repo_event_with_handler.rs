@@ -66,8 +66,9 @@ use tidepool_bridge_effects::{
     EvCommitReceipt, EvEventId, EvHeadChangeKind, EvHeadChangeReceipt, EvRepositoryEvent,
     WtBranchName, WtGitOid, WtWorktreeId,
 };
-use tidepool_codegen::jit_machine::{
-    ContinuationId, JitEffectMachine, JitError, ParkedOutcome, RealmId, ResumeInput, SuspensionRun,
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
+use tidepool_codegen::suspension::{
+    ContinuationId, ParkedOutcome, RealmId, ResumeInput, SuspensionRun,
 };
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;

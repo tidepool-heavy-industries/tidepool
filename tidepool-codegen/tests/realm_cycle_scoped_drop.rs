@@ -31,9 +31,8 @@ mod support;
 use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{
-    JitEffectMachine, ParkKind, ParkedOutcome, RealmId, ResumeInput,
-};
+use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::suspension::{ParkKind, ParkedOutcome, RealmId, ResumeInput};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;

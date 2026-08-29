@@ -29,9 +29,9 @@ use crate::heap_bridge;
 use crate::machine_state::{machine_state, MachineState};
 use crate::nursery::Nursery;
 use crate::pipeline::CodegenPipeline;
-pub use crate::suspension::{
-    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
-    SuspensionEntry, SuspensionRun, ValueHandle,
+use crate::suspension::{
+    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionEntry, SuspensionRun,
+    ValueHandle,
 };
 use crate::yield_type::Yield;
 
@@ -1655,10 +1655,9 @@ impl JitEffectMachine {
                         // live at `slot` regardless (that root is what
                         // `MaterializeResult::Bind`'s caller actually resolves a
                         // later reference through), this bridge only needs to
-                        // produce SOMETHING renderable. Strictly a superset of
-                        // the old behavior — a Tier0 value never reaches a
-                        // `TAG_CLOSURE` (nothing left to substitute), so this
-                        // is a no-op there.
+                        // produce SOMETHING renderable. Tier0 values never
+                        // reach a `TAG_CLOSURE`, so this tolerance changes only
+                        // the closure-bearing cases it is intended to support.
                         let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                         let bridge_res = unsafe {
                             let live = slot.current();

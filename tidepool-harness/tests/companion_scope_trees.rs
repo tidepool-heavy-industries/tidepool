@@ -75,8 +75,8 @@ mod support;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tidepool_codegen::jit_machine::RealmId;
 use tidepool_codegen::scope::ScopeId;
+use tidepool_codegen::suspension::RealmId;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::harness::{AnswerContract, Session};
 use tidepool_harness::log::{Actor, LogHeader, LogWriter};

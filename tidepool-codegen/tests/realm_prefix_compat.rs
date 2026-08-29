@@ -38,10 +38,8 @@ mod support;
 use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{
-    ContinuationId, JitEffectMachine, JitError, ParkKind, ParkedOutcome, PrefixMismatch, RealmId,
-    ResumeInput,
-};
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError, PrefixMismatch};
+use tidepool_codegen::suspension::{ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;

@@ -16,7 +16,7 @@
 //! [`Harness::take_finalized_value_keep_open`] (bridged, as before); a
 //! `finalize`d CLOSURE crosses via
 //! [`Harness::take_finalized_handle_keep_open`] — a
-//! [`tidepool_codegen::jit_machine::ValueHandle`] over the payload's own
+//! [`tidepool_codegen::suspension::ValueHandle`] over the payload's own
 //! machine-side root, never deep-forced or serialized — delivered straight
 //! into the OUTER session's parked `runLLMTurn` continuation via
 //! [`ResidentSession::resume`] (data) or [`ResidentSession::resume_handle`]
@@ -725,13 +725,13 @@ enum AgentSessionMode {
     /// read via [`Self::retire_typed_request_agent`] at loop end.
     ReusableLoop {
         node: NodeId,
-        realm: tidepool_codegen::jit_machine::RealmId,
+        realm: tidepool_codegen::suspension::RealmId,
     },
     /// A `runLLMTurnBranch` child's mode: answers exactly once, then is
     /// frozen and retired.
     OneShotBranch {
         node: NodeId,
-        realm: tidepool_codegen::jit_machine::RealmId,
+        realm: tidepool_codegen::suspension::RealmId,
         scope: tidepool_codegen::scope::ScopeId,
     },
 }
@@ -777,7 +777,7 @@ impl AgentSessionMode {
     ) -> Result<
         (
             NodeId,
-            tidepool_codegen::jit_machine::RealmId,
+            tidepool_codegen::suspension::RealmId,
             tidepool_codegen::scope::ScopeId,
         ),
         DriverError,

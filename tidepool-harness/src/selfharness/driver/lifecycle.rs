@@ -1098,8 +1098,8 @@ impl SelfHarnessDriver {
     /// so concurrent fanout/fork children ([`Self::service_outer_fanout`])
     /// can each mint their OWN realm alongside the single reused
     /// [`Self::answerer`]'s, without contending for `&mut self`.
-    pub(crate) fn mint_realm(&self) -> tidepool_codegen::jit_machine::RealmId {
-        tidepool_codegen::jit_machine::RealmId(
+    pub(crate) fn mint_realm(&self) -> tidepool_codegen::suspension::RealmId {
+        tidepool_codegen::suspension::RealmId(
             self.iteration_realm.fetch_add(1, Ordering::SeqCst) + 1,
         )
     }

@@ -953,7 +953,7 @@ impl<O: OutputSink> SessionEngine<O> {
 fn build_suspended_message<O, H>(
     machine: tidepool_codegen::jit_machine::JitEffectMachine,
     table: tidepool_repr::DataConTable,
-    continuation: tidepool_codegen::jit_machine::ContinuationId,
+    continuation: tidepool_codegen::suspension::ContinuationId,
     wrapped: GateDispatcher<H>,
     request: tidepool_eval::value::Value,
     permit: OwnedSemaphorePermit,
@@ -992,7 +992,7 @@ where
 fn make_resume_closure<O, H>(
     mut machine: tidepool_codegen::jit_machine::JitEffectMachine,
     table: tidepool_repr::DataConTable,
-    continuation: tidepool_codegen::jit_machine::ContinuationId,
+    continuation: tidepool_codegen::suspension::ContinuationId,
     base: H,
     effect_names: Vec<String>,
 ) -> StowedResume<O>

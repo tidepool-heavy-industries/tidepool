@@ -199,7 +199,7 @@ struct NodeConvo {
     /// answerer nodes each get their own realm on the SHARED machine;
     /// retirement is that realm's scope exit). `None` = the
     /// session's default realm ([`OUTER_REALM`]).
-    realm: Option<tidepool_codegen::jit_machine::RealmId>,
+    realm: Option<tidepool_codegen::suspension::RealmId>,
     /// The scope-tree node this node's turns COMPILE and BIND in. The
     /// `realm` above is the window's HEAP-side lifetime (parked
     /// frames, handles); this is its NAME-side one (decl tip, value-plane
@@ -322,7 +322,7 @@ struct PendingSuspension {
 /// session-owned heap root (a green thread's settled handle result).
 enum ResumeParentInput {
     Answer(Value),
-    BorrowedRoot(tidepool_codegen::jit_machine::ValueHandle),
+    BorrowedRoot(tidepool_codegen::suspension::ValueHandle),
 }
 
 /// A just-created node's staged opening context, held between node creation
@@ -574,8 +574,8 @@ fn pick_render_opts<'a>(
 /// outer run/resume, so an outer frame parked by a re-suspension can never
 /// be owned by (and accidentally closed with) whichever answerer realm ran
 /// last. Attached answerer realms are minted per loop from 1 upward.
-pub const OUTER_REALM: tidepool_codegen::jit_machine::RealmId =
-    tidepool_codegen::jit_machine::RealmId(0);
+pub const OUTER_REALM: tidepool_codegen::suspension::RealmId =
+    tidepool_codegen::suspension::RealmId(0);
 
 /// A queued window exit: the two halves of an attached node's retirement that
 /// need the machine in hand. Either half may be absent (a node with a realm and
@@ -583,7 +583,7 @@ pub const OUTER_REALM: tidepool_codegen::jit_machine::RealmId =
 struct PendingSessionExit {
     session: tidepool_repr::SessionId,
     node: NodeId,
-    realm: Option<tidepool_codegen::jit_machine::RealmId>,
+    realm: Option<tidepool_codegen::suspension::RealmId>,
     scope: Option<ScopeId>,
 }
 
@@ -1226,7 +1226,7 @@ impl Harness {
         &self,
         session: &mut Session,
         node: NodeId,
-        realm: Option<tidepool_codegen::jit_machine::RealmId>,
+        realm: Option<tidepool_codegen::suspension::RealmId>,
         scope: Option<ScopeId>,
     ) {
         if let Some(realm) = realm {
@@ -2687,7 +2687,7 @@ impl Harness {
         &self,
         node: NodeId,
         hole: &HoleId,
-        handle: tidepool_codegen::jit_machine::ValueHandle,
+        handle: tidepool_codegen::suspension::ValueHandle,
     ) -> Result<(), HarnessError> {
         let _lease = self.acquire_turn_lease(node)?;
         self.resume_parent_input(node, hole, ResumeParentInput::BorrowedRoot(handle))
@@ -3720,7 +3720,7 @@ impl Harness {
     /// Assign `node`'s realm — every subsequent turn this node runs on its
     /// session parks under it (set into the session at run time, inside the
     /// checkout). The driver mints one realm per answerer node.
-    pub fn set_node_realm(&self, node: NodeId, realm: tidepool_codegen::jit_machine::RealmId) {
+    pub fn set_node_realm(&self, node: NodeId, realm: tidepool_codegen::suspension::RealmId) {
         let mut convos = self.convos.lock();
         if let Some(convo) = convos.get_mut(&node) {
             convo.realm = Some(realm);

@@ -44,7 +44,7 @@ pub(crate) enum GreenChain {
 /// The driver's bookkeeping for one green thread: which realm its frames
 /// park under (the unit `cancel` closes) and its terminal-state sum.
 pub(crate) struct GreenThread {
-    pub(crate) realm: tidepool_codegen::jit_machine::RealmId,
+    pub(crate) realm: tidepool_codegen::suspension::RealmId,
     pub(crate) state: GreenThreadState,
 }
 
@@ -68,7 +68,7 @@ pub(crate) enum GreenThreadState {
 /// is how this distinction was found.
 pub(crate) enum GreenResult {
     Value(Value),
-    Root(tidepool_codegen::jit_machine::ValueHandle),
+    Root(tidepool_codegen::suspension::ValueHandle),
 }
 
 /// One already-produced suspension (or completion) waiting to be classified
@@ -101,7 +101,7 @@ pub(crate) enum GreenDelivery<'a> {
 /// session-owned root (a settled thread's in-heap result).
 pub(crate) enum GreenAnswer {
     Value(Value),
-    BorrowedRoot(tidepool_codegen::jit_machine::ValueHandle),
+    BorrowedRoot(tidepool_codegen::suspension::ValueHandle),
 }
 
 /// What one popped ready item resolved to, and what the scheduler owes it in
@@ -433,7 +433,7 @@ impl SelfHarnessDriver {
                 // with `OUTER_REALM` (0), a per-loop answerer realm
                 // (`iteration_realm`, small increasing ints), or
                 // `ResidentSession::run_child`'s throwaway realms (bit 63).
-                let realm = tidepool_codegen::jit_machine::RealmId((1u64 << 61) | *next_realm);
+                let realm = tidepool_codegen::suspension::RealmId((1u64 << 61) | *next_realm);
                 *next_realm += 1;
                 threads.insert(
                     tid,

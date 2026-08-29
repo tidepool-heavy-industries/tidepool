@@ -34,12 +34,13 @@ use std::path::Path;
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
 use tidepool_codegen::emit::ExternalEnv;
-use tidepool_codegen::jit_machine::{
-    CancelHandle, ContinuationId, FuncId, JitEffectMachine, ParkKind, ParkedOutcome, RealmId,
-    ResumeInput, Suspendable, SuspendableOutcome, SuspensionRun,
-};
+use tidepool_codegen::jit_machine::{CancelHandle, FuncId, JitEffectMachine};
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::scope::{ScopeId, ScopeTree};
+use tidepool_codegen::suspension::{
+    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
+    SuspensionRun,
+};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::EffectBoundary;
 use tidepool_eval::value::Value;
@@ -1064,7 +1065,7 @@ impl PersistentSession {
     /// [`Self::retire_scope`] can never drain — for a mounted persistent
     /// root, a permanent GC root by construction. Every caller must check
     /// liveness before consuming whatever custody transfer led here (a
-    /// [`super::resident::RootCustody`], a released [`ValueHandle`](tidepool_codegen::jit_machine::ValueHandle))
+    /// [`super::resident::RootCustody`], a released [`ValueHandle`](tidepool_codegen::suspension::ValueHandle))
     /// — this check is the backstop, not the first line, since `bind_in`
     /// failing here is too late to undo a handle already released from the
     /// machine's registry.

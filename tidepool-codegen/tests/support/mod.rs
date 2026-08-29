@@ -1,10 +1,11 @@
 #![allow(dead_code)]
 
-use tidepool_codegen::jit_machine::{
-    FuncId, JitEffectMachine, JitError, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable,
-    SuspendableOutcome, SuspensionRun,
-};
+use tidepool_codegen::jit_machine::{FuncId, JitEffectMachine, JitError};
 use tidepool_codegen::old_space::RootSlot;
+use tidepool_codegen::suspension::{
+    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
+    SuspensionRun,
+};
 use tidepool_effect::{DispatchEffect, EffectBoundary};
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
@@ -74,7 +75,7 @@ impl SuspensionTestExt for JitEffectMachine {
 /// longer carries this policy itself.
 pub struct LinearMachine {
     machine: JitEffectMachine,
-    active: Option<tidepool_codegen::jit_machine::ContinuationId>,
+    active: Option<ContinuationId>,
 }
 
 impl LinearMachine {

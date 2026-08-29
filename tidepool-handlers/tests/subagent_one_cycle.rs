@@ -68,7 +68,8 @@ use tidepool_agent::seam::{
     AgentBackendError, BackendThreadId, CycleResultPayload, CycleSpec, ThreadSpec, ToolReply,
     TurnEvent,
 };
-use tidepool_codegen::jit_machine::{JitEffectMachine, ParkedOutcome, RealmId, SuspensionRun};
+use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::suspension::{ParkedOutcome, RealmId, SuspensionRun};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::EffectBoundary;

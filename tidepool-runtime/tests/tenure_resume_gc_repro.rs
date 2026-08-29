@@ -51,7 +51,7 @@
 //! why it must not touch `gc_trigger`'s call-count instrumentation), and
 //! this lane's `notify_parent` history for the full diagnosis.
 
-use tidepool_codegen::jit_machine::RealmId;
+use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;

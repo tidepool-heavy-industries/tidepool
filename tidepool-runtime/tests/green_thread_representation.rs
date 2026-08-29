@@ -30,7 +30,7 @@ use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentOutcome, ResidentSession};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
-use tidepool_codegen::jit_machine::RealmId;
+use tidepool_codegen::suspension::RealmId;
 
 // ─── freer-simple constructor IDs (qualified names are what the machine's
 // ConTags setup resolves by; the numeric ids here are local to this file's

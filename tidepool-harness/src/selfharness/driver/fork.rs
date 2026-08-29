@@ -292,7 +292,7 @@ pub(crate) fn dropped_threads_warning(dropped: usize) -> String {
 pub(crate) struct BranchAgentSessionGuard {
     agent: Arc<Harness>,
     node: NodeId,
-    realm: tidepool_codegen::jit_machine::RealmId,
+    realm: tidepool_codegen::suspension::RealmId,
     scope: tidepool_codegen::scope::ScopeId,
     retired: bool,
 }
