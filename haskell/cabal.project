@@ -7,12 +7,8 @@ packages: .
 -- at this index-state.
 index-state: 2026-06-11T20:22:08Z
 
--- Bounded GHC module-level parallelism (GHC's own -jN, not cabal's build
--- parallelism). Measured clean `cabal build tidepool-extract-bin` under one
--- ghc-slots slot: -j1 23.95s wall / 1655488 KB peak RSS vs -j2 17.99s wall /
--- 1654992 KB peak RSS — ~25% faster with no RSS cost. Stop at 2: the box runs
--- up to 3 concurrent GHC slots, so passing a higher worker count here would
--- let three simultaneous builds each fan out further and reproduce the
--- oversubscription ghc-slots exists to prevent.
+-- Bound GHC's module-level parallelism independently of cabal's package-level
+-- build scheduling. Two workers improve local build time without multiplying
+-- the compiler's peak memory footprint.
 package tidepool-extract
   ghc-options: -j2

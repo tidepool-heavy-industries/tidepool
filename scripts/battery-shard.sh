@@ -30,8 +30,7 @@
 # whole). The `-E 'binary(...) or binary(...)'` groups below replace the
 # single `-p <crate>` shard for those three. Each group is its own
 # `scripts/battery-shard.sh <crate> -E '...'` invocation — run them as a
-# sequence, not concurrently (concurrent GHC-heavy shards on one box compete
-# for the same `ghc-slots.sh` semaphore and CPU). Re-measure and re-bucket
+# sequence, not concurrently. Re-measure and re-bucket
 # before trusting these groups against a renamed/added test binary.
 #
 # tidepool-harness (7 shards):
@@ -77,12 +76,6 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
-# Take a host GHC slot for the whole shard — see scripts/battery.sh for why
-# this is self-slotted rather than left to the caller. After the usage check,
-# so a misinvocation fails immediately instead of after a slot wait.
-if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
-  exec /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- "$PWD/scripts/battery-shard.sh" "$@"
-fi
 crate="$1"
 shift
 
@@ -114,8 +107,7 @@ trap cleanup_exit EXIT
 on_signal() {
   echo "==> signal received — stopping nextest and tearing down the compile daemon" >&2
   # See scripts/battery.sh's on_signal comment: waits for nextest to
-  # actually exit before returning, so the ghc-slots.sh semaphore slot is
-  # never released while nextest or its child compiles might still be alive.
+  # actually exit before returning, so no child compile remains alive.
   [ -n "$nextest_pid" ] && _terminate_and_wait "$nextest_pid" "nextest"
   exit 130
 }

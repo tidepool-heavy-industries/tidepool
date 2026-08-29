@@ -16,6 +16,10 @@ async fn auto_expr_verdict_skips_declaration_probe() {
     let real_extract =
         std::env::var("TIDEPOOL_EXTRACT").expect("require_extract() installs TIDEPOOL_EXTRACT");
 
+    // This test observes process-boundary requests. A resident daemon would
+    // receive them over its socket and correctly bypass the wrapper below.
+    std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+
     // A logging, delegating wrapper: record every invocation's argv, then
     // exec the real extract so the turn actually runs to completion.
     let wrap_dir = tempfile::TempDir::new().unwrap();

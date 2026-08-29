@@ -253,9 +253,8 @@ start_battery_daemon() {
 
 # Sends TERM to pid $1, waits up to a 10s grace period (polling `kill -0`),
 # escalates to KILL on that SAME pid if it's still alive, then blocks until
-# it's actually reaped (`wait`) — so a caller never proceeds (e.g. releasing
-# the ghc-slots.sh semaphore by exiting) while $1 or its own children may
-# still be alive. $2 is a short label for the log lines. Still "exact
+# it's actually reaped (`wait`) — so a caller never proceeds while $1 or its
+# own children may still be alive. $2 is a short label for the log lines. Still "exact
 # recorded pid, never pattern-kill" — this only ever escalates signal
 # strength on the SAME identified process, never widens the target.
 #

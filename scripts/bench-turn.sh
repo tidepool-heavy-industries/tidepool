@@ -58,13 +58,6 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# --- self-slotting (copied from scripts/battery.sh — see that script's
-# preamble for why the absolute parent-repo path is load-bearing: a
-# worktree's own copy of ghc-slots.sh is inert / may be stale). ---
-if [ -z "${TIDEPOOL_GHC_SLOT:-}" ]; then
-  exec /home/inanna/dev/tidepool/scripts/ghc-slots.sh run -- "$PWD/scripts/bench-turn.sh" "$@"
-fi
-
 # --- TIDEPOOL_EXTRACT resolution (shared with battery.sh/battery-shard.sh) -
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
 resolve_tidepool_extract
