@@ -53,7 +53,8 @@ import Tidepool.Translate
   ( ClosedModule(..), UnresolvedVar(..), collectDataCons
   , collectTransitiveDCons, collectUsedDataCons, mergeMetaPreserving
   , targetBindingHasIO, translateBinds, translateModuleClosed
-  , typeMentionsEffectMonad, wiredInDataCons )
+  , wiredInDataCons )
+import Tidepool.TypePolicy (typeMentionsEffectMonad)
 import Tidepool.CborEncode (encodeTree, encodeMetadata, encodeTurnOut)
 import Tidepool.Timing (readTimingEnabled, timePhase)
 
@@ -622,33 +623,12 @@ mkBoundBinders probeOnly bindNames g root result = do
           then error $ "multi-binder: " ++ show (length bindNames) ++ " binders but "
                      ++ "type is a " ++ show (length tys) ++ "-tuple: " ++ renderType t
           else return tys
-  -- Cross-row bind guard (one-session plan Phase 3e, TASK 2; narrowed by
-  -- stable-effects-core): a session bind whose captured type mentions the
-  -- 'Eff' tycon itself cannot mean anything once it crosses into a LATER
-  -- turn's compile, which applies it to its OWN row (the row is per-compile,
-  -- same reasoning as 'Tidepool.Translate.checkRunLLMTurnType'). This no
-  -- longer also rejects a bind merely for mentioning an effect GADT
-  -- (@Console@, @KV@, a bridged record, …) — those now live in the STABLE
-  -- @Tidepool.Effects.Core@ module (a pure function of the vocabulary alone,
-  -- identical across turns/windows that share it), so a value naming one is
-  -- exactly as safe to cross as a plain data value always was. Reject loudly
-  -- here rather than let a genuine row-typed value silently reach a later
-  -- turn as an unresolvable/wrongly-resolved reference. @probeOnly@ (an
-  -- ephemeral @:t@ type-probe, never registered as a session binding — see
-  -- 'mkBoundBinders' doc) has no later fragment to cross into, so it is
-  -- exempt by construction.
-  --
-  -- NOT generalized the way an M-mentioning DECL signature now is (the
-  -- decl-plane fix in @tidepool-runtime@'s @render_module@ that lets
-  -- @probe :: M Value@ persist by stripping the signature and letting GHC
-  -- infer): a bind's type is not an ANNOTATION to strip and re-infer, it is
-  -- the type of a value THAT ALREADY EXISTS on the heap from running this
-  -- turn's expression once. There is nothing to re-infer a bind's captured
-  -- type FROM — the value is already computed, and if it genuinely mentions
-  -- @Eff@ (e.g. the action itself, not its result, or a closure that would
-  -- need to resume a suspended computation) that is a real fact about the
-  -- value, not an artifact of how the model spelled a signature. This
-  -- residual stays exactly as it was.
+  -- A materialized value keeps the type it had in this compilation; unlike a
+  -- declaration signature, it cannot be stripped and inferred again later.
+  -- Therefore a concrete Eff row cannot cross into a later compilation with
+  -- a different row. Vocabulary GADTs are allowed because their definitions
+  -- live in the stable Tidepool.Effects.Core module. A type probe is exempt:
+  -- it reports a type but never registers a value for a later turn.
   when (not probeOnly) $
     forM_ (zip bindNames componentTypes) $ \(name, cty) ->
       when (typeMentionsEffectMonad cty) $

@@ -20,9 +20,7 @@ module Tidepool.Translate
   , UnresolvedVar(..)
   , errorSentinelVar
   , poisonSentinelSlot
-  , modulesOfType
   , stabilizeLocalUniques
-  , typeMentionsEffectMonad
   ) where
 
 import GHC
@@ -43,11 +41,10 @@ import GHC.Types.Literal
 import GHC.Types.Name (nameOccName, isSystemName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Data.FastString (unpackFS)
-import GHC.Unit.Types (moduleUnitId, unitIdString)
 import GHC.Core.TyCon
 import GHC.Core.Type (splitTyConApp_maybe, splitFunTy_maybe, isUnliftedType)
 import GHC.Builtin.Types.Prim (statePrimTyCon)
-import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Core.TyCo.FVs (tyConsOfType, tyCoVarsOfType)
 import GHC.Types.Var.Set (isEmptyVarSet)
 import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
@@ -77,7 +74,12 @@ import Tidepool.IR (FlatNode(..), FlatAlt(..), FlatAltCon(..), LitEnc(..))
 import Tidepool.Identity
   ( binderQualName, checkedKeyToIdx, normalizeMod, qualifiedName, varId )
 import Tidepool.Metadata (DCMeta(..))
+import Tidepool.EffectSchema
+  ( SiteTypePolicy(..), VerbSpec(..), sitedVerbs )
 import Tidepool.Session (isSessionValModule)
+import Tidepool.TypePolicy
+  ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType
+  , typeMentionsEffectMonad )
 import qualified System.Environment
 import qualified Data.List
 import qualified Data.Maybe
@@ -99,16 +101,11 @@ data TransState = TransState
   , tsRecJoinIds :: !(Set.Set Word64)  -- join IDs from Rec groups (translated as LetRec lambdas)
   , tsSynthCounter :: !Word64          -- counter for synthetic VarIds (tag 'T')
   , tsUnresolvedIds :: !(Set.Set Word64) -- IDs that should be translated as error nodes
-  -- Item 20 defect (b): the identity SLOT assigned to each distinct unresolved
-  -- external that this run poisoned (original varId -> slot, slots monotonic
-  -- from 1). The slot is what the emitted node CARRIES
-  -- ('errorSentinelVar' / D-C's @0x45<<56 | slot<<8 | kind@), so this map is
-  -- the encoding table, not a side channel: the caller pairs it with the
-  -- unresolved-var names to build meta.cbor's @poisoned@ key, and everything
-  -- else about "what did this program poison" is read back out of the emitted
-  -- nodes.
+  -- Identity slot assigned to each unresolved external replaced by a poison
+  -- sentinel. The emitted node carries the slot; metadata maps it back to the
+  -- missing symbol's name.
   , tsPoisonSlots :: !(Map.Map Word64 Word64)
-  -- Typed-yield pass (#R0 and its widenings): the varId of each sited verb's
+  -- The varId of each sited verb's
   -- hidden @*Sited@ sibling, keyed by the SURFACE verb's occurrence name
   -- ('vsName'). Seeded once per 'lowerModule' run by 'resolveSitedIds',
   -- which walks 'sitedVerbs' — so this map's key set is exactly the table's,
@@ -119,11 +116,8 @@ data TransState = TransState
   -- extract-pipeline bug (see the head-swap arm's 'Nothing' branch for the
   -- one benign caller that hits it deliberately).
   --
-  -- This ONE map replaced a family of per-verb @Maybe Word64@ fields whose
-  -- adjacency here — and correspondingly adjacent positional arguments at
-  -- the sole construction site — made transposing two of them type-check
-  -- silently while head-swapping every call site of one verb to another
-  -- verb's sibling.
+  -- A map keyed by the schema's surface name keeps lookup aligned with the
+  -- declarative verb table.
   , tsSitedIds :: !(Map.Map String Word64)
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
   -- Accumulated {site, type, modules} for the asks.json sidecar — 'modules'
@@ -177,8 +171,8 @@ freshSynthVarId = do
 -- @TIDEPOOL_TEST_DROP_DC=\<module-qualified-name\>@ makes 'recordDC' silently
 -- skip recording exactly the one constructor whose 'qualifiedName' matches —
 -- simulating a constructor that reaches the emitted IR but never lands in
--- the authoritative translation's 'tsUsedDCs', the exact shape the D1 hard-fail
--- defense exists to catch. Inert unless set; checked once via 'unsafePerformIO',
+-- the authoritative translation's 'tsUsedDCs', exercising the artifact
+-- metadata coverage check. Inert unless set; checked once via 'unsafePerformIO',
 -- same pattern as 'joinrecDebugEnabled'.
 {-# NOINLINE testDropDC #-}
 testDropDC :: Maybe String
@@ -190,7 +184,7 @@ recordDC dc
   | otherwise = modify' $ \s ->
       s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
--- | Fresh site id for a runLLMTurn/runLLMTurnFork call site (#R0):
+-- | Fresh site id for a typed suspension call site:
 -- a plain per-'lowerModule'-run counter, distinct from 'freshSynthVarId'
 -- (this counter's values travel as literal 'Int' payload data, not VarIds).
 freshSiteId :: TransM Word64
@@ -221,46 +215,6 @@ poisonSlotFor vid = do
 recordRunLLMTurnSite :: Word64 -> Text -> [Text] -> TransM ()
 recordRunLLMTurnSite siteId typeStr modules = modify' $ \s ->
   s { tsRunLLMTurnSites = tsRunLLMTurnSites s |> (siteId, typeStr, modules) }
-
--- | The distinct defining modules of every TyCon @ty@ mentions — its own
--- head plus every type argument's head (e.g. @Either MyErr MyOk@ needs
--- 'Either', 'MyErr', AND 'MyOk') — what a shim importing @ty@ by name must
--- have in scope to resolve it. This is the extract-side lookup: extract
--- already has the type environment in hand at a sited-verb call site, so it
--- reports the answer, rather than a downstream harness scraping its own
--- source file's import list and guessing. Sorted + deduplicated for a
--- stable asks.json rendering; a TyCon whose Name carries no Module (none
--- exist for a real, named TyCon) is simply skipped rather than guessed.
---
--- @ty@'s own HEAD tycon is unioned in via a RAW, non-synonym-expanding
--- pattern match ('TyConApp' the data constructor, never a "view" function)
--- ALONGSIDE 'tyConsOfType's walk, not instead of it: 'tyConsOfType' looks
--- THROUGH type synonyms (GHC's `coreView`-based traversal — correct for
--- "what does this type semantically resolve to", e.g. a nested argument's
--- own defining module still needs full resolution), but a MODEL-declared
--- @type X = Y@ answer type must resolve `X`'s OWN defining module (its decl-
--- plane `Lib.G<g>` module), not `Y`'s — a shim's `type M = Eff '[...,
--- Finalize X]` names the surface synonym `X` verbatim (so does
--- 'renderType', via plain unexpanding `ppr`), so importing only `Y`'s
--- module leaves `X` itself "Not in scope" even on an import list that is,
--- by 'tyConsOfType's own lights, complete. Live incident: `type
--- KyotoResearch = Text` reported `modulesOfType` == `[GHC.Types]` (`Int`\/
--- `Text`'s own home, from looking through the synonym) instead of the
--- decl-plane module `KyotoResearch` is actually declared in, crashing a
--- fork child's row-validation probe that only had `GHC.Types` to import.
-modulesOfType :: Type -> [Text]
-modulesOfType ty =
-  Data.List.sort $ Data.List.nub $
-    headTyConModule ty ++
-    [ T.pack (moduleNameString (moduleName m))
-    | tc <- USet.nonDetEltsUniqSet (tyConsOfType ty)
-    , Just m <- [nameModule_maybe (tyConName tc)]
-    ]
-  where
-    headTyConModule (TyConApp tc _)
-      | Just m <- nameModule_maybe (tyConName tc) =
-          [T.pack (moduleNameString (moduleName m))]
-    headTyConModule _ = []
 
 -- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
 -- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
@@ -889,7 +843,7 @@ translateModuleClosed hscEnv allBinds targetName = do
     collectBound acc (NJoin b params _ _) = foldl' (\a p -> Set.insert p a) (Set.insert b acc) params
     collectBound acc _ = acc
 
--- | #313 t11 fix: globally freshen duplicate binder uniques.
+-- | Globally freshen duplicate binder uniques.
 --
 -- GHC's rapier-style simplifier clones a binder only when it clashes with
 -- the enclosing in-scope set, so identical uniques legitimately recur in
@@ -1144,35 +1098,8 @@ nestedBinders = go
     go _                         = []
     goAlt (Alt _ bs e)           = bs ++ go e
 
--- | True when a unit id names the GHC compiler library itself — id of the form
--- @ghc-<version>@ (e.g. @ghc-9.12.2-fb67@). @ghc-prim@, @ghc-bignum@,
--- @ghc-internal@, @ghc-boot@ all have a word (not a digit) after @ghc-@, so
--- they are NOT matched — those carry executable constructors (@I#@, @D#@,
--- @Integer@, …) the JIT really runs.
-isGhcCompilerUnitId :: String -> Bool
-isGhcCompilerUnitId uid = case Data.List.stripPrefix "ghc-" uid of
-  Just (c : _) -> c >= '0' && c <= '9'
-  _            -> False
-
--- | True when a Name is defined in the GHC compiler library.
---
--- Such entities (HsExpr, DynFlags, RdrName, …) are reachable only through
--- compile-time-only TH machinery: the vendored @Tidepool.QQ.HsMeta.*@ hole
--- parser imports the GHC API, and those binders enter the translated set even
--- though the JIT never runs them. Their constructors must be kept OUT of the
--- DataConTable: the whole @DynFlags@ type closure is thousands of cons, and at
--- that volume a 64-bit varId collision evicts a real constructor — notably
--- freer-simple's @Union@, which fails effect-machine setup for every QQ eval.
-isGhcCompilerName :: Name -> Bool
-isGhcCompilerName n = case nameModule_maybe n of
-  Just m  -> isGhcCompilerUnitId (unitIdString (moduleUnitId m))
-  Nothing -> False
-
 isGhcCompilerDC :: DataCon -> Bool
 isGhcCompilerDC = isGhcCompilerName . dataConName
-
-isGhcCompilerTyCon :: TyCon -> Bool
-isGhcCompilerTyCon = isGhcCompilerName . tyConName
 
 -- | Collect all DataCons encountered during translation of Core bindings.
 -- This includes constructors from imported packages (e.g. freer-simple's
@@ -1192,7 +1119,7 @@ collectUsedDataCons binds =
         in tsUsedDCs s
       ) pairs
 
--- | D1 CHECK A input: every constructor id that reaches the wire in a
+-- | Every constructor id that reaches the wire in a
 -- translated program's 'FlatNode's — an 'NCon' head id, or an 'FDataAlt'
 -- inside any 'NCase' alt. 'NCase'\'s own 'Word64' is the case BINDER's
 -- varId, not a constructor, and is deliberately excluded. The caller
@@ -1207,7 +1134,7 @@ emittedConIds = foldl' step Set.empty
     altStep acc (FlatAlt (FDataAlt w) _ _) = Set.insert w acc
     altStep acc _                          = acc
 
--- | D1 CHECK B: an INDEPENDENT syntactic Core visitor — every DataCon
+-- | An independent syntactic Core visitor: every DataCon
 -- reachable from these binds' RHSs, found WITHOUT ever invoking 'translate'
 -- or constructing a 'TransState'. That independence is the entire point:
 -- comparing this against the authoritative translation's 'tsUsedDCs' only
@@ -1378,7 +1305,7 @@ tyConToDCMeta tc = case tyConDataCons_maybe tc of
   Nothing  -> []
 
 -- | Sibling-complete metadata for DataCons actually built or matched in
--- Core (D2's @RuntimeTypeClosure@, the runtime-observable-roots half):
+-- Core:
 -- for every distinct non-GHC-compiler parent TyCon among @dcs@, include ALL
 -- of that TyCon's constructors, not just the one(s) Core happened to touch.
 -- This is what lets Rust resolve a rendered type name to its full
@@ -1935,7 +1862,7 @@ translate expr =
           -- before them is 0+ leading `Member <Eff> effs` dictionaries (see
           -- 'splitTrailingArgs').
           , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
-        vsCheckType spec ty
+        checkSiteType spec ty
         sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
         case sitedIdM of
           -- The sibling's varId is resolved ONCE, by name, by a scan over
@@ -3110,151 +3037,6 @@ isEitherDecodeValueVar = isIntrinsicVerb "eitherDecodeValue"
 isParseISO8601Var :: Id -> Bool
 isParseISO8601Var = isIntrinsicVerb "parseISO8601"
 
--- | Everything the extractor knows about ONE sited verb: a surface verb
--- whose call sites are head-swapped to a hidden @*Sited@ sibling carrying a
--- fresh site id.
---
--- === Adding a sited verb is ONE ROW in 'sitedVerbs'. ===
---
--- This table is the single source for all of it: the call-site recognizer
--- (via 'intrinsicVerbModules', built from 'vsName'\/'vsModule'), the
--- sibling resolution ('resolveSitedIds', from
--- 'vsSitedName'\/'vsSitedModule'), the 'TransState' slot the resolved id
--- lands in ('tsSitedIds', keyed by 'vsName'), and every constant the one
--- head-swap arm in 'translateHead' needs. There is no second place to
--- register a verb and no per-verb field, accessor, guard arm or constructor
--- argument to keep in step — which is the point: the family of same-typed
--- @Maybe Word64@ fields this replaced was applied POSITIONALLY at its sole
--- construction site, where transposing two of them type-checked silently
--- and head-swapped every call site of one verb to another verb's sibling.
-data VerbSpec = VerbSpec
-  { vsName :: String
-    -- ^ The surface verb's occurrence name (@"runLLMTurn"@). Doubles as the
-    -- 'tsSitedIds' key and as the verb's name in the mis-shape error.
-  , vsModule :: String
-    -- ^ Module the surface verb is DEFINED in. 'isIntrinsicVerb' qualifies
-    -- on it, so a user's own same-named function is never head-swapped.
-  , vsSitedName :: String
-    -- ^ The hidden @*Sited@ sibling each well-formed call site is swapped
-    -- to. Sibling names are disjoint from every recognizer in this file, so
-    -- occurrences of a sibling (including a sibling's own body referencing
-    -- another sibling) always fall through to ordinary Var\/App translation
-    -- — that holds by construction of the naming, not by a runtime check.
-  , vsSitedModule :: String
-    -- ^ Module the SIBLING is defined in. Usually 'vsModule', but not
-    -- always: @fork@\/@forkAll@ are Tidepool.Fork's surface verbs while
-    -- their siblings are generated into Tidepool.Effects.Core.
-  , vsTypeArgs :: Int
-    -- ^ How many leading @Type@ arguments a well-formed call site carries.
-    -- The ANSWER type is always the first; see each row for what a second
-    -- one is and why it is discarded.
-  , vsValueArity :: Int
-    -- ^ How many trailing value args belong to the verb's own signature.
-    -- Anything ahead of them is @Member \<Eff\> effs@ dictionaries, which
-    -- ride along and are re-applied verbatim to the sibling
-    -- ('splitTrailingArgs').
-  , vsCheckType :: Type -> TransM ()
-    -- ^ The extract-time rejection applied to the answer type.
-  , vsListAnswer :: Bool
-    -- ^ Record the asks.json sidecar type as @[T]@ rather than @T@ — true
-    -- for the fanout-shaped verbs, whose @\@T@ pins the per-child ELEMENT
-    -- type while the site really answers a list.
-  , vsMisShapeIsError :: Bool
-    -- ^ A recognized occurrence that does NOT match the shape above is a
-    -- hard extract error naming the site, instead of falling through to
-    -- ordinary Var\/App translation (and thence to the verb's OPAQUE,
-    -- dead-at-runtime stub).
-  }
-
--- | The sited verbs, one row each. See 'VerbSpec' — this is the whole cost
--- of adding one.
---
--- Every surface verb here carries @{-\# OPAQUE \#-}@ at its definition (see
--- 'intrinsicVerbModules' for why NOINLINE is not enough), which is what
--- keeps its calls un-inlined so the type application at each call site
--- survives to the interception.
-sitedVerbs :: [VerbSpec]
-sitedVerbs =
-  [ -- The RunLLMTurn effect's own surface verbs (ask_effect_def!'s helper
-    -- text, generated into Tidepool.Effects.Core — stable-effects-core: these
-    -- are ordinary row-polymorphic helpers, not row-dependent, so they live
-    -- in Core, not the per-agent-session Tidepool.Effects shim).
-    VerbSpec { vsName = "runLLMTurn", vsModule = "Tidepool.Effects.Core"
-             , vsSitedName = "runLLMTurnSited", vsSitedModule = "Tidepool.Effects.Core"
-             , vsTypeArgs = 1, vsValueArity = 1
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = False, vsMisShapeIsError = False }
-  , VerbSpec { vsName = "runLLMTurnFork", vsModule = "Tidepool.Effects.Core"
-             , vsSitedName = "runLLMTurnForkSited", vsSitedModule = "Tidepool.Effects.Core"
-             , vsTypeArgs = 1, vsValueArity = 1
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = False, vsMisShapeIsError = False }
-    -- B1 widen. One `[Text]` prompts list in, N children each answering the
-    -- per-child type `@T` — so the SITE answers `[T]` ('vsListAnswer').
-  , VerbSpec { vsName = "runLLMTurnFanout", vsModule = "Tidepool.Effects.Core"
-             , vsSitedName = "runLLMTurnFanoutSited", vsSitedModule = "Tidepool.Effects.Core"
-             , vsTypeArgs = 1, vsValueArity = 1
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = True, vsMisShapeIsError = False }
-    -- self-iterating-harness WS-B. `finalize :: forall v a. v -> M a` has
-    -- TWO forall'd tyvars (`v`, the finalized value's type; `a`, its
-    -- independent "never returns" placeholder — see effect_defs.rs's
-    -- finalize_effect_def! for why they stay independent), so a call site
-    -- carries TWO explicit type arguments. Only the first (`v`, what `@T`
-    -- fixes) crosses the suspend boundary; `a` is discarded.
-    --
-    -- DIFFERENT type check from the runLLMTurn family: 'checkFinalizeType'
-    -- skips the function-arrow rejection (finalize's value crosses in-heap
-    -- via run_child, never through JSON, so it may carry a closure) but
-    -- still rejects a polymorphic site.
-  , VerbSpec { vsName = "finalize", vsModule = "Tidepool.Effects.Core"
-             , vsSitedName = "finalizeSited", vsSitedModule = "Tidepool.Effects.Core"
-             , vsTypeArgs = 2, vsValueArity = 1
-             , vsCheckType = checkFinalizeType
-             , vsListAnswer = False, vsMisShapeIsError = False }
-    -- Tidepool.Fork's surface verbs, riding the distinct Fork effect (NOT
-    -- RunLLMTurn) — note the sibling module differs from the verb's own.
-    -- `fork :: forall a. Text -> M a` is structurally identical to
-    -- runLLMTurnFork's shape, and `forkAll :: forall a. [Text] -> M [a]` to
-    -- runLLMTurnFanout's; each still resolves its OWN sibling. `fork`/
-    -- `forkAll` themselves are authored in Tidepool.Fork (a library module,
-    -- unaffected by stable-effects-core), but their *Sited siblings are
-    -- ask_effect_def!'s generated helpers and now live in Core.
-  , VerbSpec { vsName = "fork", vsModule = "Tidepool.Fork"
-             , vsSitedName = "forkSited", vsSitedModule = "Tidepool.Effects.Core"
-             , vsTypeArgs = 1, vsValueArity = 1
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = False, vsMisShapeIsError = False }
-  , VerbSpec { vsName = "forkAll", vsModule = "Tidepool.Fork"
-             , vsSitedName = "forkAllSited", vsSitedModule = "Tidepool.Effects.Core"
-             , vsTypeArgs = 1, vsValueArity = 1
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = True, vsMisShapeIsError = False }
-    -- combinator-sites widen: library-defined recursion schemes over
-    -- runLLMTurnFanout. Each is quantified `forall b a. ...`, so a single
-    -- explicit `@T` pins the ANSWER type b; the element/tree type a is
-    -- inferred from the second value argument and NEVER checked here (it
-    -- never crosses the suspend boundary, only b does). Their sidecar entry
-    -- records the SAME "[b]" shape a bare runLLMTurnFanout site records —
-    -- their *Sited bodies route through exactly one forkAllSited dispatch
-    -- per answer, so every payload such a site id tags really does carry a
-    -- `[b]`-shaped fanout (see Tidepool.Fork's haddock).
-    --
-    -- 'vsMisShapeIsError': Fork.hs's module haddock is explicit that these
-    -- have no runtime fallback, so a call extract cannot rewrite must fail
-    -- at extract naming the site.
-  , VerbSpec { vsName = "forkMap", vsModule = "Tidepool.Fork"
-             , vsSitedName = "forkMapSited", vsSitedModule = "Tidepool.Fork"
-             , vsTypeArgs = 2, vsValueArity = 2
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = True, vsMisShapeIsError = True }
-  , VerbSpec { vsName = "forkCata", vsModule = "Tidepool.Fork"
-             , vsSitedName = "forkCataSited", vsSitedModule = "Tidepool.Fork"
-             , vsTypeArgs = 2, vsValueArity = 2
-             , vsCheckType = checkRunLLMTurnType
-             , vsListAnswer = True, vsMisShapeIsError = True }
-  ]
-
 -- | The 'VerbSpec' for @v@ when @v@ IS one of the sited verbs — matched on
 -- occurrence name AND defining module (via 'isIntrinsicVerb'), so a user's
 -- own same-named function never matches. 'Nothing' for everything else,
@@ -3276,29 +3058,10 @@ leadingTypes n as
     asType (Type t) = Just t
     asType _        = Nothing
 
--- | Resolve every sited verb's hidden @*Sited@ sibling in ONE scan over the
--- FULL (pre-reachability) bind pool, producing 'TransState's 'tsSitedIds'
--- seed. The siblings are ordinary home-module bindings (Tidepool.Effects,
--- spliced via the effect defs' helper text, or Tidepool.Fork's own
--- @forkMapSited@\/@forkCataSited@), so a name lookup over the top binders
--- finds their real Ids, mirroring 'lowerModule''s target lookup.
--- @translate@ can't do an HscEnv lookup itself (TransM is pure State, no
--- IO), which is why resolution happens once, here.
---
--- A sibling that ISN'T present is simply absent from the map (unlike a
--- missing target, that is not an error — it just means the corresponding
--- head-swap can't fire). Each lookup is qualified on the sibling's own
--- defining module ('vsSitedModule'), the same discipline 'isIntrinsicVerb'
--- applies to call sites: a user binding that merely shares a @*Sited@
--- occurrence name is never picked as a head-swap target.
---
--- The only pass between 'resolveExternals' and this scan that touches binder
--- identity is 'uniquifyDuplicateBinders': its @goTop@ rewrites only each
--- bind's RHS (@NonRec b <$> goE ...@ \/ @Rec ... (b,) <$> goE ...@) and
--- returns the TOP binder @b@ unchanged. This scans exactly those top
--- binders, so a sibling's Name — and its defining module — is still whatever
--- it was before that pass ran, same as the call-site Vars 'isIntrinsicVerb'
--- relies on.
+-- | Resolve site-aware siblings from the full bind pool before reachability
+-- pruning. Missing siblings remain absent; a call that requires one will then
+-- produce a site-shape error. Module qualification prevents user bindings with
+-- the same occurrence name from being selected.
 resolveSitedIds :: [CoreBind] -> Map.Map String Word64
 resolveSitedIds binds = Map.fromList
   [ (vsName spec, varId b)
@@ -3311,12 +3074,13 @@ resolveSitedIds binds = Map.fromList
       && not (isSystemName (idName b))
       && definedIn (vsSitedModule spec) b
 
--- | The shared extract-time rejection every typed-yield site (runLLMTurn
--- family, finalize) applies: a leftover type variable means the site isn't
--- monomorphic. Raises via plain 'error', mirroring every other hard-failure
--- in this file (e.g. the tagToEnum# arm above) — caught by 'processFile's
--- `try` and rendered as a diagnostic, not a pipeline crash. `what` names the
--- verb in the error message (e.g. "runLLMTurn", "finalize").
+checkSiteType :: VerbSpec -> Type -> TransM ()
+checkSiteType spec = case vsTypePolicy spec of
+  CrossCompileAnswer -> checkCrossCompileAnswer (vsName spec)
+  InHeapAnswer -> checkMonomorphicSite (vsName spec)
+
+-- | Suspension sites carry concrete type metadata, so their answer type must
+-- be monomorphic at extraction time.
 checkMonomorphicSite :: String -> Type -> TransM ()
 checkMonomorphicSite what ty = do
   binder <- gets tsCurrentBinder
@@ -3325,110 +3089,16 @@ checkMonomorphicSite what ty = do
   when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
     error $ "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr
 
--- | The two extract-time rejections for a runLLMTurn/runLLMTurnFork
--- site's answer type (spec step 4): a leftover type variable (the site isn't
--- monomorphic, via 'checkMonomorphicSite') or the answer type mentioning the
--- effect monad anywhere in its structure ('typeMentionsEffectMonad' — the
--- 'Eff' tycon itself; see that function's doc for why it no longer also
--- catches every tycon the generated @Tidepool.Effects@ module declares).
--- A function arrow is otherwise fine: on the one-session path a
--- function-typed answer is delivered IN-HEAP by handle (the same mechanism
--- 'finalize' has always used), so there is no longer a serialization
--- boundary to fail against. What's still rejected is narrower: a
--- compile's ROW (@type M = Eff '[...]@) still varies per compile — that is
--- unchanged and locked (row capability enforcement is untouched) — so a
--- value whose type names @Eff@ applied to a concrete row cannot be
--- meaningfully applied once it crosses into a different compile's world.
--- Both raise via plain 'error'.
-checkRunLLMTurnType :: Type -> TransM ()
-checkRunLLMTurnType ty = do
-  checkMonomorphicSite "runLLMTurn" ty
+-- | Values supplied by separately compiled code may be closures, but cannot
+-- contain the concrete effect row of the program that requested them.
+checkCrossCompileAnswer :: String -> Type -> TransM ()
+checkCrossCompileAnswer verb ty = do
+  checkMonomorphicSite verb ty
   let typeStr = Tidepool.GhcPipeline.renderType ty
   when (typeMentionsEffectMonad ty) $
-    error $ "effectful function answers not supported (the row varies per compile): "
+    error $ verb ++ " answer captures a compile-local effect row: "
           ++ typeStr
-          ++ " — answer with a PURE function; the M inside cannot unify across turns/windows compiling a different row"
-
--- | 'finalize's extract-time rejection (self-iterating-harness WS-B): ONLY
--- the monomorphism check ('checkMonomorphicSite') — deliberately NOT
--- 'typeMentionsEffectMonad'. 'finalize's value crosses in-heap via
--- 'run_child'/the one-session resume path (no JSON round-trip, no
--- 'unsafeCoerce' relabeling), so — unlike 'runLLMTurn' — it may carry a
--- closure or other non-serializable value, including one containing a
--- function arrow.
-checkFinalizeType :: Type -> TransM ()
-checkFinalizeType = checkMonomorphicSite "finalize"
-
--- | Does @ty@ mention the effect monad anywhere in its structure — ONLY the
--- 'Eff' tycon itself (freer-simple's @Control.Monad.Freer.Internal.Eff@).
--- Checked directly, in a type-application argument, under a function arrow
--- (both sides), or nested inside a field of some ADT/newtype the type
--- transitively refers to. Mirrors 'closeTyCons's newtype/field walk
--- (visited-set keyed on TyCon, so a recursive type like
--- @data Rec = Rec (M Int) Rec@ terminates instead of looping).
---
--- STABLE-EFFECTS-CORE NARROWING: this used to ALSO reject any tycon whose
--- original defining module was exactly @Tidepool.Effects@ — every effect
--- GADT (@AskUser@, @Fork@, @Finalize@, @RunLLMTurn@, any effect a session's
--- vocabulary carries), because that module was regenerated PER COMPILE (a
--- fresh nominal identity every turn, even for byte-identical declarations).
--- The generated effects module is now split: the GADTs live in
--- @Tidepool.Effects.Core@, a module whose text is a pure function of the
--- effect VOCABULARY alone and is therefore IDENTICAL — same dir, same
--- tycons — across every agent session that shares a vocabulary (see
--- @tidepool-mcp@'s @effects_core_module_source@/@ensure_effects_core_module@
--- and @tidepool-mcp/CLAUDE.md@'s stable-effects-core section). A value
--- mentioning a Core-defined tycon is therefore SAFE to cross a session bind
--- now — it is exactly as stable as a bridged @Tidepool.Records.Bridged@/
--- @Stable@ type already was, and this guard no longer needs to (and must
--- not) treat it as suspect. What remains genuinely per-compile is only the
--- ROW itself (@type M = Eff '[...]@, declared in the tiny per-agent-session SHIM
--- module @Tidepool.Effects@) — and @M@ is a type SYNONYM, which
--- 'splitTyConApp_maybe' unwraps to its @Eff@ application before this ever
--- sees a tycon, so the bare @Eff@-tycon check below is what catches it; no
--- second disjunct is needed.
---
--- Used by 'checkRunLLMTurnType' (a function-typed answer may cross in-heap,
--- but @Eff@ applied to a concrete row is still tied to THAT compile) and by
--- @tidepool-extract-bin@'s @Main.mkBoundBinders@ (same reasoning, applied to
--- a session BIND's captured type — this is what lets an effectful helper
--- declared @Member <Eff> effs => ... -> Eff effs T@ persist across turns and
--- windows: its type mentions only stable Core tycons, never a concrete @Eff@
--- row application).
-typeMentionsEffectMonad :: Type -> Bool
-typeMentionsEffectMonad = goT emptyUniqSet
-  where
-    goT :: UniqSet TyCon -> Type -> Bool
-    goT visited ty
-      | Just (_ftf, _mult, argTy, resTy) <- splitFunTy_maybe ty = goT visited argTy || goT visited resTy
-      | Just (tc, tyArgs) <- splitTyConApp_maybe ty =
-          isEffTyCon tc || any (goT visited) tyArgs || goTc visited tc
-      | otherwise = False
-
-    isEffTyCon :: TyCon -> Bool
-    isEffTyCon tc =
-      occNameString (nameOccName (tyConName tc)) == "Eff"
-        && definedInModule "Control.Monad.Freer.Internal" tc
-
-    definedInModule :: String -> TyCon -> Bool
-    definedInModule modStr tc =
-      maybe False ((== modStr) . moduleNameString . moduleName)
-            (nameModule_maybe (tyConName tc))
-
-    goTc :: UniqSet TyCon -> TyCon -> Bool
-    goTc visited tc
-      | tc `elementOfUniqSet` visited = False
-      | isGhcCompilerTyCon tc = False
-      | otherwise =
-          let visited' = addOneToUniqSet visited tc
-              newtypeHit = case unwrapNewTyCon_maybe tc of
-                Just (_tvs, reprTy, _coax) -> goT visited' reprTy
-                Nothing -> False
-              fieldHit = case tyConDataCons_maybe tc of
-                Just dcs -> any (\dc -> any (\(Scaled _ ft) -> goT visited' ft)
-                                             (dataConOrigArgTys dc)) dcs
-                Nothing -> False
-          in newtypeHit || fieldHit
+          ++ " — return a pure value or closure instead"
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]

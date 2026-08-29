@@ -18,6 +18,7 @@ library tidepool-extract-internal
     Tidepool.CborEncode
     Tidepool.WorkerServer
     Tidepool.DiagJson
+    Tidepool.EffectSchema
     Tidepool.ExtractUtil
     Tidepool.ExtractRequest
     Tidepool.FatIface
@@ -30,6 +31,7 @@ library tidepool-extract-internal
     Tidepool.Session
     Tidepool.Timing
     Tidepool.Translate
+    Tidepool.TypePolicy
   build-depends:
     base         >= 4.20 && < 5,
     ghc          >= 9.12 && < 9.13,
