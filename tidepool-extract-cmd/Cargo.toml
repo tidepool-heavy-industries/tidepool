@@ -1,13 +1,17 @@
 [package]
 name = "tidepool-extract-cmd"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-authors.workspace = true
-rust-version.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/tidepool-heavy-industries/tidepool"
+homepage = "https://github.com/tidepool-heavy-industries/tidepool"
+authors = ["Inanna Malick <inanna@recursion.wtf>"]
+rust-version = "1.89"
 description = "The one builder for `tidepool-extract` invocations: binary resolution, typed arguments, the spawn, and the process-global spawn counter"
+
+[[bin]]
+name = "tidepool-extract"
+path = "src/main.rs"
 
 # ZERO dependencies, deliberately (`plans/post-restart/extract-manifest.md`, D-A):
 # `tidepool-macro` is a proc-macro crate that must be able to depend on this

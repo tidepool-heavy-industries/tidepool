@@ -2,9 +2,9 @@
 //! connect step, and `Output` synthesis. Narrow `pub(crate)` surface —
 //! `ExtractCmd::run`/`run_with` are the only callers.
 //!
-//! Wire (mirrors `haskell/src/Tidepool/DaemonServer.hs` exactly — see that
-//! module's doc for the authoritative shape): little-endian, length-prefixed
-//! frames over a UNIX domain socket, one request/response per connection.
+//! External wire: little-endian, length-prefixed frames over a Unix domain
+//! socket, one request/response per connection. This module owns both ends of
+//! that transport; the Haskell worker sees only a private stdin/stdout loop.
 //!
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
@@ -15,25 +15,31 @@
 //! EOF (a short read) at any point is the daemon-crashed-mid-request signal
 //! both sides rely on — this module turns it into [`DaemonError::Crashed`].
 //! Every [`DaemonError`] variant means the same thing to the caller: this ONE
-//! request was not served by the daemon, fall back to a direct spawn (design
-//! §4.2/§5.2) — never a hang, never a silent retry against the same daemon.
+//! request was not served by the daemon, fall back to a direct spawn — never
+//! a hang, never a silent retry against the same daemon.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{ExitStatus, Output};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
+
+use crate::frontend::{DaemonConfig, FrontendError};
+use crate::ExtractRequest;
 
 /// Bound on the daemon round-trip's I/O (connect itself is local and
 /// near-instant over a UNIX domain socket, so this bounds the READ side — a
 /// wedged or overloaded daemon must not hang the caller forever). Generous:
 /// a COLD resident-session compile can legitimately take several seconds
-/// (design §6's own projection), so this is sized well above that, not
+/// so this is sized well above a cold compile, not
 /// tuned to the warm case.
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+const MAX_REQUEST_ARGS: u32 = 4096;
 
 /// The daemon did not serve this request. Every variant carries the SAME
 /// meaning to the caller (fall back to Direct) — the distinction exists only
@@ -158,6 +164,209 @@ fn synthesize_output(code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> Output {
     }
 }
 
+pub(crate) fn serve(
+    config: DaemonConfig,
+    worker_bin: std::path::PathBuf,
+) -> Result<u8, FrontendError> {
+    let mut worker = Worker::spawn(&worker_bin)?;
+    if let Some(parent) = config.socket.parent() {
+        fs::create_dir_all(parent).map_err(FrontendError::Io)?;
+    }
+    match fs::remove_file(&config.socket) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(FrontendError::Io(error)),
+    }
+    let listener =
+        std::os::unix::net::UnixListener::bind(&config.socket).map_err(FrontendError::Io)?;
+    let boot_stamp = config
+        .watch_stamp
+        .as_deref()
+        .map(read_optional)
+        .transpose()
+        .map_err(FrontendError::Io)?;
+    let rotate_after = config.rotate_after.unwrap_or(256);
+    let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(2048);
+
+    let result = (|| {
+        let mut served = 0;
+        loop {
+            let (mut connection, _) = listener.accept().map_err(FrontendError::Io)?;
+            if connection
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .is_err()
+            {
+                continue;
+            }
+            let (cwd, argv) = match read_daemon_request(&mut connection) {
+                Ok(request) => request,
+                Err(_) => continue,
+            };
+            let worker_argv = match normalize_worker_argv(argv) {
+                Ok(argv) => argv,
+                Err(_) => continue,
+            };
+            let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
+            served += 1;
+            let _ = write_daemon_response(&mut connection, code, &stdout, &stderr);
+
+            let stamp_changed = match (&config.watch_stamp, &boot_stamp) {
+                (Some(path), Some(at_boot)) => {
+                    read_optional(path).map_err(FrontendError::Io)? != *at_boot
+                }
+                _ => false,
+            };
+            if served >= rotate_after
+                || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
+                || stamp_changed
+            {
+                break;
+            }
+        }
+        Ok(0)
+    })();
+
+    drop(listener);
+    let _ = fs::remove_file(&config.socket);
+    worker.shutdown();
+    result
+}
+
+fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
+    if matches!(argv.as_slice(), [flag, _] if flag == crate::request::WORKER_REQUEST_FLAG) {
+        return Ok(argv);
+    }
+    if argv
+        .iter()
+        .any(|arg| arg == crate::request::WORKER_REQUEST_FLAG)
+    {
+        return Err(FrontendError::Usage(
+            "typed worker request must contain exactly a marker and payload".to_owned(),
+        ));
+    }
+    Ok(ExtractRequest::from_cli(&argv)?.worker_argv())
+}
+
+fn read_daemon_request(
+    stream: &mut UnixStream,
+) -> Result<(std::path::PathBuf, Vec<OsString>), FrontendError> {
+    let cwd = OsString::from_vec(read_request_frame(stream)?).into();
+    let count = read_u32(stream).map_err(daemon_frontend_error)?;
+    if count > MAX_REQUEST_ARGS {
+        return Err(FrontendError::Daemon(format!(
+            "daemon request has {count} arguments"
+        )));
+    }
+    let mut argv = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        argv.push(OsString::from_vec(read_request_frame(stream)?));
+    }
+    Ok((cwd, argv))
+}
+
+fn read_request_frame(stream: &mut UnixStream) -> Result<Vec<u8>, FrontendError> {
+    let length = read_u32(stream).map_err(daemon_frontend_error)?;
+    if length > MAX_REQUEST_FRAME_BYTES {
+        return Err(FrontendError::Daemon(format!(
+            "daemon request frame is {length} bytes; maximum is {MAX_REQUEST_FRAME_BYTES}"
+        )));
+    }
+    read_exact_or_crash(stream, length as usize).map_err(daemon_frontend_error)
+}
+
+fn write_daemon_response(
+    stream: &mut UnixStream,
+    code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(), FrontendError> {
+    let mut response = code.to_le_bytes().to_vec();
+    push_frame(&mut response, stdout);
+    push_frame(&mut response, stderr);
+    stream.write_all(&response).map_err(FrontendError::Io)
+}
+
+fn daemon_frontend_error(error: DaemonError) -> FrontendError {
+    FrontendError::Daemon(error.to_string())
+}
+
+fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn worker_rss_mb(pid: u32) -> io::Result<u64> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    Ok(status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("VmRSS:")?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or(0)
+        / 1024)
+}
+
+struct Worker {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: ChildStdout,
+}
+
+impl Worker {
+    fn spawn(bin: &Path) -> Result<Self, FrontendError> {
+        let mut child = Command::new(bin)
+            .arg("--worker-loop-v1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(FrontendError::Io)?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| FrontendError::Daemon("worker stdin was not piped".to_owned()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| FrontendError::Daemon("worker stdout was not piped".to_owned()))?;
+        Ok(Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        })
+    }
+
+    fn request(
+        &mut self,
+        cwd: &Path,
+        argv: &[OsString],
+    ) -> Result<(i32, Vec<u8>, Vec<u8>), FrontendError> {
+        let bytes = encode_request(cwd, argv);
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| FrontendError::Daemon("worker stdin is closed".to_owned()))?;
+        stdin.write_all(&bytes).map_err(FrontendError::Io)?;
+        stdin.flush().map_err(FrontendError::Io)?;
+        decode_response(&mut self.stdout).map_err(daemon_frontend_error)
+    }
+
+    fn shutdown(&mut self) {
+        drop(self.stdin.take());
+        if self.child.wait().is_err() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 /// A `PathBuf` from raw wire bytes — used only by the fake-daemon test
 /// harness (never on the hot path; every real caller builds `Path`/`PathBuf`
 /// from Rust-side values, never from decoded wire bytes).
@@ -197,11 +406,8 @@ mod tests {
 
     #[test]
     fn encode_request_round_trips_through_a_hand_rolled_decoder() {
-        // Mirrors the shape Tidepool.DaemonServer.decodeRequest parses on
-        // the Haskell side — decoded here with a small inline parser (this
-        // crate never needs to DECODE a request in production; only the
-        // Haskell side does) purely to pin that encode_request produces
-        // exactly what that decoder expects.
+        // Decode with an independent inline parser to pin the documented
+        // external wire shape.
         let cwd = Path::new("/a/b c/d");
         let argv = vec![
             OsString::from(""),
@@ -237,6 +443,19 @@ mod tests {
         assert_eq!(decoded_argv, argv);
         // The whole buffer was consumed — no trailing bytes.
         assert_eq!(cur.position() as usize, cur.get_ref().len());
+    }
+
+    #[test]
+    fn typed_worker_request_must_be_the_complete_argv() {
+        let valid = vec![crate::request::WORKER_REQUEST_FLAG.into(), "payload".into()];
+        assert_eq!(normalize_worker_argv(valid.clone()).unwrap(), valid);
+
+        let mixed = vec![
+            "Expr.hs".into(),
+            crate::request::WORKER_REQUEST_FLAG.into(),
+            "payload".into(),
+        ];
+        assert!(normalize_worker_argv(mixed).is_err());
     }
 
     fn encode_response_bytes(code: i32, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {

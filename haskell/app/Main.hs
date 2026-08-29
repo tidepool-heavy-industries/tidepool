@@ -2,20 +2,20 @@ module Main where
 
 import System.Environment (getArgs, setEnv)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
-import System.Directory (createDirectoryIfMissing, getCurrentDirectory, setCurrentDirectory, listDirectory, removeFile, doesFileExist)
+import System.Directory (createDirectoryIfMissing, setCurrentDirectory, listDirectory, removeFile, doesFileExist)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Numeric (showHex, readHex, readFloat)
-import Control.Exception (evaluate, try, SomeException, fromException)
+import Control.Exception (evaluate, try, SomeException, fromException, toException)
 import Data.Char (isAlphaNum, isSpace, isDigit)
 import Data.List (isPrefixOf, isSuffixOf, stripPrefix, intercalate, nub)
 import Data.Maybe (fromMaybe, mapMaybe, isJust, listToMaybe)
 import Control.Monad (foldM, when, forM, forM_, void)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import System.Exit (ExitCode(..), exitWith)
-import System.IO (hPutStr, hPutStrLn, stderr, stdout, hSetEncoding, utf8)
+import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 
 import GHC.Types.SourceError (SourceError)
 import GHC (moduleName, moduleNameString, TyCon, Type)
@@ -43,7 +43,7 @@ import Tidepool.GhcPipeline
   , stripMonadHead, isClosureType, renderType, splitTupleType
   , BatchItem(..), BatchItemResult(..), runBatchPipeline
   , withResidentPipeline )
-import qualified Tidepool.DaemonServer as DaemonServer
+import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson (Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson, renderDiag)
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (RequestField(..), workerRequestFromArgv)
@@ -64,62 +64,28 @@ import Tidepool.Timing (readTimingEnabled, timePhase, timeSection, emitPhase)
 -- only.
 main :: IO ()
 main = do
-  hSetEncoding stdout utf8
   rawArgs <- getArgs
-  case parseConnectArgs rawArgs of
-    Just (Left err) -> hPutStrLn stderr err >> exitWith (ExitFailure 2)
-    Just (Right ca) -> runConnectMode ca
-    Nothing -> case parseDaemonArgs rawArgs of
-      Just (Left err) -> hPutStrLn stderr err >> exitWith (ExitFailure 2)
-      Just (Right da) -> runDaemonMode da
-      Nothing         -> runOneInvocation runPipelineSession rawArgs >>= exitWith
+  if rawArgs == ["--worker-loop-v1"]
+    then do
+      hSetBinaryMode stdin True
+      hSetBinaryMode stdout True
+      withResidentPipeline [] $ \compiler ->
+        WorkerServer.runWorkerLoop
+          (\cwd argv -> setCurrentDirectory cwd >> runWorkerInvocation compiler argv)
+    else do
+      hSetEncoding stdout utf8
+      runWorkerInvocation runPipelineSession rawArgs >>= exitWith
 
--- | Client-mode entry: forward one ordinary invocation to an already-running
--- daemon, preserving its stdout, stderr, and exit status locally.
-runConnectMode :: ConnectArgs -> IO ()
-runConnectMode ca = do
-  cwd <- getCurrentDirectory
-  result <- try (DaemonServer.sendRequestToDaemon
-    (caSocket ca)
-    (DaemonServer.DaemonRequest cwd (caArgv ca)))
-  case result of
-    Left (err :: SomeException) -> do
-      hPutStrLn stderr ("--connect: could not communicate with daemon at " ++ caSocket ca ++ ": " ++ show err)
-      exitWith (ExitFailure 2)
-    Right response -> do
-      hPutStr stdout (DaemonServer.respStdout response)
-      hPutStr stderr (DaemonServer.respStderr response)
-      exitWith (intToExitCode (DaemonServer.respExitCode response))
-  where
-    intToExitCode 0 = ExitSuccess
-    intToExitCode code = ExitFailure code
-
-data ConnectArgs = ConnectArgs
-  { caSocket :: FilePath
-  , caArgv   :: [String]
-  }
-
--- | A @--connect@ anywhere selects client mode. Arguments before it belong to
--- the local launcher; everything following its socket path is forwarded
--- byte-for-byte as the daemon request argv.
-parseConnectArgs :: [String] -> Maybe (Either String ConnectArgs)
-parseConnectArgs [] = Nothing
-parseConnectArgs ["--connect"] = Just (Left "--connect: socket path is required")
-parseConnectArgs ("--connect" : socketPath : requestArgv) =
-  Just (Right (ConnectArgs socketPath requestArgv))
-parseConnectArgs (_ : rest) = parseConnectArgs rest
-
--- | Decode a Rust worker request, or temporarily accept the legacy CLI
--- surface, then run one compilation request. Direct and daemon transports use
+-- | Decode a Rust worker request and run one compilation. Direct and daemon transports use
 -- the same versioned payload and therefore the same dispatch path.
-runOneInvocation
+runWorkerInvocation
   :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
   -> [String] -> IO ExitCode
-runOneInvocation compiler rawArgs = do
+runWorkerInvocation compiler rawArgs = do
   parsedArgs <- case workerRequestFromArgv rawArgs of
     Left err -> hPutStrLn stderr err >> pure Nothing
     Right (Just fields) -> pure (Just (requestArgs fields))
-    Right Nothing -> pure (Just (parseArgs rawArgs))
+    Right Nothing -> hPutStrLn stderr "worker requires a versioned request" >> pure Nothing
   case parsedArgs of
     Nothing -> pure (ExitFailure 2)
     Just request -> runParsedInvocation compiler request
@@ -130,8 +96,8 @@ runParsedInvocation
 runParsedInvocation compiler parsedArgs = do
   -- Set BEFORE any GhcPipeline call, which is what actually reads it (see
   -- 'Tidepool.GhcPipeline.withBuildProductsFromEnv') — see 'argBuildProductsDir'.
-  -- Under the daemon this env var was already read once at RESIDENT SESSION
-  -- BOOT (see 'runDaemonMode'), so a later request's own flag has no further
+  -- Under the resident worker this env var was already read once at session
+  -- boot, so a later request's own field has no further
   -- effect — the same "process-wide setting" framing 'argBuildProductsDir'
   -- already documents, just pinned earlier under a resident session.
   case argBuildProductsDir parsedArgs of
@@ -141,7 +107,7 @@ runParsedInvocation compiler parsedArgs = do
   -- TIDEPOOL_TIMING is diagnostic-only and never touches stdout/the emitted
   -- files — see the module doc there and tidepool-harness/src/timing.rs.
   timing <- readTimingEnabled
-  -- Harness compilation profile (generic-surface wave item 4, PART 2):
+  -- Apply the harness language profile by rewriting a scratch copy:
   -- rewrite the target to a pragma-prepended scratch copy BEFORE any mode
   -- dispatch below, so every mode (one-shot, session, turn) sees a plain
   -- file with no pragma-block requirement of its own. See
@@ -151,9 +117,7 @@ runParsedInvocation compiler parsedArgs = do
             else pure parsedArgs
   dispatch compiler timing args
 
--- | The mode-dispatch case @main@ used to run directly, unchanged in shape —
--- split out purely so 'runOneInvocation' can call it for both the CLI entry
--- point and a daemon request.
+-- | Dispatch one decoded worker request.
 dispatch
   :: (Maybe SessionScope -> FilePath -> [FilePath] -> IO PipelineResult)
   -> Bool -> Args -> IO ExitCode
@@ -166,9 +130,7 @@ dispatch compiler timing args =
     _ | isJust (argTurnBatch args) -> runTurnBatchMode args
     _ -> case argFiles args of
       [] -> do
-        hPutStrLn stderr "Usage: tidepool-extract-bin [--output-dir <dir>] [--target <name>] [--targets <a,b,...>] [--include <dir>] [--build-products-dir <dir>] [--dump-core] [--harness-profile] [--classify --classify-out <out.json>] [--session-root <dir> --inject-val <mod> ...] [--session-bind --bind-name <occ> --bind-gen <g> --emit-bound-binders <out.json>] [--turn --turn-template <kind>=<file> --turn-out <out.cbor> [--turn-verdict <kind>[:<names>]]] [--turn-batch <plan.json> --batch-out <dir>] [--daemon --socket <path> [--rotate-after N] [--rss-ceiling-mb M] [--watch-stamp <path>]] <file.hs> ..."
-        putStrLn (renderDiagsJson [])
-        pure ExitSuccess
+        reportDiags (Left (toException (userError "worker request contains no input")))
       (file : _)
         -- Block classify mode: every positional file is one item, classified
         -- in ONE GHC session boot. Checked before '--turn' since it reads the
@@ -191,69 +153,22 @@ dispatch compiler timing args =
         -- multi-target compile; a plain multi-target caller with no session
         -- flags is byte-identical to before (`scope = Nothing` there).
         | not (null (argTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
-        -- Session mode (Wave 3b): bind/reference turn with iface injection +
+        -- Session mode: bind/reference turn with iface injection +
         -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
         -- file is processed (matching the two guards above) — one invocation,
         -- one stdout report, per the module doc.
         | isSessionMode args                  -> processSessionFile compiler args file
-        -- Normal one-shot extraction (byte-identical to historical behaviour).
+        -- Normal one-shot extraction.
         | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
 
--- | Daemon-mode entry (@--daemon --socket <path> ...@): boot ONE resident
--- GHC session ('withResidentPipeline') and hand 'Tidepool.DaemonServer' a
--- request handler that reuses 'runOneInvocation' against it — the ONLY thing
--- this function does beyond flag dispatch. Per the design's boundary:
--- DaemonServer owns the accept loop, rotation, RSS backstop and stamp
--- watch; Main.hs never grows a serving loop of its own.
-runDaemonMode :: DaemonArgs -> IO ()
-runDaemonMode da =
-  withResidentPipeline [] $ \compiler ->
-    DaemonServer.runDaemon
-      DaemonServer.DaemonConfig
-        { DaemonServer.dcSocketPath        = daSocket da
-        , DaemonServer.dcRotateAfter       = daRotateAfter da
-        , DaemonServer.dcRssCeilingMb      = daRssCeilingMb da
-        , DaemonServer.dcWatchStamp        = daWatchStamp da
-        , DaemonServer.dcRequestTimeoutSec = 30
-        }
-      (\cwd argv -> setCurrentDirectory cwd >> runOneInvocation compiler argv)
-
--- | Parsed @--daemon@ flags (@app/Main.hs@'s ONLY daemon-mode responsibility
--- — see the module boundary note on 'runDaemonMode').
-data DaemonArgs = DaemonArgs
-  { daSocket       :: FilePath
-  , daRotateAfter  :: Maybe Int
-  , daRssCeilingMb :: Maybe Int
-  , daWatchStamp   :: Maybe FilePath
-  }
-
--- | 'Nothing' when @--daemon@ is absent from argv at all — every existing
--- caller, test, and CI job, byte-identical to before this flag existed.
--- 'Just' parses the rest of the daemon flag grammar; 'Left' is a usage
--- error (a missing @--socket@, or an unrecognized daemon-mode flag).
-parseDaemonArgs :: [String] -> Maybe (Either String DaemonArgs)
-parseDaemonArgs args
-  | "--daemon" `elem` args = Just (go (filter (/= "--daemon") args) Nothing Nothing Nothing Nothing)
-  | otherwise = Nothing
-  where
-    go [] msock rot rss watch = case msock of
-      Just sock -> Right (DaemonArgs sock rot rss watch)
-      Nothing   -> Left "--daemon: --socket <path> is required"
-    go ("--socket" : v : rest) _ rot rss watch = go rest (Just v) rot rss watch
-    go ("--rotate-after" : v : rest) msock _ rss watch = go rest msock (Just (read v)) rss watch
-    go ("--rss-ceiling-mb" : v : rest) msock rot _ watch = go rest msock rot (Just (read v)) watch
-    go ("--watch-stamp" : v : rest) msock rot rss _ = go rest msock rot rss (Just v)
-    go (x : _) _ _ _ _ = Left ("--daemon: unrecognized flag " ++ x)
 
 -- | Rewrites the FIRST target file (`argFiles`'s head) to a scratch copy
 -- with 'harnessProfilePragmaLine' prepended — the harness compilation
--- profile's PART 2 (generic-surface wave item 4). A no-op when 'argFiles'
+-- profile. A no-op when 'argFiles'
 -- is empty (the usage-banner path handles that separately).
 --
--- Splices SOURCE TEXT rather than toggling GHC extension FLAGS on the
--- original file's DynFlags. A prior version of this mechanism did exactly
--- that (per-module 'GHC.Driver.Session.DynFlags' patching inside
--- @Tidepool.GhcPipeline@) and was reverted: a compilation-request cache
+-- Splice source text rather than toggling GHC extension flags on the
+-- original file's DynFlags: a compilation-request cache
 -- (@tidepool_runtime::cache@, see @cache.rs@'s @cache_key_salted@) keys on
 -- rendered SOURCE BYTES, the target binder, include-directory content
 -- fingerprints, and the extract binary's own fingerprint — NOT on CLI
@@ -364,17 +279,17 @@ data Args = Args
   , argTargetModuleOnly :: Bool
   , argIncludes :: [FilePath]
   , argFiles :: [String]
-  -- Wave 3b session-eval value binding:
+  -- Session-eval value binding:
   , argSessionBind :: Bool
   , argBindNames :: [String]
   , argBindGen :: Maybe Word64
   , argSessionRoot :: Maybe FilePath
   , argInjectVals :: [String]
   , argEmitBoundBinders :: Maybe FilePath
-  -- Ephemeral type-probe bind (`:t`): the same @--session-bind@ machinery,
+  -- Ephemeral type-probe bind (`:t`): the same session-bind machinery,
   -- but the captured binder is read-and-discarded, never a real session
   -- binding — so the cross-row bind guard in 'mkBoundBinders' must not
-  -- reject a row-mentioning type here (friction 2, round-2 test-user report).
+  -- reject a row-mentioning type here.
   , argProbeOnly :: Bool
   -- --turn mode (one-spawn-per-turn protocol):
   , argTurn :: Bool
@@ -387,7 +302,7 @@ data Args = Args
   -- --turn-batch mode:
   , argTurnBatch :: Maybe FilePath
   , argBatchOut :: Maybe FilePath
-  -- Harness compilation profile (generic-surface wave item 4, PART 2): the
+  -- Harness compilation profile: the
   -- standard extension set applied to the target module by prepending one
   -- LANGUAGE pragma line to a SCRATCH COPY of its source (see
   -- 'spliceHarnessProfilePragma') — never the author's own file on disk,
@@ -408,36 +323,6 @@ data Args = Args
   -- home module.
   , argBuildProductsDir :: Maybe FilePath
   }
-
-parseArgs :: [String] -> Args
-parseArgs = go defaultArgs
-  where
-    go a ("--output-dir" : dir : rest) = go a { argOutDir = Just dir } rest
-    go a ("--target" : name : rest) = go a { argTarget = Just name } rest
-    go a ("--targets" : ts : rest) = go a { argTargets = argTargets a ++ splitComma ts } rest
-    go a ("--dump-core" : rest) = go a { argDumpCore = True } rest
-    go a ("--all-closed" : rest) = go a { argAllClosed = True } rest
-    go a ("--target-module-only" : rest) = go a { argTargetModuleOnly = True } rest
-    go a ("--session-bind" : rest) = go a { argSessionBind = True } rest
-    go a ("--bind-name" : n : rest) = go a { argBindNames = argBindNames a ++ [n] } rest
-    go a ("--bind-gen" : g : rest) = go a { argBindGen = Just (read g) } rest
-    go a ("--session-root" : dir : rest) = go a { argSessionRoot = Just dir } rest
-    go a ("--inject-val" : m : rest) = go a { argInjectVals = argInjectVals a ++ [m] } rest
-    go a ("--emit-bound-binders" : out : rest) = go a { argEmitBoundBinders = Just out } rest
-    go a ("--probe-only" : rest) = go a { argProbeOnly = True } rest
-    go a ("--turn" : rest) = go a { argTurn = True } rest
-    go a ("--turn-template" : kv : rest) = go a { argTurnTemplates = argTurnTemplates a ++ [kv] } rest
-    go a ("--turn-out" : out : rest) = go a { argTurnOut = Just out } rest
-    go a ("--turn-verdict" : v : rest) = go a { argTurnVerdict = Just v } rest
-    go a ("--classify" : rest) = go a { argClassify = True } rest
-    go a ("--classify-out" : out : rest) = go a { argClassifyOut = Just out } rest
-    go a ("--turn-batch" : p : rest) = go a { argTurnBatch = Just p } rest
-    go a ("--batch-out" : d : rest) = go a { argBatchOut = Just d } rest
-    go a ("--include" : dir : rest) = go a { argIncludes = argIncludes a ++ [dir] } rest
-    go a ("--harness-profile" : rest) = go a { argHarnessProfile = True } rest
-    go a ("--build-products-dir" : dir : rest) = go a { argBuildProductsDir = Just dir } rest
-    go a (x : rest) = go a { argFiles = argFiles a ++ [x] } rest
-    go a [] = a
 
 defaultArgs :: Args
 defaultArgs = Args Nothing Nothing [] False False False [] []
@@ -1062,7 +947,7 @@ runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts tar
   _ <- writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts closedTargets
   return ()
 
--- | A Wave-3b session-eval turn (reference or bind). Compile through
+-- | A session-eval turn (reference or bind). Compile through
 -- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
 -- earlier bindings resolve), emit the JIT-able Core for @__result@, and — on a
 -- bind turn — capture the bound value's type, write the thin session iface, and
@@ -1073,8 +958,7 @@ processSessionFile
 processSessionFile compiler args path = do
   -- The self-iterating harness's fused outer render/loop compile never
   -- reaches this session-mode path even though it now DOES carry
-  -- --session-root/--inject-val (its stable-val injection,
-  -- plans/turn-latency-state-injection.md): 'main' checks
+  -- --session-root/--inject-val for stable-value injection: 'dispatch' checks
   -- `not (null (argTargets args))` (which its multi-target --targets
   -- result,__selfHarnessLoopEntry always is) BEFORE 'isSessionMode', so it
   -- always lands on 'processFile' instead. This read is here purely so
@@ -1665,10 +1549,7 @@ runTurnBatchMode args = do
       Just (se :: SourceError) -> diagsFromSourceError se
       Nothing                  -> [diagFromException e]
 
--- | Parse one raw @--turn-template kind=file@ argument. Validated here (not in
--- 'parseArgs', which stays total) so a malformed flag surfaces through
--- 'runTurnMode''s @try@ as the same JSON diagnostics report every other
--- failure does, not a bare crash.
+-- | Validate one template selected by the typed request.
 parseTurnTemplate :: String -> IO (String, FilePath)
 parseTurnTemplate kv = case break (== '=') kv of
   (kind, '=' : file) | not (null kind), not (null file) -> return (kind, file)

@@ -10,13 +10,15 @@
 # resolver coverage hole, NOT an accepted loss — this script FAILS on any skip.
 #
 # Env overrides (defaults target this worktree's native build):
-#   TIDEPOOL_EXTRACT      native tidepool-extract-bin
+#   TIDEPOOL_EXTRACT          Rust extractor frontend
+#   TIDEPOOL_EXTRACT_WORKER   native-bignum Haskell compiler worker
 #   TIDEPOOL_GHC_LIBDIR   that GHC's libdir
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-EXTRACT="${TIDEPOOL_EXTRACT:-$HERE/dist-newstyle/build/x86_64-linux/ghc-9.12.2/tidepool-extract-0.1.0.0/x/tidepool-extract-bin/build/tidepool-extract-bin/tidepool-extract-bin}"
+EXTRACT="${TIDEPOOL_EXTRACT:-$HERE/../target/debug/tidepool-extract}"
+export TIDEPOOL_EXTRACT_WORKER="${TIDEPOOL_EXTRACT_WORKER:-$(cd "$HERE" && cabal list-bin tidepool-extract-bin 2>/dev/null)}"
 export TIDEPOOL_GHC_LIBDIR="${TIDEPOOL_GHC_LIBDIR:-/nix/store/swcff7l71v3466rks25slabajwzrx51c-ghc-native-bignum-9.12.2/lib/ghc-9.12.2/lib}"
 
 SRC="$HERE/test/corpus/Corpus.hs"
@@ -24,7 +26,12 @@ OUT="$HERE/test/corpus_cbor"
 
 if [[ ! -x "$EXTRACT" ]]; then
   echo "FATAL: native extract binary not found/executable: $EXTRACT" >&2
-  echo "Set TIDEPOOL_EXTRACT to the native-bignum tidepool-extract-bin." >&2
+  echo "Build the Rust frontend or set TIDEPOOL_EXTRACT to it." >&2
+  exit 1
+fi
+if [[ ! -x "$TIDEPOOL_EXTRACT_WORKER" ]]; then
+  echo "FATAL: native compiler worker not found/executable: $TIDEPOOL_EXTRACT_WORKER" >&2
+  echo "Build tidepool-extract-bin or set TIDEPOOL_EXTRACT_WORKER to it." >&2
   exit 1
 fi
 

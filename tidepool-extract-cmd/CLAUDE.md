@@ -1,8 +1,10 @@
 # tidepool-extract-cmd — the ONE `tidepool-extract` invocation builder
 
-**Charter.** Belongs: binary resolution (the strict `$TIDEPOOL_EXTRACT`
-policy), typed request construction and encoding (`ExtractCmd`), and the spawn + spawn
-counter — a std-only leaf with zero dependencies. Parsing extractor output
+**Charter.** This crate is the public extractor boundary. It owns the CLI,
+binary resolution (the strict `$TIDEPOOL_EXTRACT` policy), typed request
+construction and encoding (`ExtractCmd`), resident-daemon transport and
+lifecycle, and the spawn counter. The Haskell executable is a compiler worker
+behind this boundary. Parsing extractor output
 belongs to callers; the compile cache belongs to `tidepool-toolchain`, which
 uses this crate's `argv()` in its cache key.
 
@@ -11,9 +13,9 @@ uses this crate's `argv()` in its cache key.
 `ExtractCmd::run()` (never `run_with` — see below) transparently tries the
 resident compile daemon before falling back
 to a direct spawn: when `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a path, it
-connects, sends `(cwd, worker request)` over the wire the `daemon` module owns
-(length-prefixed frames — see that module's doc for the exact byte shape,
-mirrored byte-for-byte by `haskell/src/Tidepool/DaemonServer.hs`), and
+connects and sends `(cwd, worker request)` over the length-prefixed wire owned
+by the `daemon` module. The Rust daemon forwards the typed request to a
+resident Haskell worker over its private framed stdin/stdout protocol, then
 synthesizes the daemon's response into the same `ExtractRun{output, elapsed}`
 shape a spawned process produces (`std::os::unix::process::ExitStatusExt::
 from_raw` over a wait(2)-style status, NOT a bare exit code — see
@@ -29,8 +31,8 @@ request, never a retry against the same daemon and never surfaced as this
 call's own error. The spawn counter (`extract_spawn_count`) increments
 exactly once per logical request either way — on the daemon's own success,
 or on the Direct fallback's — see `run`'s own doc for why `run_via_daemon`
-counts a daemon-served request as a real spawn (design §5.2: the counter
-means "an invocation was served," not "a process was forked").
+counts a daemon-served request as a real spawn: the counter means "an
+invocation was served," not "a process was forked."
 
 **`Launcher::Daemon(PathBuf)`** is the third launcher variant, structurally
 not `Command`-shaped (no process to build — `Launcher::command()` panics on
@@ -43,7 +45,7 @@ failure is reported honestly rather than silently retried through Direct.
 No caller does this today; it exists so the type is total rather than a
 landmine.
 
-**Zero new dependencies** (the charter above still holds): the wire codec is
+**Zero dependencies** (the charter above still holds): the wire codec is
 hand-rolled (`u32`-LE length-prefixed frames), never `serde`/`serde_json`,
 even for the response's small `{exit_code, stdout, stderr}` shape — see
 `daemon`'s module doc for why the frame boundaries alone are enough

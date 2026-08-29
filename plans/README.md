@@ -15,13 +15,8 @@ charter / glossary and the plan file is deleted (git is the archive).
 - [Resident-session kernel design](resident-session-kernel-design.md):
   decision-complete (operator answers recorded inline 2026-08-24);
   implementation lane in flight against it.
-- [Compile daemon design](compile-daemon-design.md): decision-complete
-  (operator picks in the Decisions section, 2026-08-24); phase 0
-  (opt-in daemon mode + `ExtractCmd` socket transport + warm spike
-  measurement) in flight.
 - [Test-time cut](test-time-cut.md): diagnosis landed; family bundling
-  merged, turn-count top-5 lane in flight; nextest setup-scripts pilot
-  DEFERRED pending compile-daemon phase 1 (still experimental upstream).
+  merged, turn-count top-5 lane in flight.
 - [Flight dogfood campaign](flight-dogfood-campaign.md): live process doc
   for autonomous fresh-session dogfood rounds driven by the root + native
   subagents while the operator is offline; robot-operator form answering,

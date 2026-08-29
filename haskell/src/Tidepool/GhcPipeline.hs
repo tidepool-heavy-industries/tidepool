@@ -82,14 +82,11 @@ data PipelineResult = PipelineResult
   -- @__user@ binding is present (e.g. fixture/Suite extraction). Captured at the
   -- typecheck stage because our CBOR serializer strips all type information.
   --
-  -- CAVEAT (Wave-4): 'ppr' rendering is NOT parser-faithful — it can elide
-  -- qualifiers / use unicode that won't round-trip through GHC's parser. Fine
-  -- for v1 display + the synthetic @x :: <type>@ decl when the type is simple,
-  -- but cross-turn typechecking of references may need a structured
-  -- @IfaceType@ instead of this string.
+  -- This display string is not parser-faithful: 'ppr' can elide qualifiers or
+  -- use Unicode. Cross-turn typechecking must use structured type data.
   , prCapturedType :: Maybe String
   -- | The GHC 'Type' of the target module's @result@ binding, captured for the
-  -- Wave-3b BIND mode (the value-binding turn). For @result = do { x <- action;
+  -- value-binding mode. For @result = do { x <- action;
   -- pure x } :: Eff stack T@ this is the FULL @Eff stack T@; 'stripMonadHead'
   -- recovers the bound value type @T@. 'Nothing' when the module has no @result@
   -- binder (every non-bind extraction — reference turns, fixtures, one-shot
@@ -97,15 +94,15 @@ data PipelineResult = PipelineResult
   , prResultType :: Maybe Type
   -- | GHC diagnostic warnings (@-Wincomplete-patterns@, name shadowing, ...)
   -- emitted while compiling the TARGET module — dependency modules (the
-  -- preamble, stdlib) are excluded, see 'warnCollectorHook'. Rendered by
+  -- preamble, stdlib) are excluded, see 'diagnosticCollectorHook'. Rendered by
   -- GHC's own diagnostic pretty-printer, so a warning carries its
   -- @Expr.hs:<line>:<col>@ location exactly like a compile error does. Empty
   -- on a clean compile.
   , prWarnings :: [String]
   }
 
--- | The normal one-shot eval extraction. Byte-identical to its historical
--- behaviour: it is exactly @runPipelineSession Nothing@, so no session
+-- | The normal one-shot extraction. This is exactly
+-- @runPipelineSession Nothing@, so no session
 -- machinery (iface injection, source-less home modules) ever touches this path.
 runPipeline :: FilePath -> [FilePath] -> IO PipelineResult
 runPipeline = runPipelineSession Nothing
@@ -175,7 +172,7 @@ data CompilePlan = CompilePlan
     -- ^ Runs after a module's 'core2core', on the pre-'externalizeInternalTops'
     -- guts. The session path registers deferred modules into the HPT here.
   , cpTier :: TierPolicy
-  , cpBeforeMerge :: SuccessFlag -> Ghc ()
+  , cpBeforeMerge :: SuccessFlag -> [String] -> Ghc ()
     -- ^ Runs after the compile loop and its phase emits, before the guts are
     -- merged. The normal path puts its load barrier here (deliberately LATE —
     -- see 'normalVariant').
@@ -245,15 +242,9 @@ runPipelineSession mscope path includes
 
 -- ---------------------------------------------------------------------------
 -- Batch turns: N item compiles in one GHC session, threading GHC's own
--- 'ModIfaceCache' so
--- cycles 2..N skip stdlib recompilation) and a per-module dep-guts memo
--- (§7.6/§7.3 — a module's guts, once compiled in ANY cycle, are reused
--- verbatim by every LATER cycle that compiles the same module again). The
--- memo is populated INCREMENTALLY — on a module's FIRST compile in the
--- batch, whichever cycle that is — which is what closes §7.6's
--- incremental-population gap: a module that only appears partway through the
--- batch still gets memoized from that point on, without needing to be known
--- up front.
+-- 'ModIfaceCache' and a per-module Core memo. A module's guts, once compiled
+-- in any cycle, are reused by later cycles. Modules first encountered partway
+-- through a batch are memoized from that point onward.
 --
 -- 'runCompileCycle' is the ONE compile-cycle body, shared by 'runCompile'
 -- (called once, 'mCache'/'mMemoRef' both 'Nothing') and 'runBatchPipeline'
@@ -262,7 +253,7 @@ runPipelineSession mscope path includes
 -- single-turn session paths (both via 'runCompile') are pinned byte-identical
 -- by 'cross_mode_targeted'; the batch path is pinned by
 -- @extract-fidelity-test@'s 'Fidelity.TurnBatch' (per-item error attribution,
--- and item 0's output being byte-identical-single-turn shape).
+-- and the first item's output having the single-turn shape).
 -- ---------------------------------------------------------------------------
 
 -- | One memoized module's compile artifacts, keyed by 'ModuleName' across a
@@ -331,11 +322,12 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     sessionT0 <- maybe monotonicTime pure mSummaryT0
     target <- guessTarget path Nothing Nothing
     setTargets [target]
-    -- Success-path warning capture (see 'warnCollectorHook'): installed before
-    -- any typecheck runs so every diagnostic the per-module loop below emits
-    -- for the target file is recorded, not just printed.
+    -- Install target-diagnostic capture before load/typecheck. Warnings become
+    -- part of a successful result; errors remain available if 'load'' reports
+    -- only a 'Failed' flag rather than throwing a 'SourceError'.
     warnRef <- liftIO (newIORef [])
-    pushLogHookM (warnCollectorHook path warnRef)
+    errorRef <- liftIO (newIORef [])
+    pushLogHookM (diagnosticCollectorHook path warnRef errorRef)
     -- EPS unpoisoning (QQ/TH support — see canonicalizeDFlags haddock).
     -- 'depanal' runs downsweep, whose @enableCodeGenForTH@ downgrades the
     -- splice-needed home modules' ms_hspp_opts to -O0 +
@@ -351,7 +343,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- but interface loading honors pragmas, so the EPS is healthy from the
     -- start. Non-TH graphs carry no downgrade — the unset is a no-op there.
     --
-    -- A post-'load' EPS flush (the previous fix) does NOT work: home-module
+    -- A post-'load' EPS flush cannot work: home-module
     -- TyCons are already realized in the HPT, so re-typechecking lib modules
     -- never re-demands the package interfaces that define their instances —
     -- they never re-enter the fresh EPS, and typechecking fails with e.g.
@@ -386,8 +378,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- they do not nest inside each other.
     liftIO (emitPhase timing "ghc_load" (elapsedMs loadT0 loadT1))
     cpAfterLoad plan loadFlag
-    -- hs-boot summaries are EXCLUDED from extraction (item 20, 2026-08-10) —
-    -- ONE site, for both variants, which is the point of this unification:
+    -- Exclude hs-boot summaries in one shared site for both variants:
     -- a boot node shares its ModuleName with the real module, so its
     -- near-empty desugared guts would CLOBBER the real module's entry in
     -- the name-keyed 'gutsByMod' below — hiding every Core edge out of that
@@ -422,7 +413,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- quantity.
     dsMsRef  <- liftIO (newIORef (0 :: Integer))
     c2cMsRef <- liftIO (newIORef (0 :: Integer))
-    -- Per-module wall time (compile-attribution lane): front (typecheck +
+    -- Per-module wall time: front (typecheck +
     -- desugar) and back (core2core) halves keyed by module name and SUMMED
     -- into one entry per module via 'Map.insertWith' — tracked UNCONDITIONALLY
     -- (like 'tcMsRef'/'coreMsRef' above, cheap monotonic-clock reads), not
@@ -507,10 +498,9 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     -- vocabularies can populate/consult the shared memo under one key with
     -- genuinely different bindings (e.g. one row lacking
     -- @Tidepool.Agent.Spawn@'s @spawnSpec@) — exactly the "module names are
-    -- not globally unique across independent requests" hazard design §2.2
-    -- names, one step past what 'sanitizeMemo's target\/@Tidepool.Session.*@
-    -- exclusion already covers (spawnrow-fix, plans/compile-daemon-design.md
-    -- §7). A hash mismatch is treated as an ordinary miss: compiled fresh
+    -- not globally unique across independent requests" hazard. This extends
+    -- the target\/@Tidepool.Session.*@ exclusion in 'sanitizeMemo'. A hash
+    -- mismatch is treated as an ordinary miss: compiled fresh
     -- below, and the memo entry is overwritten with the new content via the
     -- existing 'Map.insert'. Costs nothing when content is unchanged (the
     -- overwhelmingly common case — same vocabulary, same hash, hit as
@@ -586,17 +576,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
               pure (mf, r)
         pure (map fst pairs, map snd pairs, Nothing)
       OptimizeCoreReachable -> do
-        -- Memo consultation (resident-session addition, plans/compile-daemon-design.md
-        -- §7 deviation record): with 'mMemoRef' 'Nothing' (every EXISTING
-        -- caller — only 'runBatchPipeline' ever passes 'Just', and it never
-        -- selects this tier), 'cached' is always 'Nothing' below, so every
-        -- module takes the SAME 'compileFront'-then-'compileBack' path this
-        -- branch has always taken — this generalization is behavior-
-        -- preserving for every pre-existing caller BY CONSTRUCTION, not by
-        -- re-review. The resident daemon is the only caller that ever
-        -- passes 'Just' here.
-        --
-        -- A memo HIT reuses a module's cached front (needed for the
+        -- A resident-session memo hit reuses a module's cached front (needed for the
         -- reachability walk below, since it carries 'mfDesugared') without
         -- redoing parse/typecheck/desugar. A hit's cached RESULT is reused
         -- outright if the module turns out reachable this cycle — safe even
@@ -682,7 +662,7 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
     totalCoreMs <- liftIO (readIORef coreMsRef)
     liftIO (emitPhase timing "typecheck" totalTcMs)
     liftIO (emitPhase timing "core" totalCoreMs)
-    -- Default-on per-compile summary (compile-attribution lane): fires
+    -- Default-on per-compile summary: fires
     -- whenever the caller passed 'Just' for 'mSummaryT0' (a lone compile,
     -- always; a batch cycle, never — see the haddock above), independent of
     -- 'timing' — see 'emitCompileSummary''s haddock for why. Wall time is the
@@ -721,7 +701,8 @@ runCompileCycle mCache mMemoRef timing mSummaryT0 variant path = do
           ++ " validation_only=" ++ show validationOnly
           ++ " reachable_names=" ++ show (map moduleNameString (Set.toList reachableMods))
       _ -> pure ()
-    cpBeforeMerge plan loadFlag
+    capturedErrors <- liftIO (nub . reverse <$> readIORef errorRef)
+    cpBeforeMerge plan loadFlag capturedErrors
     -- Merge: dependency module bindings first, target module last
     let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g
@@ -850,7 +831,7 @@ runBatchPipeline includes items onItem = do
 -- 'runGhc' boot, one
 -- 'setSessionDynFlags', serving individual compile REQUESTS one at a time
 -- instead of a pre-built @[BatchItem]@ list. Transport-blind: this module
--- knows nothing about sockets or frames (Tidepool.DaemonServer owns that) —
+-- knows nothing about sockets or frames (the worker transport owns that) —
 -- it hands the caller a plain IO closure shaped exactly like
 -- 'runPipelineSession', so app/Main.hs's existing dispatch can substitute it
 -- in with no other change to its own call sites.
@@ -904,7 +885,7 @@ withResidentPipeline baseIncludes useCompiler = do
 -- request still gets the same default-on per-compile summary a direct spawn
 -- would emit.
 --
--- Variant: the SAME choice 'runPipelineSession' itself makes —
+-- Use the same variant choice as 'runPipelineSession':
 -- 'sessionVariant' for an active scope, 'normalVariant' otherwise — so a
 -- daemon-served request always selects the identical TIER a direct spawn of
 -- the same argv would have, which 'OptimizeCoreReachable'-vs-
@@ -912,17 +893,12 @@ withResidentPipeline baseIncludes useCompiler = do
 -- tiers can compile a validation-only (non-reachable) dependency module
 -- into differently-shaped Core (raw desugared vs. fully core2core'd), and
 -- 'writeClosedTargets''s metadata merge walks that Core, so swapping tiers
--- silently changed @meta.cbor@'s byte content — empirically caught by this
--- lane's own integration test before this comment was written (an earlier
--- version of this function forced 'sessionVariant' unconditionally, on the
--- mistaken assumption that a non-reachable module's Core is thrown away
--- identically either way; the metadata WALK is not, even though the final
--- wire-emitted bindings are). See 'runCompileCycle''s @OptimizeCoreReachable@
+-- changes @meta.cbor@'s byte content because metadata still walks that Core.
+-- See 'runCompileCycle''s @OptimizeCoreReachable@
 -- arm below for the memo integration that makes THIS gate — matching a
 -- direct spawn's tier exactly — still get the warm-cache win for a plain,
 -- non-session request: both tiers now consult @mMemoRef@, so either choice
--- here reuses the shared stdlib memo. Recorded as an implementation-forced
--- deviation from an earlier draft in plans/compile-daemon-design.md §7.
+-- here reuses the shared stdlib memo.
 residentCompileOne
   :: ModIfaceCache -> IORef GutsMemo -> [FilePath]
   -> Bool -> Maybe SessionScope -> FilePath -> [FilePath] -> Ghc PipelineResult
@@ -945,24 +921,21 @@ residentCompileOne cache memoRef baseImportPaths timing mscope path extraInclude
 -- and @Lib@ kinds — the ONE existing session-module-name recognizer, reused
 -- rather than a second hand-rolled prefix check).
 --
--- Deliberately NOT a literal @mMemoRef = Nothing@ for the whole cycle, which
--- a first reading of design doc §2.3's wording might suggest: that would
--- also disable READS of the already-warmed STDLIB entries the whole
--- mechanism exists to serve, defeating the daemon's purpose (every module in
--- 'cpSummaries' — stdlib deps included — would compile fresh every cycle).
--- Stripping request-scoped names post-hoc keeps the read-side win (stdlib
--- entries persist and keep accumulating across requests) while upholding the
--- actual invariant §2.2 states: a request-spanning memo must never let one
--- request's @__result@/@Val.G\<g\>@ guts reach another request's compile of
--- the same name. Recorded as an implementation-forced deviation from the
--- design doc's literal wording in plans/compile-daemon-design.md §7.
+-- | Remove request-scoped modules after each resident compile. Reusable
+-- library entries stay warm, while @__result@ and session-value guts cannot
+-- leak into a later request that reuses the same module name.
 sanitizeMemo :: ModuleName -> IORef GutsMemo -> IO ()
 sanitizeMemo targetModName' memoRef =
   modifyIORef' memoRef $ Map.filterWithKey $ \mn _ ->
     mn /= targetModName' && isNothing (parseSessionModule (moduleNameString mn))
 
--- | A 'GHC.Utils.Logger.LogAction' hook that records every @SevWarning@
--- diagnostic whose source span is @targetPath@ (the file being extracted,
+-- | Record target-module warnings for successful results and target-module
+-- errors for the late load barrier. GHC can report a fatal warning from
+-- 'load'' only through the logger and return 'Failed'; preserving it here
+-- prevents the barrier from replacing the useful diagnostic with a generic
+-- "module load failed" error.
+--
+-- Only diagnostics whose source span is @targetPath@ are recorded,
 -- NOT a dependency module — the preamble/stdlib compile alongside it in the
 -- same GHC session and must not leak their own warnings into the eval's).
 -- Rendered with 'mkLocMessage', the same formatter GHC's default log action
@@ -970,11 +943,14 @@ sanitizeMemo targetModName' memoRef =
 -- ...@ shape callers already parse compile errors out of. Delegates to
 -- `fallback` unconditionally so normal stderr printing is unaffected — this
 -- only ADDS a capture, it never suppresses.
-warnCollectorHook :: FilePath -> IORef [String] -> LogAction -> LogAction
-warnCollectorHook targetPath ref fallback flags msgClass srcSpan msg = do
+diagnosticCollectorHook
+  :: FilePath -> IORef [String] -> IORef [String] -> LogAction -> LogAction
+diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass srcSpan msg = do
   case msgClass of
     MCDiagnostic SevWarning _ _ | inTarget srcSpan ->
-      modifyIORef' ref (rendered :)
+      modifyIORef' warningRef (rendered :)
+    MCDiagnostic SevError _ _ | inTarget srcSpan ->
+      modifyIORef' errorRef (rendered :)
     _ -> pure ()
   fallback flags msgClass srcSpan msg
   where
@@ -1004,28 +980,16 @@ extractionDynFlags dflags includes = canonicalizeDFlags dflags
   , avx512pf = False
   }
 
--- | Apply the shared, persistent build-products dir (module-granular GHC
--- recompilation avoidance across `tidepool-extract` spawns — spike-verified
--- 2026-08-20, plans/turn-latency-state-injection.md's "Direction: toward a
--- resident compile daemon" section) from @$TIDEPOOL_BUILD_PRODUCTS_DIR@, if
+-- | Apply the shared, persistent build-products directory from
+-- @$TIDEPOOL_BUILD_PRODUCTS_DIR@, if
 -- set. Points @hiDir@\/@objectDir@ at it and turns on @-fwrite-interface@ so
 -- GHC's own @checkOldIface@ recompilation checking can skip an unchanged
 -- home module (typically 49 of ~51 modules on a companion turn — every
 -- stdlib module the compiled target doesn't itself edit) instead of
 -- redoing parse\/typecheck\/desugar for it every single spawn.
 --
--- A no-op (byte-identical 'DynFlags') when the env var is unset — exactly
--- like 'getLibdir''s own @$TIDEPOOL_GHC_LIBDIR@ — so every existing caller
--- that never sets it (every test suite besides the acceptance test this
--- lane adds, every non-companion eval) is untouched. The env var, not a
--- 'GhcPipeline' function parameter, is the seam deliberately: threading a
--- new parameter through 'runPipeline'\/'runPipelineSession'\/
--- 'runBatchPipeline' would ripple into every call site across
--- @app/Main.hs@ and four independent test-suites for a setting that is
--- process-wide, not per-compile — @app/Main.hs@'s own @--build-products-dir@
--- flag (the one 'tidepool-extract-cmd' surface + compile-memo allowlist
--- entry this lane adds) sets this SAME env var once at startup, before any
--- 'GhcPipeline' call.
+-- The environment variable is process-wide because the resident GHC session
+-- reads this setting at startup. With no value, the transform is a no-op.
 withBuildProductsFromEnv :: DynFlags -> IO DynFlags
 withBuildProductsFromEnv dflags = do
   mDir <- lookupEnv "TIDEPOOL_BUILD_PRODUCTS_DIR"
@@ -1084,8 +1048,10 @@ normalVariant path = PipelineVariant
         -- finished without re-surfacing whatever 'load'' choked on; stop
         -- rather than return a 'PipelineResult' built against a
         -- half-populated environment.
-      , cpBeforeMerge = \loadFlag -> case loadFlag of
-          Failed    -> liftIO $ ioError $ userError $
+      , cpBeforeMerge = \loadFlag capturedErrors -> case loadFlag of
+          Failed | not (null capturedErrors) ->
+            liftIO $ ioError $ userError (unlines capturedErrors)
+          Failed -> liftIO $ ioError $ userError $
             "runPipeline: module load failed compiling " ++ path
           Succeeded -> pure ()
       , cpFinalEnv = id
@@ -1250,7 +1216,7 @@ sessionVariant scope path = PipelineVariant
               setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
         , cpTier = OptimizeEveryModule
           -- The load barrier already fired in 'cpAfterLoad' (see there).
-        , cpBeforeMerge = \_ -> pure ()
+        , cpBeforeMerge = \_ _ -> pure ()
         , cpFinalEnv = hscUpdateFlags canonicalizeDFlags
         }
   }
@@ -1275,7 +1241,7 @@ capturedUserType tcg =
     []    -> Nothing
 
 -- | Read the GHC 'Type' (NOT a rendered string) of the named top-level binding
--- out of a module's typechecked type env. Used by the Wave-3b BIND mode to grab
+-- out of a module's typechecked type env. Binding mode uses it to grab
 -- the @result@ binding's @Eff stack T@ type so 'stripMonadHead' can recover the
 -- bound value's type @T@ for the thin session iface + the BoundBinder sidecar.
 -- 'Nothing' when no such binder exists (every non-bind extraction).

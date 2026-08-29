@@ -31,14 +31,12 @@
 #   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery.sh -p tidepool-codegen \
 #     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
 #
-# Resident compile daemon (plans/compile-daemon-design.md, phase 1): this
+# Resident compile daemon: this
 # script can start (or, if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set and
 # live, reuse) a per-run tidepool-extract compile daemon and export the
 # socket for the whole nextest invocation below, amortizing the ~5s
 # GHC-boot-plus-stdlib-typecheck tax every extract spawn otherwise pays.
-# ON BY DEFAULT (2026-08-24, post spawnSpec-memo fix — design doc Phase 1
-# status has the A/B receipts). TIDEPOOL_EXTRACT_NO_DAEMON=1
-# is the explicit kill switch. When running, the daemon is
+# It is on by default; TIDEPOOL_EXTRACT_NO_DAEMON=1 is the kill switch. The daemon is
 # always torn down (by its exact recorded pid, escalating to SIGKILL after a
 # 10s grace period if it doesn't exit on TERM) on script exit, including
 # SIGINT/SIGTERM — see lib-extract.sh's
@@ -67,16 +65,15 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
 resolve_tidepool_extract
 
-# Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
-# 1): amortizes the ~5s GHC-boot-plus-stdlib-typecheck tax every
-# tidepool-extract spawn otherwise pays, across every compile in this run.
+# Per-run resident compile daemon amortizes the GHC startup and stdlib
+# typecheck cost across every extraction in this run.
 # On by default (kill switch: TIDEPOOL_EXTRACT_NO_DAEMON=1). Outer-wrapper respect:
 # reuses an already-live $TIDEPOOL_EXTRACT_DAEMON_SOCKET instead of starting
 # a second one (see lib-extract.sh's start_battery_daemon doc). The trap is
 # installed BEFORE start_battery_daemon runs so a signal mid-boot still
 # tears the daemon down; nextest_pid starts empty since on_signal may fire
 # before it's set. (start_battery_daemon is always called — it's a no-op
-# when the daemon isn't enabled.)
+# when the daemon is disabled.)
 nextest_pid=""
 tmp_log="$(mktemp)"
 cleanup_exit() {

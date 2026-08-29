@@ -4,12 +4,13 @@
 module Tidepool.ExtractRequest
   ( RequestField(..)
   , workerRequestFromArgv
+  , workerArgv
   ) where
 
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Data.Bits ((.|.), shiftL)
+import Data.Bits ((.|.), shiftL, shiftR)
 import Data.Char (digitToInt, isHexDigit)
 import Data.Word (Word32, Word64, Word8)
 
@@ -44,20 +45,17 @@ data RequestField
 workerRequestFlag :: String
 workerRequestFlag = "--worker-request-v1"
 
--- | Find and decode the one worker payload in a launcher's argv. Arguments
--- before the marker are a temporary compatibility rendering and are ignored.
+workerArgv :: [RequestField] -> [String]
+workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
+
+-- | Decode the worker's complete argv. The compiler boundary deliberately has
+-- no command-line grammar: exactly one versioned payload is accepted.
 workerRequestFromArgv :: [String] -> Either String (Maybe [RequestField])
-workerRequestFromArgv = go
-  where
-    go [] = Right Nothing
-    go [flag] | flag == workerRequestFlag = Left (workerRequestFlag ++ ": payload is required")
-    go [_] = Right Nothing
-    go (flag : payload : rest)
-      | flag == workerRequestFlag = do
-          if workerRequestFlag `elem` rest
-            then Left (workerRequestFlag ++ ": request marker appears more than once")
-            else Just <$> (decodeHex payload >>= decodeRequest)
-      | otherwise = go (payload : rest)
+workerRequestFromArgv [] = Right Nothing
+workerRequestFromArgv [flag] | flag == workerRequestFlag = Left (workerRequestFlag ++ ": payload is required")
+workerRequestFromArgv [flag, payload]
+  | flag == workerRequestFlag = Just <$> (decodeHex payload >>= decodeRequest)
+workerRequestFromArgv _ = Left "worker requires exactly one versioned request"
 
 type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 
@@ -72,6 +70,60 @@ decodeRequest bytes = do
       if BS.null trailing
         then Right fields
         else Left "worker request: trailing bytes"
+
+encodeRequest :: [RequestField] -> BS.ByteString
+encodeRequest fields = "TPREQ001" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+
+encodeField :: RequestField -> BS.ByteString
+encodeField field = case field of
+  Input value -> taggedText 1 value
+  OutputDir value -> taggedText 2 value
+  Target value -> taggedText 3 value
+  Targets values -> BS.singleton 4 <> putU32 (length values) <> BS.concat (map textFrame values)
+  DumpCore -> BS.singleton 5
+  AllClosed -> BS.singleton 6
+  TargetModuleOnly -> BS.singleton 7
+  Include value -> taggedText 8 value
+  SessionBind -> BS.singleton 9
+  BindName value -> taggedText 10 value
+  BindGen value -> BS.singleton 11 <> putU64 value
+  SessionRoot value -> taggedText 12 value
+  InjectVal value -> taggedText 13 value
+  EmitBoundBinders value -> taggedText 14 value
+  ProbeOnly -> BS.singleton 15
+  Turn -> BS.singleton 16
+  TurnTemplate kind path -> BS.singleton 17 <> textFrame kind <> textFrame path
+  TurnOut value -> taggedText 18 value
+  TurnVerdict value -> taggedText 19 value
+  Classify -> BS.singleton 20
+  ClassifyOut value -> taggedText 21 value
+  TurnBatch value -> taggedText 22 value
+  BatchOut value -> taggedText 23 value
+  HarnessProfile -> BS.singleton 24
+  BuildProductsDir value -> taggedText 25 value
+
+taggedText :: Word8 -> String -> BS.ByteString
+taggedText tag value = BS.singleton tag <> textFrame value
+
+textFrame :: String -> BS.ByteString
+textFrame value = let bytes = TE.encodeUtf8 (T.pack value) in putU32 (BS.length bytes) <> bytes
+
+putU32 :: Int -> BS.ByteString
+putU32 value = BS.pack
+  [ fromIntegral (value `shiftR` 0)
+  , fromIntegral (value `shiftR` 8)
+  , fromIntegral (value `shiftR` 16)
+  , fromIntegral (value `shiftR` 24)
+  ]
+
+putU64 :: Word64 -> BS.ByteString
+putU64 value = BS.pack [fromIntegral (value `shiftR` shift) | shift <- [0, 8 .. 56]]
+
+encodeHex :: BS.ByteString -> String
+encodeHex = concatMap byteHex . BS.unpack
+  where
+    digits = "0123456789abcdef"
+    byteHex byte = [digits !! fromIntegral (byte `div` 16), digits !! fromIntegral (byte `mod` 16)]
 
 pField :: Parser RequestField
 pField bytes = do

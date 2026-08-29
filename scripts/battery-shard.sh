@@ -61,7 +61,7 @@
 #   -E 'binary(value_fidelity) or binary(shadow_rebind) or binary(bindings_dedup)'
 #   -E 'binary(text_bind) or binary(stub_fetch) or binary(session_acceptance) or binary(repro_decl_library_import) or binary(value_binding_acceptance) or binary(repro_t_multiline_sig) or binary(name_shadowing)'
 #
-# Resident compile daemon (plans/compile-daemon-design.md, phase 1): same
+# Resident compile daemon: same
 # per-run daemon scripts/battery.sh can start — see its header for the full
 # rationale. ON BY DEFAULT (kill switch: TIDEPOOL_EXTRACT_NO_DAEMON=1). This script
 # starts one (or reuses an outer wrapper's, e.g. when chained across the
@@ -94,9 +94,8 @@ fi
 source "$(dirname "${BASH_SOURCE[0]}")/lib-extract.sh"
 resolve_tidepool_extract
 
-# Per-run resident compile daemon (plans/compile-daemon-design.md §7 phase
-# 1) — see scripts/battery.sh's matching comment for the full rationale;
-# this mirrors it via the shared lib-extract.sh helpers rather than
+# Per-run resident compile daemon; see scripts/battery.sh for the rationale.
+# This mirrors it via the shared lib-extract.sh helpers rather than
 # duplicating the logic. On by default (kill switch: TIDEPOOL_EXTRACT_NO_DAEMON=1).
 # Outer-wrapper respect: when battery-shard.sh runs as one leg of a chain
 # (scripts/battery-shard.sh's own header documents the multi-shard sequence

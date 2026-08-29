@@ -155,20 +155,31 @@
             random
             splitmix
           ]);
-          # The fidelity checks that exercise the extract BINARY (TurnBatch,
-          # D1Defense) resolve it via $TIDEPOOL_EXTRACT before falling back to
-          # `cabal list-bin`; the build sandbox has no cabal, so point them at
-          # the exe this same build just produced.
+          # Fidelity tests exercise the worker protocol directly. The build
+          # sandbox has no cabal, so point their worker override at the
+          # executable this same derivation just produced.
           harness = pkgs.haskell.lib.overrideCabal
             (hsPkgs.callCabal2nix "tidepool-extract" ./haskell {})
             (old: {
               preCheck = (old.preCheck or "") + ''
-                export TIDEPOOL_EXTRACT="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
+                export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
               '';
             });
+          # This crate has an independent zero-dependency lockfile so Nix
+          # vendors its actual graph rather than the whole workspace graph.
+          frontend = pkgs.rustPlatform.buildRustPackage {
+            pname = "tidepool-extract-frontend";
+            version = "0.1.0";
+            src = ./tidepool-extract-cmd;
+            cargoLock.lockFile = ./tidepool-extract-cmd/Cargo.lock;
+            # The daemon integration test needs the separately packaged GHC
+            # worker; the final wrapper is exercised by the repository battery.
+            cargoTestFlags = [ "--lib" ];
+          };
         in pkgs.writeShellScriptBin "tidepool-extract" ''
           export PATH="${ghcEnv}/bin:$PATH"
-          exec ${harness}/bin/tidepool-extract-bin "$@"
+          export TIDEPOOL_EXTRACT_WORKER="${harness}/bin/tidepool-extract-bin"
+          exec ${frontend}/bin/tidepool-extract "$@"
         '';
 
         packages.default = self.packages.${system}.tidepool-extract;

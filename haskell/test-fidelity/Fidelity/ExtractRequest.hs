@@ -13,7 +13,7 @@ checks = pure
 
 typedRequestDecodes :: Bool
 typedRequestDecodes =
-  workerRequestFromArgv ["ignored", "--worker-request-v1", payload]
+  workerRequestFromArgv ["--worker-request-v1", payload]
     == Right (Just [Input "x", BindGen 42])
   where
     payload = "5450524551303031020000000101000000780b2a00000000000000"

@@ -375,7 +375,7 @@ pub fn compile_invocation(
     // GHC's own interface content-hash check means the losing race forces a
     // recompile rather than silently reusing mismatched output, so the
     // failure mode is wasted work, not wrong output — see
-    // plans/compile-daemon-design.md, where a single resident process (not
+    // the resident compile daemon, where a single worker process (not
     // many concurrent spawns) is the long-term answer.
     //
     // `$TIDEPOOL_BUILD_PRODUCTS_DIR` still overrides the LOCATION (an

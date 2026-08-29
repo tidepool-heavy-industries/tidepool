@@ -373,9 +373,8 @@ session until it releases.
 **Option 2 — turn-admission queueing (a FIFO in front of `checkout_run`).**
 Every frontend's turn request enters one queue per session; a dispatcher
 drains it one `checkout_run` at a time, handing the result back to whichever
-frontend's request it was. This is the compile-daemon's own precedent
-(§3 below) applied one layer up: "one worker, a FIFO request queue" is
-`plans/compile-daemon-design.md` §5.4's own operator-decided answer to an
+frontend's request it was. This applies the compile daemon's serialized-worker
+precedent (§3 below) one layer up: "one worker, a FIFO request queue" is an
 almost identical single-mutable-resource-many-callers shape (GHC's session
 there; the JIT machine's registry slot here). Guarantees I1 for free (only
 the dispatcher ever calls `checkout_run`) and gives every frontend a fair
@@ -463,33 +462,30 @@ vocabulary both, so it is flagged for the operator rather than assumed.
 
 ## 3. Network-mount precedent — what transfers from the compile daemon, what doesn't
 
-`plans/compile-daemon-design.md` (decision-complete, Phase 0 shipped, Phase 1
-scripts-wired-but-off-by-default per that doc's own status) is the house
-precedent for "one resident process, many clients" — worth measuring a
+The extractor daemon in `tidepool-extract-cmd` is the house precedent for
+"one resident process, many clients" — worth measuring a
 session/repl mount against point by point rather than assuming it transfers
 wholesale.
 
 **What transfers directly:**
 
-- **UDS, one request per connection.** §5.3's reasoning — same-host,
+- **UDS, one request per connection.** The same-host,
   same-user, no reason for a network-bindable service — applies identically
   to a session mount: nothing in §7's north star statement describes a
   cross-host use case, and `tidepool-agent`'s containment boundary
   (`tidepool-agent/CLAUDE.md`) already assumes same-host spawning.
-- **EOF-as-crash-signal.** §5.3's "a broken pipe or unexpected EOF mid-
+- **EOF-as-crash-signal.** A broken pipe or unexpected EOF mid-
   response IS the daemon-crashed-mid-request signal, with no separate
   heartbeat protocol to design" is exactly the detection primitive a
   session mount needs too — no new liveness mechanism to invent.
-- **Client fallback is not a special case.** §5.2/§5.5's shape — the
+- **Client fallback is not a special case.** The extractor client's shape — the
   daemon launcher is tried first, falling back to the existing path on any
   connect/timeout failure, so "no daemon" stays the untouched default —
   is the right shape for a delegate session mount too: a spawned
   `tidepool-agent` coding backend whose mount connection fails should fall
   back to its OWN private stdio `tidepool` server (today's shipping
   behavior), never hang waiting for a mount that isn't there.
-- **The length-prefixed wire-framing correction (Decisions item 6).** The
-  daemon's own design initially specified JSON-over-socket and was
-  corrected to length-prefixed frames specifically because
+- **Length-prefixed framing.** The extractor uses length-prefixed frames because
   `tidepool-extract-cmd` is a zero-dependency std-only leaf. A session
   mount's transport constraint is different in KIND (its client is a full
   `tidepool` MCP server, already carrying `serde_json`/MCP's own framing —
@@ -500,11 +496,9 @@ wholesale.
 **What does NOT transfer — the two real differences:**
 
 - **Sessions are stateful across connections; compiles are not.** The whole
-  of §2's Session-scope-isolation design (§2.1-2.4 of the daemon doc) exists
-  to guarantee that ONE daemon process serving MANY independent, mutually
-  ISOLATING compile requests never leaks state between them — `load'`
-  wiping the whole HPT every cycle, the `GutsMemo` sanitize-after-cycle fix
-  (§7 deviation 1). A session mount inverts this goal entirely: the whole
+  extractor's session-scope isolation exists to guarantee that one daemon
+  process serving independent compile requests never leaks state between
+  them. A session mount inverts this goal entirely: the whole
   POINT is that N connections see the SAME machine's SAME accumulated
   state, deliberately, per §7's "shared environment with shared decls." Any
   isolation the mount needs (§2.2/§2.4's scope boundaries) is isolation
@@ -512,7 +506,7 @@ wholesale.
   from itself across requests — a categorically different property than
   anything §2 of the daemon doc builds.
 - **A request is a TURN, not an idempotent compile.** The daemon's
-  request/response shape (§5.3: one argv in, one `{exit_code, stdout,
+  request/response shape (one request in, one `{exit_code, stdout,
   stderr}` out, connection closed) is stateless and safely retryable — a
   failed/timed-out request can simply be resent, because a compile has no
   side effect on the daemon beyond its own cache. A session turn is neither:

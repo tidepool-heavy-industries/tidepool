@@ -49,7 +49,7 @@ Small support crates have short local charters describing their exact scope.
 | git subprocess invocation | `tidepool-worktree::git::GitCli` |
 | durable JSONL append/read | shared primitive in `tidepool-repr` |
 | config, cache, and project paths | `tidepool-toolchain::paths` |
-| extract executable resolution and invocation | `tidepool-extract-cmd` |
+| extractor CLI, typed requests, daemon, and worker invocation | `tidepool-extract-cmd` |
 | compiled-artifact cache | `tidepool-toolchain::cache` |
 | toolchain fingerprint and deploy handshake | `tidepool-toolchain::toolchain` |
 | monotonic process-local identifiers | issuer in `tidepool-repr` |

@@ -1,4 +1,4 @@
-//! Typed construction and execution of `tidepool-extract` invocations.
+//! Public process boundary for the Haskell compiler worker.
 //!
 //! What lives here:
 //!
@@ -9,7 +9,7 @@
 //! - [`ExtractCmd`] — typed argument construction for every mode the tree
 //!   drives (`--target`/`--targets`/`--turn`/`--classify`/`--session-*`/
 //!   `--include`/`--output-dir`/…).
-//! - Execution and the process-global [`extract_spawn_count`].
+//! - CLI/daemon infrastructure and the process-global [`extract_spawn_count`].
 //!
 //! This is a std-only leaf because proc-macro crates depend on it. Parsing JSON
 //! diagnostics and CBOR output belongs to callers; the content-addressed
@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 mod daemon;
 pub mod exec_check;
+pub mod frontend;
 mod request;
 use exec_check::is_readable_executable_file;
 pub use request::ExtractRequest;
@@ -574,7 +575,7 @@ impl ExtractCmd {
     /// The full argv (positional inputs first, then flags in the order they
     /// were set), without the program. Exposed for tests and diagnostics.
     pub fn argv(&self) -> Vec<OsString> {
-        self.request.legacy_argv()
+        self.request.cli_argv()
     }
 
     /// Versioned worker request bytes. Unlike [`Self::argv`], this preserves
@@ -641,14 +642,14 @@ impl ExtractCmd {
     /// directory is forwarded exactly as a spawned process would have
     /// inherited it (`std::env::current_dir`) — the daemon's single worker
     /// `setCurrentDirectory`s to it before compiling (safe: one worker,
-    /// serialized — design §2.3), so relative-path semantics match a
+    /// serialized), so relative-path semantics match a
     /// spawned process exactly.
     fn run_via_daemon(&self, socket_path: &Path) -> Result<ExtractRun, daemon::DaemonError> {
         let cwd = std::env::current_dir().map_err(daemon::DaemonError::Io)?;
         let (output, elapsed) =
             daemon::run_over_daemon(socket_path, &cwd, &self.request.worker_argv())?;
         // Counts "a tidepool-extract invocation was served" — true whether
-        // the transport was a process or a socket (module doc, §5.2).
+        // the transport was a process or a socket.
         EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
         Ok(ExtractRun { output, elapsed })
     }
@@ -657,6 +658,12 @@ impl ExtractCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-global environment or counters.
+    /// The crate must also pass ordinary multi-threaded `cargo test`; process
+    /// isolation by a particular test runner is not part of its contract.
+    static PROCESS_STATE: Mutex<()> = Mutex::new(());
 
     fn strs(argv: &[OsString]) -> Vec<String> {
         argv.iter()
@@ -803,6 +810,7 @@ mod tests {
     /// sequence) so no two tests race on the same process-global env var.
     #[test]
     fn bin_resolution_is_strict() {
+        let _state = PROCESS_STATE.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-resolve-{}",
@@ -872,6 +880,7 @@ mod tests {
     /// and not on a spawn that never launched.
     #[test]
     fn counter_tracks_spawns_that_ran() {
+        let _state = PROCESS_STATE.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-counter-{}",
@@ -885,11 +894,10 @@ mod tests {
         reset_extract_spawn_count();
 
         // This test is about the DIRECT-SPAWN counter: under an inherited
-        // live daemon socket (battery default since 2026-08-24) run() would
+        // live daemon socket run() would
         // route to the daemon and return Ok(diagnostics) instead of the
-        // NotFound this asserts. Safe to clear without restore: nextest runs
-        // each test in its own process, and the daemon tests below set the
-        // var themselves for their own duration.
+        // NotFound this asserts. The shared test lock prevents another test
+        // from observing the temporary removal.
         std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
 
         // Never launched: not counted.
@@ -910,11 +918,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Fake-daemon response synthesis and direct-fallback tests. Each test owns
-    // $TIDEPOOL_EXTRACT_DAEMON_SOCKET for its own duration (env vars are
-    // process-global) — safe under nextest's one-process-per-test model
-    // (root CLAUDE.md), same rationale as bin_resolution_is_strict owning
-    // $TIDEPOOL_EXTRACT above.
+    // Fake-daemon response synthesis and direct-fallback tests. The shared
+    // lock gives each test exclusive ownership of process-global environment
+    // and counters for its duration.
     // -----------------------------------------------------------------
 
     fn read_u32(s: &mut std::os::unix::net::UnixStream) -> u32 {
@@ -955,6 +961,7 @@ mod tests {
 
     #[test]
     fn fake_daemon_serves_run_and_synthesizes_output() {
+        let _state = PROCESS_STATE.lock().unwrap();
         use std::io::Write;
         use std::os::unix::net::UnixListener;
 
@@ -990,6 +997,7 @@ mod tests {
 
     #[test]
     fn dead_socket_falls_back_to_direct() {
+        let _state = PROCESS_STATE.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-daemon-fallback-{}",

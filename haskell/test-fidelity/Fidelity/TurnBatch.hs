@@ -28,6 +28,7 @@
 module Fidelity.TurnBatch (checks) where
 
 import Fidelity.Harness (Check, check)
+import Tidepool.ExtractRequest (RequestField(..), workerArgv)
 
 import Data.List (isInfixOf, isPrefixOf)
 import System.Directory
@@ -64,7 +65,7 @@ planJson root = unlines
 -- neither is exported from the other).
 resolveExtractBin :: IO FilePath
 resolveExtractBin = do
-  mEnv <- lookupEnv "TIDEPOOL_EXTRACT"
+  mEnv <- lookupEnv "TIDEPOOL_EXTRACT_WORKER"
   case mEnv of
     Just p  -> pure p
     Nothing -> do
@@ -93,10 +94,10 @@ checks = do
   writeFile planPath (planJson sessionRoot)
 
   env0 <- getEnvironment
-  let args =
-        [ "--turn-batch", planPath, "--batch-out", batchOut
-        , "--turn-template", "decl=" ++ declTmpl
-        , "--turn-template", "bind=" ++ bindTmpl
+  let args = workerArgv
+        [ TurnBatch planPath, BatchOut batchOut
+        , TurnTemplate "decl" declTmpl
+        , TurnTemplate "bind" bindTmpl
         ]
       cp = (proc binPath args) { env = Just env0 }
   (exitCode, out, _err) <- readCreateProcessWithExitCode cp ""

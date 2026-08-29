@@ -14,6 +14,7 @@
 module Fidelity.TurnBatchJsonBugs (checks) where
 
 import Fidelity.Harness (Check, check)
+import Tidepool.ExtractRequest (RequestField(..), workerArgv)
 
 import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
@@ -31,7 +32,7 @@ declTemplateSrc = "module Input where\n{{TURN}}\n"
 
 resolveExtractBin :: IO FilePath
 resolveExtractBin = do
-  mEnv <- lookupEnv "TIDEPOOL_EXTRACT"
+  mEnv <- lookupEnv "TIDEPOOL_EXTRACT_WORKER"
   case mEnv of
     Just p  -> pure p
     Nothing -> do
@@ -62,9 +63,8 @@ runBatch tag planBytes = do
   BS.writeFile planPath planBytes
   binPath <- resolveExtractBin
   env0 <- getEnvironment
-  let args = [ "--turn-batch", planPath, "--batch-out", batchOut
-             , "--turn-template", "decl=" ++ declTmpl
-             ]
+  let args = workerArgv
+        [ TurnBatch planPath, BatchOut batchOut, TurnTemplate "decl" declTmpl ]
       cp = (proc binPath args) { env = Just env0 }
   (exitCode, out, _err) <- readCreateProcessWithExitCode cp ""
   pure (exitCode, out, modPath)

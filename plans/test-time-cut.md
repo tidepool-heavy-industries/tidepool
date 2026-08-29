@@ -272,7 +272,7 @@ verified, recommend a SCOPED PILOT, not a blanket adoption.**
   precondition are both real risk, not just sizing. Do not build this
   blind; the pilot's own memo-hit measurement is the go/no-go gate.
 - **Status (operator-reviewed, 2026-08-24): DEFERRED pending compile-daemon
-  phase 1** (`plans/compile-daemon-design.md`). The pilot's payoff is
+  resident compile daemon. The pilot's payoff is
   amortizing the per-process GHC-boot tax through the memo; a per-run
   daemon removes that same tax at the transport layer for every compile,
   memo-hit or not. Re-evaluate only if daemon phase-1 battery measurements

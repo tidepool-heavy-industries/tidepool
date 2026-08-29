@@ -51,7 +51,7 @@ The `tidepool` library crate re-exports the crates a Rust consumer needs to comp
 - **`tidepool-bignum`**: Native `ghc-bignum` shims — `Integer` arithmetic without GMP.
 - **`tidepool-optimize`**: Optimization passes (beta reduction, DCE, inlining, case reduction). Test/research crate ONLY — see "Compile Pipeline" above; the production compile path never calls it, and the public facade does not depend on or re-export it.
 - **`tidepool-codegen`**: The Cranelift-based compiler that generates native code and manages the `JitEffectMachine` lifecycle.
-- **`tidepool-extract-cmd`**: The one `tidepool-extract` invocation builder (bin resolution, typed args, the spawn) that every caller of the Haskell toolchain goes through. `std`-only, zero deps, so `tidepool-macro` can depend on it without pulling in the runtime graph.
+- **`tidepool-extract-cmd`**: The public extractor boundary: CLI parsing, typed requests, process resolution, and resident-daemon transport/lifecycle. It sends a versioned request to the internal Haskell compiler worker, so Haskell owns GHC and Core translation rather than application infrastructure. `std`-only, zero deps, so `tidepool-macro` can depend on it without pulling in the runtime graph.
 - **`tidepool-atomic-write`**: The one atomic write-then-rename helper, shared by every durable on-disk store in the workspace (worktree registry, agent binding table, checkpoints, compile cache, toolchain stamp).
 - **`tidepool-toolchain`**: Toolchain discovery, fingerprints, paths, and the compiled-artifact cache.
 - **`tidepool-runtime`**: The high-level orchestration layer for compiling and running programs. Also owns the `SessionEngine`/`PersistentSession` machinery shared by the one-shot and REPL surfaces (see "Surfaces" above).

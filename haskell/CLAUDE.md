@@ -6,7 +6,7 @@ This directory owns the GHC→Core extractor and `lib/Tidepool`, the Haskell
 library auto-imported by the MCP surfaces. Toolchain discovery and caching live
 in `tidepool-toolchain`; CBOR decoding lives in `tidepool-repr`.
 
-## Build the extractor
+## Build the compiler worker
 
 From `haskell/`:
 
@@ -15,15 +15,17 @@ cabal build tidepool-extract-bin
 cabal list-bin tidepool-extract-bin
 ```
 
-The executable uses the internal `tidepool-extract-internal` library. A plain
-`cabal build` builds the production executable; `cabal build --enable-tests`
-also builds the extractor test components.
+The executable is an internal compiler worker, not a user-facing CLI. It accepts
+only the versioned request protocol emitted by `tidepool-extract-cmd`, or
+`--worker-loop-v1` when run behind the resident daemon. A plain `cabal build`
+builds the worker; `cabal build --enable-tests` also builds the extractor test
+components.
 
-For local Rust tests, point `TIDEPOOL_EXTRACT` at the worktree binary and put
-the Nix GHC-with-packages directory on `PATH`:
+For local Rust tests, use the Rust frontend and point it at the worktree worker:
 
 ```bash
-TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin) \
+TIDEPOOL_EXTRACT=../target/debug/tidepool-extract \
+TIDEPOOL_EXTRACT_WORKER=$(cabal list-bin tidepool-extract-bin) \
   PATH=<ghc-with-packages>/bin:$PATH \
   cargo nextest run --ignore-default-filter -p tidepool-runtime
 ```
@@ -36,7 +38,7 @@ and dependencies; `dist-newstyle` is mutable Cabal state.
 `tidepool-toolchain/src/toolchain.rs` owns resolution and the startup
 fingerprint check.
 
-Extractor precedence:
+Frontend precedence:
 
 1. `$TIDEPOOL_EXTRACT`; a set but invalid value is an error.
 2. `tidepool-extract` on `PATH`.
@@ -56,12 +58,17 @@ default handshake.
 
 ## Regenerate fixtures
 
-After changing translation or serialization:
+After changing translation or serialization, build both halves and invoke the
+Rust frontend:
 
 ```bash
 cd haskell
-cabal run tidepool-extract-bin -- test/Suite.hs --all-closed \
-  --include lib --target-module-only --output-dir test/suite_cbor
+WORKER=$(cabal list-bin tidepool-extract-bin)
+cd ..
+cargo build -p tidepool-extract-cmd --bin tidepool-extract
+TIDEPOOL_EXTRACT_WORKER="$WORKER" target/debug/tidepool-extract \
+  haskell/test/Suite.hs --all-closed \
+  --include haskell/lib --target-module-only --output-dir haskell/test/suite_cbor
 ```
 
 `--all-closed` treats its output directory as an owned fixture corpus: after a
@@ -87,19 +94,18 @@ Diagnostics are opt-in:
 `TIDEPOOL_TEST_DROP_DC` and `TIDEPOOL_TEST_FORCE_VALIDATION_ONLY` are
 fault-injection controls for extractor tests, not debugging defaults.
 
-## Resident compile daemon
+## Worker lifetime
 
-`tidepool-extract-bin --daemon --socket <path>` serves serialized compile
-requests through a single resident GHC session. The mode is selected by
-`TIDEPOOL_EXTRACT_DAEMON_SOCKET`; otherwise clients spawn the extractor.
-
-`Tidepool.DaemonServer` owns transport and process lifecycle.
-`Tidepool.GhcPipeline` owns the resident compiler state. Request-local target
+The Rust frontend owns CLI parsing, Unix sockets, daemon configuration, and
+process lifecycle. It either starts this worker for one typed request or keeps
+one worker alive with `--worker-loop-v1`. `Tidepool.WorkerServer` owns only the
+framed stdin/stdout loop; `Tidepool.GhcPipeline` owns the resident compiler
+state. Request-local target
 and `Tidepool.Session.*` modules are removed from the shared memo after each
 request; reusable library interfaces remain warm. Requests are serialized and
 carry their own CWD and extractor argv.
 
-The daemon process environment is fixed at startup. Restart it after changing
+The worker process environment is fixed at startup. Restart the daemon after changing
 extractor diagnostic variables, GHC configuration, or its watched toolchain
 stamp.
 
@@ -141,7 +147,7 @@ returned JSON value against the schema.
   available in extracted Core or accepted session modules.
 - Session-generated modules require the stable `Tidepool.Effects.Core` plus a
   per-compile row shim; do not persist types that pin a concrete effect row.
-- The resident daemon is single-worker and changes process CWD per request;
+- The resident worker is single-threaded and changes process CWD per request;
   parallel request execution would require a different isolation model.
 
 Add a limit here only when it is present, user-visible, and not already made

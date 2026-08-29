@@ -9,8 +9,7 @@
 #
 # Also owns the resident-compile-daemon lifecycle helpers
 # (start_battery_daemon / teardown_battery_daemon) used by battery.sh and
-# battery-shard.sh — see plans/compile-daemon-design.md §7 phase 1. Kept
-# here, not duplicated per script, for the same reason as
+# battery-shard.sh. Kept here, not duplicated per script, for the same reason as
 # resolve_tidepool_extract above.
 
 resolve_tidepool_extract() {
@@ -23,7 +22,7 @@ resolve_tidepool_extract() {
   [ -n "${TIDEPOOL_EXTRACT:-}" ] && _was_preset=1
 
   if [ -z "${TIDEPOOL_EXTRACT:-}" ]; then
-    echo "==> TIDEPOOL_EXTRACT not set — building the dev tidepool-extract-bin"
+    echo "==> TIDEPOOL_EXTRACT not set — building the Rust frontend and Haskell worker"
     # The locally-built binary needs the with-packages GHC (supplying lens/
     # freer-simple) on PATH at runtime, or extraction fails with "Could not
     # find module Control.Lens". The deployed nix wrapper hard-codes that
@@ -38,37 +37,30 @@ resolve_tidepool_extract() {
       fi
     fi
     ( cd haskell && cabal build tidepool-extract-bin )
+    cargo build -p tidepool-extract-cmd --bin tidepool-extract
     # Split assignment from export: `export VAR="$(cmd)"` masks the command's
     # exit status (SC2155), so a failed list-bin would proceed with an empty
     # var.
-    TIDEPOOL_EXTRACT="$(cd haskell && cabal list-bin tidepool-extract-bin)"
-    export TIDEPOOL_EXTRACT
+    TIDEPOOL_EXTRACT_WORKER="$(cd haskell && cabal list-bin tidepool-extract-bin)"
+    TIDEPOOL_EXTRACT="$PWD/target/debug/tidepool-extract"
+    export TIDEPOOL_EXTRACT TIDEPOOL_EXTRACT_WORKER
   fi
 
-  # A caller-supplied TIDEPOOL_EXTRACT skipped the build-above branch
-  # entirely, so it never got the freshness this function gives its own
-  # builds for free — this is the stale-ambient-extract class (bit three
-  # times in one week): a binary that runs cleanly through the Usage: probe
-  # below but was compiled before a subsequent haskell/{src,lib} edit, then
-  # fails deep in a GHC-heavy test with an unrelated-looking error, or
-  # silently exercises old translation logic. `nix` canonicalizes every store
-  # path's mtime to a fixed near-epoch value for reproducibility (this covers
-  # both a literal /nix/store/... path and the ~/.nix-profile/bin wrapper
-  # symlink chain, whose resolved mtime is the same), so a binary whose mtime
-  # predates the year 2000 is treated as "not applicable" rather than a false
-  # STALE — see toolchain-doctor.sh's matching caveat for the full reasoning.
+  # Check caller-supplied worktree binaries against the sources that build
+  # each half. Nix store timestamps are canonicalized near the epoch, so they
+  # cannot support this mtime check.
   if [ "$_was_preset" = 1 ] && [ -x "$TIDEPOOL_EXTRACT" ]; then
     _bin_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT" 2>/dev/null || echo 0)"
-    _plausible_mtime_floor=946684800 # year 2000 — below this looks nix-canonicalized, not a real build time
+    _plausible_mtime_floor=946684800
     if [ "$_bin_mtime" -gt "$_plausible_mtime_floor" ]; then
-      _newest_src="$(find "$PWD/haskell/src" "$PWD/haskell/lib" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+      _newest_src="$(find "$PWD/tidepool-extract-cmd/src" "$PWD/tidepool-extract-cmd/Cargo.toml" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
       _newest_src="${_newest_src:-0}"
       if [ "$_bin_mtime" -lt "$_newest_src" ]; then
         if [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" = "1" ]; then
-          echo "warning: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than the newest haskell/{src,lib} file — continuing (TIDEPOOL_ALLOW_STALE_EXTRACT=1)" >&2
+          echo "warning: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than tidepool-extract-cmd sources — continuing (TIDEPOOL_ALLOW_STALE_EXTRACT=1)" >&2
         else
-          echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than the newest haskell/{src,lib} file — your extract binary is stale, rebuild from this worktree" >&2
-          echo "  fix: cd haskell && cabal build tidepool-extract-bin && export TIDEPOOL_EXTRACT=\$(cd haskell && cabal list-bin tidepool-extract-bin)" >&2
+          echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is older than tidepool-extract-cmd sources" >&2
+          echo "  fix: cargo build -p tidepool-extract-cmd --bin tidepool-extract; cd haskell && cabal build tidepool-extract-bin" >&2
           echo "  or, for a deliberate cross-worktree/pinned run: TIDEPOOL_ALLOW_STALE_EXTRACT=1" >&2
           echo "  (full diagnostic: scripts/toolchain-doctor.sh)" >&2
           exit 1
@@ -77,28 +69,40 @@ resolve_tidepool_extract() {
     fi
   fi
 
-  # The announced binary must actually run. eval_harness::extract_env
-  # silently falls back to a `cabal list-bin` binary when the announced one
-  # doesn't execute (so the banner below could name a binary the tests never
-  # used), and when nothing resolves the GHC-guarded suites "skip cleanly" —
-  # a green battery with zero GHC coverage. Same no-args `Usage:` probe
-  # extract_env uses — the banner is on stderr, written before stdout's
-  # diagnostics JSON, so a plain merged `2>&1` (not a stdout/stderr swap)
-  # sees it first either way. Do NOT truncate the read with `head -c N`: the
-  # extract binary ALWAYS writes a second thing after the banner (the
-  # diagnostics JSON, to stdout) — `head` closing the pipe the instant it has
-  # its N bytes races that second write, and an EPIPE there is an uncaught
-  # exception that fails the process (an intermittent nonzero exit with no
-  # other symptom). `grep` alone drains the pipe to EOF, so the writer never
-  # gets closed out from under it.
-  if [ ! -x "$TIDEPOOL_EXTRACT" ] || ! "$TIDEPOOL_EXTRACT" 2>&1 | grep -q '^Usage:'; then
+  # A worktree frontend must resolve an executable compiler worker. Installed
+  # packages provide a sibling worker through their wrapper; local builds set
+  # this explicitly so the public/frontend and compiler halves cannot drift.
+  if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ ! -x "$TIDEPOOL_EXTRACT_WORKER" ]; then
+    echo "error: TIDEPOOL_EXTRACT_WORKER='$TIDEPOOL_EXTRACT_WORKER' is not executable" >&2
+    exit 1
+  fi
+
+  if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ -x "$TIDEPOOL_EXTRACT_WORKER" ]; then
+    _worker_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT_WORKER" 2>/dev/null || echo 0)"
+    if [ "$_worker_mtime" -gt 946684800 ]; then
+      _newest_haskell="$(find "$PWD/haskell/src" "$PWD/haskell/app" "$PWD/haskell/lib" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+      if [ "$_worker_mtime" -lt "${_newest_haskell:-0}" ] && [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" != "1" ]; then
+        echo "error: TIDEPOOL_EXTRACT_WORKER='$TIDEPOOL_EXTRACT_WORKER' is older than Haskell worker sources" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  # Capture the whole no-args probe before searching it so an early-closing
+  # pipe cannot give the frontend EPIPE while it writes diagnostics JSON.
+  if [ ! -x "$TIDEPOOL_EXTRACT" ]; then
+    echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not executable" >&2
+    exit 1
+  fi
+  _usage_output="$("$TIDEPOOL_EXTRACT" 2>&1)"
+  if ! grep -q '^Usage:' <<<"$_usage_output"; then
     echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
     exit 1
   fi
   echo "TIDEPOOL_EXTRACT=${TIDEPOOL_EXTRACT}"
 }
 
-# --- Resident compile daemon (plans/compile-daemon-design.md §7 phase 1) ---
+# --- Resident compile daemon ---
 #
 # Globals set by start_battery_daemon and read by teardown_battery_daemon:
 #   BATTERY_DAEMON_PID         pid of the daemon THIS process started, or ""
@@ -172,13 +176,8 @@ _battery_daemon_stamp_path() {
 # TIDEPOOL_EXTRACT_DAEMON_SOCKET for the caller's whole nextest invocation.
 # Must run after resolve_tidepool_extract (needs $TIDEPOOL_EXTRACT).
 #
-# ON BY DEFAULT (2026-08-24): the phase-1 blocker (warm-daemon spawnSpec
-# memo poison) was fixed by content-validating memo hits against GHC's own
-# ms_hs_hash (lookupValidMemo, GhcPipeline.hs), and the handlers A/B went
-# 197/197 on both legs — daemon leg 45s vs 71s direct-spawn, cold isolated
-# caches. TIDEPOOL_EXTRACT_NO_DAEMON=1 is the kill switch (checked first,
-# unconditional). Measurements + history: plans/compile-daemon-design.md
-# Phase 1 status.
+# Enabled by default. TIDEPOOL_EXTRACT_NO_DAEMON=1 is the unconditional kill
+# switch. Memo hits are content-validated by GhcPipeline before reuse.
 #
 # Outer-wrapper respect: if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set
 # and looks alive, reuse it and leave BATTERY_DAEMON_OWNED=0 — a chain
@@ -209,11 +208,6 @@ start_battery_daemon() {
     return 0
   fi
 
-  # Default ON (flipped 2026-08-24 after the spawnSpec memo-poison fix —
-  # lookupValidMemo content-validation — took the handlers A/B to 197/197
-  # both legs; see plans/compile-daemon-design.md's Phase 1 status).
-  # TIDEPOOL_EXTRACT_NO_DAEMON=1 above is the kill switch.
-
   BATTERY_DAEMON_SOCKET_DIR="$(mktemp -d -t tidepool-extract-daemon.XXXXXX)"
   local sock="$BATTERY_DAEMON_SOCKET_DIR/extract.sock"
   local log="$BATTERY_DAEMON_SOCKET_DIR/daemon.log"
@@ -228,9 +222,7 @@ start_battery_daemon() {
   fi
 
   echo "==> starting per-run resident compile daemon: socket=$sock log=$log" >&2
-  # Rotation/RSS-ceiling flags deliberately omitted — ride the binary's own
-  # defaults (plans/compile-daemon-design.md Decisions item 3: N=256
-  # requests, 2048MB RSS ceiling, both provisional and tuned there, not here).
+  # Rotation and RSS flags are omitted so the frontend owns their defaults.
   "$TIDEPOOL_EXTRACT" --daemon --socket "$sock" "${watch_args[@]}" >"$log" 2>&1 &
   BATTERY_DAEMON_PID=$!
   # Recorded before the boot-wait below so a signal arriving mid-wait still

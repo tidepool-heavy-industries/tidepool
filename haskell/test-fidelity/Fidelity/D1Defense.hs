@@ -17,6 +17,7 @@
 module Fidelity.D1Defense (checks) where
 
 import Fidelity.Harness (Check, check)
+import Tidepool.ExtractRequest (RequestField(..), workerArgv)
 
 import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesFileExist, doesDirectoryExist, removeDirectoryRecursive)
@@ -66,13 +67,11 @@ fixtureSrc = unlines
   , "  (n :| _) -> n"
   ]
 
--- | Resolve the built @tidepool-extract-bin@: prefer TIDEPOOL_EXTRACT (same
--- env var the Rust runtime and battery scripts use, so a caller that already
--- built one doesn't pay to rebuild); otherwise build + resolve it via cabal
--- (the same local-iteration recipe haskell/CLAUDE.md documents).
+-- | Resolve the built compiler worker. The fidelity suite drives the private
+-- protocol directly so failures exercise the Haskell executable boundary.
 resolveExtractBin :: IO FilePath
 resolveExtractBin = do
-  mEnv <- lookupEnv "TIDEPOOL_EXTRACT"
+  mEnv <- lookupEnv "TIDEPOOL_EXTRACT_WORKER"
   case mEnv of
     Just p  -> pure p
     Nothing -> do
@@ -97,7 +96,7 @@ runExtract binPath outDir mDropDC = do
   baseEnv <- getEnvironment
   let scrubbed = filter ((/= "TIDEPOOL_TEST_DROP_DC") . fst) baseEnv
       env' = maybe scrubbed (\dc -> ("TIDEPOOL_TEST_DROP_DC", dc) : scrubbed) mDropDC
-      args = [workDir ++ "/D1Fixture.hs", "--target", "target", "--output-dir", outDir]
+      args = workerArgv [Input (workDir ++ "/D1Fixture.hs"), Target "target", OutputDir outDir]
       cp = (proc binPath args) { env = Just env' }
   readCreateProcessWithExitCode cp ""
 

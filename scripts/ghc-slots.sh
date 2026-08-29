@@ -86,7 +86,7 @@ set -euo pipefail
 # (head-of-line blocking behind a long --ignore-default-filter run that holds
 # a slot for its whole duration) — accepted deliberately: throughput behind
 # the semaphore beats another swap incident. Revisit once the resident
-# compile daemon serves battery compiles (plans/compile-daemon-design.md):
+# compile daemon serves battery compiles:
 # a per-run daemon serialises its own compiles, making the slot a
 # fallback-path guard rather than the primary throttle. Raise either factor
 # only with a fresh measurement — the product is the budget.

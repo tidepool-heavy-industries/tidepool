@@ -10,6 +10,9 @@ enum Field {
     OutputDir(OsString),
     Target(OsString),
     Targets(Vec<String>),
+    DumpCore,
+    AllClosed,
+    TargetModuleOnly,
     Include(OsString),
     Turn,
     TurnTemplate { kind: String, path: PathBuf },
@@ -25,19 +28,99 @@ enum Field {
     BindGen(u64),
     EmitBoundBinders(OsString),
     ProbeOnly,
+    TurnBatch(OsString),
+    BatchOut(OsString),
+    HarnessProfile,
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
 ///
-/// Fields retain their domain shape until encoding. `legacy_argv` exists only
-/// for cache keys and transitional launcher compatibility; worker dispatch
-/// consumes [`encode`](Self::encode), not reparsed command-line flags.
+/// Fields retain their domain shape until encoding. The CLI rendering exists
+/// only for cache keys and diagnostics; worker dispatch consumes
+/// [`encode`](Self::encode), not reparsed command-line flags.
 #[derive(Clone, Debug, Default)]
 pub struct ExtractRequest {
     fields: Vec<Field>,
 }
 
 impl ExtractRequest {
+    /// Parse the human CLI into the same typed request used by
+    /// library callers. Unknown options and missing/invalid values are usage
+    /// errors; they are never reinterpreted as source paths.
+    pub fn from_cli(args: &[OsString]) -> Result<Self, CliError> {
+        let mut request = Self::default();
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            match arg.to_str() {
+                Some("--output-dir") => request.output_dir(value(&mut args, "--output-dir")?),
+                Some("--target") => request.target(value(&mut args, "--target")?),
+                Some("--targets") => {
+                    let raw = text_value(&mut args, "--targets")?;
+                    request
+                        .fields
+                        .push(Field::Targets(raw.split(',').map(str::to_owned).collect()));
+                }
+                Some("--dump-core") => request.fields.push(Field::DumpCore),
+                Some("--all-closed") => request.fields.push(Field::AllClosed),
+                Some("--target-module-only") => request.fields.push(Field::TargetModuleOnly),
+                Some("--include") => request.include(value(&mut args, "--include")?),
+                Some("--turn") => request.turn(),
+                Some("--turn-template") => {
+                    let raw = text_value(&mut args, "--turn-template")?;
+                    let Some((kind, path)) = raw.split_once('=') else {
+                        return Err(CliError::new("--turn-template requires KIND=PATH"));
+                    };
+                    request.turn_template(kind, Path::new(path));
+                }
+                Some("--turn-out") => request.turn_out(value(&mut args, "--turn-out")?),
+                Some("--turn-verdict") => request.turn_verdict(value(&mut args, "--turn-verdict")?),
+                Some("--classify") => request.classify(),
+                Some("--classify-out") => request.classify_out(value(&mut args, "--classify-out")?),
+                Some("--build-products-dir") => {
+                    request.build_products_dir(value(&mut args, "--build-products-dir")?)
+                }
+                Some("--session-root") => request.session_root(value(&mut args, "--session-root")?),
+                Some("--inject-val") => request.inject_val(value(&mut args, "--inject-val")?),
+                Some("--session-bind") => request.session_bind(),
+                Some("--bind-name") => request.bind_name(value(&mut args, "--bind-name")?),
+                Some("--bind-gen") => {
+                    let raw = text_value(&mut args, "--bind-gen")?;
+                    let generation = raw
+                        .parse()
+                        .map_err(|_| CliError::new("--bind-gen requires an unsigned integer"))?;
+                    request.bind_gen(generation);
+                }
+                Some("--emit-bound-binders") => {
+                    request.emit_bound_binders(value(&mut args, "--emit-bound-binders")?)
+                }
+                Some("--probe-only") => request.probe_only(),
+                Some("--turn-batch") => request.fields.push(Field::TurnBatch(
+                    value(&mut args, "--turn-batch")?.to_owned(),
+                )),
+                Some("--batch-out") => request
+                    .fields
+                    .push(Field::BatchOut(value(&mut args, "--batch-out")?.to_owned())),
+                Some("--harness-profile") => request.fields.push(Field::HarnessProfile),
+                Some(option) if option.starts_with('-') => {
+                    return Err(CliError::new(format!("unknown option: {option}")));
+                }
+                _ => request.input(arg),
+            }
+        }
+        let has_input = request
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::Input(_)));
+        let has_batch_plan = request
+            .fields
+            .iter()
+            .any(|field| matches!(field, Field::TurnBatch(_)));
+        if !has_input && !has_batch_plan {
+            return Err(CliError::new("an input file or --turn-batch is required"));
+        }
+        Ok(request)
+    }
+
     pub(crate) fn input(&mut self, value: impl AsRef<OsStr>) {
         self.fields.push(Field::Input(value.as_ref().to_owned()));
     }
@@ -133,7 +216,7 @@ impl ExtractRequest {
         self.fields.push(Field::ProbeOnly);
     }
 
-    pub(crate) fn legacy_argv(&self) -> Vec<OsString> {
+    pub(crate) fn cli_argv(&self) -> Vec<OsString> {
         let mut inputs = Vec::new();
         let mut flags = Vec::new();
         for field in &self.fields {
@@ -144,6 +227,9 @@ impl ExtractRequest {
                 Field::Targets(values) => {
                     flag(&mut flags, "--targets", OsStr::new(&values.join(",")))
                 }
+                Field::DumpCore => flags.push("--dump-core".into()),
+                Field::AllClosed => flags.push("--all-closed".into()),
+                Field::TargetModuleOnly => flags.push("--target-module-only".into()),
                 Field::Include(value) => flag(&mut flags, "--include", value),
                 Field::Turn => flags.push("--turn".into()),
                 Field::TurnTemplate { kind, path } => flag(
@@ -165,6 +251,9 @@ impl ExtractRequest {
                 }
                 Field::EmitBoundBinders(value) => flag(&mut flags, "--emit-bound-binders", value),
                 Field::ProbeOnly => flags.push("--probe-only".into()),
+                Field::TurnBatch(value) => flag(&mut flags, "--turn-batch", value),
+                Field::BatchOut(value) => flag(&mut flags, "--batch-out", value),
+                Field::HarnessProfile => flags.push("--harness-profile".into()),
             }
         }
         inputs.extend(flags);
@@ -181,10 +270,7 @@ impl ExtractRequest {
     }
 
     pub(crate) fn worker_argv(&self) -> Vec<OsString> {
-        let mut argv = self.legacy_argv();
-        argv.push(WORKER_REQUEST_FLAG.into());
-        argv.push(hex(&self.encode()).into());
-        argv
+        vec![WORKER_REQUEST_FLAG.into(), hex(&self.encode()).into()]
     }
 }
 
@@ -220,6 +306,9 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
                 push_frame(out, OsStr::new(value));
             }
         }
+        Field::DumpCore => out.push(5),
+        Field::AllClosed => out.push(6),
+        Field::TargetModuleOnly => out.push(7),
         Field::Include(value) => tagged_frame(out, 8, value),
         Field::Turn => out.push(16),
         Field::TurnTemplate { kind, path } => {
@@ -242,6 +331,9 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         }
         Field::EmitBoundBinders(value) => tagged_frame(out, 14, value),
         Field::ProbeOnly => out.push(15),
+        Field::TurnBatch(value) => tagged_frame(out, 22, value),
+        Field::BatchOut(value) => tagged_frame(out, 23, value),
+        Field::HarnessProfile => out.push(24),
     }
 }
 
@@ -250,7 +342,7 @@ fn tagged_frame(out: &mut Vec<u8>, tag: u8, value: &OsStr) {
     push_frame(out, value);
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
@@ -259,6 +351,45 @@ fn hex(bytes: &[u8]) -> String {
     }
     out
 }
+
+fn value<'a>(
+    args: &mut impl Iterator<Item = &'a OsString>,
+    option: &str,
+) -> Result<&'a OsStr, CliError> {
+    args.next()
+        .map(OsString::as_os_str)
+        .ok_or_else(|| CliError::new(format!("{option} requires a value")))
+}
+
+fn text_value<'a>(
+    args: &mut impl Iterator<Item = &'a OsString>,
+    option: &str,
+) -> Result<&'a str, CliError> {
+    value(args, option)?
+        .to_str()
+        .ok_or_else(|| CliError::new(format!("{option} requires UTF-8 text")))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliError {
+    message: String,
+}
+
+impl CliError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliError {}
 
 #[cfg(test)]
 mod tests {
@@ -275,5 +406,36 @@ mod tests {
         assert_eq!(bytes[12], 1);
         assert_eq!(bytes[24], 11);
         assert_eq!(&bytes[25..33], &0x0102_0304_0506_0708u64.to_le_bytes());
+    }
+
+    #[test]
+    fn worker_argv_contains_only_the_typed_protocol() {
+        let request =
+            ExtractRequest::from_cli(&["Expr.hs".into(), "--target".into(), "answer".into()])
+                .unwrap();
+        let argv = request.worker_argv();
+        assert_eq!(argv.len(), 2);
+        assert_eq!(argv[0], WORKER_REQUEST_FLAG);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_options() {
+        let error = ExtractRequest::from_cli(&["--traget".into(), "answer".into()]).unwrap_err();
+        assert_eq!(error.to_string(), "unknown option: --traget");
+    }
+
+    #[test]
+    fn cli_rejects_invalid_typed_values() {
+        let error = ExtractRequest::from_cli(&["--bind-gen".into(), "nope".into()]).unwrap_err();
+        assert_eq!(error.to_string(), "--bind-gen requires an unsigned integer");
+    }
+
+    #[test]
+    fn cli_requires_an_input_or_batch_plan() {
+        let error = ExtractRequest::from_cli(&["--target".into(), "answer".into()]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "an input file or --turn-batch is required"
+        );
     }
 }
