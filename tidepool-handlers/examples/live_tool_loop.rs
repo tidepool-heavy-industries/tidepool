@@ -63,10 +63,10 @@ use std::path::{Path, PathBuf};
 use tidepool_agent::backend::codex::isolation::{self, ConfigSnapshot};
 use tidepool_agent::backend::codex::CodexAgentBackend;
 use tidepool_agent::seam::{ModelPolicy, ReasoningEffort};
-use tidepool_codegen::jit_machine::{JitEffectMachine, ParkedOutcome, RealmId};
+use tidepool_codegen::jit_machine::{JitEffectMachine, ParkedOutcome, RealmId, SuspensionRun};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::Response;
+use tidepool_effect::{EffectBoundary, Response};
 use tidepool_eval::value::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
@@ -331,13 +331,11 @@ fn run() -> i32 {
     let started = std::time::Instant::now();
     let captured = CapturedOutput::new();
     let mut stack = stack;
-    let outcome = machine.run_suspendable_parked(
-        &table,
+    let boundary = EffectBoundary::new(ask_tag, &handled_prefix);
+    let outcome = machine.run_until_suspension(
+        SuspensionRun::main(&table, &boundary, RealmId(0)),
         &mut stack,
         &captured,
-        ask_tag,
-        RealmId(0),
-        &handled_prefix,
     );
     let elapsed = started.elapsed();
 
