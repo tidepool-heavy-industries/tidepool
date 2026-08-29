@@ -162,6 +162,23 @@ impl ExtractRequest {
         Ok(Self { fields })
     }
 
+    /// Decode the complete argv accepted by the compiler worker.
+    ///
+    /// This is the inspection counterpart to the launcher's private argv
+    /// renderer. Wrappers and tests can assert on typed request fields without
+    /// depending on the payload's hexadecimal transport representation.
+    pub fn decode_worker_argv(args: &[OsString]) -> Result<Self, ProtocolError> {
+        if args.len() != 2 || args[0] != WORKER_REQUEST_FLAG {
+            return Err(ProtocolError::new(
+                "worker argv must be exactly --worker-request-v1 PAYLOAD",
+            ));
+        }
+        let payload = args[1]
+            .to_str()
+            .ok_or_else(|| ProtocolError::new("worker request payload is not UTF-8"))?;
+        Self::decode(&unhex(payload)?)
+    }
+
     /// Requested output directory, if this request carries one.
     pub fn output_directory(&self) -> Option<&OsStr> {
         self.fields.iter().find_map(|field| match field {
@@ -501,6 +518,31 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
+fn unhex(text: &str) -> Result<Vec<u8>, ProtocolError> {
+    if !text.len().is_multiple_of(2) {
+        return Err(ProtocolError::new("worker request payload has odd length"));
+    }
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_digit(pair[0])?;
+            let low = hex_digit(pair[1])?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn hex_digit(byte: u8) -> Result<u8, ProtocolError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(ProtocolError::new(
+            "worker request payload contains non-hexadecimal data",
+        )),
+    }
+}
+
 fn value<'a>(
     args: &mut impl Iterator<Item = &'a OsString>,
     option: &str,
@@ -565,6 +607,8 @@ mod tests {
         let argv = request.worker_argv();
         assert_eq!(argv.len(), 2);
         assert_eq!(argv[0], WORKER_REQUEST_FLAG);
+        let decoded = ExtractRequest::decode_worker_argv(&argv).unwrap();
+        assert_eq!(decoded.target_names(), ["answer"]);
     }
 
     #[test]

@@ -107,17 +107,19 @@ pub fn effects_include() -> [PathBuf; 2] {
 /// 3. Otherwise fall back to the checked-in nix-profile wrapper
 ///    `<root>/haskell/tidepool-extract`.
 ///
-/// Returns `true` iff the resolved binary runs and prints its usage banner
-/// (a no-args invocation — the extract binary has no version flag; any flag it
-/// doesn't recognize is treated as an input file and fails). The banner is on
-/// stderr — stdout always carries the fixed-shape diagnostics JSON, even for
-/// this no-args case (`{"version":1,"diagnostics":[]}`).
+/// Returns `true` iff the resolved binary starts and identifies itself as a
+/// Tidepool extractor. A current compiler worker rejects an empty invocation
+/// with its typed-request error; older frontend binaries print a usage banner.
 pub fn extract_env() -> bool {
     fn runs(bin: &str) -> bool {
         std::process::Command::new(bin)
             .stdout(std::process::Stdio::null())
             .output()
-            .map(|out| out.status.success() && out.stderr.starts_with(b"Usage:"))
+            .map(|out| {
+                out.stderr
+                    .starts_with(b"worker requires a versioned request")
+                    || out.stderr.starts_with(b"Usage:")
+            })
             .unwrap_or(false)
     }
 
