@@ -393,6 +393,71 @@ struct LiveTurnContext {
     binddiscard_source: String,
 }
 
+/// The external imports one model-authored turn is allowed to compile
+/// against. This is deliberately distinct from the session-generated
+/// declaration/value modules added by [`Harness::live_turn_context`]: those
+/// modules are lexical implementation detail, while these imports are part of
+/// the authored source's durable compile view.
+///
+/// Keeping this as one value matters for declarations. A declaration is first
+/// classified in a turn template and then compiled again into the resident
+/// declaration plane. Both compilations must see the same author/system types;
+/// previously the first saw [`AnswerContract::imports`] while the second kept
+/// only imports written explicitly by the model.
+#[derive(Debug, Clone, Default)]
+struct TurnCompileImports {
+    lines: Vec<String>,
+}
+
+impl TurnCompileImports {
+    fn new(contract: Option<&AnswerContract>, authored: &str) -> Self {
+        let mut lines = Vec::new();
+        if let Some(contract) = contract {
+            for import in &contract.imports {
+                Self::push_lines(&mut lines, import);
+            }
+        }
+        Self::push_lines(&mut lines, authored);
+        Self { lines }
+    }
+
+    fn push_lines(lines: &mut Vec<String>, imports: &str) {
+        for line in imports
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if !lines.iter().any(|existing| existing == line) {
+                lines.push(line.to_string());
+            }
+        }
+    }
+
+    /// Import specifications as expected by the turn template builders
+    /// (without the leading `import`).
+    fn template_imports(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// The same compile view rendered as real source imports for the resident
+    /// declaration plane.
+    fn declaration_prefix(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| format!("import {line}\n"))
+            .collect()
+    }
+
+    fn declaration_source(&self, body: &str) -> String {
+        let prefix = self.declaration_prefix();
+        if prefix.is_empty() {
+            body.to_string()
+        } else {
+            format!("{prefix}\n{body}")
+        }
+    }
+}
+
 /// Render a turn-compile failure as text a MODEL can act on, with GHC's
 /// coordinates remapped from TEMPLATE space to the model's own turn text
 /// (`block`).
@@ -1615,12 +1680,13 @@ impl Harness {
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
             extra_session,
         )?;
+        let compile_imports = TurnCompileImports::new(contract.as_ref(), imports);
 
         // Session/contract/bind-template context — exactly what
         // `run_multi_item_block`'s singleton-item path gathers fresh per item
         // (see `live_turn_context`'s doc); a single-item block is that same
         // shape with one item.
-        let ctx = self.live_turn_context(node, imports, helpers, &target.include)?;
+        let ctx = self.live_turn_context(node, &compile_imports, helpers, &target.include)?;
 
         // Build every template `run_turn` might select — the verdict, and so
         // which one applies, isn't known until it returns. Timed from HERE,
@@ -1664,26 +1730,11 @@ impl Harness {
         let inject_modules = ctx.inject_modules.clone();
         let gen = ctx.gen;
 
-        // The DECL path needs the turn's import lines back: `drive_turn`
-        // split them off the block, but a declaration's imports (author
-        // types it mentions) must ride INTO the decl plane, where
-        // `extract_user_imports` hoists them into the generated module —
-        // without this a decl naming an author type fails validation with
-        // "not in scope". ONLY the define input gets them re-glued: the turn
-        // COMPILE below must keep the import-stripped block (the templates
-        // splice imports separately; re-gluing them into the expression
-        // placeholder is a parse error in every template).
-        let decl_source = if imports.is_empty() {
-            block.to_string()
-        } else {
-            let rebuilt: String = imports
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(|l| format!("import {l}\n"))
-                .collect();
-            format!("{rebuilt}\n{block}")
-        };
+        // Declarations are compiled once more into the resident declaration
+        // plane. Preserve the exact external compile view used above; session
+        // ancestry is supplied by `define_scoped_in` and must not be re-glued
+        // here.
+        let decl_source = compile_imports.declaration_source(block);
         let block_owned = block.to_string();
         let req_block = block_owned.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1812,20 +1863,17 @@ impl Harness {
     fn live_turn_context(
         &self,
         node: NodeId,
-        imports: &str,
+        compile_imports: &TurnCompileImports,
         helpers: &str,
         target_include: &[PathBuf],
     ) -> Result<LiveTurnContext, HarnessError> {
         let (session_module, session_include) = self.session_decl_context(node);
         let bind_ctx = self.session_bind_context(node);
-        let contract = self.answer_contract(node);
 
-        let mut expr_import_lines: Vec<String> = contract
-            .iter()
-            .flat_map(|c| c.imports.iter().cloned())
-            .collect();
-        if !imports.is_empty() {
-            expr_import_lines.push(imports.to_string());
+        let mut expr_import_lines = Vec::new();
+        let external_imports = compile_imports.template_imports();
+        if !external_imports.is_empty() {
+            expr_import_lines.push(external_imports.clone());
         }
         expr_import_lines.extend(session_module.clone());
         if let Some((session_imports, ..)) = &bind_ctx {
@@ -1835,12 +1883,9 @@ impl Harness {
         }
         let expr_imports = expr_import_lines.join("\n");
 
-        let mut bind_import_lines: Vec<String> = contract
-            .iter()
-            .flat_map(|c| c.imports.iter().cloned())
-            .collect();
-        if !imports.is_empty() {
-            bind_import_lines.push(imports.to_string());
+        let mut bind_import_lines = Vec::new();
+        if !external_imports.is_empty() {
+            bind_import_lines.push(external_imports);
         }
         if let Some((session_imports, ..)) = &bind_ctx {
             if !session_imports.is_empty() {
@@ -1932,22 +1977,12 @@ impl Harness {
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
             extra_session,
         )?;
+        let compile_imports = TurnCompileImports::new(contract.as_ref(), imports);
 
-        // The user-import lines a decl item's compiled module needs re-glued
-        // — the same rebuild `run_block`'s single-item decl path does
-        // (`decl_source`), applied once per decl RUN below: a batch's
-        // declarations land in one module, so the import block is needed
-        // only once at the top of the run, not repeated per source.
-        let decl_import_prefix: String = if imports.is_empty() {
-            String::new()
-        } else {
-            imports
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(|l| format!("import {l}\n"))
-                .collect()
-        };
+        // The same exact external compile view as the single-item lane. A
+        // batch lands in one resident module, so the prefix is applied only
+        // to its first declaration.
+        let decl_import_prefix = compile_imports.declaration_prefix();
 
         let template_started = std::time::Instant::now();
         let item_refs: Vec<&str> = items.iter().map(String::as_str).collect();
@@ -2087,7 +2122,7 @@ impl Harness {
 
             // Singleton bind/expr item — fresh live context every iteration
             // (see `live_turn_context`'s doc).
-            let ctx = self.live_turn_context(node, imports, helpers, &target.include)?;
+            let ctx = self.live_turn_context(node, &compile_imports, helpers, &target.include)?;
             let item_text = items[index].clone();
             let verdict = verdicts[index].clone();
             let expr_source = engine::expr_turn_template(
@@ -3686,6 +3721,33 @@ mod tests {
 
     fn test_engine_cfg() -> EngineConfig {
         EngineConfig::inert(vec!["Console".to_string()])
+    }
+
+    #[test]
+    fn turn_compile_imports_are_one_ordered_deduplicated_view() {
+        let contract = AnswerContract {
+            ty: "Decision".into(),
+            imports: vec![
+                "HarnessTypes (Decision (..))".into(),
+                "Data.Text (Text)".into(),
+            ],
+        };
+        let imports = TurnCompileImports::new(
+            Some(&contract),
+            "Data.Text (Text)\nqualified Data.Map.Strict as Map",
+        );
+
+        assert_eq!(
+            imports.template_imports(),
+            "HarnessTypes (Decision (..))\nData.Text (Text)\nqualified Data.Map.Strict as Map"
+        );
+        assert_eq!(
+            imports.declaration_source("data Wrapped = Wrapped Decision"),
+            "import HarnessTypes (Decision (..))\n\
+             import Data.Text (Text)\n\
+             import qualified Data.Map.Strict as Map\n\n\
+             data Wrapped = Wrapped Decision"
+        );
     }
 
     /// `HarnessError::from_checkout` preserves `CheckoutError::WrongHole`'s

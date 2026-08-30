@@ -191,6 +191,73 @@ async fn finalize_hands_up_a_plain_data_value() {
     );
 }
 
+/// The answer contract's imports are part of the whole authored compile view,
+/// including declarations persisted into the resident declaration plane. The
+/// model does not need to repeat a system-supplied type import merely because
+/// its first turn defines a helper around that type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn answer_contract_imports_persist_with_declarations() {
+    support::require_extract();
+
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("finalize-contract-decl-import.jsonl");
+    let writer = LogWriter::create(&log_path, &header()).unwrap();
+    let mut cfg = EngineConfig::standard(prelude_dir(), None).expect("engine config");
+    cfg.include.push(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root")
+            .join("examples/harness"),
+    );
+
+    let replies = vec![
+        reply("```haskell\ndata WrappedDecision = WrappedDecision Decision\n```"),
+        reply(
+            "```haskell\n\
+             (case WrappedDecision (Decision { action = \"observe\", rationale = \"because\", confidence = High }) of\n\
+             \x20  WrappedDecision decision -> finalize @Decision decision) :: M ()\n\
+             ```",
+        ),
+    ];
+    let provider: Arc<dyn DynModelProvider> = Arc::new(ReplayProvider::new(replies));
+    let harness = Arc::new(Harness::new(writer, cfg, provider).expect("harness boots"));
+
+    let root = harness
+        .create_root(
+            "contract import declaration root",
+            "Define a helper around the answer type, then use it.",
+        )
+        .unwrap();
+    harness.force(root, Actor::Operator).unwrap();
+    harness.set_answer_contract(
+        root,
+        Some(AnswerContract {
+            ty: "Decision".to_string(),
+            imports: vec!["HarnessTypes (Confidence (..), Decision (..))".to_string()],
+        }),
+    );
+
+    let declared = harness
+        .run_to_hole_or_done(root)
+        .await
+        .expect("contract-imported declaration must persist");
+    assert!(
+        matches!(declared, TurnOutcome::Completed { .. }),
+        "the declaration turn must complete, got {}",
+        outcome_tag(&declared)
+    );
+
+    let finalized = harness
+        .follow_up(root, "Now construct and finalize the wrapped decision.")
+        .await
+        .expect("the persisted declaration must remain usable");
+    assert!(
+        matches!(finalized, TurnOutcome::Suspended { .. }),
+        "the second turn must suspend at finalize, got {}",
+        outcome_tag(&finalized)
+    );
+}
+
 /// EXTRACT-LEVEL proof of the relaxed function-arrow rule:
 /// `finalize @(Int -> Int) f`
 /// compiles cleanly — `checkFinalizeType` (Translate.hs) deliberately skips
