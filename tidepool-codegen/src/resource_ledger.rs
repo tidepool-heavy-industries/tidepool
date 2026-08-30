@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::DataConTable;
 
 use crate::old_space::RootSlot;
@@ -21,7 +21,7 @@ use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
 pub(crate) struct ContinuationFrame {
     pub(crate) cell: Box<*mut u8>,
     pub(crate) realm: RealmId,
-    pub(crate) boundary: EffectBoundary,
+    pub(crate) effect_policy: EffectRunPolicy,
     pub(crate) kind: ParkKind,
     pub(crate) live_payload_root: Option<RootSlot>,
     pub(crate) live_payload: LivePayloadPolicy,

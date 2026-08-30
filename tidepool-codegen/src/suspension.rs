@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cranelift_module::FuncId;
-use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 
@@ -82,7 +82,7 @@ pub enum SuspensionEntry {
 pub struct SuspensionRun<'a> {
     pub entry: SuspensionEntry,
     pub table: &'a DataConTable,
-    pub boundary: &'a EffectBoundary,
+    pub effect_policy: EffectRunPolicy,
     pub realm: RealmId,
     pub completion: ParkKind,
     pub live_payload: LivePayloadPolicy,
@@ -90,11 +90,11 @@ pub struct SuspensionRun<'a> {
 
 impl<'a> SuspensionRun<'a> {
     #[must_use]
-    pub fn main(table: &'a DataConTable, boundary: &'a EffectBoundary, realm: RealmId) -> Self {
+    pub fn main(table: &'a DataConTable, effect_policy: EffectRunPolicy, realm: RealmId) -> Self {
         Self {
             entry: SuspensionEntry::Main,
             table,
-            boundary,
+            effect_policy,
             realm,
             completion: ParkKind::Plain,
             live_payload: LivePayloadPolicy::None,
@@ -105,14 +105,14 @@ impl<'a> SuspensionRun<'a> {
     pub fn fragment(
         func_id: FuncId,
         table: &'a DataConTable,
-        boundary: &'a EffectBoundary,
+        effect_policy: EffectRunPolicy,
         realm: RealmId,
         completion: ParkKind,
     ) -> Self {
         Self {
             entry: SuspensionEntry::Fragment(func_id),
             table,
-            boundary,
+            effect_policy,
             realm,
             completion,
             live_payload: LivePayloadPolicy::None,

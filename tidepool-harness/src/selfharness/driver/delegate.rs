@@ -54,9 +54,8 @@ impl SelfHarnessDriver {
     /// args are bridged ADTs, never JSON-probed), dispatch it into the
     /// driver-owned [`tidepool_handlers::SubagentHandler`], and return the
     /// `Response::Complete` value the caller resumes the hole with — the
-    /// IDENTICAL generated conversion path a dispatched effect takes, minus
-    /// the dispatch (the outer row's handled prefix must stay empty on the
-    /// shared machine; see [`outer_decls`]).
+    /// identical generated conversion path a dispatched effect takes. The
+    /// outer resident session uses `SuspendAll`, so this driver owns delivery.
     ///
     /// Runs the actual dispatch on the tokio BLOCKING thread pool via
     /// `tokio::task::spawn_blocking`, not `tokio::task::block_in_place`:

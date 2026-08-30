@@ -75,11 +75,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — this test's entries never yield an effect");
+    ) -> Result<Option<Response>, EffectError> {
+        panic!("this test's entries never yield an effect");
     }
 }
 

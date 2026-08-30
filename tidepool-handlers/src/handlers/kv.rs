@@ -293,7 +293,7 @@ mod tests {
         let mut handlers = frunk::hlist![KvHandler::new(tmp)];
         let con_id = table.get_by_name("KvKeys").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(expect_handled(handlers.dispatch(&request, &cx)), &table);
         assert_is_haskell_list(&result, &table);
     }
 
@@ -320,11 +320,11 @@ mod tests {
         let key_val = "isolation-test-key".to_string().to_value(&table).unwrap();
         let lit_val = Value::Lit(tidepool_repr::Literal::LitInt(99));
         let set_req = Value::Con(set_id, vec![key_val, lit_val]);
-        ha.dispatch(0, &set_req, &cx).unwrap();
+        expect_handled(ha.dispatch(&set_req, &cx));
 
         // kvKeys on handler B (session B) must be empty — no bleed from A.
         let keys_req = Value::Con(keys_id, vec![]);
-        let keys_b = response_value(hb.dispatch(0, &keys_req, &cx).unwrap(), &table);
+        let keys_b = response_value(expect_handled(hb.dispatch(&keys_req, &cx)), &table);
         match &keys_b {
             Value::Con(id, args) => {
                 let name = table.name_of(*id).unwrap();
@@ -361,14 +361,14 @@ mod tests {
         for key in &["ns1/alpha", "ns1/beta", "ns2/gamma"] {
             let k = key.to_string().to_value(&table).unwrap();
             let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
-            h.dispatch(0, &Value::Con(set_id, vec![k, v]), &cx).unwrap();
+            expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
         }
 
         // Clear "ns1/" — expect count = 2.
         // i64 is bridged as I#(LitInt(n)); unbox via the shared shape decoder.
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
         let clear_req = Value::Con(clear_id, vec![prefix]);
-        let clear_result = response_value(h.dispatch(0, &clear_req, &cx).unwrap(), &table);
+        let clear_result = response_value(expect_handled(h.dispatch(&clear_req, &cx)), &table);
         let deleted_count =
             tidepool_eval::shapes::unbox_int(&clear_result, &table).unwrap_or_else(|| {
                 panic!(
@@ -383,7 +383,7 @@ mod tests {
 
         // "ns2/gamma" must still be present.
         let all_keys = response_value(
-            h.dispatch(0, &Value::Con(keys_id, vec![]), &cx).unwrap(),
+            expect_handled(h.dispatch(&Value::Con(keys_id, vec![]), &cx)),
             &table,
         );
         let mut surviving: Vec<String> = Vec::new();
@@ -428,13 +428,12 @@ mod tests {
         for key in &["ns1/b", "ns1/a", "ns2/c"] {
             let k = key.to_string().to_value(&table).unwrap();
             let v = Value::Lit(tidepool_repr::Literal::LitInt(0));
-            h.dispatch(0, &Value::Con(set_id, vec![k, v]), &cx).unwrap();
+            expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
         }
 
         let prefix = "ns1/".to_string().to_value(&table).unwrap();
         let result = response_value(
-            h.dispatch(0, &Value::Con(keysp_id, vec![prefix]), &cx)
-                .unwrap(),
+            expect_handled(h.dispatch(&Value::Con(keysp_id, vec![prefix]), &cx)),
             &table,
         );
 
@@ -499,7 +498,7 @@ mod tests {
         let set_id = table.get_by_name("KvSet").unwrap();
         let k = "x".to_string().to_value(&table).unwrap();
         let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
-        h.dispatch(0, &Value::Con(set_id, vec![k, v]), &cx).unwrap();
+        expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -536,7 +535,7 @@ mod tests {
         // Handler A: CAS from absent -> 1. Commits (Right ()).
         let a_new = Value::Lit(tidepool_repr::Literal::LitInt(1));
         let a_req = Value::Con(cas_id, vec![key.clone(), nothing.clone(), a_new]);
-        let a_res = response_value(ha.dispatch(0, &a_req, &cx).unwrap(), &table);
+        let a_res = response_value(expect_handled(ha.dispatch(&a_req, &cx)), &table);
         let a_name = match &a_res {
             Value::Con(id, _) => table.name_of(*id).unwrap(),
             other => panic!("expected Con from kvCas, got {other:?}"),
@@ -547,7 +546,7 @@ mod tests {
         // Must be Left (conflict), NOT a silent clobber.
         let b_new = Value::Lit(tidepool_repr::Literal::LitInt(2));
         let b_req = Value::Con(cas_id, vec![key, nothing, b_new]);
-        let b_res = response_value(hb.dispatch(0, &b_req, &cx).unwrap(), &table);
+        let b_res = response_value(expect_handled(hb.dispatch(&b_req, &cx)), &table);
         let b_name = match &b_res {
             Value::Con(id, _) => table.name_of(*id).unwrap(),
             other => panic!("expected Con from kvCas, got {other:?}"),
@@ -587,12 +586,12 @@ mod tests {
         for key in &["a", "b", "c"] {
             let k = key.to_string().to_value(&table).unwrap();
             let v = Value::Lit(tidepool_repr::Literal::LitInt(1));
-            h.dispatch(0, &Value::Con(set_id, vec![k, v]), &cx).unwrap();
+            expect_handled(h.dispatch(&Value::Con(set_id, vec![k, v]), &cx));
         }
 
         // kvInfo must not error; the response is a non-null Value.
         let result = response_value(
-            h.dispatch(0, &Value::Con(info_id, vec![]), &cx).unwrap(),
+            expect_handled(h.dispatch(&Value::Con(info_id, vec![]), &cx)),
             &table,
         );
         // The response is a Haskell-encoded JSON Value. Just verify it's not Null

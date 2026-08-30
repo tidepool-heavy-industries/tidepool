@@ -49,8 +49,8 @@ inventory, not a required Rust struct layout.
 | actor program continuation | The currently running or parked fixed harness |
 | program snapshot | Current persistent declarations, bindings, and installed behavior roots |
 | model context | Provider thread, exact transcript prefix, compaction state, and usage |
-| effect-stack ABI | Fixed effect identities and request layout for this incarnation |
-| actor interpreter | Rust handlers and grants implementing that ABI for this actor |
+| effect policy | Actor-local handlers, allowed request families, and suspension policy |
+| actor interpreter | Rust handlers and grants enforcing that policy for this actor |
 | execution principal | Identity installed while this actor's Haskell runs |
 | capability grants | Owned, delegated, revoked, and fork-policy metadata |
 | runtime resource scope | Parked frames, handles, cancellation state, and live roots |
@@ -86,8 +86,8 @@ on the existing checkout path.
 - scheduling and admission to a shared machine session;
 - model-provider threads, exact context snapshots, compaction, and cache
   accounting;
-- one Rust effect interpreter per actor, checked against the effect-stack ABI
-  carried by each fragment and continuation;
+- one Rust effect interpreter per actor, routing nominal request constructors
+  under that actor's policy and execution principal;
 - Haskell compilation routing and machine-session checkout;
 - continuation and live-root custody;
 - capability registration, delegation, revocation, and caller checks;
@@ -417,9 +417,10 @@ are invalid.
 
 Capabilities apply their own fork policy. Structural sharing of a closure does
 not automatically register the child as an allowed caller. The child receives
-its own interpreter instance with the same effect-stack ABI; handler state and
-grants are shared, cloned, rebound, or withheld by each Rust component's fork
-policy.
+its own interpreter instance; handler state and grants are shared, cloned,
+rebound, or withheld by each Rust component's fork policy. There is no parallel
+runtime effect-row ABI: GHC owns row compatibility, while the interpreter owns
+nominal request authorization.
 
 ## 7. Program images and snapshots
 
@@ -446,8 +447,8 @@ compose mechanisms Tidepool already has:
   made visible to the child's fenced-Haskell environment;
 - declaration source and documentation retained only for inspection and
   provenance; and
-- the sealed actor effect-stack ABI retained by the authoritative actor
-  descriptor.
+- the actor descriptor's fixed interpreter policy and handler installation
+  recipe.
 
 The resident code arena owns executable code, the value-handle ledger owns
 roots while they are in transit, and the actor's resource realm owns deployed
@@ -586,8 +587,9 @@ ultimate owner of every external resource.
 12. External actions are reachable only through the actor kernel and checked
     capabilities; the model-facing environment exposes no ambient `IO`, FFI,
     or unsafe escape hatch that bypasses the execution principal.
-13. One actor incarnation has one fixed effect-stack ABI. A continuation can
-    run only through an actor interpreter implementing that ABI.
+13. One actor incarnation has one fixed Haskell effect vocabulary and one
+    actor-local interpreter policy. Rust routes by nominal request identity,
+    never by union position or a duplicated effect-row ABI.
 14. Abnormal or unexpected child exit is observed through an active exact
    obligation or one keyed advisory, and never kills the owner implicitly.
 15. No actor reference escapes before startup readiness.

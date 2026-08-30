@@ -16,10 +16,9 @@ pub struct FsDispatcher {
 impl DispatchEffect<()> for FsDispatcher {
     fn dispatch(
         &mut self,
-        _tag: u64,
         request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         let table = cx.table();
         if let Value::Con(con_id, fields) = request {
             match table.name_of(*con_id) {
@@ -30,24 +29,24 @@ impl DispatchEffect<()> for FsDispatcher {
                         is_file: true,
                         is_dir: false,
                     });
-                    return cx.respond(meta);
+                    return cx.respond(meta).map(Some);
                 }
                 Some("FsRead") => {
                     let path = String::from_value(&fields[0], table).unwrap();
                     let content = self.files.get(&path).cloned().unwrap_or_default();
-                    return cx.respond(Ok::<String, String>(content));
+                    return cx.respond(Ok::<String, String>(content)).map(Some);
                 }
                 Some("FsWrite") => {
                     let path = String::from_value(&fields[0], table).unwrap();
                     let content = String::from_value(&fields[1], table).unwrap();
                     self.files.insert(path, content);
                     self.writes += 1;
-                    return cx.respond(Ok::<(), String>(()));
+                    return cx.respond(Ok::<(), String>(())).map(Some);
                 }
                 _ => {}
             }
         }
-        cx.respond(())
+        Ok(None)
     }
 }
 

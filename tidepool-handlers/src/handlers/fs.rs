@@ -1188,7 +1188,13 @@ mod tests {
         let con_id = table.get_by_name("FsExists").unwrap();
         let path = "Cargo.toml".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(
+            handlers
+                .dispatch(&request, &cx)
+                .unwrap()
+                .expect("FsPathExists should be handled"),
+            &table,
+        );
         // FsExists is errors-tagged: `Right True` for an existing path.
         let decoded: Result<bool, FsError> = FromCore::from_value(&result, &table).unwrap();
         assert_eq!(decoded, Ok(true), "Cargo.toml should exist");
@@ -1203,7 +1209,13 @@ mod tests {
         let con_id = table.get_by_name("FsListDir").unwrap();
         let path = ".".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(
+            handlers
+                .dispatch(&request, &cx)
+                .unwrap()
+                .expect("FsReadFile should be handled"),
+            &table,
+        );
         // FsListDir is errors-tagged: `Right [entries]`.
         let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&result, &table).unwrap();
         assert!(

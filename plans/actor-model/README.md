@@ -113,8 +113,8 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | program snapshot | An immutable point in an actor's Haskell environment, suitable for structural sharing |
 | execution principal | The runtime identity under whose authority Haskell is currently executing |
 | capability | An opaque live value whose operations are authorized by Rust at use time |
-| effect-stack ABI | The ordered effect identities and request ABI against which a continuation was compiled |
-| actor interpreter | One actor-local Rust handler instance implementing an effect-stack ABI |
+| effect policy | The actor-local allowed request families, handlers, grants, and suspension policy |
+| actor interpreter | One actor-local Rust handler instance enforcing an effect policy by nominal request identity |
 | advisory turn | A Developer-triggered model session for an abnormal runtime fact with no parked Haskell result obligation |
 
 ## Relationship to existing work

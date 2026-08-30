@@ -44,7 +44,10 @@ mod tests {
         let con_id = table.get_by_name("Print").unwrap();
         let msg = "test output".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![msg]);
-        let _result = handlers.dispatch(0, &request, &cx).unwrap();
+        handlers
+            .dispatch(&request, &cx)
+            .unwrap()
+            .expect("Print should be handled");
         assert_eq!(captured.drain(), vec!["test output".to_string()]);
     }
 }

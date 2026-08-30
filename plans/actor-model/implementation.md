@@ -127,13 +127,13 @@ Move a pure closure and a row-polymorphic effectful function between them.
 Acceptance:
 
 - each actor dispatches through its own Rust interpreter;
-- continuations carry and validate an effect-stack ABI rather than a
-  machine-global handled prefix;
+- dispatch is nominal and actor-local; continuations carry no positional
+  handler prefix or duplicated effect-row ABI;
 - the polymorphic function instantiates in the receiver when its `Member`
   constraints are satisfied;
-- a source-specialized effectful closure is rejected in a foreign stack;
-- a fork creates a new interpreter instance with the same ABI and distinct
-  grants.
+- GHC rejects applying a source-specialized effectful closure where its row
+  does not unify;
+- a fork creates a new interpreter instance under distinct grants.
 
 ### 0F. Mechanical retry, terminal failure, and advisory
 
@@ -168,7 +168,7 @@ Introduce the minimum Rust-owned substrate required by the spikes:
 - a shared managed Haskell exit cell per exact reference, filled before the
   Rust terminal transition, plus session-lifetime terminal metadata for
   repeatable waits;
-- fixed `EffectStackId`/ABI plus one Rust interpreter instance per actor;
+- one fixed interpreter policy and handler instance per actor incarnation;
 - execution-principal installation on every Haskell entry;
 - capability registry with caller authorization, revocation, and fork hooks;
 - mapping from actors to lexical scopes and runtime resource scopes;
@@ -397,7 +397,7 @@ their shape.
 | special fork/fanout prompt paths | Spawn, structural fork, and ordinary actor operations | Cache-preserving fork and ordered result assembly are covered |
 | JSON-only actor-like mailboxes | Root-owning live-value envelopes | Closure-valued request/result tests pass |
 | separate one-shot/delegate runtimes | Haskell actor programs and capability grants | Existing production behaviors are represented without backend leakage |
-| machine-global handled prefix | Actor-local fixed effect-stack ABI and Rust interpreter | Different actor rows coexist on one machine without tag ambiguity |
+| machine-global handled prefix | Nominal actor-local Rust dispatch | Different actor rows coexist on one machine without tag ambiguity or a second row ABI |
 | concrete effect rows in reusable APIs | `Member`/`Members` constraints; specialization only at actor entry | Portable behavior instantiates in the receiving actor |
 
 ## 12. Cross-phase test scenarios
@@ -452,7 +452,7 @@ evidence:
    `tidepool-harness` rather than deepening it.
 2. A program image composes a rooted compiled entry closure, exact
    declaration/interface identities with explicit model-visible exports,
-   provenance, and the actor descriptor's sealed effect-stack ABI. Existing
+   provenance, and the actor descriptor's fixed interpreter policy. Existing
    code, root, realm, and session-module owners remain authoritative; source is
    never replayed as deployment identity.
 3. Capability fork behavior is one of `OwnerOnly`, `ShareWithChild`,

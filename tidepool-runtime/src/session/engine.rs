@@ -65,13 +65,12 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{timeout, Duration};
 
 use tidepool_bridge::{FromCore, ToCore};
-use tidepool_effect::error::EffectError;
 use tidepool_effect::pause::PauseGate;
 use tidepool_repr::MonotonicIdIssuer;
 
 use crate::{
-    classify, value_to_json, CancelHandle, CompileError, DispatchEffect, FailureClass, JitError,
-    Phase, ResumeInput, ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
+    classify, value_to_json, CancelHandle, CompileError, DispatchEffect, FailureClass, Phase,
+    ResumeInput, ResumedRun, RuntimeError, SuspendableRun, EVAL_STACK_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -288,10 +287,6 @@ pub struct StartTurn<H, O> {
     pub include: Vec<PathBuf>,
     /// The effect handler stack for this turn (moved onto the eval thread).
     pub handlers: H,
-    /// The `Ask` effect's union tag, intercepted by the suspend driver.
-    pub ask_tag: u64,
-    /// Effect names by tag, for annotating an `UnhandledEffect` error.
-    pub effect_names: Vec<String>,
     /// The console-output buffer this turn writes into.
     pub captured: O,
     /// JIT nursery size.
@@ -476,8 +471,6 @@ impl<O: OutputSink> SessionEngine<O> {
             source,
             include,
             handlers,
-            ask_tag,
-            effect_names,
             captured,
             nursery_size,
             timeout_secs,
@@ -516,8 +509,6 @@ impl<O: OutputSink> SessionEngine<O> {
                     &mut wrapped,
                     &captured,
                     nursery_size,
-                    ask_tag,
-                    &effect_names,
                     |h| {
                         gate_run.set_compiling(false);
                         *cancel_cb.lock() = Some(h);
@@ -545,11 +536,10 @@ impl<O: OutputSink> SessionEngine<O> {
                     wrapped,
                     request,
                     permit,
-                    effect_names,
                 ),
                 Ok(Err(e)) => {
                     drop(permit);
-                    let (error, class, phase, diagnostics) = describe_run_error(&e, &effect_names);
+                    let (error, class, phase, diagnostics) = describe_run_error(&e);
                     EngineMessage::Error {
                         error,
                         class,
@@ -957,7 +947,6 @@ fn build_suspended_message<O, H>(
     wrapped: GateDispatcher<H>,
     request: tidepool_eval::value::Value,
     permit: OwnedSemaphorePermit,
-    effect_names: Vec<String>,
 ) -> EngineMessage<O>
 where
     O: OutputSink,
@@ -975,8 +964,7 @@ where
             };
         }
     };
-    let resume =
-        make_resume_closure::<O, H>(machine, table, continuation, wrapped.inner, effect_names);
+    let resume = make_resume_closure::<O, H>(machine, table, continuation, wrapped.inner);
     EngineMessage::SuspendedAsk {
         prompt,
         meta,
@@ -994,7 +982,6 @@ fn make_resume_closure<O, H>(
     table: tidepool_repr::DataConTable,
     continuation: tidepool_codegen::suspension::ContinuationId,
     base: H,
-    effect_names: Vec<String>,
 ) -> StowedResume<O>
 where
     O: OutputSink,
@@ -1064,11 +1051,10 @@ where
                 wrapped,
                 request,
                 permit,
-                effect_names,
             ),
             Ok(Err(e)) => {
                 drop(permit);
-                let (error, class, phase, diagnostics) = describe_run_error(&e, &effect_names);
+                let (error, class, phase, diagnostics) = describe_run_error(&e);
                 EngineMessage::Error {
                     error,
                     class,
@@ -1100,7 +1086,6 @@ where
 /// is all that survives past this point.
 fn describe_run_error(
     e: &RuntimeError,
-    effect_names: &[String],
 ) -> (
     String,
     FailureClass,
@@ -1114,25 +1099,6 @@ fn describe_run_error(
     };
     let jit_diagnostics = crate::drain_diagnostics();
     let mut detail = env.message;
-    // Annotate UnhandledEffect with the effect name + roster. Classified
-    // STRUCTURALLY from the typed error (in hand here), never by
-    // string-matching `env.message` — `JitError::Effect`'s `Display` renders
-    // as "effect dispatch error: Unhandled effect at tag N", which does not
-    // start with "Unhandled effect at tag ", so a `strip_prefix` match on
-    // that text would silently never fire.
-    if let RuntimeError::Jit(JitError::Effect(EffectError::UnhandledEffect { tag })) = e {
-        let tag = *tag as usize;
-        if tag < effect_names.len() {
-            detail = format!("{} (effect: {})", detail, effect_names[tag]);
-        }
-        let roster: String = effect_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| format!("  {} = {}", i, name))
-            .collect::<Vec<_>>()
-            .join("\n");
-        detail.push_str(&format!("\n\nRegistered effects:\n{roster}"));
-    }
     if !jit_diagnostics.is_empty() {
         detail.push_str("\n\n## JIT Diagnostics\n");
         for d in &jit_diagnostics {
@@ -1159,18 +1125,15 @@ fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureCla
 }
 
 // ---------------------------------------------------------------------------
-// Gate dispatcher (timeout-yield checkpoint; ask is intercepted upstream)
+// Gate dispatcher (timeout-yield checkpoint)
 // ---------------------------------------------------------------------------
 
 /// Wraps a handler stack with the shared [`PauseGate`] timeout-yield checkpoint.
-/// It does NOT intercept the ask tag — that is handled by the codegen suspend
-/// driver (`ask_tag` → threadless suspension), so the ask never reaches this
-/// dispatcher. Every non-ask dispatch entry is a timeout-yield checkpoint:
+/// Every routed dispatch entry is a timeout-yield checkpoint:
 /// park while paused, error out on abort.
 ///
 /// Shared, not per-server: `tidepool-repl` wraps every resident turn's handler
-/// stack in this same dispatcher — there is exactly one non-ask-intercepting
-/// gate wrapper, here.
+/// stack in this same dispatcher.
 pub struct GateDispatcher<H> {
     inner: H,
     gate: Arc<PauseGate>,
@@ -1187,10 +1150,9 @@ impl<H> GateDispatcher<H> {
 impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &tidepool_eval::value::Value,
         cx: &tidepool_effect::dispatch::EffectContext<'_, O>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         // Yield point: park here while paused; error out on abort. A gate abort
         // is a cancellation, not a handler fault — record it in the JIT's
         // first-cause cell so the run boundary surfaces `Cancelled` regardless
@@ -1201,7 +1163,7 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
             );
             tidepool_effect::error::EffectError::Handler(reason)
         })?;
-        self.inner.dispatch(tag, request, cx)
+        self.inner.dispatch(request, cx)
     }
 }
 
@@ -1293,16 +1255,14 @@ fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
 mod tests {
     use super::*;
 
-    /// An `UnhandledEffect` over an N-handler stack must name the
-    /// out-of-range tag's effect and append the full registered-effects
-    /// roster. This depends on matching the typed error structurally, not on
-    /// string-matching `JitError::Effect`'s `Display` text — see the
-    /// structural-match note on [`describe_run_error`].
     #[test]
-    fn describe_run_error_annotates_unhandled_effect_with_name_and_roster() {
-        let effect_names = vec!["Console".to_string(), "Kv".to_string(), "Fs".to_string()];
-        let err = RuntimeError::Jit(JitError::Effect(EffectError::UnhandledEffect { tag: 2 }));
-        let (detail, class, phase, diagnostics) = describe_run_error(&err, &effect_names);
+    fn describe_run_error_preserves_the_unhandled_constructor() {
+        let err = RuntimeError::Jit(tidepool_codegen::jit_machine::JitError::Effect(
+            tidepool_effect::EffectError::UnhandledEffect {
+                constructor: "Tidepool.Effect.Fs.ReadFile".to_string(),
+            },
+        ));
+        let (detail, class, phase, diagnostics) = describe_run_error(&err);
 
         assert_eq!(class, FailureClass::Runtime);
         assert_eq!(phase, Phase::Run);
@@ -1311,19 +1271,9 @@ mod tests {
             "a JIT error carries no GHC diagnostics"
         );
         assert!(
-            detail.contains("(effect: Fs)"),
-            "expected tag 2's effect name (Fs) annotated, got: {detail}"
+            detail.contains("Tidepool.Effect.Fs.ReadFile"),
+            "expected the nominal request constructor, got: {detail}"
         );
-        assert!(
-            detail.contains("Registered effects:"),
-            "expected the roster header, got: {detail}"
-        );
-        for line in ["0 = Console", "1 = Kv", "2 = Fs"] {
-            assert!(
-                detail.contains(line),
-                "expected roster line {line:?}, got: {detail}"
-            );
-        }
     }
 
     #[derive(Clone, Default)]

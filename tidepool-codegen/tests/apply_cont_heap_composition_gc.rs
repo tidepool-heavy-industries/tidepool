@@ -62,6 +62,8 @@ const UNION_ID: DataConId = DataConId(12);
 const LEAF_ID: DataConId = DataConId(13);
 const NODE_ID: DataConId = DataConId(14);
 const I_HASH_ID: DataConId = DataConId(15);
+const FIRST_REQUEST_ID: DataConId = DataConId(16);
+const SECOND_REQUEST_ID: DataConId = DataConId(17);
 
 /// The tag the ENTRY's own effect request carries — dispatched once, before
 /// any continuation composition happens.
@@ -101,6 +103,20 @@ fn table_with_freer_cons() -> DataConTable {
         qualified_name: None,
         type_name: String::new(),
     });
+    for (id, name) in [
+        (FIRST_REQUEST_ID, "FirstRequest"),
+        (SECOND_REQUEST_ID, "SecondRequest"),
+    ] {
+        table.insert(DataCon {
+            id,
+            name: name.to_string(),
+            tag: 0,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some(format!("Test.{name}")),
+            type_name: "TestRequest".to_string(),
+        });
+    }
     table
 }
 
@@ -130,15 +146,19 @@ fn build_entry(depth: usize) -> tidepool_repr::CoreExpr {
         body: val_x,
     });
 
-    let y = b.push(CoreFrame::Var(VarId(1)));
+    let _y = b.push(CoreFrame::Var(VarId(1)));
     let leaf_id_for_fe = b.push(CoreFrame::Con {
         tag: LEAF_ID,
         fields: vec![id_lam],
     });
     let tag2 = b.push(CoreFrame::Lit(Literal::LitWord(EFFECT_TAG2)));
+    let request2 = b.push(CoreFrame::Con {
+        tag: SECOND_REQUEST_ID,
+        fields: vec![],
+    });
     let union2 = b.push(CoreFrame::Con {
         tag: UNION_ID,
-        fields: vec![tag2, y],
+        fields: vec![tag2, request2],
     });
     let e2 = b.push(CoreFrame::Con {
         tag: E_ID,
@@ -165,7 +185,10 @@ fn build_entry(depth: usize) -> tidepool_repr::CoreExpr {
     }
 
     let tag1 = b.push(CoreFrame::Lit(Literal::LitWord(EFFECT_TAG)));
-    let req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let req = b.push(CoreFrame::Con {
+        tag: FIRST_REQUEST_ID,
+        fields: vec![],
+    });
     let union1 = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![tag1, req],
@@ -182,14 +205,13 @@ struct TwoTagHandler;
 impl DispatchEffect<()> for TwoTagHandler {
     fn dispatch(
         &mut self,
-        tag: u64,
-        _request: &Value,
+        request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        match tag {
-            EFFECT_TAG => cx.respond(0i64),
-            EFFECT_TAG2 => cx.respond(99i64),
-            other => panic!("unexpected effect tag {other}"),
+    ) -> Result<Option<Response>, EffectError> {
+        match request {
+            Value::Con(id, _) if *id == FIRST_REQUEST_ID => cx.respond(0i64).map(Some),
+            Value::Con(id, _) if *id == SECOND_REQUEST_ID => cx.respond(99i64).map(Some),
+            _ => Ok(None),
         }
     }
 }

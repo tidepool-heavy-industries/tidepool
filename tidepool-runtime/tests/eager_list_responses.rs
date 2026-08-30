@@ -18,12 +18,11 @@ struct BigListDispatcher {
 impl DispatchEffect<()> for BigListDispatcher {
     fn dispatch(
         &mut self,
-        _tag: u64,
         _request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         let items: Vec<String> = (0..self.n).map(|i| format!("item-{i}")).collect();
-        cx.respond_list(items)
+        cx.respond_list(items).map(Some)
     }
 }
 

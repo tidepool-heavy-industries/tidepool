@@ -81,8 +81,6 @@ async fn pure_cpu_spin_is_interrupted_by_turn_timeout() {
             source: source.into(),
             include,
             handlers: NullDispatcher,
-            ask_tag: u64::MAX,
-            effect_names: Vec::new(),
             captured: TestSink::default(),
             nursery_size: tidepool_runtime::DEFAULT_NURSERY_SIZE,
             // Must exceed the per-eval GHC compile (cold cache can take tens of

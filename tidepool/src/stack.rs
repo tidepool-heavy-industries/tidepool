@@ -151,13 +151,8 @@ mod tests {
         };
         let (effect_names, helper_sigs) = debug_effect_names_and_helper_sigs();
         let handlers = tidepool_handlers::build_debug_stack(&cfg, effect_names, helper_sigs);
-        let (collected, ask_tag) = tidepool_handlers::base_decls_with_ask(&handlers);
+        let collected = tidepool_handlers::base_decls(&handlers);
         let collected_names: Vec<&str> = collected.iter().map(|d| d.type_name).collect();
         assert_eq!(collected_names, EXPECTED_ORDER);
-        assert_eq!(
-            ask_tag as usize,
-            EXPECTED_ORDER.len() - 2,
-            "Ask must land after Meta, followed only by RunLLMTurn"
-        );
     }
 }

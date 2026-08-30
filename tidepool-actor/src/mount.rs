@@ -1,7 +1,7 @@
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_effect::{EffectBoundary, EffectStackAbi};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{PrincipalId, SessionId};
 use tidepool_runtime::session::{
     MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionRunContext,
@@ -52,8 +52,8 @@ impl ActorSourceImports {
 pub struct ActorSessionContext {
     pub actor: ActorRef,
     pub placement: ActorPlacement,
-    pub effect_abi: EffectStackAbi,
-    pub effect_boundary: EffectBoundary,
+    pub effect_policy: EffectRunPolicy,
+    pub live_payload: LivePayloadPolicy,
     pub source_imports: ActorSourceImports,
 }
 
@@ -76,8 +76,8 @@ pub trait ActorRunTarget {
     fn install_actor_execution(
         &mut self,
         context: SessionRunContext,
-        effect_abi: EffectStackAbi,
-        boundary: EffectBoundary,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
     ) -> Result<(), Self::Error>;
 }
 
@@ -91,10 +91,10 @@ where
     fn install_actor_execution(
         &mut self,
         context: SessionRunContext,
-        effect_abi: EffectStackAbi,
-        boundary: EffectBoundary,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
     ) -> Result<(), Self::Error> {
-        self.set_actor_execution(context, boundary, effect_abi.live_payload())
+        self.set_actor_execution(context, effect_policy, live_payload)
     }
 }
 
@@ -123,8 +123,8 @@ where
     target
         .install_actor_execution(
             context.run_context(),
-            context.effect_abi.clone(),
-            context.effect_boundary.clone(),
+            context.effect_policy,
+            context.live_payload,
         )
         .map_err(MountActorTurnError::Target)?;
     Ok(lease)
@@ -138,8 +138,8 @@ mod tests {
     #[derive(Default)]
     struct FakeTarget {
         installed: Option<SessionRunContext>,
-        effect_abi: Option<EffectStackAbi>,
-        boundary: Option<EffectBoundary>,
+        effect_policy: Option<EffectRunPolicy>,
+        live_payload: Option<LivePayloadPolicy>,
         fail: bool,
     }
 
@@ -149,15 +149,15 @@ mod tests {
         fn install_actor_execution(
             &mut self,
             context: SessionRunContext,
-            effect_abi: EffectStackAbi,
-            boundary: EffectBoundary,
+            effect_policy: EffectRunPolicy,
+            live_payload: LivePayloadPolicy,
         ) -> Result<(), Self::Error> {
             if self.fail {
                 Err("dead scope")
             } else {
                 self.installed = Some(context);
-                self.effect_abi = Some(effect_abi);
-                self.boundary = Some(boundary);
+                self.effect_policy = Some(effect_policy);
+                self.live_payload = Some(live_payload);
                 Ok(())
             }
         }
@@ -192,11 +192,11 @@ mod tests {
             .expect("mount actor");
 
         assert_eq!(target.installed, Some(context.run_context()));
-        assert_eq!(target.boundary, Some(context.effect_boundary));
-        assert_eq!(target.effect_abi, Some(context.effect_abi.clone()));
-        assert_eq!(context.effect_abi.names(), &[] as &[String]);
+        assert_eq!(target.effect_policy, Some(context.effect_policy));
+        assert_eq!(target.live_payload, Some(context.live_payload));
+        assert_eq!(context.effect_policy, EffectRunPolicy::SuspendAll);
         assert_eq!(
-            context.effect_abi.live_payload(),
+            context.live_payload,
             tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE
         );
         assert!(matches!(
@@ -215,8 +215,8 @@ mod tests {
         let actor = ready_actor(&registry);
         let mut target = FakeTarget {
             installed: None,
-            effect_abi: None,
-            boundary: None,
+            effect_policy: None,
+            live_payload: None,
             fail: true,
         };
         let result = mount_actor_turn(&registry, &mut target, actor, ActorTurnKind::Haskell);

@@ -33,7 +33,7 @@ use tidepool_codegen::suspension::{
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value;
 use tidepool_repr::datacon::DataCon;
@@ -279,11 +279,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — this fragment should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -336,7 +335,7 @@ fn park_entry(
     expect_req: i64,
 ) -> ContinuationId {
     match machine
-        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm, &[])
+        .run_suspendable_parked(table, &mut NoDispatch, &(), realm)
         .expect("entry run_suspendable_parked")
     {
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -377,10 +376,8 @@ fn park_fragment(
             table,
             &mut NoDispatch,
             &(),
-            ASK_TAG,
             realm,
             ParkKind::Plain,
-            &[],
         )
         .expect("fragment run_fragment_suspendable_parked")
     {
@@ -484,10 +481,8 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(0),
                 ParkKind::Binding { forced: true },
-                &[],
             )
             .expect("realm A bind completes");
         let (value_a, root_a) = match outcome_a {
@@ -519,10 +514,8 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(1),
                 ParkKind::Binding { forced: true },
-                &[],
             )
             .expect("realm B bind completes");
         let (value_b, root_b) = match outcome_b {
@@ -578,11 +571,9 @@ fn a2_live_payload_requires_an_explicit_run_policy() {
         let mut machine =
             JitEffectMachine::compile_session(&build_suspending_finalize(10, 100), &table, 1 << 16)
                 .expect("compile_session");
-        let boundary = EffectBoundary::new(ASK_TAG, &[]);
-
         let outcome = machine
             .run_until_suspension(
-                SuspensionRun::main(&table, &boundary, RealmId(0)),
+                SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, RealmId(0)),
                 &mut NoDispatch,
                 &(),
             )
@@ -619,7 +610,7 @@ fn a2_live_payload_root_is_per_frame_not_per_machine() {
         assert_rooting_receipt(&machine, 0);
 
         let id_a = match machine
-            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), RealmId(0))
             .expect("realm A parks on its closure-valued finalize")
         {
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -659,10 +650,8 @@ fn a2_live_payload_root_is_per_frame_not_per_machine() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(1),
                 ParkKind::Plain,
-                &[],
             )
             .expect("realm B parks on its OWN closure-valued finalize")
         {

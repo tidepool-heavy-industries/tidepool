@@ -33,11 +33,10 @@ struct MockDispatcher;
 impl DispatchEffect<()> for MockDispatcher {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
-        Err(tidepool_effect::error::EffectError::UnhandledEffect { tag })
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
+        Ok(None)
     }
 }
 

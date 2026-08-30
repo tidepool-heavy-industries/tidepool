@@ -1,129 +1,164 @@
 use frunk::hlist;
 use proptest::prelude::*;
+use tidepool_bridge::{BridgeError, FromCore};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_eval::value::Value;
+use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
-use tidepool_repr::Literal;
+use tidepool_repr::{DataConId, Literal};
 
-/// Mock handler that returns its own ID as a response.
-struct MockHandler {
-    id: u64,
+const FIRST: DataConId = DataConId(1);
+const SECOND: DataConId = DataConId(2);
+const UNKNOWN: DataConId = DataConId(3);
+
+fn table() -> DataConTable {
+    let mut table = DataConTable::new();
+    for (id, name) in [
+        (FIRST, "FirstRequest"),
+        (SECOND, "SecondRequest"),
+        (UNKNOWN, "UnknownRequest"),
+    ] {
+        table.insert(DataCon {
+            id,
+            name: name.into(),
+            tag: id.0 as u32,
+            rep_arity: 1,
+            field_bangs: vec![],
+            qualified_name: Some(format!("Test.{name}")),
+            type_name: "TestRequest".into(),
+        });
+    }
+    table
 }
 
-impl EffectHandler<()> for MockHandler {
-    type Request = Value;
-    fn handle(
-        &mut self,
-        _req: Self::Request,
-        _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        Ok(Value::Lit(Literal::LitInt(self.id as i64)).into())
+fn request(id: DataConId, value: i64) -> Value {
+    Value::Con(id, vec![Value::Lit(Literal::LitInt(value))])
+}
+
+fn decode_request(value: &Value, expected_id: DataConId) -> Result<i64, BridgeError> {
+    let Value::Con(id, fields) = value else {
+        return Err(BridgeError::UnknownDataCon(DataConId(0)));
+    };
+    if *id != expected_id {
+        return Err(BridgeError::UnknownDataCon(*id));
+    }
+    if fields.len() != 1 {
+        return Err(BridgeError::ArityMismatch {
+            con: expected_id,
+            expected: 1,
+            got: fields.len(),
+        });
+    }
+    match fields[0] {
+        Value::Lit(Literal::LitInt(n)) => Ok(n),
+        ref other => Err(BridgeError::TypeMismatch {
+            expected: "LitInt".into(),
+            got: format!("{other:?}"),
+        }),
     }
 }
 
-/// Helper to create a dummy DataConTable.
-fn empty_table() -> DataConTable {
-    DataConTable::new()
+struct FirstRequest(i64);
+impl tidepool_bridge::sealed::FromCoreSealed for FirstRequest {}
+impl FromCore for FirstRequest {
+    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+        decode_request(value, FIRST).map(Self)
+    }
+}
+
+struct SecondRequest(i64);
+impl tidepool_bridge::sealed::FromCoreSealed for SecondRequest {}
+impl FromCore for SecondRequest {
+    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+        decode_request(value, SECOND).map(Self)
+    }
+}
+
+struct FirstHandler;
+impl EffectHandler for FirstHandler {
+    type Request = FirstRequest;
+
+    fn handle(
+        &mut self,
+        request: FirstRequest,
+        _cx: &EffectContext<'_>,
+    ) -> Result<Response, EffectError> {
+        Ok(Value::Lit(Literal::LitInt(request.0 + 10)).into())
+    }
+}
+
+struct SecondHandler;
+impl EffectHandler for SecondHandler {
+    type Request = SecondRequest;
+
+    fn handle(
+        &mut self,
+        request: SecondRequest,
+        _cx: &EffectContext<'_>,
+    ) -> Result<Response, EffectError> {
+        Ok(Value::Lit(Literal::LitInt(request.0 + 20)).into())
+    }
+}
+
+fn completed_int(response: Option<Response>) -> i64 {
+    match response {
+        Some(Response::Complete(Value::Lit(Literal::LitInt(n)))) => n,
+        other => panic!("expected a completed integer response, got {other:?}"),
+    }
 }
 
 proptest! {
-    /// Test that dispatching with tag K routes to the K-th handler in the HList.
+    /// Handler order is composition order, not protocol identity. A constructor
+    /// reaches the same handler no matter where that handler sits in the HList.
     #[test]
-    fn dispatch_routes_by_tag(tag in 0u64..3u64) {
-        let mut h3 = hlist![
-            MockHandler { id: 0 },
-            MockHandler { id: 1 },
-            MockHandler { id: 2 }
-        ];
-
-        let table = empty_table();
+    fn routes_by_nominal_constructor(value in any::<i64>()) {
+        let table = table();
         let cx = EffectContext::with_user(&table, &());
-        let req = Value::Lit(Literal::LitInt(42));
+        let first = request(FIRST, value);
+        let second = request(SECOND, value);
+        let mut forward = hlist![FirstHandler, SecondHandler];
+        let mut reverse = hlist![SecondHandler, FirstHandler];
 
-        let res = h3.dispatch(tag, &req, &cx).unwrap();
-        if let Response::Complete(Value::Lit(Literal::LitInt(id))) = res {
-            prop_assert_eq!(id, tag as i64);
-        } else {
-            panic!("Unexpected response: {:?}", res);
-        }
+        prop_assert_eq!(
+            completed_int(forward.dispatch(&first, &cx).unwrap()),
+            value.wrapping_add(10),
+        );
+        prop_assert_eq!(
+            completed_int(reverse.dispatch(&first, &cx).unwrap()),
+            value.wrapping_add(10),
+        );
+        prop_assert_eq!(
+            completed_int(forward.dispatch(&second, &cx).unwrap()),
+            value.wrapping_add(20),
+        );
+        prop_assert_eq!(
+            completed_int(reverse.dispatch(&second, &cx).unwrap()),
+            value.wrapping_add(20),
+        );
     }
+}
 
-    /// Test that dispatching with a tag beyond the HList length returns an error.
-    /// The error tag is the ORIGINAL out-of-range tag (#F2): each HCons layer
-    /// decrements on the way in to address the tail, then restores by 1 on the
-    /// way back out, so a caller sees the tag it actually dispatched with —
-    /// not the point-of-failure index relative to HNil.
-    #[test]
-    fn unknown_tag_returns_error(tag in 3u64..100u64) {
-        let mut h3 = hlist![
-            MockHandler { id: 0 },
-            MockHandler { id: 1 },
-            MockHandler { id: 2 }
-        ];
+#[test]
+fn unknown_constructor_is_left_unhandled() {
+    let table = table();
+    let cx = EffectContext::with_user(&table, &());
+    let mut handlers = hlist![FirstHandler, SecondHandler];
+    assert!(handlers
+        .dispatch(&request(UNKNOWN, 42), &cx)
+        .unwrap()
+        .is_none());
+}
 
-        let table = empty_table();
-        let cx = EffectContext::with_user(&table, &());
-        let req = Value::Lit(Literal::LitInt(42));
+#[test]
+fn malformed_owned_constructor_does_not_fall_through() {
+    let table = table();
+    let cx = EffectContext::with_user(&table, &());
+    let malformed = Value::Con(FIRST, vec![]);
+    let mut handlers = hlist![FirstHandler, SecondHandler];
 
-        let res = h3.dispatch(tag, &req, &cx);
-        prop_assert!(res.is_err());
-        match res {
-            Err(EffectError::UnhandledEffect { tag: actual_tag }) => {
-                prop_assert_eq!(actual_tag, tag);
-            }
-            other => panic!("Expected UnhandledEffect, got {:?}", other),
-        }
-    }
-
-    /// Test that the handler receives the exact request Value passed to dispatch.
-    #[test]
-    fn handler_receives_correct_request(req_val in any::<i64>()) {
-        struct EchoHandler;
-        impl EffectHandler<()> for EchoHandler {
-            type Request = Value;
-            fn handle(&mut self, req: Self::Request, _cx: &EffectContext<'_, ()>) -> Result<Response, EffectError> {
-                Ok(req.into())
-            }
-        }
-
-        let mut handlers = hlist![EchoHandler];
-        let table = empty_table();
-        let cx = EffectContext::with_user(&table, &());
-        let req = Value::Lit(Literal::LitInt(req_val));
-
-        let res = handlers.dispatch(0, &req, &cx).unwrap();
-        // Compare using Debug representation as Value doesn't implement PartialEq
-        let Response::Complete(res_val) = res else {
-            panic!("expected complete response");
-        };
-        prop_assert_eq!(format!("{:?}", res_val), format!("{:?}", req));
-    }
-
-    /// Test that dispatch routing is consistent even if we change handler order and tags.
-    #[test]
-    fn hlist_order_consistent(val in any::<i64>()) {
-        let mut h_ab = hlist![
-            MockHandler { id: 10 },
-            MockHandler { id: 20 }
-        ];
-        let mut h_ba = hlist![
-            MockHandler { id: 20 },
-            MockHandler { id: 10 }
-        ];
-
-        let table = empty_table();
-        let cx = EffectContext::with_user(&table, &());
-        let req = Value::Lit(Literal::LitInt(val));
-
-        // Handler with id 10 is at tag 0 in h_ab, and tag 1 in h_ba.
-        let res_a0 = h_ab.dispatch(0, &req, &cx).unwrap();
-        let res_a1 = h_ba.dispatch(1, &req, &cx).unwrap();
-        prop_assert_eq!(format!("{:?}", res_a0), format!("{:?}", res_a1));
-
-        // Handler with id 20 is at tag 1 in h_ab, and tag 0 in h_ba.
-        let res_b1 = h_ab.dispatch(1, &req, &cx).unwrap();
-        let res_b0 = h_ba.dispatch(0, &req, &cx).unwrap();
-        prop_assert_eq!(format!("{:?}", res_b1), format!("{:?}", res_b0));
-    }
+    assert!(matches!(
+        handlers.dispatch(&malformed, &cx),
+        Err(EffectError::Bridge(BridgeError::ArityMismatch { .. }))
+    ));
 }

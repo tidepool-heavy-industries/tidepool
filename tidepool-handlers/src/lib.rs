@@ -1,14 +1,14 @@
 //! Concrete effect handlers for the Tidepool eval server.
 //!
 //! Provides the base handlers (Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy),
-//! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls_with_ask`]
+//! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls`]
 //! convenience functions for assembling a fully-wired eval server.
 //!
 //! ## Stack assembly
 //!
 //! ```no_run
 //! # use std::path::PathBuf;
-//! # use tidepool_handlers::{HandlerConfig, build_base_stack, base_decls_with_ask};
+//! # use tidepool_handlers::{HandlerConfig, build_base_stack};
 //! # use tidepool_mcp::TidepoolMcpServer;
 //! // Must be called inside a tokio runtime (LlmHandler captures Handle::current()).
 //! let cfg = HandlerConfig {
@@ -94,15 +94,13 @@ macro_rules! handler_for {
     };
 }
 
-/// Build the base effect stack (tags 0–8: Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy).
+/// Build the base effect handler stack.
 ///
 /// **Must be called inside a tokio runtime** — `LlmHandler` captures
 /// `tokio::runtime::Handle::current()` at construction time.
 ///
-/// Ask (tag 9 on this 9-handler stack — see [`base_decls_with_ask`]) is
-/// **not** included here; it is interposed by `tidepool_runtime::session`'s
-/// `SessionEngine`/`GateDispatcher` (see `TidepoolMcpServer::new`), not by a
-/// handler in this HList.
+/// Ask is **not** included here; an unhandled `Ask` request is suspended by
+/// `tidepool_runtime::session`, not handled by this HList.
 pub fn build_base_stack(
     cfg: &HandlerConfig,
 ) -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
@@ -112,11 +110,9 @@ pub fn build_base_stack(
        + Sync
        + 'static {
     // The handler HList is generated from the single-source `base_effects!`
-    // list in `tidepool-mcp` (the SAME sequence that drives `standard_decls`,
-    // the `type M = Eff '[…]` string, and the union-tag positions). Reordering
-    // or cutting an effect is a single edit THERE — this fn just maps each
-    // effect name to its handler constructor (`handler_for!`), so the two
-    // orders cannot desync.
+    // list in `tidepool-mcp` (the same sequence that drives `standard_decls`
+    // and the `type M = Eff '[…]` string). This function only maps each effect
+    // name to its handler constructor.
     macro_rules! build_stack_rows {
         ($(($name:ident, $decl:ident)),* $(,)?) => {
             frunk::hlist![ $( handler_for!($name, cfg) ),* ]
@@ -126,12 +122,11 @@ pub fn build_base_stack(
 }
 
 /// Build the debug effect stack: the same base effects as [`build_base_stack`]
-/// (tags 0–8) plus `MetaHandler` appended last (tag 9) — the `--debug`-only
+/// plus `MetaHandler` — the `--debug`-only
 /// self-mirror. Mirrors `build_base_stack`'s callback exactly, so the two
 /// stacks can never desync on order; the ONLY difference is the trailing
 /// `MetaHandler::new(effect_names, helper_sigs)` row. Callers derive
-/// `effect_names`/`helper_sigs` from the SAME `base_effects!`-ordered decl
-/// list (plus `meta_decl()` appended, matching this stack's tag order) so
+/// `effect_names`/`helper_sigs` from the same declaration list so
 /// `metaEffects`/`metaHelp` report the actual running stack, not a
 /// hand-maintained guess.
 ///
@@ -157,14 +152,12 @@ pub fn build_debug_stack(
     tidepool_mcp::base_effects!(build_debug_stack_rows)
 }
 
-/// Build the MINIMAL effect stack (tag 0: Console only).
+/// Build the minimal effect stack (Console only).
 ///
 /// For cheap-startup sessions and tests that exercise the session mechanism
 /// rather than the effects — it avoids constructing the heavier handlers (Llm's
-/// genai client, the cwd-bound Fs/Exec). Ask (the next tag) is interposed
-/// the same way as with [`build_base_stack`], not by a handler here. Pair
-/// with [`base_decls_with_ask`] (which is generic over any `CollectEffectDecls`
-/// stack) to derive `(decls, ask_tag)`.
+/// genai client, the cwd-bound Fs/Exec). Ask is interposed rather than handled
+/// here. Pair with [`base_decls`] to build the Haskell effect row.
 pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
        + CollectEffectDecls
        + Clone
@@ -180,16 +173,9 @@ pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<C
 /// `ForkWith`/`ForkAllWith` (vestigial-subsystems review §4) — see
 /// `tidepool_mcp::EffectRoster::from_handlers`'s doc.
 ///
-/// Returns `(decls, ask_tag)` where `ask_tag` is the index of the FIRST
-/// interposed effect (`Ask`) in `decls` — the suspend threshold every tag at
-/// or beyond it shares (see `jit_machine::drive_effect_loop`'s `suspend_tag`
-/// doc). A thin tuple-shaped adapter over `tidepool_mcp::EffectRoster` — the
-/// single place that actually appends the interposed suffix and derives the
-/// tag — kept so existing `(Vec<EffectDecl>, u64)` call sites don't need to
-/// migrate to the roster type themselves.
-pub fn base_decls_with_ask<H: CollectEffectDecls>(stack: &H) -> (Vec<EffectDecl>, u64) {
+pub fn base_decls<H: CollectEffectDecls>(stack: &H) -> Vec<EffectDecl> {
     let roster = tidepool_mcp::EffectRoster::from_handlers(stack);
-    (roster.decls().to_vec(), roster.suspend_tag())
+    roster.decls().to_vec()
 }
 
 #[cfg(test)]

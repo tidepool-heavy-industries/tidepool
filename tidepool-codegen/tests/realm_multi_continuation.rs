@@ -80,10 +80,12 @@ const I_HASH_ID: DataConId = DataConId(5);
 const FINALIZE_ID: DataConId = DataConId(16);
 /// 3-field constructor for W1/W2's deep-verify: `Triple captured mid answer`.
 const TRIPLE_ID: DataConId = DataConId(17);
+/// Nominal request constructor owned by W1/W2's installed handler. The later
+/// plain integer request is deliberately unowned and therefore suspends.
+const MID_REQUEST_ID: DataConId = DataConId(18);
 
-/// The internal (DISPATCHED) effect tag W1/W2 use before their own suspending
-/// ask — distinct from `ASK_TAG` so a single `suspend_tag` threshold (1)
-/// dispatches tag 0 and suspends tag 1.
+/// Carrier tags vary across the handled and suspended requests to prove that
+/// Rust routing is nominal rather than positional.
 const MID_EFFECT_TAG: u64 = 0;
 const MID_ASK_TAG: u64 = 1;
 
@@ -113,6 +115,7 @@ fn adversarial_table() -> DataConTable {
         (I_HASH_ID, "I#", 5, 1),
         (FINALIZE_ID, "FinalizeWith", 16, 2),
         (TRIPLE_ID, "Triple", 17, 3),
+        (MID_REQUEST_ID, "MidRequest", 18, 1),
     ] {
         table.insert(DataCon {
             id,
@@ -213,11 +216,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -317,7 +319,11 @@ fn build_mid_effect_suspend(captured_n: i64, effect_req: i64, ask_req: i64) -> C
         fields: vec![lam1],
     });
     let effect_tag_word = b.push(CoreFrame::Lit(Literal::LitWord(MID_EFFECT_TAG)));
-    let effect_request = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_payload = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_request = b.push(CoreFrame::Con {
+        tag: MID_REQUEST_ID,
+        fields: vec![effect_payload],
+    });
     let effect_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![effect_tag_word, effect_request],
@@ -393,7 +399,11 @@ fn build_streamed_tail_suspend(captured_n: i64, effect_req: i64, ask_req: i64) -
         fields: vec![lam1],
     });
     let effect_tag_word = b.push(CoreFrame::Lit(Literal::LitWord(MID_EFFECT_TAG)));
-    let effect_request = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_payload = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_request = b.push(CoreFrame::Con {
+        tag: MID_REQUEST_ID,
+        fields: vec![effect_payload],
+    });
     let effect_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![effect_tag_word, effect_request],
@@ -482,41 +492,54 @@ fn build_finalize_suspend(captured_n: i64, site: i64) -> CoreExpr {
     b.build()
 }
 
-/// Dispatches `MID_EFFECT_TAG` by echoing the request straight back as the
-/// answer (no `ToCore`/table lookup needed) — panics on anything else,
-/// including the ask tag (which must suspend, not dispatch).
+/// Handles `MidRequest payload` by echoing its payload. Other nominal request
+/// families remain unhandled and therefore suspend.
 struct MidEffectDispatch;
 impl DispatchEffect<()> for MidEffectDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        assert_eq!(
-            tag, MID_EFFECT_TAG,
-            "only the internal effect should dispatch; the ask must suspend instead"
-        );
-        Ok(Response::Complete(request.clone()))
+    ) -> Result<Option<Response>, EffectError> {
+        match request {
+            Value::Con(id, fields) if *id == MID_REQUEST_ID && fields.len() == 1 => {
+                Ok(Some(Response::Complete(fields[0].clone())))
+            }
+            Value::Con(id, fields) if *id == MID_REQUEST_ID => {
+                Err(EffectError::FieldCountMismatch {
+                    constructor: "MidRequest",
+                    expected: 1,
+                    got: fields.len(),
+                })
+            }
+            _ => Ok(None),
+        }
     }
 }
 
-/// Dispatches `MID_EFFECT_TAG` with a lazily-streamed 3-element list — any
+/// Handles `MidRequest` with a lazily-streamed 3-element list — any
 /// size takes the Park arm in `materialize_response_and_resume` when lazy
 /// results are enabled (the default), which is the mechanism W2 falsifies.
 struct StreamDispatch;
 impl DispatchEffect<()> for StreamDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
-        _request: &Value,
+        request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        assert_eq!(
-            tag, MID_EFFECT_TAG,
-            "only the internal effect should dispatch; the ask must suspend instead"
-        );
-        cx.respond_list(vec![10i64, 20i64, 30i64])
+    ) -> Result<Option<Response>, EffectError> {
+        match request {
+            Value::Con(id, fields) if *id == MID_REQUEST_ID && fields.len() == 1 => {
+                cx.respond_list(vec![10i64, 20i64, 30i64]).map(Some)
+            }
+            Value::Con(id, fields) if *id == MID_REQUEST_ID => {
+                Err(EffectError::FieldCountMismatch {
+                    constructor: "MidRequest",
+                    expected: 1,
+                    got: fields.len(),
+                })
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -599,7 +622,7 @@ fn park_entry(
     expect_req: i64,
 ) -> ContinuationId {
     match machine
-        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, realm, &[])
+        .run_suspendable_parked(table, &mut NoDispatch, &(), realm)
         .expect("entry run_suspendable_parked")
     {
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -646,10 +669,8 @@ fn park_fragment(
             table,
             &mut NoDispatch,
             &(),
-            ASK_TAG,
             realm,
             ParkKind::Plain,
-            &[],
         )
         .expect("fragment run_fragment_suspendable_parked")
     {
@@ -1008,7 +1029,7 @@ fn linear_facade_and_explicit_park_are_rooted_together() {
         assert_rooting_receipt(&machine, 1);
 
         match machine
-            .run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG)
+            .run_suspendable(&table, &mut NoDispatch, &())
             .expect("linear façade run")
         {
             SuspendableOutcome::Suspended { request, .. } => {
@@ -1030,7 +1051,6 @@ fn linear_facade_and_explicit_park_are_rooted_together() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(2))),
             )
             .expect("resume linear façade")
@@ -1130,14 +1150,7 @@ fn w1_nested_mid_effect_continuation_parks_across_gc() {
                 .expect("compile_session");
 
         let id = match machine
-            .run_suspendable_parked(
-                &table,
-                &mut MidEffectDispatch,
-                &(),
-                MID_ASK_TAG,
-                RealmId(0),
-                &[],
-            )
+            .run_suspendable_parked(&table, &mut MidEffectDispatch, &(), RealmId(0))
             .expect("w1 entry run_suspendable_parked")
         {
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -1217,14 +1230,7 @@ fn w2_streamed_response_tail_parks_across_gc() {
         .expect("compile_session");
 
         let id = match machine
-            .run_suspendable_parked(
-                &table,
-                &mut StreamDispatch,
-                &(),
-                MID_ASK_TAG,
-                RealmId(0),
-                &[],
-            )
+            .run_suspendable_parked(&table, &mut StreamDispatch, &(), RealmId(0))
             .expect("w2 entry run_suspendable_parked")
         {
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -1302,7 +1308,7 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
                 .expect("compile_session");
 
         let id = match machine
-            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), RealmId(0))
             .expect("w3 entry run_suspendable_parked")
         {
             ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -1409,10 +1415,8 @@ fn w4_binding_park_case(forced: bool, captured_n: i64, req: i64, answer: i64) {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(0),
                 ParkKind::Binding { forced },
-                &[],
             )
             .expect("w4 fragment run_fragment_suspendable_parked")
         {

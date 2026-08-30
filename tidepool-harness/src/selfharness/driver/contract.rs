@@ -1,5 +1,5 @@
 //! The effect-row / answer-contract definitions: the outer loop's own
-//! decl row (`outer_decls`/`outer_template`/`OuterRow`/`TurnHeadDecl`), the
+//! decl row (`outer_decls`/`outer_template`), the
 //! answerer's scoped decl row (`typed_request_agent_decls`, widened by
 //! `typed_request_agent_decls_with_delegate`), and per-hole
 //! [`crate::harness::AnswerContract`] construction.
@@ -22,14 +22,9 @@ use crate::harness::AnswerContract;
 /// Harness State` uses only `runLLMTurn`, and a loop that wants a form imports
 /// `Tidepool.Form` and relies on `askUser`'s `Member AskUser` constraint
 /// unifying against this wider row.
-/// INTERPOSED EFFECTS FIRST — this ordering is load-bearing, not stylistic.
-/// `EngineConfig::from_decls` takes the index of the FIRST interposed decl as
-/// the suspend threshold, so with `RunLLMTurn` at index 0 the outer session's
-/// handled prefix is EMPTY and every effect (including `Subagent`) SUSPENDS
-/// to the driver. Putting a handled effect before `RunLLMTurn` would give the
-/// SHARED machine a non-empty established prefix, silently dispatching the
-/// answerer realms' `AskUser`/`Fork` (tags 0/1) into handler slots — a
-/// capability-boundary break. Pinned by `outer_row_suspends_everything`.
+/// The outer resident session uses `EffectRunPolicy::SuspendAll`, so
+/// declaration order has no Rust dispatch meaning. Every request reaches the
+/// driver as a suspension.
 ///
 /// `worktree_decl` is a HARD companion of `subagent_decl`: Subagent's
 /// type_defs reference `WorktreeSpec`/`WorktreeId`/`WorktreeHandle`, and its
@@ -60,7 +55,7 @@ use crate::harness::AnswerContract;
 /// compile's import list (its `EffectDecl::extra_imports`), which is what puts
 /// `Resume.ResumeFold` in scope for the `__selfHarnessResume` splice.
 ///
-/// The row also carries `Green`, placed LAST so `RunLLMTurn` keeps index 0. Under the
+/// The row also carries `Green`. Under the
 /// registry representation (threads park as new continuations in the
 /// session's multi-hole registry), `Green` is NOT
 /// serviced through [`SelfHarnessDriver::service_outer_effect`]'s mechanical
@@ -75,16 +70,17 @@ use crate::harness::AnswerContract;
 /// `run_loop_fragment_inner` call (structured concurrency — nothing survives
 /// past the `loop` fragment that spawned it).
 pub(crate) fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
-    OuterRow::new(TurnHeadDecl::run_llm_turn())
-        .push(tidepool_mcp::askuser_decl())
-        .push(tidepool_mcp::console_decl())
-        .push(tidepool_mcp::worktree_decl())
-        .push(tidepool_mcp::event_decl())
-        .push(tidepool_mcp::exec_decl())
-        .push(tidepool_mcp::subagent_decl())
-        .push(tidepool_mcp::journal_decl())
-        .push(tidepool_mcp::green_decl())
-        .into_decls()
+    vec![
+        tidepool_mcp::runllmturn_decl(),
+        tidepool_mcp::askuser_decl(),
+        tidepool_mcp::console_decl(),
+        tidepool_mcp::worktree_decl(),
+        tidepool_mcp::event_decl(),
+        tidepool_mcp::exec_decl(),
+        tidepool_mcp::subagent_decl(),
+        tidepool_mcp::journal_decl(),
+        tidepool_mcp::green_decl(),
+    ]
 }
 
 /// The ONE template every outer-session fragment compile
@@ -106,51 +102,6 @@ pub(crate) fn outer_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// forever. Pinned by `outer_template_is_unpaginated` in this module's tests.
 pub(crate) fn outer_template(stack: &str, code: &str, imports: &str, helpers: &str) -> String {
     engine::template_turn_for_fused(&outer_decls(), stack, code, imports, helpers, &[])
-}
-
-/// A decl permitted to occupy [`OuterRow`]'s HEAD slot. The only constructor
-/// is [`Self::run_llm_turn`], which calls `tidepool_mcp::runllmturn_decl()`
-/// directly (no parameter) — so a `TurnHeadDecl` is never anything other
-/// than the real `RunLLMTurn` decl. This is what makes index-0 displacement
-/// UNWRITABLE rather than merely pinned by a regression test: there is no
-/// value of this type that could wrap a different decl, and [`OuterRow`]
-/// only ever renders its head first.
-pub(crate) struct TurnHeadDecl(tidepool_mcp::EffectDecl);
-
-impl TurnHeadDecl {
-    pub(crate) fn run_llm_turn() -> Self {
-        TurnHeadDecl(tidepool_mcp::runllmturn_decl())
-    }
-}
-
-/// A NonEmpty-shaped builder for the outer row: a `head` slot only
-/// [`TurnHeadDecl`] can occupy, plus an ordinary `tail`. `RunLLMTurn` must be
-/// first — see [`outer_decls`]'s doc for why (the interposed-effect suspend
-/// threshold, `EngineConfig::from_decls`) — and this makes that constructional
-/// rather than a fact only a pin test (`outer_row_suspends_everything`)
-/// happens to keep true: [`Self::into_decls`] always renders `head` before
-/// `tail`, and nothing in this module can construct an `OuterRow` without one.
-pub(crate) struct OuterRow {
-    head: TurnHeadDecl,
-    tail: Vec<tidepool_mcp::EffectDecl>,
-}
-
-impl OuterRow {
-    pub(crate) fn new(head: TurnHeadDecl) -> Self {
-        OuterRow {
-            head,
-            tail: Vec::new(),
-        }
-    }
-
-    pub(crate) fn push(mut self, decl: tidepool_mcp::EffectDecl) -> Self {
-        self.tail.push(decl);
-        self
-    }
-
-    pub(crate) fn into_decls(self) -> Vec<tidepool_mcp::EffectDecl> {
-        std::iter::once(self.head.0).chain(self.tail).collect()
-    }
 }
 
 /// The nested answerer Agent's scoped decl row: `[AskUser, Fork, ReadState, Green, Finalize]`.
@@ -175,9 +126,6 @@ impl OuterRow {
 /// `Green` grants NO new external capability: a green thread's body can only
 /// perform effects already in this row.
 ///
-/// `AskUser` comes first because [`EngineConfig::from_decls`] takes the first
-/// interposed effect as the suspend threshold; `Fork`/`Green`/`Finalize` land
-/// at or past it regardless of position.
 pub fn typed_request_agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
     vec![
         tidepool_mcp::askuser_decl(),

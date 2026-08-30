@@ -12,10 +12,9 @@ pub struct NullDispatcher;
 impl<U> DispatchEffect<U> for NullDispatcher {
     fn dispatch(
         &mut self,
-        _tag: u64,
         _request: &Value,
         cx: &EffectContext<'_, U>,
-    ) -> Result<Response, EffectError> {
-        cx.respond(serde_json::json!(0))
+    ) -> Result<Option<Response>, EffectError> {
+        cx.respond(serde_json::json!(0)).map(Some)
     }
 }

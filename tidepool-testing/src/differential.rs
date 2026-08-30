@@ -291,7 +291,6 @@ pub fn classify_jit(e: &JitError) -> JitErrorClass {
         JitError::EffectResponseTooLarge { .. } => JitErrorClass::Other,
         JitError::InvalidSuspensionState(_) | JitError::EmptyProjection => JitErrorClass::Other,
         JitError::VarIdCollision(_) => JitErrorClass::Other,
-        JitError::IncompatibleHandledPrefix { .. } => JitErrorClass::Other,
     }
 }
 

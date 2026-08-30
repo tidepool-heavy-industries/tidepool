@@ -1,10 +1,13 @@
 use frunk::{hlist, HNil};
 use proptest::prelude::*;
+use tidepool_bridge::{BridgeError, FromCore};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler, Response};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::machine::EffectMachine;
 use tidepool_eval::heap::VecHeap;
 use tidepool_eval::value::Value;
+use tidepool_repr::datacon::DataCon;
+use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::types::{DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, RecursiveTree};
 use tidepool_testing::gen::freer_effect_test_table as make_test_table;
@@ -68,15 +71,93 @@ fn make_single_effect(tag: u64, request_val: i64) -> CoreExpr {
     }
 }
 
-struct TaggedHandler(i64);
-impl EffectHandler<()> for TaggedHandler {
-    type Request = Value;
+const ROUTE_A: DataConId = DataConId(10);
+const ROUTE_B: DataConId = DataConId(11);
+const ROUTE_C: DataConId = DataConId(12);
+
+fn routing_table() -> DataConTable {
+    let mut table = make_test_table();
+    for (id, name) in [
+        (ROUTE_A, "RouteA"),
+        (ROUTE_B, "RouteB"),
+        (ROUTE_C, "RouteC"),
+    ] {
+        table.insert(DataCon {
+            id,
+            name: name.into(),
+            tag: id.0 as u32,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: Some(format!("Test.{name}")),
+            type_name: "RouteRequest".into(),
+        });
+    }
+    table
+}
+
+struct RouteRequest<const ID: u64>;
+impl<const ID: u64> tidepool_bridge::sealed::FromCoreSealed for RouteRequest<ID> {}
+impl<const ID: u64> FromCore for RouteRequest<ID> {
+    fn from_value(value: &Value, _table: &DataConTable) -> Result<Self, BridgeError> {
+        match value {
+            Value::Con(id, fields) if *id == DataConId(ID) && fields.is_empty() => Ok(Self),
+            Value::Con(id, fields) if *id == DataConId(ID) => Err(BridgeError::ArityMismatch {
+                con: *id,
+                expected: 0,
+                got: fields.len(),
+            }),
+            Value::Con(id, _) => Err(BridgeError::UnknownDataCon(*id)),
+            other => Err(BridgeError::TypeMismatch {
+                expected: "request constructor".into(),
+                got: format!("{other:?}"),
+            }),
+        }
+    }
+}
+
+struct RouteHandler<const ID: u64>(i64);
+impl<const ID: u64> EffectHandler<()> for RouteHandler<ID> {
+    type Request = RouteRequest<ID>;
     fn handle(
         &mut self,
         _req: Self::Request,
         _cx: &EffectContext<'_, ()>,
     ) -> Result<Response, EffectError> {
         Ok(Value::Lit(Literal::LitInt(self.0)).into())
+    }
+}
+
+/// Build `E (Union carrierTag RequestConstructor) (Leaf (\x -> Val x))`.
+fn make_routed_effect(carrier_tag: u64, request_id: DataConId) -> CoreExpr {
+    RecursiveTree {
+        nodes: vec![
+            CoreFrame::Var(VarId(100)),
+            CoreFrame::Con {
+                tag: DataConId(1),
+                fields: vec![0],
+            },
+            CoreFrame::Lam {
+                binder: VarId(100),
+                body: 1,
+            },
+            CoreFrame::Con {
+                tag: DataConId(3),
+                fields: vec![2],
+            },
+            CoreFrame::Con {
+                tag: request_id,
+                fields: vec![],
+            },
+            CoreFrame::Lit(Literal::LitWord(carrier_tag)),
+            CoreFrame::Con {
+                tag: DataConId(5),
+                fields: vec![5, 4],
+            },
+            CoreFrame::Con {
+                tag: DataConId(2),
+                fields: vec![6, 3],
+            },
+        ],
     }
 }
 
@@ -123,18 +204,19 @@ proptest! {
     }
 
     #[test]
-    fn multi_handler_routing(tag in 0u64..3u64) {
-        let table = make_test_table();
+    fn multi_handler_routing(route in 0usize..3, carrier_tag in any::<u64>()) {
+        let table = routing_table();
         let mut heap = VecHeap::new();
-        let expr = make_single_effect(tag, 0);
+        let request_id = [ROUTE_A, ROUTE_B, ROUTE_C][route];
+        let expr = make_routed_effect(carrier_tag, request_id);
         let mut handlers = hlist![
-            TaggedHandler(10),
-            TaggedHandler(20),
-            TaggedHandler(30)
+            RouteHandler::<10>(10),
+            RouteHandler::<11>(20),
+            RouteHandler::<12>(30)
         ];
         let mut machine = EffectMachine::new(&table, &mut heap).unwrap();
         let res = machine.run(&expr, &mut handlers).unwrap();
-        let expected = (tag as i64 + 1) * 10;
+        let expected = (route as i64 + 1) * 10;
         if let Value::Lit(Literal::LitInt(n)) = res {
             prop_assert_eq!(n, expected);
         } else {

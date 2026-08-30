@@ -252,11 +252,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — this fragment should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -339,7 +338,7 @@ fn projected_turn_suspends_then_tenures_every_field_on_resume() {
             session_with_fragment(&table, "multi_bind_ask", &build_suspending_pair(111, 42));
 
         let outcome = machine
-            .run_fragment_suspendable_projected(fid, &table, &mut NoDispatch, &(), ASK_TAG, 2)
+            .run_fragment_suspendable_projected(fid, &table, &mut NoDispatch, &(), 2)
             .expect("projected suspendable run");
         expect_suspended(outcome, 42);
         assert!(machine.is_suspended());
@@ -353,7 +352,6 @@ fn projected_turn_suspends_then_tenures_every_field_on_resume() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(222))),
                     2,
                 )
@@ -414,7 +412,7 @@ fn render_turn_suspends_then_returns_render_and_field0_root() {
             session_with_fragment(&table, "bare_expr_ask", &build_suspending_pair(111, 7));
 
         let outcome = machine
-            .run_fragment_suspendable_render(fid, &table, &mut NoDispatch, &(), ASK_TAG, true)
+            .run_fragment_suspendable_render(fid, &table, &mut NoDispatch, &(), true)
             .expect("render suspendable run");
         expect_suspended(outcome, 7);
         assert!(machine.is_suspended());
@@ -427,7 +425,6 @@ fn render_turn_suspends_then_returns_render_and_field0_root() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(222))),
                     true,
                 )
@@ -473,7 +470,7 @@ fn render_aliased_fields_survive_a_suspension() {
             session_with_fragment(&table, "aliased_ask", &build_suspending_aliased(5));
 
         let outcome = machine
-            .run_fragment_suspendable_render(fid, &table, &mut NoDispatch, &(), ASK_TAG, true)
+            .run_fragment_suspendable_render(fid, &table, &mut NoDispatch, &(), true)
             .expect("aliased render suspendable run");
         expect_suspended(outcome, 5);
 
@@ -483,7 +480,6 @@ fn render_aliased_fields_survive_a_suspension() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(333))),
                     true,
                 )
@@ -538,7 +534,7 @@ fn projected_and_render_entries_refuse_an_already_suspended_machine() {
             session_with_fragment(&table, "first_ask", &build_suspending_pair(111, 1));
 
         let outcome = machine
-            .run_fragment_suspendable_projected(fid, &table, &mut NoDispatch, &(), ASK_TAG, 2)
+            .run_fragment_suspendable_projected(fid, &table, &mut NoDispatch, &(), 2)
             .expect("first projected run suspends");
         expect_suspended(outcome, 1);
         assert!(machine.is_suspended());
@@ -550,24 +546,10 @@ fn projected_and_render_entries_refuse_an_already_suspended_machine() {
                 // the point — only the refusal is being probed here.
                 match probe {
                     "projected" => machine
-                        .run_fragment_suspendable_projected(
-                            fid,
-                            &table,
-                            &mut NoDispatch,
-                            &(),
-                            ASK_TAG,
-                            2,
-                        )
+                        .run_fragment_suspendable_projected(fid, &table, &mut NoDispatch, &(), 2)
                         .map(|_| ()),
                     _ => machine
-                        .run_fragment_suspendable_render(
-                            fid,
-                            &table,
-                            &mut NoDispatch,
-                            &(),
-                            ASK_TAG,
-                            true,
-                        )
+                        .run_fragment_suspendable_render(fid, &table, &mut NoDispatch, &(), true)
                         .map(|_| ()),
                 }
             }));

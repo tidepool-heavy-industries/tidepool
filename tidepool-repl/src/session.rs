@@ -487,18 +487,7 @@ impl Session {
             // Decl validation must resolve the same imports eval does (notably
             // the generated `Tidepool.Effects`), so feed it the base include.
             .with_validation_include(cfg.base_include.clone());
-        let effect_names = cfg
-            .roster
-            .decls()
-            .iter()
-            .map(|d| d.type_name.to_string())
-            .collect();
-        let core = PersistentSession::new(
-            Some(lib),
-            cfg.roster.suspend_tag(),
-            effect_names,
-            cfg.nursery_size,
-        );
+        let core = PersistentSession::new(Some(lib), cfg.nursery_size);
         Ok(Session {
             cfg,
             make_handlers,
@@ -624,8 +613,8 @@ impl Session {
     ///
     /// `gate` is the turn's abort latch: [`GateDispatcher`] makes every effect
     /// dispatch a checkpoint, so a server-side `request_abort` unwinds the turn
-    /// at the next effect. It does NOT intercept the ask tag — the JIT's own
-    /// suspend driver catches that first.
+    /// at the next effect. It does not decide whether an unhandled request
+    /// suspends; the resident run policy does.
     pub fn run_turn(
         &mut self,
         cmd: &SessionCommand,
@@ -2327,19 +2316,7 @@ impl Session {
                         // value bindings + accumulated table) and the turn
                         // counter in one move.
                         let lib = lib.with_validation_include(self.cfg.base_include.clone());
-                        let effect_names = self
-                            .cfg
-                            .roster
-                            .decls()
-                            .iter()
-                            .map(|d| d.type_name.to_string())
-                            .collect();
-                        self.core = PersistentSession::new(
-                            Some(lib),
-                            self.cfg.roster.suspend_tag(),
-                            effect_names,
-                            self.cfg.nursery_size,
-                        );
+                        self.core = PersistentSession::new(Some(lib), self.cfg.nursery_size);
                         // The rebuilt core has no machine, so publish the (now
                         // empty) cancel handle explicitly — otherwise the shared
                         // `CancelSlot` keeps the dropped machine's stale

@@ -783,16 +783,13 @@ impl Harness {
         let mut iter = records.into_iter();
         let mut failure: Option<HarnessError> = None;
         while let Some(rec) = iter.next() {
-            let tag = self
-                .cfg
-                .effect_names
-                .get(rec.tag as usize)
-                .cloned()
-                .unwrap_or_else(|| format!("tag{}", rec.tag));
-            match self
-                .tree
-                .effect(node, seq, tag, rec.req.clone(), rec.resp.clone())
-            {
+            match self.tree.effect(
+                node,
+                seq,
+                rec.constructor.clone(),
+                rec.req.clone(),
+                rec.resp.clone(),
+            ) {
                 Ok(()) => seq += 1,
                 Err(e) => {
                     let mut unwritten = vec![rec];
@@ -932,7 +929,6 @@ impl Harness {
         include.extend(extra_include);
         let session = ResidentSession::unbootstrapped(
             stack,
-            self.cfg.suspend_tag,
             self.cfg.effect_names.clone(),
             CapturedOutput::new(),
             include,
@@ -4141,7 +4137,6 @@ mod tests {
         let (stack, _trace) = harness.build_stack();
         ResidentSession::unbootstrapped(
             stack,
-            0,
             vec![],
             CapturedOutput::new(),
             vec![],
@@ -4187,12 +4182,12 @@ mod tests {
             .unwrap();
 
         let rec_a = EffectRecord {
-            tag: 0,
+            constructor: "Console.Write".to_string(),
             req: serde_json::json!({"call": "a"}),
             resp: serde_json::json!({"result": "a"}),
         };
         let rec_b = EffectRecord {
-            tag: 0,
+            constructor: "Console.Write".to_string(),
             req: serde_json::json!({"call": "b"}),
             resp: serde_json::json!({"result": "b"}),
         };

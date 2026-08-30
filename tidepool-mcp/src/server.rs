@@ -64,36 +64,27 @@ impl<T> McpEffectHandler for T where
 #[derive(Clone)]
 pub struct EffectRoster {
     decls: Vec<EffectDecl>,
-    suspend_tag: u64,
 }
 
 impl EffectRoster {
     /// Collect `H`'s handler-derived declarations, then append the fixed
-    /// interposed suffix — `Ask`, then `RunLLMTurn` (WS-B split `runLLMTurn`
-    /// out of `Ask`) — in that order. The suspend tag is minted BEFORE the
-    /// suffix is appended, so it always equals the handler-decl count by
-    /// construction. Takes `&H` (unused beyond type inference) so callers
+    /// interposed suffix — `Ask`, then `RunLLMTurn` — in that order. Takes
+    /// `&H` (unused beyond type inference) so callers
     /// holding an already-built stack don't need a turbofish.
     ///
     /// No `Fork` here — see this struct's doc for why the one-shot/REPL
     /// roster stops at `RunLLMTurn`.
     pub fn from_handlers<H: CollectEffectDecls>(_handlers: &H) -> EffectRoster {
         let mut decls = H::collect_decls();
-        let suspend_tag = decls.len() as u64;
         decls.push(ask_decl());
         decls.push(runllmturn_decl());
-        EffectRoster { decls, suspend_tag }
+        EffectRoster { decls }
     }
 
     /// The full ordered declaration list: handler decls, then the interposed
     /// suffix.
     pub fn decls(&self) -> &[EffectDecl] {
         &self.decls
-    }
-
-    /// The `Ask` effect's union tag — every tag at or beyond it is interposed.
-    pub fn suspend_tag(&self) -> u64 {
-        self.suspend_tag
     }
 }
 
@@ -125,11 +116,7 @@ pub struct TidepoolMcpServerImpl {
     pub(crate) eval_tool_description: String,
     // User library support
     pub(crate) has_user_library: bool,
-    // Effect names for error annotation (indexed by tag)
-    pub(crate) effect_names: Vec<String>,
-    // The single-sourced effect roster: ordered decls + the Ask suspend tag,
-    // built only via `EffectRoster::from_handlers` (see its doc for why this
-    // replaced two independent decls+ask_tag derivations). Also backs
+    // The single-sourced effect roster. Also backs
     // `read_resource`'s per-effect detail, live library vocab, patterns, and
     // stdlib module sources via `resource_ctx`.
     pub(crate) roster: EffectRoster,
@@ -253,8 +240,6 @@ impl TidepoolMcpServerImpl {
                 source,
                 include: include_refs,
                 handlers,
-                ask_tag: self.roster.suspend_tag(),
-                effect_names: self.effect_names.clone(),
                 captured,
                 nursery_size: tidepool_runtime::DEFAULT_NURSERY_SIZE,
                 timeout_secs,
@@ -756,11 +741,6 @@ where
     /// implement `DescribeEffect`.
     pub fn new(handler: H) -> Self {
         let roster = EffectRoster::from_handlers(&handler);
-        let effect_names: Vec<String> = roster
-            .decls()
-            .iter()
-            .map(|d| d.type_name.to_string())
-            .collect();
         // The generated Tidepool.Effects.Core + Tidepool.Effects modules must
         // both be on the include path for every eval (the preamble imports
         // the shim, which re-exports Core). Keep their sources so the eval
@@ -795,7 +775,6 @@ where
                 effect_stack_type,
                 eval_tool_description,
                 has_user_library: false,
-                effect_names,
                 roster,
                 lib_dirs: Vec::new(),
                 patterns_path: None,

@@ -192,25 +192,21 @@ impl OutputSink for TestSink {
     }
 }
 
-/// Never dispatches — every tag this file constructs is >= the suspend
-/// threshold (0), so everything suspends; a real dispatch call would mean
-/// the representation under test silently stopped suspending.
+/// Leaves every request unhandled so the resident session suspends it.
 struct NoDispatch;
 impl DispatchEffect<TestSink> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — expected a suspension");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
 fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
     ResidentSession::unbootstrapped(
         NoDispatch,
-        0, // ask_tag: suspend threshold 0 — every tag here suspends.
         Vec::new(),
         TestSink::default(),
         Vec::new(),

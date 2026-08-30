@@ -277,8 +277,8 @@ pub enum SuspensionRouting {
     /// NEVER decoded here (its args are bridged ADTs, not JSON — the
     /// servicing site decodes the ORIGINAL request `Value` via the generated
     /// `SubagentReq: FromCore` and dispatches it to the driver-owned
-    /// `SubagentHandler`, suspension-serviced because the outer row's
-    /// handled prefix must stay EMPTY on the shared machine).
+    /// `SubagentHandler`; the outer session uses `SuspendAll`, so the driver
+    /// remains the sole service point).
     Subagent,
     /// A Console/Worktree/RepoEvent/Exec/Journal verb (`say`/`createWorktree`/
     /// `lookupWorktree`/`listWorktrees`/`worktreeBranch`/`worktreeHead`/
@@ -1251,7 +1251,7 @@ pub fn split_block_items(block: &str) -> Vec<String> {
 
 /// Everything the engine needs to compile + run turns: the extract binary, the
 /// include search paths (prelude + effects module + optional project lib), the
-/// effect decls, the Ask tag, and the effect-row names.
+/// effect declarations, and the effect-row names.
 #[derive(Clone)]
 pub struct EngineConfig {
     pub extract_bin: tidepool_extract_cmd::ResolvedExtractBin,
@@ -1265,12 +1265,6 @@ pub struct EngineConfig {
     /// (gui + finalize only), and its turns must NOT advertise verbs
     /// (`run`/`runLLMTurn`/…) it cannot compile.
     pub decls: Vec<tidepool_mcp::EffectDecl>,
-    /// The suspend THRESHOLD: the tag (position) of the FIRST interposed
-    /// effect (`Ask`|`RunLLMTurn`|`Finalize`) in [`Self::decls`] — every effect
-    /// at or past this tag suspends the machine rather than dispatching to a
-    /// handler. Named for what it is, the suspend threshold, not just
-    /// `Ask`, since `RunLLMTurn`/`Finalize` share the same suspend path.
-    pub suspend_tag: u64,
     /// The stdlib include dir this config was built from (`include[0]`,
     /// carried separately so a caller building a NARROWER decls list against
     /// the same stdlib — e.g. the self-iterating harness's outer `Eff
@@ -1356,11 +1350,8 @@ pub const DEFAULT_MAX_TOKENS: u32 = 2048;
 
 /// The Agent turn engine's decl list: `standard_decls()` (base9 + Ask +
 /// RunLLMTurn — the ordinary one-shot/REPL roster) with `Fork` and
-/// `Finalize` appended last — both their own interposed effect/tag, sharing
-/// `Ask`/`RunLLMTurn`'s suspend path (see `jit_machine::drive_effect_loop`'s
-/// `suspend_tag` threshold: every tag from the FIRST interposed effect
-/// onward suspends, so appending further interposed effects here needs no
-/// further Rust-side dispatch change). `Agent` isn't a literal Haskell type
+/// `Finalize` appended last. All of these are interposed because the actor run
+/// suspends requests its installed handlers do not recognize. `Agent` isn't a literal Haskell type
 /// anywhere — it's this decl list, used wherever an Agent turn (an Agent
 /// node driven by `Harness::run_to_hole_or_done`, including the
 /// self-iterating-harness's nested Agent sessions answering a `runLLMTurn`
@@ -1371,9 +1362,8 @@ pub const DEFAULT_MAX_TOKENS: u32 = 2048;
 /// (below) genuinely matches `ForkWith`/`ForkAllWith` and routes them to a
 /// fan/site — unlike the ordinary session engine's `extract_ask_request`,
 /// which has no scheduler for either constructor. `Fork` was always the
-/// tail-most element of the old universal roster, so re-adding it here,
-/// ahead of `Finalize`, reproduces the EXACT same union-tag order this stack
-/// always had — no positional-tag shift for any surface.
+/// tail-most element of the old universal roster; its declaration order now
+/// matters only to the generated Haskell row.
 fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
     let mut decls = tidepool_mcp::standard_decls();
     decls.push(tidepool_mcp::fork_decl());
@@ -1397,7 +1387,7 @@ fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
 // call's ARGUMENT shares).
 
 impl EngineConfig {
-    /// The canonical effect stack's decls + ask tag + effect names, resolving
+    /// The canonical effect declarations and names, resolving
     /// the extract binary from `TIDEPOOL_EXTRACT` (falling back to
     /// `tidepool-extract` on PATH) and the include paths from `prelude_dir`
     /// (the stdlib `haskell/lib`) plus a freshly-materialized effects module.
@@ -1413,8 +1403,7 @@ impl EngineConfig {
 
     /// A config for unit tests that never compile a turn: no extract binary,
     /// no includes, and an effects dir that is never read. `effect_names` is
-    /// the one field such a test does read — `Harness::flush_effects` maps an
-    /// effect's stack tag through it.
+    /// the one field such a test does read for effect diagnostics.
     #[cfg(test)]
     pub(crate) fn inert(effect_names: Vec<String>) -> Self {
         EngineConfig {
@@ -1422,7 +1411,6 @@ impl EngineConfig {
             include: Vec::new(),
             effect_names,
             decls: Vec::new(),
-            suspend_tag: 0,
             prelude_dir: PathBuf::from("."),
             project_lib: None,
             effects_dir: PathBuf::from("."),
@@ -1443,22 +1431,6 @@ impl EngineConfig {
         prelude_dir: PathBuf,
         project_lib: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        // `suspend_tag` is the suspend THRESHOLD: the index of the first
-        // interposed effect. For the full Agent stack that's `Ask`; for the
-        // answerer stack it's `AskUser`; for a narrower stack (e.g.
-        // RunLLMTurn-only) there is no `Ask`/`AskUser` entry at all, so fall
-        // back to the first of the other interposed effects — found by name,
-        // not by position, since none of them is necessarily the list's last
-        // entry.
-        let suspend_tag = decls
-            .iter()
-            .position(|d| {
-                matches!(
-                    d.type_name,
-                    "Ask" | "AskUser" | "RunLLMTurn" | "Fork" | "Finalize"
-                )
-            })
-            .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
         let dirs =
             tidepool_mcp::ensure_effects_module_at(&decls, &tidepool_mcp::RowArgs::default())
@@ -1476,7 +1448,6 @@ impl EngineConfig {
             include,
             effect_names,
             decls,
-            suspend_tag,
             prelude_dir,
             project_lib,
             effects_dir: dirs.shim,

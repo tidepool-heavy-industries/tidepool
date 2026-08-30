@@ -58,13 +58,12 @@ types, declarations, values, protocols, and behavior, but cannot redefine the
 stack. Adding or removing an effect class creates a new actor incarnation and
 a new `AgentRef`.
 
-Rust builds one actor-local interpreter for the stack. An effect-stack ABI
-identifies the ordered effect types and request layouts against which compiled
-continuations run; the interpreter instance supplies this actor's handlers,
-grants, and caller identity. Forks create a new interpreter instance with the
-same ABI. Actors sharing a machine may share the machine's established prefix
-of locally dispatched effects, but that prefix is not the actor's full row:
-the suspension tail and its ABI remain actor-local.
+Rust builds one actor-local interpreter for the incarnation. GHC checks effect
+row compatibility; Rust does not duplicate that work as a positional ABI.
+Instead, handlers recognize nominal request constructors and the interpreter
+checks this actor's policy, grants, and caller identity. Forks create a new
+interpreter instance under the child's principal. Different actor rows may
+share one machine because union position has no Rust dispatch meaning.
 
 The stack determines which operation classes Haskell can express. Opaque
 handles and principal-scoped grants still authorize particular resources at
@@ -73,7 +72,7 @@ runtime.
 ## 3. Actor specifications are Haskell values
 
 An actor specification packages an entry point, startup type, mailbox
-protocol, successful exit type, fixed effect-stack ABI, and program image. A
+protocol, successful exit type, fixed effect vocabulary, and program image. A
 possible surface is:
 
 ```haskell
@@ -114,7 +113,7 @@ awaitExit
 ```
 
 This is a conceptual surface: the representation existentially seals `boot`,
-`initial`, `childEffs`, the effect-stack ABI, and the program image.
+`initial`, `childEffs`, and the program image.
 `StartupM` and `ShutdownM` are restricted lifecycle surfaces that cannot
 deliberate.
 

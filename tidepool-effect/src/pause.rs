@@ -9,9 +9,9 @@
 //! reaches no effect within a grace period is treated as a runaway and detached.
 //!
 //! Two call sites share this ONE gate, both wrapping the same
-//! `tidepool_runtime::session::GateDispatcher` around their handler stack —
-//! it never intercepts the ask tag (the JIT's own suspend driver catches that
-//! first), only turns every non-ask dispatch into a checkpoint:
+//! `tidepool_runtime::session::GateDispatcher` around their handler stack. It
+//! adds a checkpoint to every dispatch attempt; nominal handler routing and
+//! the run's unhandled-request policy remain separate:
 //!
 //! - `tidepool_runtime::session::SessionEngine`'s per-eval turn driver (the
 //!   oneshot MCP eval path) exercises the full state machine — pause → park →

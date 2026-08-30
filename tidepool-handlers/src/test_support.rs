@@ -3,6 +3,14 @@ use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
 use tidepool_repr::{DataCon, DataConId, DataConTable};
 
+pub(crate) fn expect_handled(
+    result: Result<Option<tidepool_effect::Response>, tidepool_effect::EffectError>,
+) -> tidepool_effect::Response {
+    result
+        .expect("effect dispatch should succeed")
+        .expect("test request should be handled")
+}
+
 /// Unwrap a handler Response: Complete passes through; a List builds the
 /// equivalent cons-list Value (iteratively, back-to-front).
 pub(crate) fn response_value(r: tidepool_effect::Response, table: &DataConTable) -> Value {

@@ -180,7 +180,6 @@ fn sibling_scopes_shadow_independently_without_touching_root() {
 }
 
 /// The `Ask` union tag; nothing in this suite suspends.
-const ASK_TAG: u64 = 0;
 /// Nursery size for the (never bootstrapped) resident machine — a decl-only
 /// test never reaches the JIT, since `PersistentSession` boots lazily.
 const NURSERY: usize = 1 << 16;
@@ -227,7 +226,7 @@ fn a_sibling_define_between_mint_and_first_use_does_not_leak() {
     // Driven through `PersistentSession` on purpose: `mint_scope`'s seeding IS
     // the code under test, and it lives here because this is the only type
     // that owns the `ScopeTree` and therefore knows a scope's parent.
-    let mut core = PersistentSession::new(Some(lib), ASK_TAG, Vec::new(), NURSERY);
+    let mut core = PersistentSession::new(Some(lib), NURSERY);
 
     // ---- (1) ROOT defines the name both children will shadow. ----
     let g_root = core
@@ -356,7 +355,7 @@ fn isolated_scope_has_an_empty_independent_declaration_chain() {
     )
     .expect("open session")
     .with_validation_include(vec![lib_dir.clone()]);
-    let mut core = PersistentSession::new(Some(lib), ASK_TAG, Vec::new(), NURSERY);
+    let mut core = PersistentSession::new(Some(lib), NURSERY);
 
     let root_generation = core
         .define_scoped(&["rootOnly = 41 :: Int"])
@@ -415,7 +414,7 @@ fn define_and_retract_scoped_in_reject_a_dead_scope_without_touching_the_log() {
         ModuleEnv::standalone_default(),
     )
     .expect("open session");
-    let mut core = PersistentSession::new(Some(lib), ASK_TAG, Vec::new(), NURSERY);
+    let mut core = PersistentSession::new(Some(lib), NURSERY);
 
     let child = core.mint_scope(ScopeId::ROOT).expect("ROOT is live");
     core.retire_scope(child);

@@ -42,7 +42,13 @@ mod tests {
         let mut handlers = frunk::hlist![TimeHandler];
         let con_id = table.get_by_name("TimeNow").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(
+            handlers
+                .dispatch(&request, &cx)
+                .unwrap()
+                .expect("TimeNow should be handled"),
+            &table,
+        );
         // i64::to_value boxes as Con(I#, [LitInt(n)]).
         let ms = match &result {
             Value::Con(_, fields) if fields.len() == 1 => match &fields[0] {

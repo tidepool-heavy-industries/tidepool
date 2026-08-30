@@ -42,7 +42,7 @@ use tidepool_codegen::suspension::{
     SuspensionRun,
 };
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
@@ -102,8 +102,8 @@ pub struct PersistentSession {
     scopes: ScopeTree,
     /// Monotonic per-turn counter → unique fragment function names.
     turn_counter: u64,
-    /// The suspension tag and its derived handled-effect prefix.
-    effect_boundary: EffectBoundary,
+    /// How requests interact with the handlers installed for this checkout.
+    effect_policy: EffectRunPolicy,
     /// Live-value crossing policy paired with the current effect stack.
     live_payload: LivePayloadPolicy,
     /// Capacity-one façade state for the REPL/linear session surface.
@@ -119,13 +119,7 @@ impl PersistentSession {
     /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
     /// machine is not bootstrapped until the first turn.
-    pub fn new(
-        lib: Option<SessionLib>,
-        ask_tag: u64,
-        effect_names: Vec<String>,
-        nursery_size: usize,
-    ) -> Self {
-        let effect_boundary = EffectBoundary::new(ask_tag, &effect_names);
+    pub fn new(lib: Option<SessionLib>, nursery_size: usize) -> Self {
         PersistentSession {
             machine: None,
             session_table: DataConTable::new(),
@@ -134,7 +128,7 @@ impl PersistentSession {
             val_gen: Generation(0),
             scopes: ScopeTree::new(),
             turn_counter: 0,
-            effect_boundary,
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             active_continuation: None,
             last_bound_root: LinearRootStash(None),
@@ -191,13 +185,8 @@ impl PersistentSession {
             self.val_gen = g;
         }
     }
-    /// The `Ask` union tag this session suspends on.
-    pub fn ask_tag(&self) -> u64 {
-        self.effect_boundary.suspend_tag()
-    }
-
-    pub fn effect_boundary(&self) -> &EffectBoundary {
-        &self.effect_boundary
+    pub fn effect_policy(&self) -> EffectRunPolicy {
+        self.effect_policy
     }
 
     #[must_use]
@@ -205,15 +194,13 @@ impl PersistentSession {
         self.live_payload
     }
 
-    /// Select the execution-relevant part of the effect ABI for the next
-    /// mounted actor turn. The actor descriptor retains full identity; the
-    /// resident core installs its dispatch boundary and live-value policy.
+    /// Select request routing and live-value crossing for the next checkout.
     pub fn set_effect_execution(
         &mut self,
-        boundary: EffectBoundary,
+        effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) {
-        self.effect_boundary = boundary;
+        self.effect_policy = effect_policy;
         self.live_payload = live_payload;
     }
     /// Whether the resident machine has been bootstrapped (first turn run).
@@ -554,14 +541,14 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let boundary = self.effect_boundary.clone();
+        let effect_policy = self.effect_policy;
         let live_payload = self.live_payload;
         #[allow(clippy::expect_used, reason = "machine bootstrapped before run_entry")]
         let machine = self
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_entry");
-        let run = SuspensionRun::main(run_table, &boundary, RealmId::ROOT)
+        let run = SuspensionRun::main(run_table, effect_policy, RealmId::ROOT)
             .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
@@ -585,7 +572,7 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let boundary = self.effect_boundary.clone();
+        let effect_policy = self.effect_policy;
         let live_payload = self.live_payload;
         #[allow(
             clippy::expect_used,
@@ -598,7 +585,7 @@ impl PersistentSession {
         let run = SuspensionRun::fragment(
             func_id,
             run_table,
-            &boundary,
+            effect_policy,
             RealmId::ROOT,
             ParkKind::Plain,
         )
@@ -643,7 +630,7 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let boundary = self.effect_boundary.clone();
+        let effect_policy = self.effect_policy;
         let live_payload = self.live_payload;
         let PersistentSession {
             machine,
@@ -660,7 +647,7 @@ impl PersistentSession {
         let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            &boundary,
+            effect_policy,
             RealmId::ROOT,
             ParkKind::Plain,
         )
@@ -722,7 +709,7 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let boundary = self.effect_boundary.clone();
+        let effect_policy = self.effect_policy;
         let live_payload = self.live_payload;
         let PersistentSession {
             machine,
@@ -739,7 +726,7 @@ impl PersistentSession {
         let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            &boundary,
+            effect_policy,
             RealmId::ROOT,
             ParkKind::Binding { forced },
         )
@@ -788,7 +775,7 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let boundary = self.effect_boundary.clone();
+        let effect_policy = self.effect_policy;
         let live_payload = self.live_payload;
         let n_fields = NonZeroUsize::new(n_fields).ok_or(JitError::EmptyProjection)?;
         let PersistentSession {
@@ -806,7 +793,7 @@ impl PersistentSession {
         let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            &boundary,
+            effect_policy,
             RealmId::ROOT,
             ParkKind::Project { n_fields },
         )
@@ -853,7 +840,7 @@ impl PersistentSession {
             self.active_continuation.is_none(),
             "resume the active turn first"
         );
-        let boundary = self.effect_boundary.clone();
+        let effect_policy = self.effect_policy;
         let live_payload = self.live_payload;
         let PersistentSession {
             machine,
@@ -870,7 +857,7 @@ impl PersistentSession {
         let run = SuspensionRun::fragment(
             func_id,
             session_table,
-            &boundary,
+            effect_policy,
             RealmId::ROOT,
             ParkKind::Render { field0_forced },
         )

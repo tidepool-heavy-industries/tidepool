@@ -99,7 +99,7 @@ impl<'a> EffectMachine<'a> {
                     let k = tidepool_eval::eval::force(fields[1].clone(), self.heap)?;
 
                     // Destructure Union(tag, req)
-                    let (tag, request) = match union_val {
+                    let request = match union_val {
                         Value::Con(uid, ref ufields) if uid == self.union_id => {
                             if ufields.len() != 2 {
                                 return Err(EffectError::FieldCountMismatch {
@@ -108,9 +108,9 @@ impl<'a> EffectMachine<'a> {
                                     got: ufields.len(),
                                 });
                             }
-                            let tag = match &ufields[0] {
-                                Value::Lit(tidepool_repr::Literal::LitWord(w)) => *w,
-                                Value::Lit(tidepool_repr::Literal::LitInt(i)) => *i as u64,
+                            match &ufields[0] {
+                                Value::Lit(tidepool_repr::Literal::LitWord(_))
+                                | Value::Lit(tidepool_repr::Literal::LitInt(_)) => {}
                                 other => {
                                     return Err(EffectError::UnexpectedValue {
                                         context: "Union tag (Word#/Int#)",
@@ -121,8 +121,7 @@ impl<'a> EffectMachine<'a> {
                             // Invariant: `req` is already deep-forced here — it
                             // came out of `union_val`, which was deep-forced
                             // above — so `FromCore` never sees a `ThunkRef`.
-                            let req = ufields[1].clone();
-                            (tag, req)
+                            ufields[1].clone()
                         }
                         other => {
                             return Err(EffectError::UnexpectedValue {
@@ -134,7 +133,11 @@ impl<'a> EffectMachine<'a> {
 
                     // Dispatch to handler
                     let cx = EffectContext::with_user(self.table, user);
-                    let response = match handlers.dispatch(tag, &request, &cx)? {
+                    let response = match handlers.dispatch(&request, &cx)?.ok_or_else(|| {
+                        EffectError::UnhandledEffect {
+                            constructor: crate::dispatch::request_constructor(&request, self.table),
+                        }
+                    })? {
                         crate::dispatch::Response::Complete(v) => v,
                         // A list response arrives pre-converted; build the
                         // spine back-to-front (iteratively — deep spines

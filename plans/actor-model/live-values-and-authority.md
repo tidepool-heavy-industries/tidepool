@@ -188,18 +188,17 @@ reachability.
 
 ## 8. Effectful function portability
 
-Each continuation and specialized effectful closure carries the effect-stack
-ABI against which it was compiled.
-
 - Pure closures move freely.
 - Row-polymorphic functions with `Member` constraints move and instantiate
   against the receiving actor's stack.
-- A function specialized to one actor's concrete stack remains actor-local.
-- A forked continuation runs through the child's new interpreter instance,
-  which must implement the same effect-stack ABI.
+- A function specialized to a concrete stack may move as a value, but GHC only
+  permits applying it where that concrete row unifies.
+- A forked continuation runs through the child's new interpreter instance
+  under the child's principal and grants.
 
-The runtime rejects an ABI mismatch rather than interpreting union tags through
-the wrong actor's handler table.
+Rust never interprets union tags as handler positions and does not maintain a
+second effect-row ABI. The actor interpreter authorizes nominal request
+constructors at use time; Haskell row compatibility remains Haskell's job.
 
 ## 9. Same-machine boundary
 
@@ -229,7 +228,7 @@ The authority layer is not complete until tests demonstrate all of these:
 7. A live-value call across a machine boundary is rejected before execution.
 8. An old incarnation cannot use a grant issued to its predecessor.
 9. A transferred snapshot remains valid after its source actor retires.
-10. A forked continuation dispatches through a child interpreter with the same
-    ABI, while a foreign-ABI continuation is rejected.
+10. A forked continuation dispatches nominal requests through the child's
+    interpreter and is subject to the child's principal and grants.
 11. Pre-fork continuation references remain valid in the parent and fail in
     children without any Haskell binding rewrite.

@@ -118,59 +118,60 @@ pub trait EffectHandler<U = ()> {
     ) -> Result<Response, EffectError>;
 }
 
-/// Tag-based effect dispatch over an HList of handlers.
+/// Constructor-based effect routing over an HList of handlers.
 ///
-/// The JIT yields `(tag, request)` pairs where `tag` identifies which effect
-/// in the `Eff '[E0, E1, ...]` list fired. `DispatchEffect` peels one layer
-/// per HCons: tag 0 → head handler, tag N → tail with tag N−1.
-///
-/// You don't implement this manually — it's derived for `frunk::HList![H0, H1, ...]`
-/// when each `Hi: EffectHandler`.
+/// The freer-simple union tag is deliberately absent from this interface.
+/// Each handler declares the nominal request constructors it owns; routing
+/// returns `None` when no installed handler owns the request. The execution
+/// layer then decides whether an unhandled request suspends or is an error.
 pub trait DispatchEffect<U = ()> {
-    /// Route `request` to the handler at position `tag` in the HList and run it.
+    /// Route `request` by its nominal constructor.
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, U>,
-    ) -> Result<Response, EffectError>;
+    ) -> Result<Option<Response>, EffectError>;
+}
+
+/// Name an effect request for diagnostics without assigning routing meaning
+/// to the freer-simple union tag that carried it.
+#[must_use]
+pub fn request_constructor(request: &Value, table: &DataConTable) -> String {
+    match request {
+        Value::Con(id, _) => table
+            .get(*id)
+            .and_then(|con| con.qualified_name.as_deref().or(Some(con.name.as_str())))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("constructor {id:?}")),
+        other => format!("non-constructor value {other:?}"),
+    }
 }
 
 impl<U> DispatchEffect<U> for HNil {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, U>,
-    ) -> Result<Response, EffectError> {
-        Err(EffectError::UnhandledEffect { tag })
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
 impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H, T> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, U>,
-    ) -> Result<Response, EffectError> {
-        if tag == 0 {
-            let req = H::Request::from_value(request, cx.table())?;
-            self.head.handle(req, cx)
-        } else {
-            // Restore the original tag on the way back out: each peeled layer
-            // subtracted 1 to address the tail, so an `UnhandledEffect` bubbling
-            // up from `HNil` (or a deeper layer) must have 1 added back per
-            // layer it passes through, or the diagnostic names the wrong
-            // (handled) effect for any tag beyond the first.
-            self.tail
-                .dispatch(tag - 1, request, cx)
-                .map_err(|e| match e {
-                    EffectError::UnhandledEffect { tag: t } => {
-                        EffectError::UnhandledEffect { tag: t + 1 }
-                    }
-                    other => other,
-                })
+    ) -> Result<Option<Response>, EffectError> {
+        match H::Request::from_value(request, cx.table()) {
+            Ok(req) => self.head.handle(req, cx).map(Some),
+            // Derived request enums use UnknownDataCon only after checking
+            // every constructor they own. At this layer that means "not my
+            // effect", not malformed input; continue through the installed
+            // handler set. Arity/field/type errors from a recognized
+            // constructor remain loud and never fall through to a sibling.
+            Err(BridgeError::UnknownDataCon(_)) => self.tail.dispatch(request, cx),
+            Err(error) => Err(EffectError::Bridge(error)),
         }
     }
 }
@@ -183,22 +184,20 @@ impl<U, H: EffectHandler<U>, T: DispatchEffect<U>> DispatchEffect<U> for HCons<H
 impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for &mut H {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, U>,
-    ) -> Result<Response, EffectError> {
-        (**self).dispatch(tag, request, cx)
+    ) -> Result<Option<Response>, EffectError> {
+        (**self).dispatch(request, cx)
     }
 }
 
 impl<U, H: DispatchEffect<U> + ?Sized> DispatchEffect<U> for Box<H> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, U>,
-    ) -> Result<Response, EffectError> {
-        (**self).dispatch(tag, request, cx)
+    ) -> Result<Option<Response>, EffectError> {
+        (**self).dispatch(request, cx)
     }
 }
 
@@ -220,14 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn hnil_rejects_all_tags() {
+    fn hnil_leaves_every_request_unhandled() {
         let table = empty_table();
         let cx = make_cx(&table);
-        let result = HNil.dispatch(0, &lit_int(5), &cx);
-        match result {
-            Err(EffectError::UnhandledEffect { tag: 0 }) => {}
-            other => panic!("expected UnhandledEffect {{ tag: 0 }}, got {other:?}"),
-        }
+        assert!(HNil.dispatch(&lit_int(5), &cx).unwrap().is_none());
     }
 
     #[test]

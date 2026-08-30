@@ -22,7 +22,7 @@ pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
 pub use tidepool_codegen::suspension::ResumeInput;
 use tidepool_codegen::suspension::{ContinuationId, ParkedOutcome, RealmId, SuspensionRun};
 pub use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -266,9 +266,10 @@ pub enum ResumedRun {
     },
 }
 
-/// Compile `source` and drive it until it COMPLETES or SUSPENDS at `ask_tag`
-/// (the `Ask` union tag). Sibling of [`compile_and_run_cancellable`] that, at an
-/// ask boundary, hands the machine back as data instead of blocking a thread —
+/// Compile `source` and drive it until it completes or reaches a request that
+/// the installed handlers do not recognize. Sibling of
+/// [`compile_and_run_cancellable`] that hands the machine back as data at that
+/// point instead of blocking a thread —
 /// the substrate for threadless session suspension. The machine is compiled
 /// as a SESSION machine so its heap is retained across the suspension (the drive
 /// itself is byte-identical to the one-shot path for a turn that never asks).
@@ -280,8 +281,6 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
     nursery_size: usize,
-    ask_tag: u64,
-    effect_names: &[String],
     on_ready: impl FnOnce(CancelHandle),
 ) -> Result<SuspendableRun, RuntimeError> {
     let CompileResult {
@@ -296,8 +295,7 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     let mut machine = JitEffectMachine::compile_session(&expr, &table, nursery_size)?;
     let realm = RealmId::ROOT;
     on_ready(machine.realm_cancel_handle(realm));
-    let boundary = EffectBoundary::new(ask_tag, effect_names);
-    let run = SuspensionRun::main(&table, &boundary, realm)
+    let run = SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, realm)
         .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
     match machine.run_until_suspension(run, handlers, user)? {
         ParkedOutcome::CompletedValue(value) => Ok(SuspendableRun::Completed(EvalResult::new(

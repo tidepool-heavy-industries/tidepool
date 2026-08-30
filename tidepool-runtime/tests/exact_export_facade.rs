@@ -14,7 +14,7 @@ fn facade_preserves_exact_types_without_leaking_ambient_declarations() {
     let lib = SessionLib::open(SessionId(71), root.path(), ModuleEnv::standalone_default())
         .expect("open declaration plane")
         .with_validation_include(vec![stdlib.clone()]);
-    let mut session = PersistentSession::new(Some(lib), 0, Vec::new(), 1 << 20);
+    let mut session = PersistentSession::new(Some(lib), 1 << 20);
     session
         .lib_mut()
         .define(

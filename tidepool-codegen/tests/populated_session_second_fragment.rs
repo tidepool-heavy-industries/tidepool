@@ -249,11 +249,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -272,7 +271,7 @@ fn suspend_parent(table: &DataConTable, captured_n: i64, req: i64) -> LinearMach
         JitEffectMachine::compile_session(&entry, table, 1 << 16).expect("compile_session parent"),
     );
     let outcome = machine
-        .run_suspendable(table, &mut NoDispatch, &(), ASK_TAG)
+        .run_suspendable(table, &mut NoDispatch, &())
         .expect("parent run_suspendable");
     match outcome {
         SuspendableOutcome::Suspended { request, .. } => {
@@ -356,7 +355,6 @@ fn second_fragment_on_accumulated_table_compiles_runs_and_classifies() {
                     &session,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(7))),
                 )
                 .expect("parent resumes after the second fragment");
@@ -414,7 +412,6 @@ fn successive_fragments_track_the_growing_session_table() {
                     &session,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
                 )
                 .expect("parent resumes after four accreted fragments");

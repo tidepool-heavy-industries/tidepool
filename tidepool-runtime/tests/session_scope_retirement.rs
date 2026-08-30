@@ -53,9 +53,6 @@ use tidepool_runtime::session::{PersistentSession, SessionError};
 /// `C1 :: Int -> T`, the one constructor every session fixture here needs.
 const C1: DataConId = DataConId(1);
 
-/// The `Ask` union tag; nothing in this suite suspends.
-const ASK_TAG: u64 = 0;
-
 fn table_with_c1() -> DataConTable {
     let mut table = DataConTable::new();
     table.insert(DataCon {
@@ -84,7 +81,7 @@ fn value_fragment(n: i64) -> CoreExpr {
 /// A bootstrapped, value-plane-only session (no decl plane).
 fn session() -> PersistentSession {
     let table = table_with_c1();
-    let mut core = PersistentSession::new(None, ASK_TAG, Vec::new(), 1 << 16);
+    let mut core = PersistentSession::new(None, 1 << 16);
     core.bootstrap_if_needed(&value_fragment(0), &table)
         .expect("compile_session");
     core.seed_session_table(table);
@@ -497,11 +494,10 @@ mod resident_delegation {
     impl DispatchEffect<Sink> for NoDispatch {
         fn dispatch(
             &mut self,
-            tag: u64,
             _request: &tidepool_eval::value::Value,
             _cx: &EffectContext<'_, Sink>,
-        ) -> Result<Response, EffectError> {
-            panic!("nothing in this suite dispatches (tag {tag})");
+        ) -> Result<Option<Response>, EffectError> {
+            Ok(None)
         }
     }
 
@@ -511,7 +507,6 @@ mod resident_delegation {
             &value_fragment(0),
             table_with_c1(),
             NoDispatch,
-            ASK_TAG,
             Vec::new(),
             Sink,
             Vec::new(),

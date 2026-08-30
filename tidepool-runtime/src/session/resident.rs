@@ -38,9 +38,7 @@
 //! list; [`ResidentSession::resume`] resumes ANY member hole by identity
 //! (the machine imposes no order). Each entry runs in an explicit
 //! [`SessionRunContext`] that pairs its heap-resource and lexical scopes; the
-//! handled prefix is derived from the session's own
-//! `effect_names[..ask_tag]` — one source of truth, per the parking
-//! contract's "derive, don't declare" guidance.
+//! request routing is selected independently of the Haskell effect row.
 //!
 //! # Child runs
 //!
@@ -67,7 +65,7 @@ use tidepool_codegen::suspension::{
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
-use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::{
     BindingName, CoreExpr, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
@@ -487,7 +485,7 @@ where
     /// against the SAME machine [`Self::unbootstrapped`] would also have
     /// booted from their first `run`.
     // The arg list mirrors the engine's `StartTurn` field carrier (source,
-    // handlers, ask_tag, effect_names, captured, include, nursery) — bundling
+    // handlers, effect_names, captured, include, nursery) — bundling
     // them into a struct would just move the arity, not remove it.
     ///
     /// `lib` is the decl plane: pass `Some` to accumulate declarations across
@@ -498,14 +496,13 @@ where
         expr: &CoreExpr,
         table: DataConTable,
         handlers: H,
-        ask_tag: u64,
         effect_names: Vec<String>,
         captured: O,
         include: Vec<PathBuf>,
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Result<Self, JitError> {
-        let mut core = PersistentSession::new(lib, ask_tag, effect_names.clone(), nursery_size);
+        let mut core = PersistentSession::new(lib, nursery_size);
         core.bootstrap_if_needed(expr, &table)?;
         core.seed_session_table(table);
         Ok(ResidentSession {
@@ -532,14 +529,13 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn unbootstrapped(
         handlers: H,
-        ask_tag: u64,
         effect_names: Vec<String>,
         captured: O,
         include: Vec<PathBuf>,
         nursery_size: usize,
         lib: Option<SessionLib>,
     ) -> Self {
-        let core = PersistentSession::new(lib, ask_tag, effect_names.clone(), nursery_size);
+        let core = PersistentSession::new(lib, nursery_size);
         ResidentSession {
             core,
             handlers,
@@ -675,20 +671,30 @@ where
         Ok(())
     }
 
-    /// Atomically select one actor's authority/scopes and its machine dispatch
-    /// boundary. Validation precedes both assignments, so a dead lexical scope
+    /// Select request routing and live-value crossing without changing the
+    /// current execution principal or resource scopes.
+    pub fn set_effect_execution(
+        &mut self,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
+    ) {
+        self.core.set_effect_execution(effect_policy, live_payload);
+    }
+
+    /// Atomically select one actor's authority/scopes and request policy.
+    /// Validation precedes both assignments, so a dead lexical scope
     /// cannot leave half of another actor's execution contract installed.
     pub fn set_actor_execution(
         &mut self,
         context: SessionRunContext,
-        boundary: EffectBoundary,
+        effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) -> Result<(), ResidentError> {
         if !self.core.scope_tree().is_live(context.lexical_scope) {
             return Err(SessionError::DeadScope(context.lexical_scope).into());
         }
         self.run_context = context;
-        self.core.set_effect_execution(boundary, live_payload);
+        self.set_effect_execution(effect_policy, live_payload);
         Ok(())
     }
 
@@ -698,10 +704,10 @@ where
         self.run_context
     }
 
-    /// Machine dispatch boundary currently selected for resident entries.
+    /// Request policy currently selected for resident entries.
     #[must_use]
-    pub fn effect_boundary(&self) -> &EffectBoundary {
-        self.core.effect_boundary()
+    pub fn effect_policy(&self) -> EffectRunPolicy {
+        self.core.effect_policy()
     }
 
     /// Live-value crossing policy currently installed with the effect stack.
@@ -1186,13 +1192,14 @@ where
             0,
         );
 
-        let boundary = self.core.effect_boundary().clone();
+        let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         let realm = self.run_context.resource_scope;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain)
-                .with_live_payload(live_payload);
+            let run =
+                SuspensionRun::fragment(func_id, table, effect_policy, realm, ParkKind::Plain)
+                    .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
@@ -1245,7 +1252,7 @@ where
             0,
         );
 
-        let boundary = self.core.effect_boundary().clone();
+        let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
@@ -1256,7 +1263,7 @@ where
             let run = SuspensionRun::fragment(
                 func_id,
                 table,
-                &boundary,
+                effect_policy,
                 realm,
                 ParkKind::Binding { forced },
             )
@@ -1320,12 +1327,17 @@ where
         // closed) rather than parked. Suspension-capable turns are `run`'s
         // job. The shared issuer keeps it distinct from every caller scope.
         let child_realm = RealmId::fresh();
-        let boundary = self.core.effect_boundary().clone();
+        let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            let run =
-                SuspensionRun::fragment(func_id, table, &boundary, child_realm, ParkKind::Plain)
-                    .with_live_payload(live_payload);
+            let run = SuspensionRun::fragment(
+                func_id,
+                table,
+                effect_policy,
+                child_realm,
+                ParkKind::Plain,
+            )
+            .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, child_realm))
@@ -1580,7 +1592,7 @@ where
             .add_fragment_session(name_hint, &expr, &env)
             .map_err(ResidentError::AddFunction)?;
 
-        let boundary = self.core.effect_boundary().clone();
+        let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         // Handle ownership on completion is the SESSION's realm, deliberately:
         // a result must outlive the thread realm that produced it, since
@@ -1588,8 +1600,9 @@ where
         // still be holding the value.
         let owning_realm = self.run_context.resource_scope;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain)
-                .with_live_payload(live_payload);
+            let run =
+                SuspensionRun::fragment(func_id, table, effect_policy, realm, ParkKind::Plain)
+                    .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, owning_realm))
@@ -2046,7 +2059,6 @@ mod tests {
             &expr,
             table,
             frunk::HNil,
-            0,
             Vec::new(),
             NullSink,
             Vec::new(),

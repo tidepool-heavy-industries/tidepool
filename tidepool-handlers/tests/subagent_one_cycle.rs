@@ -72,7 +72,7 @@ use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::suspension::{ParkedOutcome, RealmId, SuspensionRun};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
@@ -227,22 +227,12 @@ struct Session {
     table: DataConTable,
     stack: Stack,
     captured: CapturedOutput,
-    ask_tag: u64,
-    /// DERIVED from `stack` at construction and never restated at a park
-    /// site — the parking contract's "derive, don't declare".
-    handled_prefix: Vec<String>,
 }
 
-/// The decls/preamble/row shape derived from `Stack` — identical for any
-/// `SubagentHandler`, since `base_decls_with_ask` reads the row's EFFECT
-/// LIST (fixed by `Stack`'s type), not any handler's runtime state.
-fn stack_decls(stack: &Stack) -> (Vec<tidepool_mcp::EffectDecl>, u64, Vec<String>) {
-    let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(stack);
-    let handled_prefix: Vec<String> = decls[..ask_tag as usize]
-        .iter()
-        .map(|d| d.type_name.to_string())
-        .collect();
-    (decls, ask_tag, handled_prefix)
+/// The declarations derived from `Stack`; identical for any handler value
+/// with this fixed stack type.
+fn stack_decls(stack: &Stack) -> Vec<tidepool_mcp::EffectDecl> {
+    tidepool_handlers::base_decls(stack)
 }
 
 impl Session {
@@ -254,7 +244,7 @@ impl Session {
     /// second spawn.
     fn compile(code: &str, handler: SubagentHandler) -> (Self, CompiledProgram) {
         let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
-        let (decls, ask_tag, handled_prefix) = stack_decls(&stack);
+        let decls = stack_decls(&stack);
 
         let preamble = tidepool_mcp::build_preamble(&decls, false);
         let row = tidepool_mcp::build_effect_stack_type(&decls);
@@ -292,8 +282,6 @@ impl Session {
                 table,
                 stack,
                 captured: CapturedOutput::new(),
-                ask_tag,
-                handled_prefix,
             },
             program,
         )
@@ -305,7 +293,7 @@ impl Session {
     /// stack throughout — only the compile is shared).
     fn from_compiled(program: &CompiledProgram, handler: SubagentHandler) -> Self {
         let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
-        let (_decls, ask_tag, handled_prefix) = stack_decls(&stack);
+        let _decls = stack_decls(&stack);
 
         let mut table = program.table.clone();
         table.populate_siblings_from_expr(&program.expr);
@@ -317,8 +305,6 @@ impl Session {
             table,
             stack,
             captured: CapturedOutput::new(),
-            ask_tag,
-            handled_prefix,
         }
     }
 
@@ -328,8 +314,7 @@ impl Session {
     /// on every branch it exercises, so either is a bug in the program or in
     /// what is under test, not a case to handle quietly.
     fn run(&mut self) -> serde_json::Value {
-        let boundary = EffectBoundary::new(self.ask_tag, &self.handled_prefix);
-        let run = SuspensionRun::main(&self.table, &boundary, RealmId(0));
+        let run = SuspensionRun::main(&self.table, EffectRunPolicy::HandleOrSuspend, RealmId(0));
         let outcome = self
             .machine
             .run_until_suspension(run, &mut self.stack, &self.captured);

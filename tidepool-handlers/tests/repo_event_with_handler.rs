@@ -25,9 +25,8 @@
 //! `docs/continuation-parking-contract.md` is frozen
 //! and is consumed, not extended:
 //!
-//! - the handled prefix is DERIVED from [`Session::stack`] — the same value
-//!   that built the handler stack — never restated at a park site, so the
-//!   lying-realm case is unconstructible rather than a duty to discharge;
+//! - requests route by nominal constructor through [`Session::stack`], while
+//!   unrecognized requests suspend under the run's explicit policy;
 //! - the rooting receipt `stowed_roots_count() == parked_count()` is asserted
 //!   at EVERY quiescent point (see [`assert_rooting_receipt`]);
 //! - the two suspension paths are never mixed: nothing here touches
@@ -72,7 +71,7 @@ use tidepool_codegen::suspension::{
 };
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value;
 use tidepool_handlers::{
@@ -398,10 +397,6 @@ struct Session {
     table: DataConTable,
     stack: Stack,
     captured: CapturedOutput,
-    ask_tag: u64,
-    /// DERIVED from `stack` at construction and never restated at a park site
-    /// — see the parking contract's "derive, don't declare".
-    handled_prefix: Vec<String>,
     parked: Option<ContinuationId>,
     /// Every continuation id this realm has ever handed out, in order. Ids are
     /// never reused, so this doubles as the no-ABA check.
@@ -414,14 +409,7 @@ impl Session {
     fn compile(code: &str, events: RepoEventHandler) -> Self {
         let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, events];
 
-        // ONE source of truth: the decls, the effect-row type, the generated
-        // `Tidepool.Effects`, the suspend threshold, and the handled prefix all
-        // come from the value that IS the handler stack.
-        let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
-        let handled_prefix: Vec<String> = decls[..ask_tag as usize]
-            .iter()
-            .map(|d| d.type_name.to_string())
-            .collect();
+        let decls = tidepool_handlers::base_decls(&stack);
 
         let preamble = tidepool_mcp::build_preamble(&decls, false);
         let row = tidepool_mcp::build_effect_stack_type(&decls);
@@ -454,8 +442,6 @@ impl Session {
             table,
             stack,
             captured: CapturedOutput::new(),
-            ask_tag,
-            handled_prefix,
             parked: None,
             ids_seen: Vec::new(),
         };
@@ -494,8 +480,7 @@ impl Session {
     }
 
     fn start(&mut self) -> Result<Step, JitError> {
-        let boundary = EffectBoundary::new(self.ask_tag, &self.handled_prefix);
-        let run = SuspensionRun::main(&self.table, &boundary, RealmId(0));
+        let run = SuspensionRun::main(&self.table, EffectRunPolicy::HandleOrSuspend, RealmId(0));
         let outcome = self
             .machine
             .run_until_suspension(run, &mut self.stack, &self.captured);

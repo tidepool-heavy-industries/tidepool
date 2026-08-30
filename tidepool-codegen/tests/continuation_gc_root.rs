@@ -126,10 +126,9 @@ struct ListResponder;
 impl DispatchEffect<()> for ListResponder {
     fn dispatch(
         &mut self,
-        _tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
+    ) -> Result<Option<Response>, EffectError> {
         let mut acc = Value::Con(DataConId(NIL_ID), vec![]);
         for i in (0..LIST_LEN).rev() {
             acc = Value::Con(
@@ -137,7 +136,7 @@ impl DispatchEffect<()> for ListResponder {
                 vec![Value::Lit(Literal::LitInt(i as i64)), acc],
             );
         }
-        Ok(Response::Complete(acc))
+        Ok(Some(Response::Complete(acc)))
     }
 }
 

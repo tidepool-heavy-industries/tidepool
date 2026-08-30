@@ -504,9 +504,8 @@ pub struct SelfHarnessDriver {
     /// The driver-owned handler set for every outer-row effect that isn't
     /// `RunLLMTurn`/`AskUser`/`Subagent` (which have their own dedicated
     /// servicing paths) — `Console`/`Worktree`/`RepoEvent`/`Exec`/`Journal`.
-    /// Each is DRIVER-owned, never a handler stack on the outer session,
-    /// whose handled prefix must stay empty on the shared machine (see
-    /// [`outer_decls`]); a suspension against an unwired handler fails
+    /// Each is driver-owned rather than installed on the outer session, which
+    /// uses `SuspendAll`; a suspension against an unwired handler fails
     /// LOUDLY with the wiring instruction, never a hang. Wire one via
     /// [`Self::set_console_handler`]/[`Self::set_worktree_handler`]/
     /// [`Self::set_event_handler`]/[`Self::set_exec_handler`]/
@@ -1038,30 +1037,14 @@ mod tests {
     use super::fork::{fork_child_path_segment, FORK_LABEL_SLUG_BUDGET};
     use super::typed_request_agent_decls;
 
-    /// The outer row's handled prefix must be EMPTY — every effect (including
-    /// `Subagent`/`Worktree`) SUSPENDS to the driver. A reorder that puts a
-    /// handled effect before `RunLLMTurn` would give the SHARED machine a
-    /// non-empty established prefix and silently dispatch the answerer
-    /// realms' `AskUser`/`Fork` into handler slots (see [`outer_decls`]).
-    /// Decl-name-position is the whole mechanism, so this pin is pure.
+    /// The outer row exposes every effect family serviced by the driver.
+    /// Suspension is selected explicitly on the resident session, not encoded
+    /// in this declaration order.
     #[test]
-    fn outer_row_suspends_everything() {
+    fn outer_row_contains_driver_serviced_effects() {
         let decls = outer_decls();
-        assert_eq!(decls[0].type_name, "RunLLMTurn", "interposed first");
-        let first_interposed = decls
-            .iter()
-            .position(|d| {
-                matches!(
-                    d.type_name,
-                    "Ask" | "AskUser" | "RunLLMTurn" | "Fork" | "Finalize"
-                )
-            })
-            .expect("outer row has an interposed effect");
-        assert_eq!(
-            first_interposed, 0,
-            "the suspend threshold must be 0 — a non-empty handled prefix on the outer \
-             session breaks the shared machine's answerer realms"
-        );
+        assert!(decls.iter().any(|d| d.type_name == "RunLLMTurn"));
+        assert!(decls.iter().any(|d| d.type_name == "AskUser"));
         // The Subagent lane's hard companion rides along.
         assert!(decls.iter().any(|d| d.type_name == "Worktree"));
         assert!(decls.iter().any(|d| d.type_name == "Subagent"));

@@ -80,10 +80,8 @@ const NODE_ID: DataConId = DataConId(14);
 /// under.
 const ASK_TAG: u64 = 0;
 
-/// The tag the CHILD's effect request carries. Any run with `suspend_tag =
-/// None` (every plain/child run) dispatches every tag to the handler rather
-/// than suspending, so this need not avoid `ASK_TAG` for correctness — kept
-/// distinct anyway for clarity when reading a failure's tag in a log.
+/// The CHILD request's carrier tag. Rust routing ignores it; keeping it
+/// distinct from the parent's tag makes the hand-built Core easier to inspect.
 const EFFECT_TAG: u64 = 7;
 
 fn table_with_list_cons() -> DataConTable {
@@ -160,11 +158,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -175,7 +172,7 @@ fn suspend_parent(table: &DataConTable, nursery: usize, req: i64) -> LinearMachi
     );
     let mut handler = NoDispatch;
     let outcome = machine
-        .run_suspendable(table, &mut handler, &(), ASK_TAG)
+        .run_suspendable(table, &mut handler, &())
         .expect("parent run_suspendable");
     assert!(matches!(outcome, SuspendableOutcome::Suspended { .. }));
     assert!(machine.is_suspended());
@@ -250,12 +247,10 @@ struct StreamHandler;
 impl DispatchEffect<()> for StreamHandler {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        assert_eq!(tag, EFFECT_TAG, "only the designated effect tag dispatches");
-        cx.respond_list(vec![1i64, 2i64, 3i64])
+    ) -> Result<Option<Response>, EffectError> {
+        cx.respond_list(vec![1i64, 2i64, 3i64]).map(Some)
     }
 }
 

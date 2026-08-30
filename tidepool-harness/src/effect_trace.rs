@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tidepool_effect::dispatch::{DispatchEffect, EffectContext, Response};
+use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext, Response};
 use tidepool_effect::EffectError;
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
@@ -22,11 +22,11 @@ use tidepool_mcp::CapturedOutput;
 /// truncating — bounds the cost of snapshotting a large effect payload.
 const TRACE_JSON_DEPTH: usize = 6;
 
-/// One traced effect: which effect (stack `tag`), the request, and the
+/// One traced effect: its nominal request constructor, request, and
 /// response (or an error / `"<stream>"` marker), captured at dispatch time.
 #[derive(Clone, Debug)]
 pub struct EffectRecord {
-    pub tag: u64,
+    pub constructor: String,
     pub req: serde_json::Value,
     pub resp: serde_json::Value,
 }
@@ -50,23 +50,28 @@ impl<H> TracingDispatcher<H> {
 impl<H: DispatchEffect<CapturedOutput>> DispatchEffect<CapturedOutput> for TracingDispatcher<H> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, CapturedOutput>,
-    ) -> Result<Response, EffectError> {
+    ) -> Result<Option<Response>, EffectError> {
+        let constructor = request_constructor(request, cx.table());
         let req = tidepool_runtime::value_to_json(request, cx.table(), TRACE_JSON_DEPTH);
-        let result = self.inner.dispatch(tag, request, cx);
+        let result = self.inner.dispatch(request, cx);
         let resp = match &result {
-            Ok(Response::Complete(v)) => {
+            Ok(Some(Response::Complete(v))) => {
                 tidepool_runtime::value_to_json(v, cx.table(), TRACE_JSON_DEPTH)
             }
-            Ok(Response::List { items, .. }) => {
+            Ok(Some(Response::List { items, .. })) => {
                 serde_json::json!(format!("<list of {} elements>", items.len()))
             }
+            Ok(None) => serde_json::Value::Null,
             Err(e) => serde_json::json!({ "error": e.to_string() }),
         };
-        tracing::info!(tag, req = %req, resp = %resp, "effect dispatched");
-        self.trace.lock().push(EffectRecord { tag, req, resp });
+        tracing::info!(%constructor, req = %req, resp = %resp, "effect dispatched");
+        self.trace.lock().push(EffectRecord {
+            constructor,
+            req,
+            resp,
+        });
         result
     }
 }

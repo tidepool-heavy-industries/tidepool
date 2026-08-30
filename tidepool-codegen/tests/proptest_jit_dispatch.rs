@@ -8,20 +8,10 @@
 //! (`tidepool_effect::machine::EffectMachine`, the tree-walking interpreter
 //! used here as a differential oracle).
 //!
-//! Both peel effect tags through the *same* real `DispatchEffect` HList impl
-//! (`tidepool-effect/src/dispatch.rs`, tag 0 → head, N → tail with N-1).
-//! Because routing is shared code, a routing off-by-one cannot surface as a
-//! JIT/eval divergence — so tag routing is probed directly instead
-//! (invalid-tag cases: clean `UnhandledEffect` with the same decremented tag
-//! on both sides, and never a fatal signal).
-//!
-//! ## Why a real frunk HList (the one Cargo.toml deviation)
-//!
-//! The only `DispatchEffect` impls in the tree are for frunk's `HCons`/`HNil`,
-//! and there is no reachable re-export. Driving both machines through a
-//! hand-rolled dispatcher would test a *mirror* of the routing logic rather
-//! than the real thing, so `frunk` is a **dev-dependency only** here
-//! (test-scoped; the production crate graph is untouched).
+//! Both route effects through the same real nominal `DispatchEffect` HList
+//! implementation. This test deliberately varies the freer-simple union tag:
+//! it remains an implementation detail of the Haskell library and has no
+//! authority over Rust handler selection.
 //!
 //! ## Crash isolation
 //!
@@ -40,10 +30,10 @@
 //!  * **B1** — both machines succeed but final values differ.
 //!  * **B2** — JIT errors where eval succeeds, outside the known whitelist.
 //!  * **B3** — any fatal signal / uncaught fault (verdict absent), including on
-//!    invalid tags and shape-mismatched responses.
+//!    shape-mismatched responses.
 //!  * **B4** — JIT run-twice nondeterminism.
-//!  * **B-transcript** — dispatch sequence (handler indices, in order) diverges
-//!    between the two machines even when final values agree.
+//!  * **B-transcript** — dispatch order diverges between the two machines even
+//!    when final values agree.
 //!
 //! Known-divergence filters (NOT bugs): eval-side errors/faults on synthetic
 //! programs; `HeapOverflow` from a tiny nursery.
@@ -71,8 +61,6 @@ use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, RecursiveTree};
 use tidepool_testing::proptest::values_equal;
 
-// Fixed handler arity: tags 0..N_HANDLERS are valid, N_HANDLERS..256 invalid.
-const N_HANDLERS: u64 = 4;
 const NURSERY: usize = 1 << 20;
 const CHILD_STACK: usize = 8 * 1024 * 1024;
 
@@ -164,31 +152,36 @@ impl Spec {
 }
 
 /// Shared per-machine state: a global dispatch cursor into the script plus a
-/// transcript of (dispatch_index, handler_tag) in dispatch order. One instance
-/// per machine — never shared across the JIT and eval runs.
+/// transcript of requests in dispatch order. One instance per machine — never
+/// shared across the JIT and eval runs.
 struct Recorder {
     cursor: usize,
-    transcript: Vec<(usize, u64)>,
+    transcript: Vec<i64>,
 }
 
-/// A scripted, transcript-recording handler. Every HList slot holds one,
-/// carrying its slot index (= the tag it answers when reached at tag 0).
+/// A scripted, transcript-recording handler for the test's single nominal
+/// request family.
 struct ScriptedHandler {
-    index: u64,
     script: Rc<Vec<Spec>>,
     rec: Rc<RefCell<Recorder>>,
 }
 
 impl EffectHandler for ScriptedHandler {
-    // `Value` so the raw request reaches us unchanged (its FromCore is identity)
-    // — shape mismatches must not be intercepted at the dispatch boundary.
+    // `Value` intentionally owns every request in this one-handler test. The
+    // effect crate separately tests routing between distinct nominal families.
     type Request = Value;
-    fn handle(&mut self, _req: Value, cx: &EffectContext) -> Result<Response, EffectError> {
+    fn handle(&mut self, req: Value, cx: &EffectContext) -> Result<Response, EffectError> {
         let pos = {
             let mut r = self.rec.borrow_mut();
             let p = r.cursor;
             r.cursor += 1;
-            r.transcript.push((p, self.index));
+            let Value::Lit(Literal::LitInt(request)) = req else {
+                return Err(EffectError::UnexpectedValue {
+                    context: "LitInt request",
+                    got: format!("{req:?}"),
+                });
+            };
+            r.transcript.push(request);
             p
         };
         self.script
@@ -199,20 +192,14 @@ impl EffectHandler for ScriptedHandler {
     }
 }
 
-type Handlers = frunk::HList![
-    ScriptedHandler,
-    ScriptedHandler,
-    ScriptedHandler,
-    ScriptedHandler
-];
+type Handlers = frunk::HList![ScriptedHandler];
 
 fn make_handlers(script: &Rc<Vec<Spec>>, rec: &Rc<RefCell<Recorder>>) -> Handlers {
-    let mk = |index| ScriptedHandler {
-        index,
+    let handler = ScriptedHandler {
         script: script.clone(),
         rec: rec.clone(),
     };
-    hlist![mk(0), mk(1), mk(2), mk(3)]
+    hlist![handler]
 }
 
 fn fresh_rec() -> Rc<RefCell<Recorder>> {
@@ -226,8 +213,8 @@ fn fresh_rec() -> Rc<RefCell<Recorder>> {
 // Program builders — hand-built effect trees: E(Union(tag, req), Leaf(\x -> ...)).
 // ---------------------------------------------------------------------------
 
-/// A single effect's coordinates: which handler tag fires and the integer
-/// request payload.
+/// A single effect's carrier tag and integer request payload. The carrier tag
+/// is varied to prove it has no routing meaning.
 #[derive(Clone, Debug)]
 struct Eff {
     tag: u64,
@@ -403,7 +390,7 @@ fn wrap_effect(
 /// Survival marker written after the JIT phase, before the eval oracle runs.
 const MARKER: u8 = 0xA1;
 /// Fixed-size verdict payload following the marker.
-const REC_LEN: usize = 40;
+const REC_LEN: usize = 24;
 
 /// Error class buckets (stable across `EffectError`/`JitError`).
 mod errclass {
@@ -425,13 +412,11 @@ struct Verdict {
     jit_kind: u8,
     jit_val: i64,
     jit_errclass: u8,
-    jit_unhandled_tag: i64,
     determ: bool,
     eval_ok: bool,
     eval_kind: u8,
     eval_val: i64,
     eval_errclass: u8,
-    eval_unhandled_tag: i64,
     values_match: bool,
     transcript_match: bool,
 }
@@ -443,15 +428,13 @@ impl Verdict {
         b[1] = self.jit_kind;
         b[2..10].copy_from_slice(&self.jit_val.to_le_bytes());
         b[10] = self.jit_errclass;
-        b[11..19].copy_from_slice(&self.jit_unhandled_tag.to_le_bytes());
-        b[19] = self.determ as u8;
-        b[20] = self.eval_ok as u8;
-        b[21] = self.eval_kind;
-        b[22..30].copy_from_slice(&self.eval_val.to_le_bytes());
-        b[30] = self.eval_errclass;
-        b[31..39].copy_from_slice(&self.eval_unhandled_tag.to_le_bytes());
-        // 39: packed booleans
-        b[39] = (self.values_match as u8) | ((self.transcript_match as u8) << 1);
+        b[11] = self.determ as u8;
+        b[12] = self.eval_ok as u8;
+        b[13] = self.eval_kind;
+        b[14..22].copy_from_slice(&self.eval_val.to_le_bytes());
+        b[22] = self.eval_errclass;
+        // 23: packed booleans
+        b[23] = (self.values_match as u8) | ((self.transcript_match as u8) << 1);
         b
     }
 
@@ -466,15 +449,13 @@ impl Verdict {
             jit_kind: b[1],
             jit_val: i64at(2),
             jit_errclass: b[10],
-            jit_unhandled_tag: i64at(11),
-            determ: b[19] != 0,
-            eval_ok: b[20] != 0,
-            eval_kind: b[21],
-            eval_val: i64at(22),
-            eval_errclass: b[30],
-            eval_unhandled_tag: i64at(31),
-            values_match: b[39] & 1 != 0,
-            transcript_match: b[39] & 2 != 0,
+            determ: b[11] != 0,
+            eval_ok: b[12] != 0,
+            eval_kind: b[13],
+            eval_val: i64at(14),
+            eval_errclass: b[22],
+            values_match: b[23] & 1 != 0,
+            transcript_match: b[23] & 2 != 0,
         }
     }
 }
@@ -505,7 +486,7 @@ fn val_summary(v: &Value) -> (u8, i64) {
 /// falling into a catch-all.
 fn eval_err_class(e: &EffectError) -> (u8, i64) {
     match e {
-        EffectError::UnhandledEffect { tag } => (errclass::UNHANDLED, *tag as i64),
+        EffectError::UnhandledEffect { .. } => (errclass::UNHANDLED, -1),
         EffectError::Eval(_) => (errclass::EVAL, -1),
         EffectError::Bridge(_) => (errclass::BRIDGE, -1),
         EffectError::Handler(_) => (errclass::HANDLER, -1),
@@ -554,7 +535,6 @@ fn yield_err_class(e: &YieldError) -> (u8, i64) {
 
 /// Total: every `JitError` variant is named, no wildcard arm. Doesn't route
 /// through a pre-collapsed effect-error class: this lane needs the
-/// `UnhandledEffect` tag payload for tag-routing assertions.
 fn jit_err_class(e: &JitError) -> (u8, i64) {
     match e {
         JitError::Effect(eff) => eval_err_class(eff),
@@ -567,7 +547,6 @@ fn jit_err_class(e: &JitError) -> (u8, i64) {
         JitError::MissingConTags(_) => (errclass::OTHER, -1),
         JitError::InvalidSuspensionState(_) | JitError::EmptyProjection => (errclass::OTHER, -1),
         JitError::VarIdCollision(_) => (errclass::OTHER, -1),
-        JitError::IncompatibleHandledPrefix { .. } => (errclass::OTHER, -1),
     }
 }
 
@@ -581,7 +560,7 @@ fn run_jit(
     expr: &CoreExpr,
     table: &DataConTable,
     script: &Rc<Vec<Spec>>,
-) -> (Result<Value, JitError>, Vec<(usize, u64)>) {
+) -> (Result<Value, JitError>, Vec<i64>) {
     let rec = fresh_rec();
     let mut handlers = make_handlers(script, &rec);
     let res = match JitEffectMachine::compile(expr, table, NURSERY) {
@@ -596,7 +575,7 @@ fn run_eval(
     expr: &CoreExpr,
     table: &DataConTable,
     script: &Rc<Vec<Spec>>,
-) -> (Result<Value, EffectError>, Vec<(usize, u64)>) {
+) -> (Result<Value, EffectError>, Vec<i64>) {
     let rec = fresh_rec();
     let mut handlers = make_handlers(script, &rec);
     let mut heap = VecHeap::new();
@@ -626,14 +605,15 @@ fn child_run(expr: &CoreExpr, script: Vec<Spec>, fd: i32) -> ! {
     // (marker absent) from an eval fault (marker present, record absent).
     write_all(fd, &[MARKER]);
 
-    let (jit_ok, jit_kind, jit_val, jit_errclass, jit_unhandled_tag) = match &jit1 {
+    let (jit_ok, jit_kind, jit_val, jit_errclass) = match &jit1 {
         Ok(v) => {
             let (k, n) = val_summary(v);
-            (true, k, n, errclass::NONE, -1)
+            (true, k, n, errclass::NONE)
         }
         Err(e) => {
             let (c, t) = jit_err_class(e);
-            (false, 0, 0, c, t)
+            let _ = t;
+            (false, 0, 0, c)
         }
     };
     let determ = match (&jit1, &jit2) {
@@ -648,14 +628,15 @@ fn child_run(expr: &CoreExpr, script: Vec<Spec>, fd: i32) -> ! {
 
     // --- eval oracle phase ---
     let (eval, elog) = run_eval(expr, &table, &script);
-    let (eval_ok, eval_kind, eval_val, eval_errclass, eval_unhandled_tag) = match &eval {
+    let (eval_ok, eval_kind, eval_val, eval_errclass) = match &eval {
         Ok(v) => {
             let (k, n) = val_summary(v);
-            (true, k, n, errclass::NONE, -1)
+            (true, k, n, errclass::NONE)
         }
         Err(e) => {
             let (c, t) = eval_err_class(e);
-            (false, 0, 0, c, t)
+            let _ = t;
+            (false, 0, 0, c)
         }
     };
 
@@ -670,13 +651,11 @@ fn child_run(expr: &CoreExpr, script: Vec<Spec>, fd: i32) -> ! {
         jit_kind,
         jit_val,
         jit_errclass,
-        jit_unhandled_tag,
         determ,
         eval_ok,
         eval_kind,
         eval_val,
         eval_errclass,
-        eval_unhandled_tag,
         values_match,
         transcript_match,
     };
@@ -766,8 +745,8 @@ fn run_case(expr: CoreExpr, script: Vec<Spec>) -> Outcome {
 // Shared assertion helpers.
 // ---------------------------------------------------------------------------
 
-/// Assert the full differential contract for a case whose valid-tag program is
-/// expected to run to a final value on the eval oracle. Returns `Ok(true)` if
+/// Assert the full differential contract for a program expected to run to a
+/// final value on the eval oracle. Returns `Ok(true)` if
 /// the case reached final-value comparison (both machines produced a value).
 fn assert_differential(outcome: &Outcome) -> Result<bool, TestCaseError> {
     match outcome {
@@ -820,23 +799,14 @@ fn assert_differential(outcome: &Outcome) -> Result<bool, TestCaseError> {
 // Strategies.
 // ---------------------------------------------------------------------------
 
-fn valid_tag() -> impl Strategy<Value = u64> {
-    0u64..N_HANDLERS
+fn carrier_tag() -> impl Strategy<Value = u64> {
+    0u64..256
 }
 
-fn invalid_tag() -> impl Strategy<Value = u64> {
-    // Includes 255 explicitly (u8-boundary tag value).
-    prop_oneof![
-        N_HANDLERS..256u64,
-        Just(255u64),
-        Just(N_HANDLERS),
-        Just(N_HANDLERS + 1)
-    ]
-}
-
-/// A valid-tag arithmetic chain (1..6 effects, all integer responses).
+/// An arithmetic chain (1..6 effects, all integer responses) whose irrelevant
+/// carrier tags vary independently of the requests.
 fn arith_chain_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
-    prop::collection::vec((valid_tag(), -1000i64..1000i64), 1..=6).prop_map(|pairs| {
+    prop::collection::vec((carrier_tag(), -1000i64..1000i64), 1..=6).prop_map(|pairs| {
         let effs: Vec<Eff> = pairs.iter().map(|&(tag, req)| Eff { tag, req }).collect();
         let script: Vec<Spec> = pairs.iter().map(|&(_, _)| Spec::Int(0)).collect();
         // Make responses distinct so the sum is sensitive to ordering.
@@ -849,7 +819,7 @@ fn arith_chain_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
     })
 }
 
-/// A single valid-tag effect returning a huge `Complete` list or a `Stream` at
+/// A single effect returning a huge `Complete` list or a `Stream` at
 /// chunk-boundary sizes; continuation reduces to the head element.
 fn huge_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
     let sizes = prop_oneof![
@@ -863,12 +833,13 @@ fn huge_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
         ]
         .prop_map(Spec::Stream),
     ];
-    (valid_tag(), sizes).prop_map(|(tag, spec)| (build_list_head(&Eff { tag, req: 0 }), vec![spec]))
+    (carrier_tag(), sizes)
+        .prop_map(|(tag, spec)| (build_list_head(&Eff { tag, req: 0 }), vec![spec]))
 }
 
-/// A valid-tag arithmetic chain where the handler at a chosen position errors.
+/// An arithmetic chain where the handler at a chosen position errors.
 fn err_at_k_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
-    (prop::collection::vec(valid_tag(), 1..=6))
+    (prop::collection::vec(carrier_tag(), 1..=6))
         .prop_flat_map(|tags| {
             let n = tags.len();
             (Just(tags), 0usize..n)
@@ -881,22 +852,7 @@ fn err_at_k_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
         })
 }
 
-/// A chain of valid arithmetic effects terminated by one invalid-tag effect.
-fn invalid_tag_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
-    (
-        prop::collection::vec(valid_tag(), 0..=4),
-        invalid_tag(),
-        -1000i64..1000i64,
-    )
-        .prop_map(|(valids, bad, req)| {
-            let mut effs: Vec<Eff> = valids.iter().map(|&tag| Eff { tag, req: 0 }).collect();
-            effs.push(Eff { tag: bad, req });
-            let script: Vec<Spec> = (0..effs.len()).map(|i| Spec::Int(i as i64)).collect();
-            (build_sum_chain(&effs), script)
-        })
-}
-
-/// A single valid-tag effect whose integer continuation receives a wrong-shape
+/// A single effect whose integer continuation receives a wrong-shape
 /// response — a string (pointer-valued lit) or a double (float-class lit). Both
 /// are rejected by eval's strict `expect_int`, so the JIT must reject them too
 /// rather than reinterpret a pointer / IEEE-754 payload as `Int#`.
@@ -905,7 +861,7 @@ fn shape_mismatch_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
         "[a-z]{0,8}".prop_map(Spec::Str),
         (-1e9f64..1e9f64).prop_map(Spec::Double),
     ];
-    (valid_tag(), wrong_shape)
+    (carrier_tag(), wrong_shape)
         .prop_map(|(tag, spec)| (build_arith1(&Eff { tag, req: 0 }), vec![spec]))
 }
 
@@ -915,10 +871,8 @@ fn shape_mismatch_strategy() -> impl Strategy<Value = (CoreExpr, Vec<Spec>)> {
 // `full_differential` and `huge_complete_and_stream` drive `TestRunner`
 // directly (not the `proptest!` macro) so each can own a local, in-process
 // reach floor (`ReachTally`) for its bespoke `Outcome`/`Verdict` type.
-// `err_at_k` / `invalid_tag_never_signals` / `shape_mismatch_resume` stay on
-// the `proptest!` macro: they probe error/edge paths where "reached a value
-// comparison" isn't the metric under test (invalid tags never produce a
-// comparable value at all, by design).
+// `err_at_k` / `shape_mismatch_resume` stay on the `proptest!` macro: they
+// probe error paths where "reached a value comparison" is not the metric.
 //
 // A hand-built `Config` driven through `TestRunner` must set `source_file`
 // explicitly: `FileFailurePersistence::SourceParallel` (proptest's default)
@@ -978,7 +932,8 @@ impl ReachTally {
     }
 }
 
-/// Full differential: valid-tag arithmetic chains. Both machines must agree
+/// Full differential: arithmetic chains with arbitrary carrier tags. Both
+/// machines must agree
 /// on the final value AND the dispatch sequence; the JIT must be
 /// deterministic across two runs.
 #[test]
@@ -1036,41 +991,6 @@ proptest! {
                 prop_assert!(
                     v.transcript_match,
                     "B-transcript: dispatch sequences diverge on the handler-error path"
-                );
-            }
-        }
-    }
-
-    /// Invalid tags must never produce a fatal signal, and must surface a clean
-    /// `UnhandledEffect` with the SAME decremented tag (dispatch index) on both
-    /// machines. Value comparison is undefined here and is not asserted.
-    #[test]
-    fn invalid_tag_never_signals((expr, script) in invalid_tag_strategy()) {
-        let outcome = run_case(expr, script);
-        match outcome {
-            Outcome::JitFault => {
-                prop_assert!(false, "B3: invalid tag produced a fatal signal / uncaught fault");
-            }
-            Outcome::EvalFault => {}
-            Outcome::Rec(v) => {
-                prop_assert!(!v.jit_ok, "invalid tag must error, JIT returned a value");
-                prop_assert!(!v.eval_ok, "invalid tag must error, eval returned a value");
-                prop_assert_eq!(
-                    v.jit_errclass, errclass::UNHANDLED,
-                    "JIT invalid-tag error was not UnhandledEffect (class {})", v.jit_errclass
-                );
-                prop_assert_eq!(
-                    v.eval_errclass, errclass::UNHANDLED,
-                    "eval invalid-tag error was not UnhandledEffect (class {})", v.eval_errclass
-                );
-                prop_assert_eq!(
-                    v.jit_unhandled_tag, v.eval_unhandled_tag,
-                    "tag-routing divergence: JIT errored at index {} but eval at {}",
-                    v.jit_unhandled_tag, v.eval_unhandled_tag
-                );
-                prop_assert!(
-                    v.transcript_match,
-                    "B-transcript: dispatch sequence before the invalid tag diverged"
                 );
             }
         }
@@ -1136,7 +1056,7 @@ proptest! {
 #[test]
 fn bug_shape_mismatch_jit_reads_string_as_int() {
     // Minimal shrunk form: E(Union(0, 0), Leaf(\x -> Val(x +# 7))) with the
-    // tag-0 handler answering Complete(Lit("")).
+    // handler answering Complete(Lit("")).
     let expr = build_arith1(&Eff { tag: 0, req: 0 });
     let script = vec![Spec::Str(String::new())];
 
@@ -1184,7 +1104,7 @@ fn bug_shape_mismatch_jit_reads_string_as_int() {
 // FLOAT/DOUBLE (or pointer) lit. Active regression test.
 #[test]
 fn bug_shape_mismatch_jit_reads_double_as_int() {
-    // E(Union(0, 0), Leaf(\x -> Val(x +# 7))) with the tag-0 handler answering
+    // E(Union(0, 0), Leaf(\x -> Val(x +# 7))) with the handler answering
     // Complete(Lit(Double 3.5)).
     let expr = build_arith1(&Eff { tag: 0, req: 0 });
     let script = vec![Spec::Double(3.5)];
@@ -1211,13 +1131,13 @@ fn bug_shape_mismatch_jit_reads_double_as_int() {
 // Deterministic coverage + transcript audit (the >=80% / counter requirement).
 // ---------------------------------------------------------------------------
 
-/// Enumerate a fixed, RNG-free spread of valid-tag arithmetic chains and prove:
+/// Enumerate a fixed, RNG-free spread of arithmetic chains and prove:
 ///  * at least 80% reach final-value comparison (both machines produce a value);
 ///  * the transcript (dispatch sequence) is actually compared on every reached
 ///    case — the counter is non-trivial and every comparison agreed.
 ///
 /// This is the explicit evidence that sequences (not just final values) are
-/// compared, and that valid-tag coverage clears the bar.
+/// compared, and that coverage clears the bar.
 #[test]
 fn coverage_and_transcript_audit() {
     let mut total = 0usize;
@@ -1231,7 +1151,9 @@ fn coverage_and_transcript_audit() {
             total += 1;
             let effs: Vec<Eff> = (0..len)
                 .map(|i| Eff {
-                    tag: (seed >> (i % 6)) % N_HANDLERS,
+                    // Include values far beyond the former handler-list width:
+                    // carrier tags must not select Rust handlers.
+                    tag: (seed << (i % 3)) % 256,
                     req: ((seed as i64 + i as i64) % 11) - 5,
                 })
                 .collect();
@@ -1253,7 +1175,7 @@ fn coverage_and_transcript_audit() {
                     }
                 }
                 Outcome::JitFault => panic!(
-                    "coverage audit: JIT fault on a valid arithmetic chain (len={} seed={})",
+                    "coverage audit: JIT fault on an arithmetic chain (len={} seed={})",
                     len, seed
                 ),
                 Outcome::EvalFault => {}
@@ -1274,7 +1196,7 @@ fn coverage_and_transcript_audit() {
     let ratio = reached as f64 / total as f64;
     assert!(
         ratio >= 0.80,
-        "only {}/{} ({:.0}%) of valid-tag cases reached final-value comparison; need >=80%",
+        "only {}/{} ({:.0}%) of cases reached final-value comparison; need >=80%",
         reached,
         total,
         ratio * 100.0

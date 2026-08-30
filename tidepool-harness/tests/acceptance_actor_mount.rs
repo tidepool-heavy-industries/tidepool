@@ -33,20 +33,12 @@ struct AsSink<Handlers>(Handlers);
 impl<Handlers: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<Handlers> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         context: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
+    ) -> Result<Option<Response>, EffectError> {
         let unit_context = EffectContext::with_user(context.table(), &());
-        self.0.dispatch(tag, request, &unit_context)
+        self.0.dispatch(request, &unit_context)
     }
-}
-
-fn ask_tag() -> u64 {
-    mock::EFFECT_NAMES
-        .iter()
-        .position(|name| *name == "Ask")
-        .expect("mock effect stack contains Ask") as u64
 }
 
 #[test]
@@ -66,7 +58,6 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
         &compiled.expr,
         compiled.table.clone(),
         AsSink(mock::min_stack()),
-        ask_tag(),
         effect_names,
         TestSink,
         Vec::new(),
@@ -99,7 +90,7 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
         .expect("mount actor turn");
 
     assert_eq!(session.run_context(), context.run_context());
-    assert_eq!(session.effect_boundary(), &context.effect_boundary);
+    assert_eq!(session.effect_policy(), context.effect_policy);
     let outcome = session
         .run("actor_literal", &compiled.expr, &compiled.table)
         .expect("run actor turn");
@@ -117,7 +108,7 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
 }
 
 #[test]
-fn actor_mount_installs_its_boundary_without_erasing_the_full_abi() {
+fn actor_mount_installs_its_request_policy_and_effect_metadata() {
     eval_harness::require_extract();
     let compiler = EvalHarness::new().with_stdlib();
     let source =
@@ -133,7 +124,6 @@ fn actor_mount_installs_its_boundary_without_erasing_the_full_abi() {
         &compiled.expr,
         compiled.table.clone(),
         AsSink(mock::min_stack()),
-        ask_tag(),
         effect_names.clone(),
         TestSink,
         Vec::new(),
@@ -162,15 +152,18 @@ fn actor_mount_installs_its_boundary_without_erasing_the_full_abi() {
         .expect("begin actor startup");
     let actor = registry.publish_ready(starting).expect("publish actor");
     let descriptor = registry.descriptor(actor).expect("actor descriptor");
-    assert_eq!(descriptor.effect_abi().names(), effect_names);
-    assert!(descriptor.effect_boundary().handled_prefix().is_empty());
+    assert_eq!(descriptor.effect_names(), effect_names);
+    assert_eq!(
+        descriptor.effect_policy(),
+        tidepool_effect::EffectRunPolicy::SuspendAll
+    );
 
     let _lease = mount_actor_turn(&registry, &mut session, actor, ActorTurnKind::Haskell)
         .expect("mount actor turn");
-    assert_eq!(session.effect_boundary(), descriptor.effect_boundary());
+    assert_eq!(session.effect_policy(), descriptor.effect_policy());
     assert_eq!(
         session.live_payload_policy(),
-        descriptor.effect_abi().live_payload()
+        descriptor.live_payload_policy()
     );
     assert!(
         matches!(

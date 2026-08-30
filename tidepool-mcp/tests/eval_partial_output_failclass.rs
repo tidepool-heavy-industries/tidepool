@@ -36,7 +36,7 @@ fn prelude_dir() -> &'static Path {
         .leak()
 }
 
-// Console is tag 0 in `standard_decls()`; a single-handler HList catches `say`
+// A single-handler HList recognizes Console's `say` request constructor
 // (`send (Print t)`) and routes the text into the CapturedOutput state, exactly
 // like the production `ConsoleHandler`. Any other effect falls through to HNil
 // (UnhandledEffect) — these evals only print, so it is never reached.

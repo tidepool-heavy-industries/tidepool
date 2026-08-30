@@ -22,11 +22,11 @@ struct NumberDispatcher;
 impl DispatchEffect<()> for NumberDispatcher {
     fn dispatch(
         &mut self,
-        _tag: u64,
         _request: &Value,
         cx: &tidepool_effect::EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::error::EffectError> {
         cx.respond(Ok::<serde_json::Value, String>(serde_json::json!(42.0)))
+            .map(Some)
     }
 }
 

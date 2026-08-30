@@ -89,6 +89,8 @@ const WATCH_ID: DataConId = DataConId(11);
 const CONS_ID: DataConId = DataConId(12);
 /// `[]` — nil, 0 fields.
 const NIL_ID: DataConId = DataConId(13);
+const HANDLED_ONE_ID: DataConId = DataConId(15);
+const HANDLED_TWO_ID: DataConId = DataConId(16);
 
 fn table() -> DataConTable {
     let mut table = DataConTable::new();
@@ -107,6 +109,8 @@ fn table() -> DataConTable {
         (CONS_ID, ":", 0, 2, Some("GHC.Types.:")),
         (NIL_ID, "[]", 0, 0, Some("GHC.Types.[]")),
         (RIGHT_ID, "Right", 0, 1, Some("Data.Either.Right")),
+        (HANDLED_ONE_ID, "HandledOne", 0, 0, None),
+        (HANDLED_TWO_ID, "HandledTwo", 0, 0, None),
     ] {
         table.insert(DataCon {
             id,
@@ -380,25 +384,21 @@ impl OutputSink for TestSink {
     }
 }
 
-/// Every tag this file constructs is >= the suspend threshold (0), so
-/// everything suspends; a real dispatch call would mean the representation
-/// under test silently stopped suspending.
+/// Leaves every request unhandled so the resident session suspends it.
 struct NoDispatch;
 impl DispatchEffect<TestSink> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — expected a suspension");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
 fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
     ResidentSession::unbootstrapped(
         NoDispatch,
-        0, // ask_tag: suspend threshold 0 — every tag here suspends.
         Vec::new(),
         TestSink::default(),
         Vec::new(),
@@ -620,22 +620,24 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     );
 }
 
-/// A dispatcher that HANDLES tags 1/2 (returning fresh materialized Ints —
+/// A dispatcher that handles two nominal request constructors (returning fresh materialized Ints —
 /// exercising `materialize_response_and_resume`'s real allocation path, NOT
-/// a program literal) and refuses anything else — tags >= `ask_tag` (100 in
-/// the test below) must never reach here; they suspend instead.
+/// a program literal) and leaves everything else to suspend.
 struct HandledThenSuspend;
 impl DispatchEffect<TestSink> for HandledThenSuspend {
     fn dispatch(
         &mut self,
-        tag: u64,
-        _request: &Value,
+        request: &Value,
         _cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
-        match tag {
-            1 => Ok(Response::Complete(Value::Lit(Literal::LitInt(111)))),
-            2 => Ok(Response::Complete(Value::Lit(Literal::LitInt(222)))),
-            other => panic!("handler dispatched tag {other} — expected only 1/2"),
+    ) -> Result<Option<Response>, EffectError> {
+        match request {
+            Value::Con(id, fields) if *id == HANDLED_ONE_ID && fields.is_empty() => {
+                Ok(Some(Response::Complete(Value::Lit(Literal::LitInt(111)))))
+            }
+            Value::Con(id, fields) if *id == HANDLED_TWO_ID && fields.is_empty() => {
+                Ok(Some(Response::Complete(Value::Lit(Literal::LitInt(222)))))
+            }
+            _ => Ok(None),
         }
     }
 }
@@ -643,7 +645,6 @@ impl DispatchEffect<TestSink> for HandledThenSuspend {
 fn handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
     ResidentSession::unbootstrapped(
         HandledThenSuspend,
-        100, // ask_tag: tags 1/2 are handled; tags >= 100 suspend.
         Vec::new(),
         TestSink::default(),
         Vec::new(),
@@ -763,7 +764,10 @@ fn build_wrap_suspend_handled_deps(wrap_tag: u64, dummy: i64, body_tag: u64) -> 
 
     // upMid = E(Union 2 dummy2) (Leaf (\upMid -> wrap_e))
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -783,7 +787,10 @@ fn build_wrap_suspend_handled_deps(wrap_tag: u64, dummy: i64, body_tag: u64) -> 
 
     // downMid = E(Union 1 dummy1) (Leaf (\downMid -> up_e))
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],
@@ -899,7 +906,10 @@ fn build_wrap_suspend_sync_child(wrap_tag: u64, dummy: i64) -> CoreExpr {
     //                        (Pair downMid upMid))))` — dispatches ONE
     // handled effect (allocating a real response), then completes.
     let handled_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let handled_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let handled_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let body_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![handled_tag_lit, handled_req],
@@ -976,7 +986,10 @@ fn build_wrap_suspend_sync_child(wrap_tag: u64, dummy: i64) -> CoreExpr {
 
     // upMid = E(Union 2 dummy2) (Leaf (\upMid -> wrap_e))
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -996,7 +1009,10 @@ fn build_wrap_suspend_sync_child(wrap_tag: u64, dummy: i64) -> CoreExpr {
 
     // downMid = E(Union 1 dummy1) (Leaf (\downMid -> up_e))
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],
@@ -1434,7 +1450,10 @@ fn build_wrap_suspend_with_event_capture(wrap_tag: u64, dummy: i64, body_tag: u6
 
     // upMid = E(Union 2 dummy2) (Leaf (\upMid -> wrap_e))
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -1454,7 +1473,10 @@ fn build_wrap_suspend_with_event_capture(wrap_tag: u64, dummy: i64, body_tag: u6
 
     // downMid = E(Union 1 dummy1) (Leaf (\downMid -> up_e))
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],
@@ -1547,7 +1569,6 @@ fn event_shaped_capture_survives_tenure_and_resume() {
 fn tiny_handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
     ResidentSession::unbootstrapped(
         HandledThenSuspend,
-        100,
         Vec::new(),
         TestSink::default(),
         Vec::new(),
@@ -1639,27 +1660,25 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
 /// unwrap).
 const RIGHT_ID: DataConId = DataConId(14);
 
-/// A dispatcher that HANDLES tags 1/2 by returning `Right 111`/`Right 222`
+/// A dispatcher that handles `HandledOne`/`HandledTwo` by returning
+/// `Right 111`/`Right 222`
 /// (an `Either`-shaped Con), matching `mailboxNew`'s real response shape —
 /// the caller must `case`-unwrap it, exactly like `liftEither`.
 struct HandledEitherThenSuspend;
 impl DispatchEffect<TestSink> for HandledEitherThenSuspend {
     fn dispatch(
         &mut self,
-        tag: u64,
-        _request: &Value,
+        request: &Value,
         _cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
-        match tag {
-            1 => Ok(Response::Complete(Value::Con(
-                RIGHT_ID,
-                vec![Value::Lit(Literal::LitInt(111))],
-            ))),
-            2 => Ok(Response::Complete(Value::Con(
-                RIGHT_ID,
-                vec![Value::Lit(Literal::LitInt(222))],
-            ))),
-            other => panic!("handler dispatched tag {other} — expected only 1/2"),
+    ) -> Result<Option<Response>, EffectError> {
+        match request {
+            Value::Con(id, fields) if *id == HANDLED_ONE_ID && fields.is_empty() => Ok(Some(
+                Response::Complete(Value::Con(RIGHT_ID, vec![Value::Lit(Literal::LitInt(111))])),
+            )),
+            Value::Con(id, fields) if *id == HANDLED_TWO_ID && fields.is_empty() => Ok(Some(
+                Response::Complete(Value::Con(RIGHT_ID, vec![Value::Lit(Literal::LitInt(222))])),
+            )),
+            _ => Ok(None),
         }
     }
 }
@@ -1667,7 +1686,6 @@ impl DispatchEffect<TestSink> for HandledEitherThenSuspend {
 fn handled_either_session() -> ResidentSession<HandledEitherThenSuspend, TestSink> {
     ResidentSession::unbootstrapped(
         HandledEitherThenSuspend,
-        100,
         Vec::new(),
         TestSink::default(),
         Vec::new(),
@@ -1812,7 +1830,10 @@ fn build_wrap_suspend_event_via_either_unwrap(
         }],
     });
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -1842,7 +1863,10 @@ fn build_wrap_suspend_event_via_either_unwrap(
         }],
     });
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],
@@ -2021,7 +2045,10 @@ fn build_wrap_suspend_with_bare_list_capture(wrap_tag: u64, dummy: i64, body_tag
     });
 
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -2040,7 +2067,10 @@ fn build_wrap_suspend_with_bare_list_capture(wrap_tag: u64, dummy: i64, body_tag
     });
 
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],
@@ -2274,7 +2304,10 @@ fn build_wrap_suspend_with_undce_able_list_capture(
     });
 
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -2293,7 +2326,10 @@ fn build_wrap_suspend_with_undce_able_list_capture(
     });
 
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],
@@ -2523,7 +2559,10 @@ fn build_wrap_suspend_with_thunked_app_capture(
     });
 
     let up_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(2)));
-    let up_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let up_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_TWO_ID,
+        fields: vec![],
+    });
     let up_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![up_dummy_tag, up_dummy_req],
@@ -2542,7 +2581,10 @@ fn build_wrap_suspend_with_thunked_app_capture(
     });
 
     let down_dummy_tag = b.push(CoreFrame::Lit(Literal::LitWord(1)));
-    let down_dummy_req = b.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let down_dummy_req = b.push(CoreFrame::Con {
+        tag: HANDLED_ONE_ID,
+        fields: vec![],
+    });
     let down_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![down_dummy_tag, down_dummy_req],

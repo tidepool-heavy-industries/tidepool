@@ -28,17 +28,6 @@ use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
 use tidepool_testing::eval_harness::{extract_env, prelude_path, EvalHarness};
 
-/// `RunLLMTurn`'s union tag in `standard_decls()` — derived from its
-/// POSITION in that list (Locked Decision: tags index the effect list
-/// positionally), never hand-copied. `standard_decls()`'s own doc has the
-/// story (self-iterating-harness WS-B split `runLLMTurn`/`runLLMTurnFork`/
-/// `runLLMTurnFanout` out of `Ask` into their own effect/tag, same
-/// `typedSite`/`fork`/`fan`/`prompts` payload shape, now riding a
-/// `RunLLMTurnWith` Con instead of `AskWith`).
-fn run_llm_turn_tag() -> u64 {
-    tidepool_testing::effect_tags::tag_of(&tidepool_mcp::standard_decls(), "RunLLMTurn")
-}
-
 fn verdict_helpers() -> &'static str {
     "{-# NOINLINE loopCount #-}\n\
      loopCount :: Int\n\
@@ -87,18 +76,17 @@ struct SiteRecorder {
 impl DispatchEffect<()> for SiteRecorder {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        if tag != run_llm_turn_tag() {
-            return Err(EffectError::UnhandledEffect { tag });
-        }
-        let Value::Con(_con_id, fields) = request else {
+    ) -> Result<Option<Response>, EffectError> {
+        let Value::Con(con_id, fields) = request else {
             return Err(EffectError::Handler(format!(
                 "expected RunLLMTurnWith Con, got {request:?}"
             )));
         };
+        if cx.table().get_by_name("RunLLMTurnWith") != Some(*con_id) {
+            return Ok(None);
+        }
         let payload = fields
             .get(1)
             .ok_or_else(|| EffectError::Handler("RunLLMTurnWith missing payload field".into()))?;
@@ -116,9 +104,9 @@ impl DispatchEffect<()> for SiteRecorder {
                 .table()
                 .get_by_name("True")
                 .ok_or_else(|| EffectError::Handler("no True DataCon in table".into()))?;
-            Ok(Response::Complete(Value::Con(true_id, vec![])))
+            Ok(Some(Response::Complete(Value::Con(true_id, vec![]))))
         } else {
-            Ok(Response::Complete(Value::Lit(Literal::LitInt(0))))
+            Ok(Some(Response::Complete(Value::Lit(Literal::LitInt(0)))))
         }
     }
 }
@@ -257,18 +245,17 @@ struct VerdictRecorder {
 impl DispatchEffect<()> for VerdictRecorder {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        if tag != run_llm_turn_tag() {
-            return Err(EffectError::UnhandledEffect { tag });
-        }
-        let Value::Con(_con_id, fields) = request else {
+    ) -> Result<Option<Response>, EffectError> {
+        let Value::Con(con_id, fields) = request else {
             return Err(EffectError::Handler(format!(
                 "expected RunLLMTurnWith Con, got {request:?}"
             )));
         };
+        if cx.table().get_by_name("RunLLMTurnWith") != Some(*con_id) {
+            return Ok(None);
+        }
         let payload = fields
             .get(1)
             .ok_or_else(|| EffectError::Handler("RunLLMTurnWith missing payload field".into()))?;
@@ -284,7 +271,7 @@ impl DispatchEffect<()> for VerdictRecorder {
             .table()
             .get_by_name("Approve")
             .ok_or_else(|| EffectError::Handler("no Approve DataCon in table".into()))?;
-        Ok(Response::Complete(Value::Con(approve_id, vec![])))
+        Ok(Some(Response::Complete(Value::Con(approve_id, vec![]))))
     }
 }
 

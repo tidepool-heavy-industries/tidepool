@@ -274,11 +274,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -372,16 +371,7 @@ fn park_finalize_fragment(
         )
         .expect("add finalize fragment");
     match machine
-        .run_fragment_suspendable_parked(
-            frag,
-            table,
-            &mut NoDispatch,
-            &(),
-            ASK_TAG,
-            realm,
-            ParkKind::Plain,
-            &[],
-        )
+        .run_fragment_suspendable_parked(frag, table, &mut NoDispatch, &(), realm, ParkKind::Plain)
         .expect("park finalize fragment")
     {
         ParkedOutcome::Suspended {
@@ -421,7 +411,7 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
             JitEffectMachine::compile_session(&build_applying_parent(7007, 55, 99), &table, 2048)
                 .expect("compile_session");
         let loop_id = match machine
-            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, LOOP_REALM, &[])
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), LOOP_REALM)
             .expect("park loop entry")
         {
             ParkedOutcome::Suspended { id, request, .. } => {
@@ -546,7 +536,7 @@ fn h2_close_realm_leaves_sibling_realm_untouched() {
                 .expect("compile_session");
         // KEEP realm: the entry.
         let keep_id = match machine
-            .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, KEEP, &[])
+            .run_suspendable_parked(&table, &mut NoDispatch, &(), KEEP)
             .expect("park keep entry")
         {
             ParkedOutcome::Suspended { id, .. } => id,
@@ -569,10 +559,8 @@ fn h2_close_realm_leaves_sibling_realm_untouched() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 CLOSE,
                 ParkKind::Plain,
-                &[],
             )
             .expect("park plain fragment")
         {
@@ -643,12 +631,10 @@ fn h3_project_and_render_parks_complete_inline() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(0),
                 ParkKind::Project {
                     n_fields: std::num::NonZeroUsize::new(2).unwrap(),
                 },
-                &[],
             )
             .expect("park project fragment")
         {
@@ -694,12 +680,10 @@ fn h3_project_and_render_parks_complete_inline() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(0),
                 ParkKind::Render {
                     field0_forced: true,
                 },
-                &[],
             )
             .expect("park render fragment")
         {

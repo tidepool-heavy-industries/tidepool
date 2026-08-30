@@ -47,17 +47,16 @@ struct BlockFirstDispatcher {
 impl DispatchEffect<TestSink> for BlockFirstDispatcher {
     fn dispatch(
         &mut self,
-        _tag: u64,
         _request: &Value,
         cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
+    ) -> Result<Option<Response>, EffectError> {
         if !self.fired {
             self.fired = true;
             while !self.release.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-        cx.respond(serde_json::json!(0))
+        cx.respond(serde_json::json!(0)).map(Some)
     }
 }
 
@@ -150,8 +149,6 @@ async fn paused_resume_into_runaway_is_cancelled_and_reaped() {
             source: source.into(),
             include,
             handlers,
-            ask_tag: u64::MAX,
-            effect_names: Vec::new(),
             captured: TestSink::default(),
             nursery_size: tidepool_runtime::DEFAULT_NURSERY_SIZE,
             timeout_secs: TURN_TIMEOUT,

@@ -64,20 +64,12 @@ struct AsSink<H>(H);
 impl<H: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<H> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         cx: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
+    ) -> Result<Option<Response>, EffectError> {
         let unit_cx = EffectContext::with_user(cx.table(), &());
-        self.0.dispatch(tag, request, &unit_cx)
+        self.0.dispatch(request, &unit_cx)
     }
-}
-
-fn ask_tag() -> u64 {
-    mock::EFFECT_NAMES
-        .iter()
-        .position(|&n| n == "Ask")
-        .expect("mock::EFFECT_NAMES always contains Ask") as u64
 }
 
 fn setup() -> EvalHarness {
@@ -140,7 +132,6 @@ fn bootstrap(
         &expr,
         table,
         AsSink(mock::min_stack()),
-        ask_tag(),
         effect_names,
         TestSink::default(),
         Vec::new(),

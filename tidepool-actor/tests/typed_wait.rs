@@ -36,12 +36,11 @@ struct AsSink<Handlers>(Handlers);
 impl<Handlers: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<Handlers> {
     fn dispatch(
         &mut self,
-        tag: u64,
         request: &Value,
         context: &EffectContext<'_, TestSink>,
-    ) -> Result<Response, EffectError> {
+    ) -> Result<Option<Response>, EffectError> {
         let unit_context = EffectContext::with_user(context.table(), &());
-        self.0.dispatch(tag, request, &unit_context)
+        self.0.dispatch(request, &unit_context)
     }
 }
 
@@ -136,7 +135,6 @@ result =
         &compiled.expr,
         compiled.table.clone(),
         AsSink(mock::min_stack()),
-        0,
         vec!["Actor".into()],
         TestSink,
         Vec::new(),

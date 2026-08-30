@@ -67,7 +67,7 @@ use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::suspension::{ParkedOutcome, RealmId, SuspensionRun};
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::{EffectBoundary, Response};
+use tidepool_effect::{EffectRunPolicy, Response};
 use tidepool_eval::value::Value as JitValue;
 use tidepool_handlers::{ConsoleHandler, SubagentHandler};
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
@@ -287,13 +287,7 @@ fn run() -> i32 {
     //    here costs nothing and may be fixed and retried freely.
     println!("\n--- compiling the authored program (free; retry as needed) ---");
     let stack: Stack = frunk::hlist![ConsoleHandler, UnwiredWorktreeRow, handler];
-    let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
-    // DERIVED from the same value that built the stack — the parking contract's
-    // rule, never restated at the park site.
-    let handled_prefix: Vec<String> = decls[..ask_tag as usize]
-        .iter()
-        .map(|d| d.type_name.to_string())
-        .collect();
+    let decls = tidepool_handlers::base_decls(&stack);
 
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let row = tidepool_mcp::build_effect_stack_type(&decls);
@@ -332,9 +326,8 @@ fn run() -> i32 {
     let started = std::time::Instant::now();
     let captured = CapturedOutput::new();
     let mut stack = stack;
-    let boundary = EffectBoundary::new(ask_tag, &handled_prefix);
     let outcome = machine.run_until_suspension(
-        SuspensionRun::main(&table, &boundary, RealmId(0)),
+        SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, RealmId(0)),
         &mut stack,
         &captured,
     );

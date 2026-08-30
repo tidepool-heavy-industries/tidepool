@@ -4,8 +4,8 @@
 //! an `after`/`nextEvent` blocking deadline wait (RepoEvent's `RepoEventAwait`
 //! suspension — the headline verb `nextEvent`/`after`/`awaitSubscription` all
 //! send), and `record` (Journal), and the driver services each resulting
-//! suspension through its driver-owned handler set — suspension-serviced, the
-//! outer session's handled prefix staying EMPTY on the shared machine.
+//! suspension through its driver-owned handler set. The outer resident session
+//! selects `SuspendAll` explicitly.
 //!
 //! ONE fixture, ONE compile, every assertion off the single resulting
 //! `State` (family-bundle discipline — a new suspension kind joins this

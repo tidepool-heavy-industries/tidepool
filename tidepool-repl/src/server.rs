@@ -287,10 +287,7 @@ pub fn classify_item(text: &str) -> Result<BlockItem, String> {
 /// Static config for the server (everything but the per-session root, which is
 /// minted per session open).
 pub struct ReplServerConfig {
-    /// The single-sourced effect roster (ordered decls + the `Ask` suspend
-    /// tag), built only via `EffectRoster::from_handlers` — replaces what used
-    /// to be an unrelated `decls: Vec<EffectDecl>` + `ask_tag: u64` pair that
-    /// a caller could construct with mismatched ordering.
+    /// The single-sourced effect roster built from the installed handlers.
     pub roster: EffectRoster,
     /// Base GHC include dirs (generated `Tidepool.Effects` dir + prelude/stdlib).
     pub base_include: Vec<PathBuf>,

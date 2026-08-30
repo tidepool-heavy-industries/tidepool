@@ -84,7 +84,7 @@ fn start_turn_for(
     CapturedOutput,
 > {
     let stack = tidepool_handlers::build_minimal_stack();
-    let (decls, ask_tag) = tidepool_handlers::base_decls_with_ask(&stack);
+    let decls = tidepool_handlers::base_decls(&stack);
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack_type = tidepool_mcp::build_effect_stack_type(&decls);
     let wrapped_code = tidepool_mcp::wrap_do(code);
@@ -94,14 +94,10 @@ fn start_turn_for(
     let effects_dir = tidepool_mcp::ensure_effects_module(&decls).expect("effects module");
     let mut include = vec![prelude_include()];
     include.extend(effects_dir.include_paths());
-    let effect_names: Vec<String> = decls.iter().map(|d| d.type_name.to_string()).collect();
-
     StartTurn {
         source,
         include,
         handlers: stack,
-        ask_tag,
-        effect_names,
         captured: CapturedOutput::new(),
         nursery_size,
         timeout_secs: 60,

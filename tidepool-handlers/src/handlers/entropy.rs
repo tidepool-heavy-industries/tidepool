@@ -43,7 +43,13 @@ mod tests {
         let mut handlers = frunk::hlist![EntropyHandler];
         let con_id = table.get_by_name("EntropySeed").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(
+            handlers
+                .dispatch(&request, &cx)
+                .unwrap()
+                .expect("EntropyBytes should be handled"),
+            &table,
+        );
         // i64::to_value boxes as Con(I#, [LitInt]).
         match &result {
             Value::Con(_, fields) if fields.len() == 1 => match &fields[0] {

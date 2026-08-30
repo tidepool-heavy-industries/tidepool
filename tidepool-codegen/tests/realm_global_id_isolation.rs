@@ -239,11 +239,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -282,10 +281,8 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
                 &table_a,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(0),
                 ParkKind::Plain,
-                &[],
             )
             .expect("realm A run_fragment_suspendable_parked")
         {
@@ -323,10 +320,8 @@ fn two_realms_with_colliding_domain_ids_do_not_shadow_each_other() {
                 &table_b,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(1),
                 ParkKind::Plain,
-                &[],
             )
             .expect("realm B run_fragment_suspendable_parked")
         {

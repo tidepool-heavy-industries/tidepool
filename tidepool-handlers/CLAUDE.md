@@ -8,7 +8,7 @@ primitives a `WorktreeHandler` call wraps (`tidepool-worktree`), the coding
 backend a `SubagentHandler` drives (`tidepool-agent`).
 
 The Rust side of every `<Eff>Req` — Console, KV, Fs, Http, Exec, Llm, Git,
-Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls_with_ask`
+Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls`
 assemble the fully-wired server. See root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the Haskell-facing half of the effect contract
 (`*_decl()` + the eval-authoring patterns) — this doc covers the Rust side of
@@ -39,7 +39,7 @@ One module per effect under `src/handlers/`:
   `base_effects!` default row — see `tidepool-worktree/CLAUDE.md`
 
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
-`build_base_stack`, `build_minimal_stack`, `base_decls_with_ask`) and
+`build_base_stack`, `build_minimal_stack`, `base_decls`) and
 re-exports everything via `pub use handlers::*;`, so the external surface is
 flat (`tidepool_handlers::FsHandler`). Each module carries its own `#[cfg(test)] mod tests`;
 shared test helpers (`full_effect_test_table`, `jit_eval`, `response_value`, …)
@@ -60,8 +60,8 @@ one `verbs` row + helper text in the definition
 (`tidepool-mcp/src/effect_defs.rs`) + one inherent method here. A wholly new
 effect type needs a new definition, a new module under `src/handlers/`, a
 `pub mod` + `pub use` line in `src/handlers/mod.rs`, a `handler_for!` arm in
-`src/lib.rs`, and a new positional union-tag slot (see root `CLAUDE.md`'s
-locked decision on union tags).
+`src/lib.rs`. Rust dispatch is by the request constructor's nominal identity;
+the Haskell union position is not a handler slot.
 
 ## `cx.respond*` — pick by result shape, not habit
 

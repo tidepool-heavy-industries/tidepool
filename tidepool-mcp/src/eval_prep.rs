@@ -85,7 +85,7 @@ macro_rules! base_effects {
 /// `runLLMTurnFanout` when its decl is present. Both `Ask` and `RunLLMTurn`
 /// are UNHANDLED (interposed) tags: no `tidepool-handlers` entry, serviced by
 /// each server's own suspend machinery (see
-/// `tidepool-codegen::jit_machine::drive_effect_loop`'s `suspend_tag`
+/// the runtime's nominal request router
 /// threshold — every tag from the first interposed effect onward suspends,
 /// so appending further interposed effects here needs no Rust-side dispatch
 /// change).

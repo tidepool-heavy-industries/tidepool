@@ -6,7 +6,7 @@ use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
     SuspensionRun,
 };
-use tidepool_effect::{DispatchEffect, EffectBoundary, LivePayloadPolicy};
+use tidepool_effect::{DispatchEffect, EffectRunPolicy, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 
@@ -19,9 +19,7 @@ pub trait SuspensionTestExt {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
         realm: RealmId,
-        effect_names: &[String],
     ) -> Result<ParkedOutcome, JitError>;
 
     #[allow(clippy::too_many_arguments)]
@@ -31,10 +29,8 @@ pub trait SuspensionTestExt {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
         realm: RealmId,
         completion: ParkKind,
-        effect_names: &[String],
     ) -> Result<ParkedOutcome, JitError>;
 }
 
@@ -44,12 +40,9 @@ impl SuspensionTestExt for JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
         realm: RealmId,
-        effect_names: &[String],
     ) -> Result<ParkedOutcome, JitError> {
-        let boundary = EffectBoundary::new(suspend_tag, effect_names);
-        let run = SuspensionRun::main(table, &boundary, realm)
+        let run = SuspensionRun::main(table, EffectRunPolicy::HandleOrSuspend, realm)
             .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         self.run_until_suspension(run, handlers, user)
     }
@@ -60,14 +53,17 @@ impl SuspensionTestExt for JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
         realm: RealmId,
         completion: ParkKind,
-        effect_names: &[String],
     ) -> Result<ParkedOutcome, JitError> {
-        let boundary = EffectBoundary::new(suspend_tag, effect_names);
-        let run = SuspensionRun::fragment(func_id, table, &boundary, realm, completion)
-            .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
+        let run = SuspensionRun::fragment(
+            func_id,
+            table,
+            EffectRunPolicy::HandleOrSuspend,
+            realm,
+            completion,
+        )
+        .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         self.run_until_suspension(run, handlers, user)
     }
 }
@@ -99,11 +95,9 @@ impl LinearMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
     ) -> Result<SuspendableOutcome, JitError> {
         self.assert_idle();
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::main(table, &boundary, RealmId(0))
+        let run = SuspensionRun::main(table, EffectRunPolicy::HandleOrSuspend, RealmId(0))
             .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         let outcome = self.machine.run_until_suspension(run, handlers, user)?;
         Ok(self.track_value(outcome))
@@ -115,16 +109,14 @@ impl LinearMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
         n_fields: usize,
     ) -> Result<Suspendable<Vec<RootSlot>>, JitError> {
         self.assert_idle();
         let n_fields = std::num::NonZeroUsize::new(n_fields).expect("projected fields");
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
         let run = SuspensionRun::fragment(
             func_id,
             table,
-            &boundary,
+            EffectRunPolicy::HandleOrSuspend,
             RealmId(0),
             ParkKind::Project { n_fields },
         )
@@ -139,15 +131,13 @@ impl LinearMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        suspend_tag: u64,
         field0_forced: bool,
     ) -> Result<Suspendable<(RootSlot, Value)>, JitError> {
         self.assert_idle();
-        let boundary = EffectBoundary::new(suspend_tag, &[]);
         let run = SuspensionRun::fragment(
             func_id,
             table,
-            &boundary,
+            EffectRunPolicy::HandleOrSuspend,
             RealmId(0),
             ParkKind::Render { field0_forced },
         )
@@ -161,7 +151,6 @@ impl LinearMachine {
         _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        _suspend_tag: u64,
         input: ResumeInput,
     ) -> Result<SuspendableOutcome, JitError> {
         let outcome = self.resume(handlers, user, input)?;
@@ -173,7 +162,6 @@ impl LinearMachine {
         _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        _suspend_tag: u64,
         input: ResumeInput,
         _n_fields: usize,
     ) -> Result<Suspendable<Vec<RootSlot>>, JitError> {
@@ -186,7 +174,6 @@ impl LinearMachine {
         _table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        _suspend_tag: u64,
         input: ResumeInput,
         _field0_forced: bool,
     ) -> Result<Suspendable<(RootSlot, Value)>, JitError> {

@@ -156,7 +156,13 @@ mod tests {
         let mut handlers = frunk::hlist![MetaHandler::new(vec![], vec![])];
         let con_id = table.get_by_name("MetaVersion").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(
+            handlers
+                .dispatch(&request, &cx)
+                .unwrap()
+                .expect("MetaStack should be handled"),
+            &table,
+        );
         match &result {
             Value::Con(id, _) => {
                 let name = table.name_of(*id).unwrap();
@@ -174,7 +180,13 @@ mod tests {
         let mut handlers = frunk::hlist![MetaHandler::new(vec![], vec![])];
         let con_id = table.get_by_name("MetaPrimOps").unwrap();
         let request = Value::Con(con_id, vec![]);
-        let result = response_value(handlers.dispatch(0, &request, &cx).unwrap(), &table);
+        let result = response_value(
+            handlers
+                .dispatch(&request, &cx)
+                .unwrap()
+                .expect("MetaCapabilities should be handled"),
+            &table,
+        );
         assert_is_cons_list(&result, &table);
     }
 }

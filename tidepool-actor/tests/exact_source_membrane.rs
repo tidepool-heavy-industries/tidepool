@@ -18,7 +18,7 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
     let lib = SessionLib::open(SessionId(81), root.path(), ModuleEnv::standalone_default())
         .expect("open declaration plane")
         .with_validation_include(vec![stdlib]);
-    let mut session = PersistentSession::new(Some(lib), 0, Vec::new(), 1 << 20);
+    let mut session = PersistentSession::new(Some(lib), 1 << 20);
     session
         .define_scoped(&["data Public = Public Int\n\
              data Secret = Secret\n\

@@ -165,11 +165,10 @@ struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -233,7 +232,7 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
 
     // Park the entry.
     let first = match machine
-        .run_suspendable_parked(table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
+        .run_suspendable_parked(table, &mut NoDispatch, &(), RealmId(0))
         .expect("park entry")
     {
         ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
@@ -264,10 +263,8 @@ fn one_cycle(table: &DataConTable, resume_one: bool) -> (usize, usize) {
                 table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 RealmId(i as u64),
                 ParkKind::Plain,
-                &[],
             )
             .expect("park fragment")
         {
@@ -501,7 +498,7 @@ fn dropping_with_live_parks_is_clean_and_the_next_machine_is_unaffected() {
             assert_eq!(machine.parked_count(), 0);
 
             let id = match machine
-                .run_suspendable_parked(&table, &mut NoDispatch, &(), ASK_TAG, RealmId(0), &[])
+                .run_suspendable_parked(&table, &mut NoDispatch, &(), RealmId(0))
                 .expect("park")
             {
                 ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {

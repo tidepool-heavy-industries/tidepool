@@ -178,18 +178,15 @@ fn build_suspending_parent(captured_n: i64, req: i64) -> CoreExpr {
     b.build()
 }
 
-/// A handler that never actually runs for the ask tag (we suspend before
-/// dispatch), but the drive loop needs a `DispatchEffect`. Panics if called —
-/// reaching dispatch means the suspend branch was NOT taken (a regression).
+/// Leaves the request unhandled so the suspendable run parks it.
 struct NoDispatch;
 impl DispatchEffect<()> for NoDispatch {
     fn dispatch(
         &mut self,
-        tag: u64,
         _request: &Value,
         _cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        panic!("handler dispatched tag {tag} — the ask should have suspended instead");
+    ) -> Result<Option<Response>, EffectError> {
+        Ok(None)
     }
 }
 
@@ -228,7 +225,7 @@ fn suspend_parent(
     );
     let mut handler = NoDispatch;
     let outcome = machine
-        .run_suspendable(table, &mut handler, &(), ASK_TAG)
+        .run_suspendable(table, &mut handler, &())
         .expect("parent run_suspendable");
     match outcome {
         SuspendableOutcome::Suspended { request, .. } => {
@@ -317,7 +314,6 @@ fn child_gc_then_parent_resumes_and_captured_survives() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(5))),
                 )
                 .expect("parent resumes after the child GC");
@@ -378,7 +374,6 @@ fn child_heap_doubling_then_parent_resumes() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(9))),
                 )
                 .expect("parent resumes after child heap doubling");
@@ -441,7 +436,6 @@ fn child_decl_accretion_is_inert_for_parent() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(8))),
                 )
                 .expect("parent resumes after child decl accretion");
@@ -484,7 +478,6 @@ fn bottom_answer_does_not_consume_the_continuation() {
                 &table,
                 &mut NoDispatch,
                 &(),
-                ASK_TAG,
                 ResumeInput::Answer(bottom),
             ) {
                 Ok(_) => panic!("a bottom answer must be rejected, not accepted"),
@@ -506,7 +499,6 @@ fn bottom_answer_does_not_consume_the_continuation() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(3))),
                 )
                 .expect("a valid answer resumes after a rejected bottom");
@@ -596,7 +588,7 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
 
             // 3. Suspend the parent at the ask.
             let out = machine
-                .run_suspendable(&table, &mut NoDispatch, &(), ASK_TAG)
+                .run_suspendable(&table, &mut NoDispatch, &())
                 .expect("parent suspends");
             assert!(matches!(out, SuspendableOutcome::Suspended { .. }));
             assert!(machine.is_suspended());
@@ -642,7 +634,6 @@ fn value_plane_binding_survives_suspend_child_gc_resume() {
                     &table,
                     &mut NoDispatch,
                     &(),
-                    ASK_TAG,
                     ResumeInput::Answer(Value::Lit(Literal::LitInt(6))),
                 )
                 .expect("parent resumes");

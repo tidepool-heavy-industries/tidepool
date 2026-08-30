@@ -110,18 +110,6 @@ fn fork_decls() -> Vec<tidepool_mcp::EffectDecl> {
     decls
 }
 
-/// `Fork`'s union tag under [`fork_decls`] — derived from its POSITION in
-/// that list (Locked Decision: tags index the effect list positionally),
-/// never hand-copied, so an earlier effect joining the stack can't silently
-/// stale this the way a hardcoded integer did.
-///
-/// `Tidepool.Fork`'s `forkFilter`/`forkMap` reach the machine through
-/// `forkAllSited`, which sends on `Fork` — so their fanout dispatch arrives
-/// at THIS tag, not `RunLLMTurn`'s and not `Ask`'s.
-fn fork_tag() -> u64 {
-    tidepool_testing::effect_tags::tag_of(&fork_decls(), "Fork")
-}
-
 /// Compile `code` (a single Haskell expression of type `M a`) under the full
 /// MCP preamble and run it. Returns `Ok(json)` with the rendered result or
 /// `Err(text)` with the failure message (compile error OR runtime yield error).
@@ -1481,11 +1469,8 @@ fn works_stdlib_quoter_survives_extract() {
 // fanout always answers a fixed `Bool` — so it's the one combinator that
 // composes over `runLLMTurnFanout` cleanly.
 //
-// Unlike `works`/`works_with_imports` (NullDispatcher), a
-// `runLLMTurnFanout` site genuinely dispatches an `Ask` effect (tag 8,
-// same as `run_llm_turn_sidecar.rs`'s `ASK_TAG`) — this probe answers it
-// with a scripted `DispatchEffect` so the eval runs straight through to a
-// final value, exactly as a harness-driven fanout resume would.
+// Unlike `works`/`works_with_imports` (NullDispatcher), these probes genuinely
+// dispatch `ForkAllWith`, answered by a scripted nominal dispatcher.
 // ---------------------------------------------------------------------------
 
 /// Same shape as `eval_raw_with_imports`, generic over the dispatcher so a
@@ -1529,12 +1514,14 @@ struct BoolListOnce {
 impl DispatchEffect<()> for BoolListOnce {
     fn dispatch(
         &mut self,
-        tag: u64,
-        _request: &Value,
+        request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        assert_eq!(tag, fork_tag(), "expected the fanout's Fork dispatch");
-        cx.respond_list(self.answer.clone())
+    ) -> Result<Option<Response>, EffectError> {
+        assert_eq!(
+            tidepool_effect::request_constructor(request, cx.table()),
+            "Tidepool.Effects.Core.ForkAllWith"
+        );
+        cx.respond_list(self.answer.clone()).map(Some)
     }
 }
 
@@ -1564,12 +1551,14 @@ struct IntListOnce {
 impl DispatchEffect<()> for IntListOnce {
     fn dispatch(
         &mut self,
-        tag: u64,
-        _request: &Value,
+        request: &Value,
         cx: &EffectContext<'_, ()>,
-    ) -> Result<Response, EffectError> {
-        assert_eq!(tag, fork_tag(), "expected the fanout's Fork dispatch");
-        cx.respond_list(self.answer.clone())
+    ) -> Result<Option<Response>, EffectError> {
+        assert_eq!(
+            tidepool_effect::request_constructor(request, cx.table()),
+            "Tidepool.Effects.Core.ForkAllWith"
+        );
+        cx.respond_list(self.answer.clone()).map(Some)
     }
 }
 

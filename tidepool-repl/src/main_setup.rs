@@ -66,7 +66,7 @@ pub fn build(
     let llm_model =
         std::env::var("TIDEPOOL_LLM_MODEL").unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string());
 
-    // Build a representative stack to derive effect declarations and ask_tag.
+    // Build a representative stack to derive effect declarations.
     // The kv_path here doesn't matter for decls (they depend only on handler types).
     let sample_cfg = HandlerConfig {
         cwd: cwd.clone(),
@@ -74,7 +74,8 @@ pub fn build(
         llm_model: llm_model.clone(),
     };
     let stack = build_base_stack(&sample_cfg);
-    // Decls derive from the stack (in HList/tag order) + Ask appended.
+    // Declarations derive from the installed handler families plus interposed
+    // session effects.
     let roster = EffectRoster::from_handlers(&stack);
     drop(stack); // the per-session builder owns each session's stack
 

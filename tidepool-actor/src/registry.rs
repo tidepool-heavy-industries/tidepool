@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
-use tidepool_effect::{EffectBoundary, EffectStackAbi, LivePayloadPolicy};
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::MonotonicIdIssuer;
 
 use crate::agent_session::AgentSessionState;
@@ -18,27 +18,28 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
     label: String,
-    effect_abi: EffectStackAbi,
-    effect_boundary: EffectBoundary,
+    effect_names: Vec<String>,
+    effect_policy: EffectRunPolicy,
+    live_payload: LivePayloadPolicy,
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
 }
 
 impl ActorDescriptor {
-    /// Build an immutable actor execution contract. `suspend_tag` selects the
-    /// machine-handled prefix but does not participate in full ABI identity.
+    /// Build an immutable actor execution contract.
     #[must_use]
     pub fn new(
         label: impl Into<String>,
-        effect_abi: EffectStackAbi,
-        suspend_tag: u64,
+        effect_names: impl IntoIterator<Item = impl Into<String>>,
+        effect_policy: EffectRunPolicy,
+        live_payload: LivePayloadPolicy,
         placement: ActorPlacement,
     ) -> Self {
-        let effect_boundary = effect_abi.boundary(suspend_tag);
         Self {
             label: label.into(),
-            effect_abi,
-            effect_boundary,
+            effect_names: effect_names.into_iter().map(Into::into).collect(),
+            effect_policy,
+            live_payload,
             placement,
             source_imports: ActorSourceImports::default(),
         }
@@ -54,8 +55,9 @@ impl ActorDescriptor {
     ) -> Self {
         Self::new(
             label,
-            EffectStackAbi::new(effect_names, LivePayloadPolicy::HASKELL_EFFECT_VALUE),
-            0,
+            effect_names,
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
         )
     }
@@ -66,13 +68,18 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn effect_abi(&self) -> &EffectStackAbi {
-        &self.effect_abi
+    pub fn effect_names(&self) -> &[String] {
+        &self.effect_names
     }
 
     #[must_use]
-    pub fn effect_boundary(&self) -> &EffectBoundary {
-        &self.effect_boundary
+    pub fn effect_policy(&self) -> EffectRunPolicy {
+        self.effect_policy
+    }
+
+    #[must_use]
+    pub fn live_payload_policy(&self) -> LivePayloadPolicy {
+        self.live_payload
     }
 
     #[must_use]
@@ -310,8 +317,7 @@ impl ActorRegistry {
         let created = ActorEvent::Created {
             owner,
             label: descriptor.label.clone(),
-            effect_stack: descriptor.effect_abi.names().to_vec(),
-            effect_abi: descriptor.effect_abi.digest().to_string(),
+            effect_stack: descriptor.effect_names.clone(),
         };
         state.actors.insert(
             reference.id,
@@ -432,16 +438,16 @@ impl ActorRegistry {
             return Err(ActorRegistryError::Parked { actor, obligation });
         }
         let placement = actor_entry.descriptor.placement;
-        let effect_abi = actor_entry.descriptor.effect_abi.clone();
-        let effect_boundary = actor_entry.descriptor.effect_boundary.clone();
+        let effect_policy = actor_entry.descriptor.effect_policy;
+        let live_payload = actor_entry.descriptor.live_payload;
         let source_imports = actor_entry.descriptor.source_imports.clone();
         actor_entry.active_turn = Some(kind);
         Ok(TurnLease {
             actor,
             kind,
             placement,
-            effect_abi,
-            effect_boundary,
+            effect_policy,
+            live_payload,
             source_imports,
             registry: Arc::downgrade(&self.inner),
             released: false,
@@ -472,8 +478,8 @@ impl ActorRegistry {
             actor,
             kind: ActorTurnKind::Provider,
             placement: actor_entry.descriptor.placement,
-            effect_abi: actor_entry.descriptor.effect_abi.clone(),
-            effect_boundary: actor_entry.descriptor.effect_boundary.clone(),
+            effect_policy: actor_entry.descriptor.effect_policy,
+            live_payload: actor_entry.descriptor.live_payload,
             source_imports: actor_entry.descriptor.source_imports.clone(),
             registry: Arc::downgrade(&self.inner),
             released: false,
@@ -491,8 +497,8 @@ impl ActorRegistry {
         Ok(ActorSessionContext {
             actor,
             placement: actor_entry.descriptor.placement,
-            effect_abi: actor_entry.descriptor.effect_abi.clone(),
-            effect_boundary: actor_entry.descriptor.effect_boundary.clone(),
+            effect_policy: actor_entry.descriptor.effect_policy,
+            live_payload: actor_entry.descriptor.live_payload,
             source_imports: actor_entry.descriptor.source_imports.clone(),
         })
     }
@@ -1054,8 +1060,8 @@ pub struct TurnLease {
     actor: ActorRef,
     kind: ActorTurnKind,
     placement: ActorPlacement,
-    effect_abi: EffectStackAbi,
-    effect_boundary: EffectBoundary,
+    effect_policy: EffectRunPolicy,
+    live_payload: LivePayloadPolicy,
     source_imports: ActorSourceImports,
     registry: Weak<RegistryInner>,
     released: bool,
@@ -1067,8 +1073,8 @@ impl TurnLease {
         ActorSessionContext {
             actor: self.actor,
             placement: self.placement,
-            effect_abi: self.effect_abi.clone(),
-            effect_boundary: self.effect_boundary.clone(),
+            effect_policy: self.effect_policy,
+            live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
         }
     }

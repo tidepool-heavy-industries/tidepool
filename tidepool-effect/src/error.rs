@@ -12,11 +12,12 @@ pub enum EffectError {
     /// Bridge error during value conversion.
     #[error("Bridge error: {0}")]
     Bridge(#[from] BridgeError),
-    /// No handler was found for an effect tag.
-    #[error("Unhandled effect at tag {tag}")]
+    /// No installed handler recognized the request constructor.
+    #[error("unhandled effect request {constructor}")]
     UnhandledEffect {
-        /// The unhandled effect tag.
-        tag: u64,
+        /// The constructor name, or a structural description when the request
+        /// was not a known constructor value.
+        constructor: String,
     },
     /// A required constructor was not found in the DataConTable.
     #[error("{name} constructor not found in DataConTable")]

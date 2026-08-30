@@ -8,7 +8,7 @@
 //! Suspendable execution has one start operation
 //! ([`JitEffectMachine::run_until_suspension`]) and one resume operation
 //! ([`JitEffectMachine::resume_continuation`]). [`SuspensionRun`] selects the
-//! entry function, effect boundary, realm, and completion policy. A parked
+//! entry function, effect policy, realm, and completion policy. A parked
 //! frame retains that policy, so resume cannot change how completion is
 //! materialized.
 
@@ -17,9 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use cranelift_module::FuncId;
-pub use tidepool_effect::PrefixMismatch;
+use frunk::HNil;
 use tidepool_effect::{
-    DispatchEffect, EffectBoundary, EffectContext, EffectError, LivePayloadPolicy,
+    request_constructor, DispatchEffect, EffectContext, EffectError, EffectRunPolicy,
+    LivePayloadPolicy,
 };
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -68,18 +69,6 @@ pub enum JitError {
         "VarId collision at load: {0}. This indicates a Haskell-side VarId-scheme regression."
     )]
     VarIdCollision(#[from] tidepool_repr::VarIdCollision),
-    /// A run's handled-effect layout disagrees with the non-empty layout
-    /// already established by this machine. Positional effect dispatch requires
-    /// exact agreement; an empty prefix dispatches nothing and is compatible.
-    #[error(
-        "realm handled-effect prefix disagrees with the machine's established prefix \
-         ({mismatch}): established {established:?}, incoming {incoming:?}"
-    )]
-    IncompatibleHandledPrefix {
-        established: Vec<String>,
-        incoming: Vec<String>,
-        mismatch: PrefixMismatch,
-    },
 }
 
 /// A pending first-cause `RuntimeError` surfaces as a yield error — the shape
@@ -137,8 +126,8 @@ enum ParkTarget {
     Registry {
         realm: RealmId,
         kind: ParkKind,
-        /// Already checked at entry; retained if the run suspends.
-        boundary: EffectBoundary,
+        /// Retained with the continuation so resume preserves routing policy.
+        effect_policy: EffectRunPolicy,
         /// Request-field policy replayed on every suspension of this run.
         live_payload: LivePayloadPolicy,
     },
@@ -315,27 +304,6 @@ enum RunTarget<'a, U, H: DispatchEffect<U>> {
     },
 }
 
-/// Uninhabited marker instantiating [`RunTarget`]'s `H` type parameter for a
-/// [`RunTarget::Pure`] call, where no handler is ever dispatched.
-/// [`RunTarget::Pure`] carries no handlers value, so a caller driving a pure
-/// run still has to name SOME concrete `H: DispatchEffect<U>` to monomorphize
-/// [`JitEffectMachine::with_active_run`]; this type exists purely to fill
-/// that slot. It can never be constructed, so `dispatch` is unreachable by
-/// construction — [`JitEffectMachine::drive_active`]'s pure branch never
-/// calls it either.
-enum NoHandlers {}
-
-impl DispatchEffect<()> for NoHandlers {
-    fn dispatch(
-        &mut self,
-        _tag: u64,
-        _request: &Value,
-        _cx: &EffectContext<'_, ()>,
-    ) -> Result<tidepool_effect::Response, EffectError> {
-        match *self {}
-    }
-}
-
 /// The live driving context [`JitEffectMachine::with_active_run`] owns for one
 /// run: a bare [`VMContext`] for [`RunTarget::Pure`], or a
 /// [`CompiledEffectMachine`] (which owns its own `VMContext`) for
@@ -416,11 +384,6 @@ pub struct JitEffectMachine {
     /// Monotonic count of fragments compiled into the JITModule (its
     /// executable memory is never reclaimed) — [`HeapStats::fragments`].
     fragments_added: u64,
-    /// Non-empty handled-effect layout established by the first parked-path
-    /// entry. It is monotonic because every realm uses the same monomorphized
-    /// handler stack for the machine's lifetime. Compatibility is defined by
-    /// [`EffectBoundary`].
-    established_prefix: Option<Arc<[String]>>,
 }
 
 // SAFETY: a `JitEffectMachine` is only ever touched by ONE thread at a time —
@@ -689,7 +652,6 @@ impl JitEffectMachine {
             machine_state: MachineState::new(),
             resources: ResourceLedger::default(),
             fragments_added: 0,
-            established_prefix: None,
         })
     }
 
@@ -724,7 +686,6 @@ impl JitEffectMachine {
             machine_state: MachineState::new(),
             resources: ResourceLedger::default(),
             fragments_added: 0,
-            established_prefix: None,
         })
     }
 
@@ -1350,7 +1311,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        boundary: &EffectBoundary,
+        effect_policy: EffectRunPolicy,
         materialization: ResultMaterialization,
         park: ParkTarget,
     ) -> Result<ParkedRaw, JitError> {
@@ -1385,7 +1346,7 @@ impl JitEffectMachine {
             handlers,
             user,
             "",
-            Some(boundary.suspend_tag()),
+            effect_policy,
             yield_result,
         ) {
             Ok(outcome) => self.finish_suspendable(
@@ -1419,7 +1380,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
-        boundary: &EffectBoundary,
+        effect_policy: EffectRunPolicy,
         input: ResumeInput,
         materialization: ResultMaterialization,
         park: ParkTarget,
@@ -1498,35 +1459,30 @@ impl JitEffectMachine {
         // + resume path the effect loop uses, then continue driving. Capture the
         // result WITHOUT `?` so the tail arm runs on every path (a bind finish
         // tenures into self.session, so the arm must follow finish_suspendable).
-        let finished = match materialize_response_and_resume(
-            &mut machine,
-            continuation,
-            payload,
-            boundary.suspend_tag(),
-            "",
-        ) {
-            Ok(yield_result) => match drive_effect_loop(
-                &mut machine,
-                &cancel_flag,
-                table,
-                handlers,
-                user,
-                "",
-                Some(boundary.suspend_tag()),
-                yield_result,
-            ) {
-                Ok(outcome) => self.finish_suspendable(
+        let finished =
+            match materialize_response_and_resume(&mut machine, continuation, payload, "") {
+                Ok(yield_result) => match drive_effect_loop(
                     &mut machine,
-                    outcome,
-                    materialization,
-                    park,
+                    &cancel_flag,
                     table,
-                    cancel_flag,
-                ),
+                    handlers,
+                    user,
+                    "",
+                    effect_policy,
+                    yield_result,
+                ) {
+                    Ok(outcome) => self.finish_suspendable(
+                        &mut machine,
+                        outcome,
+                        materialization,
+                        park,
+                        table,
+                        cancel_flag,
+                    ),
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
-            },
-            Err(e) => Err(e),
-        };
+            };
         // SAFETY: machine.vmctx_mut() points into `machine` on this frame; the
         // guard's reclaim reads the post-run buffer/cursor into self.session.
         unsafe {
@@ -1641,7 +1597,7 @@ impl JitEffectMachine {
                 let ParkTarget::Registry {
                     realm,
                     kind,
-                    boundary,
+                    effect_policy,
                     live_payload,
                 } = park;
                 // A live request value crosses by reference only when the run
@@ -1694,7 +1650,7 @@ impl JitEffectMachine {
                     park_cancel_flag,
                     Arc::new(table.clone()),
                     live_payload_root,
-                    boundary,
+                    effect_policy,
                     live_payload,
                 );
                 Ok(ParkedRaw::Suspended {
@@ -1779,7 +1735,7 @@ impl JitEffectMachine {
     /// [`Self::add_function`]-minted fragment id. Same session lifecycle either way.
     fn run_pure_with_entry(&mut self, func_id: FuncId) -> Result<Value, JitError> {
         Ok(self
-            .with_active_run::<(), NoHandlers>(
+            .with_active_run::<(), HNil>(
                 func_id,
                 RunTarget::Pure,
                 ResultMaterialization::Value,
@@ -1970,7 +1926,7 @@ impl JitEffectMachine {
         // — unlike its effectful sibling `run_fragment_and_bind`, it takes no
         // `forced` flag.
         Ok(self
-            .with_active_run::<(), NoHandlers>(
+            .with_active_run::<(), HNil>(
                 func_id,
                 RunTarget::Pure,
                 ResultMaterialization::Bind { forced: true },
@@ -2260,28 +2216,6 @@ impl JitEffectMachine {
     // Parked-continuation registry.
     // ----------------------------------------------------------------------
 
-    /// Validate and establish the handled-effect layout before a parked-path
-    /// run starts. Establishment happens at entry, even if the run completes:
-    /// dispatch may occur without a suspension.
-    fn enter_parked_path(&mut self, boundary: &EffectBoundary) -> Result<(), JitError> {
-        if let Err(mismatch) = boundary.check_compatible_prefix(self.established_prefix.as_deref())
-        {
-            return Err(JitError::IncompatibleHandledPrefix {
-                established: self
-                    .established_prefix
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_vec(),
-                incoming: boundary.handled_prefix().to_vec(),
-                mismatch,
-            });
-        }
-        if self.established_prefix.is_none() && !boundary.handled_prefix().is_empty() {
-            self.established_prefix = Some(boundary.handled_prefix_arc());
-        }
-        Ok(())
-    }
-
     /// The rooting receipt: every parked continuation must be a
     /// registered GC root for its whole parked lifetime, so
     /// `stowed_roots_count() == parked_count()` at every quiescent point the
@@ -2306,9 +2240,8 @@ impl JitEffectMachine {
     /// this registration is released by [`Self::resume_continuation`], not by a guard
     /// at the end of the next child run.
     ///
-    /// The caller has already checked and established `boundary` via
-    /// [`Self::enter_parked_path`]. It is stored on the frame so resume uses
-    /// the same dispatch and suspension policy.
+    /// The effect policy is stored on the frame so resume preserves the same
+    /// dispatch and suspension semantics.
     #[allow(clippy::too_many_arguments)]
     fn park_continuation(
         &mut self,
@@ -2318,7 +2251,7 @@ impl JitEffectMachine {
         cancel_flag: Arc<AtomicBool>,
         table: Arc<DataConTable>,
         live_payload_root: Option<crate::old_space::RootSlot>,
-        boundary: EffectBoundary,
+        effect_policy: EffectRunPolicy,
         live_payload: LivePayloadPolicy,
     ) -> ContinuationId {
         let mut cell = Box::new(continuation);
@@ -2332,7 +2265,7 @@ impl JitEffectMachine {
         let id = self.resources.park(ContinuationFrame {
             cell,
             realm,
-            boundary,
+            effect_policy,
             kind,
             live_payload_root,
             live_payload,
@@ -2358,18 +2291,17 @@ impl JitEffectMachine {
             SuspensionEntry::Main => self.func_id,
             SuspensionEntry::Fragment(func_id) => func_id,
         };
-        self.enter_parked_path(run.boundary)?;
         self.run_suspendable_shared(
             func_id,
             run.table,
             handlers,
             user,
-            run.boundary,
+            run.effect_policy,
             run.completion.materialization(),
             ParkTarget::Registry {
                 realm: run.realm,
                 kind: run.completion,
-                boundary: run.boundary.clone(),
+                effect_policy: run.effect_policy,
                 live_payload: run.live_payload,
             },
         )
@@ -2378,9 +2310,9 @@ impl JitEffectMachine {
 
     /// Re-enter the continuation parked under `id`, feeding the answer (or an
     /// abort) and driving to the next suspension or completion. The frame's own
-    /// effect boundary and [`ParkKind`] are replayed — the caller supplies only
+    /// effect policy and [`ParkKind`] are replayed — the caller supplies only
     /// the id and input. Resumes may occur in any order. A re-suspension mints a
-    /// fresh id in the same realm and retains the frame's boundary.
+    /// fresh id in the same realm and retains the frame's policy.
     ///
     /// A bridged answer is checked for normal form BEFORE the frame is taken
     /// out of the map. A bottom-bearing answer therefore leaves the frame
@@ -2399,11 +2331,11 @@ impl JitEffectMachine {
     ) -> Result<ParkedOutcome, JitError> {
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
-        let (realm, kind, boundary, live_payload) = match self.resources.continuation(id) {
+        let (realm, kind, effect_policy, live_payload) = match self.resources.continuation(id) {
             Some(frame) => (
                 frame.realm,
                 frame.kind,
-                frame.boundary.clone(),
+                frame.effect_policy,
                 frame.live_payload,
             ),
             None => {
@@ -2413,7 +2345,6 @@ impl JitEffectMachine {
             }
         };
         // Validate before consuming the frame or running the continuation.
-        self.enter_parked_path(&boundary)?;
         if let ResumeInput::Answer(val) = &input {
             if let Err(reason) = answer_force_nf(val) {
                 // Reject without consuming. The frame stays parked and rooted,
@@ -2453,13 +2384,13 @@ impl JitEffectMachine {
             &table,
             handlers,
             user,
-            &boundary,
+            effect_policy,
             input,
             kind.materialization(),
             ParkTarget::Registry {
                 realm,
                 kind,
-                boundary: boundary.clone(),
+                effect_policy,
                 live_payload,
             },
             cancel_flag,
@@ -2822,12 +2753,11 @@ enum ResponsePlan {
 }
 
 /// Outcome of the shared effect step loop ([`drive_effect_loop`]): the turn
-/// completed with a Done heap pointer, or it SUSPENDED at the caller's
-/// `suspend_tag` (threadless suspension). `Suspended` carries the bridged
+/// completed with a Done heap pointer, or it suspended according to the run's
+/// [`EffectRunPolicy`]. `Suspended` carries the bridged
 /// request `Value` (the caller extracts prompt/meta) and the raw continuation
 /// heap pointer (the caller stows it; the machine's session heap is retained
-/// across the suspension). The non-suspend callers pass `suspend_tag = None`
-/// and never observe `Suspended`.
+/// across the suspension).
 enum DriveOutcome {
     Done(*mut u8),
     Suspended {
@@ -2879,9 +2809,6 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
     resume_suffix: &str,
 ) -> Result<*mut u8, JitError> {
     let yield_result = initial_step(machine, exec_start);
-    // suspend_tag = None: the ask-suspend branch is never taken, so this drives
-    // the plain non-suspend path. Threadless suspension is opt-in via
-    // `JitEffectMachine::run_until_suspension`, which passes `Some(ask_tag)`.
     match drive_effect_loop(
         machine,
         cancel_flag,
@@ -2889,12 +2816,12 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
         handlers,
         user,
         resume_suffix,
-        None,
+        EffectRunPolicy::HandleOrError,
         yield_result,
     )? {
         DriveOutcome::Done(ptr) => Ok(ptr),
         DriveOutcome::Suspended { .. } => {
-            unreachable!("drive_to_done passes suspend_tag=None; the effect loop never suspends")
+            unreachable!("HandleOrError runs never suspend")
         }
     }
 }
@@ -2917,17 +2844,10 @@ fn initial_step(machine: &mut CompiledEffectMachine, exec_start: &str) -> Yield 
 }
 
 /// The shared freer-simple effect step loop, factored out of [`drive_to_done`]
-/// so the same body serves the non-suspending run AND threadless suspension.
-///
-/// `suspend_tag = Some(t)`: a `Yield::Request` with `tag >= t` unwinds as
-/// [`DriveOutcome::Suspended`] (after bridging the request and while the
-/// continuation is still valid), instead of dispatching to a handler. `t` is
-/// the first INTERPOSED (unhandled) tag — every tag from there on is
-/// unhandled by construction, so this threshold test is what lets
-/// `Ask`/`RunLLMTurn`/`Finalize` share this one suspend arm without each
-/// needing its own comparison.
-/// `suspend_tag = None`: every effect dispatches through the plain,
-/// non-suspend path.
+/// so ordinary and suspendable runs use one nominal routing path. Handlers
+/// recognize request constructors; [`EffectRunPolicy`] determines whether an
+/// unrecognized request suspends or fails. The union's positional tag has no
+/// Rust routing semantics.
 ///
 /// `yield_result` is the entry Yield: a fresh [`initial_step`] for a new turn,
 /// or a `machine.resume(..)` of the stowed continuation for a re-entry.
@@ -2939,14 +2859,14 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
     handlers: &mut H,
     user: &U,
     resume_suffix: &str,
-    suspend_tag: Option<u64>,
+    effect_policy: EffectRunPolicy,
     mut yield_result: Yield,
 ) -> Result<DriveOutcome, JitError> {
     loop {
         match yield_result {
             Yield::Done(ptr) => return Ok(DriveOutcome::Done(ptr)),
             Yield::Request {
-                tag,
+                tag: _,
                 request,
                 continuation,
             } => {
@@ -3003,45 +2923,43 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 // `gc_trigger`); the bridge outcome is only its symptom.
                 let req_val =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
-                log::debug!(target: "tidepool::effects", "effect tag={} request={:?}", tag, req_val);
-                // Threadless suspension: `suspend_tag` is the FIRST interposed
-                // (unhandled) tag — the position right after the last effect with
-                // a real handler. Every tag at or beyond it is unhandled by
-                // construction (Ask, and RunLLMTurn/Finalize, always appended
-                // consecutively after the handled stack), so the threshold test
-                // `tag >= suspend_tag` catches ALL of them through this one arm:
-                // no per-effect duplication, `Ask`/`RunLLMTurn`/`Finalize` share
-                // this exact suspend path. A stack with only one interposed
-                // effect (today's ordinary eval/repl stacks) has `suspend_tag`
-                // as the only tag >= it, so this is behavior-preserving there.
-                // Unwind carrying the bridged request + the
-                // continuation instead of dispatching. `continuation` here is the
-                // post-request-bridge value (the arm's `register_rust_root`
-                // updated it in place through any GC during forcing). The arm's
-                // `_cont_root` drops as we return, releasing the run-scoped root;
-                // the raw pointer stays valid because the session heap buffer is
-                // retained across the suspension (no GC runs while stowed), and
-                // `resume_continuation` re-roots it before its answer materialization
-                // can collect.
-                if suspend_tag.is_some_and(|t| tag >= t) {
+                log::debug!(target: "tidepool::effects", "effect request={:?}", req_val);
+                let cx = EffectContext::with_user(table, user);
+                let response = match effect_policy {
+                    EffectRunPolicy::SuspendAll => None,
+                    EffectRunPolicy::HandleOrError | EffectRunPolicy::HandleOrSuspend => {
+                        crate::host_fns::surface_error(
+                            handlers.dispatch(&req_val, &cx).map_err(JitError::from),
+                        )?
+                    }
+                };
+
+                if response.is_none() && effect_policy != EffectRunPolicy::HandleOrError {
+                    // Unwind carrying the bridged request and continuation.
+                    // `continuation` here is the
+                    // post-request-bridge value (the arm's `register_rust_root`
+                    // updated it in place through any GC during forcing). The arm's
+                    // `_cont_root` drops as we return, releasing the run-scoped root;
+                    // the raw pointer stays valid because the session heap buffer is
+                    // retained across the suspension (no GC runs while stowed), and
+                    // `resume_continuation` re-roots it before its answer materialization
+                    // can collect.
                     return Ok(DriveOutcome::Suspended {
                         request: req_val,
                         request_ptr: request,
                         continuation,
                     });
                 }
-                let cx = EffectContext::with_user(table, user);
-                // A dispatcher that aborts at its `PauseGate` checkpoint
+                let response = response.ok_or_else(|| {
+                    JitError::Effect(EffectError::UnhandledEffect {
+                        constructor: request_constructor(&req_val, table),
+                    })
+                })?;
+                // A handler that aborts at its `PauseGate` checkpoint
                 // records `RuntimeError::Cancelled` as the first cause before
                 // returning `EffectError::Handler`, so a gate-fired timeout
                 // surfaces the same cause as a flag-fired one. Ordinary
                 // handler errors record no cause and pass through unchanged.
-                let response = crate::host_fns::surface_error(
-                    handlers
-                        .dispatch(tag, &req_val, &cx)
-                        .map_err(JitError::from),
-                )?;
-
                 // External cancellation safepoint at the effect-dispatch
                 // boundary. The handler we just called may itself have flipped
                 // the cancel flag (a watchdog handler is the canonical case);
@@ -3064,7 +2982,6 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                     machine,
                     continuation,
                     ResumePayload::Response(response),
-                    tag,
                     resume_suffix,
                 )?;
             }
@@ -3102,7 +3019,6 @@ fn materialize_response_and_resume(
     machine: &mut CompiledEffectMachine,
     mut continuation: *mut u8,
     response: ResumePayload,
-    tag: u64,
     resume_suffix: &str,
 ) -> Result<Yield, JitError> {
     let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
@@ -3231,10 +3147,7 @@ fn materialize_response_and_resume(
     };
     // SAFETY: as above.
     unsafe { machine_state(machine.vmctx_mut() as *mut VMContext) }.reset_call_depth();
-    crate::host_fns::set_exec_context(&format!(
-        "resuming after effect tag={}{}",
-        tag, resume_suffix
-    ));
+    crate::host_fns::set_exec_context(&format!("resuming after effect{resume_suffix}"));
     // SAFETY: continuation and resp_ptr are valid nursery heap pointers.
     // resume applies the continuation tree to the response.
     Ok(

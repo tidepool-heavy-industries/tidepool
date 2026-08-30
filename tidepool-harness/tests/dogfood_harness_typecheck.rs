@@ -87,9 +87,8 @@ fn typecheck(
 }
 
 /// The companion's row is the driver's own outer session: `[RunLLMTurn,
-/// AskUser, Worktree, Subagent]` (mirrors `selfharness::driver::outer_decls`
-/// — interposed effects FIRST so the suspend threshold stays 0; Worktree is
-/// Subagent's hard companion). Its `loop` calls only `runLLMTurn` today —
+/// AskUser, Worktree, Subagent]` (mirrors `selfharness::driver::outer_decls`;
+/// Worktree is Subagent's hard companion). Its `loop` calls only `runLLMTurn` today —
 /// conversation happens through the answerer's own `askUser` forms — but the
 /// probe compiles against the full outer row the driver actually serves.
 #[test]
@@ -128,8 +127,7 @@ fn outer_row_decls() -> Vec<tidepool_mcp::EffectDecl> {
 /// dev-tree is the executable design target of S1-L1: its row now IS the
 /// driver's widened outer session (`[RunLLMTurn, AskUser, Console, Worktree,
 /// RepoEvent, Exec, Subagent, Journal, Green]` — mirrors
-/// `selfharness::driver::outer_decls`, interposed effects FIRST so the
-/// suspend threshold stays 0). Typechecking against that exact row is what
+/// `selfharness::driver::outer_decls`). Typechecking against that exact row is what
 /// turns this from "the file names only landed API" into "this compiles
 /// against what the driver actually serves".
 ///

@@ -222,19 +222,21 @@ impl SelfHarnessDriver {
             llm_model: std::env::var("TIDEPOOL_LLM_MODEL")
                 .unwrap_or_else(|_| "gpt-4o-mini".to_string()),
         };
-        // Never actually dispatched to: `cfg.suspend_tag == 0` means every
-        // declared effect suspends before reaching a handler.
         let stack: crate::harness::BoxedStack =
             Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
-        crate::harness::Session::unbootstrapped(
+        let mut session = crate::harness::Session::unbootstrapped(
             stack,
-            cfg.suspend_tag,
             cfg.effect_names.clone(),
             tidepool_mcp::CapturedOutput::new(),
             cfg.include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
             lib,
-        )
+        );
+        session.set_effect_execution(
+            tidepool_effect::EffectRunPolicy::SuspendAll,
+            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        session
     }
 
     /// LOOP-BOUNDARY MACHINE MAINTENANCE (bounded lifetime, not
