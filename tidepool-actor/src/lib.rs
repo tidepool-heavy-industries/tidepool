@@ -10,6 +10,7 @@
 mod agent_session;
 mod event;
 mod identity;
+mod mailbox;
 mod mount;
 mod registry;
 mod sequence;
@@ -17,14 +18,18 @@ mod timeline;
 
 pub use agent_session::{ActorAgentSession, AssistantTurn, PendingProviderTurn};
 pub use event::{
-    ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, EventCausality,
-    ModelUsage, StartInitiator,
+    ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,
+    EventCausality, MailboxMessageKind, ModelUsage, StartInitiator,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
+pub use mailbox::{
+    CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
+    MessageId,
+};
 pub use mount::{mount_actor_turn, ActorRunTarget, ActorSessionContext, MountActorTurnError};
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
-    ActorTurnKind, StartingActor, TurnLease,
+    ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,
 };
 pub use sequence::{
     run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, ParsedBlock,

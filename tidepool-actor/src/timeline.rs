@@ -135,7 +135,10 @@ impl ActorTimelines {
             | ActorEvent::HaskellCompiled { .. }
             | ActorEvent::EffectSettled { .. }
             | ActorEvent::SuspensionAnswerAttempt { .. }
-            | ActorEvent::ConversationForked { .. } => {}
+            | ActorEvent::ConversationForked { .. }
+            | ActorEvent::MailboxAccepted { .. }
+            | ActorEvent::MailboxDequeued { .. }
+            | ActorEvent::CallSettled { .. } => {}
             ActorEvent::Ready => timeline.lifecycle = TimelineLifecycle::Ready,
             ActorEvent::Exited { kind, summary } => {
                 timeline.lifecycle = TimelineLifecycle::Exited;
@@ -164,6 +167,9 @@ fn event_name(event: &ActorEvent) -> &'static str {
         ActorEvent::Ready => "ready",
         ActorEvent::Exited { .. } => "exited",
         ActorEvent::ModelMessage { .. } => "model_message",
+        ActorEvent::MailboxAccepted { .. } => "mailbox_accepted",
+        ActorEvent::MailboxDequeued { .. } => "mailbox_dequeued",
+        ActorEvent::CallSettled { .. } => "call_settled",
         ActorEvent::ConversationForked { .. } => "conversation_forked",
         ActorEvent::HaskellBatchStarted { .. } => "haskell_batch_started",
         ActorEvent::HaskellCompiled { .. } => "haskell_compiled",
@@ -188,6 +194,7 @@ mod tests {
                 ActorDescriptor {
                     label: "reviewer".into(),
                     effect_stack: vec!["Deliberate".into()],
+                    session: tidepool_repr::SessionId(1),
                 },
                 StartInitiator::Runtime,
             )

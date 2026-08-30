@@ -105,6 +105,7 @@ mod tests {
                 ActorDescriptor {
                     label: "actor".into(),
                     effect_stack: vec![],
+                    session: tidepool_repr::SessionId(1),
                 },
                 StartInitiator::Runtime,
             )

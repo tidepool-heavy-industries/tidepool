@@ -69,6 +69,7 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
                     .iter()
                     .map(|name| (*name).to_string())
                     .collect(),
+                session: tidepool_repr::SessionId(1),
             },
             StartInitiator::Runtime,
         )

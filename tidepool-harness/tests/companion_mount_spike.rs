@@ -16,7 +16,10 @@
 //!    payload ([`ResidentSession::finalized_handle`]) — the SAME primitive
 //!    the fn-finalize-spike suite uses to deliver a closure into a parked
 //!    continuation, reached here directly rather than through the driver.
-//! 2. **Z**, a throwaway node on the SAME session, runs an ordinary
+//! 2. The producer transfers that root through an exact-incarnation actor
+//!    mailbox. The mailbox owns the existing `RootCustody`; it does not mint
+//!    a parallel root or serialize the closure.
+//! 3. **Z**, a throwaway node on the SAME session, runs an ordinary
 //!    `mounted <- pure (Mounted { applyMounted = id })` — ordinary value-
 //!    plane bind machinery already used for `x <- fork …` results. Its OWN
 //!    tenured value is thrown away; what matters is that it mints a REAL
@@ -24,14 +27,14 @@
 //!    name `mounted`, which a later turn on ANY node sharing this session
 //!    already resolves through the existing `session_bind_context`
 //!    plumbing — no new GHC-facing mechanism.
-//! 3. The runtime redirects that binding's root to point at P's real handle
+//! 4. The runtime redirects that binding's root to point at P's real handle
 //!    ([`ResidentSession::mount_handle`]) — the mount seam itself: "a handle
 //!    installed under a name in a window's declaration scope",
 //!    the closure-tenure-then-handle path pointed
 //!    the OTHER direction. P then retires (`terminate_node`) — its realm
 //!    closes, but the handle was already transferred OUT before that, so the
 //!    mount survives P's death.
-//! 4. **C**, a brand-new node forced AFTER the mount (never sees `mounted`
+//! 5. **C**, a brand-new node forced AFTER the mount (never sees `mounted`
 //!    established — it just opens with the name already resolvable),
 //!    compiles a turn that parks on `askUser` (the GC-risk window — a
 //!    genuine suspend/resume cycle sits between "the name resolves" and
@@ -59,6 +62,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::json;
+use tidepool_actor::{
+    ActorDescriptor, ActorRegistry, MailboxDelivery, MailboxValue, StartInitiator,
+};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::harness::{AnswerContract, Session};
@@ -250,6 +256,60 @@ async fn mounted_closure_survives_retirement_and_suspension() {
         "minting the handle is this ownership class's ONE new root"
     );
 
+    // Transfer that same root through the actor mailbox. Acceptance moves
+    // custody into the envelope; dequeue moves it to the target handler. No
+    // bridge value, JSON representation, or second root is involved.
+    let actors = ActorRegistry::new();
+    let producer_start = actors
+        .begin_start(
+            None,
+            ActorDescriptor {
+                label: "closure producer".into(),
+                effect_stack: Vec::new(),
+                session: sid,
+            },
+            StartInitiator::Runtime,
+        )
+        .expect("start producer actor");
+    let producer = actors
+        .publish_ready(producer_start)
+        .expect("ready producer actor");
+    let consumer_start = actors
+        .begin_start(
+            Some(producer),
+            ActorDescriptor {
+                label: "closure consumer".into(),
+                effect_stack: Vec::new(),
+                session: sid,
+            },
+            StartInitiator::Runtime,
+        )
+        .expect("start consumer actor");
+    let consumer = actors
+        .publish_ready(consumer_start)
+        .expect("ready consumer actor");
+    actors
+        .cast(producer, consumer, MailboxValue::new(sid, handle))
+        .expect("mailbox accepts closure custody");
+    let MailboxDelivery::Cast(mut delivery) = actors
+        .dequeue(consumer)
+        .expect("dequeue mailbox")
+        .expect("closure message")
+    else {
+        panic!("closure transfer must be a cast");
+    };
+    let handle = delivery
+        .take_value()
+        .expect("closure custody")
+        .into_custody();
+    assert_eq!(
+        harness
+            .with_session(sid, |s| s.value_handle_count())
+            .expect("session checkout"),
+        1,
+        "mailbox transfer moves custody without duplicating its machine root"
+    );
+
     // --- Runtime: mint the placeholder identity, then redirect it to P's
     // real handle — the mount itself. ---
     let node_z = harness
@@ -272,6 +332,7 @@ async fn mounted_closure_survives_retirement_and_suspension() {
         .with_session(sid, |s| s.mount_handle("mounted", handle))
         .expect("session checkout")
         .expect("mount succeeds: the handle was live");
+    drop(delivery);
     assert_eq!(
         harness
             .with_session(sid, |s| s.value_handle_count())
