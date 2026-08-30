@@ -54,8 +54,9 @@ Rust builds one actor-local interpreter for the stack. An effect-stack ABI
 identifies the ordered effect types and request layouts against which compiled
 continuations run; the interpreter instance supplies this actor's handlers,
 grants, and caller identity. Forks create a new interpreter instance with the
-same ABI. There is no machine-global handled prefix requiring unrelated actors
-to use the same row.
+same ABI. Actors sharing a machine may share the machine's established prefix
+of locally dispatched effects, but that prefix is not the actor's full row:
+the suspension tail and its ABI remain actor-local.
 
 The stack determines which operation classes Haskell can express. Opaque
 handles and principal-scoped grants still authorize particular resources at

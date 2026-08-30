@@ -431,29 +431,54 @@ A program image has two jobs:
    actor's model-facing Haskell environment.
 
 A closure alone satisfies the first job but not the second. Therefore a
-dynamically constructed `ActorSpec` must retain a dependency-closed declaration
-image alongside its live roots. The exact extraction format is an
-implementation question; the semantic contract is not.
+dynamically constructed `ActorSpec` must retain an exact declaration view
+alongside its live roots. That view has an explicit model-visible export
+membrane: fresh spawn does not inherit the defining actor's ambient binding or
+declaration namespace merely because the specification was created there.
 
-The initial representation is a dependency-closed set of compiled fragment
-identities, declaration/interface metadata for model inspection, and leased
-live-root handles for executable entry points. Source text is provenance and
-display material, never the identity-bearing deployment format. Phase 0 may
-change the container layout but not these three constituents.
+`Program image` is a semantic bundle, not a mandate for another registry,
+compiler cache, or root ledger. The initial same-machine representation should
+compose mechanisms Tidepool already has:
+
+- a rooted compiled entry closure, executed through the resident machine's
+  existing suspension-capable entry path;
+- exact `SessionModule`/interface identities plus an explicit set of exports
+  made visible to the child's fenced-Haskell environment;
+- declaration source and documentation retained only for inspection and
+  provenance; and
+- the sealed actor effect-stack ABI retained by the authoritative actor
+  descriptor.
+
+The resident code arena owns executable code, the value-handle ledger owns
+roots while they are in transit, and the actor's resource realm owns deployed
+roots. A program image must not create parallel ownership for any of them.
+Phase 0 may add a small deployment record tying these identities together, but
+only if the vertical spike reveals an invariant with no existing home.
 
 Deploy the exact compiled declaration identities; do not replay equivalent
-source into a new module and pretend the resulting types are equal. A dynamic
-protocol value created by the parent and a handler compiled for the child must
-refer to the same type and constructor identities.
+source into a new module and pretend the resulting types are equal. Import the
+selected exports from those exact modules into the fresh actor environment.
+A dynamic protocol value created by the parent and a handler compiled for the
+child must refer to the same type and constructor identities.
+
+Fresh spawn is not lexical-scope child creation. The current session scope tree
+is the correct substrate for forked visibility, but its value plane walks the
+live parent chain. Using `mint_scope(parent)` for fresh spawn would therefore
+leak later parent bindings. A fresh actor begins from the sealed machine base
+and receives only the image's exact module exports, rooted entry closure,
+startup value, and granted capabilities.
 
 Snapshots are immutable. A successful declaration or binding creates a new
-tip. Forks point at an existing tip, and later definitions diverge. This uses
-the same parent-to-child, no-sibling-leak lexical rule that Tidepool's current
-scope tree already enforces.
+tip. Forks point at an existing tip, and later definitions diverge. Tidepool's
+declaration plane already freezes a parent's generation when a child scope is
+minted. Its current value plane does not: lookup still walks mutable ancestor
+frames. Structural fork must add an immutable binding snapshot with root leases
+before claiming the same property for live values; ordinary scope ancestry is
+not that snapshot.
 
 Before a spawn or fork returns, the new actor must own leases for every live
-root in its snapshot. Actor termination must not invalidate a live value whose
-root ownership was already transferred to another actor.
+root in its deployment or snapshot. Actor termination must not invalidate a
+live value whose root ownership was already transferred to another actor.
 
 ## 8. State and persistence
 

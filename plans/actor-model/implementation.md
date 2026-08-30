@@ -69,6 +69,12 @@ Acceptance:
 
 - child receives the dependency-closed program image but no unrelated parent
   transcript or binding;
+- deployment reuses the resident code arena, value-handle ledger, resource
+  realms, and exact session-module identities; it does not add a program-image
+  registry, replay source into nominally new types, or use live parent-scope
+  ancestry as fresh-spawn isolation;
+- the child compiler imports only the image's explicit model-visible exports
+  from their exact modules;
 - startup follows `prepare`, one typed User-role agent session, and one
   authored `install`; preparation or installation cannot open nested model
   turns;
@@ -372,7 +378,7 @@ their shape.
 |---|---|
 | `tidepool-codegen` | Existing JIT execution, parked continuations, live-root handles, GC accounting; only narrow support needed by root transfer or principal installation |
 | machine-session substrate | Persistent declarations/bindings, scope snapshots, checkout, mounted Haskell evaluation |
-| actor runtime | Actor registry, ownership tree, mailboxes, principals, per-actor interpreters, capabilities, program images, supervision, model/Haskell coordination |
+| actor runtime | Actor registry, ownership tree, mailboxes, principals, per-actor interpreters, capabilities, program-image deployment metadata, supervision, model/Haskell coordination |
 | `tidepool-agent` | Provider/coding-backend adapter and persistent backend thread seam |
 | `tidepool-harness` | Transitional authored-harness driver; actor-specific machinery should move to the actor runtime rather than deepen this crate's current mixed charter |
 | `tidepool-repl` | Shared Haskell-aware classification behavior; it does not own the provider-to-resident agent loop |
@@ -444,9 +450,11 @@ evidence:
 
 1. `tidepool-actor` owns the actor kernel; mixed actor machinery leaves
    `tidepool-harness` rather than deepening it.
-2. A program image contains dependency-closed compiled identities,
-   declaration/interface metadata, and leased executable roots. Source is
-   provenance, not deployment identity.
+2. A program image composes a rooted compiled entry closure, exact
+   declaration/interface identities with explicit model-visible exports,
+   provenance, and the actor descriptor's sealed effect-stack ABI. Existing
+   code, root, realm, and session-module owners remain authoritative; source is
+   never replayed as deployment identity.
 3. Capability fork behavior is one of `OwnerOnly`, `ShareWithChild`,
    `RebindForChild`, or `InvalidAfterFork`, registered by the Rust capability
    class.
