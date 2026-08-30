@@ -1073,14 +1073,11 @@ mod tests {
         assert!(decls.iter().any(|d| d.type_name == "Journal"));
     }
 
-    /// The answerer's generated `Tidepool.Effects` module declares the
-    /// `AskUser` GADT + `askUserRaw` helper
-    /// — and does NOT declare `Ask`/`ask`/`dialogAsk` (a DIFFERENT effect,
-    /// deliberately absent from `typed_request_agent_decls()`, and `dialogAsk` is
-    /// deleted outright). Pure string-level check, no GHC needed.
+    /// Universal Core names both request effects, while the answerer's
+    /// concrete row grants `AskUser` but not `Ask`.
     #[test]
-    fn answerer_effects_module_declares_askuser_not_ask() {
-        let src = tidepool_mcp::effects_core_module_source(&typed_request_agent_decls());
+    fn answerer_row_grants_askuser_not_ask() {
+        let src = tidepool_mcp::effects_core_module_source();
         assert!(
             src.contains("data AskUser a where"),
             "expected an AskUser GADT declaration, got:\n{src}"
@@ -1090,9 +1087,12 @@ mod tests {
             "expected the askUserRaw helper, got:\n{src}"
         );
         assert!(
-            !src.contains("data Ask a where"),
-            "the answerer stack must NOT declare the Ask GADT, got:\n{src}"
+            src.contains("data Ask a where"),
+            "universal Core must declare the Ask GADT, got:\n{src}"
         );
+        let row = typed_request_agent_decls();
+        assert!(row.iter().any(|decl| decl.type_name == "AskUser"));
+        assert!(!row.iter().any(|decl| decl.type_name == "Ask"));
         assert!(
             !src.contains("dialogAsk"),
             "dialogAsk is deleted and must not appear anywhere, got:\n{src}"

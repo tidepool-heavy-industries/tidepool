@@ -3,7 +3,7 @@
 -- declarations. Do not edit; regenerated (content-addressed) at startup.
 -- PER-WINDOW shim: re-exports the stable Tidepool.Effects.Core and adds
 -- only `type M`, this compile's own effect row — see that module and
--- tidepool-mcp/CLAUDE.md's stable-effects-core section.
+-- tidepool-mcp/CLAUDE.md's generated-effects section.
 module Tidepool.Effects (module Tidepool.Effects.Core, M) where
 import Tidepool.Effects.Core
 import Control.Monad.Freer hiding (run)

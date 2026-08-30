@@ -2,23 +2,20 @@ module Tidepool.TypePolicy
   ( isGhcCompilerName
   , isGhcCompilerTyCon
   , modulesOfType
-  , typeMentionsEffectMonad
+  , stabilizeEffectRows
   ) where
 
 import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.List as List
 import qualified Data.Text as T
-import GHC.Core.DataCon (dataConOrigArgTys)
 import GHC.Core.TyCo.FVs (tyConsOfType)
-import GHC.Core.TyCo.Rep (Scaled(..), Type(TyConApp))
+import GHC.Core.TyCo.Rep (Type(..))
 import GHC.Core.TyCon
-  ( TyCon, tyConDataCons_maybe, tyConName, unwrapNewTyCon_maybe )
-import GHC.Core.Type (splitFunTy_maybe, splitTyConApp_maybe)
+  ( TyCon, isTypeSynonymTyCon, tyConName )
+import GHC.Core.Type (coreView, expandTypeSynonyms)
 import GHC.Types.Name (Name, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (occNameString)
-import GHC.Types.Unique.Set
-  ( UniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet )
 import qualified GHC.Types.Unique.Set as USet
 import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
@@ -55,23 +52,35 @@ modulesOfType ty =
           [T.pack (moduleNameString (moduleName m))]
     headModule _ = []
 
--- | Whether a type contains freer-simple's @Eff@, including through function
--- arguments, type arguments, newtypes, and data-constructor fields.
+-- | Replace effect-row aliases with their exact underlying @Eff '[...]@ type.
 --
--- A concrete @Eff@ row is local to one generated program and cannot safely
--- cross into a later compilation. Effect vocabulary types themselves are not
--- rejected: they live in the stable @Tidepool.Effects.Core@ module and have a
--- shared identity across programs using the same vocabulary.
-typeMentionsEffectMonad :: Type -> Bool
-typeMentionsEffectMonad = goType emptyUniqSet
+-- Per-incarnation aliases such as @M@ are convenient authored syntax but are
+-- the wrong persisted contract: a later compilation could resolve the same
+-- spelling to a different row. We therefore expand a synonym only when its
+-- fully expanded meaning contains freer-simple's @Eff@. Ordinary domain
+-- aliases remain intact, while aliases nested inside functions and records'
+-- type arguments are handled recursively.
+--
+-- This is normalization, not a prohibition. Effectful functions and values
+-- may cross a session or typed-suspension boundary; GHC checks their exact row
+-- when the receiving program uses them.
+stabilizeEffectRows :: Type -> Type
+stabilizeEffectRows = go
   where
-    goType :: UniqSet TyCon -> Type -> Bool
-    goType visited ty
-      | Just (_, _, argTy, resultTy) <- splitFunTy_maybe ty =
-          goType visited argTy || goType visited resultTy
-      | Just (tc, args) <- splitTyConApp_maybe ty =
-          isEffTyCon tc || any (goType visited) args || goTyCon visited tc
-      | otherwise = False
+    go ty@(TyConApp tc args)
+      | isTypeSynonymTyCon tc
+      , containsEff (expandTypeSynonyms ty)
+      , Just expanded <- coreView ty
+      = go expanded
+      | otherwise = TyConApp tc (map go args)
+    go (AppTy f x) = AppTy (go f) (go x)
+    go (ForAllTy binder body) = ForAllTy binder (go body)
+    go (FunTy flag mult arg result) =
+      FunTy flag (go mult) (go arg) (go result)
+    go (CastTy ty coercion) = CastTy (go ty) coercion
+    go other = other
+
+    containsEff = any isEffTyCon . USet.nonDetEltsUniqSet . tyConsOfType
 
     isEffTyCon tc =
       occNameString (nameOccName (tyConName tc)) == "Eff"
@@ -80,20 +89,3 @@ typeMentionsEffectMonad = goType emptyUniqSet
     definedIn expected tc =
       maybe False ((== expected) . moduleNameString . moduleName)
         (nameModule_maybe (tyConName tc))
-
-    goTyCon :: UniqSet TyCon -> TyCon -> Bool
-    goTyCon visited tc
-      | tc `elementOfUniqSet` visited = False
-      | isGhcCompilerTyCon tc = False
-      | otherwise =
-          let visited' = addOneToUniqSet visited tc
-              newtypeHit = case unwrapNewTyCon_maybe tc of
-                Just (_, representation, _) -> goType visited' representation
-                Nothing -> False
-              fieldHit = case tyConDataCons_maybe tc of
-                Just constructors -> any
-                  (any (\(Scaled _ fieldType) -> goType visited' fieldType)
-                    . dataConOrigArgTys)
-                  constructors
-                Nothing -> False
-          in newtypeHit || fieldHit

@@ -114,13 +114,6 @@ pub struct SessionBind<'a> {
     pub names: &'a [String],
     /// The generation of the `Val.G<g>` module to mint (shared by all N names).
     pub gen: u64,
-    /// This bind is an ephemeral type probe (`:t`) — the binder is read then
-    /// discarded, never registered as a session binding, so it never crosses
-    /// into a later fragment. Exempts the extract's cross-row bind guard
-    /// (`typeMentionsEffectMonad` in `haskell/app/Main.hs`), which otherwise
-    /// rejects any row-mentioning type — the guard exists to protect REAL
-    /// binds, not a discard-immediately probe. `false` for a genuine bind.
-    pub probe_only: bool,
 }
 
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
@@ -1108,9 +1101,6 @@ pub fn compile_session_turn(
         for name in b.names {
             cmd.bind_name(name);
         }
-        if b.probe_only {
-            cmd.probe_only();
-        }
     }
 
     let run = cmd.run().map_err(map_notfound)?;
@@ -1701,7 +1691,7 @@ mod tests {
         );
         let call = calls.lines().next().unwrap_or_default();
         assert!(
-            call.starts_with("--worker-request-v1 5450524551303031"),
+            call.starts_with("--worker-request-v2 5450524551303032"),
             "spawn did not use the versioned typed worker protocol:\n{call}"
         );
     }

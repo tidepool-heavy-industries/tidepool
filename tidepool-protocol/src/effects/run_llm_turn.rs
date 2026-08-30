@@ -24,11 +24,10 @@
 //! `RunLLMTurnWith` payload's JSON object (this GADT has no dedicated site
 //! field of its own, unlike `Fork`'s/`Finalize`'s), sends it, and
 //! `unsafeCoerce`s the `Value` result back to the caller's answer type — safe
-//! because the extractor has already checked the call site's answer type is
-//! monomorphic (`checkRunLLMTurnType`): a pure function type is allowed (the
-//! model may finalize a `State -> State`), a type mentioning the effect monad
-//! is rejected (`typeMentionsEffectMonad`), so the harness always resumes with
-//! a value the caller validated against that exact type — the coercion is a
+//! because the extractor has checked the call site's answer type is
+//! monomorphic and normalized any per-window effect-row alias to its exact
+//! `Eff '[...]` type. The harness therefore compiles the answer against the
+//! caller's actual contract before resuming it; the coercion is a
 //! same-representation relabeling, never a genuine type change.
 //!
 //! `InvocationExit` — why a forked child ended WITHOUT a typed answer — rides

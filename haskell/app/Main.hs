@@ -477,7 +477,7 @@ runTurnMode compiler args path = do
           SBind -> do
             g    <- requireArg "--bind-gen"     (requestBindGen args)
             root <- requireArg "--session-root" (requestSessionRoot args)
-            bbs  <- mkBoundBinders False (sbBinders sb) g root result
+            bbs  <- mkBoundBinders (sbBinders sb) g root result
             return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
           SBindDiscard -> return (TBind [] 0 [] asksSites wrapped)
           SExpr -> return (TExpr 0 asksSites wrapped)

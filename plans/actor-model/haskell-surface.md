@@ -45,6 +45,14 @@ constraints and can be instantiated in any actor whose stack satisfies them.
 A function already specialized to one actor's concrete stack remains
 actor-local.
 
+This is primarily an authoring rule taught in the actor's Developer guidance:
+do not hardcode a concrete effect stack or its order in reusable code; state
+the required capabilities with `Member`/`Members`. The runtime does not reject
+cross-actor function values merely because they are effectful. GHC decides
+whether the receiver's row satisfies their constraints, while Rust still
+checks principal-bound handles and actor-local runtime authority when an
+effect is interpreted.
+
 The effect stack is fixed for the incarnation. The model may add ordinary
 types, declarations, values, protocols, and behavior, but cannot redefine the
 stack. Adding or removing an effect class creates a new actor incarnation and

@@ -2025,8 +2025,8 @@ Green threads: cooperative concurrency with the authored surface of `Control.Con
 -- end prompt_card.0 --
 
 -- constructors (5 items) --
--- constructors[0] (51 bytes) --
-AsyncSpawnWith :: Int -> (Int -> M ()) -> Green Int
+-- constructors[0] (62 bytes) --
+AsyncSpawnWith :: Int -> (Int -> Eff bodyEffs ()) -> Green Int
 -- end constructors[0] --
 
 -- constructors[1] (32 bytes) --
@@ -2062,7 +2062,7 @@ import Tidepool.Async
 -- end extra_imports --
 
 -- helpers (4 items) --
--- helpers[0] (475 bytes) --
+-- helpers[0] (523 bytes) --
 -- @substrate-helper@
 -- | Fork a green thread; substrate for 'Tidepool.Async.async'.
 -- The body rides as a lambda so the closure-sentinel scan fires
@@ -2070,7 +2070,7 @@ import Tidepool.Async
 -- The authored wrapper publishes its result into a managed
 -- Haskell cell before the body's last, payload-free
 -- AsyncDoneWith suspension.
-asyncSpawn :: M () -> M Int
+asyncSpawn :: forall effs. Member Green effs => Eff effs () -> Eff effs Int
 asyncSpawn body = send (AsyncSpawnWith 0 (\_ -> body >>= \() -> send (AsyncDoneWith 0)))
 -- end helpers[0] --
 

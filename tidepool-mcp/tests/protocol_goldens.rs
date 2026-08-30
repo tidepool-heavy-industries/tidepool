@@ -186,8 +186,8 @@ fn effect_decls_golden_matches_committed_file() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn effects_core_module_standard_golden_matches_committed_file() {
-    let generated = tidepool_mcp::effects_core_module_source(&tidepool_mcp::standard_decls());
+fn effects_core_module_universal_golden_matches_committed_file() {
+    let generated = tidepool_mcp::effects_core_module_source();
     assert_matches_golden("effects_core_module.standard.hs", &generated);
 }
 

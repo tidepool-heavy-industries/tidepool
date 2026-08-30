@@ -4,11 +4,7 @@ module Tidepool.SessionArtifacts
   , parseValModule
   ) where
 
-import Control.Monad (forM_, when)
-import GHC (Type)
-import GHC.Core.TyCon (tyConName)
-import GHC.Core.Type (splitTyConApp_maybe)
-import GHC.Types.Name (getOccString)
+import Control.Monad (forM_)
 import GHC.Types.Name.Occurrence (mkVarOcc)
 import Data.Word (Word64)
 import System.IO (hPutStrLn, stderr)
@@ -23,13 +19,13 @@ import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..)
   , mkThinSessionIface, parseSessionModule, sessionBinderName
   , sessionModuleString, writeSessionIface )
-import Tidepool.TypePolicy (typeMentionsEffectMonad)
+import Tidepool.TypePolicy (stabilizeEffectRows)
 
 -- | Describe and publish the values materialized by one session bind. The
 -- captured result type is split for multi-binds, checked for cross-compilation
 -- safety, and written as the thin interface later turns import.
-mkBoundBinders :: Bool -> [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
-mkBoundBinders probeOnly bindNames generation root result = do
+mkBoundBinders :: [String] -> Word64 -> FilePath -> PipelineResult -> IO [BoundBinder]
+mkBoundBinders bindNames generation root result = do
   resultType <- case prResultType result of
     Just ty -> pure ty
     Nothing -> error "session bind has no captured result type"
@@ -44,19 +40,14 @@ mkBoundBinders probeOnly bindNames generation root result = do
         | length types == length bindNames -> pure types
         | otherwise -> error $ "multi-bind has " ++ show (length bindNames)
             ++ " names but its result has " ++ show (length types) ++ " fields"
-  when (not probeOnly) $
-    forM_ (zip bindNames componentTypes) $ \(name, ty) ->
-      when (typeMentionsEffectMonad ty) $
-        error $ "session bind '" ++ name ++ "' captures a compile-local effect row ("
-          ++ renderType ty ++ "); bind a pure value or inline the effectful part"
-          ++ eitherBindHint ty
   let build name ty =
-        let occurrence = mkVarOcc name
+        let persistedType = stabilizeEffectRows ty
+            occurrence = mkVarOcc name
             varId = stableVarId (sessionBinderName hsc sessionModule occurrence)
             moduleName = sessionModuleString sessionModule
-            tier = if isClosureType ty then "Tier1Closure" else "Tier0Data"
+            tier = if isClosureType persistedType then "Tier1Closure" else "Tier0Data"
             displayType = renderType ty
-        in (BoundBinder name varId moduleName tier displayType, occurrence, ty)
+        in (BoundBinder name varId moduleName tier displayType, occurrence, persistedType)
       built = zipWith build bindNames componentTypes
       binders = [binder | (binder, _, _) <- built]
   iface <- mkThinSessionIface hsc sessionModule [(occ, ty) | (_, occ, ty) <- built]
@@ -65,12 +56,6 @@ mkBoundBinders probeOnly bindNames generation root result = do
     hPutStrLn stderr $ "  Wrote session iface: " ++ moduleName ++ " (" ++ name
       ++ " :: " ++ displayType ++ ", " ++ tier ++ ", varId " ++ show varId ++ ")"
   pure binders
-
-eitherBindHint :: Type -> String
-eitherBindHint ty = case splitTyConApp_maybe ty of
-  Just (tc, [_, _]) | getOccString (tyConName tc) == "Either" ->
-    " or destructure at the bind: `Right x <- <expr>`"
-  _ -> ""
 
 -- | Emit the interface and optional binder-description sidecar for a bind
 -- request.
@@ -81,7 +66,7 @@ emitBindArtifacts request result = do
     names -> pure names
   generation <- requireField "bind generation" (requestBindGen request)
   root <- requireField "session root" (requestSessionRoot request)
-  binders <- mkBoundBinders (requestProbeOnly request) bindNames generation root result
+  binders <- mkBoundBinders bindNames generation root result
   forM_ (requestEmitBoundBinders request) $ \output -> do
     writeFile output (renderBoundBindersJson binders)
     hPutStrLn stderr $ "  Wrote bound-binder sidecar: " ++ output

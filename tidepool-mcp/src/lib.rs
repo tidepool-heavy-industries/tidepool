@@ -214,12 +214,9 @@ pub struct HelpRequest {
 /// must be on the include path (GHC resolves `Tidepool.Effects`'s `import
 /// Tidepool.Effects.Core` against the `core` root).
 ///
-/// **`core` is the stable half**: content-addressed on the effect VOCABULARY
-/// alone, so every window/turn that shares a vocabulary (the general Agent
-/// stack, the self-iterating harness's answerer stack, …) resolves to the
-/// SAME dir — no recompiling every effect GADT + helper per window, and no
-/// tycon churn for a value that mentions one (see
-/// `haskell/src/Tidepool/Translate.hs`'s narrowed `typeMentionsEffectMonad`).
+/// **`core` is the universal stable half**: every compile resolves the same
+/// content-addressed effect vocabulary. The narrow shim row controls which
+/// effects are executable.
 ///
 /// **`shim` is the per-window half**: content-addressed on the ROW (which
 /// effects are actually in `type M`) and any [`RowArgs`] type application —
@@ -227,7 +224,7 @@ pub struct HelpRequest {
 /// answer type changes between windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectsModuleDirs {
-    /// Include root holding `Tidepool/Effects/Core.hs` — vocabulary-keyed.
+    /// Include root holding universal `Tidepool/Effects/Core.hs`.
     pub core: PathBuf,
     /// Include root holding `Tidepool/Effects.hs` (the shim) and
     /// `Tidepool/Orchestrate.hs` — row-keyed.
@@ -245,11 +242,11 @@ impl EffectsModuleDirs {
     }
 }
 
-/// Write the generated `Tidepool/Effects/Core.hs` (vocabulary-keyed) and
+/// Write universal `Tidepool/Effects/Core.hs` and
 /// `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs` (row-keyed) into their two
 /// content-addressed directories and return both (see [`EffectsModuleDirs`]).
 /// Idempotent: each path is keyed on its own module source(s), so distinct
-/// vocabularies/rows coexist and repeat startups reuse the same dirs.
+/// rows coexist and repeat startups reuse the same dirs.
 /// Re-callable per eval (see [`write_core_module`]/[`write_shim_module`]) to
 /// self-heal if a dir is reaped.
 pub fn ensure_effects_module(effects: &[EffectDecl]) -> std::io::Result<EffectsModuleDirs> {
@@ -270,70 +267,34 @@ pub fn ensure_effects_module_at(
     effects: &[EffectDecl],
     row: &RowArgs,
 ) -> std::io::Result<EffectsModuleDirs> {
-    ensure_effects_module_with_vocab(effects, effects, row)
-}
-
-/// [`ensure_effects_module_at`] with the effect VOCABULARY (what's nameable —
-/// gets a GADT + `type_defs` emitted into the stable Core module) split from
-/// the effect ROW (`row_effects` — what's IN `type M`, i.e. actually
-/// executable via `Member`). A name can be in scope (compiles, resolves, has a real GADT
-/// constructor) without being IN THE ROW (a `Member` constraint at its call
-/// site is then unsolved — a comprehensible type error, not "not in scope").
-///
-/// **`vocab_effects` must be a SUPERSET of `row_effects`** (matched by
-/// `type_name`) — a loud panic, not a silently-widened row, if it isn't: a
-/// row effect with no vocabulary entry would have no GADT in Core to compile
-/// `type M` against at all.
-///
-/// **A [`ROW_DEPENDENT_EFFECTS`] vocab effect (e.g. `Green`) must ALSO be in
-/// `row_effects`** — a loud panic, not a silent drop, if it isn't:
-/// [`effects_core_module_source`] excludes such an effect from Core entirely
-/// (it cannot typecheck there, having no `M`), and only
-/// [`effects_shim_module_source`] picks it up again, keyed on `row_effects`
-/// alone — a vocab-only row-dependent effect would simply vanish from the
-/// generated surface with no error at all.
-pub fn ensure_effects_module_with_vocab(
-    row_effects: &[EffectDecl],
-    vocab_effects: &[EffectDecl],
-    row: &RowArgs,
-) -> std::io::Result<EffectsModuleDirs> {
-    for v in vocab_effects {
+    let vocabulary = all_decls();
+    for effect in effects {
         assert!(
-            !is_row_dependent_effect(v.type_name)
-                || row_effects.iter().any(|r| r.type_name == v.type_name),
-            "`{}` is row-dependent (ROW_DEPENDENT_EFFECTS) but is only in the \
-             vocabulary, not the row — it would be silently excluded from both \
-             Core and the shim; add it to `row_effects` too",
-            v.type_name
+            vocabulary
+                .iter()
+                .any(|known| known.type_name == effect.type_name),
+            "effect row contains `{}`, which is absent from universal Tidepool.Effects.Core",
+            effect.type_name
         );
     }
-    for r in row_effects {
-        assert!(
-            vocab_effects.iter().any(|v| v.type_name == r.type_name),
-            "effect vocabulary must be a superset of the row: `{}` is in the \
-             row but not in the vocabulary",
-            r.type_name
-        );
-    }
-    let core = ensure_effects_core_module(vocab_effects)?;
-    let shim = ensure_effects_shim_module(row_effects, row)?;
+    let core = ensure_effects_core_module()?;
+    let shim = ensure_effects_shim_module(effects, row)?;
     Ok(EffectsModuleDirs { core, shim })
 }
 
-/// Write the stable `Tidepool/Effects/Core.hs` module (a pure function of
-/// `vocab_effects` alone) into its own content-addressed dir and return it.
-/// Separate from [`ensure_effects_module_with_vocab`]'s shim/orchestrate
+/// Write the universal stable `Tidepool/Effects/Core.hs` module into its own
+/// content-addressed dir and return it. Separate from the shim/orchestrate
 /// write so the decl plane (which needs Core on its include path but NEVER
 /// the per-window shim — see `tidepool-mcp/CLAUDE.md`) can materialize it
 /// without also minting a throwaway row-keyed dir.
-pub fn ensure_effects_core_module(vocab_effects: &[EffectDecl]) -> std::io::Result<PathBuf> {
-    write_core_module(&effects_core_module_source(vocab_effects))
+pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
+    write_core_module(&effects_core_module_source())
 }
 
 /// Like [`ensure_effects_core_module`] but takes the already-rendered source
 /// text directly — the self-heal path (a server holding onto its own
 /// generated sources to re-materialize them if the staging dir is reaped)
-/// calls this instead of re-deriving the text from `vocab_effects` each time.
+/// calls this instead of re-deriving the universal text each time.
 pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
     write_module_dir("tidepool-effects-core", &[("Effects/Core.hs", core_src)])
 }
@@ -343,7 +304,7 @@ pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
 /// it, WITHOUT touching Core. For a caller that already holds a stable Core
 /// dir (e.g. re-pinning a `Finalize <T>` row every round of the same
 /// answerer hole) and only needs to re-materialize the small per-row half —
-/// [`ensure_effects_module_with_vocab`] would also recompute (a cheap,
+/// [`ensure_effects_module_at`] would also recompute (a cheap,
 /// content-addressed cache hit, but still a hash + lock) Core's dir every
 /// call, which this skips entirely.
 pub fn ensure_effects_shim_module(
@@ -596,7 +557,7 @@ mod tests {
     /// sources the eval sees. NOT compilable as one file (two `module`
     /// headers) — `.contains()` assertions only.
     fn generated_sources(effects: &[EffectDecl], user_library: bool) -> String {
-        let mut s = effects_core_module_source(effects);
+        let mut s = effects_core_module_source();
         s.push_str(&effects_shim_module_source(effects, &RowArgs::default()));
         s.push_str(&orchestrate_module_source(effects));
         s.push_str(&build_preamble(effects, user_library));
@@ -760,7 +721,7 @@ mod tests {
         assert!(result.contains("import Control.Monad.Freer hiding (run)"));
         // GADTs live in the generated Tidepool.Effects module now.
         assert!(result.contains("import Tidepool.Effects"));
-        assert!(effects_core_module_source(&effects).contains("data Console a where"));
+        assert!(effects_core_module_source_for(&effects).contains("data Console a where"));
         // User code is a real top-level binding (expression-first contract).
         assert!(result.contains("__user = let {\n __b =\ndo\n  let x = 42\n  pure x\n } in __b"));
         assert!(result.contains("result :: Eff '[Console] Value"));
@@ -1187,7 +1148,7 @@ data Console a where
         // cannot import authored library code, so it keeps only the thin
         // `askRaw` verb wrapper (bare `send (AskWith …)`, no `Schema`
         // reference at all).
-        let effects_mod = effects_core_module_source(&decls);
+        let effects_mod = effects_core_module_source_for(&decls);
         assert!(!effects_mod.contains("data Schema = SObj"));
         assert!(!effects_mod.contains("import Tidepool.Form.Schema"));
         assert!(!effects_mod
@@ -1231,7 +1192,7 @@ data Console a where
             .into_iter()
             .filter(|d| d.type_name != "Llm")
             .collect();
-        let no_llm_mod = effects_core_module_source(&no_llm);
+        let no_llm_mod = effects_core_module_source_for(&no_llm);
         assert!(no_llm_mod
             .contains("askRaw :: forall effs. Member Ask effs => Text -> Value -> Eff effs Value"));
         // llm needs the Llm effect — absent from an Llm-less stack.

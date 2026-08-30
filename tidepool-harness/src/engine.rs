@@ -1290,16 +1290,14 @@ pub struct EngineConfig {
     /// correct regardless of what else got appended later.
     ///
     /// Distinct from [`Self::core_dir`] (the STABLE `Tidepool.Effects.Core`
-    /// dir, vocabulary-keyed): only the shim changes per pinned turn — Core
+    /// dir): only the shim changes per pinned turn — Core
     /// never needs finding-and-replacing, because its content never depends
     /// on a hole's answer type.
     effects_dir: PathBuf,
-    /// The config's stable effects-VOCABULARY dir — `Tidepool/Effects/Core.hs`,
-    /// content-addressed on [`Self::decls`] (+ `RunLLMTurn`, via
-    /// [`vocab_with_runllmturn`]) ALONE. Pushed into [`Self::include`] once, at
-    /// construction, and never swapped by [`Self::turn_target`] — every pinned
-    /// `Finalize <T>` turn this config ever compiles shares this SAME dir, so
-    /// `Console`/`KV`/`Finalize`/… stay one stable tycon across every window.
+    /// The universal stable effect-vocabulary dir —
+    /// `Tidepool/Effects/Core.hs`. Pushed into [`Self::include`] once and never
+    /// swapped by [`Self::turn_target`]; narrow rows control authority without
+    /// creating new nominal effect types.
     core_dir: PathBuf,
     /// Per-CHILD turn cap for a `runLLMTurnFanout` answerer: each of the N
     /// children gets this budget independently, so one
@@ -1383,29 +1381,6 @@ fn agent_decls() -> Vec<tidepool_mcp::EffectDecl> {
     decls
 }
 
-/// The effect-VOCABULARY policy: `row ∪ {RunLLMTurn}`,
-/// applied at every [`EngineConfig`] compile ([`EngineConfig::from_decls`]'s
-/// default row and [`EngineConfig::turn_target`]'s `Finalize`-pinned row
-/// alike). `RunLLMTurn`'s GADT + helpers are declared row-polymorphic
-/// (`EffectDecl::helpers_row_polymorphic`), so this only ever makes
-/// `runLLMTurn`/`RunLLMTurn` NAMEABLE — never adds it to `type M` — and
-/// `Member RunLLMTurn effs` still fails loudly at any call site whose actual
-/// row (`decls`) doesn't carry it, e.g. the answerer's `[AskUser, Fork,
-/// ReadState, Green, Finalize]`.
-///
-/// A no-op, returning `decls` unchanged, whenever `RunLLMTurn` is already in
-/// the row (the outer harness session's `[RunLLMTurn, AskUser]`, a general
-/// Agent turn's `standard_decls()`-based stack) — those compiles' generated
-/// source stays byte-identical to before this policy existed.
-fn vocab_with_runllmturn(decls: &[tidepool_mcp::EffectDecl]) -> Vec<tidepool_mcp::EffectDecl> {
-    if decls.iter().any(|d| d.type_name == "RunLLMTurn") {
-        return decls.to_vec();
-    }
-    let mut vocab = decls.to_vec();
-    vocab.push(tidepool_mcp::runllmturn_decl());
-    vocab
-}
-
 // The delegation surface does NOT need a vocab/row split for
 // `Worktree`: `Tidepool.Agent.Spawn` (auto-imported alongside
 // `Tidepool.Agent.Delegate` whenever `Subagent` is in the row —
@@ -1485,13 +1460,9 @@ impl EngineConfig {
             })
             .unwrap_or(decls.len()) as u64;
         let effect_names = decls.iter().map(|d| d.type_name.to_string()).collect();
-        let vocab = vocab_with_runllmturn(&decls);
-        let dirs = tidepool_mcp::ensure_effects_module_with_vocab(
-            &decls,
-            &vocab,
-            &tidepool_mcp::RowArgs::default(),
-        )
-        .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
+        let dirs =
+            tidepool_mcp::ensure_effects_module_at(&decls, &tidepool_mcp::RowArgs::default())
+                .map_err(|e| EngineError::Setup(format!("materialize effects module: {e}")))?;
         let mut include = vec![prelude_dir.clone()];
         if let Some(lib) = &project_lib {
             include.push(lib.clone());
@@ -1594,8 +1565,8 @@ impl EngineConfig {
     ///
     /// The include set MINUS the generated effects-module SHIM dir — the
     /// shared decl plane's VALIDATION context (the plane living on the one
-    /// shared session). The STABLE `Tidepool.Effects.Core` dir stays IN this
-    /// set (stable-effects-core): a model-authored declaration naming an effect surface
+    /// shared session). Universal `Tidepool.Effects.Core` stays in this set:
+    /// a model-authored declaration naming an effect surface
     /// via `Member <Eff> effs => ... -> Eff effs T` validates and persists,
     /// because Core's tycons are the same ones every later turn's compile
     /// sees. A declaration that instead spells the per-window `M` alias

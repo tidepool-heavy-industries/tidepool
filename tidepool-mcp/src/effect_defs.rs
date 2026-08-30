@@ -442,15 +442,11 @@ macro_rules! effect_decl_projection {
         }
     };
     // `stable_errors true` main arm: identical to the normal main arm below,
-    // except `type_defs` OMITS the `errors` block's inline `data`/`ToJSON`
-    // text — that text needs a STABLE home instead (some other type meant to
-    // cross session-bind fragments embeds this errors ADT as a FIELD, e.g.
-    // `Fs`'s `FileRead.contents :: Either FsError Text`; a type inlined into
-    // the per-session `Tidepool.Effects` module is fragment-nominal, so a
-    // record meant to survive a session bind cannot mention one — see
-    // haskell/src/Tidepool/Translate.hs's `typeMentionsEffectMonad` and
-    // `tidepool-mcp/src/fs_stable.rs`, which carries this SAME `errname`
-    // block's text into `haskell/lib/Tidepool/Records/Stable.hs` instead).
+    // except `type_defs` omits the `errors` block's inline `data`/`ToJSON`
+    // text. These pre-schema domain types are already exported by
+    // `Tidepool.Records.Stable` and the Prelude; Core must reuse that nominal
+    // type rather than declare a duplicate. `fs_stable.rs` carries the same
+    // `errname` block into the committed Haskell module.
     // The Rust-side projection (`effect_rust_projection!`) is unaffected —
     // it still generates the error enum from the same `errors` block exactly
     // as before; only where the HASKELL decl text lands changes.
@@ -855,10 +851,8 @@ macro_rules! git_effect_def {
             // revspec (also a `gitShow` with zero matching commits); `GitFailed`
             // is the residual (git exited nonzero for another reason, or the git
             // binary itself couldn't be spawned — exit code -1 in that case).
-            // STABLE home (`stable_errors true`, below): a `GitError` inlined into
-            // the per-turn fragment-nominal `Tidepool.Effects` cannot survive a
-            // session bind of the WHOLE `Either GitError a` a verb returns — see
-            // `tidepool-mcp/src/fs_stable.rs`.
+            // Reuse the pre-schema `GitError` exported by
+            // `Tidepool.Records.Stable`; do not declare a duplicate in Core.
             errors GitError [
                 { ctor GitBadRevspec, fields { detail: "Text" as String },                     doc "unknown or ambiguous revspec" },
                 { ctor GitFailed,     fields { code: "Int" as i64, detail: "Text" as String },  doc "git exited nonzero (or could not be spawned)" },
@@ -1184,16 +1178,10 @@ macro_rules! fs_effect_def {
             // unsafe.
             helpers_row_polymorphic true,
             description ["Read and write files (sandboxed to server working directory)."],
-            // `FileRead` (readGlob's per-file result record) and `FsError`
-            // (below) both live in the STABLE `Tidepool.Records.Stable`
-            // module instead of here (`stable_errors true`, at the bottom of
-            // this block) — NOT inline `type_defs` — because `FileRead`
-            // embeds `FsError` as a FIELD (`contents :: Either FsError
-            // Text`), and a record meant to survive a session bind cannot
-            // mention a type inline in the per-session `Tidepool.Effects`
-            // module (fragment-nominal — see haskell/src/Tidepool/
-            // Translate.hs's `typeMentionsEffectMonad`). See
-            // `tidepool-mcp/src/fs_stable.rs` for both decls' single source.
+            // `FileRead` and `FsError` are pre-schema domain types already
+            // exported by `Tidepool.Records.Stable`; `stable_errors true`
+            // below makes generated Core reuse them rather than declare a
+            // second nominal copy. See `fs_stable.rs` for their source.
             type_defs [],
             // #335 typed-failure ADT. Coarse: `FsNotFound`/`FsNotUtf8` carry the
             // path so callers can dispatch (`Left (FsNotFound _)`); the rest carry
@@ -1273,9 +1261,8 @@ macro_rules! fs_effect_def {
                 { raw ["-- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`\n-- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).\nfsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)\nfsMeta = send . FsMetadata"] },
                 // `Member Exec effs`, not `Member Fs effs`: this calls `run`
                 // (Exec's own helper), not any Fs constructor at all. Exec's
-                // own `run` is itself Member-polymorphic (stable-effects-core
-                // migrated every schema-generated effect's helpers off
-                // concrete `M`), so this can borrow `Member Exec effs`
+                // own `run` is Member-polymorphic, so this can borrow
+                // `Member Exec effs`
                 // directly instead of needing Fs in the row at all.
                 { raw ["getCurrentDirectory :: forall effs. Member Exec effs => Eff effs FilePath\ngetCurrentDirectory = do { p <- run \"pwd\" >>= liftEither; pure (T.strip p.stdout) }"] },
                 { raw ["-- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty\n-- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap\n-- with `Right ps <- glob pat` or `glob pat >>= liftEither`.\nglob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])\nglob = send . FsGlob"] },
@@ -1659,10 +1646,9 @@ mod tests {
     /// the tagged verbs, leaves the untagged ones bare. `stable_errors true`
     /// (fs_stable.rs) means NEITHER `FileRead` nor `FsError` lands in
     /// `type_defs` — both live in the stable `Tidepool.Records.Stable` module
-    /// instead, so a session bind of the whole `Either FsError a`/`[FileRead]`
-    /// survives into a later turn (see `tidepool-mcp/src/fs_stable.rs`).
+    /// instead and are imported into universal Core.
     #[test]
-    fn generated_fs_decl_threads_either_and_emits_error_adt() {
+    fn generated_fs_decl_threads_either_and_reuses_stable_types() {
         let d = crate::fs_decl();
         assert!(
             d.constructors
@@ -1691,11 +1677,9 @@ mod tests {
 
     /// Every Git verb threads `Either GitError`. `stable_errors
     /// true` (fs_stable.rs precedent) means the error ADT does NOT land in
-    /// `type_defs` — it lives in `Tidepool.Records.Stable` instead, so a bare
-    /// `x <- gitLog n` bind (no `Right x <-` destructuring) survives a
-    /// session bind into a later turn.
+    /// `type_defs` — it reuses `Tidepool.Records.Stable` instead.
     #[test]
-    fn generated_git_decl_threads_either_and_emits_error_adt() {
+    fn generated_git_decl_threads_either_and_reuses_stable_types() {
         let d = crate::git_decl();
         assert!(d
             .constructors
@@ -1721,7 +1705,7 @@ mod tests {
     /// Http effect carries no parse verb and no bad-JSON error. `stable_errors
     /// true` means the error ADT does not land in `type_defs` (same as Git).
     #[test]
-    fn generated_http_decl_threads_either_and_emits_error_adt() {
+    fn generated_http_decl_threads_either_and_reuses_stable_types() {
         let d = crate::http_decl();
         assert!(d
             .constructors
@@ -1739,7 +1723,7 @@ mod tests {
     /// TryLlmStructured is gone. `stable_errors true` means the error ADT
     /// does not land in `type_defs` (same as Git).
     #[test]
-    fn generated_llm_decl_threads_either_and_emits_error_adt() {
+    fn generated_llm_decl_threads_either_and_reuses_stable_types() {
         let d = crate::llm_decl();
         assert!(d
             .constructors

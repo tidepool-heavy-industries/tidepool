@@ -11,13 +11,10 @@
 //! the loop's single static site fires 3x with the SAME id every time.
 //!
 //! Negative: a polymorphic site fails extract (exact error text asserted).
-//! A function-typed site is no longer categorically rejected: a PURE
-//! function-typed answer (e.g. `Int -> Int`) now
-//! compiles past `checkRunLLMTurnType`, and only an answer type that itself
-//! mentions the `Eff` tycon (`M`/`Eff`) — e.g. `Int -> M Int` — is rejected,
-//! since the row `M` expands to is still per-compile (stable-effects-core:
-//! the effect GADTs themselves are now stable, but a compile's own row still
-//! varies) — with the row-varies-per-compile error text.
+//! Function-valued answers may themselves be effectful. Their per-window `M`
+//! alias is normalized to the exact `Eff '[...]` row in the sidecar contract,
+//! so a separately compiled answer must match that row rather than resolving
+//! its own potentially different `M` spelling.
 //!
 //! Run with the worktree extract binary, e.g.:
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
@@ -367,8 +364,7 @@ fn runllmturn_rejects_polymorphic_site() {
 
 #[test]
 fn runllmturn_accepts_pure_function_typed_site() {
-    // Function-valued answers are valid when the closure does not capture
-    // the compile-local effect row.
+    // Function-valued answers are ordinary monomorphic contracts.
     let src_result = try_compile_runllmturn("runLLMTurn @(Int -> Int) \"fn\"", "");
     assert!(
         src_result.is_ok(),
@@ -379,15 +375,18 @@ fn runllmturn_accepts_pure_function_typed_site() {
 }
 
 #[test]
-fn runllmturn_rejects_effectful_function_typed_site() {
-    // An answer type containing the current program's effect monad cannot
-    // cross the separately compiled suspension boundary.
-    let err = try_compile_runllmturn("runLLMTurn @(Int -> M Int) \"fn\"", "")
-        .expect_err("an effectful function-typed runLLMTurn site must fail extract");
+fn runllmturn_stabilizes_effectful_function_typed_site() {
+    let src = runllmturn_source("runLLMTurn @(Int -> M Int) \"fn\"", "");
+    let asks = compile_and_read_asks(&src, "result", &tidepool_mcp::standard_decls());
+    let ty = asks[0]["type"]
+        .as_str()
+        .expect("effectful runLLMTurn site has a rendered type");
+    let compact = ty.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        err.contains("runLLMTurn answer captures a compile-local effect row"),
-        "expected the cross-compile effect-row diagnostic, got:\n{err}"
+        compact.starts_with("Int -> Eff '[") && compact.ends_with("] Int"),
+        "the sidecar must carry the exact concrete row, got {ty:?}"
     );
+    assert!(!ty.contains("M Int"), "volatile M alias leaked: {ty}");
 }
 
 #[test]
@@ -408,11 +407,7 @@ fn runllmturn_accepts_monomorphic_data_site() {
 /// instantiation beyond the explicit `@T`) via the REAL eval pipeline,
 /// returning the classified error message on failure.
 fn try_compile_runllmturn(hole: &str, helpers: &str) -> Result<(), String> {
-    let decls = tidepool_mcp::standard_decls();
-    let pre = tidepool_mcp::build_preamble(&decls, false);
-    let stack = tidepool_mcp::build_effect_stack_type(&decls);
-    let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
-    let src = tidepool_mcp::template_haskell(&pre, &stack, &code, "", helpers, None, None);
+    let src = runllmturn_source(hole, helpers);
 
     EvalHarness::new()
         .with_stdlib()
@@ -421,6 +416,14 @@ fn try_compile_runllmturn(hole: &str, helpers: &str) -> Result<(), String> {
         .compile(&src, "result")
         .map(|_| ())
         .map_err(|e| tidepool_runtime::classify_compile(&e).message)
+}
+
+fn runllmturn_source(hole: &str, helpers: &str) -> String {
+    let decls = tidepool_mcp::standard_decls();
+    let pre = tidepool_mcp::build_preamble(&decls, false);
+    let stack = tidepool_mcp::build_effect_stack_type(&decls);
+    let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
+    tidepool_mcp::template_haskell(&pre, &stack, &code, "", helpers, None, None)
 }
 
 // ---------------------------------------------------------------------------

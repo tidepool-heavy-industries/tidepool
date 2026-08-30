@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v1";
-const MAGIC: &[u8; 8] = b"TPREQ001";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v2";
+const MAGIC: &[u8; 8] = b"TPREQ002";
 
 #[derive(Clone, Debug)]
 enum Field {
@@ -27,7 +27,6 @@ enum Field {
     BindName(OsString),
     BindGen(u64),
     EmitBoundBinders(OsString),
-    ProbeOnly,
     HarnessProfile,
 }
 
@@ -91,7 +90,6 @@ impl ExtractRequest {
                 Some("--emit-bound-binders") => {
                     request.emit_bound_binders(value(&mut args, "--emit-bound-binders")?)
                 }
-                Some("--probe-only") => request.probe_only(),
                 Some("--harness-profile") => request.fields.push(Field::HarnessProfile),
                 Some(option) if option.starts_with('-') => {
                     return Err(CliError::new(format!("unknown option: {option}")));
@@ -142,7 +140,6 @@ impl ExtractRequest {
                 12 => Field::SessionRoot(decoder.os_string()?),
                 13 => Field::InjectVal(decoder.os_string()?),
                 14 => Field::EmitBoundBinders(decoder.os_string()?),
-                15 => Field::ProbeOnly,
                 16 => Field::Turn,
                 17 => Field::TurnTemplate {
                     kind: decoder.string()?,
@@ -170,7 +167,7 @@ impl ExtractRequest {
     pub fn decode_worker_argv(args: &[OsString]) -> Result<Self, ProtocolError> {
         if args.len() != 2 || args[0] != WORKER_REQUEST_FLAG {
             return Err(ProtocolError::new(
-                "worker argv must be exactly --worker-request-v1 PAYLOAD",
+                "worker argv must be exactly --worker-request-v2 PAYLOAD",
             ));
         }
         let payload = args[1]
@@ -290,10 +287,6 @@ impl ExtractRequest {
             .push(Field::EmitBoundBinders(value.as_ref().to_owned()));
     }
 
-    pub(crate) fn probe_only(&mut self) {
-        self.fields.push(Field::ProbeOnly);
-    }
-
     pub(crate) fn cli_argv(&self) -> Vec<OsString> {
         let mut inputs = Vec::new();
         let mut flags = Vec::new();
@@ -328,7 +321,6 @@ impl ExtractRequest {
                     flag(&mut flags, "--bind-gen", OsStr::new(&value.to_string()))
                 }
                 Field::EmitBoundBinders(value) => flag(&mut flags, "--emit-bound-binders", value),
-                Field::ProbeOnly => flags.push("--probe-only".into()),
                 Field::HarnessProfile => flags.push("--harness-profile".into()),
             }
         }
@@ -498,7 +490,6 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             out.extend_from_slice(&value.to_le_bytes());
         }
         Field::EmitBoundBinders(value) => tagged_frame(out, 14, value),
-        Field::ProbeOnly => out.push(15),
         Field::HarnessProfile => out.push(24),
     }
 }
@@ -641,7 +632,6 @@ mod tests {
             "7".into(),
             "--emit-bound-binders".into(),
             "/tmp/binders.json".into(),
-            "--probe-only".into(),
             "--harness-profile".into(),
         ];
         let request = ExtractRequest::from_cli(&args).unwrap();

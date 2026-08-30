@@ -1,22 +1,6 @@
-//! Regression guard: `:t` on a binding whose inferred type is wide enough
-//! that GHC's `ppr` line-wraps it must not crash.
-//!
-//! Root cause (found 2026-06-30/07-01): `:t`'s bound-binder JSON is hand-built
-//! by `renderBoundBindersJson` (`haskell/app/Main.hs`) with a hand-rolled
-//! escaper that only escapes `"` and `\`. `renderType` (`GhcPipeline.hs`)
-//! pretty-prints the type via `ppr` under `defaultSDocContext`'s default page
-//! width, which inserts a real newline when the rendered type is wide — GHC's
-//! `Type` carries no source comments, so the type's own width is what
-//! triggers this, not the multi-line-with-Haddock source presentation (that
-//! was the original but incorrect hypothesis). The raw `\n` byte then lands
-//! unescaped inside a JSON string field, and the Rust side
-//! (`tidepool-runtime/src/session/turn.rs`, a real `serde_json` parser)
-//! rejects it with "invalid bound-binder JSON: control character...".
-//!
-//! Repro shape mirrors a real case found dogfooding the repl (a `steer`-style
-//! cascade helper: pure rule -> local model -> suspend-to-human) — three
-//! curried function-typed arguments, wide enough that the rendered type wraps
-//! under default GHC pretty-printing.
+//! REPL type-query and effectful-value persistence regressions. Wide GHC type
+//! renderings exercise bound-binder JSON escaping; the later cases exercise
+//! stable effect rows and values across turn-module boundaries.
 
 mod common;
 use common::*;
@@ -70,16 +54,11 @@ fn bindings_only(s: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// `:t` on an M-returning expression must not crash: the probe bind's
-/// captured type (`Int -> M Int`) mentions the effect row, which the
-/// cross-row bind guard in `Main.mkBoundBinders` (`typeMentionsEffectMonad`)
-/// would otherwise reject exactly as it would a REAL session bind, even
-/// though a `:t` probe is read-and-discarded and never crosses into a later
-/// turn's compile. `:t` must be exempt by construction
-/// (`SessionBind::probe_only`), for ANY well-typed expression, and must
-/// mutate nothing — `:bindings` lists the same names before and after.
+/// `:t` on an M-returning expression must report the authored spelling and
+/// mutate nothing. Persistence normalizes `M` internally, but type display is
+/// deliberately the original readable type.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t_on_m_returning_helper_does_not_trip_cross_row_guard() {
+async fn t_on_m_returning_helper_reports_authored_type() {
     require_extract();
     let repl = Repl::new();
 
@@ -97,9 +76,7 @@ async fn t_on_m_returning_helper_does_not_trip_cross_row_guard() {
         .to_string();
 
     let t = repl.cmd(":t commitDeltaRepro").await;
-    let out = t.expect_ok(
-        ":t commitDeltaRepro (M-returning expression must not crash the cross-row bind guard)",
-    );
+    let out = t.expect_ok(":t commitDeltaRepro (M-returning expression must typecheck)");
     assert!(
         out.contains("->") && out.contains('M'),
         ":t commitDeltaRepro should report a function type mentioning M: {out}"
@@ -117,22 +94,51 @@ async fn t_on_m_returning_helper_does_not_trip_cross_row_guard() {
     );
 }
 
+/// A named value whose constructor contains an effectful closure persists and
+/// can be invoked by a later turn. This specifically guards removal of the old
+/// recursive policy walk: a stable product type is not rejected merely because
+/// one of its fields mentions `Eff`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn effectful_binds_persist_across_turns() {
+    require_extract();
+    let repl = Repl::new();
+
+    repl.def(
+        "data EffectBox = EffectBox { runEffectBox :: Int -> Eff '[Console, Ask, RunLLMTurn] Int }",
+    )
+    .await
+    .expect_ok("define a product containing an exact-row closure");
+
+    repl.cmd(
+        "(step, box) <- putStrLn \"\" >> pure ((\\n -> (pure (n + 1) :: M Int)), EffectBox (\\n -> pure (n + 1)))",
+    )
+        .await
+        .expect_ok("bind a direct and a nested effectful function");
+
+    let later = repl.cmd("step 40 >>= runEffectBox box").await;
+    let out = later.expect_ok("invoke both persisted effectful functions");
+    assert!(
+        out.contains("42"),
+        "expected persisted closure result, got: {out}"
+    );
+}
+
 /// Same friction, for a stdlib EFFECT VERB whose type is `Either <Err> T`
 /// (`run :: forall effs. Member Exec effs => Text -> Eff effs (Either
 /// ExecError Proc)`) — `ExecError` is defined in the STABLE
-/// `Tidepool.Effects.Core` module (stable-effects-core), so `:t run`'s probe
-/// bind must not trip the cross-row bind guard. `run` is queried at the
+/// universal `Tidepool.Effects.Core` module, so `:t run`'s probe
+/// bind must remain a valid type query. `run` is queried at the
 /// session's own concrete `M` (`:t (run :: Text -> M (Either ExecError
 /// Proc))`) rather than bare: bare `run` is a genuinely AMBIGUOUS type query
 /// now that it is row-polymorphic (`Member Exec effs0` alone can never
 /// default `effs0` — the same GHC defaulting gap `__anchor`
 /// (`tidepool-mcp::eval_prep::TurnTemplate`) works around for `finalize`'s
 /// free result type — an orthogonal, pre-existing `:t`-on-an-unapplied-
-/// polymorphic-value limitation, not a cross-row-bind-guard regression).
+/// polymorphic-value limitation).
 /// Needs the full
 /// effect stack (Exec) rather than `Repl::new()`'s Console-only minimal one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
+async fn t_on_either_returning_effect_verb_reports_type() {
     require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let repl = Repl {
@@ -148,8 +154,7 @@ async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
     let t = repl
         .cmd(":t (run :: Text -> M (Either ExecError Proc))")
         .await;
-    let out =
-        t.expect_ok(":t run (Either-returning verb type must not crash the cross-row bind guard)");
+    let out = t.expect_ok(":t run (Either-returning verb type must typecheck)");
     assert!(
         out.contains("Either"),
         ":t run should report an Either-shaped type: {out}"
@@ -167,21 +172,9 @@ async fn t_on_either_returning_effect_verb_does_not_trip_cross_row_guard() {
     );
 }
 
-/// STABLE-EFFECTS-CORE ACCEPTANCE: a GENUINE bind (not `:t`) of an
-/// `Either ExecError Proc` value now PERSISTS instead of being rejected.
-/// Before this change, `ExecError`/`Proc` were declared inline in the
-/// per-session generated `Tidepool.Effects` module (fragment-nominal — a
-/// fresh nominal identity every turn), so the cross-row bind guard
-/// (`typeMentionsEffectMonad`) rejected ANY bind mentioning them, with a
-/// "destructure at the bind" hint as the only workaround. Now `ExecError`/
-/// `Proc` live in the STABLE `Tidepool.Effects.Core` module (a pure function
-/// of the effect vocabulary alone), so a bind mentioning them is exactly as
-/// safe to persist as any other plain data value — the guard only fires for
-/// a type that itself mentions the `Eff` tycon (a genuinely row-typed value),
-/// which `Either ExecError Proc` never did once the effect monad's OWN tycon
-/// is the only thing checked. The bound value must also be genuinely
-/// CALLABLE in a LATER turn, not merely accepted — that's the persistence
-/// payoff, not just an absence of rejection.
+/// A generated effect-domain value persists and remains callable in a later
+/// turn. Universal Core gives these types one nominal identity independent of
+/// the executable row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn either_returning_verb_bind_now_persists_across_turns() {
     require_extract();

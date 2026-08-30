@@ -352,8 +352,9 @@ fn ask_is_a_compile_error_in_the_answerer_stack() {
 /// `Console`/`KV`/`Fs`/`Http`/`Exec`/`Git`/`Time`/`Llm`) does NOT
 /// typecheck against `Eff '[AskUser, Fork, ReadState, Green, Finalize]`. This is the whole
 /// point of the scoped stack — the answerer structurally cannot hit the
-/// network, run a shell command, or read files, because those verbs are
-/// UNDECLARED in its compile, not merely unreachable.
+/// network, run a shell command, or read files. Core exposes the universal
+/// vocabulary, while the concrete row makes unavailable operations fail their
+/// `Member` constraint.
 #[test]
 fn base_effect_is_a_compile_error_in_the_answerer_stack() {
     support::require_extract();
@@ -367,19 +368,19 @@ fn base_effect_is_a_compile_error_in_the_answerer_stack() {
         Ok(_) => panic!(
             "httpGet (a base Http effect) compiled against the answerer stack \
              '[AskUser, Fork, ReadState, Green, Finalize] — the capability boundary is BROKEN \
-             (base effects must be undeclared there)"
+             (the Http Member constraint must be unsatisfied there)"
         ),
         Err(e) => diag_text(e),
     };
     assert!(
-        err.contains("httpGet") && err.contains("not in scope"),
-        "expected a GHC not-in-scope error naming httpGet, got:\n{err}"
+        err.contains("Http") && err.contains("not a member"),
+        "expected a GHC Member failure naming Http, got:\n{err}"
     );
 }
 
 /// The SYMMETRIC harness-side guarantee: `ask`/`finalize` do not typecheck
-/// against the outer harness's `Eff '[RunLLMTurn]`-only stack, because
-/// `Ask`/`Finalize` are not declared in that compile at all.
+/// against the outer harness's `Eff '[RunLLMTurn]`-only stack. Core names are
+/// universal, but the executable row remains the capability boundary.
 #[test]
 fn ask_is_a_compile_error_in_the_harness_stack() {
     support::require_extract();
@@ -388,7 +389,7 @@ fn ask_is_a_compile_error_in_the_harness_stack() {
     let err = match result {
         Ok(_) => panic!(
             "ask compiled against the harness stack '[RunLLMTurn] — the structural \
-             scoping is BROKEN (Ask must be undeclared there)"
+             scoping is BROKEN (Ask must be unavailable there)"
         ),
         Err(e) => diag_text(e),
     };
@@ -407,13 +408,13 @@ fn finalize_is_a_compile_error_in_the_harness_stack() {
     let err = match result {
         Ok(_) => panic!(
             "finalize compiled against the harness stack '[RunLLMTurn] — the structural \
-             scoping is BROKEN (Finalize must be undeclared there)"
+             scoping is BROKEN (Finalize must be unavailable there)"
         ),
         Err(e) => diag_text(e),
     };
     assert!(
-        err.contains("finalize") && err.contains("not in scope"),
-        "expected a GHC not-in-scope error naming finalize, got:\n{err}"
+        err.contains("Finalize Int") && err.contains("not a member"),
+        "expected a GHC Member failure naming Finalize, got:\n{err}"
     );
 }
 

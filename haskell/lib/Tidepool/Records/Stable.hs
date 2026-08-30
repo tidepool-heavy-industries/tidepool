@@ -1,7 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DuplicateRecordFields #-}
 
--- | The stable home for effect-adjacent decls a bridged record's FIELD
--- embeds, or an effect's own `errors` ADT (see tidepool-mcp/src/
+-- | Pre-schema effect-domain types exported through Tidepool.Records and
+-- Tidepool.Prelude (see tidepool-mcp/src/
 -- fs_stable.rs). DO NOT EDIT BY HAND: the Rust side is the single source
 -- of truth, and this file is regenerated + verified by the `stable_records`
 -- test (`TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records`).

@@ -174,8 +174,8 @@ impl SelfHarnessDriver {
     /// every later answerer turn — across loops, and across machine
     /// rotations (the plane transfers; it is source-side state). Validated
     /// against [`EngineConfig::validation_include`] — the include set MINUS
-    /// the per-window SHIM dir, PLUS the stable `Tidepool.Effects.Core` dir
-    /// (stable-effects-core). An effectful declaration written
+    /// the per-window shim dir, plus universal `Tidepool.Effects.Core`. An
+    /// effectful declaration written
     /// `Member <Eff> effs => ... -> Eff effs T` validates at define time AND
     /// persists across turns/windows — Core's tycons are the same ones every
     /// later turn's compile sees, so a bound call site unifies cleanly. A
@@ -575,7 +575,6 @@ impl SelfHarnessDriver {
             Some(tidepool_runtime::session::turn::SessionBind {
                 names: std::slice::from_ref(&binding_name),
                 gen: 0,
-                probe_only: false,
             }),
         )
         .map_err(|e| DriverError::Session(format!("harness-ctx bind compile failed: {e:?}")))?;

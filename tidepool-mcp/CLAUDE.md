@@ -39,16 +39,16 @@ New helper signatures are row-polymorphic:
 Member SomeEffect effs => ... -> Eff effs Result
 ```
 
-Do not define helpers against the per-compile `M` alias. A genuinely
-row-dependent effect belongs in the generated row shim and must be listed in
-`ROW_DEPENDENT_EFFECTS`.
+Do not define helpers against the per-compile `M` alias. Effect GADTs and
+helpers live in universal Core; a constructor that stores an effectful closure
+must existentially package that closure's row.
 
 ## Generated effects modules
 
 The generated surface has two layers:
 
-- `Tidepool.Effects.Core`: stable GADTs, records, errors, and row-polymorphic
-  helpers for a vocabulary;
+- `Tidepool.Effects.Core`: the universal stable GADTs, records, errors, and
+  row-polymorphic helpers;
 - `Tidepool.Effects`: per-compile shim that re-exports Core and defines the
   concrete `M` row.
 

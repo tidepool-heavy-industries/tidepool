@@ -1051,7 +1051,7 @@ stripMonadHead ty =
 -- OR MENTIONS one anywhere in its structure — a type application argument, a
 -- newtype's representation, or a data constructor field, walked transitively
 -- (visited-set keyed on 'TyCon', so a recursive type terminates instead of
--- looping; mirrors 'Tidepool.Translate.typeMentionsEffectMonad's walk). The
+-- looping). The
 -- wider check matters because Tier0 forces the bound value to normal form
 -- before tenuring: a record with a function FIELD (e.g. a companion "mounted
 -- value" carrying an applied handler) is not itself a

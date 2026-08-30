@@ -767,7 +767,7 @@ where
         // path can re-materialize them if a staging dir is reaped mid-session
         // (macOS purges $TMPDIR / cache). Failure is survivable here — evals
         // will fail with a clear missing-module error.
-        let core_source = effects_core_module_source(roster.decls());
+        let core_source = effects_core_module_source();
         let shim_source = effects_shim_module_source(roster.decls(), &RowArgs::default());
         let orchestrate_source = orchestrate_module_source(roster.decls());
         let mut include = Vec::new();

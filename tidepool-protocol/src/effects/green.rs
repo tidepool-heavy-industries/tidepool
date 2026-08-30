@@ -11,12 +11,9 @@
 //! `SelfHarnessDriver::service_green_hole`.
 //!
 //! All four substrate helpers below back `Tidepool.Async` (authored library
-//! code, not generated here): `asyncJoinAny`/`asyncStatus`/`asyncCancel` are
-//! thin `Member`-polymorphic wrappers; `asyncSpawn` is the
-//! one exception to `helpers_row_polymorphic` in this whole schema, forced
-//! concrete (`M`, not `Eff effs`) because `AsyncSpawnWith`'s own constructor
-//! field type is fixed to `Int -> M ()` by the wire shape — see
-//! [`crate::schema::HelperBody::AsyncSpawnBody`]'s own doc.
+//! code, not generated here) and are `Member`-polymorphic. `AsyncSpawnWith`
+//! existentially packages the spawned body's concrete row; Rust treats that
+//! closure as an opaque live value and resumes it in the originating machine.
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -116,18 +113,16 @@ pub fn green() -> Effect {
                     site_arg(),
                     Arg {
                         name: "body",
-                        // `Int -> M ()`, not `Value`: the field genuinely is
-                        // a function type (see `HsType::Fn`'s own doc), and
-                        // the constructor signature must say so — a `Value`
-                        // field here is what let `AsyncSpawnWith 0 (\_ -> …)`
-                        // (a real lambda) silently mistype against the
-                        // generated GADT. `Named("M ()")` stands in for `M`
-                        // applied to `()`: the closed type language has no
-                        // general type-application shape, and this is the
-                        // one place in the whole schema that needs it — see
-                        // `HsType::Fn`'s doc for why `M` (not `Eff effs`) is
-                        // correct here.
-                        ty: HsType::func(HsType::Int, HsType::Named("M ()")),
+                        // The body row is existential: construction chooses
+                        // the caller's row, while the generated Core GADT stays
+                        // independent of every per-window `M` synonym.
+                        ty: HsType::func(
+                            HsType::Int,
+                            HsType::app(
+                                HsType::app(HsType::Named("Eff"), HsType::Var("bodyEffs")),
+                                HsType::Unit,
+                            ),
+                        ),
                         rust: RustBinding::CoreValue,
                     },
                 ],

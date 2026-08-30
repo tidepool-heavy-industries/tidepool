@@ -560,16 +560,6 @@ impl ExtractCmd {
         self
     }
 
-    /// `--probe-only` — this bind is an ephemeral type probe (`:t`), read
-    /// then discarded rather than registered as a session binding. Exempts
-    /// the extract's cross-row bind guard, which otherwise rejects any
-    /// row-mentioning type — the guard protects real binds from crossing
-    /// into a later fragment, which a discard-immediately probe never does.
-    pub fn probe_only(&mut self) -> &mut Self {
-        self.request.probe_only();
-        self
-    }
-
     /// The full argv (positional inputs first, then flags in the order they
     /// were set), without the program. Exposed for tests and diagnostics.
     pub fn argv(&self) -> Vec<OsString> {

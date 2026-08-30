@@ -1,20 +1,8 @@
 //! The stable Haskell home for effect-adjacent `errors` ADTs (and `FileRead`,
-//! the one bridged-record FIELD case) — moved out of the per-session
-//! generated `Tidepool.Effects` module (an effect definition's
-//! `stable_errors true`, effect_defs.rs) because a value meant to survive a
-//! session bind cannot mention a type declared inline in `Tidepool.Effects`
-//! — that module is fragment-nominal (a fresh one per turn), so a value
-//! naming one of its types cannot mean anything once it crosses into a LATER
-//! turn's compile (haskell/src/Tidepool/Translate.hs's
-//! `typeMentionsEffectMonad`, the session-bind cross-row guard). `FsError`/
-//! `FileRead` shipped inline for a long time harmlessly, until a later-landed
-//! guard turned the gap into a hard failure the moment someone bound it —
-//! this module is the fix and (see `FILE_READ_STABLE_DECL`'s doc) the origin
-//! story. `GitError`/`LlmError`/`HttpError` hit the SAME guard for a plainer
-//! reason: a verb's own `Either <Err> T` result mentions `<Err>` directly, so
-//! binding the WHOLE `Either` (not just a nested record field) already
-//! trips it — e.g. `x <- gitLog n` (no `Right x <-` destructuring) reused in
-//! a later turn.
+//! the one bridged-record FIELD case). These pre-schema effects already expose
+//! the types from `Tidepool.Records.Stable`; `stable_errors true` keeps their
+//! declaration projection from defining a second nominal copy. New
+//! schema-owned types belong directly in universal `Tidepool.Effects.Core`.
 //!
 //! Mirrors `tidepool_bridge_effects::bridged_records_module` (the stable
 //! home the bridged records already have) — same idea, different source.
@@ -78,13 +66,10 @@ pub const HTTP_ERROR_STABLE_DECL: &str = crate::effect_defs::error_decl_text!(
 /// this stable home (see module doc) — text unchanged from that original.
 pub const FILE_READ_STABLE_DECL: &str = "data FileRead = FileRead { path :: Text, contents :: Either FsError Text } deriving (Show, Eq)\ninstance ToJSON FileRead where\n  toJSON (FileRead p c) = object [\"path\" .= p, \"contents\" .= c]";
 
-/// Build the `Tidepool.Records.Stable` Haskell module: the stable,
-/// always-available home for effect-adjacent decls that either embed a
-/// bridged record's FIELD or are themselves an effect's whole `Either <Err>
-/// T` result, so they need to be safe to name from a value that crosses a
-/// session bind but can't go through the CoreRecord/`Tidepool.Records.Bridged`
-/// pipeline (see module doc for why `FsError`/`FileRead` were the first
-/// tenants). Materialized to the committed
+/// Build the `Tidepool.Records.Stable` Haskell module: the nominal home for
+/// pre-schema effect-domain types already exported through
+/// `Tidepool.Records` and `Tidepool.Prelude`. New schema-owned domain types
+/// belong directly in universal Core. Materialized to the committed
 /// `haskell/lib/Tidepool/Records/Stable.hs` (kept in sync by the
 /// `stable_records` test, mirroring `bridged_records_module`).
 pub fn stable_records_module() -> String {
@@ -92,8 +77,8 @@ pub fn stable_records_module() -> String {
     out.push_str(
         "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DuplicateRecordFields #-}\n\n",
     );
-    out.push_str("-- | The stable home for effect-adjacent decls a bridged record's FIELD\n");
-    out.push_str("-- embeds, or an effect's own `errors` ADT (see tidepool-mcp/src/\n");
+    out.push_str("-- | Pre-schema effect-domain types exported through Tidepool.Records and\n");
+    out.push_str("-- Tidepool.Prelude (see tidepool-mcp/src/\n");
     out.push_str("-- fs_stable.rs). DO NOT EDIT BY HAND: the Rust side is the single source\n");
     out.push_str("-- of truth, and this file is regenerated + verified by the `stable_records`\n");
     out.push_str(

@@ -9,7 +9,7 @@
 //! answering them: a verb missing a handling-class annotation fails
 //! generation, not runtime — but no phase-1 generator reads them yet.
 
-use crate::hs::{render_member_signature_with, render_signature, HsType};
+use crate::hs::{render_member_signature, render_member_signature_with, render_signature, HsType};
 pub use crate::types::{
     AdapterKind, DomainMap, IdentityPayload, JsonInstance, RecordField, SumVariant, TypeDef,
     TypeShape, Validation, WireDerive, WireDerives,
@@ -872,7 +872,7 @@ fn named_types(ty: &HsType) -> Vec<&'static str> {
     match ty {
         HsType::Named(n) => vec![n],
         HsType::List(t) | HsType::Maybe(t) => named_types(t),
-        HsType::Either(a, b) | HsType::Fn(a, b) => {
+        HsType::App(a, b) | HsType::Either(a, b) | HsType::Fn(a, b) => {
             let mut v = named_types(a);
             v.extend(named_types(b));
             v
@@ -895,7 +895,7 @@ fn free_type_vars(ty: &HsType) -> Vec<&'static str> {
     match ty {
         HsType::Var(v) => vec![v],
         HsType::List(t) | HsType::Maybe(t) => free_type_vars(t),
-        HsType::Either(a, b) | HsType::Fn(a, b) => {
+        HsType::App(a, b) | HsType::Either(a, b) | HsType::Fn(a, b) => {
             let mut v = free_type_vars(a);
             v.extend(free_type_vars(b));
             v
@@ -1213,14 +1213,9 @@ pub enum HelperBody {
     /// has already published its result into managed heap storage before its
     /// last, payload-free completion suspension.
     ///
-    /// Fixed to the concrete `M`, never `Eff effs` — the ONE case in this
-    /// migration where an effect's `helpers_row_polymorphic: true` does not
-    /// apply to one of its own helpers, forced by the wire shape rather than
-    /// a body dependency: the wrapped verb's own constructor field type is
-    /// `Int -> M ()` (see the verb's own `body` arg, bound
-    /// [`RustBinding::CoreValue`]), so the lambda passed to it must have
-    /// that exact type, which forces this helper's own `body :: M a`. One
-    /// real use: `asyncSpawn` (`green.rs`).
+    /// The constructor existentially packages the body's effect row, so this
+    /// helper remains ordinarily `Member`-polymorphic. One real use:
+    /// `asyncSpawn` (`green.rs`).
     AsyncSpawnBody {
         /// The parameter naming the thread body (conventionally `"body"`).
         param: &'static str,
@@ -1424,8 +1419,16 @@ impl Helper {
             return out;
         }
         if let HelperBody::AsyncSpawnBody { param, done_ctor } = &self.body {
+            let sig = render_member_signature(
+                &[HsType::app(
+                    HsType::app(HsType::Named("Eff"), HsType::Var("effs")),
+                    HsType::Unit,
+                )],
+                eff.name,
+                &HsType::Int,
+            );
             out.push_str(&format!(
-                "{} :: M () -> M Int\n{} {param} = send ({ctor} 0 (\\_ -> {param} >>= \
+                "{} :: {sig}\n{} {param} = send ({ctor} 0 (\\_ -> {param} >>= \
                  \\() -> send ({done_ctor} 0)))",
                 self.name, self.name
             ));
@@ -1581,9 +1584,6 @@ pub enum OuterEffect {
 /// The extractor's per-verb call-site policy, for the few verbs it rewrites.
 ///
 /// A CLOSED description of what `Translate.hs`'s `sitedVerbs` rows vary today.
-/// `vsCheckType` is a function field in Haskell; enumerating its degrees of
-/// freedom here is what lets a new policy be added deliberately in Haskell
-/// rather than serialized through the schema.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtractPolicy {
     /// The `*Sited` sibling this call site is rewritten to.
@@ -1595,10 +1595,6 @@ pub struct ExtractPolicy {
     /// Trailing value arguments (1 or 2 today); anything ahead of them is
     /// dictionary arguments, re-applied verbatim.
     pub value_arity: u8,
-    /// Reject an answer type that mentions the effect monad. False only for
-    /// `finalize`, whose value crosses in-heap and may carry a closure.
-    /// (Rejecting a POLYMORPHIC site is unconditional and so is not a field.)
-    pub reject_effect_monad: bool,
     /// What the site records as its answer shape.
     pub answer_shape: AnswerShape,
     /// What happens when the call cannot be rewritten.

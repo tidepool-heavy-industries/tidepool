@@ -209,7 +209,7 @@ fn daemon_integration() {
     check_b_failing_program_same_diagnostics(&bin, &dir, &lib, &socket);
     check_c_isolation_across_session_roots(&bin, &dir, &lib, &socket);
     check_d_relative_target_and_distinct_cwd(&bin, &dir, &lib, &socket);
-    check_f_spawn_row_warm_second_request(&bin, &dir, &lib, &socket);
+    check_f_module_memo_follows_include_roots(&bin, &dir, &lib, &socket);
     check_g_shim_dependent_module_warm_second_request(&bin, &dir, &lib, &socket);
     check_h_request_build_products_dir(&bin, &dir, &lib, &socket);
     check_a_byte_identical_transport(&bin, &dir, &lib, &socket);
@@ -437,46 +437,28 @@ fn check_d_relative_target_and_distinct_cwd(bin: &Path, dir: &Path, lib: &Path, 
     assert!(sub.join("out-d/result.cbor").is_file());
 }
 
-/// A generated module can be a pure
-/// function of the request's own effect VOCABULARY while always resolving
-/// under one FIXED module name (`Tidepool.Effects.Core`,
-/// tidepool-mcp/CLAUDE.md's "Generated effects modules" section — vocabulary-keyed
-/// into a distinct content-addressed include dir per vocabulary on the Rust
-/// side). A NARROW-vocabulary compile through the warm daemon populates the
-/// shared `GutsMemo` under that name; a LATER, WIDER-vocabulary compile
-/// through the SAME daemon (the production symptom: a Subagent/Worktree/Spawn
-/// row needing `Tidepool.Agent.Spawn`'s `spawnSpec`, compiled after a
-/// narrower row already warmed the memo) must resolve its OWN include dir's
-/// binding, not the stale narrow one — else `spawnSpec` (or whatever the
-/// wider vocabulary alone defines) surfaces as an unresolved external the
-/// extract silently replaces with a poison sentinel
-/// (`tidepool-codegen/src/host_fns/errors.rs`'s runtime error text, whose
-/// extract-time signature is the `[extract] POISONED` stderr line
-/// `Translate.hs` emits). This fixture defines its own minimal `spawnSpec`
-/// (`Int -> Int -> Int`) rather than pulling in the real Agent/Spawn/Worktree
-/// effect machinery — this crate is a std-only leaf (its own CLAUDE.md) and
-/// the mechanism under test is the daemon's memo, not effect-row generation
-/// (covered at a higher level by `tidepool-handlers`).
-fn check_f_spawn_row_warm_second_request(bin: &Path, dir: &Path, lib: &Path, socket: &Path) {
-    let narrow_inc = dir.join("f-narrow-vocab");
-    let wide_inc = dir.join("f-wide-vocab");
-    fs::create_dir_all(narrow_inc.join("Tidepool/Effects")).unwrap();
-    fs::create_dir_all(wide_inc.join("Tidepool/Effects")).unwrap();
+/// A warm daemon must key resolved module guts by the request's include roots,
+/// not only by module name. Two requests may intentionally resolve the same
+/// module name to different files; the second must not reuse the first one's
+/// binding. `Tidepool.Effects.Core` is merely a convenient fixture name here:
+/// production Core is now universal, while the memoization invariant applies
+/// to every generated or actor-supplied module.
+fn check_f_module_memo_follows_include_roots(bin: &Path, dir: &Path, lib: &Path, socket: &Path) {
+    let first_inc = dir.join("f-first-module");
+    let second_inc = dir.join("f-second-module");
+    fs::create_dir_all(first_inc.join("Tidepool/Effects")).unwrap();
+    fs::create_dir_all(second_inc.join("Tidepool/Effects")).unwrap();
 
-    // NARROW: no `spawnSpec` at all — this is the vocabulary that warms the
-    // shared memo entry under the module name `Tidepool.Effects.Core` FIRST.
+    // The first file has no `spawnSpec` and warms the memo entry under the
+    // shared module name.
     fs::write(
-        narrow_inc.join("Tidepool/Effects/Core.hs"),
+        first_inc.join("Tidepool/Effects/Core.hs"),
         "module Tidepool.Effects.Core where\nimport Tidepool.Prelude\ncoreStub :: Int\ncoreStub = 0\n",
     )
     .unwrap();
-    // WIDE: the Subagent/Worktree/Spawn-row analogue — defines `spawnSpec`,
-    // and is a COMPLETELY DIFFERENT FILE (different include dir), exactly as
-    // two independent daemon requests with different effect vocabularies
-    // resolve `Tidepool.Effects.Core` against two different content-addressed
-    // dirs on the real Rust side.
+    // The second include root resolves that same name to a different file.
     fs::write(
-        wide_inc.join("Tidepool/Effects/Core.hs"),
+        second_inc.join("Tidepool/Effects/Core.hs"),
         "module Tidepool.Effects.Core where\nimport Tidepool.Prelude\nspawnSpec :: Int -> Int -> Int\nspawnSpec a b = a + b\n",
     )
     .unwrap();
@@ -492,64 +474,63 @@ fn check_f_spawn_row_warm_second_request(bin: &Path, dir: &Path, lib: &Path, soc
         "module FWide where\nimport Tidepool.Prelude\nimport Tidepool.Effects.Core\nresult :: Int\nresult = spawnSpec 40 2\n",
     );
 
-    // Request 1 (narrow): warms the shared memo's `Tidepool.Effects.Core`
-    // entry with the spawnSpec-less compile.
-    let mut narrow_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-    narrow_cmd
+    // Request 1 warms the shared memo with the spawnSpec-less module.
+    let mut first_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    first_cmd
         .input(dir.join("FNarrow.hs"))
         .output_dir(dir.join("out-f-narrow"))
         .target("result")
         .include(lib)
-        .include(&narrow_inc);
-    let narrow_out = run_via_env_socket(&narrow_cmd, socket);
+        .include(&first_inc);
+    let first_out = run_via_env_socket(&first_cmd, socket);
     assert!(
-        narrow_out.status.success(),
-        "narrow-vocabulary warm-up compile should succeed: {}",
-        String::from_utf8_lossy(&narrow_out.stderr)
+        first_out.status.success(),
+        "first warm-up compile should succeed: {}",
+        String::from_utf8_lossy(&first_out.stderr)
     );
 
-    // Request 2 (wide), through the SAME warm daemon: must see ITS OWN
-    // include dir's `spawnSpec`, not request 1's stale narrow entry.
-    let mut wide_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-    wide_cmd
+    // Request 2 through the same daemon must see its own include root's
+    // `spawnSpec`, not request 1's stale binding.
+    let mut second_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    second_cmd
         .input(dir.join("FWide.hs"))
         .output_dir(dir.join("out-f-wide-daemon"))
         .target("result")
         .include(lib)
-        .include(&wide_inc);
-    let wide_daemon_out = run_via_env_socket(&wide_cmd, socket);
+        .include(&second_inc);
+    let second_daemon_out = run_via_env_socket(&second_cmd, socket);
 
     assert!(
-        wide_daemon_out.status.success(),
-        "the SECOND request (wider vocabulary, same Tidepool.Effects.Core module name) \
+        second_daemon_out.status.success(),
+        "the second request (same module name, different include root) \
          must compile through the warm daemon, not fail as though spawnSpec were unresolved: {}",
-        String::from_utf8_lossy(&wide_daemon_out.stderr)
+        String::from_utf8_lossy(&second_daemon_out.stderr)
     );
-    let daemon_stderr = String::from_utf8_lossy(&wide_daemon_out.stderr);
+    let daemon_stderr = String::from_utf8_lossy(&second_daemon_out.stderr);
     assert!(
         !daemon_stderr.contains("POISONED"),
         "spawnSpec must not be silently replaced with a poison sentinel: {daemon_stderr}"
     );
 
-    // Baseline: a direct spawn of the SAME wide fixture never touches the
+    // Baseline: a direct spawn of the same second fixture never touches the
     // daemon's shared memo at all, so it is the ground truth for "what does
     // this request's own include dir actually resolve to".
-    let mut wide_direct_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-    wide_direct_cmd
+    let mut second_direct_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    second_direct_cmd
         .input(dir.join("FWide.hs"))
         .output_dir(dir.join("out-f-wide-direct"))
         .target("result")
         .include(lib)
-        .include(&wide_inc);
-    let wide_direct_out = run_direct(&wide_direct_cmd);
+        .include(&second_inc);
+    let second_direct_out = run_direct(&second_direct_cmd);
     assert!(
-        wide_direct_out.status.success(),
+        second_direct_out.status.success(),
         "direct spawn baseline should succeed: {}",
-        String::from_utf8_lossy(&wide_direct_out.stderr)
+        String::from_utf8_lossy(&second_direct_out.stderr)
     );
 
     assert_eq!(
-        wide_daemon_out.stdout, wide_direct_out.stdout,
+        second_daemon_out.stdout, second_direct_out.stdout,
         "diagnostics JSON must match between the warm-daemon-served second request and a direct spawn"
     );
     let daemon_cbor = fs::read(dir.join("out-f-wide-daemon/result.cbor")).unwrap();
@@ -557,7 +538,7 @@ fn check_f_spawn_row_warm_second_request(bin: &Path, dir: &Path, lib: &Path, soc
     assert_eq!(
         daemon_cbor, direct_cbor,
         "result.cbor must be byte-identical — spawnSpec (40+2=42) must be the ACTUAL binding \
-         resolved from this request's own include dir, not a stale narrow-vocabulary memo entry"
+         resolved from this request's own include dir, not a stale memo entry"
     );
 }
 

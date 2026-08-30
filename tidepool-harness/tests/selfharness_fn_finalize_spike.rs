@@ -40,13 +40,9 @@
 //! continuation via `resume_handle` (no bridge, no sentinel), and applied
 //! by the loop's compiled `f st` — composing across cycles.
 //!
-//! `checkRunLLMTurnType` (`haskell/src/Tidepool/Translate.hs`) admits a PURE
-//! function-typed answer like `State -> State` and rejects only an answer
-//! type that itself mentions the `Eff` tycon (`typeMentionsEffectMonad`,
-//! narrowed further by stable-effects-core: it does not also reject every
-//! tycon the generated effects module declares, since those live in the
-//! STABLE `Tidepool.Effects.Core` module), with error text "effectful
-//! function answers not supported (the row varies per compile): ...".
+//! The extractor admits monomorphic function-valued answers and records exact
+//! effect rows when one is effectful; generated effect types themselves live
+//! in the universal stable `Tidepool.Effects.Core` module.
 //! `take_live_payload_handle_keep_open` is the closure-aware branch of
 //! `Harness`'s finalize-value extraction path (deep sentinel scan — nested
 //! closures included), and `resume_handle` delivers the closure on the
@@ -537,22 +533,9 @@ async fn living_helper_survives_loop_boundary_and_rotation() {
     );
 }
 
-// A driver-cycle-level effectful-helper acceptance test (declaring
-// `Member ReadState effs => ...` on the plane in cycle 1, calling it in
-// cycle 2) was attempted here and removed: it hit a PRE-EXISTING failure
-// ("Variable not in scope: bumpBy") in `living_helper_survives_loop_boundary_and_rotation`
-// ABOVE, reproduced on a clean baseline checkout with none of this branch's
-// changes applied — the shared decl plane's declarations are not actually
-// visible to the very next same-cycle answerer turn in this environment,
-// unrelated to stable-effects-core. See
-// `tidepool-harness/tests/stable_effects_core_decl_plane.rs` for the
-// direct, driver-independent acceptance of the actual mechanism this branch
-// changes (`pure_decl_module_env` + `EngineConfig::validation_include`
-// admitting `Tidepool.Effects.Core`): a `SessionLib` opened exactly the way
-// `SelfHarnessDriver::open_outer_plane` does, with a `Member`-constrained
-// declaration validating and a later declaration calling it, sidestepping
-// the pre-existing driver-cycle issue entirely. Flagged to the parent as a
-// pre-existing, out-of-scope bug rather than fixed here.
+// Direct declaration-plane behavior is covered in
+// `stable_effects_core_decl_plane.rs`; this file stays focused on values
+// crossing full driver cycles.
 
 fn ooda_harness_dir() -> std::path::PathBuf {
     repo_root().join("examples/harness/ooda-spike")

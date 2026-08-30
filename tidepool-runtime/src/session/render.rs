@@ -414,10 +414,9 @@ fn extract_user_imports(src: &str) -> (String, Vec<String>) {
     (kept.join("\n"), imports)
 }
 
-/// True iff `env` carries no `import Tidepool.Effects` line — the per-window
-/// SHIM that declares `type M` (stable-effects-core: `pure_decl_module_env`
-/// in `tidepool-mcp` deliberately excludes it, `session_decl_module_env`
-/// deliberately includes it). Exactly the condition under which `M` does not
+/// True iff `env` carries no `import Tidepool.Effects` line—the per-window
+/// shim that declares `type M`. `pure_decl_module_env` deliberately excludes
+/// it and `session_decl_module_env` includes it. Exactly when `M` does not
 /// resolve on this plane, and therefore the condition
 /// [`generalize_m_signatures`] must fire under — a plane that DOES import
 /// the shim leaves user signatures untouched, since `M` already means

@@ -77,12 +77,11 @@ import Tidepool.Metadata (DCMeta(..))
 import Tidepool.PrimOps
   ( floatMathToDouble, mapPrimOp, primOpArity, splitMultiReturnPrimOp
   , splitTripleReturnPrimOp, splitUnaryMultiReturnPrimOp, splitWord2DivPrimOp )
-import Tidepool.EffectSchema
-  ( SiteTypePolicy(..), VerbSpec(..), sitedVerbs )
+import Tidepool.EffectSchema (VerbSpec(..), sitedVerbs)
 import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
   ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType
-  , typeMentionsEffectMonad )
+  , stabilizeEffectRows )
 import qualified System.Environment
 import qualified Data.List
 import qualified Data.Maybe
@@ -1852,7 +1851,7 @@ translate expr =
           -- before them is 0+ leading `Member <Eff> effs` dictionaries (see
           -- 'splitTrailingArgs').
           , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
-        checkSiteType spec ty
+        stableTy <- checkSiteType spec ty
         sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
         case sitedIdM of
           -- The sibling's varId is resolved ONCE, by name, by a scan over
@@ -1880,13 +1879,13 @@ translate expr =
             -- actually resumes the parent; the harness derives the element
             -- type back by stripping the outer `[]`. 'vsListAnswer' is which
             -- verbs those are.
-            let renderedTy = Tidepool.GhcPipeline.renderType ty
+            let renderedTy = Tidepool.GhcPipeline.renderType stableTy
                 typeStr | vsListAnswer spec = "[" ++ renderedTy ++ "]"
                         | otherwise         = renderedTy
             -- Modules are resolved from the per-child element type `ty`
             -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
             -- shim needs T's own defining module(s), not '[]''s.
-            recordRunLLMTurnSite siteId (T.pack typeStr) (modulesOfType ty)
+            recordRunLLMTurnSite siteId (T.pack typeStr) (modulesOfType stableTy)
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
             -- their original order, before the injected site-id literal —
@@ -2729,10 +2728,10 @@ resolveSitedIds binds = Map.fromList
       && not (isSystemName (idName b))
       && definedIn (vsSitedModule spec) b
 
-checkSiteType :: VerbSpec -> Type -> TransM ()
-checkSiteType spec = case vsTypePolicy spec of
-  CrossCompileAnswer -> checkCrossCompileAnswer (vsName spec)
-  InHeapAnswer -> checkMonomorphicSite (vsName spec)
+checkSiteType :: VerbSpec -> Type -> TransM Type
+checkSiteType spec ty = do
+  checkMonomorphicSite (vsName spec) ty
+  pure (stabilizeEffectRows ty)
 
 -- | Suspension sites carry concrete type metadata, so their answer type must
 -- be monomorphic at extraction time.
@@ -2743,17 +2742,6 @@ checkMonomorphicSite what ty = do
       typeStr = Tidepool.GhcPipeline.renderType ty
   when (not (isEmptyVarSet (tyCoVarsOfType ty))) $
     error $ "polymorphic " ++ what ++ " site in " ++ siteDesc ++ ": " ++ typeStr
-
--- | Values supplied by separately compiled code may be closures, but cannot
--- contain the concrete effect row of the program that requested them.
-checkCrossCompileAnswer :: String -> Type -> TransM ()
-checkCrossCompileAnswer verb ty = do
-  checkMonomorphicSite verb ty
-  let typeStr = Tidepool.GhcPipeline.renderType ty
-  when (typeMentionsEffectMonad ty) $
-    error $ verb ++ " answer captures a compile-local effect row: "
-          ++ typeStr
-          ++ " — return a pure value or closure instead"
 
 -- | Recognize GHC's unpackAppendCString# builtin.
 -- unpackAppendCString# :: Addr# -> [Char] -> [Char]

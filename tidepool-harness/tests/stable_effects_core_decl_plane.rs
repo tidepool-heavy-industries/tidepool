@@ -1,38 +1,6 @@
-//! STABLE-EFFECTS-CORE acceptance: the shared decl plane's validation
-//! surface directly — no `SelfHarnessDriver`/replay/model machinery at all.
-//!
-//! `SelfHarnessDriver::open_outer_plane` (private) opens a `SessionLib` with
-//! `tidepool_mcp::pure_decl_module_env()`, validated against
-//! `EngineConfig::validation_include()`. These tests replicate exactly that
-//! construction and drive `SessionLib::define`/`define_scoped_in` directly,
-//! proving the actual mechanism this branch changes:
-//!
-//! - a declaration written `Member <Eff> effs => ... -> Eff effs T` VALIDATES
-//!   (Core is on the validation include) and PERSISTS (a LATER declaration
-//!   can call it, in the SAME plane instance a real cross-window plane would
-//!   be) — the original stable-effects-core payoff;
-//! - a declaration spelling the per-window `M` alias now GENERALIZES instead
-//!   of failing: `SessionLib`/`render_module` strips the M-mentioning
-//!   signature before this plane compiles it (the shim is still excluded —
-//!   `M` never resolves here), letting GHC infer the same
-//!   `Member <Eff> effs => ... -> Eff effs T` shape a hand-written
-//!   row-polymorphic signature would have — so `M`-spelled and
-//!   `Member`-spelled declarations now persist identically, in a later
-//!   window AND in a different scope of the same tree;
-//! - an unannotated declaration (no signature at all) validates the same way
-//!   — this was already true, pinned here as the third baseline shape;
-//! - a helper whose Member constraint a LATER, concretely-row-pinned
-//!   declaration cannot satisfy fails AT THAT USE SITE with an ordinary
-//!   unsolved-`Member` error, never at the helper's own define time — the
-//!   row itself still does not cross plane compiles, only its declaration
-//!   text does;
-//! - an ordinary pure declaration (no effect surface at all) is unaffected.
-//!
-//! A driver-cycle-level version of the first acceptance was attempted in
-//! `selfharness_fn_finalize_spike.rs` and removed — it hit a PRE-EXISTING
-//! failure reproduced on a clean baseline checkout, unrelated to this
-//! branch's changes (see that file's note). This file is deliberately
-//! independent of that pathway.
+//! Direct acceptance tests for the shared declaration plane used by the
+//! self-harness. They cover row-polymorphic, authored-`M`, inferred, invalid-
+//! capability, and pure declarations without provider/replay machinery.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).

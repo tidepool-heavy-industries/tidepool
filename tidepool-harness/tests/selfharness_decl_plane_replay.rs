@@ -1,23 +1,6 @@
-//! DRIVER-LEVEL regression for the decl-plane replay bug the
-//! stable-effects-core lane found and documented in `tidepool-harness/CLAUDE.md`
-//! ("Living decl plane" section): a top-level declaration a model makes in
-//! one answerer round was not actually being committed to the session's
-//! decl plane when the round's block ENDED on a declaration (no bind/expr
-//! after it) — `Harness::run_multi_item_block` rejected such a block with a
-//! "not something that runs" compile error BEFORE ever calling
-//! `session.define_scoped_in`, contradicting its own doc comment ("ending on
-//! a bare declaration compiles and persists fine but advances nothing").
-//! `tests/stable_effects_core_decl_plane.rs` proved the decl plane ITSELF
-//! (`SessionLib::define`) works fine when driven directly — this file proves
-//! the fix at the level the bug actually lived at: the driver's per-round
-//! commit-then-nudge sequencing.
-//!
-//! Fixture: `examples/harness/decl-replay-spike/{Harness,HarnessTypes}.hs` —
-//! a `loop` with THREE sequential `runLLMTurn @(State -> State)` windows on
-//! the SAME per-loop answerer node (the driver reuses one node across a
-//! cycle's holes — see `Harness::session_decl_context`'s doc), so declaring
-//! in window 1 and referencing in window 3 crosses two hole boundaries, not
-//! just one retry round.
+//! Driver-level declaration replay: a round ending in a declaration commits
+//! it before advancing, and later windows on the same answerer can use it.
+//! The three-window fixture crosses two hole boundaries.
 //!
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).

@@ -183,18 +183,15 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
     }
 }
 
-/// The [`ModuleEnv`] for a PURE-OR-EFFECTFUL-BUT-STABLE declaration plane —
-/// the self-iterating harness's living decl plane (stable-effects-core: this
-/// plane is the payoff feature, not just a pure-decls guard any more).
+/// The [`ModuleEnv`] for a pure or stable-effectful declaration plane: the
+/// self-iterating harness's living declaration surface.
 ///
 /// This is [`session_decl_module_env`]'s import surface MINUS the per-window
 /// SHIM (`Tidepool.Effects`, whose only content is `type M` — a row that
 /// genuinely varies turn to turn — and `Tidepool.Orchestrate`, which is
 /// `M`-typed throughout) PLUS the STABLE `Tidepool.Effects.Core` (every effect
-/// GADT + type_defs + `Member`-polymorphic helper, content-addressed on the
-/// vocabulary alone, so identical across every window/turn that shares it —
-/// see `tidepool-mcp/CLAUDE.md`'s stable-effects-core section and
-/// `haskell/src/Tidepool/Translate.hs`'s narrowed `typeMentionsEffectMonad`).
+/// GADT + type_defs + `Member`-polymorphic helper, universal and
+/// content-addressed, so identical across every window and actor incarnation).
 ///
 /// The practical effect: a declaration written `Member <Eff> effs => ... ->
 /// Eff effs T` validates here and persists across turns/windows (it

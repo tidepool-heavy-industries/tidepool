@@ -30,7 +30,6 @@ data RequestField
   | SessionRoot FilePath
   | InjectVal String
   | EmitBoundBinders FilePath
-  | ProbeOnly
   | Turn
   | TurnTemplate String FilePath
   | TurnOut FilePath
@@ -58,7 +57,6 @@ data WorkerRequest = WorkerRequest
   , requestSessionRoot :: Maybe FilePath
   , requestInjectVals :: [String]
   , requestEmitBoundBinders :: Maybe FilePath
-  , requestProbeOnly :: Bool
   , requestTurn :: Bool
   , requestTurnTemplates :: [(String, FilePath)]
   , requestTurnOut :: Maybe FilePath
@@ -86,7 +84,6 @@ emptyWorkerRequest = WorkerRequest
   , requestSessionRoot = Nothing
   , requestInjectVals = []
   , requestEmitBoundBinders = Nothing
-  , requestProbeOnly = False
   , requestTurn = False
   , requestTurnTemplates = []
   , requestTurnOut = Nothing
@@ -115,7 +112,6 @@ requestFromFields = foldl apply emptyWorkerRequest
       SessionRoot path -> request { requestSessionRoot = Just path }
       InjectVal name -> request { requestInjectVals = requestInjectVals request ++ [name] }
       EmitBoundBinders path -> request { requestEmitBoundBinders = Just path }
-      ProbeOnly -> request { requestProbeOnly = True }
       Turn -> request { requestTurn = True }
       TurnTemplate kind path -> request
         { requestTurnTemplates = requestTurnTemplates request ++ [(kind, path)] }
@@ -127,7 +123,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v1"
+workerRequestFlag = "--worker-request-v2"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -146,7 +142,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ001"
+  if magic /= "TPREQ002"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -156,7 +152,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ001" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ002" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -174,7 +170,6 @@ encodeField field = case field of
   SessionRoot value -> taggedText 12 value
   InjectVal value -> taggedText 13 value
   EmitBoundBinders value -> taggedText 14 value
-  ProbeOnly -> BS.singleton 15
   Turn -> BS.singleton 16
   TurnTemplate kind path -> BS.singleton 17 <> textFrame kind <> textFrame path
   TurnOut value -> taggedText 18 value
@@ -227,7 +222,6 @@ pField bytes = do
     12 -> mapParser SessionRoot pText rest
     13 -> mapParser InjectVal pText rest
     14 -> mapParser EmitBoundBinders pText rest
-    15 -> Right (ProbeOnly, rest)
     16 -> Right (Turn, rest)
     17 -> do
       (kind, rest') <- pText rest

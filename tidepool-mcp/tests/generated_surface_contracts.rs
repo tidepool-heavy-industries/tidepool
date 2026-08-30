@@ -20,12 +20,7 @@
 //! would then fail on.
 
 fn worktree_and_event_module() -> String {
-    let decls = vec![
-        tidepool_mcp::console_decl(),
-        tidepool_mcp::worktree_decl(),
-        tidepool_mcp::event_decl(),
-    ];
-    tidepool_mcp::effects_core_module_source(&decls)
+    tidepool_mcp::effects_core_module_source()
 }
 
 /// A row importing `Tidepool.Event` must hide Prelude's Alternative operator,

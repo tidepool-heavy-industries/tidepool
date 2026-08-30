@@ -33,12 +33,18 @@ pub enum HsType {
     Bool,
     /// `Value` — the vendored aeson JSON value.
     Value,
-    /// A named type resolved elsewhere: a bridged record (`Proc`, `Commit`), a
+    /// A named type constructor or saturated type resolved elsewhere: a
+    /// bridged record (`Proc`, `Commit`), a
     /// type declared in the effect's own `type_defs` (`FileRead`), or a type
     /// from the Haskell stdlib (`UTCTime`).
     Named(&'static str),
     /// A type VARIABLE (`v`, `a`) — only parameterized effects have these.
     Var(&'static str),
+    /// General type application, `F A`. Most common constructors retain
+    /// dedicated variants below because their structure matters elsewhere;
+    /// this is for genuinely higher-kinded contract types such as
+    /// `Eff bodyEffs ()`.
+    App(Box<HsType>, Box<HsType>),
     /// `[T]`.
     List(Box<HsType>),
     /// `Maybe T`.
@@ -47,12 +53,8 @@ pub enum HsType {
     Either(Box<HsType>, Box<HsType>),
     /// `(A, B, …)`.
     Tuple(Vec<HsType>),
-    /// `A -> B` — a function type. Used ONLY by `Green`'s `AsyncSpawnWith`
-    /// GADT constructor field (`Int -> M ()`, the async thread body) — the
-    /// sole function-typed field in this whole closed language; see
-    /// `tidepool-protocol/src/effects/green.rs`'s
-    /// `HelperBody::AsyncSpawnBody` doc for why it is forced concrete rather
-    /// than row-polymorphic.
+    /// `A -> B` — a function type. Green's async body is currently the sole
+    /// function-typed field in the effect contract.
     Fn(Box<HsType>, Box<HsType>),
 }
 
@@ -81,6 +83,12 @@ impl HsType {
         HsType::Fn(Box::new(arg), Box::new(ret))
     }
 
+    /// `F A`.
+    #[must_use]
+    pub fn app(head: HsType, arg: HsType) -> Self {
+        HsType::App(Box::new(head), Box::new(arg))
+    }
+
     /// Bare rendering. Use in arrow-argument position and at the top level —
     /// EXCEPT for an argument that is itself [`HsType::Fn`], which still
     /// needs parenthesizing there (`->` is right-associative, so an
@@ -96,6 +104,7 @@ impl HsType {
             HsType::Bool => "Bool".to_string(),
             HsType::Value => "Value".to_string(),
             HsType::Named(n) | HsType::Var(n) => (*n).to_string(),
+            HsType::App(f, x) => format!("{} {}", f.render_app_head(), x.render_app_arg()),
             HsType::List(t) => format!("[{}]", t.render()),
             HsType::Maybe(t) => format!("Maybe {}", t.render_app_arg()),
             HsType::Either(e, a) => {
@@ -109,8 +118,8 @@ impl HsType {
         }
     }
 
-    /// Rendering for type-application-argument position: parenthesized exactly
-    /// when the type is an application itself.
+    /// Rendering for type-application-argument position: parenthesized when
+    /// required to keep the argument grouped as one type.
     ///
     /// `[T]` and tuples are already self-delimiting, so they are NOT wrapped —
     /// which is what makes `Meta (Maybe (Int, Int))` come out with two levels
@@ -118,9 +127,16 @@ impl HsType {
     #[must_use]
     pub fn render_app_arg(&self) -> String {
         match self {
-            HsType::Maybe(_) | HsType::Either(_, _) | HsType::Fn(_, _) => {
+            HsType::App(_, _) | HsType::Maybe(_) | HsType::Either(_, _) | HsType::Fn(_, _) => {
                 format!("({})", self.render())
             }
+            _ => self.render(),
+        }
+    }
+
+    fn render_app_head(&self) -> String {
+        match self {
+            HsType::Fn(_, _) => format!("({})", self.render()),
             _ => self.render(),
         }
     }
@@ -157,12 +173,10 @@ pub fn render_signature(args: &[HsType], head: &str, result: &HsType) -> String 
     out
 }
 
-/// Render a ROW-POLYMORPHIC curried Haskell signature: `forall effs. Member
-/// <effect> effs => A -> B -> Eff effs <result>` — the stable-effects-core
-/// shape every migrated effect's helper now uses instead of a concrete `M`
-/// head, so the helper's compiled body can live in the vocabulary-only,
-/// session-stable `Tidepool.Effects.Core` module (which has no `M` alias of
-/// its own to write against — `M` is a per-agent-session shim concept).
+/// Render a row-polymorphic curried Haskell signature: `forall effs. Member
+/// <effect> effs => A -> B -> Eff effs <result>`. Generated helpers use this
+/// shape so their bodies live in universal `Tidepool.Effects.Core`; `M`
+/// remains an actor-local shim alias.
 #[must_use]
 pub fn render_member_signature(args: &[HsType], effect: &str, result: &HsType) -> String {
     render_member_signature_with(&[], args, effect, result)
@@ -244,6 +258,22 @@ mod tests {
             (HsType::Named("Proc"), "Proc", "Proc"),
             (HsType::Named("Commit"), "Commit", "Commit"),
             (HsType::Var("a"), "a", "a"),
+            (
+                HsType::app(
+                    HsType::app(HsType::Named("Eff"), HsType::Var("effs")),
+                    HsType::Unit,
+                ),
+                "Eff effs ()",
+                "(Eff effs ())",
+            ),
+            (
+                HsType::app(
+                    HsType::func(HsType::Var("a"), HsType::Var("b")),
+                    HsType::Var("c"),
+                ),
+                "(a -> b) c",
+                "((a -> b) c)",
+            ),
             (HsType::list(HsType::Text), "[Text]", "[Text]"),
             (
                 HsType::list(HsType::Named("Commit")),

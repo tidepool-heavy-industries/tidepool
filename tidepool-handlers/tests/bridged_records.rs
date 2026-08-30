@@ -114,9 +114,8 @@ fn stable_records_decl_matches_fs_effect_def() {
     }
     assert!(tidepool_mcp::FS_ERROR_STABLE_DECL.starts_with("data FsError = "));
     assert!(tidepool_mcp::FILE_READ_STABLE_DECL.starts_with("data FileRead = "));
-    // `fs_decl()`'s own `type_defs` no longer carries either decl inline —
-    // that's the whole point (a session bind of `[FileRead]` must not see a
-    // fragment-nominal `FsError`/`FileRead`).
+    // `fs_decl()` reuses the nominal types exported by Records/Prelude rather
+    // than declaring a duplicate copy in Core.
     assert!(tidepool_mcp::fs_decl().type_defs.is_empty());
 }
 
@@ -158,10 +157,7 @@ fn stable_records_decl_matches_git_llm_http_effect_defs() {
     }
     assert!(tidepool_mcp::HTTP_ERROR_STABLE_DECL.starts_with("data HttpError = "));
 
-    // None of the three effects' own `type_defs` carries its error ADT
-    // inline anymore — same point as `fs_decl()` above: a session bind of
-    // the WHOLE `Either <Err> a` a verb returns must not see a
-    // fragment-nominal error type.
+    // These effects reuse the nominal types exported by Records/Prelude.
     assert!(tidepool_mcp::git_decl().type_defs.is_empty());
     assert!(tidepool_mcp::llm_decl().type_defs.is_empty());
     assert!(tidepool_mcp::http_decl().type_defs.is_empty());
