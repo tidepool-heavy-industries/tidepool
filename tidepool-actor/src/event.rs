@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ActorRef, CallId, MessageId};
+use crate::{ActorRef, CallId, MessageId, WaitId};
 
 /// Durable ordering envelope shared by native actor events and compatibility
 /// adapters. `stream_sequence` orders one journal; `actor_sequence` orders the
@@ -57,6 +57,8 @@ pub enum ActorEvent {
     Exited {
         kind: ActorExitKind,
         summary: String,
+        #[serde(default)]
+        owner_observing: bool,
     },
     ModelMessage {
         turn: u64,
@@ -77,6 +79,14 @@ pub enum ActorEvent {
     CallSettled {
         call: CallId,
         disposition: CallDisposition,
+    },
+    WaitRegistered {
+        wait: WaitId,
+        waiter: ActorRef,
+    },
+    WaitSettled {
+        wait: WaitId,
+        disposition: WaitDisposition,
     },
     ConversationForked {
         parent: ActorRef,
@@ -153,6 +163,14 @@ pub enum CallDisposition {
     DeliveryAbandoned,
     CallerExited,
     CallerCancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitDisposition {
+    Observed,
+    WaiterCancelled,
+    WaiterExited,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

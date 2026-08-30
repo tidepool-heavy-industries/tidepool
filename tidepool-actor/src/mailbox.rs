@@ -14,6 +14,16 @@ pub struct CallId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageId(pub u64);
 
+/// Process-local identity of one parked exact-incarnation wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaitId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkedObligation {
+    Call(CallId),
+    Wait(WaitId),
+}
+
 /// One live Haskell value under exclusive machine-root custody.
 ///
 /// The session tag lets the actor kernel reject a cross-machine delivery
@@ -93,8 +103,6 @@ impl Drop for DropProbe {
 pub enum MailboxFailure {
     #[error(transparent)]
     Registry(#[from] ActorRegistryError),
-    #[error("actor {caller:?} already has synchronous call {active:?} outstanding")]
-    CallAlreadyPending { caller: ActorRef, active: CallId },
     #[error("synchronous call {caller:?} -> {target:?} would create a cycle")]
     CallCycle { caller: ActorRef, target: ActorRef },
     #[error(
@@ -177,4 +185,65 @@ pub enum CallStatus {
 pub enum ExitObservation {
     Pending,
     Exited(crate::ActorTerminal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WaitError {
+    #[error(transparent)]
+    Registry(#[from] ActorRegistryError),
+    #[error(
+        "waiter {waiter:?} and target {target:?} belong to different sessions ({waiter_session} and {target_session})"
+    )]
+    MachineBoundary {
+        waiter: ActorRef,
+        waiter_session: SessionId,
+        target: ActorRef,
+        target_session: SessionId,
+    },
+    #[error("wait {waiter:?} -> {target:?} would create a parked-obligation cycle")]
+    WaitCycle { waiter: ActorRef, target: ActorRef },
+    #[error("wait {0:?} is unknown or already consumed")]
+    UnknownWait(WaitId),
+}
+
+/// Linear parked wait. Dropping it unregisters the waiter; polling consumes
+/// only an immutable terminal result for the exact target incarnation.
+pub struct WaitTicket {
+    pub(crate) id: WaitId,
+    pub(crate) waiter: ActorRef,
+    pub(crate) target: ActorRef,
+    pub(crate) registry: crate::ActorRegistry,
+    pub(crate) settled: bool,
+}
+
+impl WaitTicket {
+    #[must_use]
+    pub fn id(&self) -> WaitId {
+        self.id
+    }
+
+    pub fn poll(&mut self) -> Result<ExitObservation, WaitError> {
+        let registry = self.registry.clone();
+        registry.poll_wait(self)
+    }
+}
+
+impl fmt::Debug for WaitTicket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WaitTicket")
+            .field("id", &self.id)
+            .field("waiter", &self.waiter)
+            .field("target", &self.target)
+            .field("settled", &self.settled)
+            .finish()
+    }
+}
+
+impl Drop for WaitTicket {
+    fn drop(&mut self) {
+        if !self.settled {
+            let registry = self.registry.clone();
+            registry.cancel_wait(self);
+        }
+    }
 }

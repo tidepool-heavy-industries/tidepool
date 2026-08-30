@@ -165,10 +165,12 @@ fn adapt_event(event: &Event) -> (EventCausality, ActorEvent) {
         } => ActorEvent::Exited {
             kind: ActorExitKind::Completed,
             summary: result_rendered.clone(),
+            owner_observing: false,
         },
         Event::NodeCancelled { reason, .. } => ActorEvent::Exited {
             kind: ActorExitKind::Cancelled,
             summary: reason.clone(),
+            owner_observing: false,
         },
         Event::TurnDelta {
             turn,

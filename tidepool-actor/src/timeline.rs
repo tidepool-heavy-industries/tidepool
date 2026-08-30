@@ -138,9 +138,11 @@ impl ActorTimelines {
             | ActorEvent::ConversationForked { .. }
             | ActorEvent::MailboxAccepted { .. }
             | ActorEvent::MailboxDequeued { .. }
-            | ActorEvent::CallSettled { .. } => {}
+            | ActorEvent::CallSettled { .. }
+            | ActorEvent::WaitRegistered { .. }
+            | ActorEvent::WaitSettled { .. } => {}
             ActorEvent::Ready => timeline.lifecycle = TimelineLifecycle::Ready,
-            ActorEvent::Exited { kind, summary } => {
+            ActorEvent::Exited { kind, summary, .. } => {
                 timeline.lifecycle = TimelineLifecycle::Exited;
                 timeline.terminal = Some(ActorTerminal {
                     kind: *kind,
@@ -170,6 +172,8 @@ fn event_name(event: &ActorEvent) -> &'static str {
         ActorEvent::MailboxAccepted { .. } => "mailbox_accepted",
         ActorEvent::MailboxDequeued { .. } => "mailbox_dequeued",
         ActorEvent::CallSettled { .. } => "call_settled",
+        ActorEvent::WaitRegistered { .. } => "wait_registered",
+        ActorEvent::WaitSettled { .. } => "wait_settled",
         ActorEvent::ConversationForked { .. } => "conversation_forked",
         ActorEvent::HaskellBatchStarted { .. } => "haskell_batch_started",
         ActorEvent::HaskellCompiled { .. } => "haskell_compiled",

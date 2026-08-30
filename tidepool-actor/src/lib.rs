@@ -19,12 +19,12 @@ mod timeline;
 pub use agent_session::{ActorAgentSession, AssistantTurn, PendingProviderTurn};
 pub use event::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,
-    EventCausality, MailboxMessageKind, ModelUsage, StartInitiator,
+    EventCausality, MailboxMessageKind, ModelUsage, StartInitiator, WaitDisposition,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use mailbox::{
     CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
-    MessageId,
+    MessageId, ParkedObligation, WaitError, WaitId, WaitTicket,
 };
 pub use mount::{mount_actor_turn, ActorRunTarget, ActorSessionContext, MountActorTurnError};
 pub use registry::{

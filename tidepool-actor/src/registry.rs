@@ -7,7 +7,8 @@ use tidepool_repr::{MonotonicIdIssuer, SessionId};
 use crate::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorRef, CallDisposition, CallFailure,
     CallId, CallStatus, CallTicket, EventCausality, ExitObservation, MailboxFailure,
-    MailboxMessageKind, MailboxValue, MessageId, StartInitiator,
+    MailboxMessageKind, MailboxValue, MessageId, ParkedObligation, StartInitiator, WaitDisposition,
+    WaitError, WaitId, WaitTicket,
 };
 
 /// Immutable attributes selected before an actor begins initialization.
@@ -72,8 +73,11 @@ pub enum ActorRegistryError {
         actor: ActorRef,
         active: ActorTurnKind,
     },
-    #[error("actor {actor:?} is parked on synchronous call {call:?}")]
-    AwaitingCall { actor: ActorRef, call: CallId },
+    #[error("actor {actor:?} is parked on {obligation:?}")]
+    Parked {
+        actor: ActorRef,
+        obligation: ParkedObligation,
+    },
     #[error("startup token belongs to another actor registry")]
     ForeignStartup,
 }
@@ -90,6 +94,7 @@ struct RegistryInner {
     ids: MonotonicIdIssuer,
     message_ids: MonotonicIdIssuer,
     call_ids: MonotonicIdIssuer,
+    wait_ids: MonotonicIdIssuer,
     state: Mutex<RegistryState>,
 }
 
@@ -97,6 +102,7 @@ struct RegistryInner {
 struct RegistryState {
     actors: HashMap<ActorId, ActorEntry>,
     calls: HashMap<CallId, CallEntry>,
+    waits: HashMap<WaitId, WaitEntry>,
     next_stream_sequence: u64,
     events: Vec<ActorEventRecord>,
 }
@@ -109,7 +115,7 @@ struct ActorEntry {
     lifecycle: ActorLifecycle,
     active_turn: Option<ActorTurnKind>,
     mailbox: VecDeque<QueuedMessage>,
-    active_call: Option<CallId>,
+    parked: Option<ParkedObligation>,
     terminal: Option<ActorTerminal>,
     next_event_sequence: u64,
 }
@@ -125,6 +131,11 @@ struct CallEntry {
     caller: ActorRef,
     target: ActorRef,
     state: CallState,
+}
+
+struct WaitEntry {
+    waiter: ActorRef,
+    target: ActorRef,
 }
 
 enum CallState {
@@ -189,6 +200,7 @@ impl ActorRegistry {
                 ids: MonotonicIdIssuer::new("actor"),
                 message_ids: MonotonicIdIssuer::new("actor-message"),
                 call_ids: MonotonicIdIssuer::new("actor-call"),
+                wait_ids: MonotonicIdIssuer::new("actor-wait"),
                 state: Mutex::new(RegistryState::default()),
             }),
         }
@@ -226,7 +238,7 @@ impl ActorRegistry {
                 lifecycle: ActorLifecycle::Initializing,
                 active_turn: None,
                 mailbox: VecDeque::new(),
-                active_call: None,
+                parked: None,
                 terminal: None,
                 next_event_sequence: 0,
             },
@@ -324,8 +336,8 @@ impl ActorRegistry {
         if let Some(active) = actor_entry.active_turn {
             return Err(ActorRegistryError::Busy { actor, active });
         }
-        if let Some(call) = actor_entry.active_call {
-            return Err(ActorRegistryError::AwaitingCall { actor, call });
+        if let Some(obligation) = actor_entry.parked {
+            return Err(ActorRegistryError::Parked { actor, obligation });
         }
         actor_entry.active_turn = Some(kind);
         Ok(TurnLease {
@@ -383,10 +395,14 @@ impl ActorRegistry {
         let call = CallId(self.inner.call_ids.next_raw());
         let mut state = self.inner.state.lock();
         validate_delivery(&state, caller, target, &value)?;
-        if let Some(active) = entry(&state, caller)?.active_call {
-            return Err(MailboxFailure::CallAlreadyPending { caller, active });
+        if let Some(obligation) = entry(&state, caller)?.parked {
+            return Err(ActorRegistryError::Parked {
+                actor: caller,
+                obligation,
+            }
+            .into());
         }
-        if creates_call_cycle(&state, caller, target) {
+        if creates_obligation_cycle(&state, caller, target) {
             return Err(MailboxFailure::CallCycle { caller, target });
         }
         state.calls.insert(
@@ -397,7 +413,7 @@ impl ActorRegistry {
                 state: CallState::Queued,
             },
         );
-        entry_mut(&mut state, caller)?.active_call = Some(call);
+        entry_mut(&mut state, caller)?.parked = Some(ParkedObligation::Call(call));
         entry_mut(&mut state, target)?
             .mailbox
             .push_back(QueuedMessage {
@@ -489,7 +505,7 @@ impl ActorRegistry {
                     .calls
                     .remove(&ticket.id)
                     .ok_or(MailboxFailure::UnknownCall(ticket.id))?;
-                clear_active_call(&mut state, ticket.caller, ticket.id);
+                clear_parked(&mut state, ticket.caller, ParkedObligation::Call(ticket.id));
                 ticket.settled = true;
                 match call.state {
                     CallState::Replied(value) => Ok(CallStatus::Reply(value)),
@@ -515,7 +531,7 @@ impl ActorRegistry {
                 .retain(|message| message.call != Some(ticket.id));
         }
         state.calls.remove(&ticket.id);
-        clear_active_call(&mut state, ticket.caller, ticket.id);
+        clear_parked(&mut state, ticket.caller, ParkedObligation::Call(ticket.id));
         if unsettled {
             let _ = record(
                 &mut state,
@@ -542,6 +558,113 @@ impl ActorRegistry {
             Some(terminal) => ExitObservation::Exited(terminal.clone()),
             None => ExitObservation::Pending,
         })
+    }
+
+    /// Register one parked wait on an exact target incarnation. Registration
+    /// succeeds even after target exit so publication/termination races still
+    /// observe the immutable terminal record.
+    pub fn register_wait(
+        &self,
+        waiter: ActorRef,
+        target: ActorRef,
+    ) -> Result<WaitTicket, WaitError> {
+        let wait = WaitId(self.inner.wait_ids.next_raw());
+        let mut state = self.inner.state.lock();
+        require_ready(&state, waiter)?;
+        let waiter_session = entry(&state, waiter)?.session;
+        let target_session = entry(&state, target)?.session;
+        if waiter_session != target_session {
+            return Err(WaitError::MachineBoundary {
+                waiter,
+                waiter_session,
+                target,
+                target_session,
+            });
+        }
+        if let Some(obligation) = entry(&state, waiter)?.parked {
+            return Err(ActorRegistryError::Parked {
+                actor: waiter,
+                obligation,
+            }
+            .into());
+        }
+        if creates_obligation_cycle(&state, waiter, target) {
+            return Err(WaitError::WaitCycle { waiter, target });
+        }
+        state.waits.insert(wait, WaitEntry { waiter, target });
+        entry_mut(&mut state, waiter)?.parked = Some(ParkedObligation::Wait(wait));
+        record(
+            &mut state,
+            target,
+            EventCausality {
+                owner: Some(waiter),
+                operation: Some(format!("wait:{}", wait.0)),
+                ..EventCausality::default()
+            },
+            ActorEvent::WaitRegistered { wait, waiter },
+        )?;
+        Ok(WaitTicket {
+            id: wait,
+            waiter,
+            target,
+            registry: self.clone(),
+            settled: false,
+        })
+    }
+
+    pub(crate) fn poll_wait(&self, ticket: &mut WaitTicket) -> Result<ExitObservation, WaitError> {
+        let mut state = self.inner.state.lock();
+        let Some(wait) = state.waits.get(&ticket.id) else {
+            return Err(WaitError::UnknownWait(ticket.id));
+        };
+        if wait.waiter != ticket.waiter || wait.target != ticket.target {
+            return Err(WaitError::UnknownWait(ticket.id));
+        }
+        let Some(terminal) = entry(&state, ticket.target)?.terminal.clone() else {
+            return Ok(ExitObservation::Pending);
+        };
+        state.waits.remove(&ticket.id);
+        clear_parked(&mut state, ticket.waiter, ParkedObligation::Wait(ticket.id));
+        ticket.settled = true;
+        record(
+            &mut state,
+            ticket.target,
+            EventCausality {
+                owner: Some(ticket.waiter),
+                operation: Some(format!("wait:{}", ticket.id.0)),
+                ..EventCausality::default()
+            },
+            ActorEvent::WaitSettled {
+                wait: ticket.id,
+                disposition: WaitDisposition::Observed,
+            },
+        )?;
+        Ok(ExitObservation::Exited(terminal))
+    }
+
+    pub(crate) fn cancel_wait(&self, ticket: &WaitTicket) {
+        let mut state = self.inner.state.lock();
+        let Some(wait) = state.waits.get(&ticket.id) else {
+            return;
+        };
+        if wait.waiter != ticket.waiter || wait.target != ticket.target {
+            return;
+        }
+        state.waits.remove(&ticket.id);
+        clear_parked(&mut state, ticket.waiter, ParkedObligation::Wait(ticket.id));
+        let _ = record(
+            &mut state,
+            ticket.target,
+            EventCausality {
+                owner: Some(ticket.waiter),
+                operation: Some(format!("wait:{}", ticket.id.0)),
+                ..EventCausality::default()
+            },
+            ActorEvent::WaitSettled {
+                wait: ticket.id,
+                disposition: WaitDisposition::WaiterCancelled,
+            },
+        );
     }
 
     /// Retain a terminal outcome and recursively cancel descendants. Ordinary
@@ -824,7 +947,7 @@ fn validate_delivery(
     Ok(())
 }
 
-fn creates_call_cycle(state: &RegistryState, caller: ActorRef, target: ActorRef) -> bool {
+fn creates_obligation_cycle(state: &RegistryState, caller: ActorRef, target: ActorRef) -> bool {
     let mut cursor = Some(target);
     let mut visited = BTreeSet::new();
     while let Some(actor) = cursor {
@@ -836,20 +959,24 @@ fn creates_call_cycle(state: &RegistryState, caller: ActorRef, target: ActorRef)
         }
         cursor = entry(state, actor)
             .ok()
-            .and_then(|entry| entry.active_call)
-            .and_then(|call| state.calls.get(&call))
-            .and_then(|call| {
-                matches!(call.state, CallState::Queued | CallState::Delivered)
-                    .then_some(call.target)
+            .and_then(|entry| match entry.parked {
+                Some(ParkedObligation::Call(call)) => state.calls.get(&call).and_then(|call| {
+                    matches!(call.state, CallState::Queued | CallState::Delivered)
+                        .then_some(call.target)
+                }),
+                Some(ParkedObligation::Wait(wait)) => {
+                    state.waits.get(&wait).map(|wait| wait.target)
+                }
+                None => None,
             });
     }
     false
 }
 
-fn clear_active_call(state: &mut RegistryState, caller: ActorRef, call: CallId) {
-    if let Ok(entry) = entry_mut(state, caller) {
-        if entry.active_call == Some(call) {
-            entry.active_call = None;
+fn clear_parked(state: &mut RegistryState, actor: ActorRef, obligation: ParkedObligation) {
+    if let Ok(entry) = entry_mut(state, actor) {
+        if entry.parked == Some(obligation) {
+            entry.parked = None;
         }
     }
 }
@@ -913,13 +1040,14 @@ fn exit_subtree(
         return Ok(());
     }
     let children: Vec<_> = entry(state, actor)?.children.iter().copied().collect();
-    settle_actor_calls(state, actor);
+    settle_actor_obligations(state, actor);
     {
         let actor_entry = entry_mut(state, actor)?;
         actor_entry.lifecycle = ActorLifecycle::Exited;
         actor_entry.active_turn = None;
         actor_entry.terminal = Some(terminal.clone());
     }
+    let owner_observing = owner_observes_exit(state, actor);
     record(
         state,
         actor,
@@ -927,6 +1055,7 @@ fn exit_subtree(
         ActorEvent::Exited {
             kind: terminal.kind,
             summary: terminal.summary,
+            owner_observing,
         },
     )?;
     for child in children {
@@ -942,7 +1071,25 @@ fn exit_subtree(
     Ok(())
 }
 
-fn settle_actor_calls(state: &mut RegistryState, actor: ActorRef) {
+fn owner_observes_exit(state: &RegistryState, actor: ActorRef) -> bool {
+    let Some(owner) = entry(state, actor).ok().and_then(|entry| entry.owner) else {
+        return false;
+    };
+    let waiting = state
+        .waits
+        .values()
+        .any(|wait| wait.waiter == owner && wait.target == actor);
+    let calling = entry(state, owner)
+        .ok()
+        .and_then(|entry| match entry.parked {
+            Some(ParkedObligation::Call(call)) => state.calls.get(&call),
+            Some(ParkedObligation::Wait(_)) | None => None,
+        })
+        .is_some_and(|call| call.target == actor);
+    waiting || calling
+}
+
+fn settle_actor_obligations(state: &mut RegistryState, actor: ActorRef) {
     let queued = entry_mut(state, actor)
         .map(|entry| std::mem::take(&mut entry.mailbox))
         .unwrap_or_default();
@@ -1010,6 +1157,28 @@ fn settle_actor_calls(state: &mut RegistryState, actor: ActorRef) {
             CallFailure::TargetExited(actor),
             CallDisposition::TargetExited,
             actor,
+        );
+    }
+
+    let waits: Vec<_> = state
+        .waits
+        .iter()
+        .filter_map(|(id, wait)| (wait.waiter == actor).then_some((*id, wait.target)))
+        .collect();
+    for (wait, target) in waits {
+        state.waits.remove(&wait);
+        let _ = record(
+            state,
+            target,
+            EventCausality {
+                owner: Some(actor),
+                operation: Some(format!("wait:{}", wait.0)),
+                ..EventCausality::default()
+            },
+            ActorEvent::WaitSettled {
+                wait,
+                disposition: WaitDisposition::WaiterExited,
+            },
         );
     }
 }
@@ -1192,6 +1361,187 @@ mod tests {
     }
 
     #[test]
+    fn multiple_waiters_observe_one_retained_exit_and_suppress_owner_advisory() {
+        let registry = ActorRegistry::new();
+        let owner = ready_root(&registry);
+        let observer = ready_in(&registry, None, "observer", SessionId(1));
+        let child = ready_in(&registry, Some(owner), "child", SessionId(1));
+        let mut owner_wait = registry.register_wait(owner, child).expect("owner wait");
+        let mut observer_wait = registry
+            .register_wait(observer, child)
+            .expect("observer wait");
+
+        assert!(matches!(owner_wait.poll(), Ok(ExitObservation::Pending)));
+        assert!(matches!(
+            registry.begin_turn(owner, ActorTurnKind::Provider),
+            Err(ActorRegistryError::Parked {
+                actor,
+                obligation: ParkedObligation::Wait(wait),
+            }) if actor == owner && wait == owner_wait.id()
+        ));
+
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "reviewer failed".into(),
+        };
+        registry
+            .finish(child, terminal.clone())
+            .expect("finish child");
+        assert!(matches!(
+            registry.events().last().map(|record| &record.event),
+            Some(ActorEvent::Exited {
+                owner_observing: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            owner_wait.poll(),
+            Ok(ExitObservation::Exited(terminal.clone()))
+        );
+        assert_eq!(
+            observer_wait.poll(),
+            Ok(ExitObservation::Exited(terminal.clone()))
+        );
+        registry
+            .begin_turn(owner, ActorTurnKind::Haskell)
+            .expect("observed wait restored owner admission");
+        assert_eq!(
+            registry.observe_exit(child),
+            Ok(ExitObservation::Exited(terminal))
+        );
+    }
+
+    #[test]
+    fn wait_after_exit_is_immediate_and_ticket_drop_restores_admission() {
+        let registry = ActorRegistry::new();
+        let waiter = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "done".into(),
+        };
+        registry
+            .finish(target, terminal.clone())
+            .expect("finish target");
+        let mut completed = registry.register_wait(waiter, target).expect("late wait");
+        assert_eq!(completed.poll(), Ok(ExitObservation::Exited(terminal)));
+
+        let live = ready_in(&registry, None, "live", SessionId(1));
+        let wait = registry.register_wait(waiter, live).expect("live wait");
+        drop(wait);
+        registry
+            .begin_turn(waiter, ActorTurnKind::Haskell)
+            .expect("wait cancellation restored admission");
+    }
+
+    #[test]
+    fn waiter_exit_unregisters_without_consuming_the_targets_future_exit() {
+        let registry = ActorRegistry::new();
+        let waiter = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        let mut wait = registry
+            .register_wait(waiter, target)
+            .expect("register wait");
+        registry
+            .finish(
+                waiter,
+                ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "waiter cancelled".into(),
+                },
+            )
+            .expect("finish waiter");
+        assert!(matches!(
+            wait.poll(),
+            Err(WaitError::UnknownWait(id)) if id == wait.id()
+        ));
+        registry
+            .finish(
+                target,
+                ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "later".into(),
+                },
+            )
+            .expect("finish target");
+        assert!(matches!(
+            registry.observe_exit(target),
+            Ok(ExitObservation::Exited(_))
+        ));
+    }
+
+    #[test]
+    fn waits_reject_foreign_machines_and_share_the_parked_obligation_with_calls() {
+        let registry = ActorRegistry::new();
+        let waiter = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        let foreign = ready_in(&registry, None, "foreign", SessionId(2));
+        assert!(matches!(
+            registry.register_wait(waiter, foreign),
+            Err(WaitError::MachineBoundary { .. })
+        ));
+
+        let wait = registry
+            .register_wait(waiter, target)
+            .expect("register wait");
+        let (request, dropped) = probe(SessionId(1));
+        assert!(matches!(
+            registry.call(waiter, target, request),
+            Err(MailboxFailure::Registry(ActorRegistryError::Parked {
+                actor,
+                obligation: ParkedObligation::Wait(_),
+            })) if actor == waiter
+        ));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        drop(wait);
+
+        let call = registry
+            .call(waiter, target, probe(SessionId(1)).0)
+            .expect("call");
+        assert!(matches!(
+            registry.register_wait(waiter, target),
+            Err(WaitError::Registry(ActorRegistryError::Parked {
+                actor,
+                obligation: ParkedObligation::Call(_),
+            })) if actor == waiter
+        ));
+        drop(call);
+    }
+
+    #[test]
+    fn waits_and_calls_reject_cycles_across_both_obligation_kinds() {
+        let registry = ActorRegistry::new();
+        let first = ready_root(&registry);
+        let second = ready_in(&registry, None, "second", SessionId(1));
+
+        assert!(matches!(
+            registry.register_wait(first, first),
+            Err(WaitError::WaitCycle { waiter, target })
+                if waiter == first && target == first
+        ));
+
+        let first_wait = registry
+            .register_wait(first, second)
+            .expect("first waits on second");
+        assert!(matches!(
+            registry.call(second, first, probe(SessionId(1)).0),
+            Err(MailboxFailure::CallCycle { caller, target })
+                if caller == second && target == first
+        ));
+        drop(first_wait);
+
+        let second_call = registry
+            .call(second, first, probe(SessionId(1)).0)
+            .expect("second calls first");
+        assert!(matches!(
+            registry.register_wait(first, second),
+            Err(WaitError::WaitCycle { waiter, target })
+                if waiter == first && target == second
+        ));
+        drop(second_call);
+    }
+
+    #[test]
     fn casts_are_fifo_and_mailbox_owns_each_root_after_acceptance() {
         let registry = ActorRegistry::new();
         let caller = ready_root(&registry);
@@ -1260,8 +1610,10 @@ mod tests {
         assert_eq!(reply_dropped.load(Ordering::SeqCst), 0);
         assert!(matches!(
             registry.begin_turn(caller, ActorTurnKind::Haskell),
-            Err(ActorRegistryError::AwaitingCall { actor, call })
-                if actor == caller && call == ticket.id()
+            Err(ActorRegistryError::Parked {
+                actor,
+                obligation: ParkedObligation::Call(call),
+            }) if actor == caller && call == ticket.id()
         ));
         let CallStatus::Reply(reply) = ticket.poll().expect("poll reply") else {
             panic!("expected reply");
@@ -1376,6 +1728,13 @@ mod tests {
                 },
             )
             .expect("finish target");
+        assert!(matches!(
+            registry.events().last().map(|record| &record.event),
+            Some(ActorEvent::Exited {
+                owner_observing: true,
+                ..
+            })
+        ));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert!(matches!(
             ticket.poll(),
@@ -1491,6 +1850,7 @@ mod tests {
             Some(ActorEvent::Exited {
                 kind: ActorExitKind::Cancelled,
                 summary,
+                ..
             }) if summary.contains("startup capability dropped")
         ));
     }
