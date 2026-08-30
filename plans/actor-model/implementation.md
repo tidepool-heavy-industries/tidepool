@@ -159,15 +159,17 @@ Introduce the minimum Rust-owned substrate required by the spikes:
   cancellation, and actor-death settlement inside the runtime;
 - exact-incarnation `AgentRef` values; no transparent recreation or stable
   service reference;
-- immutable terminal `ActorExit exit` retention with multi-waiter root leases;
+- a shared managed Haskell exit cell per exact reference, filled before the
+  Rust terminal transition, plus session-lifetime terminal metadata for
+  repeatable waits;
 - fixed `EffectStackId`/ABI plus one Rust interpreter instance per actor;
 - execution-principal installation on every Haskell entry;
 - capability registry with caller authorization, revocation, and fork hooks;
 - mapping from actors to lexical scopes and runtime resource scopes;
 - one lifecycle ownership tree with child-selected typed startup/shutdown
-  values and retained exit records;
-- exact typed exits retained for `wait` plus Developer-triggered advisory turns
-  for abnormal exits, without automatic owner death;
+  values and retained terminal records;
+- repeatable typed waits plus Developer-triggered advisory turns for abnormal
+  exits, without automatic owner death;
 - recursive subtree termination and cleanup when an owner terminates;
 - cooperative typed shutdown delivery followed by runtime-owned eventual
   termination with a configurable twelve-hour initial watchdog;

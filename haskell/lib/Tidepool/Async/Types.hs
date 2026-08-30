@@ -1,33 +1,14 @@
--- | The green-thread HANDLE vocabulary, split from "Tidepool.Async" so the
--- two modules built on it stay independently loadable:
---
--- * "Tidepool.Async" (the verbs: @async@\/@wait@\/…) rides @Green@'s
---   substrate and compiles only in rows containing @Green@.
--- * "Tidepool.Event"'s 'Tidepool.Event.waitEvent' (the completion watch)
---   rides @RepoEvent@'s substrate and compiles only in rows containing
---   @RepoEvent@.
---
--- Before this split, @waitEvent@ lived in "Tidepool.Async" and imported
--- "Tidepool.Event" — which made a @Green@-without-@RepoEvent@ row (the
--- agent session's row) unable to load "Tidepool.Async" AT ALL, over one
--- function it could never call anyway. This module imports nothing from the
--- generated effects surface, so either side loads without the other.
+-- | Opaque green-thread handles shared by "Tidepool.Async" and
+-- "Tidepool.Event" without coupling their independent effect rows.
 module Tidepool.Async.Types
-  ( Async (..)
+  ( Async
   , asyncThreadId
   , AsyncCancelled (..)
   ) where
 
 import Prelude
 
--- | A handle on a green thread.  Opaque, and phantom-typed by the thread's
--- result — the same posture as @AgentHandle@.
-newtype Async a = Async Int
-
--- | The thread's runtime identity.  Stable for the thread's life; useful for
--- tracing.
-asyncThreadId :: Async a -> Int
-asyncThreadId (Async t) = t
+import Tidepool.Async.Internal (Async, asyncThreadId)
 
 -- | The outcome of cancelling a thread — what
 -- 'Tidepool.Async.waitCatch' reports for one.

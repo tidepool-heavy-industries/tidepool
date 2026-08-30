@@ -2024,13 +2024,13 @@ Green threads: cooperative concurrency with the authored surface of `Control.Con
 `Tidepool.Async` — the `Control.Concurrent.Async` surface (`async`/`wait`/`waitCatch`/`waitEither`/`waitBoth`/`waitAny`/`cancel`, `race`/`concurrently`/`mapConcurrently`), auto-imported. `async (fork @T brief)` runs a fork in a green thread so several can be outstanding before the first `wait`. Spawn and wait in the SAME ```haskell block — threads do not survive their block; results you bound with `<-` do.
 -- end prompt_card.0 --
 
--- constructors (6 items) --
+-- constructors (5 items) --
 -- constructors[0] (51 bytes) --
 AsyncSpawnWith :: Int -> (Int -> M ()) -> Green Int
 -- end constructors[0] --
 
--- constructors[1] (37 bytes) --
-AsyncDoneWith :: Int -> a -> Green ()
+-- constructors[1] (32 bytes) --
+AsyncDoneWith :: Int -> Green ()
 -- end constructors[1] --
 
 -- constructors[2] (38 bytes) --
@@ -2041,13 +2041,9 @@ AsyncJoinAnyWith :: [Int] -> Green Int
 AsyncStatusWith :: Int -> Green Int
 -- end constructors[3] --
 
--- constructors[4] (33 bytes) --
-AsyncResultWith :: Int -> Green a
--- end constructors[4] --
-
--- constructors[5] (34 bytes) --
+-- constructors[4] (34 bytes) --
 AsyncCancelWith :: Int -> Green ()
--- end constructors[5] --
+-- end constructors[4] --
 
 -- end constructors --
 
@@ -2065,17 +2061,17 @@ import Tidepool.Async
 
 -- end extra_imports --
 
--- helpers (5 items) --
--- helpers[0] (501 bytes) --
+-- helpers (4 items) --
+-- helpers[0] (475 bytes) --
 -- @substrate-helper@
 -- | Fork a green thread; substrate for 'Tidepool.Async.async'.
 -- The body rides as a lambda so the closure-sentinel scan fires
 -- and the runtime tenures it (see the effect's Rust definition).
--- The body is wrapped so its last act is an AsyncDoneWith
--- suspension carrying the result — the return trip uses the
--- same field-1 crossing as the outbound one.
-asyncSpawn :: M a -> M Int
-asyncSpawn body = send (AsyncSpawnWith 0 (\_ -> body >>= \v -> send (AsyncDoneWith 0 v)))
+-- The authored wrapper publishes its result into a managed
+-- Haskell cell before the body's last, payload-free
+-- AsyncDoneWith suspension.
+asyncSpawn :: M () -> M Int
+asyncSpawn body = send (AsyncSpawnWith 0 (\_ -> body >>= \() -> send (AsyncDoneWith 0)))
 -- end helpers[0] --
 
 -- helpers[1] (239 bytes) --
@@ -2097,22 +2093,13 @@ asyncStatus t = decode <$> send (AsyncStatusWith t)
     decode _ = AsyncRunning
 -- end helpers[2] --
 
--- helpers[3] (282 bytes) --
--- @substrate-helper@
--- | A settled thread's result, delivered in-heap by handle.
--- Gate it with 'asyncStatus': the result of a thread that has
--- not settled is not defined.
-asyncResult :: forall a effs. Member Green effs => Int -> Eff effs a
-asyncResult = send . AsyncResultWith
--- end helpers[3] --
-
--- helpers[4] (268 bytes) --
+-- helpers[3] (268 bytes) --
 -- @substrate-helper@
 -- | Cancel a thread: its runtime resource scope closes, discarding its pending
 -- suspensions. Idempotent, and a no-op on a terminal thread.
 asyncCancel :: forall effs. Member Green effs => Int -> Eff effs ()
 asyncCancel = send . AsyncCancelWith
--- end helpers[4] --
+-- end helpers[3] --
 
 -- end helpers --
 

@@ -47,8 +47,8 @@ use tidepool_repr::PrincipalId;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, RootedValueRef, SessionLib, SessionRunContext,
-    TemplateSelector, TurnKind, TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ResidentOutcome, ResidentSession, SessionLib, SessionRunContext, TemplateSelector, TurnKind,
+    TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -120,22 +120,6 @@ pub enum HarnessError {
         #[source]
         source: CheckoutError,
     },
-    /// [`Self::resume_with_borrowed_root`] landed on a
-    /// [`crate::tree`]-suspended [`ResidentHole::Binding`] hole. A
-    /// bind-shaped answerer turn, `h <- async (…closure-valued…); wait h`,
-    /// carries the Binding obligation through every resume of that
-    /// continuation) — the raw `resume_handle_borrowed` seam carries no
-    /// binder/generation obligation, so honoring it would silently drop the
-    /// binding the hole owes. Kept distinct from [`Self::Resident`] (a
-    /// stringly-typed catch-all) so a caller CAN distinguish this specific,
-    /// model-attributable shape from an opaque mechanism failure — the
-    /// answerer-plane green scheduler does, routing it through
-    /// `GreenRoundExit::AsyncMisuse` instead of hard-failing the run.
-    #[error(
-        "node {0:?}: a borrowed-root resume cannot honor a Binding hole's binder \
-         obligation — refuse rather than silently drop it"
-    )]
-    BorrowedRootOnBindingHole(NodeId),
 }
 
 impl HarnessError {
@@ -313,14 +297,6 @@ struct PendingSuspension {
     /// answer Value against the same constructor set.
     suspend_table: DataConTable,
     suspend_asks: AsksSidecar,
-}
-
-/// What crosses a node's parked hole on the node-aware resume path
-/// ([`Harness::resume_parent_input`]): a bridged `Value`, or a borrowed
-/// session-owned heap root (a green thread's settled handle result).
-enum ResumeParentInput {
-    Answer(Value),
-    BorrowedRoot(RootedValueRef),
 }
 
 /// A just-created node's staged opening context, held between node creation
@@ -2634,24 +2610,6 @@ impl Harness {
         self.resume_parent(node, hole, value).await
     }
 
-    /// [`Self::resume_with_value`]'s borrowed-root sibling: deliver a green
-    /// thread's session-owned heap result to `node`'s own parked turn
-    /// (answerer-plane `wait` on a thread whose value settled by handle),
-    /// keeping the node-aware re-publish bookkeeping [`Self::resume_parent`]
-    /// does. The root stays owned by the session realm — this borrows it, the
-    /// same delivery `ResidentSession::resume_handle_borrowed` performs on
-    /// the outer plane's raw path.
-    pub(crate) async fn resume_with_borrowed_root(
-        &self,
-        node: NodeId,
-        hole: &HoleId,
-        handle: RootedValueRef,
-    ) -> Result<(), HarnessError> {
-        let _lease = self.acquire_turn_lease(node)?;
-        self.resume_parent_input(node, hole, ResumeParentInput::BorrowedRoot(handle))
-            .await
-    }
-
     /// Reconstruct a [`TurnOutcome::Suspended`] from `node`'s CURRENT pending
     /// hole (self-iterating-harness fork widen: after a fork/fanout resumes
     /// a parent answerer, the driver needs the parent's freshly
@@ -3092,33 +3050,6 @@ impl Harness {
         hole: &HoleId,
         answer: Value,
     ) -> Result<(), HarnessError> {
-        self.resume_parent_input(node, hole, ResumeParentInput::Answer(answer))
-            .await
-    }
-
-    /// [`Self::resume_parent`] generalized over WHAT crosses the hole: a
-    /// bridged `Value`, or a BORROWED session-owned heap root (a green
-    /// thread's settled closure/handle result delivered to the node's own
-    /// turn — the same borrow `ResidentSession::resume_handle_borrowed`
-    /// performs on the raw path, here with the node-aware re-publish
-    /// bookkeeping kept intact).
-    ///
-    /// A borrowed-root resume is refused on a [`ResidentHole::Binding`] hole:
-    /// the raw `resume_handle_borrowed` seam carries no binder/generation
-    /// obligation, so honoring it here would silently drop the binding the
-    /// hole owes. A bind-shaped
-    /// turn (`h <- async (…closure-valued…); wait h`) carries the Binding
-    /// obligation through every resume of that continuation, so a settled
-    /// closure-valued thread result delivered here lands on exactly this
-    /// hole shape. The typed [`HarnessError::BorrowedRootOnBindingHole`]
-    /// this returns is what lets the answerer-plane scheduler route it to
-    /// the model as a corrective instead of hard-failing the run.
-    async fn resume_parent_input(
-        &self,
-        node: NodeId,
-        hole: &HoleId,
-        input: ResumeParentInput,
-    ) -> Result<(), HarnessError> {
         let sid = self
             .tree
             .session_of(node)
@@ -3141,11 +3072,6 @@ impl Harness {
             pending.resident_hole,
         );
 
-        if matches!(input, ResumeParentInput::BorrowedRoot(_))
-            && !matches!(resident_hole, ResidentHole::Plain(_))
-        {
-            return Err(HarnessError::BorrowedRootOnBindingHole(node));
-        }
         let checkout = self.checkout_resume_waiting(node, hole).await?;
         // ONE consuming resume: `resident_hole` already carries its own
         // completion obligation (`ResidentHole::Binding` materializes on
@@ -3153,12 +3079,7 @@ impl Harness {
         // external flag to pick a method by.
         let outcome = self
             .run_checked_out(node, checkout, move |mut session| {
-                let out = match input {
-                    ResumeParentInput::Answer(answer) => session.resume(resident_hole, answer),
-                    ResumeParentInput::BorrowedRoot(h) => {
-                        session.resume_handle_borrowed(resident_hole.cont_id(), h)
-                    }
-                };
+                let out = session.resume(resident_hole, answer);
                 (session, out)
             })
             .await?;

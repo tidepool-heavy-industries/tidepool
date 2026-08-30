@@ -737,10 +737,18 @@ impl Effect {
                     }
                 }
                 HelperBody::AsyncSpawnBody { done_ctor, .. } => {
-                    if self.verb(done_ctor).is_none() {
+                    let Some(done) = self.verb(done_ctor) else {
                         errs.push(format!(
                             "{}: helper {} completes via `{done_ctor}`, which is not a verb \
                              of this effect",
+                            self.name, h.name
+                        ));
+                        continue;
+                    };
+                    if done.args.len() != 1 || done.ret != HsType::Unit {
+                        errs.push(format!(
+                            "{}: helper {} completion verb `{done_ctor}` must take only its \
+                             site argument and return ()",
                             self.name, h.name
                         ));
                     }
@@ -876,9 +884,8 @@ fn named_types(ty: &HsType) -> Vec<&'static str> {
 
 /// Every [`HsType::Var`] appearing anywhere inside `ty`.
 ///
-/// Ordinary Hindley-Milner-polymorphic helpers (`Green`'s `asyncResult ::
-/// forall a effs. Member Green effs => Int -> Eff effs a`) have a free type
-/// variable in their `ret`/args that is NOT one of the effect's own applied
+/// Ordinary Hindley-Milner-polymorphic helpers may have a free type variable
+/// in their `ret`/args that is NOT one of the effect's own applied
 /// `type_params` — [`Helper::render`]'s shared thin-wrapper path uses this to
 /// widen the `forall` beyond `effs`, the same way a hand-written signature
 /// would name `a` explicitly. Every already-migrated effect before `Green`
@@ -1201,10 +1208,10 @@ pub enum HelperBody {
         /// `cases` target and `default`.
         result_type: &'static str,
     },
-    /// `v param = send (Ctor 0 (\_ -> param >>= \result_param -> send
-    /// (<done_ctor> 0 result_param)))` — spawn a green thread whose body's
-    /// last act suspends carrying its own result, the return trip crossing
-    /// by the same field the spawn's body crossed out by.
+    /// `v param = send (Ctor 0 (\_ -> param >>= \() -> send
+    /// (<done_ctor> 0)))` — spawn a green thread whose sealed Haskell wrapper
+    /// has already published its result into managed heap storage before its
+    /// last, payload-free completion suspension.
     ///
     /// Fixed to the concrete `M`, never `Eff effs` — the ONE case in this
     /// migration where an effect's `helpers_row_polymorphic: true` does not
@@ -1217,9 +1224,6 @@ pub enum HelperBody {
     AsyncSpawnBody {
         /// The parameter naming the thread body (conventionally `"body"`).
         param: &'static str,
-        /// The parameter naming the completed value inside the body's own
-        /// continuation (conventionally `"v"`).
-        result_param: &'static str,
         /// The sibling verb constructor a completing thread suspends with
         /// (`"AsyncDoneWith"`).
         done_ctor: &'static str,
@@ -1419,15 +1423,10 @@ impl Helper {
             out.push_str(&format!("    decode _ = {default}"));
             return out;
         }
-        if let HelperBody::AsyncSpawnBody {
-            param,
-            result_param,
-            done_ctor,
-        } = &self.body
-        {
+        if let HelperBody::AsyncSpawnBody { param, done_ctor } = &self.body {
             out.push_str(&format!(
-                "{} :: M a -> M Int\n{} {param} = send ({ctor} 0 (\\_ -> {param} >>= \
-                 \\{result_param} -> send ({done_ctor} 0 {result_param})))",
+                "{} :: M () -> M Int\n{} {param} = send ({ctor} 0 (\\_ -> {param} >>= \
+                 \\() -> send ({done_ctor} 0)))",
                 self.name, self.name
             ));
             return out;
@@ -1442,7 +1441,7 @@ impl Helper {
         };
         let sig = if eff.helpers_row_polymorphic {
             // Free type variables beyond `effs` (ordinary Hindley-Milner
-            // polymorphism, e.g. `Green`'s `asyncResult`) must be forall'd
+            // polymorphism) must be forall'd
             // explicitly, or GHC rejects the signature as referencing an
             // out-of-scope type variable — see `free_type_vars`'s own doc.
             let mut extra: Vec<&'static str> = Vec::new();

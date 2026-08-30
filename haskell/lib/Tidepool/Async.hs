@@ -35,18 +35,12 @@
 --
 -- == Results cross in-heap
 --
--- A thread's value reaches its waiter by handle, never through JSON, so a
--- thread may return a closure or a record of functions.
---
--- __A non-closure result should be forced (WHNF is enough) before it
--- settles.__  'asyncSpawn' hands a lazy thunk to @AsyncDoneWith@ by
--- construction; the driver reads that field once, at settle time, and holds
--- onto it until a waiter's 'asyncResult' delivers it — an unforced thunk
--- left to cross that gap (rather than being forced at settle time, in the
--- thread's own realm) has been observed to surface as a GC-forwarding
--- corruption on delivery, not a clean error.  @pure $! expensiveResult@ (or
--- an already-strict computation, as most are) sidesteps it entirely; this is
--- a property of the settle boundary, not of any particular value's shape.
+-- A thread writes its value into the managed single-assignment cell carried
+-- by 'Async'. Copies of the handle share that cell through ordinary Haskell
+-- reachability; Rust retains only terminal metadata. The producer's realm can
+-- therefore close immediately after settlement while a closure, lazy value,
+-- or record of functions remains usable by every surviving handle. Nothing
+-- is serialized and no session-lifetime result root is created.
 --
 -- == The ONE divergence from @Control.Concurrent.Async@
 --
@@ -101,22 +95,31 @@ module Tidepool.Async
 
 import Prelude
 
-import Tidepool.Async.Types (Async (..), AsyncCancelled (..), asyncThreadId)
+import Tidepool.Async.Internal (Async (..))
+import Tidepool.Async.Types (AsyncCancelled (..), asyncThreadId)
 import Tidepool.Effects
   ( AsyncStatus (..)
   , M
   , asyncCancel
   , asyncJoinAny
-  , asyncResult
   , asyncSpawn
   , asyncStatus
   )
+import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
 
 -- | Fork a green thread.  Returns as soon as the thread is registered; the
 -- thread runs until it performs an effect and then parks, independently of
 -- this caller.
 async :: M a -> M (Async a)
-async body = fmap Async (asyncSpawn body)
+{-# NOINLINE async #-}
+async body = do
+  let cell = newExitCell body
+      publish = do
+        value <- body
+        case fillExitCell cell value of
+          () -> pure ()
+  threadId <- asyncSpawn publish
+  pure (Async threadId cell)
 
 -- | Wait for a thread and return its value.  Fails loudly if the thread was
 -- cancelled — 'waitCatch' is the total form.
@@ -135,25 +138,32 @@ wait h = do
 -- read.  A cancel landing while this caller is parked is therefore observed,
 -- not missed.
 waitCatch :: Async a -> M (Either AsyncCancelled a)
-waitCatch (Async t) = do
+waitCatch (Async t cell) = do
   _ <- asyncJoinAny [t]
   st <- asyncStatus t
   case st of
     AsyncWasCancelled -> pure (Left AsyncCancelled)
-    _ -> fmap Right (asyncResult t)
+    AsyncSettled ->
+      case readExitCell st cell of
+        Just value -> pure (Right value)
+        Nothing -> error "Tidepool.Async.wait: settled thread has an empty exit cell"
+    AsyncRunning -> error "Tidepool.Async.wait: join returned a running thread"
 
 -- | Has this thread finished?  Never parks and never advances anything.
 poll :: Async a -> M (Maybe a)
-poll (Async t) = do
+poll (Async t cell) = do
   st <- asyncStatus t
   case st of
-    AsyncSettled -> fmap Just (asyncResult t)
+    AsyncSettled ->
+      case readExitCell st cell of
+        Just value -> pure (Just value)
+        Nothing -> error "Tidepool.Async.poll: settled thread has an empty exit cell"
     _ -> pure Nothing
 
 -- | Cancel a thread, discarding its pending suspensions.  Idempotent; a no-op
 -- on a thread that already reached a terminal state.
 cancel :: Async a -> M ()
-cancel (Async t) = asyncCancel t
+cancel (Async t _) = asyncCancel t
 
 -- | Wait for the first of two threads to finish.  The loser keeps running —
 -- 'cancel' it yourself if you want it stopped ('race' does).

@@ -13,6 +13,9 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
 ## Invariants
 
 - An `ActorRef` names exactly one incarnation. Never silently retarget it.
+- `ActorRef` is routing identity, not live-value ownership. Successful typed
+  exits live in the shared managed Haskell cell carried by `AgentRef`; the
+  registry retains only terminal metadata.
 - Actor events record authoritative facts but are not the mutable actor
   registry and never serialize live heap values.
 - Every event has both stream ordering and per-actor ordering. Adapters must

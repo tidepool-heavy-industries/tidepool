@@ -17,8 +17,7 @@ use super::contract::{outer_decls, outer_template};
 use super::corrective::typed_request_agent_framing_suffix;
 use super::fork::drive_concurrent;
 use super::green::{
-    GreenChain, GreenDelivery, GreenHoleServiced, GreenReady, GreenThread, GreenThreadState,
-    ServicedSuspension,
+    GreenChain, GreenDelivery, GreenReady, GreenThread, GreenThreadState, ServicedSuspension,
 };
 use super::SelfHarnessDriver;
 use super::*;
@@ -1496,11 +1495,7 @@ impl SelfHarnessDriver {
                         // `ServicedSuspension` (see that type's doc), so it owns
                         // `ready` directly and this arm hands nothing back.
                         SuspensionRouting::Green => {
-                            // Raw delivery never reports node-blocked. The
-                            // AUTHORED plane keeps misuse a hard error —
-                            // authored code fails loud, it is not coached.
-                            if let GreenHoleServiced::Misuse(msg) = self
-                                .service_green_hole(
+                            self.service_green_hole(
                                     None,
                                     chain,
                                     hole.cont_id(),
@@ -1512,10 +1507,7 @@ impl SelfHarnessDriver {
                                     &mut ready,
                                     GreenDelivery::Raw,
                                 )
-                                .await?
-                            {
-                                return Err(DriverError::Session(msg));
-                            }
+                                .await?;
                             continue;
                         }
                         // `runLLMTurnFork @T`/`runLLMTurnFanout @T` raised

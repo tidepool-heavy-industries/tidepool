@@ -1,18 +1,18 @@
 //! The `Green` suspension — decode-only.
 //!
 //! `Tidepool.Async`'s substrate (`AsyncSpawnWith`/`AsyncDoneWith`/
-//! `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncResultWith`/`AsyncCancelWith`).
+//! `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncCancelWith`).
 //! Routed by CONSTRUCTOR NAME only, same discipline as [`crate::effects::subagent`]:
-//! `classify_hole` never decodes a Green verb's payload (field 1 of
-//! `AsyncSpawnWith`/`AsyncDoneWith` may carry a live closure), so every
-//! payload field beyond a bare `Int` is bound as
+//! `classify_hole` never decodes a Green verb's payload (`AsyncSpawnWith`'s
+//! body field carries a live closure), so every
+//! live payload field beyond a bare `Int` is bound as
 //! [`crate::schema::RustBinding::CoreValue`] — recognition, not
 //! interpretation; the real decode happens at
 //! `SelfHarnessDriver::service_green_hole`.
 //!
-//! All five substrate helpers below back `Tidepool.Async` (authored library
-//! code, not generated here): `asyncJoinAny`/`asyncStatus`/`asyncResult`/
-//! `asyncCancel` are thin `Member`-polymorphic wrappers; `asyncSpawn` is the
+//! All four substrate helpers below back `Tidepool.Async` (authored library
+//! code, not generated here): `asyncJoinAny`/`asyncStatus`/`asyncCancel` are
+//! thin `Member`-polymorphic wrappers; `asyncSpawn` is the
 //! one exception to `helpers_row_polymorphic` in this whole schema, forced
 //! concrete (`M`, not `Eff effs`) because `AsyncSpawnWith`'s own constructor
 //! field type is fixed to `Int -> M ()` by the wire shape — see
@@ -40,7 +40,7 @@ fn thread_id_arg() -> Arg {
     }
 }
 
-/// The `Green` suspension (all six `Async*With` verbs), decode-only.
+/// The `Green` suspension (all five `Async*With` verbs), decode-only.
 #[must_use]
 pub fn green() -> Effect {
     Effect {
@@ -139,14 +139,7 @@ pub fn green() -> Effect {
             Verb {
                 ctor: "AsyncDoneWith",
                 method: "async_done_with",
-                args: vec![
-                    site_arg(),
-                    Arg {
-                        name: "value",
-                        ty: HsType::Var("a"),
-                        rust: RustBinding::CoreValue,
-                    },
-                ],
+                args: vec![site_arg()],
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Green,
@@ -175,19 +168,6 @@ pub fn green() -> Effect {
                 extract: None,
             },
             Verb {
-                ctor: "AsyncResultWith",
-                method: "async_result_with",
-                args: vec![thread_id_arg()],
-                // Ordinary Hindley-Milner polymorphism inferred from the
-                // thread body's own type, not `@T`-style invocation binding
-                // (no `TypeApplications` call site for extract to pattern-
-                // match on) — `Polymorphism::None` below is correct.
-                ret: HsType::Var("a"),
-                errors: None,
-                handling: HandlingClass::Green,
-                extract: None,
-            },
-            Verb {
                 ctor: "AsyncCancelWith",
                 method: "async_cancel_with",
                 args: vec![thread_id_arg()],
@@ -205,14 +185,13 @@ pub fn green() -> Effect {
                     "Fork a green thread; substrate for 'Tidepool.Async.async'.",
                     "The body rides as a lambda so the closure-sentinel scan fires",
                     "and the runtime tenures it (see the effect's Rust definition).",
-                    "The body is wrapped so its last act is an AsyncDoneWith",
-                    "suspension carrying the result — the return trip uses the",
-                    "same field-1 crossing as the outbound one.",
+                    "The authored wrapper publishes its result into a managed",
+                    "Haskell cell before the body's last, payload-free",
+                    "AsyncDoneWith suspension.",
                 ],
                 substrate: true,
                 body: HelperBody::AsyncSpawnBody {
                     param: "body",
-                    result_param: "v",
                     done_ctor: "AsyncDoneWith",
                 },
             },
@@ -239,17 +218,6 @@ pub fn green() -> Effect {
                 },
             },
             Helper {
-                name: "asyncResult",
-                ctor: Some("AsyncResultWith"),
-                doc: &[
-                    "A settled thread's result, delivered in-heap by handle.",
-                    "Gate it with 'asyncStatus': the result of a thread that has",
-                    "not settled is not defined.",
-                ],
-                substrate: true,
-                body: HelperBody::Pointfree,
-            },
-            Helper {
                 name: "asyncCancel",
                 ctor: Some("AsyncCancelWith"),
                 doc: &[
@@ -260,10 +228,8 @@ pub fn green() -> Effect {
                 body: HelperBody::Pointfree,
             },
         ],
-        // `AsyncDoneWith`/`AsyncResultWith`'s `Var("a")` usage is ordinary
-        // inferred polymorphism (from `asyncSpawn :: M a -> M Int`'s own
-        // argument), not an `@T` invocation-site binding — no call site
-        // applies a type argument here. `None` is correct.
+        // The substrate is monomorphic; the authored `Async a` wrapper owns
+        // result polymorphism in Haskell-managed storage.
         polymorphism: Polymorphism::None,
         // There is deliberately no `GreenHandler` (see the module doc).
         dispatched: false,

@@ -245,13 +245,7 @@ mod tests {
     fn derived_index_excludes_green_and_subagent_raw_helpers() {
         let green = crate::green_decl();
         let green_index = describe_effect(&green);
-        for name in [
-            "asyncSpawn",
-            "asyncJoinAny",
-            "asyncStatus",
-            "asyncResult",
-            "asyncCancel",
-        ] {
+        for name in ["asyncSpawn", "asyncJoinAny", "asyncStatus", "asyncCancel"] {
             assert!(
                 !green_index.contains(name),
                 "Green index must not advertise raw substrate helper {name}: {green_index}"

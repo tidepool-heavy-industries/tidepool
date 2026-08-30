@@ -175,6 +175,17 @@ refusal and settlement failure as structured lifecycle state. The ordinary
 Haskell operation neither fabricates a domain value nor exposes that machinery
 as part of the actor protocol.
 
+### Successful exit values
+
+Successful actor exits do not use the mailbox root ledger. The opaque
+`AgentRef api exit` carries a shared, managed Haskell single-assignment cell.
+The actor entry wrapper fills it before reporting completion to Rust, so every
+copy of the reference reaches the same typed value through the ordinary
+Haskell heap. Rust stores the terminal lifecycle fact but never a
+`RootedValueRef` for the successful payload. This keeps `RootCustody` as a
+temporary transport token and makes exit lifetime exactly ordinary value
+reachability.
+
 ## 8. Effectful function portability
 
 Each continuation and specialized effectful closure carries the effect-stack

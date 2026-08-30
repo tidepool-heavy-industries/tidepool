@@ -76,7 +76,12 @@ resolve_tidepool_extract() {
   if [ -n "${TIDEPOOL_EXTRACT_WORKER:-}" ] && [ -x "$TIDEPOOL_EXTRACT_WORKER" ]; then
     _worker_mtime="$(stat -c %Y "$TIDEPOOL_EXTRACT_WORKER" 2>/dev/null || echo 0)"
     if [ "$_worker_mtime" -gt 946684800 ]; then
-      _newest_haskell="$(find "$PWD/haskell/src" "$PWD/haskell/app" "$PWD/haskell/lib" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+      # `haskell/lib` is loaded by the worker at evaluation time; it is not a
+      # source input to the worker binary. Including it here makes every
+      # stdlib-only edit permanently "stale": Cabal correctly declines to
+      # rebuild the unaffected executable, so its mtime can never catch up.
+      # Keep this boundary identical to scripts/toolchain-doctor.sh.
+      _newest_haskell="$(find "$PWD/haskell/src" "$PWD/haskell/app" "$PWD/haskell/tidepool-extract.cabal" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
       if [ "$_worker_mtime" -lt "${_newest_haskell:-0}" ] && [ "${TIDEPOOL_ALLOW_STALE_EXTRACT:-0}" != "1" ]; then
         echo "error: TIDEPOOL_EXTRACT_WORKER='$TIDEPOOL_EXTRACT_WORKER' is older than Haskell worker sources" >&2
         exit 1

@@ -24,11 +24,6 @@
 -- turn, so it needs the ordinary explicit import below like any other
 -- symbol this module uses.
 --
--- Every 'Tidepool.Async' payload here is 'Int', deliberately: it keeps this
--- bundle's assertions about the SCHEDULER (parking, waking, ordering) free
--- of an unrelated packed-`Text`-literal JIT construction path this lane does
--- not own.
---
 -- This bundle also carries 'Tidepool.Event.waitEvent'
 -- (a select over {thread completion, deadline}), which exercises the
 -- driver's NON-BLOCKING @RepoEventAwait@ servicing.
@@ -98,6 +93,7 @@ data State = State
   , asyncLoserVal :: Int
   , asyncCancelled :: Bool
   , asyncMapResults :: [Int]
+  , asyncClosureReuse :: Bool
   , tickObserved :: Bool
   , waitEventResult :: Int
   }
@@ -114,6 +110,7 @@ initialState =
     , asyncLoserVal = 0
     , asyncCancelled = False
     , asyncMapResults = []
+    , asyncClosureReuse = False
     , tickObserved = False
     , waitEventResult = 0
     }
@@ -125,9 +122,8 @@ render st =
 -- | One `mapConcurrently` element's work: a PURE recursive sum whose length
 -- scales with `n` — deliberately DIFFERING lengths (3 vs 1 vs 2 reduction
 -- steps for the `[3, 1, 2]` list below), so the three threads are not
--- interchangeable. `$!` forces the result before it settles — see
--- `Tidepool.Async`'s own module doc ("a non-closure result should be
--- forced"). Single-level only: nested `async` (a green thread's body
+-- interchangeable. `$!` forces the result before it settles. Single-level
+-- only: nested `async` (a green thread's body
 -- spawning another thread) is a known gap this lane's submit note flags,
 -- not something this bundle exercises.
 mapWork :: Int -> Harness Int
@@ -181,6 +177,14 @@ loop st = do
       -- results come back in ORIGINAL list order regardless.
       mapResults <- mapConcurrently mapWork [3, 1, 2]
 
+      -- Successful results remain ordinary managed Haskell values. The
+      -- producer realm closes at settlement, yet both copies returned by
+      -- repeated waits share and can invoke the same closure-valued result.
+      hClosure <- async (pure not)
+      closureOne <- wait hClosure
+      closureTwo <- wait hClosure
+      let closureReuse = closureOne False && not (closureTwo True)
+
       -- `waitEvent`: a select over {thread completion,
       -- deadline} that takes the completion branch (a generous deadline
       -- against an already-fast thread), then reads the typed result with
@@ -205,6 +209,7 @@ loop st = do
               Left AsyncCancelled -> True
               _ -> False
           , asyncMapResults = mapResults
+          , asyncClosureReuse = closureReuse
           , tickObserved = tick.firedAtMs > 0
           , waitEventResult = weResult
           }

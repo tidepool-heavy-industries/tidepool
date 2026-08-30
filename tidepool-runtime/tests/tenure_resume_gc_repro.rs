@@ -1531,14 +1531,16 @@ fn event_shaped_capture_survives_tenure_and_resume() {
             let v = result.into_value();
             match &v {
                 Value::Con(id, fields) if id.0 == RESULT_ID.0 && fields.len() == 1 => {
-                    assert_eq!(expect_int(&fields[0]), 222, "echoed resume answer via ThreadResult");
+                    assert_eq!(
+                        expect_int(&fields[0]),
+                        222,
+                        "echoed resume answer via ThreadResult"
+                    );
                 }
                 other => panic!("expected ThreadResult(answer), got {other:?}"),
             }
         }
-        other => panic!(
-            "thread must complete cleanly (matching AsyncResultWith's real resume point), got {other:?}"
-        ),
+        other => panic!("thread must complete cleanly after its final resume, got {other:?}"),
     }
 }
 

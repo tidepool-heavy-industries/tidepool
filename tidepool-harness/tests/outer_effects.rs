@@ -224,6 +224,12 @@ async fn outer_loop_effects_round_trip_through_the_driver() {
         "mapConcurrently must return results in ORIGINAL list order ([3,1,2], each a \
          differing-length recursive sum), regardless of completion order, got {state:?}"
     );
+    assert_eq!(
+        state.get("asyncClosureReuse").and_then(|v| v.as_bool()),
+        Some(true),
+        "a closure-valued result must survive producer-realm closure and remain usable \
+         through repeated waits, got {state:?}"
+    );
 
     // Tidepool.Event.waitEvent — a select over
     // {thread completion, deadline} that takes the completion branch and

@@ -55,7 +55,7 @@ inventory, not a required Rust struct layout.
 | capability grants | Owned, delegated, revoked, and fork-policy metadata |
 | runtime resource scope | Parked frames, handles, cancellation state, and live roots |
 | durable namespace | Explicit access to the existing JSON get/put backend |
-| supervision state | Lifecycle owner, children, retained exits, advisories, stop reason, and deadlines |
+| supervision state | Lifecycle owner, children, terminal records, advisories, stop reason, and deadlines |
 
 The mailbox and Haskell program are sequential for one actor. Concurrency is
 expressed by several actors and asynchronous actor operations between them.
@@ -488,19 +488,25 @@ reference, not an ownership token; copying it does not reparent the actor.
 The child specification chooses the startup-input type and successful-exit
 type. Runtime failures, cancellation, and forced shutdown remain typed system
 exit variants around the successful payload. An abnormal or unexpected child
-exit never automatically kills its owner. Rust retains every typed exit for
-observation through `wait (AgentRef api exit)`. Abnormal failure and forced or
-unexpected cancellation either settle an already-observing wait or call, or
-schedule the single keyed advisory defined above. Normal
+exit never automatically kills its owner. Rust retains immutable terminal
+metadata for observation through `wait (AgentRef api exit)`; a successful
+Haskell exit value remains in the managed cell shared by copies of that exact
+reference. Abnormal failure and forced or unexpected cancellation either
+settle an already-observing wait or call, or schedule the single keyed advisory
+defined above. Normal
 completion and routine owner-requested cancellation are quiet. Unexpected
 exits do not require a heterogeneous Haskell system-event type.
 
-The terminal result is immutable and remains rooted while an `AgentRef` or
-waiter leases it. Reaping execution resources does not erase it, and multiple
-waiters may observe it. Temporary failure reading the retained record may
-mechanically retry the exact wait. A stale or invalid reference and
-cancellation of the waiter are terminal; ordinary target termination returns
-normally.
+`AgentRef` is conceptually a copyable routing identity paired with a shared,
+typed, single-assignment Haskell exit cell. Completion publishes the successful
+value to that cell before Rust records the terminal transition and wakes
+waiters. Copies therefore retain arbitrary exits, including closures, through
+ordinary Haskell reachability; the actor registry never owns a live exit root.
+The machine session keeps the small terminal tombstone, and multiple waits read
+the same cell. Reaping execution resources cannot erase either fact. Temporary
+failure reading the tombstone may mechanically retry the exact wait. A stale
+or invalid reference and cancellation of the waiter are terminal; ordinary
+target termination returns normally.
 
 When an owner terminates for any reason, Rust recursively terminates and reaps
 its owned subtree. This is a lifecycle rule, not failure propagation in the
@@ -563,5 +569,6 @@ ultimate owner of every external resource.
 16. Owner termination recursively terminates every actor in its owned subtree.
 17. Haskell enters a shared machine session only through its existing checkout;
     actors are logically concurrent but not parallel within that machine.
-18. Reaping an actor never discards a terminal result still leased by an exact
-    `AgentRef` or waiter.
+18. Successful exit values live in the shared Haskell cell carried by exact
+    `AgentRef` values; the Rust registry retains terminal metadata, never a
+    second live-value root.

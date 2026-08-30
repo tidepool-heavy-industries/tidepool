@@ -134,16 +134,18 @@ open a final agent session.
 Publication and liveness are separate facts. A child may terminate after
 signaling ready but before the caller resumes. The returned reference still
 names that exact, now-dead incarnation. `call` and `cast` cannot use it, while
-`wait` retrieves its retained terminal `ActorExit exit`. Cancellation before
-readiness publishes no reference and terminates the caller whose start
-obligation cannot be satisfied.
+`wait` reconstructs its `ActorExit exit` from the terminal record and shared
+exit cell. Cancellation before readiness publishes no reference and terminates
+the caller whose start obligation cannot be satisfied.
 
-Terminal results are immutable and retained as long as an `AgentRef` or an
-active waiter leases them. Multiple waits may observe the same result. Reaping
-the actor's execution resources therefore does not discard its exit value or
-the live roots reachable from it. Rust mechanically retries temporary
-retained-store failure for the exact wait. A stale or invalid reference and
-cancellation of the waiter are fatal; target termination returns normally.
+An `AgentRef api exit` contains an opaque routing identity and a shared,
+single-assignment cell for a successful `exit`. Completion fills the cell
+before publishing the terminal lifecycle transition. Copies and active waits
+therefore retain the exit through ordinary Haskell reachability, and repeated
+waits observe the same value even when it is a closure. Rust retains only the
+immutable terminal metadata needed to distinguish completion, failure, and
+cancellation. A stale or invalid reference and cancellation of the waiter are
+fatal; target termination returns normally.
 
 The runtime need not force every actor into callback records. A mailbox service
 can use a `serve` library combinator inside an ordinary recursive Haskell
@@ -199,8 +201,8 @@ operation succeeds; an unsatisfiable continuation never resumes.
 Actor calls, startup, casts, authoritative reads, commands, reviews, and
 capabilities never offer arbitrary result construction. A failed `cast` must
 achieve real mailbox acceptance or terminate. `wait ref` always means the
-exact incarnation named by `ref`: target termination returns its
-retained exit, transient access may retry, and an invalid reference is fatal.
+exact incarnation named by `ref`: target termination returns its recorded
+exit, transient access may retry, and an invalid reference is fatal.
 After observing an exit, ordinary Haskell or an advisory can start a new actor
 explicitly without pretending it is the actor that exited.
 

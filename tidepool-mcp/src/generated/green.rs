@@ -9,10 +9,9 @@ pub fn green_decl() -> crate::EffectDecl {
         prompt_card: Some("`Tidepool.Async` — the `Control.Concurrent.Async` surface (`async`/`wait`/`waitCatch`/`waitEither`/`waitBoth`/`waitAny`/`cancel`, `race`/`concurrently`/`mapConcurrently`), auto-imported. `async (fork @T brief)` runs a fork in a green thread so several can be outstanding before the first `wait`. Spawn and wait in the SAME ```haskell block — threads do not survive their block; results you bound with `<-` do."),
         constructors: &[
             "AsyncSpawnWith :: Int -> (Int -> M ()) -> Green Int",
-            "AsyncDoneWith :: Int -> a -> Green ()",
+            "AsyncDoneWith :: Int -> Green ()",
             "AsyncJoinAnyWith :: [Int] -> Green Int",
             "AsyncStatusWith :: Int -> Green Int",
-            "AsyncResultWith :: Int -> Green a",
             "AsyncCancelWith :: Int -> Green ()",
         ],
         type_defs: &[
@@ -22,10 +21,9 @@ pub fn green_decl() -> crate::EffectDecl {
             "import Tidepool.Async",
         ],
         helpers: &[
-            "-- @substrate-helper@\n-- | Fork a green thread; substrate for 'Tidepool.Async.async'.\n-- The body rides as a lambda so the closure-sentinel scan fires\n-- and the runtime tenures it (see the effect's Rust definition).\n-- The body is wrapped so its last act is an AsyncDoneWith\n-- suspension carrying the result — the return trip uses the\n-- same field-1 crossing as the outbound one.\nasyncSpawn :: M a -> M Int\nasyncSpawn body = send (AsyncSpawnWith 0 (\\_ -> body >>= \\v -> send (AsyncDoneWith 0 v)))",
+            "-- @substrate-helper@\n-- | Fork a green thread; substrate for 'Tidepool.Async.async'.\n-- The body rides as a lambda so the closure-sentinel scan fires\n-- and the runtime tenures it (see the effect's Rust definition).\n-- The authored wrapper publishes its result into a managed\n-- Haskell cell before the body's last, payload-free\n-- AsyncDoneWith suspension.\nasyncSpawn :: M () -> M Int\nasyncSpawn body = send (AsyncSpawnWith 0 (\\_ -> body >>= \\() -> send (AsyncDoneWith 0)))",
             "-- @substrate-helper@\n-- | Park until ANY of these threads reaches a terminal state;\n-- resumes with the id of the one that did.\nasyncJoinAny :: forall effs. Member Green effs => [Int] -> Eff effs Int\nasyncJoinAny = send . AsyncJoinAnyWith",
             "-- @substrate-helper@\n-- | A thread's current state. Never parks.\nasyncStatus :: forall effs. Member Green effs => Int -> Eff effs AsyncStatus\nasyncStatus t = decode <$> send (AsyncStatusWith t)\n  where\n    decode 1 = AsyncSettled\n    decode 2 = AsyncWasCancelled\n    decode _ = AsyncRunning",
-            "-- @substrate-helper@\n-- | A settled thread's result, delivered in-heap by handle.\n-- Gate it with 'asyncStatus': the result of a thread that has\n-- not settled is not defined.\nasyncResult :: forall a effs. Member Green effs => Int -> Eff effs a\nasyncResult = send . AsyncResultWith",
             "-- @substrate-helper@\n-- | Cancel a thread: its runtime resource scope closes, discarding its pending\n-- suspensions. Idempotent, and a no-op on a terminal thread.\nasyncCancel :: forall effs. Member Green effs => Int -> Eff effs ()\nasyncCancel = send . AsyncCancelWith",
         ],
         type_params: &[],

@@ -307,13 +307,12 @@ pub enum SuspensionRouting {
         ty: Option<String>,
     },
     /// An `Async*With` verb (`AsyncSpawnWith`/`AsyncDoneWith`/
-    /// `AsyncJoinAnyWith`/`AsyncStatusWith`/`AsyncResultWith`/
+    /// `AsyncJoinAnyWith`/`AsyncStatusWith`/
     /// `AsyncCancelWith` — `Tidepool.Async`'s substrate) raised
     /// by the AUTHORED outer loop or by a green thread's own body. Routed by
     /// CONSTRUCTOR NAME only, same discipline as [`SuspensionRouting::Subagent`];
-    /// the payload is NEVER decoded here — field 1 of `AsyncSpawnWith`/
-    /// `AsyncDoneWith` may carry a live closure (the thread body / a
-    /// closure-valued result), so decoding happens at the servicing site
+    /// the live payload is NEVER decoded here — field 1 of `AsyncSpawnWith`
+    /// carries the thread body closure, so decoding happens at the servicing site
     /// (`SelfHarnessDriver::service_green_hole`), which also owns the
     /// driver's thread table and ready queue. Unlike `Subagent`/
     /// `OuterEffect`, servicing a `Green` suspension is not a single
