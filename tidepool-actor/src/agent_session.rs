@@ -14,13 +14,23 @@ use crate::{
 pub struct ActorAgentSession {
     registry: ActorRegistry,
     actor: ActorRef,
-    state: Arc<Mutex<SessionState>>,
+    state: Arc<Mutex<AgentSessionState>>,
 }
 
-struct SessionState {
+pub(crate) struct AgentSessionState {
     conversation: Conversation,
     queued: Vec<Message>,
     next_turn: u64,
+}
+
+impl AgentSessionState {
+    pub(crate) fn new() -> Self {
+        Self {
+            conversation: Conversation::default(),
+            queued: Vec::new(),
+            next_turn: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,20 +43,16 @@ pub struct AssistantTurn {
 }
 
 impl ActorAgentSession {
-    /// Mount a fresh accumulating conversation on one exact actor incarnation.
-    /// Inputs remain explicit: callers queue System, Developer, or User
-    /// context before opening the first provider boundary.
-    #[must_use]
-    pub fn new(registry: ActorRegistry, actor: ActorRef) -> Self {
-        Self {
+    /// Attach to the one accumulating conversation owned by this exact actor
+    /// incarnation. Repeated attachment returns another handle to the same
+    /// transcript and legal-boundary queue.
+    pub fn attach(registry: ActorRegistry, actor: ActorRef) -> Result<Self, ActorRegistryError> {
+        let state = registry.attach_agent_session(actor)?;
+        Ok(Self {
             registry,
             actor,
-            state: Arc::new(Mutex::new(SessionState {
-                conversation: Conversation::default(),
-                queued: Vec::new(),
-                next_turn: 0,
-            })),
-        }
+            state,
+        })
     }
 
     pub fn queue_system(&self, content: impl Into<String>) {
@@ -240,7 +246,7 @@ mod tests {
     fn lifecycle_fact_queued_during_inference_enters_after_assistant_response() {
         let registry = ActorRegistry::new();
         let actor = ready_actor(&registry);
-        let session = ActorAgentSession::new(registry.clone(), actor);
+        let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
         session.queue_user("review this");
         let pending = session
             .begin_provider_turn(None)
@@ -273,7 +279,7 @@ mod tests {
     fn dropped_provider_turn_releases_admission_without_duplicating_input() {
         let registry = ActorRegistry::new();
         let actor = ready_actor(&registry);
-        let session = ActorAgentSession::new(registry.clone(), actor);
+        let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
         session.queue_user("start");
         let pending = session
             .begin_provider_turn(None)
@@ -296,5 +302,68 @@ mod tests {
             })
             .count();
         assert_eq!(user_events, 1, "transport retry must not duplicate input");
+    }
+
+    #[test]
+    fn repeated_attachment_reuses_the_exact_actors_transcript() {
+        let registry = ActorRegistry::new();
+        let actor = ready_actor(&registry);
+        let first = ActorAgentSession::attach(registry.clone(), actor).expect("first attachment");
+        first.queue_user("shared opening");
+        let second = ActorAgentSession::attach(registry.clone(), actor).expect("second attachment");
+
+        let pending = second
+            .begin_provider_turn(None)
+            .expect("shared provider turn");
+        assert_eq!(pending.request().messages.len(), 1);
+        pending
+            .complete(response("shared reply"))
+            .expect("complete shared turn");
+        assert_eq!(first.transcript(), second.transcript());
+
+        registry
+            .finish(
+                actor,
+                crate::ActorTerminal {
+                    kind: crate::ActorExitKind::Completed,
+                    summary: "done".into(),
+                },
+            )
+            .expect("finish actor");
+        assert!(matches!(
+            ActorAgentSession::attach(registry, actor),
+            Err(ActorRegistryError::Exited(exited)) if exited == actor
+        ));
+    }
+
+    #[test]
+    fn startup_session_survives_readiness_without_publishing_early() {
+        let registry = ActorRegistry::new();
+        let starting = registry
+            .begin_start(
+                None,
+                ActorDescriptor {
+                    label: "starting agent".into(),
+                    effect_stack: vec![],
+                    placement: ActorPlacement {
+                        session: tidepool_repr::SessionId(1),
+                        resource_scope: RealmId::fresh(),
+                        lexical_scope: ScopeId::ROOT,
+                    },
+                },
+                StartInitiator::Runtime,
+            )
+            .expect("begin startup");
+        let startup = registry
+            .startup_agent_session(&starting)
+            .expect("attach startup session");
+        startup.queue_user("configure behavior");
+
+        let actor = registry.publish_ready(starting).expect("publish ready");
+        let ready = ActorAgentSession::attach(registry, actor).expect("reattach after readiness");
+        let pending = ready
+            .begin_provider_turn(None)
+            .expect("startup input survived readiness");
+        assert_eq!(pending.request().messages[0].content, "configure behavior");
     }
 }

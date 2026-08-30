@@ -31,6 +31,9 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
 - The registry owns each incarnation's session, resource scope, and lexical
   scope. Mount callers supply an `ActorRef`; the admitted `TurnLease` carries
   the matching immutable context and principal.
+- The registry also retains exactly one accumulating `ActorAgentSession`
+  state per incarnation. Reattachment shares that transcript; it never opens
+  a parallel model context for the same actor.
 - Exit events record whether the owner was already observing that exact exit
   through a call or wait at the terminal transition; advisory code consumes
   that fact instead of racing a later registry lookup.

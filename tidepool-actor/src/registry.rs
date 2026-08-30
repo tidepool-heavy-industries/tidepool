@@ -4,9 +4,10 @@ use std::sync::{Arc, Weak};
 use parking_lot::Mutex;
 use tidepool_repr::MonotonicIdIssuer;
 
+use crate::agent_session::AgentSessionState;
 use crate::{
-    ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorPlacement, ActorRef,
-    ActorSessionContext, CallDisposition, CallFailure, CallId, CallStatus, CallTicket,
+    ActorAgentSession, ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorPlacement,
+    ActorRef, ActorSessionContext, CallDisposition, CallFailure, CallId, CallStatus, CallTicket,
     EventCausality, ExitObservation, MailboxFailure, MailboxMessageKind, MailboxValue, MessageId,
     ParkedObligation, StartInitiator, WaitDisposition, WaitError, WaitId, WaitTicket,
 };
@@ -115,6 +116,7 @@ struct ActorEntry {
     mailbox: VecDeque<QueuedMessage>,
     parked: Option<ParkedObligation>,
     terminal: Option<ActorTerminal>,
+    agent_session: Option<Arc<Mutex<AgentSessionState>>>,
     next_event_sequence: u64,
 }
 
@@ -238,6 +240,7 @@ impl ActorRegistry {
                 mailbox: VecDeque::new(),
                 parked: None,
                 terminal: None,
+                agent_session: None,
                 next_event_sequence: 0,
             },
         );
@@ -293,6 +296,16 @@ impl ActorRegistry {
         )?;
         starting.armed = false;
         Ok(actor)
+    }
+
+    /// Attach to the initializing actor's sole model session without exposing
+    /// its callable reference before readiness.
+    pub fn startup_agent_session(
+        &self,
+        starting: &StartingActor,
+    ) -> Result<ActorAgentSession, ActorRegistryError> {
+        self.validate_starting(starting)?;
+        ActorAgentSession::attach(self.clone(), starting.actor)
     }
 
     /// Terminate an actor whose startup failed before reference publication.
@@ -360,6 +373,20 @@ impl ActorRegistry {
             actor,
             placement: actor_entry.placement,
         })
+    }
+
+    pub(crate) fn attach_agent_session(
+        &self,
+        actor: ActorRef,
+    ) -> Result<Arc<Mutex<AgentSessionState>>, ActorRegistryError> {
+        let mut state = self.inner.state.lock();
+        let actor_entry = entry_mut(&mut state, actor)?;
+        if actor_entry.lifecycle == ActorLifecycle::Exited {
+            return Err(ActorRegistryError::Exited(actor));
+        }
+        Ok(Arc::clone(actor_entry.agent_session.get_or_insert_with(
+            || Arc::new(Mutex::new(AgentSessionState::new())),
+        )))
     }
 
     /// Accept a one-way message into the exact target incarnation's mailbox.
