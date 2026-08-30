@@ -2,9 +2,10 @@
 
 ## Charter
 
-This crate owns the resident-session MCP protocol, block classification, and
-session manager. The JIT and session engine live in `tidepool-codegen` and
-`tidepool-runtime`; effect definitions live in `tidepool-mcp`.
+This crate owns the resident-session MCP protocol, REPL command extensions,
+presentation, and single-session manager. Frontend-neutral workbench
+classification and sequencing live in `tidepool-runtime`; the JIT lives in
+`tidepool-codegen`, and effect definitions live in `tidepool-mcp`.
 
 ## MCP surface
 
@@ -18,18 +19,19 @@ The server exposes:
 Keep request/response details in the generated tool descriptions and protocol
 types. Do not maintain a second JSON reference here.
 
-## Block classification
+## Block execution
 
-A request may contain several top-level items. The block runner classifies and
-executes them in order:
+A request may contain several top-level items. The block runner maps shared
+workbench classifications into REPL operations:
 
 - declarations extend the persistent declaration environment;
 - bind statements create persistent heap bindings;
 - expressions evaluate and update `it` where applicable;
 - supported meta commands inspect or modify session state.
 
-Split using the Haskell-aware classifier, not line prefixes. Multiline
-declarations, comments, strings, and layout must survive intact.
+GHC remains authoritative for ambiguous Haskell. Do not add a second lexical
+classifier or meta-command tokenizer in this crate. Multiline declarations,
+comments, strings, and layout must survive intact.
 
 Declarations successfully compiled before a later item fails remain committed.
 A suspension records the cursor and materialization policy needed to resume the

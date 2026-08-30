@@ -12,3 +12,7 @@ Session state has one mutable owner at a time. `SessionRegistry` controls
 checkout admission; `PersistentSession` owns the resident execution contract;
 frontends choose whether admission waits or fails immediately. JIT resource
 ownership remains below this layer in `tidepool-codegen`.
+
+`session::workbench` owns frontend-neutral source classification,
+meta-command tokenization, and prefix-preserving ordered cursors. Frontends
+own command meaning, presentation, provider loops, and lifecycle policy.

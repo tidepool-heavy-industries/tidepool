@@ -57,6 +57,7 @@ Small support crates have short local charters describing their exact scope.
 | model-authored fenced-output parsing | `tidepool-model-output` |
 | actor identity, lifecycle, turns, and events | `tidepool-actor` |
 | Haskell turn-module templates | `tidepool-runtime::session::turn` |
+| resident Haskell workbench sequencing and source classification | `tidepool-runtime::session::workbench` |
 | durable-format migration ladders | `tidepool_repr::version_ladder` |
 | turn timeout, cancellation, and crash supervision | `tidepool-runtime::TurnSupervisor` |
 | machine-session checkout and ownership | `tidepool_runtime::session::registry` |

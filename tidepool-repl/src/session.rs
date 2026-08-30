@@ -43,7 +43,7 @@ use tidepool_runtime::session::{
     assemble_bind_module, classify_block, compile_session_turn, extract_ask_request,
     insert_preamble_imports, place_turn_stmt, subtract_import_list_names, BoundBinder,
     GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionCompileView, SessionError,
-    SessionLib, SourceImports, TurnClassification, TurnKind, ValueTier,
+    SessionLib, SourceImports, TurnClassification, TurnKind, ValueTier, WorkSequence,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -374,18 +374,16 @@ struct LastBlockValue {
 /// The cursor is created per `session_run`, driven by
 /// [`Session::drive_block`], and stowed on the session (wrapped in a
 /// [`SuspendedBlockCursor`]) only while an item is suspended. It owns its
-/// `items`/`verdicts` (rather than borrowing the request's) precisely because
-/// it must outlive the call that built it.
+/// work sequence and verdicts (rather than borrowing the request's) precisely
+/// because it must outlive the call that built it.
 struct BlockCursor {
-    /// The block's items, owned so the loop survives the suspension.
-    items: Vec<BlockItem>,
+    /// The shared workbench cursor owns both the request and its committed
+    /// prefix, so suspension cannot advance past an item whose result has not
+    /// settled.
+    sequence: WorkSequence<BlockItem, BlockItemResult>,
     /// This block's ONE batch classify verdict per item (`None` for
     /// `Decl`/`Meta`, or when the batch classify itself failed).
     verdicts: Vec<Option<TurnClassification>>,
-    /// Per-item results accumulated so far.
-    results: Vec<BlockItemResult>,
-    /// The next item index to process.
-    next: usize,
     /// The block's `input` payload lane. Carried HERE (not merely left on the
     /// session) so the do-block invariant — `input` in scope for EVERY item,
     /// including items that run after an in-block `ask`/resume — is a property
@@ -406,10 +404,8 @@ impl BlockCursor {
         verbose: bool,
     ) -> BlockCursor {
         BlockCursor {
-            results: Vec::with_capacity(items.len()),
-            items,
+            sequence: WorkSequence::new(items),
             verdicts,
-            next: 0,
             eval_input,
             verbose,
             last: None,
@@ -444,17 +440,18 @@ impl BlockCursor {
                 value: value.clone(),
                 type_display: type_display.clone(),
                 truncated: truncated.clone(),
-                result_pos: self.results.len(),
+                result_pos: self.sequence.committed().len(),
             });
         }
 
-        self.results.push(BlockItemResult {
+        let committed_index = self.sequence.commit_next(BlockItemResult {
             index,
             kind,
             ok,
             result: slim_item_result(&outcome),
             result_full: outcome.render(),
         });
+        debug_assert_eq!(committed_index, index);
         !ok
     }
 }
@@ -784,7 +781,8 @@ impl Session {
         self.drive_block(cursor, handlers, captured)
     }
 
-    /// The block item loop, re-enterable from any `cursor.next`.
+    /// The block item loop, re-enterable from the shared cursor's current
+    /// position.
     ///
     /// Items are processed by batching maximal runs of consecutive decl-shaped
     /// items (Decl/Auto) so a sig+binding pair or a mutual-recursion SCC split
@@ -803,8 +801,8 @@ impl Session {
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> TurnStep {
-        while cursor.next < cursor.items.len() {
-            let index = cursor.next;
+        while cursor.sequence.position() < cursor.sequence.len() {
+            let index = cursor.sequence.position();
             // A DECL-shaped item (a keyword decl, or an `Auto` the GHC parser
             // classifies as a top-level declaration) starts a batch run; a
             // stmt/meta/expression is a singleton. The parse verdict — not the
@@ -812,17 +810,18 @@ impl Session {
             // `sq :: T` / `sq x = …`) OUT of the decl batch: it classifies as an
             // expression, ends the run, and lands on the stmt path (the tool's
             // "define then call in one block" idiom).
-            let decl_start =
-                self.decl_shaped_text(&cursor.items[index], cursor.verdicts[index].as_ref());
+            let decl_start = self.decl_shaped_text(
+                &cursor.sequence.items()[index],
+                cursor.verdicts[index].as_ref(),
+            );
             let Some(first) = decl_start else {
                 // Singleton — the ONE arm that can suspend.
                 let (kind, step) = self.run_one_item(
-                    &cursor.items[index],
+                    &cursor.sequence.items()[index],
                     cursor.verdicts[index].as_ref(),
                     handlers,
                     captured,
                 );
-                cursor.next = index + 1;
                 match step {
                     ItemStep::Suspended(tail, req) => {
                         self.suspended = Some(SuspendedTurn {
@@ -853,8 +852,10 @@ impl Session {
             let start = index;
             let mut texts: Vec<String> = vec![first.to_string()];
             let mut end = index + 1;
-            while end < cursor.items.len() {
-                match self.decl_shaped_text(&cursor.items[end], cursor.verdicts[end].as_ref()) {
+            while end < cursor.sequence.len() {
+                match self
+                    .decl_shaped_text(&cursor.sequence.items()[end], cursor.verdicts[end].as_ref())
+                {
                     Some(t) => {
                         // Within-block REDEFINITION ends the segment: if this
                         // item defines a head an earlier item in the segment
@@ -889,8 +890,6 @@ impl Session {
             } else {
                 None
             };
-            cursor.next = end;
-
             let mut stop = false;
             match batched {
                 Some(gen) => {
@@ -911,7 +910,7 @@ impl Session {
                     // error. Never suspends — see this fn's doc.
                     for k in 0..(end - start) {
                         let (kind, step) = self.run_one_item(
-                            &cursor.items[start + k],
+                            &cursor.sequence.items()[start + k],
                             cursor.verdicts[start + k].as_ref(),
                             handlers,
                             captured,
@@ -945,7 +944,7 @@ impl Session {
     }
 
     /// Re-enter a suspended block: finish the pending item with the answer, then
-    /// continue the loop at `cursor.next`. `tail` is the stowed item tail (moved
+    /// continue the loop at the cursor's next item. `tail` is the stowed item tail (moved
     /// out of `self.suspended` by [`Self::reenter`] along with `suspended_cursor`
     /// — the two always travel together, so there is no "cursor with no pending
     /// item" case to guard here).
@@ -998,10 +997,9 @@ impl Session {
         // contract ("a block ending in a bind leaves `value` null") and GHCi
         // intuition. `result_pos` was recorded at assignment time, so this is a
         // direct index comparison, not a re-derived "last ok item" scan.
-        let is_final = cursor
-            .last
-            .as_ref()
-            .is_some_and(|lv| Some(lv.result_pos) == cursor.results.len().checked_sub(1));
+        let is_final = cursor.last.as_ref().is_some_and(|lv| {
+            Some(lv.result_pos) == cursor.sequence.committed().len().checked_sub(1)
+        });
         if !is_final {
             cursor.last = None;
         }
@@ -1014,7 +1012,7 @@ impl Session {
         // key) — the bug this replaced re-scanned for "the last ok item of any
         // kind" and could strip the wrong one.
         if let Some(lv) = &cursor.last {
-            if let Some(r) = cursor.results.get_mut(lv.result_pos) {
+            if let Some(r) = cursor.sequence.committed_mut().get_mut(lv.result_pos) {
                 if let serde_json::Value::Object(ref mut obj) = r.result {
                     obj.remove("value");
                     obj.remove("truncated");
@@ -1036,7 +1034,7 @@ impl Session {
             truncated: lv.truncated,
         });
         TurnOutcome::Block {
-            items: cursor.results,
+            items: cursor.sequence.into_committed(),
             value,
             shape,
         }

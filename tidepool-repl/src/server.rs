@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRoster};
 use tidepool_repr::{MonotonicIdIssuer, SessionId};
-use tidepool_runtime::session::{GraceOutcome, ModuleEnv, TurnSupervisor};
+use tidepool_runtime::session::{
+    classify_workbench_item, GraceOutcome, ModuleEnv, TurnSupervisor, WorkbenchItem,
+};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -231,7 +233,8 @@ pub struct SessionResumeRequest {
 /// Classify one `session_run` item string into a [`BlockItem`].
 ///
 /// Classification strategy (try-cascade):
-/// - `:` prefix → [`BlockItem::Meta`] via `MetaCommand::parse`.
+/// - `:` prefix → [`BlockItem::Meta`] via the shared command lexer and
+///   this frontend's [`MetaCommand`] extensions.
 /// - Keyword-initiated declarations (`data`, `newtype`, `type`, `class`,
 ///   `instance`, …) → [`BlockItem::Decl`] (unambiguous; skip cascade).
 /// - Everything else → [`BlockItem::Auto`]: `run_block` will attempt the item
@@ -241,43 +244,11 @@ pub struct SessionResumeRequest {
 /// Misclassification fails LOUD — the wrong handler's GHC error surfaces
 /// immediately rather than silently producing a wrong result.
 pub fn classify_item(text: &str) -> Result<BlockItem, String> {
-    let s = text.trim();
-    // An empty/whitespace-only item is a NO-OP: route it to run_def, which
-    // returns Ok without bumping the generation. Erroring here would fail the
-    // whole block.
-    if s.is_empty() {
-        return Ok(BlockItem::Decl(DeclText(String::new())));
+    match classify_workbench_item(text)? {
+        WorkbenchItem::Declaration(source) => Ok(BlockItem::Decl(DeclText(source))),
+        WorkbenchItem::Haskell(source) => Ok(BlockItem::Auto(ExprText(source))),
+        WorkbenchItem::Command(line) => MetaCommand::from_line(line).map(BlockItem::Meta),
     }
-
-    // :commands → Meta (unambiguous)
-    if s.starts_with(':') {
-        return MetaCommand::parse(s).map(BlockItem::Meta);
-    }
-
-    // Keyword-initiated declarations are unambiguous — skip the cascade.
-    const DECL_KEYWORDS: &[&str] = &[
-        "data ",
-        "newtype ",
-        "type ",
-        "class ",
-        "instance ",
-        "infixl ",
-        "infixr ",
-        "infix ",
-        "foreign ",
-        "import ",
-        "default ",
-        "{-# ",
-    ];
-    for kw in DECL_KEYWORDS {
-        if s.starts_with(kw) {
-            return Ok(BlockItem::Decl(DeclText(s.to_string())));
-        }
-    }
-
-    // Everything else needs the try-cascade (function equations, type sigs,
-    // bind stmts, bare expressions — all routed through run_def first).
-    Ok(BlockItem::Auto(ExprText(s.to_string())))
 }
 
 // ---------------------------------------------------------------------------

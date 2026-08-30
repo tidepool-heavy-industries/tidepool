@@ -38,7 +38,6 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
-use tidepool_actor::{run_block_sequence, BlockExecution, BlockSequenceOutcome};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
@@ -51,6 +50,7 @@ use tidepool_runtime::session::{
     SourceImports, TemplateSelector, TurnKind, TurnRequest, TurnResult, TurnTemplate,
     DECL_TEMPLATE_SOURCE,
 };
+use tidepool_runtime::session::{run_block_sequence, BlockExecution, BlockSequenceOutcome};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};

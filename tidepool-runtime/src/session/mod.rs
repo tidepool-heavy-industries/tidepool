@@ -26,6 +26,7 @@ pub mod resident;
 pub mod supervisor;
 pub mod turn;
 pub mod view;
+pub mod workbench;
 
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
@@ -52,6 +53,11 @@ pub use resident::{
 };
 
 pub use view::{SessionCompileView, SourceImports};
+
+pub use workbench::{
+    classify_workbench_item, run_block_sequence, BlockExecution, BlockSequenceOutcome,
+    CommittedBlock, MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchItem,
+};
 
 pub use turn::{
     assemble_bind_module, classify_block, compile_session_turn, insert_preamble_imports,

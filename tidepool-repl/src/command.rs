@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 use serde_json::Value as Json;
+use tidepool_runtime::session::MetaCommandLine;
 
 /// The classified kind of a block item, as reported in the per-item result
 /// (`kind` field). The wire strings are a user-visible contract; `serde` renders
@@ -145,12 +146,12 @@ impl MetaCommand {
     /// Parse a `:command` item string (`":reset"`, `"reset"`, `":t foo"`,
     /// …) into a [`MetaCommand`]. The leading colon is optional.
     pub fn parse(raw: &str) -> Result<MetaCommand, String> {
-        let s = raw.trim();
-        let s = s.strip_prefix(':').unwrap_or(s).trim();
-        let (head, rest) = match s.split_once(char::is_whitespace) {
-            Some((h, r)) => (h, r.trim()),
-            None => (s, ""),
-        };
+        Self::from_line(MetaCommandLine::parse(raw)?)
+    }
+
+    pub(crate) fn from_line(line: MetaCommandLine) -> Result<MetaCommand, String> {
+        let head = line.name.as_str();
+        let rest = line.arguments.as_str();
         match head {
             "bindings" | "b" => Ok(MetaCommand::Bindings),
             "reset" => Ok(MetaCommand::Reset),
