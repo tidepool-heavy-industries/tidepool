@@ -49,6 +49,7 @@ pub enum ActorEvent {
         owner: Option<ActorRef>,
         label: String,
         effect_stack: Vec<String>,
+        effect_abi: String,
     },
     Started {
         initiator: StartInitiator,

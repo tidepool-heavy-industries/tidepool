@@ -67,6 +67,7 @@ use tidepool_codegen::suspension::{
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
+use tidepool_effect::EffectBoundary;
 use tidepool_eval::value::Value;
 use tidepool_repr::{
     BindingName, CoreExpr, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
@@ -674,10 +675,32 @@ where
         Ok(())
     }
 
+    /// Atomically select one actor's authority/scopes and its machine dispatch
+    /// boundary. Validation precedes both assignments, so a dead lexical scope
+    /// cannot leave half of another actor's execution contract installed.
+    pub fn set_actor_execution(
+        &mut self,
+        context: SessionRunContext,
+        boundary: EffectBoundary,
+    ) -> Result<(), ResidentError> {
+        if !self.core.scope_tree().is_live(context.lexical_scope) {
+            return Err(SessionError::DeadScope(context.lexical_scope).into());
+        }
+        self.run_context = context;
+        self.core.set_effect_boundary(boundary);
+        Ok(())
+    }
+
     /// The context currently selected for resident-session entries.
     #[must_use]
     pub fn run_context(&self) -> SessionRunContext {
         self.run_context
+    }
+
+    /// Machine dispatch boundary currently selected for resident entries.
+    #[must_use]
+    pub fn effect_boundary(&self) -> &EffectBoundary {
+        self.core.effect_boundary()
     }
 
     /// Scope exit for `realm`: close the realm

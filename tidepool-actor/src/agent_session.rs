@@ -218,15 +218,15 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor {
-                    label: "agent".into(),
-                    effect_stack: vec![],
-                    placement: ActorPlacement {
+                ActorDescriptor::all_suspended(
+                    "agent",
+                    std::iter::empty::<String>(),
+                    ActorPlacement {
                         session: tidepool_repr::SessionId(1),
                         resource_scope: RealmId::ROOT,
                         lexical_scope: ScopeId::ROOT,
                     },
-                },
+                ),
                 StartInitiator::Runtime,
             )
             .expect("begin startup");
@@ -342,15 +342,15 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor {
-                    label: "starting agent".into(),
-                    effect_stack: vec![],
-                    placement: ActorPlacement {
+                ActorDescriptor::all_suspended(
+                    "starting agent",
+                    std::iter::empty::<String>(),
+                    ActorPlacement {
                         session: tidepool_repr::SessionId(1),
                         resource_scope: RealmId::fresh(),
                         lexical_scope: ScopeId::ROOT,
                     },
-                },
+                ),
                 StartInitiator::Runtime,
             )
             .expect("begin startup");

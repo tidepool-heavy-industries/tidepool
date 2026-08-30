@@ -264,15 +264,15 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     let producer_start = actors
         .begin_start(
             None,
-            ActorDescriptor {
-                label: "closure producer".into(),
-                effect_stack: Vec::new(),
-                placement: ActorPlacement {
+            ActorDescriptor::all_suspended(
+                "closure producer",
+                std::iter::empty::<String>(),
+                ActorPlacement {
                     session: sid,
                     resource_scope: RealmId::ROOT,
                     lexical_scope: ScopeId::ROOT,
                 },
-            },
+            ),
             StartInitiator::Runtime,
         )
         .expect("start producer actor");
@@ -282,15 +282,15 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     let consumer_start = actors
         .begin_start(
             Some(producer),
-            ActorDescriptor {
-                label: "closure consumer".into(),
-                effect_stack: Vec::new(),
-                placement: ActorPlacement {
+            ActorDescriptor::all_suspended(
+                "closure consumer",
+                std::iter::empty::<String>(),
+                ActorPlacement {
                     session: sid,
                     resource_scope: RealmId::ROOT,
                     lexical_scope: ScopeId::ROOT,
                 },
-            },
+            ),
             StartInitiator::Runtime,
         )
         .expect("start consumer actor");

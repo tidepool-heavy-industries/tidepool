@@ -1,5 +1,68 @@
 use std::sync::Arc;
 
+/// Immutable identity of one ordered Haskell effect stack.
+///
+/// This is the full actor capability ABI, not the machine-handled prefix.
+/// Names remain available for diagnostics and Haskell surface generation; the
+/// digest is the compact identity attached to compiled/deployed artifacts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectStackAbi {
+    names: Arc<[String]>,
+    digest: EffectAbiDigest,
+}
+
+impl EffectStackAbi {
+    #[must_use]
+    pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let names: Vec<String> = names.into_iter().map(Into::into).collect();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tidepool-effect-stack-abi-v1\0");
+        for name in &names {
+            hasher.update(&(name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+        }
+        Self {
+            names: Arc::from(names),
+            digest: EffectAbiDigest(*hasher.finalize().as_bytes()),
+        }
+    }
+
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> EffectAbiDigest {
+        self.digest
+    }
+
+    /// Derive only the runtime dispatch boundary from this full ABI.
+    #[must_use]
+    pub fn boundary(&self, suspend_tag: u64) -> EffectBoundary {
+        EffectBoundary::new(suspend_tag, &self.names)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EffectAbiDigest([u8; 32]);
+
+impl EffectAbiDigest {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for EffectAbiDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// How two non-empty handled-effect prefixes disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixMismatch {
@@ -86,7 +149,22 @@ impl EffectBoundary {
 
 #[cfg(test)]
 mod tests {
-    use super::EffectBoundary;
+    use super::{EffectBoundary, EffectStackAbi};
+
+    #[test]
+    fn full_abi_identity_is_ordered_and_separate_from_boundaries() {
+        let abi = EffectStackAbi::new(["State", "Actor", "Deliberate"]);
+        let same = EffectStackAbi::new(["State", "Actor", "Deliberate"]);
+        let reordered = EffectStackAbi::new(["Actor", "State", "Deliberate"]);
+        assert_eq!(abi.digest(), same.digest());
+        assert_ne!(abi.digest(), reordered.digest());
+
+        let all_suspended = abi.boundary(0);
+        let state_handled = abi.boundary(1);
+        assert_eq!(all_suspended.handled_prefix(), &[] as &[String]);
+        assert_eq!(state_handled.handled_prefix(), &["State"]);
+        assert_eq!(abi.names(), ["State", "Actor", "Deliberate"]);
+    }
 
     #[test]
     fn derives_the_prefix_below_the_boundary() {

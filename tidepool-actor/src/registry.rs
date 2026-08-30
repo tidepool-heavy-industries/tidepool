@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
+use tidepool_effect::{EffectBoundary, EffectStackAbi};
 use tidepool_repr::MonotonicIdIssuer;
 
 use crate::agent_session::AgentSessionState;
@@ -15,9 +16,61 @@ use crate::{
 /// Immutable attributes selected before an actor begins initialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
-    pub label: String,
-    pub effect_stack: Vec<String>,
-    pub placement: ActorPlacement,
+    label: String,
+    effect_abi: EffectStackAbi,
+    effect_boundary: EffectBoundary,
+    placement: ActorPlacement,
+}
+
+impl ActorDescriptor {
+    /// Build an immutable actor execution contract. `suspend_tag` selects the
+    /// machine-handled prefix but does not participate in full ABI identity.
+    #[must_use]
+    pub fn new(
+        label: impl Into<String>,
+        effect_abi: EffectStackAbi,
+        suspend_tag: u64,
+        placement: ActorPlacement,
+    ) -> Self {
+        let effect_boundary = effect_abi.boundary(suspend_tag);
+        Self {
+            label: label.into(),
+            effect_abi,
+            effect_boundary,
+            placement,
+        }
+    }
+
+    /// V0 actor contract: every actor effect suspends to its actor-local Rust
+    /// interpreter; the shared machine handles no prefix effects.
+    #[must_use]
+    pub fn all_suspended(
+        label: impl Into<String>,
+        effect_names: impl IntoIterator<Item = impl Into<String>>,
+        placement: ActorPlacement,
+    ) -> Self {
+        Self::new(label, EffectStackAbi::new(effect_names), 0, placement)
+    }
+
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    #[must_use]
+    pub fn effect_abi(&self) -> &EffectStackAbi {
+        &self.effect_abi
+    }
+
+    #[must_use]
+    pub fn effect_boundary(&self) -> &EffectBoundary {
+        &self.effect_boundary
+    }
+
+    #[must_use]
+    pub fn placement(&self) -> ActorPlacement {
+        self.placement
+    }
 }
 
 /// A private initialization capability. No callable [`ActorRef`] is exposed
@@ -231,7 +284,8 @@ impl ActorRegistry {
         let created = ActorEvent::Created {
             owner,
             label: descriptor.label.clone(),
-            effect_stack: descriptor.effect_stack.clone(),
+            effect_stack: descriptor.effect_abi.names().to_vec(),
+            effect_abi: descriptor.effect_abi.digest().to_string(),
         };
         state.actors.insert(
             reference.id,
@@ -352,11 +406,15 @@ impl ActorRegistry {
             return Err(ActorRegistryError::Parked { actor, obligation });
         }
         let placement = actor_entry.descriptor.placement;
+        let effect_abi = actor_entry.descriptor.effect_abi.clone();
+        let effect_boundary = actor_entry.descriptor.effect_boundary.clone();
         actor_entry.active_turn = Some(kind);
         Ok(TurnLease {
             actor,
             kind,
             placement,
+            effect_abi,
+            effect_boundary,
             registry: Arc::downgrade(&self.inner),
             released: false,
         })
@@ -373,6 +431,8 @@ impl ActorRegistry {
         Ok(ActorSessionContext {
             actor,
             placement: actor_entry.descriptor.placement,
+            effect_abi: actor_entry.descriptor.effect_abi.clone(),
+            effect_boundary: actor_entry.descriptor.effect_boundary.clone(),
         })
     }
 
@@ -930,6 +990,8 @@ pub struct TurnLease {
     actor: ActorRef,
     kind: ActorTurnKind,
     placement: ActorPlacement,
+    effect_abi: EffectStackAbi,
+    effect_boundary: EffectBoundary,
     registry: Weak<RegistryInner>,
     released: bool,
 }
@@ -940,6 +1002,8 @@ impl TurnLease {
         ActorSessionContext {
             actor: self.actor,
             placement: self.placement,
+            effect_abi: self.effect_abi.clone(),
+            effect_boundary: self.effect_boundary.clone(),
         }
     }
 
@@ -1276,15 +1340,15 @@ mod tests {
     use tidepool_repr::SessionId;
 
     fn descriptor(label: &str) -> ActorDescriptor {
-        ActorDescriptor {
-            label: label.into(),
-            effect_stack: vec!["Deliberate".into()],
-            placement: ActorPlacement {
+        ActorDescriptor::all_suspended(
+            label,
+            ["Deliberate"],
+            ActorPlacement {
                 session: SessionId(1),
                 resource_scope: RealmId::ROOT,
                 lexical_scope: ScopeId::ROOT,
             },
-        }
+        )
     }
 
     fn ready_root(registry: &ActorRegistry) -> ActorRef {
@@ -1300,13 +1364,15 @@ mod tests {
         let starting = registry
             .begin_start(
                 owner,
-                ActorDescriptor {
-                    placement: ActorPlacement {
+                ActorDescriptor::all_suspended(
+                    label,
+                    ["Deliberate"],
+                    ActorPlacement {
                         session,
-                        ..descriptor(label).placement
+                        resource_scope: RealmId::ROOT,
+                        lexical_scope: ScopeId::ROOT,
                     },
-                    ..descriptor(label)
-                },
+                ),
                 StartInitiator::Runtime,
             )
             .expect("begin actor startup");

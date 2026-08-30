@@ -1,6 +1,7 @@
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_effect::{EffectBoundary, EffectStackAbi};
 use tidepool_repr::{PrincipalId, SessionId};
 use tidepool_runtime::session::{OutputSink, ResidentError, ResidentSession, SessionRunContext};
 
@@ -19,15 +20,17 @@ pub struct ActorPlacement {
 /// Actor-owned portion of a resident machine mount. Machine checkout remains
 /// in `tidepool-runtime`; this value prevents scope and authority selection
 /// from drifting apart at the actor boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorSessionContext {
     pub actor: ActorRef,
     pub placement: ActorPlacement,
+    pub effect_abi: EffectStackAbi,
+    pub effect_boundary: EffectBoundary,
 }
 
 impl ActorSessionContext {
     #[must_use]
-    pub fn run_context(self) -> SessionRunContext {
+    pub fn run_context(&self) -> SessionRunContext {
         SessionRunContext::new(
             self.placement.resource_scope,
             self.placement.lexical_scope,
@@ -41,7 +44,11 @@ impl ActorSessionContext {
 pub trait ActorRunTarget {
     type Error;
 
-    fn install_actor_context(&mut self, context: SessionRunContext) -> Result<(), Self::Error>;
+    fn install_actor_execution(
+        &mut self,
+        context: SessionRunContext,
+        boundary: EffectBoundary,
+    ) -> Result<(), Self::Error>;
 }
 
 impl<H, O> ActorRunTarget for ResidentSession<H, O>
@@ -51,8 +58,12 @@ where
 {
     type Error = ResidentError;
 
-    fn install_actor_context(&mut self, context: SessionRunContext) -> Result<(), Self::Error> {
-        self.set_run_context(context)
+    fn install_actor_execution(
+        &mut self,
+        context: SessionRunContext,
+        boundary: EffectBoundary,
+    ) -> Result<(), Self::Error> {
+        self.set_actor_execution(context, boundary)
     }
 }
 
@@ -79,7 +90,7 @@ where
     let lease = registry.begin_turn(actor, kind)?;
     let context = lease.session_context();
     target
-        .install_actor_context(context.run_context())
+        .install_actor_execution(context.run_context(), context.effect_boundary.clone())
         .map_err(MountActorTurnError::Target)?;
     Ok(lease)
 }
@@ -92,17 +103,23 @@ mod tests {
     #[derive(Default)]
     struct FakeTarget {
         installed: Option<SessionRunContext>,
+        boundary: Option<EffectBoundary>,
         fail: bool,
     }
 
     impl ActorRunTarget for FakeTarget {
         type Error = &'static str;
 
-        fn install_actor_context(&mut self, context: SessionRunContext) -> Result<(), Self::Error> {
+        fn install_actor_execution(
+            &mut self,
+            context: SessionRunContext,
+            boundary: EffectBoundary,
+        ) -> Result<(), Self::Error> {
             if self.fail {
                 Err("dead scope")
             } else {
                 self.installed = Some(context);
+                self.boundary = Some(boundary);
                 Ok(())
             }
         }
@@ -112,15 +129,15 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor {
-                    label: "actor".into(),
-                    effect_stack: vec![],
-                    placement: ActorPlacement {
+                ActorDescriptor::all_suspended(
+                    "actor",
+                    std::iter::empty::<String>(),
+                    ActorPlacement {
                         session: tidepool_repr::SessionId(1),
                         resource_scope: RealmId(11),
                         lexical_scope: ScopeId::ROOT,
                     },
-                },
+                ),
                 StartInitiator::Runtime,
             )
             .expect("begin startup");
@@ -137,6 +154,8 @@ mod tests {
             .expect("mount actor");
 
         assert_eq!(target.installed, Some(context.run_context()));
+        assert_eq!(target.boundary, Some(context.effect_boundary));
+        assert_eq!(context.effect_abi.names(), &[] as &[String]);
         assert!(matches!(
             registry.begin_turn(actor, ActorTurnKind::Provider),
             Err(ActorRegistryError::Busy { .. })
@@ -153,6 +172,7 @@ mod tests {
         let actor = ready_actor(&registry);
         let mut target = FakeTarget {
             installed: None,
+            boundary: None,
             fail: true,
         };
         let result = mount_actor_turn(&registry, &mut target, actor, ActorTurnKind::Haskell);

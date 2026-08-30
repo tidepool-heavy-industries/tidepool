@@ -54,15 +54,15 @@ fn ready_actor(
     let starting = registry
         .begin_start(
             owner,
-            ActorDescriptor {
-                label: label.into(),
-                effect_stack: vec!["Actor".into()],
-                placement: ActorPlacement {
+            ActorDescriptor::all_suspended(
+                label,
+                ["Actor"],
+                ActorPlacement {
                     session: tidepool_repr::SessionId(1),
                     resource_scope: RealmId(realm),
                     lexical_scope: ScopeId::ROOT,
                 },
-            },
+            ),
             StartInitiator::Runtime,
         )
         .expect("begin actor");

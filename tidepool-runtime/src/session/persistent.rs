@@ -196,6 +196,13 @@ impl PersistentSession {
     pub fn effect_boundary(&self) -> &EffectBoundary {
         &self.effect_boundary
     }
+
+    /// Select the dispatch/suspension boundary for the next mounted actor
+    /// turn. The full actor ABI is retained by the actor descriptor; this core
+    /// needs only the machine-handled prefix and suspension threshold.
+    pub fn set_effect_boundary(&mut self, boundary: EffectBoundary) {
+        self.effect_boundary = boundary;
+    }
     /// Whether the resident machine has been bootstrapped (first turn run).
     pub fn is_bootstrapped(&self) -> bool {
         self.machine.is_some()

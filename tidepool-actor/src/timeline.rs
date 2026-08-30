@@ -199,15 +199,15 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor {
-                    label: "reviewer".into(),
-                    effect_stack: vec!["Deliberate".into()],
-                    placement: ActorPlacement {
+                ActorDescriptor::all_suspended(
+                    "reviewer",
+                    ["Deliberate"],
+                    ActorPlacement {
                         session: tidepool_repr::SessionId(1),
                         resource_scope: RealmId::ROOT,
                         lexical_scope: ScopeId::ROOT,
                     },
-                },
+                ),
                 StartInitiator::Runtime,
             )
             .expect("start actor");
