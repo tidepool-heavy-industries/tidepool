@@ -108,7 +108,7 @@ struct RegistryState {
 
 struct ActorEntry {
     reference: ActorRef,
-    placement: ActorPlacement,
+    descriptor: ActorDescriptor,
     owner: Option<ActorRef>,
     children: BTreeSet<ActorRef>,
     lifecycle: ActorLifecycle,
@@ -228,11 +228,16 @@ impl ActorRegistry {
             }
         }
 
+        let created = ActorEvent::Created {
+            owner,
+            label: descriptor.label.clone(),
+            effect_stack: descriptor.effect_stack.clone(),
+        };
         state.actors.insert(
             reference.id,
             ActorEntry {
                 reference,
-                placement: descriptor.placement,
+                descriptor,
                 owner,
                 children: BTreeSet::new(),
                 lifecycle: ActorLifecycle::Initializing,
@@ -254,11 +259,7 @@ impl ActorRegistry {
                 owner,
                 ..EventCausality::default()
             },
-            ActorEvent::Created {
-                owner,
-                label: descriptor.label,
-                effect_stack: descriptor.effect_stack,
-            },
+            created,
         )?;
         record(
             &mut state,
@@ -350,7 +351,7 @@ impl ActorRegistry {
         if let Some(obligation) = actor_entry.parked {
             return Err(ActorRegistryError::Parked { actor, obligation });
         }
-        let placement = actor_entry.placement;
+        let placement = actor_entry.descriptor.placement;
         actor_entry.active_turn = Some(kind);
         Ok(TurnLease {
             actor,
@@ -371,8 +372,15 @@ impl ActorRegistry {
         let actor_entry = entry(&state, actor)?;
         Ok(ActorSessionContext {
             actor,
-            placement: actor_entry.placement,
+            placement: actor_entry.descriptor.placement,
         })
+    }
+
+    /// Return the immutable startup descriptor retained for this exact
+    /// incarnation. Operational code must read effect-stack identity here,
+    /// never reconstruct it from observability events.
+    pub fn descriptor(&self, actor: ActorRef) -> Result<ActorDescriptor, ActorRegistryError> {
+        Ok(entry(&self.inner.state.lock(), actor)?.descriptor.clone())
     }
 
     pub(crate) fn attach_agent_session(
@@ -612,8 +620,8 @@ impl ActorRegistry {
         let wait = WaitId(self.inner.wait_ids.next_raw());
         let mut state = self.inner.state.lock();
         require_ready(&state, waiter)?;
-        let waiter_session = entry(&state, waiter)?.placement.session;
-        let target_session = entry(&state, target)?.placement.session;
+        let waiter_session = entry(&state, waiter)?.descriptor.placement.session;
+        let target_session = entry(&state, target)?.descriptor.placement.session;
         if waiter_session != target_session {
             return Err(WaitError::MachineBoundary {
                 waiter,
@@ -777,7 +785,7 @@ impl ActorRegistry {
         let target = call_entry.target;
         let caller = call_entry.caller;
         require_ready(&state, target)?;
-        let target_session = entry(&state, target)?.placement.session;
+        let target_session = entry(&state, target)?.descriptor.placement.session;
         if value.session() != target_session {
             return Err(MailboxFailure::MachineBoundary {
                 actor: target,
@@ -977,8 +985,8 @@ fn validate_delivery(
 ) -> Result<(), MailboxFailure> {
     require_ready(state, caller)?;
     require_ready(state, target)?;
-    let caller_session = entry(state, caller)?.placement.session;
-    let target_session = entry(state, target)?.placement.session;
+    let caller_session = entry(state, caller)?.descriptor.placement.session;
+    let target_session = entry(state, target)?.descriptor.placement.session;
     if caller_session != target_session {
         return Err(MailboxFailure::ActorMachineBoundary {
             caller,
@@ -1322,6 +1330,28 @@ mod tests {
             registry.events().last().map(|record| &record.event),
             Some(ActorEvent::Ready)
         ));
+    }
+
+    #[test]
+    fn startup_descriptor_remains_authoritative_after_readiness_and_exit() {
+        let registry = ActorRegistry::new();
+        let expected = descriptor("reviewer");
+        let starting = registry
+            .begin_start(None, expected.clone(), StartInitiator::Runtime)
+            .expect("begin startup");
+        let actor = registry.publish_ready(starting).expect("publish ready");
+        assert_eq!(registry.descriptor(actor), Ok(expected.clone()));
+
+        registry
+            .finish(
+                actor,
+                ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "done".into(),
+                },
+            )
+            .expect("finish actor");
+        assert_eq!(registry.descriptor(actor), Ok(expected));
     }
 
     #[test]
