@@ -73,6 +73,12 @@ checks this actor's policy, grants, and caller identity. Forks create a new
 interpreter instance under the child's principal. Different actor rows may
 share one machine because union position has no Rust dispatch meaning.
 
+Naming an effect in `AgentEffects` is not authority and cannot manufacture a
+Rust handler. A trusted launch policy decides which nominal requests this
+incarnation can actually interpret and which resource grants back them. The
+first `startActor` slice must settle how a dynamic Haskell `ActorSpec` carries
+or selects that opaque policy without reflecting its type-level row into Rust.
+
 The stack determines which operation classes Haskell can express. Opaque
 handles and principal-scoped grants still authorize particular resources at
 runtime.
@@ -120,10 +126,13 @@ awaitExit
   -> Eff effs (ActorExit exit)
 ```
 
-This is a conceptual surface: the representation existentially seals `boot`,
-`initial`, `childEffs`, and the program image.
-`StartupM` and `ShutdownM` are restricted lifecycle surfaces that cannot
-deliberate.
+This is a conceptual surface: ordinary Haskell existential packaging hides
+`boot`, `initial`, and `childEffs`; it does not imply a reflected Rust row ABI.
+The program image and launch authority are opaque runtime-backed values, not a
+second Haskell encoding of handler layout. `StartupM` and `ShutdownM` denote
+restricted lifecycle surfaces that cannot deliberate; whether they survive as
+newtypes or become constrained `Eff` rows is intentionally left to the first
+`startActor` vertical slice.
 
 `startActor` runs `prepare`, gives `boot` to the specification's sole typed
 startup agent session, and passes the resulting `initial` value to `install`.

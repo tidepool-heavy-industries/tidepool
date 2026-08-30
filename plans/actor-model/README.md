@@ -38,49 +38,23 @@ retain for rollback.
 ## Accepted direction
 
 - An actor combines one accumulating model conversation, one persistent
-  Haskell environment, one serial Haskell control flow, and one fixed
-  per-incarnation effect stack interpreted by Rust.
-- Rust owns mechanics and authority; `Member`-polymorphic Haskell owns typed
-  protocols, state machines, behavior, deliberation, and composition.
-- The model-facing DSL is intentionally smaller than the Rust kernel. New
-  operations must earn their place by improving agent reasoning or typed
-  composition, not merely by exposing an internal capability.
-- Same-machine messages may carry arbitrary live Haskell values. JSON is only
-  a durable or external boundary; durable facts use explicit get/put.
-- Fresh spawn deploys an explicit program into a fresh context. Fork clones the
-  exact model prefix, Haskell snapshot, and control continuation, while
-  actor-linear continuation, reply, join, and parked-request references remain
-  invalid in children. Capabilities follow their registered fork policies, and
-  ordinary `AgentRef` values remain portable where authority permits.
-- `startActor` performs specification-authored typed startup deliberation and
-  publishes only an exact-incarnation reference that has crossed the readiness
-  linearization point. A non-prompted constructor waits for a concrete use.
-- Actors are logically concurrent and individually serial. Shared-machine
-  Haskell execution remains globally serialized through existing checkout.
-- Typed call, cast, `awaitExit`, and startup surfaces expose only their success types.
-  Rust mechanically handles conditions it can resolve; an unsatisfied exact
-  operation terminates the actor with a retained structured failure. Exact
-  references are never silently replaced and authoritative operations never
-  invent results. Failure-prone work uses explicit `startActor`/`awaitExit`
-  supervision and may start a new child after observing an exit. Each reference
-  retains its terminal exit for repeatable `awaitExit`; abnormal exits not already
-  observed by a wait or call start advisory model turns rather than entering a
-  heterogeneous Haskell inbox.
-- Abnormal or unexpected child exit settles an already-observing obligation or
-  creates one keyed advisory; it never kills its owner.
-- Deliberation, startup, and advisory share one Rust-owned
-  agent-session executor; their completion contracts differ, not their
-  provider/Haskell orchestration. Assistant responses may contain several
-  fenced Haskell blocks; all such blocks run in order against the same
-  persistent environment, without JSON tool-call encoding.
-- The existing durable harness journal is the seed of actor observability, not
-  disposable scaffolding. The actor kernel emits neutral lifecycle, causality,
-  model-turn, Haskell-execution, suspension, and resource events; log folding,
-  streaming, and presentation remain outside authoritative runtime state.
-- Owner termination delivers typed shutdown and recursively terminates the
-  owned subtree.
-- Moving a value does not move its creator's authority. Rust checks operations
-  against the current actor principal.
+  Haskell environment, one serial control flow, and one fixed effect stack
+  interpreted under Rust-owned authority.
+- The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
+  carry live typed values; JSON is only a durable or external boundary.
+- Fresh spawn deploys an explicit program into a fresh context. Structural
+  fork clones one exact model/Haskell/control point and applies registered
+  capability and actor-linear-reference policy.
+- `startActor` publishes only a ready exact-incarnation reference. Exact calls
+  never invent results or substitute actors; failure-prone jobs use
+  `startActor`/`awaitExit` supervision and explicit Haskell control flow.
+- One actor-turn admission spans a complete agent session, while shorter
+  machine checkouts serialize only its Haskell run segments. Startup,
+  deliberation, and advisory share the same provider/fenced-Haskell executor.
+- One neutral actor event stream records runtime truth. Views, durable logs,
+  Developer advisories, and UI are projections; none is a second registry.
+- Moving a value does not move authority. Unexpected child failure informs but
+  does not kill its owner; owner termination recursively ends its subtree.
 - Model-authored verification should normally run authoritative checks and an
   independent fresh-actor review before acceptance.
 

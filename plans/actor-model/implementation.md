@@ -19,9 +19,13 @@ Every phase must preserve the repository's one-home rules:
 
 - one continuation registry and root ledger;
 - one machine-session checkout mechanism;
+- one actor-turn admission mechanism, distinct from machine checkout;
 - one actor registry;
 - one capability registry;
 - one model-backend seam;
+- one parser for executable fenced Haskell;
+- one resident-turn classifier/compiler and one ordered block executor;
+- one neutral actor event vocabulary and one durable append path;
 - one get/put durability backend.
 
 Every Haskell API addition also passes an LLM-surface test:
@@ -35,7 +39,37 @@ If the second answer is yes and the first is no, keep the mechanism in Rust.
 Do not generate comprehensive `tryX`, configuration-record, or lifecycle-state
 families as a proxy for a designed DSL.
 
-## 2. Phase 0 — semantic spikes
+## 2. Current implementation baseline
+
+The plan is ahead of the implementation, but it no longer begins from zero.
+The following substrate has landed and should be extended rather than
+re-prototyped:
+
+- `tidepool-actor` owns exact-incarnation identity, lifecycle/ownership,
+  live-value mailboxes, exact typed waits, execution-principal mounting, and
+  the neutral actor event vocabulary;
+- one actor-agent-session admission now spans provider rounds and mounted
+  Haskell execution, and each incarnation retains one accumulating
+  provider-neutral conversation;
+- `tidepool-model` owns the provider-neutral request, response, conversation,
+  streaming, and provider trait seam;
+- `tidepool-model-output` is the sole fenced-Haskell extractor;
+- `tidepool-runtime::PersistentSession` owns resident declarations, bindings,
+  exact source imports, checkout, and continuation state;
+- `tidepool-runtime::session::turn` owns the GHC-sourced resident-turn
+  classifier/compiler;
+- the generic ordered block executor exists as `tidepool-actor::sequence`, but
+  its neutral behavior still needs to move beside the resident workbench;
+- nominal request identity has replaced positional effect-prefix dispatch.
+
+What has **not** landed is equally important: there is no public
+`ActorSpec`/`startActor`, no installed actor program or startup deliberation,
+no complete actor workbench, no actor-local handler-policy constructor, no
+structural context fork, and no DevSwarm actor entry. The legacy harness and
+REPL still contain parallel orchestration which is migration input, not a
+second architecture to preserve.
+
+## 3. Phase 0 — semantic spikes
 
 These spikes settle feasibility and API pressure before crate placement or
 public names become expensive.
@@ -155,7 +189,7 @@ Acceptance:
 - advisory exhaustion closes the advisory without terminating its owner;
 - provider transport failure terminates cleanly and notifies the owner.
 
-## 3. Phase 1 — Rust actor kernel
+## 4. Phase 1 — Rust actor kernel
 
 Introduce the minimum Rust-owned substrate required by the spikes:
 
@@ -207,24 +241,26 @@ machine-session, provider-agent, and capability substrates. Actor-specific
 orchestration migrates out of `tidepool-harness`; neither the JIT nor
 `tidepool-agent` becomes the actor registry.
 
-## 4. Phase 2 — common fenced-Haskell agent session
+## 5. Phase 2 — one resident Haskell workbench
 
-Promote the existing harness response-to-block-to-resident-run loop into the
-one actor agent-session executor. Preserve fenced Haskell as the primary
-protocol rather than replacing it with a provider tool call.
+Finish the partially landed actor agent-session path by extracting one
+resident Haskell workbench. Preserve fenced Haskell as the primary protocol
+rather than replacing it with a provider tool call.
 
-Build on the harness's ordered multi-block execution and corrective rounds,
-the shared block classifier, persistent declaration environment, persistent
-binding store, and resident machine-session mount. Do not fork a second GHCi
-implementation inside the actor runtime or leave parallel harness and actor
-drivers.
+Build on the shared fence parser, ordered block executor, GHC-sourced turn
+classifier/compiler, persistent declaration environment, binding store, and
+resident machine-session mount. The harness's corrective-round behavior is a
+compatibility oracle, not the permanent owner. Do not fork a second GHCi
+implementation inside the actor runtime or leave parallel harness, REPL, and
+actor block drivers.
 
 Use `tidepool-runtime::PersistentSession` as the shared machine, declaration,
 binding, and continuation substrate. Do not reuse `tidepool-repl::Session` as
 the actor workbench: that type intentionally owns MCP-specific JSON payloads,
-rendering, meta commands, and `Ask` handling. The common layer is the resident
-session substrate and turn compiler; actor settlement remains live-value and
-all-suspending.
+rendering, meta commands, and `Ask` handling. Extract only frontend-neutral
+classification, compile/commit, source-view, and introspection behavior. Actor,
+REPL, and legacy harness adapters own their distinct rendering and suspension
+settlement until each adapter can be deleted.
 
 Deliver:
 
@@ -263,7 +299,7 @@ Acceptance:
 - network-mounted delegated agents can use the same fenced-Haskell session and
   machine-session substrate when that frontend is enabled.
 
-## 5. Phase 3 — authored actor DSL
+## 6. Phase 3 — authored actor DSL
 
 Add the narrow Haskell library surface discovered by the spikes:
 
@@ -299,7 +335,7 @@ loop         :: State -> Harness State
 Durable facts are read explicitly. Prompt construction belongs to each
 `Deliberation`, not to a global render pass.
 
-## 6. Phase 4 — spawn and fork
+## 7. Phase 4 — spawn and fork
 
 Implement the two construction operations in
 [architecture.md](architecture.md#6-actor-construction): spawn an explicit
@@ -313,7 +349,7 @@ continuation references, fresh-context non-inheritance, and provider cache
 metrics for forked prefixes. Independent repeated spawn needs no transactional
 batch API.
 
-## 7. Phase 5 — actorize delegation and DevSwarm
+## 8. Phase 5 — actorize delegation and DevSwarm
 
 Express current one-shot and coding-agent paths as Haskell programs plus
 capability grants:
@@ -340,7 +376,7 @@ Migrate DevSwarm as the first real program:
 6. remove its compatibility `State` and old `render`/`loop` entry point;
 7. delete adapters whose only purpose was the old harness morphology.
 
-## 8. Phase 6 — verification and program evolution
+## 9. Phase 6 — verification and program evolution
 
 Add the operational features that make self-extension trustworthy:
 
@@ -361,7 +397,7 @@ domain policy over which events are sufficient. A particular high-assurance
 harness may introduce abstract evidence types, but the actor kernel does not
 mandate them.
 
-## 9. Phase 7 — bounded growth and rotation
+## 10. Phase 7 — bounded growth and rotation
 
 Measure before choosing a final reclamation design, but make growth visible
 from Phase 1 onward:
@@ -383,7 +419,7 @@ images, rotating actor groups, or adding executable-code reclamation. They are
 separate engineering decisions after real self-writing workloads establish
 their shape.
 
-## 10. Ownership map
+## 11. Ownership map
 
 | Area | Expected responsibility |
 |---|---|
@@ -392,69 +428,86 @@ their shape.
 | actor runtime | Actor registry, ownership tree, mailboxes, principals, per-actor interpreters, capabilities, program-image deployment metadata, supervision, model/Haskell coordination |
 | `tidepool-agent` | Provider/coding-backend adapter and persistent backend thread seam |
 | `tidepool-harness` | Transitional authored-harness driver; actor-specific machinery should move to the actor runtime rather than deepen this crate's current mixed charter |
-| `tidepool-repl` | Shared Haskell-aware classification behavior; it does not own the provider-to-resident agent loop |
+| `tidepool-repl` | External REPL/MCP adapter only; shared classification and resident compilation live below it |
 | `haskell/lib/Tidepool` | Familiar typed actor, deliberation, protocol, and behavior combinators |
 | `tidepool-protocol` / `tidepool-mcp` | External effect/tool schemas and generated boundary declarations, not internal actor message schemas |
 | `tidepool-handlers` / `tidepool-worktree` | Concrete capability operations and resource ownership |
 | DevSwarm | Project-local roles, prompts, repository policy, and acceptance decisions |
 
-## 11. Migration table
+## 12. Migration and deletion table
 
 | Current surface | Destination | Deletion condition |
 |---|---|---|
 | `State`/`render`/`loop` selfharness contract | Direct actor-program entry plus explicit durable reads | DevSwarm runs without compatibility state |
-| harness-owned fenced-Haskell loop | Common actor agent-session executor | Harness and actor paths use the same ordered response-to-resident engine |
+| harness `NodeConvo` transcript and `turn_lease` | Actor-owned conversation plus actor-turn admission | Every model/Haskell turn enters through `ActorAgentSession`; legacy node admission is deleted |
+| harness/REPL high-level block drivers | One neutral resident-workbench core plus thin frontend settlement adapters | Classification, compile/commit, ordered prefix behavior, source views, and introspection have one implementation |
+| `tidepool-actor::sequence` generic block ordering | Resident-workbench core beside `PersistentSession` | Actor and harness use it without the machine-neutral helper living in the actor kernel |
+| harness-owned fenced-Haskell loop | Actor agent-session executor using the common workbench | Harness and actor paths use the same ordered response-to-resident engine, then the compatibility driver is deleted |
+| harness compatibility re-export and duplicate tests for fenced-block parsing | `tidepool-model-output` | All callers import the parser directly and parser behavior is tested only at its owning crate plus integration boundaries |
+| MCP and runtime module-template concepts with overlapping names/responsibilities | One resident-turn module builder in the machine-session substrate; protocol-only declaration rendering remains in MCP | Actor and REPL turns need no harness-local template builders and the surviving types have distinct responsibilities and names |
 | `RunLLMTurn` plus hidden answerer orchestration | `deliberate` against actor-owned model context | Typed completion and multi-round correction are covered |
 | special fork/fanout prompt paths | Spawn, structural fork, and ordinary actor operations | Cache-preserving fork and ordered result assembly are covered |
 | JSON-only actor-like mailboxes | Root-owning live-value envelopes | Closure-valued request/result tests pass |
 | separate one-shot/delegate runtimes | Haskell actor programs and capability grants | Existing production behaviors are represented without backend leakage |
+| `tidepool-agent::AgentId` and `tidepool-worktree::AgentRef` used as independent agent principals | Actor incarnation principal; backend thread and worktree identifiers remain opaque resource identities | No lifecycle, ownership, or authorization decision keys off a second notion of “the agent” |
+| harness-specific node/model event schemas and actor log adapter | Neutral actor events plus one durable append implementation | UI/log folds consume neutral events and no adapter invents or duplicates authoritative facts |
+| legacy node tree as lifecycle authority | Actor ownership tree; optional tree views are projections | Spawn, cancellation, supervision, and subtree cleanup no longer mutate `NodeTree` |
+| selfharness checkpoint/restart machinery | Explicit durable get/put plus fresh actor creation | The old driver is retired; live closure/context restart is not ported into v0 |
+| concrete provider adapters housed by the transitional harness | A provider-backend package behind `tidepool-model`, placed with its first actor consumer | The first production actor runs without depending on `tidepool-harness` |
 | machine-global handled prefix | Nominal actor-local Rust dispatch | Different actor rows coexist on one machine without tag ambiguity or a second row ABI |
 | concrete effect rows in reusable APIs | `Member`/`Members` constraints; specialization only at actor entry | Portable behavior instantiates in the receiving actor |
 
-## 12. Cross-phase test scenarios
+## 13. Design questions at the next vertical boundary
 
-The following scenarios should grow in place rather than spawning unrelated
-test families:
+These are deliberately unresolved representation questions. Settle each with
+one vertical test and then record the answer in the owning crate; do not create
+parallel implementations to keep every option alive.
 
-1. self-specializing actor installs and rolls back a function-bearing behavior;
-2. dynamic GADT protocol is deployed to a fresh child and returns a closure;
-3. three cache-sharing forks diverge without declaration or binding leakage;
-4. forked children preserve the exact Haskell continuation but cannot use
-   parent-owned continuation references;
-5. fresh reviewer sees the artifact and specification but no parent reasoning;
-6. protected worktree capability fails locally after transfer and succeeds via
-   authorized actor call;
-7. queued live values survive GC and are released exactly once on cancellation;
-8. actors with different stacks dispatch through their own interpreters, and
-   only row-polymorphic effectful functions cross between them;
-9. child failure remains available as the exact typed result of `awaitExit`; an
-   active wait suppresses a duplicate advisory, while an otherwise-unobserved
-   abnormal exit produces one keyed Developer notification without killing
-   the owner;
-10. a transiently refused `call` parks its continuation, retries the exact
-    operation, and resumes only after it succeeds;
-11. a refused `cast` cannot complete through acknowledgment or invented `()`;
-    it retries to real mailbox acceptance or terminates;
-12. `awaitExit` retries only temporary access to the same terminal record; stale or
-    invalid exact references are fatal, and a same-typed actor cannot replace
-    the named incarnation;
-13. supervised delegated work observes a failed exact exit with `awaitExit` and may
-    explicitly start a new child; a dead synchronous call terminates its caller
-    without replay or a final inference session;
-14. an unobserved abnormal child exit starts one keyed advisory lifecycle turn
-    without constructing a Haskell event or re-entering active Haskell; batched
-    acknowledgment preserves every key, and four unanswered responses close
-    the advisory without terminating the owner;
-15. provider failure exhausts bounded transport retry and terminates the actor
-    directly;
-16. automated checks and independent review records refer to the candidate
-   revision actually accepted;
-17. DevSwarm completes a candidate/review/revision flow with no global `State`
-   rendering and no internal JSON transport;
-18. resource accounting explains growth over a long self-extension run and a
-   quiescent rotation reports every lost live value.
+1. **Workbench boundary.** What is the smallest neutral result/settlement
+   interface that lets actor, REPL, and temporary harness adapters share
+   classification, compile/commit, ordered-prefix behavior, exact source
+   views, and introspection without importing MCP JSON or actor lifecycle
+   semantics? Migrate one existing frontend and the actor path through it
+   before calling the extraction complete.
+2. **Turn-module ownership.** `tidepool-runtime::session::turn` and
+   `tidepool-mcp::eval_prep` currently expose different `TurnTemplate` types,
+   while the harness also assembles wrappers. Decide one owner for
+   frontend-neutral resident module construction, give protocol-only rendering
+   a narrower name, and delete hand-assembled harness variants. The actor
+   crate must not depend on the MCP server to compile its workbench.
+3. **`ActorSpec` representation.** The surface needs to package hidden startup
+   artifact types and a child effect row in ordinary Haskell, but Rust neither
+   reflects nor validates that row. Decide whether lifecycle restrictions are
+   best expressed by thin `StartupM`/`ShutdownM` newtypes or by constrained
+   `Eff` rows. Choose one; do not build a mirrored lifecycle DSL merely to
+   justify the existential packaging.
+4. **Agent-session goals.** Startup, deliberation, and advisory must configure
+   one executor. Identify the minimal goal/settlement interface that covers
+   typed Haskell completion and advisory acknowledgment without three provider
+   loops or a universal option record.
+5. **Provider continuation state.** Determine whether a production backend
+   retains exact replay messages, a provider continuation identifier, or both.
+   The answer must live inside the actor's one conversation state, preserve
+   context-cache behavior, and avoid a second transcript hidden in an adapter.
+6. **Introspection.** Decide a single query model for `:goal`, `:bindings`,
+   `:program`, and `:capabilities`. These commands must be views over runtime
+   truth, not independently parsed and maintained command systems in REPL,
+   harness, and actor code.
+7. **Program-image assembly.** Prove that a rooted entry plus exact exported
+   source facades can start one real child before adding any image registry or
+   replay format. Fresh-spawn isolation and nominal type identity are the
+   acceptance criteria.
+8. **Interpreter installation.** Decide how a trusted launch policy pairs an
+   image with nominal handlers and grants when `ActorSpec` itself is a dynamic
+   Haskell value. Merely naming an effect in `AgentEffects` grants nothing,
+   Rust must not reflect the row, and the model must not mint handler authority.
+   The vertical proof is two child actors with different policies sharing one
+   machine and one Haskell protocol value where its `Member` constraints fit.
 
-## 13. Fixed initial policies
+Structural context fork remains after fresh spawn. It must not distort the
+workbench or program-image representation before a real `startActor` works.
+
+## 14. Fixed initial policies
 
 Implementation should not reopen these choices without contradictory spike
 evidence:
@@ -462,17 +515,20 @@ evidence:
 1. `tidepool-actor` owns the actor kernel; mixed actor machinery leaves
    `tidepool-harness` rather than deepening it.
 2. A program image composes a rooted compiled entry closure, exact
-   declaration/interface identities with explicit model-visible exports,
-   provenance, and the actor descriptor's fixed interpreter policy. Existing
-   code, root, realm, and session-module owners remain authoritative; source is
-   never replayed as deployment identity.
+   declaration/interface identities with explicit model-visible exports, and
+   provenance. Actor launch metadata separately supplies placement, ownership,
+   grants, and the actor-local interpreter constructor. Existing code, root,
+   realm, and session-module owners remain authoritative; source is never
+   replayed as deployment identity.
 3. Capability fork behavior is one of `OwnerOnly`, `ShareWithChild`,
    `RebindForChild`, or `InvalidAfterFork`, registered by the Rust capability
    class.
 4. Multi-child structural fork publishes atomically; ordinary repeated spawn
    has no generic batch transaction.
-5. Machine admission is FIFO by Haskell run segment through the existing
-   checkout mechanism. This is cooperative ordering, not hard fairness.
+5. Actor-turn admission remains held for a complete logical turn or agent
+   session. Machine admission is FIFO by Haskell run segment through the
+   existing checkout mechanism and may be released between those segments.
+   This is cooperative ordering, not hard fairness.
 6. Operation interpreters mechanically park or retry only conditions they own.
    Unresolved failure is terminal; no model action retries, synthesizes a
    result, replays work against a new actor, or nominates a replacement.
@@ -484,7 +540,7 @@ Only executable-code reclamation remains evidence-driven. The first
 implementation measures growth and supports explicit quiescent rotation; it
 does not promise online unloading.
 
-## 14. Completion condition
+## 15. Completion condition
 
 This plan is complete when:
 

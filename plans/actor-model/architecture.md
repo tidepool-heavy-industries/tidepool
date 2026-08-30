@@ -68,14 +68,22 @@ That is what makes structural sharing and arbitrary live-value delivery
 possible. A machine boundary is explicit and initially admits only encoded
 values.
 
-The initial scheduler uses one FIFO ready queue per machine session. A lease
-covers one Haskell run segment and is released whenever the actor suspends for
-a model response, actor reply, or external operation. Newly ready actors join
-the tail. This provides deterministic cooperative ordering, not preemptive
-fairness: a non-suspending segment can monopolize that machine. Rust requests
-cancellation at available safepoints and reports the limitation; workloads
-needing hard isolation use separate machine sessions. All JIT admission stays
-on the existing checkout path.
+Two nested admissions have different lifetimes and must not be conflated:
+
+- an **actor-turn admission** excludes every other turn for that actor. An
+  agent session retains it across provider waits, fenced-Haskell blocks,
+  retries, and corrective rounds;
+- a **machine checkout** covers one Haskell run segment. It is released while
+  the admitted actor waits on a provider, actor reply, or external operation,
+  so another actor may use the shared machine without re-entering the first.
+
+The initial scheduler uses one FIFO ready queue per machine session for those
+Haskell run segments. Newly ready segments join the tail. This provides
+deterministic cooperative ordering, not preemptive fairness: a non-suspending
+segment can monopolize that machine. Rust requests cancellation at available
+safepoints and reports the limitation; workloads needing hard isolation use
+separate machine sessions. All JIT admission stays on the existing checkout
+path, while actor-turn admission stays in the actor registry.
 
 ## 3. Ownership boundary
 
@@ -302,8 +310,9 @@ simply acknowledge it. This does not construct a Haskell event or resume a
 Haskell continuation. Normal completion and routine owner-requested
 cancellation are quiet.
 
-One actor still has at most one model turn. Events arriving during inference
-are queued in order and may be coalesced into one factual Developer update.
+One actor still has at most one active agent session or other turn of any kind.
+Events arriving during inference are queued in order and may be coalesced into
+one factual Developer update.
 Events arriving during active Haskell execution wait until it parks or
 completes; the runtime never re-enters that session.
 
@@ -448,18 +457,24 @@ alongside its live roots. That view has an explicit model-visible export
 membrane: fresh spawn does not inherit the defining actor's ambient binding or
 declaration namespace merely because the specification was created there.
 
-`Program image` is a semantic bundle, not a mandate for another registry,
-compiler cache, or root ledger. The initial same-machine representation should
-compose mechanisms Tidepool already has:
+`Program image` is a code-and-value deployment bundle, not a mandate for
+another registry, compiler cache, root ledger, or effect-policy object. The
+initial same-machine representation should compose mechanisms Tidepool already
+has:
 
 - a rooted compiled entry closure, executed through the resident machine's
   existing suspension-capable entry path;
 - exact `SessionModule`/interface identities plus an explicit set of exports
   made visible to the child's fenced-Haskell environment;
 - declaration source and documentation retained only for inspection and
-  provenance; and
-- the actor descriptor's fixed interpreter policy and handler installation
-  recipe.
+  provenance.
+
+Actor launch metadata pairs that image with placement, ownership, grants, and
+an actor-local interpreter constructor. Keeping the interpreter recipe outside
+the image matters: the image answers “what Haskell program and names are being
+deployed,” while the launch descriptor answers “under whose authority and
+which runtime handlers may it execute.” Fork may reuse both from a source
+incarnation, but they remain separate responsibilities.
 
 The resident code arena owns executable code, the value-handle ledger owns
 roots while they are in transit, and the actor's resource realm owns deployed
@@ -547,10 +562,10 @@ target termination returns normally.
 
 When an owner terminates for any reason, Rust recursively terminates and reaps
 its owned subtree. This is a lifecycle rule, not failure propagation in the
-other direction: a child crash still only notifies its owner. Detachment,
-reparenting, and adoption are plausible later extensions but are absent from
-the initial API. Restart or an effect-stack change creates a new actor
-incarnation and a new `AgentRef`.
+other direction: a child crash is retained for exact observation and, when not
+already observed, advises its owner. Detachment, reparenting, and adoption are
+plausible later extensions but are absent from the initial API. Restart or an
+effect-stack change creates a new actor incarnation and a new `AgentRef`.
 
 Termination first queues a typed shutdown event for cooperative Haskell
 cleanup. Rust remains responsible for eventual forced termination and all
