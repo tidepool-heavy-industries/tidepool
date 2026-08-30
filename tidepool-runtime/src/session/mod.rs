@@ -55,15 +55,16 @@ pub use resident::{
 pub use view::{SessionCompileView, SourceImports};
 
 pub use workbench::{
-    classify_workbench_item, run_block_sequence, BlockExecution, BlockSequenceOutcome,
-    CommittedBlock, MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchItem,
+    classify_workbench_item, resident_workbench_templates, run_block_sequence, BlockExecution,
+    BlockSequenceOutcome, CommittedBlock, MetaCommandLine, ParsedBlock, WorkSequence,
+    WorkbenchItem,
 };
 
 pub use turn::{
-    assemble_bind_module, classify_block, compile_session_turn, insert_preamble_imports,
-    place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn, SessionBind,
-    SessionTurnResult, TemplateSelector, TurnClassification, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, assemble_expression_module, classify_block, compile_session_turn,
+    insert_preamble_imports, place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn,
+    ExpressionLift, SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind,
+    TurnRequest, TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::collections::HashMap;

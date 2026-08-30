@@ -63,13 +63,25 @@ This is the canonical status inventory for the plan.
 - `PersistentSession` owns resident declarations, bindings, compile views,
   checkout, and continuations. Exact export facades can expose selected
   declaration identities without inheriting a parent scope.
+- `session::workbench` owns the shared source classifier, meta-command parser,
+  ordered/prefix-preserving block cursor, and canonical declaration, bind, and
+  pure/effectful expression templates. REPL, harness, and actor frontends use
+  those mechanics rather than carrying their own parser or cursor.
+- `tidepool-actor` owns one multi-round typed-deliberation executor. Its
+  resident adapter checks the machine out only for a Haskell segment, compiles
+  against the actor's exact source view, and returns a GHC-checked live value
+  through the private `Complete result` completion effect.
+- Typed deliberation has a real GHC/JIT vertical: a rejected wrong-typed
+  completion preserves prior declarations and bindings, the corrective round
+  completes, the never-run suffix stays unexecuted, and a closure-valued result
+  remains callable after the fragment resource realm closes.
 - Rust effect routing is nominal; no positional handler-prefix contract or
   reflected Haskell row ABI remains.
 
 ### Not landed
 
-- one frontend-neutral resident workbench;
-- a complete multi-round typed deliberation executor;
+- convergence of the remaining presentation-heavy REPL/harness execution
+  epilogues where they still duplicate neutral compile/commit behavior;
 - `ActorRuntime capEffs`, actor-local interpreter factories, and caller-checked
   launch policy;
 - public `ActorDefinition`, `ActorSpec`, `ActorProgram`, or `startActor`;

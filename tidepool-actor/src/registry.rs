@@ -148,6 +148,19 @@ pub enum ActorRegistryError {
         session: ActorRef,
         capability: ActorRef,
     },
+    #[error("actor session {session:?} cannot consume a turn lease for {lease:?}")]
+    AgentSessionTurnMismatch { session: ActorRef, lease: ActorRef },
+    #[error("actor {actor:?} cannot enter an agent session from a {kind:?} turn")]
+    AgentSessionTurnKind {
+        actor: ActorRef,
+        kind: ActorTurnKind,
+    },
+    #[error("actor {actor:?} turn transition expected {expected:?}, but registry held {active:?}")]
+    TurnTransitionMismatch {
+        actor: ActorRef,
+        expected: ActorTurnKind,
+        active: Option<ActorTurnKind>,
+    },
 }
 
 /// Thread-safe ownership and lifecycle registry. It intentionally does not
@@ -1055,6 +1068,16 @@ pub struct TurnLease {
 
 impl TurnLease {
     #[must_use]
+    pub fn actor(&self) -> ActorRef {
+        self.actor
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ActorTurnKind {
+        self.kind
+    }
+
+    #[must_use]
     pub fn session_context(&self) -> ActorSessionContext {
         ActorSessionContext {
             actor: self.actor,
@@ -1067,6 +1090,29 @@ impl TurnLease {
 
     pub fn release(mut self) {
         self.release_inner();
+    }
+
+    /// Atomically change the phase of one already-admitted logical actor
+    /// turn. This is the only path from an authored Haskell suspension into
+    /// its resident agent session: admission is never dropped between the two
+    /// phases, so another mailbox or lifecycle turn cannot enter the gap.
+    pub(crate) fn transition(mut self, next: ActorTurnKind) -> Result<Self, ActorRegistryError> {
+        let Some(registry) = self.registry.upgrade() else {
+            return Err(ActorRegistryError::Unknown(self.actor));
+        };
+        let mut state = registry.state.lock();
+        let actor = entry_mut(&mut state, self.actor)?;
+        if actor.active_turn != Some(self.kind) {
+            return Err(ActorRegistryError::TurnTransitionMismatch {
+                actor: self.actor,
+                expected: self.kind,
+                active: actor.active_turn,
+            });
+        }
+        actor.active_turn = Some(next);
+        self.kind = next;
+        drop(state);
+        Ok(self)
     }
 
     fn release_inner(&mut self) {

@@ -9,8 +9,8 @@ use tidepool_model_output::extract_haskell_blocks;
 
 use crate::mount::{install_actor_context, ActorRunTarget};
 use crate::{
-    ActorEvent, ActorRef, ActorRegistry, ActorRegistryError, ActorRole, ActorTurnKind,
-    EventCausality, ModelUsage, StartingActor, TurnLease,
+    ActorEvent, ActorRef, ActorRegistry, ActorRegistryError, ActorRole, ActorSessionContext,
+    ActorTurnKind, EventCausality, ModelUsage, StartingActor, TurnLease,
 };
 
 /// One actor's accumulating model transcript and legal-boundary queue.
@@ -100,6 +100,31 @@ impl ActorAgentSession {
         })
     }
 
+    /// Continue an authored Haskell turn as an agent session without opening
+    /// an admission gap or acquiring a nested actor turn.
+    pub fn enter_from_haskell_turn(
+        &self,
+        lease: TurnLease,
+    ) -> Result<AdmittedAgentSession, ActorRegistryError> {
+        if lease.actor() != self.actor {
+            return Err(ActorRegistryError::AgentSessionTurnMismatch {
+                session: self.actor,
+                lease: lease.actor(),
+            });
+        }
+        if lease.kind() != ActorTurnKind::Haskell {
+            return Err(ActorRegistryError::AgentSessionTurnKind {
+                actor: self.actor,
+                kind: lease.kind(),
+            });
+        }
+        let lease = lease.transition(ActorTurnKind::AgentSession)?;
+        Ok(AdmittedAgentSession {
+            session: self.clone(),
+            lease,
+        })
+    }
+
     /// Admit the prompted startup session before readiness publication. The
     /// private capability, rather than an `ActorRef`, authorizes this one
     /// initializing actor's entire model/Haskell interaction.
@@ -135,6 +160,24 @@ pub struct AdmittedAgentSession {
 }
 
 impl AdmittedAgentSession {
+    #[must_use]
+    pub fn actor(&self) -> ActorRef {
+        self.session.actor
+    }
+
+    #[must_use]
+    pub fn session_context(&self) -> ActorSessionContext {
+        self.lease.session_context()
+    }
+
+    pub(crate) fn queue_developer(&self, content: impl Into<String>) {
+        self.session.queue_developer(content);
+    }
+
+    pub(crate) fn queue_user(&self, content: impl Into<String>) {
+        self.session.queue_user(content);
+    }
+
     /// Install this actor's exact execution context on a checked-out resident
     /// target without acquiring a second actor turn. Fenced Haskell executed
     /// through the target remains part of this admitted agent session.
@@ -465,6 +508,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn authored_turn_transfers_into_agent_session_without_an_admission_gap() {
+        let registry = ActorRegistry::new();
+        let actor = ready_actor(&registry);
+        let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
+        let haskell = registry
+            .begin_turn(actor, ActorTurnKind::Haskell)
+            .expect("admit authored turn");
+
+        let admitted = session
+            .enter_from_haskell_turn(haskell)
+            .expect("transfer admission");
+        assert_eq!(admitted.actor(), actor);
+        assert!(matches!(
+            registry.begin_turn(actor, ActorTurnKind::Mailbox),
+            Err(ActorRegistryError::Busy {
+                active: ActorTurnKind::AgentSession,
+                ..
+            })
+        ));
+
+        drop(admitted);
+        registry
+            .begin_turn(actor, ActorTurnKind::Mailbox)
+            .expect("transfer guard releases normally");
     }
 
     #[tokio::test]

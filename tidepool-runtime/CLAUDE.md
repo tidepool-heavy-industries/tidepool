@@ -14,5 +14,6 @@ frontends choose whether admission waits or fails immediately. JIT resource
 ownership remains below this layer in `tidepool-codegen`.
 
 `session::workbench` owns frontend-neutral source classification,
-meta-command tokenization, and prefix-preserving ordered cursors. Frontends
-own command meaning, presentation, provider loops, and lifecycle policy.
+meta-command tokenization, canonical resident turn templates, and
+prefix-preserving ordered cursors. Frontends own command meaning, execution
+settlement, presentation, provider loops, and lifecycle policy.

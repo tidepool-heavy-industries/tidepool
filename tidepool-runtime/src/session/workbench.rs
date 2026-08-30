@@ -8,6 +8,11 @@
 
 use std::future::Future;
 
+use super::{
+    assemble_bind_module, assemble_expression_module, insert_preamble_imports, ExpressionLift,
+    TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
+};
+
 /// One tokenized `:command`. Frontends interpret the name and arguments they
 /// own; tokenization itself has one implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +84,69 @@ pub fn classify_workbench_item(source: &str) -> Result<WorkbenchItem, String> {
     } else {
         Ok(WorkbenchItem::Haskell(source.to_string()))
     }
+}
+
+/// Build the canonical raw-value templates for a resident actor workbench.
+/// GHC selects declaration, bind, or expression and tries the two expression
+/// lifts in order. Presentation-heavy frontends may post-process outcomes,
+/// but should not grow another source assembly path.
+#[must_use]
+pub fn resident_workbench_templates(
+    preamble: &str,
+    effect_stack: &str,
+    imports: &str,
+) -> Vec<TurnTemplate> {
+    let preamble = insert_preamble_imports(preamble, imports);
+    vec![
+        TurnTemplate {
+            kind: TemplateSelector::Decl,
+            source: DECL_TEMPLATE_SOURCE.to_string(),
+        },
+        TurnTemplate {
+            kind: TemplateSelector::Bind,
+            source: assemble_bind_module(
+                &preamble,
+                "",
+                "__result",
+                effect_stack,
+                "{{TURN_STMT}}",
+                "{{BINDERS}}",
+                false,
+            ),
+        },
+        TurnTemplate {
+            kind: TemplateSelector::BindDiscard,
+            source: assemble_bind_module(
+                &preamble,
+                "",
+                "__result",
+                effect_stack,
+                "{{TURN_STMT}}",
+                "()",
+                false,
+            ),
+        },
+        TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_expression_module(
+                &preamble,
+                "__result",
+                effect_stack,
+                "{{TURN}}",
+                ExpressionLift::Effectful,
+            ),
+        },
+        TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_expression_module(
+                &preamble,
+                "__result",
+                effect_stack,
+                "{{TURN}}",
+                ExpressionLift::Pure,
+            ),
+        },
+    ]
 }
 
 /// Suspension-safe cursor over one ordered unit of work.

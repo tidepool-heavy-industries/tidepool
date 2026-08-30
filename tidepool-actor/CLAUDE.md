@@ -45,6 +45,13 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
 - Mount fenced Haskell through the existing `AdmittedAgentSession` lease. Do
   not acquire a nested `Haskell` turn or release admission between a provider
   response and execution of its blocks.
+- Provider inference never owns a resident-machine checkout. The actor
+  workbench acquires and settles the machine around one fenced Haskell segment
+  while the enclosing agent-session admission remains held.
+- Typed model completion uses `Tidepool.Deliberation.complete`. GHC fixes its
+  private `Complete result` row entry to the obligation type; Rust recognizes the
+  private constructor nominally and rehomes the live payload into the actor's
+  durable resource realm before closing the fragment realm.
 - Exit events record whether the owner was already observing that exact exit
   through a call or wait at the terminal transition; advisory code consumes
   that fact instead of racing a later registry lookup.

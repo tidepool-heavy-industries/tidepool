@@ -379,6 +379,47 @@ pub fn assemble_bind_module(
     out
 }
 
+/// How a resident expression is lifted into the actor/workbench effect row.
+/// Keeping both candidates as ordered templates lets GHC decide whether the
+/// expression is already effectful; Rust does not guess from syntax.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionLift {
+    Effectful,
+    Pure,
+}
+
+/// Assemble one expression-shaped session module while preserving the source
+/// text byte-for-byte inside an explicit-layout binding. The caller normally
+/// supplies two templates—[`ExpressionLift::Effectful`] then
+/// [`ExpressionLift::Pure`]—and the turn extractor selects the first one that
+/// typechecks.
+pub fn assemble_expression_module(
+    preamble_with_imports: &str,
+    target: &str,
+    effect_stack: &str,
+    expression: &str,
+    lift: ExpressionLift,
+) -> String {
+    let mut out = preamble_with_imports.to_string();
+    out.push_str("-- [user]\n");
+    out.push_str("__workbenchValue = let {\n __value =\n");
+    out.push_str(expression);
+    if !expression.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(" } in __value\n");
+    out.push_str(&format!("{target} :: Eff {effect_stack} _\n"));
+    match lift {
+        ExpressionLift::Effectful => {
+            out.push_str(&format!("{target} = __workbenchValue\n"));
+        }
+        ExpressionLift::Pure => {
+            out.push_str(&format!("{target} = pure __workbenchValue\n"));
+        }
+    }
+    out
+}
+
 /// Place `turn_text` as a `do`-block statement — the `{{TURN_STMT}}`
 /// placement mode. Mirrors `tidepool-repl`'s and `tidepool-harness`'s own
 /// `push_braced_stmt` wrappers (both now thin callers of this function): a

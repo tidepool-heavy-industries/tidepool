@@ -9,11 +9,13 @@
 
 mod agent_session;
 mod event;
+mod executor;
 mod generated;
 mod identity;
 mod mailbox;
 mod mount;
 mod registry;
+mod resident_workbench;
 mod timeline;
 mod wait;
 
@@ -23,6 +25,9 @@ pub use agent_session::{
 pub use event::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,
     EventCausality, MailboxMessageKind, ModelUsage, StartInitiator, WaitDisposition,
+};
+pub use executor::{
+    run_typed_deliberation, AgentBlockStop, AgentExecutionError, AgentWorkbench, TypedGoal,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use mailbox::{
@@ -36,6 +41,9 @@ pub use mount::{
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
     ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,
+};
+pub use resident_workbench::{
+    ActorMachineRegistry, ActorWorkbenchSource, ResidentActorWorkbench, ResidentActorWorkbenchError,
 };
 pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
 pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};
