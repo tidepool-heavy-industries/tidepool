@@ -153,6 +153,11 @@ pub enum ActorRegistryError {
     },
     #[error("startup token belongs to another actor registry")]
     ForeignStartup,
+    #[error("startup token for {capability:?} cannot drive agent session {session:?}")]
+    StartupSessionMismatch {
+        session: ActorRef,
+        capability: ActorRef,
+    },
 }
 
 /// Thread-safe ownership and lifecycle registry. It intentionally does not
@@ -438,6 +443,38 @@ impl ActorRegistry {
             effect_abi,
             effect_boundary,
             source_imports,
+            registry: Arc::downgrade(&self.inner),
+            released: false,
+        })
+    }
+
+    /// Admit the initializing actor's sole provider turn through its private
+    /// startup capability. Ordinary actor references remain unusable until
+    /// readiness; this is the only pre-publication turn-admission path.
+    pub(crate) fn begin_startup_provider_turn(
+        &self,
+        starting: &StartingActor,
+    ) -> Result<TurnLease, ActorRegistryError> {
+        self.validate_starting(starting)?;
+        let mut state = self.inner.state.lock();
+        let actor = starting.actor;
+        let actor_entry = entry_mut(&mut state, actor)?;
+        match actor_entry.lifecycle {
+            ActorLifecycle::Initializing => {}
+            ActorLifecycle::Ready => return Err(ActorRegistryError::AlreadyReady(actor)),
+            ActorLifecycle::Exited => return Err(ActorRegistryError::Exited(actor)),
+        }
+        if let Some(active) = actor_entry.active_turn {
+            return Err(ActorRegistryError::Busy { actor, active });
+        }
+        actor_entry.active_turn = Some(ActorTurnKind::Provider);
+        Ok(TurnLease {
+            actor,
+            kind: ActorTurnKind::Provider,
+            placement: actor_entry.descriptor.placement,
+            effect_abi: actor_entry.descriptor.effect_abi.clone(),
+            effect_boundary: actor_entry.descriptor.effect_boundary.clone(),
+            source_imports: actor_entry.descriptor.source_imports.clone(),
             registry: Arc::downgrade(&self.inner),
             released: false,
         })
@@ -839,7 +876,10 @@ impl ActorRegistry {
         event: ActorEvent,
     ) -> Result<(), ActorRegistryError> {
         let mut state = self.inner.state.lock();
-        match entry(&state, actor)?.lifecycle {
+        let actor_entry = entry(&state, actor)?;
+        match actor_entry.lifecycle {
+            ActorLifecycle::Initializing
+                if actor_entry.active_turn == Some(ActorTurnKind::Provider) => {}
             ActorLifecycle::Initializing => return Err(ActorRegistryError::Initializing(actor)),
             ActorLifecycle::Exited => return Err(ActorRegistryError::Exited(actor)),
             ActorLifecycle::Ready => {}

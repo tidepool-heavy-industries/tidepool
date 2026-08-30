@@ -6,7 +6,7 @@ use tidepool_model_output::extract_haskell_blocks;
 
 use crate::{
     ActorEvent, ActorRef, ActorRegistry, ActorRegistryError, ActorRole, ActorTurnKind,
-    EventCausality, ModelUsage, TurnLease,
+    EventCausality, ModelUsage, StartingActor, TurnLease,
 };
 
 /// One actor's accumulating model transcript and legal-boundary queue.
@@ -85,6 +85,33 @@ impl ActorAgentSession {
         let lease = self
             .registry
             .begin_turn(self.actor, ActorTurnKind::Provider)?;
+        self.begin_provider_turn_with_lease(max_tokens, lease)
+    }
+
+    /// Begin the prompted startup session before readiness publication. The
+    /// private capability, rather than an `ActorRef`, authorizes this one
+    /// initializing actor's provider turn.
+    pub fn begin_startup_provider_turn(
+        &self,
+        starting: &StartingActor,
+        max_tokens: Option<u32>,
+    ) -> Result<PendingProviderTurn, ActorRegistryError> {
+        let lease = self.registry.begin_startup_provider_turn(starting)?;
+        let capability = lease.session_context().actor;
+        if capability != self.actor {
+            return Err(ActorRegistryError::StartupSessionMismatch {
+                session: self.actor,
+                capability,
+            });
+        }
+        self.begin_provider_turn_with_lease(max_tokens, lease)
+    }
+
+    fn begin_provider_turn_with_lease(
+        &self,
+        max_tokens: Option<u32>,
+        lease: TurnLease,
+    ) -> Result<PendingProviderTurn, ActorRegistryError> {
         let (turn, request, injected) = {
             let mut state = self.state.lock();
             let queued = std::mem::take(&mut state.queued);
@@ -337,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_session_survives_readiness_without_publishing_early() {
+    fn startup_session_runs_before_readiness_without_publishing_early() {
         let registry = ActorRegistry::new();
         let starting = registry
             .begin_start(
@@ -359,11 +386,67 @@ mod tests {
             .expect("attach startup session");
         startup.queue_user("configure behavior");
 
+        assert!(matches!(
+            startup.begin_provider_turn(None),
+            Err(ActorRegistryError::Initializing(_))
+        ));
+        let pending = startup
+            .begin_startup_provider_turn(&starting, None)
+            .expect("startup capability admits provider turn");
+        assert_eq!(pending.request().messages[0].content, "configure behavior");
+        pending
+            .complete(response("```haskell\ninitialPolicy\n```"))
+            .expect("record startup response");
+
         let actor = registry.publish_ready(starting).expect("publish ready");
         let ready = ActorAgentSession::attach(registry, actor).expect("reattach after readiness");
-        let pending = ready
-            .begin_provider_turn(None)
-            .expect("startup input survived readiness");
-        assert_eq!(pending.request().messages[0].content, "configure behavior");
+        assert_eq!(
+            ready.transcript().len(),
+            2,
+            "startup transcript is retained"
+        );
+    }
+
+    #[test]
+    fn a_startup_capability_cannot_drive_another_actors_session() {
+        let registry = ActorRegistry::new();
+        let first = registry
+            .begin_start(
+                None,
+                ActorDescriptor::all_suspended(
+                    "first",
+                    std::iter::empty::<String>(),
+                    ActorPlacement {
+                        session: tidepool_repr::SessionId(1),
+                        resource_scope: RealmId::fresh(),
+                        lexical_scope: ScopeId::ROOT,
+                    },
+                ),
+                StartInitiator::Runtime,
+            )
+            .expect("begin first startup");
+        let second = registry
+            .begin_start(
+                None,
+                ActorDescriptor::all_suspended(
+                    "second",
+                    std::iter::empty::<String>(),
+                    ActorPlacement {
+                        session: tidepool_repr::SessionId(1),
+                        resource_scope: RealmId::fresh(),
+                        lexical_scope: ScopeId::ROOT,
+                    },
+                ),
+                StartInitiator::Runtime,
+            )
+            .expect("begin second startup");
+        let second_session = registry
+            .startup_agent_session(&second)
+            .expect("attach second session");
+
+        assert!(matches!(
+            second_session.begin_startup_provider_turn(&first, None),
+            Err(ActorRegistryError::StartupSessionMismatch { .. })
+        ));
     }
 }

@@ -20,11 +20,9 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
         .with_validation_include(vec![stdlib]);
     let mut session = PersistentSession::new(Some(lib), 0, Vec::new(), 1 << 20);
     session
-        .define_scoped(&[
-            "data Public = Public Int\n\
+        .define_scoped(&["data Public = Public Int\n\
              data Secret = Secret\n\
-             reveal (Public n) = n",
-        ])
+             reveal (Public n) = n"])
         .expect("define source module");
 
     let surface = session
@@ -33,7 +31,9 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
     let source_view = session
         .compile_view_in(ScopeId::ROOT)
         .expect("source compile view");
-    let facade = surface.materialize(&source_view).expect("materialize facade");
+    let facade = surface
+        .materialize(&source_view)
+        .expect("materialize facade");
 
     let actor_scope = session.mint_isolated_scope();
     let actor_view = session
