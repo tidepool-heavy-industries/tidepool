@@ -30,7 +30,7 @@
 //! around this core.
 
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
 use tidepool_codegen::emit::ExternalEnv;
@@ -47,7 +47,7 @@ use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
 use super::engine::OutputSink;
-use super::{SessionError, SessionLib};
+use super::{SessionCompileView, SessionError, SessionLib};
 use crate::JitError;
 
 /// Cross-thread custody for one completed bind root. The root never moves
@@ -951,6 +951,33 @@ impl PersistentSession {
     /// `current_lib_module() == current_lib_module_in(ScopeId::ROOT)`.
     pub fn current_lib_module_in(&self, scope: ScopeId) -> Option<SessionModule> {
         self.lib.as_ref().and_then(|l| l.current_module_in(scope))
+    }
+
+    /// Snapshot the exact source-side environment visible from `scope` so a
+    /// caller can release its machine borrow before invoking GHC. Returns
+    /// `None` for a dead scope or a session without a declaration/include
+    /// plane.
+    pub fn compile_view_in(&self, scope: ScopeId) -> Option<SessionCompileView> {
+        if !self.scopes.is_live(scope) {
+            return None;
+        }
+        let lib = self.lib.as_ref()?;
+        let visible_values = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .map(|(_, entry)| entry.module)
+            .collect();
+        let injected_values = self.bindings.live_modules().collect();
+        Some(SessionCompileView::new(
+            lib.session_id(),
+            scope,
+            PathBuf::from(lib.include_dir()),
+            lib.current_module_in(scope),
+            visible_values,
+            injected_values,
+            self.val_gen.next(),
+        ))
     }
 
     /// The decl-plane include directory (where `Lib.G<g>.hs` modules live), for

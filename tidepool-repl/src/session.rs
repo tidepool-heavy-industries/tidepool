@@ -42,8 +42,8 @@ use tidepool_repr::{
 use tidepool_runtime::session::{
     assemble_bind_module, classify_block, compile_session_turn, extract_ask_request,
     insert_preamble_imports, place_turn_stmt, subtract_import_list_names, BoundBinder,
-    GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionError, SessionLib,
-    TurnClassification, TurnKind, ValueTier,
+    GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionCompileView, SessionError,
+    SessionLib, SourceImports, TurnClassification, TurnKind, ValueTier,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
@@ -535,6 +535,16 @@ impl Session {
         &self.cfg.root
     }
 
+    /// Exact source-side snapshot of the REPL's root lexical scope. The REPL
+    /// always opens a declaration plane, so absence here is an internal
+    /// construction error rather than an alternate session mode.
+    fn compile_view(&self) -> SessionCompileView {
+        match self.core.compile_view_in(ScopeId::ROOT) {
+            Some(view) => view,
+            None => unreachable!("REPL session opened without a declaration plane"),
+        }
+    }
+
     /// The GHC include path for a turn: the session's base includes (generated
     /// `Tidepool.Effects` + prelude/stdlib) plus the live `Lib.G<g>` dir. Borrows
     /// `&self`, so block-scope the result before any `&mut self` call (e.g.
@@ -549,14 +559,7 @@ impl Session {
     /// (`--inject-val`) AND imports so a session reference typechecks. Delegates
     /// to the shared core (the value plane lives there).
     fn live_val_modules(&self) -> Vec<String> {
-        self.core.live_val_modules()
-    }
-
-    /// The CURRENT (newest) `Val.G<g>` module per still-live name — what a turn
-    /// IMPORTS (unqualified). Excludes shadowed older gens (still injected, not
-    /// imported). Delegates to the shared core.
-    fn current_val_modules(&self) -> Vec<String> {
-        self.core.current_val_modules()
+        self.compile_view().injected_module_names()
     }
 
     /// The `imports` block a turn prepends: the current `Lib.G<g>` decl module
@@ -568,12 +571,7 @@ impl Session {
         // no longer exports it and there is no decl/value collision to hide here
         // — the value plane's `Val.G<g>` module is the sole provider. (One
         // mechanism: retraction at the source, not per-consumer hiding.)
-        let mut lines: Vec<String> = Vec::new();
-        if let Some(m) = self.core.current_lib_module() {
-            lines.push(m.module_name());
-        }
-        lines.extend(self.current_val_modules());
-        lines.join("\n")
+        self.compile_view().turn_imports(&SourceImports::new())
     }
 
     /// [`Self::session_imports`] plus the quasi-quoter import when the turn's

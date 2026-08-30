@@ -24,6 +24,7 @@ pub mod render;
 pub mod resident;
 pub mod supervisor;
 pub mod turn;
+pub mod view;
 
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
@@ -44,6 +45,8 @@ pub use resident::{
     ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, RootedValueRef,
     SessionRunContext,
 };
+
+pub use view::{SessionCompileView, SourceImports};
 
 pub use turn::{
     assemble_bind_module, classify_block, compile_session_turn, insert_preamble_imports,
@@ -230,6 +233,13 @@ impl SessionLib {
     pub fn with_validation_include(mut self, dirs: Vec<PathBuf>) -> Self {
         self.extra_include = dirs;
         self
+    }
+
+    /// Stable identity of the session whose exact gen modules this library
+    /// renders. A [`SessionModule`] is only unique together with this id.
+    #[must_use]
+    pub fn session_id(&self) -> SessionId {
+        self.id
     }
 
     /// The include directory to place on the GHC search path (highest precedence).

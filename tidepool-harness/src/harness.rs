@@ -47,8 +47,9 @@ use tidepool_repr::PrincipalId;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
-    ResidentOutcome, ResidentSession, SessionLib, SessionRunContext, TemplateSelector, TurnKind,
-    TurnRequest, TurnResult, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    ResidentOutcome, ResidentSession, SessionCompileView, SessionLib, SessionRunContext,
+    SourceImports, TemplateSelector, TurnKind, TurnRequest, TurnResult, TurnTemplate,
+    DECL_TEMPLATE_SOURCE,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
@@ -393,69 +394,16 @@ struct LiveTurnContext {
     binddiscard_source: String,
 }
 
-/// The external imports one model-authored turn is allowed to compile
-/// against. This is deliberately distinct from the session-generated
-/// declaration/value modules added by [`Harness::live_turn_context`]: those
-/// modules are lexical implementation detail, while these imports are part of
-/// the authored source's durable compile view.
-///
-/// Keeping this as one value matters for declarations. A declaration is first
-/// classified in a turn template and then compiled again into the resident
-/// declaration plane. Both compilations must see the same author/system types;
-/// previously the first saw [`AnswerContract::imports`] while the second kept
-/// only imports written explicitly by the model.
-#[derive(Debug, Clone, Default)]
-struct TurnCompileImports {
-    lines: Vec<String>,
-}
-
-impl TurnCompileImports {
-    fn new(contract: Option<&AnswerContract>, authored: &str) -> Self {
-        let mut lines = Vec::new();
-        if let Some(contract) = contract {
-            for import in &contract.imports {
-                Self::push_lines(&mut lines, import);
-            }
-        }
-        Self::push_lines(&mut lines, authored);
-        Self { lines }
-    }
-
-    fn push_lines(lines: &mut Vec<String>, imports: &str) {
-        for line in imports
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            if !lines.iter().any(|existing| existing == line) {
-                lines.push(line.to_string());
-            }
-        }
-    }
-
-    /// Import specifications as expected by the turn template builders
-    /// (without the leading `import`).
-    fn template_imports(&self) -> String {
-        self.lines.join("\n")
-    }
-
-    /// The same compile view rendered as real source imports for the resident
-    /// declaration plane.
-    fn declaration_prefix(&self) -> String {
-        self.lines
-            .iter()
-            .map(|line| format!("import {line}\n"))
-            .collect()
-    }
-
-    fn declaration_source(&self, body: &str) -> String {
-        let prefix = self.declaration_prefix();
-        if prefix.is_empty() {
-            body.to_string()
-        } else {
-            format!("{prefix}\n{body}")
-        }
-    }
+/// External/system imports for one authored turn. Session-generated lexical
+/// modules are added from [`SessionCompileView`] later; only this set persists
+/// with a declaration.
+fn turn_compile_imports(contract: Option<&AnswerContract>, authored: &str) -> SourceImports {
+    let contract_imports = contract
+        .into_iter()
+        .flat_map(|contract| contract.imports.iter().map(String::as_str));
+    let mut imports = SourceImports::from_specs(contract_imports);
+    imports.extend_text(authored);
+    imports
 }
 
 /// Render a turn-compile failure as text a MODEL can act on, with GHC's
@@ -1665,22 +1613,27 @@ impl Harness {
         // pinned row naming a MODEL-declared decl-plane type validates
         // through the same include set AND session-value injection its turn
         // BODY compiles against below (`live_turn_context`'s own
-        // `session_bind_context` read) — see
+        // `session_compile_view` read) — see
         // `EngineConfig::turn_target_with_extra_validation_include`'s doc.
-        let session_bind = self.session_bind_context(node);
-        let extra_session = session_bind.as_ref().map(|(_, inject_modules, root, _)| {
-            tidepool_runtime::SessionInject {
-                session_root: root.as_path(),
-                inject_modules: inject_modules.as_slice(),
-            }
-        });
+        let session_view = self.session_compile_view(node);
+        let session_inject = session_view
+            .as_ref()
+            .map(SessionCompileView::injected_module_names);
+        let extra_session =
+            session_view
+                .as_ref()
+                .zip(session_inject.as_ref())
+                .map(|(view, inject_modules)| tidepool_runtime::SessionInject {
+                    session_root: view.session_root(),
+                    inject_modules: inject_modules.as_slice(),
+                });
         let target = self.cfg.turn_target_with_extra_validation_include(
             contract
                 .as_ref()
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
             extra_session,
         )?;
-        let compile_imports = TurnCompileImports::new(contract.as_ref(), imports);
+        let compile_imports = turn_compile_imports(contract.as_ref(), imports);
 
         // Session/contract/bind-template context — exactly what
         // `run_multi_item_block`'s singleton-item path gathers fresh per item
@@ -1863,22 +1816,23 @@ impl Harness {
     fn live_turn_context(
         &self,
         node: NodeId,
-        compile_imports: &TurnCompileImports,
+        compile_imports: &SourceImports,
         helpers: &str,
         target_include: &[PathBuf],
     ) -> Result<LiveTurnContext, HarnessError> {
-        let (session_module, session_include) = self.session_decl_context(node);
-        let bind_ctx = self.session_bind_context(node);
+        let session_view = self.session_compile_view(node);
 
         let mut expr_import_lines = Vec::new();
-        let external_imports = compile_imports.template_imports();
+        let external_imports = compile_imports.template_text();
         if !external_imports.is_empty() {
             expr_import_lines.push(external_imports.clone());
         }
-        expr_import_lines.extend(session_module.clone());
-        if let Some((session_imports, ..)) = &bind_ctx {
-            if !session_imports.is_empty() {
-                expr_import_lines.push(session_imports.clone());
+        if let Some(view) = &session_view {
+            if let Some(module) = view.library() {
+                expr_import_lines.push(module.module_name());
+            }
+            for module in view.visible_values() {
+                expr_import_lines.push(module.module_name());
             }
         }
         let expr_imports = expr_import_lines.join("\n");
@@ -1887,9 +1841,12 @@ impl Harness {
         if !external_imports.is_empty() {
             bind_import_lines.push(external_imports);
         }
-        if let Some((session_imports, ..)) = &bind_ctx {
-            if !session_imports.is_empty() {
-                bind_import_lines.push(session_imports.clone());
+        if let Some(view) = &session_view {
+            if let Some(module) = view.library() {
+                bind_import_lines.push(module.module_name());
+            }
+            for module in view.visible_values() {
+                bind_import_lines.push(module.module_name());
             }
         }
         let bind_imports = bind_import_lines.join("\n");
@@ -1900,13 +1857,18 @@ impl Harness {
             engine::session_bind_template(&self.cfg, "()", &bind_imports, helpers);
 
         let mut include = target_include.to_vec();
-        if let Some(dir) = session_include {
-            include.push(dir);
-        }
-
         let scratch_root;
-        let (session_root, inject_modules, gen, bind_ctx_gen) = match &bind_ctx {
-            Some((_, inject, root, gen)) => (root.clone(), inject.clone(), gen.0, Some(*gen)),
+        let (session_root, inject_modules, gen, bind_ctx_gen) = match &session_view {
+            Some(view) => {
+                include = view.include_paths(&include);
+                let next = view.next_value_generation();
+                (
+                    view.session_root().to_path_buf(),
+                    view.injected_module_names(),
+                    next.0,
+                    Some(next),
+                )
+            }
             None => {
                 scratch_root = tempfile::TempDir::new()
                     .map_err(|e| HarnessError::Resident(format!("scratch session root: {e}")))?;
@@ -1964,20 +1926,25 @@ impl Harness {
         // must see the node's session decl-plane dir (and any live
         // `Val.G<g>` a decl module there may itself import) too, not just
         // this config's static include set.
-        let session_bind = self.session_bind_context(node);
-        let extra_session = session_bind.as_ref().map(|(_, inject_modules, root, _)| {
-            tidepool_runtime::SessionInject {
-                session_root: root.as_path(),
-                inject_modules: inject_modules.as_slice(),
-            }
-        });
+        let session_view = self.session_compile_view(node);
+        let session_inject = session_view
+            .as_ref()
+            .map(SessionCompileView::injected_module_names);
+        let extra_session =
+            session_view
+                .as_ref()
+                .zip(session_inject.as_ref())
+                .map(|(view, inject_modules)| tidepool_runtime::SessionInject {
+                    session_root: view.session_root(),
+                    inject_modules: inject_modules.as_slice(),
+                });
         let target = self.cfg.turn_target_with_extra_validation_include(
             contract
                 .as_ref()
                 .map(|c| (c.ty.as_str(), c.imports.as_slice())),
             extra_session,
         )?;
-        let compile_imports = TurnCompileImports::new(contract.as_ref(), imports);
+        let compile_imports = turn_compile_imports(contract.as_ref(), imports);
 
         // The same exact external compile view as the single-item lane. A
         // batch lands in one resident module, so the prefix is applied only
@@ -2393,48 +2360,22 @@ impl Harness {
         }
     }
 
-    /// Peek a node's value-plane compile context WITHOUT checking the session
-    /// out (so a compile failure never leaks it): `(decl module import, live
-    /// `Val.G` inject modules, session root, the next value generation to mint)`.
-    /// `None` when the node has no session or no decl plane.
-    fn session_bind_context(
-        &self,
-        node: NodeId,
-    ) -> Option<(String, Vec<String>, PathBuf, Generation)> {
+    /// Snapshot a node's exact source-side compile environment WITHOUT
+    /// checking the session out, so GHC can run after the registry borrow is
+    /// released. `None` when the node has no session or no declaration plane.
+    fn session_compile_view(&self, node: NodeId) -> Option<SessionCompileView> {
         let sid = self.tree.session_of(node)?;
         let scope = self.node_scope(node);
-        self.tree.registry().peek(sid, |s| {
-            let root = s.lib_include_dir()?;
-            // Imports: the decl `Lib.G<g>` module + the CURRENT `Val.G<g>` module
-            // of each live name (newest gen only — shadowed gens are injected,
-            // not imported, to avoid an ambiguous occurrence). Injection
-            // (`--inject-val`) uses ALL live gens.
-            //
-            // BOTH import lists are resolved FROM THE NODE'S SCOPE, not from
-            // ROOT: the decl tip module a child imports already re-exports its
-            // parent's chain (so parent declarations are callable here), and
-            // the visible `Val.G<g>` set is the upward walk with child frames
-            // shadowing parent ones (so a sibling's bindings are not even
-            // nameable). At ROOT both are the pre-C2 lists verbatim.
-            let mut import_lines: Vec<String> = Vec::new();
-            if let Some(m) = s.session_import_module_in(scope) {
-                import_lines.push(m);
-            }
-            import_lines.extend(s.current_val_modules_in(scope));
-            Some((
-                import_lines.join("\n"),
-                s.inject_val_modules(),
-                root,
-                s.val_gen().next(),
-            ))
-        })?
+        self.tree
+            .registry()
+            .peek(sid, |s| s.compile_view_in(scope))?
     }
 
     /// Materialize an ALREADY-COMPILED value-plane BIND turn (`x <- e`): run it
     /// against the resident session (`session.run_bind`), then hand off to the
     /// shared epilogue. Called from [`Self::run_block`] once `run_turn` has
     /// returned a `TurnResult::Bind` with a non-empty binder list and
-    /// `session_bind_context` confirmed the node has a decl plane — `gen` is
+    /// `session_compile_view` confirmed the node has a decl plane — `gen` is
     /// the SAME generation that compile stamped into `binder.module`. A fork
     /// bind suspends here and its value is materialized on resume — the
     /// `ResidentHole::Binding` `session.run_bind` mints on suspension already
@@ -3307,23 +3248,6 @@ impl Harness {
 // -- session take/put/drop + pending accessors -------------------------------
 
 impl Harness {
-    /// Read a node's decl-plane context — the current `Lib.G<g>` module to import
-    /// and its include directory — WITHOUT checking the session out, so a caller
-    /// can build a session-aware compile before taking the session for the run.
-    /// `(None, None)` when the node has no session or no accumulated decl plane.
-    fn session_decl_context(&self, node: NodeId) -> (Option<String>, Option<PathBuf>) {
-        let Some(sid) = self.tree.session_of(node) else {
-            return (None, None);
-        };
-        let scope = self.node_scope(node);
-        self.tree
-            .registry()
-            .peek(sid, |s| {
-                (s.session_import_module_in(scope), s.lib_include_dir())
-            })
-            .unwrap_or((None, None))
-    }
-
     /// Declare what `node` must produce to resolve the hole it is now
     /// answering — see [`AnswerContract`]. The self-iterating harness driver
     /// sets this per hole, before pushing the hole card, because its per-loop
@@ -3732,13 +3656,13 @@ mod tests {
                 "Data.Text (Text)".into(),
             ],
         };
-        let imports = TurnCompileImports::new(
+        let imports = turn_compile_imports(
             Some(&contract),
             "Data.Text (Text)\nqualified Data.Map.Strict as Map",
         );
 
         assert_eq!(
-            imports.template_imports(),
+            imports.template_text(),
             "HarnessTypes (Decision (..))\nData.Text (Text)\nqualified Data.Map.Strict as Map"
         );
         assert_eq!(

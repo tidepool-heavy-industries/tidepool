@@ -628,6 +628,12 @@ where
         self.core.current_val_modules_in(scope)
     }
 
+    /// Immutable compile environment for `scope`, suitable for carrying out of
+    /// a registry peek before a blocking GHC invocation.
+    pub fn compile_view_in(&self, scope: ScopeId) -> Option<super::SessionCompileView> {
+        self.core.compile_view_in(scope)
+    }
+
     /// The most recently parked hole (top of the stack), if any.
     ///
     /// Use [`Self::parked_holes`] when the caller needs the complete registry.
