@@ -3871,6 +3871,8 @@ dependencies = [
  "thiserror",
  "tidepool-codegen",
  "tidepool-effect",
+ "tidepool-model",
+ "tidepool-model-output",
  "tidepool-repr",
  "tidepool-runtime",
  "tokio",
@@ -4088,6 +4090,7 @@ dependencies = [
  "tidepool-extract-cmd",
  "tidepool-handlers",
  "tidepool-mcp",
+ "tidepool-model",
  "tidepool-model-output",
  "tidepool-repr",
  "tidepool-runtime",
@@ -4145,6 +4148,14 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tidepool-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

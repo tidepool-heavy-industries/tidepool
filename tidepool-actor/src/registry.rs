@@ -285,6 +285,21 @@ impl ActorRegistry {
         self.inner.state.lock().events.clone()
     }
 
+    pub(crate) fn record_event(
+        &self,
+        actor: ActorRef,
+        causality: EventCausality,
+        event: ActorEvent,
+    ) -> Result<(), ActorRegistryError> {
+        let mut state = self.inner.state.lock();
+        match entry(&state, actor)?.lifecycle {
+            ActorLifecycle::Initializing => return Err(ActorRegistryError::Initializing(actor)),
+            ActorLifecycle::Exited => return Err(ActorRegistryError::Exited(actor)),
+            ActorLifecycle::Ready => {}
+        }
+        record(&mut state, actor, causality, event)
+    }
+
     fn validate_starting(&self, starting: &StartingActor) -> Result<(), ActorRegistryError> {
         let Some(registry) = starting.registry.upgrade() else {
             return Err(ActorRegistryError::ForeignStartup);

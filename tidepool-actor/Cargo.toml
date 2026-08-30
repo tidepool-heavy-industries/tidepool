@@ -16,6 +16,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tidepool-codegen.workspace = true
 tidepool-effect.workspace = true
+tidepool-model.workspace = true
+tidepool-model-output.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 

@@ -7,6 +7,7 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
+mod agent_session;
 mod event;
 mod identity;
 mod mount;
@@ -14,6 +15,7 @@ mod registry;
 mod sequence;
 mod timeline;
 
+pub use agent_session::{ActorAgentSession, AssistantTurn, PendingProviderTurn};
 pub use event::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, EventCausality,
     ModelUsage, StartInitiator,

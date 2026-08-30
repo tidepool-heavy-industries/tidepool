@@ -53,6 +53,9 @@ Small support crates have short local charters describing their exact scope.
 | compiled-artifact cache | `tidepool-toolchain::cache` |
 | toolchain fingerprint and deploy handshake | `tidepool-toolchain::toolchain` |
 | monotonic process-local identifiers | issuer in `tidepool-repr` |
+| provider-neutral conversation values | `tidepool-model` |
+| model-authored fenced-output parsing | `tidepool-model-output` |
+| actor identity, lifecycle, turns, and events | `tidepool-actor` |
 | Haskell turn-module templates | `tidepool-runtime::session::turn` |
 | durable-format migration ladders | `tidepool_repr::version_ladder` |
 | turn timeout, cancellation, and crash supervision | `tidepool-runtime::TurnSupervisor` |
