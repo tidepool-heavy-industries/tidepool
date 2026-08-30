@@ -21,13 +21,14 @@ concerns are the decisions.
 Each actor incarnation fixes one concrete `Eff` stack in its entry module:
 
 ```haskell
-type AgentM =
-  Eff
-    '[ Actor
-     , Deliberate
-     , RepoRead
-     , Review
-     ]
+type AgentEffects =
+  '[ Actor
+   , Deliberate
+   , RepoRead
+   , Review
+   ]
+
+type AgentM = Eff AgentEffects
 ```
 
 That alias is local deployment configuration, not a library type. Reusable
@@ -57,6 +58,13 @@ The effect stack is fixed for the incarnation. The model may add ordinary
 types, declarations, values, protocols, and behavior, but cannot redefine the
 stack. Adding or removing an effect class creates a new actor incarnation and
 a new `AgentRef`.
+
+The entry module exports `AgentEffects` and `AgentM` through the actor's exact
+source facade. Generated turn modules mention `AgentEffects` only as a Haskell
+type alias, so GHC checks model-authored code against the actor's concrete row
+without Rust learning its order or reproducing it as metadata. Rust neither
+parses nor compares the alias; runtime authorization remains nominal and
+interpreter-local.
 
 Rust builds one actor-local interpreter for the incarnation. GHC checks effect
 row compatibility; Rust does not duplicate that work as a positional ABI.

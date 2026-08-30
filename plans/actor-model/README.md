@@ -2,9 +2,10 @@
 
 Status: implementation is incremental. The Rust actor registry, ownership
 tree, exact waits, live-value mailboxes, actor-local model sessions, execution
-principal mounting, and the first typed Haskell `awaitExit` vertical have
-landed. Program images, `ActorSpec`, startup, actor-local effect-stack
-interpreters, and the full resident actor loop remain planned here.
+principal mounting, exact source-import membrane, nominal effect routing,
+provider-neutral model seam, and the first typed Haskell `awaitExit` vertical
+have landed. Program images, `ActorSpec`, startup, actor-local effect-stack
+interpreters, and the full resident actor workbench remain planned here.
 
 ## Thesis
 

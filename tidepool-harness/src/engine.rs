@@ -39,8 +39,9 @@
 //! [`compile_turns`] are thin wrappers mapping a
 //! [`tidepool_runtime::CompiledArtifacts`] onto this crate's own turn/node
 //! vocabulary ([`CompiledTurn`]) and attributing timing to a (node, round)
-//! pair. The provider boundary is
-//! [`crate::provider`]. The web protocol / SSE is `tidepool-web`. This
+//! pair. Provider-neutral calls live in `tidepool-model`; concrete adapters
+//! are re-exported from [`crate::provider`]. The web protocol / SSE is
+//! `tidepool-web`. This
 //! module is the glue that sequences them into a turn loop.
 
 use std::collections::HashMap;

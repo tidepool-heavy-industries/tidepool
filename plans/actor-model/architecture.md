@@ -428,6 +428,11 @@ rebound, or withheld by each Rust component's fork policy. There is no parallel
 runtime effect-row ABI: GHC owns row compatibility, while the interpreter owns
 nominal request authorization.
 
+For model-authored compilation, the actor's exact entry facade exports a
+Haskell `AgentEffects` alias and `AgentM = Eff AgentEffects`. Turn templates
+refer to that alias as source, not to a Rust descriptor of the row. This is a
+compile-time name membrane, not a runtime ABI or an authorization check.
+
 ## 7. Program images and snapshots
 
 A program image has two jobs:

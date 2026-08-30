@@ -219,6 +219,13 @@ binding store, and resident machine-session mount. Do not fork a second GHCi
 implementation inside the actor runtime or leave parallel harness and actor
 drivers.
 
+Use `tidepool-runtime::PersistentSession` as the shared machine, declaration,
+binding, and continuation substrate. Do not reuse `tidepool-repl::Session` as
+the actor workbench: that type intentionally owns MCP-specific JSON payloads,
+rendering, meta commands, and `Ask` handling. The common layer is the resident
+session substrate and turn compiler; actor settlement remains live-value and
+all-suspending.
+
 Deliver:
 
 - one actor-admission guard spanning the complete agent session, including
@@ -226,6 +233,8 @@ Deliver:
 - one assistant-response transport carrying prose plus ordered fenced Haskell,
   with compile and execution results returned as conversation context;
 - actor-bound lexical scope and execution principal;
+- turn templates compiled against the exact entry facade's Haskell
+  `AgentEffects` alias, with no Rust effect-row descriptor;
 - typed goal input and completion binding;
 - ordered provider-role injection: runtime lifecycle facts as Developer
   messages, Haskell-authored startup work as User messages;
