@@ -591,7 +591,7 @@ impl ActorRegistry {
     }
 
     /// Nonblocking observation of one exact incarnation's retained terminal
-    /// metadata. The eventual Haskell `wait` parks when this returns Pending.
+    /// metadata. Haskell `awaitExit` parks when this returns `Pending`.
     pub fn observe_exit(&self, actor: ActorRef) -> Result<ExitObservation, ActorRegistryError> {
         let state = self.inner.state.lock();
         let entry = entry(&state, actor)?;

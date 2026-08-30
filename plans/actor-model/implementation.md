@@ -253,14 +253,14 @@ Add the narrow Haskell library surface discovered by the spikes:
 - one actor-local concrete effect-stack definition per entry module;
 - `Member`/`Members`-polymorphic reusable APIs;
 - abstract `AgentRef api exit` naming one incarnation;
-- `call`, `cast`, `wait`, and actor lifecycle operations with ordinary success
+- `call`, `cast`, `awaitExit`, and actor lifecycle operations with ordinary success
   types and Rust-owned terminal failure settlement;
 - no mirrored `tryStart`/`tryCall`/`tryCast`/`tryWait` family in the initial
   model-facing DSL; structured failures remain Rust lifecycle state;
 - `ActorSpec startup api exit` and ordinary-program serving combinators;
 - prompted `startActor`, returning only after readiness;
 - discoverable `runActor` as the ordinary Haskell composition of `startActor`
-  and `wait`, with successful one-shot products carried by `ActorExit`;
+  and `awaitExit`, with successful one-shot products carried by `ActorExit`;
 - typed `deliberate`;
 - explicit behavior installation, inspection, and rollback;
 - fresh spawn and program-image deployment;
@@ -410,7 +410,7 @@ test families:
 7. queued live values survive GC and are released exactly once on cancellation;
 8. actors with different stacks dispatch through their own interpreters, and
    only row-polymorphic effectful functions cross between them;
-9. child failure remains available as the exact typed result of `wait`; an
+9. child failure remains available as the exact typed result of `awaitExit`; an
    active wait suppresses a duplicate advisory, while an otherwise-unobserved
    abnormal exit produces one keyed Developer notification without killing
    the owner;
@@ -418,10 +418,10 @@ test families:
     operation, and resumes only after it succeeds;
 11. a refused `cast` cannot complete through acknowledgment or invented `()`;
     it retries to real mailbox acceptance or terminates;
-12. `wait` retries only temporary access to the same terminal record; stale or
+12. `awaitExit` retries only temporary access to the same terminal record; stale or
     invalid exact references are fatal, and a same-typed actor cannot replace
     the named incarnation;
-13. supervised delegated work observes a failed exact exit with `wait` and may
+13. supervised delegated work observes a failed exact exit with `awaitExit` and may
     explicitly start a new child; a dead synchronous call terminates its caller
     without replay or a final inference session;
 14. an unobserved abnormal child exit starts one keyed advisory lifecycle turn
@@ -480,7 +480,7 @@ This plan is complete when:
 - forks clone the Haskell control continuation while invalidating parent-owned
   continuation references in children;
 - startup returns only ready exact-incarnation references; child exits remain
-  available through typed `wait`, and abnormal exits notify rather than kill
+  available through typed `awaitExit`, and abnormal exits notify rather than kill
   owners;
 - mechanical retry must actually succeed before an authoritative continuation
   resumes; an unsatisfied continuation terminates its actor;

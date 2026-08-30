@@ -2113,3 +2113,52 @@ asyncCancel = send . AsyncCancelWith
 true
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: Actor ===============================
+
+-- type_name (5 bytes) --
+Actor
+-- end type_name --
+
+-- description (157 bytes) --
+Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; the constructors in this effect are runtime substrate, not a second public API.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (224 bytes) --
+`Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits.
+-- end prompt_card.0 --
+
+-- constructors (1 items) --
+-- constructors[0] (56 bytes) --
+ActorWaitWith :: Int -> Int -> Actor ActorTerminalStatus
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (1 items) --
+-- type_defs[0] (120 bytes) --
+data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
+-- end type_defs[0] --
+
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (21 bytes) --
+import Tidepool.Actor
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (0 items) --
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+

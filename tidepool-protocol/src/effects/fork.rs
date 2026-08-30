@@ -14,7 +14,7 @@
 //! reasoning.
 //!
 //! No real `tidepool-handlers` handler (harness-serviced only, same
-//! convention as `AskUser`/`ReadState`) — only `decl_rs`/`harness_req_rs`
+//! convention as `AskUser`/`ReadState`) — only `decl_rs`/`suspension_req_rs`
 //! consume this definition.
 
 use crate::hs::HsType;

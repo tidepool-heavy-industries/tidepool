@@ -38,12 +38,10 @@ in as a string.
 ## Migration status
 
 Effects move here one at a time, each proven byte-compatible against its
-hand-written predecessor before that predecessor is deleted. As of this
-writing (`git log -1 -- tidepool-protocol/src/effects/`), the migrated set
-is `Exec`, `Journal`, `Worktree`, `RepoEvent` — check `effects::all()` for
-the current, authoritative list. Everything else still lives in
-`tidepool-mcp/src/effect_defs.rs` (see that crate's `CONTRIBUTING.md`
-guidance on the two paths).
+hand-written predecessor before that predecessor is deleted. `effects::all()`
+is the sole authoritative migrated set; this document deliberately does not
+mirror a list that immediately goes stale. Effects not in that set remain in
+`tidepool-mcp/src/effect_defs.rs`.
 
 ## How to change it
 

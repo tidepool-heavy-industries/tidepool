@@ -1,7 +1,10 @@
 # Self-writing Haskell actors
 
-Status: design and implementation plan. No actor-model implementation is
-claimed by these documents.
+Status: implementation is incremental. The Rust actor registry, ownership
+tree, exact waits, live-value mailboxes, actor-local model sessions, execution
+principal mounting, and the first typed Haskell `awaitExit` vertical have
+landed. Program images, `ActorSpec`, startup, actor-local effect-stack
+interpreters, and the full resident actor loop remain planned here.
 
 ## Thesis
 
@@ -53,13 +56,13 @@ retain for rollback.
   linearization point. A non-prompted constructor waits for a concrete use.
 - Actors are logically concurrent and individually serial. Shared-machine
   Haskell execution remains globally serialized through existing checkout.
-- Typed call, cast, wait, and startup surfaces expose only their success types.
+- Typed call, cast, `awaitExit`, and startup surfaces expose only their success types.
   Rust mechanically handles conditions it can resolve; an unsatisfied exact
   operation terminates the actor with a retained structured failure. Exact
   references are never silently replaced and authoritative operations never
-  invent results. Failure-prone work uses explicit `startActor`/`wait`
+  invent results. Failure-prone work uses explicit `startActor`/`awaitExit`
   supervision and may start a new child after observing an exit. Each reference
-  retains its terminal exit for repeatable `wait`; abnormal exits not already
+  retains its terminal exit for repeatable `awaitExit`; abnormal exits not already
   observed by a wait or call start advisory model turns rather than entering a
   heterogeneous Haskell inbox.
 - Abnormal or unexpected child exit settles an already-observing obligation or

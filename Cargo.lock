@@ -3869,12 +3869,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tidepool-bridge",
+ "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
+ "tidepool-eval",
+ "tidepool-mcp",
  "tidepool-model",
  "tidepool-model-output",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-testing",
  "tokio",
 ]
 

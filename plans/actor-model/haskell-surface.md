@@ -98,7 +98,7 @@ startActor
   -> startup
   -> Eff effs (AgentRef api exit)
 
-wait
+awaitExit
   :: Member Actor effs
   => AgentRef api exit
   -> Eff effs (ActorExit exit)
@@ -118,7 +118,7 @@ mailbox protocol. A non-prompted constructor is deferred until a real actor
 needs one.
 
 An owner can have children with unrelated exit types because exit observation
-is tied to each `AgentRef api exit`. `wait` returns that child's exact exit
+is tied to each `AgentRef api exit`. `awaitExit` returns that child's exact exit
 type. Unexpected lifecycle events do not enter a heterogeneous Haskell system
 inbox; Rust instead schedules a Developer-triggered advisory turn in the
 owner's model context at the next quiescent provider boundary.
@@ -134,7 +134,7 @@ open a final agent session.
 Publication and liveness are separate facts. A child may terminate after
 signaling ready but before the caller resumes. The returned reference still
 names that exact, now-dead incarnation. `call` and `cast` cannot use it, while
-`wait` reconstructs its `ActorExit exit` from the terminal record and shared
+`awaitExit` reconstructs its `ActorExit exit` from the terminal record and shared
 exit cell. Cancellation before readiness publishes no reference and terminates
 the caller whose start obligation cannot be satisfied.
 
@@ -161,7 +161,7 @@ runActor
   => ActorSpec startup api exit
   -> startup
   -> Eff effs (ActorExit exit)
-runActor spec startup = startActor spec startup >>= wait
+runActor spec startup = startActor spec startup >>= awaitExit
 ```
 
 A one-shot job places its successful product in `exit`. `runActor` therefore
@@ -200,14 +200,14 @@ operation succeeds; an unsatisfiable continuation never resumes.
 
 Actor calls, startup, casts, authoritative reads, commands, reviews, and
 capabilities never offer arbitrary result construction. A failed `cast` must
-achieve real mailbox acceptance or terminate. `wait ref` always means the
+achieve real mailbox acceptance or terminate. `awaitExit ref` always means the
 exact incarnation named by `ref`: target termination returns its recorded
 exit, transient access may retry, and an invalid reference is fatal.
 After observing an exit, ordinary Haskell or an advisory can start a new actor
 explicitly without pretending it is the actor that exited.
 
 Failure-prone delegated work should prefer the supervised shape: `startActor`,
-`wait`, inspect the exact typed exit, and explicitly start another child when
+`awaitExit`, inspect the exact typed exit, and explicitly start another child when
 appropriate. The resident model can make that decision and write new Haskell
 inside the ordinary control flow. The initial runtime does not transparently
 replay a dead actor's in-flight work.
@@ -221,7 +221,7 @@ hook when possible, and performs authoritative cleanup. No final provider
 request runs in the dying actor. Multi-result calls remain deferred until a
 concrete protocol shows that ordinary calls and messages are insufficient.
 
-An abnormal child exit opens an advisory only when no active `wait` or failed
+An abnormal child exit opens an advisory only when no active `awaitExit` or failed
 call obligation already observes that exact terminal transition. The model may
 act through its ordinary tools and then calls a scoped `ackLifecycle` operation
 with the exact presented advisory keys. This wakes inference at a quiescent
@@ -433,7 +433,7 @@ terminal `InvalidAfterFork` failure.
 
 [architecture.md](architecture.md#9-supervision-and-shutdown) owns lifecycle
 semantics. The Haskell consequences are small: one actor is non-reentrant;
-`AgentRef api exit` supports repeatable typed `wait`; abnormal exits create
+`AgentRef api exit` supports repeatable typed `awaitExit`; abnormal exits create
 advisory model turns, not Haskell events; and `ActorSpec` supplies a
 `ShutdownReason` handler for cooperative cleanup. Rust owns recursive subtree
 termination and the twelve-hour watchdog.

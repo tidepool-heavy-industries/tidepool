@@ -27,7 +27,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 
 # Default tier: bare `cargo nextest run` skips the GHC-extract-heavy crates
 # (every test in tidepool-runtime/repl/mcp/handlers forks a real GHC
-# `extract` compile). tidepool-testing and tidepool-harness are MIXED crates
+# `extract` compile). tidepool-testing, tidepool-harness, and tidepool-actor are MIXED crates
 # — their lib unit tests are pure Rust (quick tier) but their tests/*.rs
 # integration binaries reach GHC — so they're excluded by `kind(test)` rather
 # than wholesale. tidepool-harness's `provider_behavior` and tidepool's
@@ -36,7 +36,7 @@ slow-timeout = { period = "60s", terminate-after = 30 }
 # `scripts/battery.sh` does) to run everything, or `--ignore-default-filter
 # -p <crate>` for one heavy crate — `-p` alone is ANDed against this filter,
 # not a bypass of it.
-default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool) & binary(crash_recovery)))'
+default-filter = 'not (package(tidepool-runtime) | package(tidepool-repl) | package(tidepool-mcp) | package(tidepool-handlers) | (package(tidepool-testing) & kind(test)) | (package(tidepool-harness) & kind(test) & !binary(provider_behavior)) | (package(tidepool-actor) & kind(test)) | (package(tidepool) & binary(crash_recovery)))'
 
 # GHC-heavy tests run below full core count so concurrent extractor requests do
 # not oversubscribe CPU and memory. This is a per-run limit; callers running
@@ -49,5 +49,5 @@ max-threads = 4
 # its tests do no `extract` work (no tidepool-extract spawn, no
 # EvalHarness/Harness turn, no haskell_eval!/haskell_inline! expansion).
 [[profile.default.overrides]]
-filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery)) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior))))'
+filter = 'not (package(tidepool-repr) | package(tidepool-eval) | package(tidepool-heap) | package(tidepool-bignum) | package(tidepool-optimize) | package(tidepool-effect) | package(tidepool-bridge) | package(tidepool-bridge-derive) | package(tidepool-bridge-effects) | package(tidepool-codegen) | package(tidepool-web) | (package(tidepool) & !binary(crash_recovery)) | (package(tidepool-testing) & !kind(test)) | (package(tidepool-harness) & (!kind(test) | binary(provider_behavior)) | (package(tidepool-actor) & !kind(test))))'
 test-group = 'ghc-heavy'

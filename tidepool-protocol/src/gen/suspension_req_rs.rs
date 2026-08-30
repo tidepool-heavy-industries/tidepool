@@ -1,5 +1,5 @@
-//! Generator: decode-only suspension request enums, emitted into either
-//! `tidepool-harness` or `tidepool-runtime` (see [`path`]'s `crate_dir`).
+//! Generator: decode-only suspension request enums, emitted into the crate
+//! that owns each effect's orchestration (see [`path`]'s `crate_dir`).
 //!
 //! `tidepool-harness`'s turn engine never DISPATCHES these effects — a
 //! suspending effect (`Fork`, `Finalize`, `AskUser`, `RunLLMTurn`, `ReadState`,
@@ -12,8 +12,8 @@
 //! Haskell — and none of the error ADT / `DescribeEffect` / `EffectHandler`
 //! dispatch glue, which presuppose a handler these effects don't have.
 //!
-//! **`Ask` is the one member emitted into `tidepool-runtime` instead of
-//! `tidepool-harness`.** `tidepool-runtime::session::engine::
+//! `Ask` is emitted into `tidepool-runtime` because
+//! `tidepool-runtime::session::engine::
 //! extract_ask_request` (the decode both `tidepool-repl` and the harness's
 //! own `Ask` roster member need) sits BELOW `tidepool-harness` in the crate
 //! graph, so the harness cannot be the one place this type lives without
@@ -26,18 +26,18 @@
 //! in whichever crate is lowest in the graph among its consumers.
 //!
 //! The effects this generator serves are declared in
-//! [`crate::effects::suspension_roster`], deliberately NOT part of
-//! [`crate::effects::all`]: their Haskell decls stay hand-carried in
-//! `tidepool-mcp/src/effect_defs.rs` for now (this generator's scope is the
-//! decode/typing layer only, not the decl side) — see that function's doc.
+//! [`crate::effects::suspension_roster`] for the transitional harness effects;
+//! callers may also project a separately owned effect such as `Actor` into
+//! its runtime crate. This generator owns only decode/typing, never the
+//! orchestration itself.
 
 use super::{header, index_body, module_name, GeneratedFile};
 use crate::schema::Effect;
 
 /// Where this effect's decode-only request enum lives, relative to the
 /// workspace root. `crate_dir` is the target crate's directory name
-/// (`"tidepool-harness"` for every roster member except `Ask`, which is
-/// `"tidepool-runtime"` — see this module's doc).
+/// (for example `"tidepool-harness"`, `"tidepool-runtime"`, or
+/// `"tidepool-actor"`).
 #[must_use]
 pub fn path(e: &Effect, crate_dir: &str) -> String {
     format!("{crate_dir}/src/generated/{}.rs", module_name(e))

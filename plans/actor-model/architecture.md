@@ -255,7 +255,7 @@ If the operation cannot produce its exact result, Rust records the failure and
 provenance, settles the unsatisfiable continuation, invokes the actor's typed
 shutdown hook at a safe boundary when possible, performs authoritative
 cleanup, and terminates the actor. The immutable `ActorExit` retains the
-failure for exact `wait`; an otherwise-unobserved abnormal exit advises the
+failure for exact `awaitExit`; an otherwise-unobserved abnormal exit advises the
 owner. No final inference session runs in the dying actor.
 
 The runtime never synthesizes the missing success value, retries through model
@@ -267,27 +267,27 @@ machine mismatch, rejected call cycles, and cancellation are terminal.
 `cast` returns only after real mailbox acceptance; knowingly dropping a
 message is never successful `cast`.
 
-Normal target termination is not a failed `wait`: it returns the retained
+Normal target termination is not a failed `awaitExit`: it returns the retained
 `ActorExit exit`. Temporary failure while reading that exact terminal record
 is retried mechanically. A stale or invalid exact-incarnation reference is
-terminal; `wait ref` never substitutes another actor, even one with the same
+terminal; `awaitExit ref` never substitutes another actor, even one with the same
 `api` and `exit` types. After observing an exit, authored Haskell or an advisory
 session may explicitly start a successor.
 
 Long-lived or failure-prone delegated work should therefore use explicit
-supervision: start a child, observe its exact typed exit with `wait`, and start
+supervision: start a child, observe its exact typed exit with `awaitExit`, and start
 a new child if policy calls for another attempt. That is ordinary Haskell
 control flow assisted by the resident model, not transparent runtime replay.
 Synchronous `call` remains appropriate where target death genuinely makes the
 current obligation unsatisfiable.
 
 Advisory creation is linearized at the child's terminal transition. If the
-owner already has an active `wait` for that exact child, the typed exit settles
+owner already has an active `awaitExit` for that exact child, the typed exit settles
 the wait and suppresses an advisory. If the owner has a pending call to that
 child, the call's terminal failure records the exit and suppresses a duplicate
 advisory; termination of the caller is independently visible to its owner.
 Otherwise an abnormal or unexpected exit creates exactly one advisory keyed by
-owner, child incarnation, and terminal sequence. A later `wait` does not
+owner, child incarnation, and terminal sequence. A later `awaitExit` does not
 retract an advisory already created.
 
 The advisory runs at the next quiescent boundary. Its Developer message may
@@ -358,7 +358,7 @@ start obligation cannot be satisfied.
 
 A child can terminate between readiness and publication to the caller. The
 published `AgentRef` then names a dead exact incarnation. `call` and `cast`
-cannot use it, but `wait` returns its retained terminal result.
+cannot use it, but `awaitExit` returns its retained terminal result.
 
 ### Fresh spawn
 
@@ -489,7 +489,7 @@ The child specification chooses the startup-input type and successful-exit
 type. Runtime failures, cancellation, and forced shutdown remain typed system
 exit variants around the successful payload. An abnormal or unexpected child
 exit never automatically kills its owner. Rust retains immutable terminal
-metadata for observation through `wait (AgentRef api exit)`; a successful
+metadata for observation through `awaitExit (AgentRef api exit)`; a successful
 Haskell exit value remains in the managed cell shared by copies of that exact
 reference. Abnormal failure and forced or unexpected cancellation either
 settle an already-observing wait or call, or schedule the single keyed advisory

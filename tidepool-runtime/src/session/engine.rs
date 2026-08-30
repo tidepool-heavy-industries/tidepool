@@ -1217,7 +1217,7 @@ impl<H: DispatchEffect<O>, O> DispatchEffect<O> for GateDispatcher<H> {
 /// constructor-name match that could drift from the schema. `RunLLMTurnWith`
 /// has no schema-generated decode reachable from this crate yet (its
 /// generated `RunLLMTurnReq` lives in `tidepool-harness`, ABOVE this crate in
-/// the dependency graph — see `tidepool_protocol::gen::harness_req_rs`'s
+/// the dependency graph — see `tidepool_protocol::gen::suspension_req_rs`'s
 /// doc), so it stays a hand-rolled constructor-name match, tried only after
 /// the generated `AskReq` decode reports the constructor unrecognized
 /// (`BridgeError::UnknownDataCon`) — the same "loud on a genuine field-decode

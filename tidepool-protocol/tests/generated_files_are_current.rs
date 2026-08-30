@@ -14,6 +14,8 @@
 
 use std::path::PathBuf;
 
+use tidepool_protocol::GeneratedFile;
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -21,13 +23,12 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-#[test]
-fn generated_files_are_current() {
+fn assert_current(files: Vec<GeneratedFile>, label: &str) {
     let regen = std::env::var_os("TIDEPOOL_REGEN_PROTOCOL").is_some();
     let root = workspace_root();
     let mut stale = Vec::new();
 
-    for f in tidepool_protocol::generated_files() {
+    for f in files {
         let path = root.join(&f.path);
         let current = std::fs::read_to_string(&path).ok();
         if current.as_deref() == Some(f.contents.as_str()) {
@@ -38,18 +39,23 @@ fn generated_files_are_current() {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(&path, &f.contents).unwrap();
-            continue;
+        } else {
+            stale.push(f.path);
         }
-        stale.push(f.path.clone());
     }
 
     assert!(
         stale.is_empty(),
-        "these committed files are stale vs the schema:\n  {}\n\
+        "these committed {label} files are stale vs the schema:\n  {}\n\
          regenerate with `cargo run -p tidepool-protocol --bin tidepool-protocol-gen` \
          (or `TIDEPOOL_REGEN_PROTOCOL=1 cargo test -p tidepool-protocol`)",
         stale.join("\n  ")
     );
+}
+
+#[test]
+fn generated_files_are_current() {
+    assert_current(tidepool_protocol::generated_files(), "effect declaration");
 }
 
 /// As [`generated_files_are_current`], for the suspension-decode roster
@@ -59,35 +65,12 @@ fn generated_files_are_current() {
 /// are deliberately disjoint (see `effects::suspension_roster`'s doc), and a
 /// failure here should never be confused with a decl-side staleness. `Ask`
 /// is covered by [`runtime_generated_files_are_current`] instead (see
-/// [`tidepool_protocol::gen::harness_req_rs`]'s doc for why).
+/// [`tidepool_protocol::gen::suspension_req_rs`]'s doc for why).
 #[test]
 fn harness_generated_files_are_current() {
-    let regen = std::env::var_os("TIDEPOOL_REGEN_PROTOCOL").is_some();
-    let root = workspace_root();
-    let mut stale = Vec::new();
-
-    for f in tidepool_protocol::harness_generated_files() {
-        let path = root.join(&f.path);
-        let current = std::fs::read_to_string(&path).ok();
-        if current.as_deref() == Some(f.contents.as_str()) {
-            continue;
-        }
-        if regen {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&path, &f.contents).unwrap();
-            continue;
-        }
-        stale.push(f.path.clone());
-    }
-
-    assert!(
-        stale.is_empty(),
-        "these committed harness decode files are stale vs the schema:\n  {}\n\
-         regenerate with `cargo run -p tidepool-protocol --bin tidepool-protocol-gen` \
-         (or `TIDEPOOL_REGEN_PROTOCOL=1 cargo test -p tidepool-protocol`)",
-        stale.join("\n  ")
+    assert_current(
+        tidepool_protocol::harness_generated_files(),
+        "harness decode",
     );
 }
 
@@ -95,33 +78,17 @@ fn harness_generated_files_are_current() {
 /// into `tidepool-runtime` instead.
 #[test]
 fn runtime_generated_files_are_current() {
-    let regen = std::env::var_os("TIDEPOOL_REGEN_PROTOCOL").is_some();
-    let root = workspace_root();
-    let mut stale = Vec::new();
-
-    for f in tidepool_protocol::runtime_generated_files() {
-        let path = root.join(&f.path);
-        let current = std::fs::read_to_string(&path).ok();
-        if current.as_deref() == Some(f.contents.as_str()) {
-            continue;
-        }
-        if regen {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&path, &f.contents).unwrap();
-            continue;
-        }
-        stale.push(f.path.clone());
-    }
-
-    assert!(
-        stale.is_empty(),
-        "these committed runtime decode files are stale vs the schema:\n  {}\n\
-         regenerate with `cargo run -p tidepool-protocol --bin tidepool-protocol-gen` \
-         (or `TIDEPOOL_REGEN_PROTOCOL=1 cargo test -p tidepool-protocol`)",
-        stale.join("\n  ")
+    assert_current(
+        tidepool_protocol::runtime_generated_files(),
+        "runtime decode",
     );
+}
+
+/// As [`harness_generated_files_are_current`], for the actor-runtime decoder
+/// emitted into `tidepool-actor` rather than the transitional harness.
+#[test]
+fn actor_generated_files_are_current() {
+    assert_current(tidepool_protocol::actor_generated_files(), "actor decode");
 }
 
 /// The suspension-decode roster must be internally consistent too — same

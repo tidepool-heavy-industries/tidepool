@@ -9,12 +9,14 @@
 
 mod agent_session;
 mod event;
+mod generated;
 mod identity;
 mod mailbox;
 mod mount;
 mod registry;
 mod sequence;
 mod timeline;
+mod wait;
 
 pub use agent_session::{ActorAgentSession, AssistantTurn, PendingProviderTurn};
 pub use event::{
@@ -37,3 +39,4 @@ pub use sequence::{
     run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, ParsedBlock,
 };
 pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
+pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};

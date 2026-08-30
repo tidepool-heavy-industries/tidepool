@@ -6,6 +6,7 @@
 //! `tidepool-mcp/src/effect_defs.rs`. Effects migrate one at a time,
 //! smallest first, with no flag day.
 
+pub mod actor;
 pub mod ask;
 pub mod ask_user;
 pub mod console;
@@ -24,16 +25,17 @@ use crate::schema::Effect;
 
 /// Every effect whose contract this crate owns AND generates files for.
 ///
-/// `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green` sit alongside
-/// the four dispatched base effects here even though they have no
+/// `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`/`Actor` sit
+/// alongside the four dispatched base effects here even though they have no
 /// `tidepool-handlers` `EffectHandler` (`Effect::dispatched` is `false` for
-/// all six) — `decl_rs` still owns their Haskell decl text; `crate::gen::
+/// all seven) — `decl_rs` still owns their Haskell decl text; `crate::gen::
 /// all_files` reads `dispatched` to skip `handler_rs`/`wire_rs`/`adapter_rs`
 /// for them rather than emitting glue for a handler that does not exist.
-/// They are ALSO listed in [`suspension_roster`] (a different generator,
-/// `harness_req_rs`, needs their decode-only request enum) — being in both
-/// lists is expected, not a duplication: two generators reading the same
-/// effect data for two disjoint purposes.
+/// The first six are ALSO listed in [`suspension_roster`] because the
+/// transitional harness needs their decoders. `Actor` is projected separately
+/// into `tidepool-actor`, the crate that owns its orchestration. In both cases
+/// declaration and decode generators read the same effect data for disjoint
+/// purposes.
 #[must_use]
 pub fn all() -> Vec<Effect> {
     vec![
@@ -47,6 +49,7 @@ pub fn all() -> Vec<Effect> {
         fork::fork(),
         finalize::finalize(),
         green::green(),
+        actor::actor(),
     ]
 }
 
@@ -70,7 +73,7 @@ pub fn all_described() -> Vec<Effect> {
 ///
 /// #20 steps 2-3: `AskUser`/`ReadState`/`RunLLMTurn`/`Fork`/`Finalize`/`Green`'s
 /// Haskell decl text has fully flipped onto [`crate::gen::decl_rs`] (see
-/// [`all`]'s doc) — they stay listed here too because `harness_req_rs` (this
+/// [`all`]'s doc) — they stay listed here too because `suspension_req_rs` (this
 /// generator) and `decl_rs` are disjoint GENERATORS reading the same effect
 /// data for disjoint purposes, not because the effects themselves are
 /// unmigrated. `Ask`'s decl text remains hand-carried in
@@ -92,7 +95,7 @@ pub fn all_described() -> Vec<Effect> {
 /// need `tidepool-handlers` edits, out of this migration's scope (see each
 /// module's `dispatched` doc). `Ask`/`Console`/`Subagent` do not flip through
 /// [`crate::gen::decl_rs`]/[`crate::gen::wire_rs`]/[`crate::gen::handler_rs`]/
-/// [`crate::gen::adapter_rs`], only through [`crate::gen::harness_req_rs`].
+/// [`crate::gen::adapter_rs`], only through [`crate::gen::suspension_req_rs`].
 /// The four already-migrated outer effects (`Worktree`/`RepoEvent`/`Exec`/
 /// `Journal`) are NOT repeated here — their request enums already exist,
 /// generated into `tidepool-handlers`, and `tidepool-harness` (a dependent of

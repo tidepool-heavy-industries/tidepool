@@ -120,7 +120,7 @@ fn every_harness_decode_file_is_a_rustfmt_fixed_point() {
     assert!(
         drifted.is_empty(),
         "these emitted harness decode files are NOT rustfmt fixed points:\n  {}\n\
-         Fix the EMITTER (gen::harness_req_rs), not the file.",
+         Fix the EMITTER (gen::suspension_req_rs), not the file.",
         drifted.join("\n  ")
     );
 }
@@ -149,9 +149,30 @@ fn every_runtime_decode_file_is_a_rustfmt_fixed_point() {
     assert!(
         drifted.is_empty(),
         "these emitted runtime decode files are NOT rustfmt fixed points:\n  {}\n\
-         Fix the EMITTER (gen::harness_req_rs), not the file.",
+         Fix the EMITTER (gen::suspension_req_rs), not the file.",
         drifted.join("\n  ")
     );
+}
+
+/// The actor kernel owns its own generated decoder and therefore needs the
+/// same fixed-point guard as the harness and runtime targets.
+#[test]
+fn every_actor_decode_file_is_a_rustfmt_fixed_point() {
+    let files = tidepool_protocol::actor_generated_files();
+
+    assert_eq!(
+        files.len(),
+        2,
+        "expected the Actor decode file plus its mod index"
+    );
+    for f in files {
+        assert_eq!(
+            rustfmt(&f.contents),
+            f.contents,
+            "{} is not a rustfmt fixed point",
+            f.path
+        );
+    }
 }
 
 /// The Worktree wire and adapter modules specifically, named rather than left to

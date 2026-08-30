@@ -58,6 +58,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "Subagent",
             "Journal",
             "Green",
+            "Actor",
         ]
     );
 }

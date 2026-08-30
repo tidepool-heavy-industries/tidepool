@@ -12,7 +12,7 @@
 pub mod adapter_rs;
 pub mod decl_rs;
 pub mod handler_rs;
-pub mod harness_req_rs;
+pub mod suspension_req_rs;
 pub mod wire_rs;
 
 use crate::schema::Effect;
@@ -132,7 +132,7 @@ pub fn module_name(e: &Effect) -> String {
 
 /// Render one `    Ctor(field, …),` enum-variant line, wrapping onto its own
 /// block the way rustfmt does once it would. Shared by [`handler_rs`] (the
-/// dispatchable `<Eff>Req` enums) and [`harness_req_rs`] (the decode-only
+/// dispatchable `<Eff>Req` enums) and [`suspension_req_rs`] (the decode-only
 /// suspension request enums) — both emit the identical "one variant per GADT
 /// constructor" enum shape, just into different crates for different
 /// purposes, so the rendering is the one shared piece.

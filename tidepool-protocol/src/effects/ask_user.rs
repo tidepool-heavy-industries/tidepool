@@ -10,7 +10,7 @@
 //!
 //! No real `tidepool-handlers` handler — harness-serviced only (same
 //! convention as `Ask`/`RunLlmTurn`/`Finalize`/`Fork`'s own module docs); only
-//! `decl_rs`/`harness_req_rs` consume this definition. Both `askUserRaw` and
+//! `decl_rs`/`suspension_req_rs` consume this definition. Both `askUserRaw` and
 //! `noteRaw` are thin, single-verb `send` wrappers, so — unlike
 //! `Ask`/`RunLlmTurn`/`Finalize`/`Fork`/`Green` — this effect's WHOLE surface
 //! is representable by [`crate::schema::HelperBody`]'s existing reviewed

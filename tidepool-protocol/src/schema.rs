@@ -1559,6 +1559,8 @@ pub enum HandlingClass {
     OuterDispatch(OuterEffect),
     /// Routed to the driver's green-thread (`Tidepool.Async`) scheduler.
     Green,
+    /// Routed to the Rust-owned actor registry and scheduler.
+    Actor,
 }
 
 /// Which driver-owned handler an [`HandlingClass::OuterDispatch`] verb reaches.

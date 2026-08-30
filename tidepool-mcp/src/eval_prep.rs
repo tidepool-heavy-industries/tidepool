@@ -125,6 +125,7 @@ pub fn all_decls() -> Vec<EffectDecl> {
         crate::subagent_decl(),
         crate::journal_decl(),
         crate::green_decl(),
+        crate::actor_decl(),
     ]
 }
 

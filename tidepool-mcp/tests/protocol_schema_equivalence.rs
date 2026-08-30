@@ -210,6 +210,18 @@ fn green_decl_matches_the_schema_exactly() {
     );
 }
 
+/// Actor is generated directly into its owning runtime crate rather than
+/// migrating from a hand-written declaration. This still pins the compiled
+/// `EffectDecl` value to the schema, independently of the generated-file
+/// staleness guard.
+#[test]
+fn actor_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::actor_decl(),
+        &tidepool_protocol::effects::actor::actor(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -232,6 +244,7 @@ fn every_schema_effect_is_reachable() {
             "Fork",
             "Finalize",
             "Green",
+            "Actor",
         ],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );

@@ -14,8 +14,11 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tidepool-bridge.workspace = true
+tidepool-bridge-derive.workspace = true
 tidepool-codegen.workspace = true
 tidepool-effect.workspace = true
+tidepool-eval.workspace = true
 tidepool-model.workspace = true
 tidepool-model-output.workspace = true
 tidepool-repr.workspace = true
@@ -23,4 +26,6 @@ tidepool-runtime.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tidepool-mcp.workspace = true
+tidepool-testing.workspace = true
 tokio = { workspace = true, features = ["rt"] }

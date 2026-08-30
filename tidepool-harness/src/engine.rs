@@ -444,7 +444,7 @@ fn require_arg_site(
 /// `tidepool-repl` and the one-shot MCP eval server also decode through —
 /// `tidepool-runtime` sits BELOW this crate, so `AskReq` is generated there
 /// and reused here rather than the other way around; see
-/// `tidepool_protocol::gen::harness_req_rs`'s doc). Every other member is
+/// `tidepool_protocol::gen::suspension_req_rs`'s doc). Every other member is
 /// generated fresh into [`crate::generated`], decode-only, because those
 /// effects' Haskell decls stay hand-carried in
 /// `tidepool-mcp/src/effect_defs.rs` for now (steps 2-3).
