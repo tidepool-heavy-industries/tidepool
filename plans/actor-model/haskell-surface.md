@@ -18,15 +18,20 @@ concerns are the decisions.
 
 ## 2. Actor-local effect stacks
 
-Each actor incarnation fixes one concrete `Eff` stack in its entry module:
+Each actor incarnation fixes one concrete `Eff` stack in its entry module. The
+kernel contributes the protocol-indexed local-control effect; the selected
+runtime contributes the capability row:
 
 ```haskell
-type AgentEffects =
+type AgentCapabilities =
   '[ Actor
    , Deliberate
    , RepoRead
    , Review
    ]
+
+type AgentEffects =
+  ActorLocal AgentProtocol AgentExit ': AgentCapabilities
 
 type AgentM = Eff AgentEffects
 ```
@@ -54,10 +59,12 @@ whether the receiver's row satisfies their constraints, while Rust still
 checks principal-bound handles and actor-local runtime authority when an
 effect is interpreted.
 
-The effect stack is fixed for the incarnation. The model may add ordinary
-types, declarations, values, protocols, and behavior, but cannot redefine the
-stack. Adding or removing an effect class creates a new actor incarnation and
-a new `AgentRef`.
+Effects are an extensible Haskell design vocabulary, not a frozen global ABI.
+Libraries may add a new effect when it represents a distinct algebra with its
+own interpreter semantics; model-authored code may also define and eliminate
+purely Haskell-local effects. What is fixed is one incarnation's residual row
+at the Rust boundary. Adding or removing a Rust-interpreted capability creates
+a new actor incarnation and `AgentRef`.
 
 The entry module exports `AgentEffects` and `AgentM` through the actor's exact
 source facade. Generated turn modules mention `AgentEffects` only as a Haskell
@@ -74,10 +81,20 @@ interpreter instance under the child's principal. Different actor rows may
 share one machine because union position has no Rust dispatch meaning.
 
 Naming an effect in `AgentEffects` is not authority and cannot manufacture a
-Rust handler. A trusted launch policy decides which nominal requests this
-incarnation can actually interpret and which resource grants back them. The
-first `startActor` slice must settle how a dynamic Haskell `ActorSpec` carries
-or selects that opaque policy without reflecting its type-level row into Rust.
+Rust handler. Trusted composition supplies abstract, type-indexed runtime
+tokens:
+
+```haskell
+data ActorRuntime capEffs
+```
+
+An `ActorRuntime capEffs` names a Rust interpreter factory and exact source
+facade for the capability row. Its constructor is abstract. The actor kernel
+composes `ActorLocal api exit` with that row exactly once when it promotes the
+definition. Rust sees an opaque runtime handle, not either row; GHC alone checks
+the resulting `ActorEffects api exit capEffs`. Using the token through
+`startActor` also checks the current principal, so copying it does not grant
+launch authority.
 
 The stack determines which operation classes Haskell can express. Opaque
 handles and principal-scoped grants still authorize particular resources at
@@ -85,29 +102,48 @@ runtime.
 
 ## 3. Actor specifications are Haskell values
 
-An actor specification packages an entry point, startup type, mailbox
-protocol, successful exit type, fixed effect vocabulary, and program image. A
-possible surface is:
+An actor definition is the ordinary Haskell record a model authors. Promotion
+captures its exact code/source deployment image and returns an opaque,
+deployable actor specification. This is one membrane, not separate static and
+dynamic construction systems:
 
 ```haskell
 data AgentRef api exit
+data ActorProgram capEffs api exit
+data ActorSpec startup api exit
+data LaunchGrant
+data ActorLocal api exit a
 
-data ActorSpec startup api exit where
-  ActorSpec
-    :: { prepare
-           :: startup
-           -> StartupM childEffs boot
+type ActorEffects api exit capEffs =
+  ActorLocal api exit ': capEffs
+
+data ActorDefinition startup api exit where
+  ActorDefinition
+    :: { runtime
+           :: ActorRuntime capEffs
        , startupSession
-           :: Deliberation boot initial
+           :: Deliberation startup initial
        , install
-           :: boot
+           :: startup
            -> initial
-           -> StartupM childEffs (ActorProgram api exit)
-       , shutdown
+           -> ActorProgram capEffs api exit
+       , modelExports
+           :: [Text]
+       , onShutdown
            :: ShutdownReason
-           -> ShutdownM childEffs ()
+           -> Eff (ActorEffects api exit capEffs) ()
        }
-    -> ActorSpec startup api exit
+    -> ActorDefinition startup api exit
+
+promoteActor
+  :: Member Actor effs
+  => ActorDefinition startup api exit
+  -> Eff effs (ActorSpec startup api exit)
+
+withLaunchGrant
+  :: LaunchGrant
+  -> ActorSpec startup api exit
+  -> ActorSpec startup api exit
 
 data ActorExit exit
   = Completed exit
@@ -126,21 +162,40 @@ awaitExit
   -> Eff effs (ActorExit exit)
 ```
 
-This is a conceptual surface: ordinary Haskell existential packaging hides
-`boot`, `initial`, and `childEffs`; it does not imply a reflected Rust row ABI.
-The program image and launch authority are opaque runtime-backed values, not a
-second Haskell encoding of handler layout. `StartupM` and `ShutdownM` denote
-restricted lifecycle surfaces that cannot deliberate; whether they survive as
-newtypes or become constrained `Eff` rows is intentionally left to the first
-`startActor` vertical slice.
+Ordinary Haskell existential packaging hides `initial` and `capEffs`; it does
+not imply a reflected Rust row ABI. The runtime token is an unforgeable launch
+profile, not embedded authority: the caller is authorized when the token is
+used. `promoteActor` is the sole program-image boundary. It captures the rooted
+definition, exact declaration identities, and explicit model-visible export
+facade; models never assemble an image record themselves. Project-authored
+actors are promoted at boot through the same mechanism using their checked-in
+export manifest.
 
-`startActor` runs `prepare`, gives `boot` to the specification's sole typed
-startup agent session, and passes the resulting `initial` value to `install`.
-It does not return a reference until the resulting `ActorProgram` is validated,
-installed, and accepting application messages. The startup,
-initialization-artifact, and successful-exit types need not resemble the
-mailbox protocol. A non-prompted constructor is deferred until a real actor
-needs one.
+`modelExports` is a list of top-level head names, not arbitrary Haskell export
+syntax. Promotion resolves it through GHC's export metadata against the exact
+compile view that produced the definition. Selecting a type head carries its
+GHC-derived constructor export shape; selecting a value carries that exact
+declaration identity. Missing, shadow-drifted, or type-incoherent selections
+fail promotion instead of silently exposing a later same-spelled declaration.
+
+`withLaunchGrant` decorates deployment metadata without changing the program
+image. Capability-owning modules create opaque recipes for their own
+resources; there is no public generic grant record or policy enum.
+`startActor` validates and redeems every recipe for the new child under the
+caller's principal before startup. Copying the resulting specification still
+transfers no authority.
+
+`startActor` mounts `startup` as a live value, runs the specification's sole
+typed startup agent session, and passes the resulting `initial` to the pure
+`install` function. The startup session may evaluate fenced Haskell using the
+child's complete `ActorEffects` row. The lifecycle-phase interpreter refuses
+`receive` and `forkActors` before program readiness; this is policy on the
+same row, not a startup monad. Installation itself cannot deliberate or perform
+external work because it is pure. The call returns only after the resulting
+`ActorProgram` is validated, installed, and accepting application messages.
+The startup, initialization-artifact, and successful-exit types need not
+resemble the mailbox protocol. A non-prompted constructor remains absent until
+a real actor needs one.
 
 An owner can have children with unrelated exit types because exit observation
 is tied to each `AgentRef api exit`. `awaitExit` returns that child's exact exit
@@ -148,20 +203,23 @@ type. Unexpected lifecycle events do not enter a heterogeneous Haskell system
 inbox; Rust instead schedules a Developer-triggered advisory turn in the
 owner's model context at the next quiescent provider boundary.
 
-Validating and installing the returned `ActorProgram api exit` is the readiness
-linearization point. The model produces a typed initialization artifact, not
-the actor's entire control flow. Authored Haskell decides how that artifact
-configures the fixed program. Rust invokes the specification's shutdown hook
-at a safe boundary for cooperative shutdown without depending on it for hard
-cleanup. The hook may use explicitly allowed authoritative effects but cannot
-open a final agent session.
+Validating and installing the returned
+`ActorProgram capEffs api exit` is the readiness linearization point. The
+model produces a typed initialization artifact, not the actor's entire control
+flow. Authored Haskell decides how that artifact configures the fixed program.
+Rust invokes the specification's shutdown hook at a safe boundary for
+cooperative shutdown without depending on it for hard cleanup. The hook runs
+under the actor's normal row and principal, but the interpreter is in its
+closing phase and refuses `Deliberate`, actor startup, and any other operation
+not permitted during shutdown. Rust remains the final owner of cleanup if
+Haskell cannot run.
 
 Publication and liveness are separate facts. A child may terminate after
 signaling ready but before the caller resumes. The returned reference still
 names that exact, now-dead incarnation. `call` and `cast` cannot use it, while
-`awaitExit` reconstructs its `ActorExit exit` from the terminal record and shared
-exit cell. Cancellation before readiness publishes no reference and terminates
-the caller whose start obligation cannot be satisfied.
+`awaitExit` reconstructs its `ActorExit exit` from the terminal record and
+shared exit cell. Cancellation before readiness publishes no reference and
+terminates the caller whose start obligation cannot be satisfied.
 
 An `AgentRef api exit` contains an opaque routing identity and a shared,
 single-assignment cell for a successful `exit`. Completion fills the cell
@@ -169,13 +227,49 @@ before publishing the terminal lifecycle transition. Copies and active waits
 therefore retain the exit through ordinary Haskell reachability, and repeated
 waits observe the same value even when it is a closure. Rust retains only the
 immutable terminal metadata needed to distinguish completion, failure, and
-cancellation. A stale or invalid reference and cancellation of the waiter are
-fatal; target termination returns normally.
+cancellation. A stale or invalid reference and cancellation of the waiter make
+that `awaitExit` fragment unsatisfiable; target termination returns normally.
 
-The runtime need not force every actor into callback records. A mailbox service
-can use a `serve` library combinator inside an ordinary recursive Haskell
-program. An OODA loop and a one-shot worker can use different authored control
-structures while sharing the same Rust lifecycle.
+`ActorProgram` is a typed wrapper around one ordinary `Eff` computation. The
+model-facing shape is conceptually:
+
+```haskell
+program
+  :: Eff (ActorEffects api exit capEffs) exit
+  -> ActorProgram capEffs api exit
+
+receive
+  :: Member (ActorLocal api exit) effs
+  => (forall result. api result -> Eff effs (result, next))
+  -> Eff effs next
+
+serve
+  :: Member (ActorLocal api exit) effs
+  => state
+  -> (forall result. state -> api result -> Eff effs (result, state))
+  -> Eff effs exit
+serve state step = receive (step state) >>= \next -> serve next step
+```
+
+`ActorLocal api exit` ties the receiving protocol and successful exit type to
+the row used by the installed program and its eventual `AgentRef api exit`.
+Its raw effect constructors are kernel-private; the ordinary Haskell functions
+are the public algebra. This is module encapsulation, not a magic runtime ABI.
+Every request is interpreted under the current actor principal, so there is no
+mailbox handle to forge, pass, or rewrite during fork.
+
+`receive` suspends without polling, accepts one call or cast, runs the handler
+under the actor's principal, settles the indexed result, and returns only the
+next-state value. For a cast, the request has result type `()`. The runtime-
+private reply obligation never enters authored Haskell, so the public surface
+needs no affine token or separate `reply` operation. Handler failure settles
+the caller through the ordinary actor-failure path.
+
+`serve` is only a discoverable recursive library composition. A program that
+may exit in response to a message uses `receive` directly and returns its
+`exit` from ordinary Haskell control flow. An OODA loop and a one-shot worker
+can therefore use different authored structures without creating runtime
+actor modes.
 
 The ordinary supervised-worker path is a discoverable library composition,
 not another effect:
@@ -217,43 +311,32 @@ cast
 The success types stay pleasant because lifecycle failure remains Rust-owned
 instead of entering every domain result. The interpreter mechanically parks or
 retries conditions it owns. If the exact operation still cannot complete, it
-terminates the actor rather than fabricating a domain result. There is no
-model-facing failure session or retry action. A dead target cannot become
-callable again, and the model cannot nominate an arbitrary same-typed actor.
-Mechanical retry resumes the parked continuation only after the exact original
-operation succeeds; an unsatisfiable continuation never resumes.
+abandons that Haskell continuation rather than fabricating a domain result.
+For the installed actor program, losing the continuation terminates the actor.
+For a disposable fenced workbench fragment, the existing agent session gets a
+structured failure receipt and may run different Haskell next round. There is
+no separate failure session, retry action, or replacement actor, and an
+unsatisfiable continuation never resumes.
 
-Actor calls, startup, casts, authoritative reads, commands, reviews, and
-capabilities never offer arbitrary result construction. A failed `cast` must
-achieve real mailbox acceptance or terminate. `awaitExit ref` always means the
-exact incarnation named by `ref`: target termination returns its recorded
-exit, transient access may retry, and an invalid reference is fatal.
-After observing an exit, ordinary Haskell or an advisory can start a new actor
-explicitly without pretending it is the actor that exited.
+`awaitExit ref` is different: target termination is its successful observation
+and returns the retained exact `ActorExit`. An invalid reference makes the
+invoking fragment unsatisfiable.
+Failure-prone work should therefore use `runActor` or explicit
+`startActor`/`awaitExit`, then start a new child in ordinary Haskell if policy
+calls for it. The DSL has no mirrored `tryX` family or transparent replay, and
+multi-result calls wait for a concrete protocol that needs them. Rust records
+terminal failure, attempts the authored shutdown hook, and performs final
+cleanup without a provider request in the dying actor.
 
-Failure-prone delegated work should prefer the supervised shape: `startActor`,
-`awaitExit`, inspect the exact typed exit, and explicitly start another child when
-appropriate. The resident model can make that decision and write new Haskell
-inside the ordinary control flow. The initial runtime does not transparently
-replay a dead actor's in-flight work.
-
-Rust retains structured low-level failures internally. The model-facing DSL
-does not mirror every operation with `tryStart`, `tryCall`, `tryCast`, and
-`tryWait`.
-
-Rust retains the terminal failure in `ActorExit`, runs the authored shutdown
-hook when possible, and performs authoritative cleanup. No final provider
-request runs in the dying actor. Multi-result calls remain deferred until a
-concrete protocol shows that ordinary calls and messages are insufficient.
-
-An abnormal child exit opens an advisory only when no active `awaitExit` or failed
-call obligation already observes that exact terminal transition. The model may
-act through its ordinary tools and then calls a scoped `ackLifecycle` operation
-with the exact presented advisory keys. This wakes inference at a quiescent
-actor boundary, but it neither resumes nor re-enters the actor's authored
-Haskell continuation. Several events may be presented together without losing
-identity. An advisory gets four provider responses. Exhaustion closes and
-records it, then returns to normal scheduling without terminating the owner.
+An abnormal child exit opens an advisory only when no active `awaitExit` or
+failed call obligation already observes that exact terminal transition. Its
+workbench may execute fenced Haskell under the owner's principal, including
+ordinary actor operations, and exposes a scoped `ackLifecycle` action for the
+exact presented advisory keys. This wakes inference at a quiescent actor
+boundary, but it neither resumes nor re-enters the actor's authored Haskell
+continuation. The complete deduplication, budgeting, and provider-failure
+contract is in
+[architecture.md](architecture.md#failure-settlement-and-lifecycle-advisory).
 
 ## 4. Typed deliberation
 
@@ -310,6 +393,9 @@ Required behavior:
 - expressions may inspect or invoke existing live values;
 - compile failures preserve previously committed items and return useful GHC
   diagnostics;
+- an unsatisfiable effect abandons only the current disposable fragment,
+  releases its temporary roots, and returns a structured receipt to the same
+  agent session;
 - declaration-only progress does not accidentally complete the deliberation;
 - `complete expression` can succeed only when the expression has the required
   type;
@@ -327,16 +413,16 @@ Tidepool surface such as:
 - `:bindings` — live names, types, ownership, and abbreviated values;
 - `:program` — installed behavior, exported actor specifications, definition
   generations, and provenance;
-- `:capabilities` — available operations and delegation limits, without
+- `:capabilities` — available operations and grant limits, without
   exposing forgeable identifiers.
 
 These are views over runtime truth, not a second mutable registry.
 
 ## 6. One lexical scope per actor
 
-An actor has one persistent lexical scope. There is no separate “fixed harness
-scope” and “model workbench scope.” Ordinary Haskell shadowing is the evolution
-mechanism:
+An actor has one persistent lexical scope. There is no separate installed-
+program scope and model-workbench scope. Ordinary Haskell shadowing is the
+evolution mechanism:
 
 - old closures retain old references;
 - future compilation sees the newest visible definition;
@@ -381,7 +467,7 @@ roots so later compaction or machine rotation has a sound reachability target.
 
 ## 8. Self-improving behavior
 
-A fixed harness can ask for a replacement behind a stable interface:
+An actor program can ask for a replacement behind a stable interface:
 
 ```haskell
 data Controller observation action = Controller
@@ -400,7 +486,7 @@ improve
 ```
 
 The agent may define new private types and helpers while producing the next
-`Controller`. The harness can test it, install it, and retain the predecessor.
+`Controller`. The program can test it, install it, and retain the predecessor.
 This is self-extension through typed values rather than source-file mutation.
 
 ## 9. Dynamic protocols and child actors
@@ -413,13 +499,14 @@ data Reviewer result where
   Review  :: CandidateChange -> Reviewer ReviewFindings
   Revise  :: CandidateChange -> ReviewFindings -> Reviewer CandidateChange
 
-reviewerSpec :: ActorSpec ReviewStartup Reviewer ReviewerSummary
-reviewerSpec = ...
+reviewerDefinition :: ActorDefinition ReviewStartup Reviewer ReviewerSummary
+reviewerDefinition = ...
 ```
 
 It can then spawn and call the child with ordinary types:
 
 ```haskell
+reviewerSpec <- promoteActor reviewerDefinition
 reviewer <- startActor reviewerSpec startup
 call reviewer (Review candidate)
 ```
@@ -439,27 +526,35 @@ not a substitute for an independent reviewer.
 
 ## 10. Structured continuation fork
 
-The canonical fork contract is in
-[architecture.md](architecture.md#fork). Its low-level Haskell discriminator
-is conceptually:
+The canonical fork contract is in [architecture.md](architecture.md#fork).
+The small public wrapper is conceptually:
 
 ```haskell
-data ForkSide seed api exit
-  = Parent [AgentRef api exit]
-  | Child seed
+forkActors
+  :: Members '[Actor, ActorLocal api exit] effs
+  => NonEmpty seed
+  -> (seed -> Eff effs exit)
+  -> Eff effs [AgentRef api exit]
 ```
 
-The ordinary wrapper hides this discriminator: the parent gets ready child
-references and each child enters its typed startup branch. Parent-owned
-continuation references remain present as Haskell values but child use enters
-terminal `InvalidAfterFork` failure.
+This is a useful intersection rather than duplicate actor machinery:
+`ActorLocal` fixes the current incarnation's protocol and successful-exit
+indexes, while `Actor` grants the outward ability to create actors.
+
+The runtime-private operation still has a process-fork-like parent/child
+discriminator. The wrapper consumes it: the parent receives ready exact child
+references, while each child runs the supplied branch through its new
+actor-local interpreter and publishes the returned `exit`. The child branch
+never falls through into the parent's continuation. Parent-owned continuation
+references remain present as Haskell values, but child use fails with
+`InvalidAfterFork` under the ordinary fragment-settlement rule.
 
 ## 11. Serial execution and supervision
 
 [architecture.md](architecture.md#9-supervision-and-shutdown) owns lifecycle
 semantics. The Haskell consequences are small: one actor is non-reentrant;
 `AgentRef api exit` supports repeatable typed `awaitExit`; abnormal exits create
-advisory model turns, not Haskell events; and `ActorSpec` supplies a
+advisory model turns, not Haskell events; and `ActorDefinition` supplies a
 `ShutdownReason` handler for cooperative cleanup. Rust owns recursive subtree
 termination and the twelve-hour watchdog.
 
@@ -488,14 +583,14 @@ data Specialist answer where
     -> Specialist answer
 ```
 
-The dynamic code may invent `api`, but the fixed harness only needs to know how
-to spawn the packaged specification and run the packaged client. This is a
+The dynamic code may invent `api`, but the enclosing program only needs to know
+how to spawn the packaged specification and run the packaged client. This is a
 useful design constraint: self-extension produces typed artifacts behind
 stable membranes instead of spraying source strings through the runtime.
 
 ## 13. Verification pattern
 
-The default development harness should encourage—and where appropriate
+The default development actor library should encourage—and where appropriate
 require—this loop:
 
 1. construct a candidate;
@@ -508,8 +603,8 @@ require—this loop:
 
 A model may author the strategy, but it cannot acquire integration authority
 by returning a persuasive record. Runtime-observed command and actor provenance
-remain distinguishable from model-authored claims. This is a prompt and
-harness policy by default, not a universal evidence ladder in the actor kernel.
+remain distinguishable from model-authored claims. This is prompting and actor-
+program policy by default, not a universal evidence ladder in the kernel.
 
 ## 14. What must leave Haskell
 

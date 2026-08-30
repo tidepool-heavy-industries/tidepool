@@ -1,11 +1,8 @@
 # Self-writing Haskell actors
 
-Status: implementation is incremental. The Rust actor registry, ownership
-tree, exact waits, live-value mailboxes, actor-local model sessions, execution
-principal mounting, exact source-import membrane, nominal effect routing,
-provider-neutral model seam, and the first typed Haskell `awaitExit` vertical
-have landed. Program images, `ActorSpec`, startup, actor-local effect-stack
-interpreters, and the full resident actor workbench remain planned here.
+Status: active and incremental. The canonical landed-versus-pending inventory
+and next delivery stage are in
+[the implementation plan](implementation.md#2-current-implementation-baseline).
 
 ## Thesis
 
@@ -38,8 +35,9 @@ retain for rollback.
 ## Accepted direction
 
 - An actor combines one accumulating model conversation, one persistent
-  Haskell environment, one serial control flow, and one fixed effect stack
-  interpreted under Rust-owned authority.
+  Haskell environment, one serial control flow, and one effect stack fixed for
+  that incarnation under Rust-owned authority. Effect algebras remain an
+  extensible Haskell design vocabulary, not a global ABI enum.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
   carry live typed values; JSON is only a durable or external boundary.
 - Fresh spawn deploys an explicit program into a fresh context. Structural
@@ -48,6 +46,9 @@ retain for rollback.
 - `startActor` publishes only a ready exact-incarnation reference. Exact calls
   never invent results or substitute actors; failure-prone jobs use
   `startActor`/`awaitExit` supervision and explicit Haskell control flow.
+- An abstract `ActorRuntime capEffs` token selects a trusted capability
+  interpreter; the kernel composes it with `ActorLocal api exit` without
+  reflecting either row into Rust or carrying ambient launch authority.
 - One actor-turn admission spans a complete agent session, while shorter
   machine checkouts serialize only its Haskell run segments. Startup,
   deliberation, and advisory share the same provider/fenced-Haskell executor.
@@ -66,12 +67,12 @@ restating it unless an acceptance test needs the detail.
 1. [Architecture](architecture.md) is canonical for runtime semantics,
    invariants, lifecycle, construction, and persistence.
 2. [Live values and authority](live-values-and-authority.md) defines same-
-   machine value transfer, caller identity, capability delegation, and the
+   machine value transfer, caller identity, launch grants, and the
    distinction between invoking a closure and calling an actor.
 3. [Haskell interaction surface](haskell-surface.md) is canonical for typed API
    consequences and the model-facing Haskell experience.
-4. [Implementation plan](implementation.md) contains only delivery order,
-   dependencies, acceptance criteria, and retirement work.
+4. [Implementation plan](implementation.md) owns current status, delivery
+   order, acceptance criteria, and retirement work.
 
 ## Vocabulary
 
@@ -80,16 +81,18 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | Term | Meaning |
 |---|---|
 | actor | One actor identity, mailbox, Haskell program, persistent Haskell environment, and accumulating model context |
-| actor program | The fixed authored harness plus currently installed typed behavior |
+| actor program | One installed `ActorProgram`: an authored `Eff` continuation with fixed row, protocol, and exit types |
+| actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
+| actor specification | An opaque deployable `ActorSpec` produced by promoting a definition across the program-image membrane |
 | deliberation | A typed request from the Haskell program to its resident model context |
 | agent session | The possibly multi-round interaction that answers one deliberation |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
-| program image | The declarations, interface metadata, and live roots required to deploy an actor specification |
+| program image | The exact declarations, interface metadata, and live roots captured inside a promoted actor specification |
 | program snapshot | An immutable point in an actor's Haskell environment, suitable for structural sharing |
 | execution principal | The runtime identity under whose authority Haskell is currently executing |
 | capability | An opaque live value whose operations are authorized by Rust at use time |
-| effect policy | The actor-local allowed request families, handlers, grants, and suspension policy |
-| actor interpreter | One actor-local Rust handler instance enforcing an effect policy by nominal request identity |
+| runtime profile | An abstract `ActorRuntime capEffs` token naming a trusted capability interpreter, source facade, lifecycle restrictions, and launch policy |
+| actor interpreter | One actor-local Rust handler instance created from a runtime profile and enforcing nominal requests under the actor principal |
 | advisory turn | A Developer-triggered model session for an abnormal runtime fact with no parked Haskell result obligation |
 
 ## Relationship to existing work
@@ -97,10 +100,10 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 - [DevSwarm](../devswarm-haskell-dsl.md) remains the project-specific dogfood
   program. The actor model supplies its eventual execution substrate; DevSwarm
   still owns repository policy and roles.
-- [Resident-session kernel](../resident-session-kernel-design.md) and
-  [session-crate design](../session-crate-design.md) own lower-level machine
-  suspension and frontend mounting decisions. This plan consumes those
-  mechanisms rather than introducing another continuation registry.
+- [`tidepool-runtime::session`](../../tidepool-runtime/src/session/mod.rs) and
+  its [crate charter](../../tidepool-runtime/CLAUDE.md) own resident-machine
+  suspension, checkout, roots, and frontend mounting seams. This plan consumes
+  those mechanisms rather than introducing another continuation registry.
 - [`ValueHandle`'s contract](../../docs/continuation-parking-contract.md)
   already proves that same-machine closure delivery is possible. The actor
   layer adds mailbox ownership and caller authorization above it.
@@ -117,9 +120,9 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
   extensions, but the initial ownership tree always terminates with its owner.
 - Automatically promoting every scratch declaration into permanent program
   state.
-- Solving executable-code reclamation before the semantic spikes establish the
-  useful workload. The design must expose growth and allow bounded rotation,
-  but policy should follow measurement.
+- Solving executable-code reclamation before real actor workloads establish
+  the useful pressure. The design must expose growth and allow bounded
+  rotation, but policy should follow measurement.
 
 ## Retirement
 

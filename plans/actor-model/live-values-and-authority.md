@@ -25,8 +25,8 @@ leaves they eventually invoke can check their caller.
 | Class | Examples | Mobility | Restart |
 |---|---|---|---|
 | ordinary Haskell value | sums, products, maps, pure closures | Same machine by live root | No, unless explicitly encoded |
-| actor program value | `ActorProgram api exit`, `ActorSpec startup api exit`, function-bearing record | Same machine plus declaration image when deployed | No initially |
-| opaque runtime value | `AgentRef api exit`, worktree handle, command runner | As permitted by its registry entry | Recover only through its owner |
+| actor program value | `ActorProgram capEffs api exit`, `ActorDefinition startup api exit`, opaque `ActorSpec startup api exit`, function-bearing record | Same machine; promotion captures an exact deployment image | No initially |
+| opaque runtime value | `AgentRef api exit`, `ActorRuntime capEffs`, worktree handle, command runner | Copyable where its registry permits; use is caller-checked | Recover only through its owner |
 | durable value | JSON stored through get/put | Anywhere the backend exposes it | Yes |
 | external wire value | provider or MCP payload | Encoded at the boundary | According to that protocol |
 
@@ -63,8 +63,8 @@ Passing its function is intentionally insufficient.
 ## 4. Capability registry
 
 Authority-bearing Haskell values contain unforgeable identifiers into a
-Rust-owned capability registry. Their constructors remain hidden in a sealed
-kernel module. Registry entries record:
+Rust-owned capability registry. Their constructors are abstract behind the
+owning module's public operations. Registry entries record:
 
 - owning actor and incarnation;
 - allowed callers or delegated grants;
@@ -72,6 +72,13 @@ kernel module. Registry entries record:
 - behavior when the owner forks;
 - cleanup owned by Rust;
 - optional failure provenance.
+
+`ActorRuntime capEffs` uses this same registry. Its Haskell type index ties a
+program to a trusted runtime profile, while the registry entry supplies the
+interpreter factory and launch policy. Copying the token is harmless: using it
+to start an actor still checks the current principal. There is no separate
+runtime-profile registry and no Rust reflection of `capEffs` or the composed
+actor row.
 
 The common authorization behavior should be registered callers rather than a
 blanket prohibition on copying the surrounding value. A failed operation
@@ -94,8 +101,8 @@ Each capability class registers one fork policy with the Rust interpreter:
 |---|---|---|
 | `OwnerOnly` | Child can share the enclosing value but is not an authorized caller | Parent-only integration authority |
 | `ShareWithChild` | Child becomes an authorized caller of the same resource | Read-only repository view |
-| `RebindForChild` | Runtime creates and grants a child-specific resource | Isolated worktree or mailbox endpoint |
-| `InvalidAfterFork` | The reference is actor-linear and child use terminates the actor | Continuation or reply-obligation reference |
+| `RebindForChild` | Runtime maps the copied handle to a child-specific resource | Isolated worktree endpoint |
+| `InvalidAfterFork` | The reference is actor-linear and child use is rejected | Continuation or reply-obligation reference |
 
 Fork policy is defined by the capability owner, not selected by arbitrary
 model-authored Haskell. Haskell may request explicit delegation when policy
@@ -115,38 +122,49 @@ in the parent and become invalid for child principals.
 Rust enforces this in the actor interpreter. It does not remove bindings,
 rewrite closures, or alter Haskell types. A child receives a Developer message
 describing invalid references after the shared provider prefix; actual use
-terminates the actor with `InvalidAfterFork` failure.
+fails with `InvalidAfterFork`. As with every unsatisfiable effect, that abandons
+a disposable workbench fragment or terminates an installed actor-program
+continuation.
 
 `call` remains single-result; fork never changes reply cardinality implicitly.
 
-## 6. Delegation and revocation
+## 6. Launch grants
 
-Delegation explicitly registers another actor as an allowed caller, preferably
-with a narrower operation set and lifetime than the owner's grant. A useful
-surface may eventually resemble:
+Fresh spawn needs one explicit way to authorize a child for a particular
+resource. The runtime must not recursively inspect the startup value for
+capability leaves, and a static runtime profile cannot name per-instance
+resources such as one worktree.
+
+The initial membrane is an opaque launch-grant recipe attached immutably to an
+actor specification:
 
 ```haskell
-delegate
-  :: Members '[Actor, Delegate] effs
-  => Capability operation
-  -> AgentRef api exit
-  -> DelegationPolicy
-  -> Eff effs (Delegated operation)
+data LaunchGrant
 
-revoke
-  :: Member Delegate effs
-  => Delegated operation
-  -> Eff effs ()
+withLaunchGrant
+  :: LaunchGrant
+  -> ActorSpec startup api exit
+  -> ActorSpec startup api exit
 ```
 
-The types and names are illustrative. The contract matters:
+Capability-owning modules create these recipes through their own small
+vocabulary—for example, a worktree module may expose a function that requests
+its registered child policy for one handle. The model does not choose an
+arbitrary `Share`/`Rebind` enum, forge a registry identifier, or edit a generic
+grant record.
 
-- delegation is explicit and observable;
-- a grant is tied to an actor incarnation, not a reusable numeric label;
-- revocation is checked at use, including by already-copied closures;
-- actor retirement revokes grants it owns unless a resource has been
-  deliberately transferred;
-- a child cannot further delegate unless its grant says so.
+At `startActor`, Rust checks the current principal, the resource's registered
+policy, and compatibility with the child interpreter. It then redeems every
+recipe atomically for the newly allocated child before startup. Any refusal
+rolls back the unpublished child and all grants already derived for it.
+Copying a recipe or decorated specification transfers no authority: every
+redemption is checked again, and the resource owner decides whether a recipe
+is reusable, rebinds a fresh resource, or has expired.
+
+This is launch metadata, not part of the program image. General post-start
+`delegate`/`revoke` operations are deferred until a real protocol needs them.
+Actor retirement still revokes grants it owns, and revocation is always
+checked at use by already-copied handles and closures.
 
 ## 7. Mailbox root ownership
 
@@ -218,8 +236,8 @@ The authority layer is not complete until tests demonstrate all of these:
 1. A pure closure crosses actors, survives producer retirement, and runs.
 2. A closure containing an owner-only capability crosses but fails with the
    receiver named as the unauthorized caller.
-3. Explicit delegation makes the same invocation succeed, and revocation makes
-   an already-copied closure fail again.
+3. A registered launch grant makes the same invocation succeed for the child,
+   while owner retirement makes an already-copied handle fail again.
 4. A fork inherits only capabilities whose class registers or rebinds it.
 5. A local closure call uses caller authority; an actor `call` uses callee
    authority.
