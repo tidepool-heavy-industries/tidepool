@@ -26,6 +26,7 @@ tidepool-runtime.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 tidepool-mcp.workspace = true
 tidepool-testing.workspace = true
 tokio = { workspace = true, features = ["rt"] }

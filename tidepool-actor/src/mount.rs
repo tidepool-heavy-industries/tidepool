@@ -3,7 +3,10 @@ use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectBoundary, EffectStackAbi};
 use tidepool_repr::{PrincipalId, SessionId};
-use tidepool_runtime::session::{OutputSink, ResidentError, ResidentSession, SessionRunContext};
+use tidepool_runtime::session::{
+    MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionRunContext,
+    SourceImports,
+};
 
 use crate::{ActorRef, ActorRegistry, ActorRegistryError, ActorTurnKind, TurnLease};
 
@@ -17,6 +20,31 @@ pub struct ActorPlacement {
     pub lexical_scope: ScopeId,
 }
 
+/// Exact model-visible declaration imports for one actor incarnation.
+///
+/// The only public constructor accepts materialized exact-export facades, so
+/// actor startup cannot smuggle an ambient parent module or arbitrary import
+/// string across the fresh-scope boundary. Standard Tidepool imports remain
+/// part of the shared turn template rather than this actor-local membrane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActorSourceImports(SourceImports);
+
+impl ActorSourceImports {
+    #[must_use]
+    pub fn from_exact_facades<'a>(
+        facades: impl IntoIterator<Item = &'a MaterializedFacade>,
+    ) -> Self {
+        Self(SourceImports::from_specs(
+            facades.into_iter().map(MaterializedFacade::module_name),
+        ))
+    }
+
+    #[must_use]
+    pub fn source_imports(&self) -> &SourceImports {
+        &self.0
+    }
+}
+
 /// Actor-owned portion of a resident machine mount. Machine checkout remains
 /// in `tidepool-runtime`; this value prevents scope and authority selection
 /// from drifting apart at the actor boundary.
@@ -26,6 +54,7 @@ pub struct ActorSessionContext {
     pub placement: ActorPlacement,
     pub effect_abi: EffectStackAbi,
     pub effect_boundary: EffectBoundary,
+    pub source_imports: ActorSourceImports,
 }
 
 impl ActorSessionContext {

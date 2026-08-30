@@ -8,9 +8,10 @@ use tidepool_repr::MonotonicIdIssuer;
 use crate::agent_session::AgentSessionState;
 use crate::{
     ActorAgentSession, ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorPlacement,
-    ActorRef, ActorSessionContext, CallDisposition, CallFailure, CallId, CallStatus, CallTicket,
-    EventCausality, ExitObservation, MailboxFailure, MailboxMessageKind, MailboxValue, MessageId,
-    ParkedObligation, StartInitiator, WaitDisposition, WaitError, WaitId, WaitTicket,
+    ActorRef, ActorSessionContext, ActorSourceImports, CallDisposition, CallFailure, CallId,
+    CallStatus, CallTicket, EventCausality, ExitObservation, MailboxFailure, MailboxMessageKind,
+    MailboxValue, MessageId, ParkedObligation, StartInitiator, WaitDisposition, WaitError, WaitId,
+    WaitTicket,
 };
 
 /// Immutable attributes selected before an actor begins initialization.
@@ -20,6 +21,7 @@ pub struct ActorDescriptor {
     effect_abi: EffectStackAbi,
     effect_boundary: EffectBoundary,
     placement: ActorPlacement,
+    source_imports: ActorSourceImports,
 }
 
 impl ActorDescriptor {
@@ -38,6 +40,7 @@ impl ActorDescriptor {
             effect_abi,
             effect_boundary,
             placement,
+            source_imports: ActorSourceImports::default(),
         }
     }
 
@@ -75,6 +78,19 @@ impl ActorDescriptor {
     #[must_use]
     pub fn placement(&self) -> ActorPlacement {
         self.placement
+    }
+
+    /// Install the exact declaration membrane compiled for this actor. This
+    /// consumes the descriptor so the import set is fixed before startup.
+    #[must_use]
+    pub fn with_source_imports(mut self, source_imports: ActorSourceImports) -> Self {
+        self.source_imports = source_imports;
+        self
+    }
+
+    #[must_use]
+    pub fn source_imports(&self) -> &ActorSourceImports {
+        &self.source_imports
     }
 }
 
@@ -413,6 +429,7 @@ impl ActorRegistry {
         let placement = actor_entry.descriptor.placement;
         let effect_abi = actor_entry.descriptor.effect_abi.clone();
         let effect_boundary = actor_entry.descriptor.effect_boundary.clone();
+        let source_imports = actor_entry.descriptor.source_imports.clone();
         actor_entry.active_turn = Some(kind);
         Ok(TurnLease {
             actor,
@@ -420,6 +437,7 @@ impl ActorRegistry {
             placement,
             effect_abi,
             effect_boundary,
+            source_imports,
             registry: Arc::downgrade(&self.inner),
             released: false,
         })
@@ -438,6 +456,7 @@ impl ActorRegistry {
             placement: actor_entry.descriptor.placement,
             effect_abi: actor_entry.descriptor.effect_abi.clone(),
             effect_boundary: actor_entry.descriptor.effect_boundary.clone(),
+            source_imports: actor_entry.descriptor.source_imports.clone(),
         })
     }
 
@@ -997,6 +1016,7 @@ pub struct TurnLease {
     placement: ActorPlacement,
     effect_abi: EffectStackAbi,
     effect_boundary: EffectBoundary,
+    source_imports: ActorSourceImports,
     registry: Weak<RegistryInner>,
     released: bool,
 }
@@ -1009,6 +1029,7 @@ impl TurnLease {
             placement: self.placement,
             effect_abi: self.effect_abi.clone(),
             effect_boundary: self.effect_boundary.clone(),
+            source_imports: self.source_imports.clone(),
         }
     }
 
