@@ -26,7 +26,9 @@ pub use mailbox::{
     CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
     MessageId, ParkedObligation, WaitError, WaitId, WaitTicket,
 };
-pub use mount::{mount_actor_turn, ActorRunTarget, ActorSessionContext, MountActorTurnError};
+pub use mount::{
+    mount_actor_turn, ActorPlacement, ActorRunTarget, ActorSessionContext, MountActorTurnError,
+};
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
     ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,

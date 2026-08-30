@@ -1,10 +1,20 @@
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_repr::PrincipalId;
+use tidepool_repr::{PrincipalId, SessionId};
 use tidepool_runtime::session::{OutputSink, ResidentError, ResidentSession, SessionRunContext};
 
 use crate::{ActorRef, ActorRegistry, ActorRegistryError, ActorTurnKind, TurnLease};
+
+/// Immutable location of one actor incarnation in the resident Haskell
+/// machine. The registry owns this mapping; turn callers select an actor, not
+/// an independently assembled set of scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActorPlacement {
+    pub session: SessionId,
+    pub resource_scope: RealmId,
+    pub lexical_scope: ScopeId,
+}
 
 /// Actor-owned portion of a resident machine mount. Machine checkout remains
 /// in `tidepool-runtime`; this value prevents scope and authority selection
@@ -12,16 +22,15 @@ use crate::{ActorRef, ActorRegistry, ActorRegistryError, ActorTurnKind, TurnLeas
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActorSessionContext {
     pub actor: ActorRef,
-    pub resource_scope: RealmId,
-    pub lexical_scope: ScopeId,
+    pub placement: ActorPlacement,
 }
 
 impl ActorSessionContext {
     #[must_use]
     pub fn run_context(self) -> SessionRunContext {
         SessionRunContext::new(
-            self.resource_scope,
-            self.lexical_scope,
+            self.placement.resource_scope,
+            self.placement.lexical_scope,
             PrincipalId::from(self.actor),
         )
     }
@@ -61,13 +70,14 @@ pub enum MountActorTurnError<TargetError> {
 pub fn mount_actor_turn<Target>(
     registry: &ActorRegistry,
     target: &mut Target,
-    context: ActorSessionContext,
+    actor: ActorRef,
     kind: ActorTurnKind,
 ) -> Result<TurnLease, MountActorTurnError<Target::Error>>
 where
     Target: ActorRunTarget,
 {
-    let lease = registry.begin_turn(context.actor, kind)?;
+    let lease = registry.begin_turn(actor, kind)?;
+    let context = lease.session_context();
     target
         .install_actor_context(context.run_context())
         .map_err(MountActorTurnError::Target)?;
@@ -105,7 +115,11 @@ mod tests {
                 ActorDescriptor {
                     label: "actor".into(),
                     effect_stack: vec![],
-                    session: tidepool_repr::SessionId(1),
+                    placement: ActorPlacement {
+                        session: tidepool_repr::SessionId(1),
+                        resource_scope: RealmId(11),
+                        lexical_scope: ScopeId::ROOT,
+                    },
                 },
                 StartInitiator::Runtime,
             )
@@ -118,12 +132,8 @@ mod tests {
         let registry = ActorRegistry::new();
         let actor = ready_actor(&registry);
         let mut target = FakeTarget::default();
-        let context = ActorSessionContext {
-            actor,
-            resource_scope: RealmId(11),
-            lexical_scope: ScopeId::ROOT,
-        };
-        let lease = mount_actor_turn(&registry, &mut target, context, ActorTurnKind::Haskell)
+        let context = registry.session_context(actor).expect("actor context");
+        let lease = mount_actor_turn(&registry, &mut target, actor, ActorTurnKind::Haskell)
             .expect("mount actor");
 
         assert_eq!(target.installed, Some(context.run_context()));
@@ -145,16 +155,7 @@ mod tests {
             installed: None,
             fail: true,
         };
-        let result = mount_actor_turn(
-            &registry,
-            &mut target,
-            ActorSessionContext {
-                actor,
-                resource_scope: RealmId(11),
-                lexical_scope: ScopeId::ROOT,
-            },
-            ActorTurnKind::Haskell,
-        );
+        let result = mount_actor_turn(&registry, &mut target, actor, ActorTurnKind::Haskell);
         assert!(matches!(
             result,
             Err(MountActorTurnError::Target("dead scope"))

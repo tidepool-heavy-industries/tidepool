@@ -205,7 +205,8 @@ fn model_usage(usage: Usage) -> ModelUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActorDescriptor, StartInitiator};
+    use crate::{ActorDescriptor, ActorPlacement, StartInitiator};
+    use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
 
     fn ready_actor(registry: &ActorRegistry) -> ActorRef {
         let starting = registry
@@ -214,7 +215,11 @@ mod tests {
                 ActorDescriptor {
                     label: "agent".into(),
                     effect_stack: vec![],
-                    session: tidepool_repr::SessionId(1),
+                    placement: ActorPlacement {
+                        session: tidepool_repr::SessionId(1),
+                        resource_scope: RealmId::ROOT,
+                        lexical_scope: ScopeId::ROOT,
+                    },
                 },
                 StartInitiator::Runtime,
             )

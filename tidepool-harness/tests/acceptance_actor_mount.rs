@@ -3,8 +3,7 @@
 //! resident-session substrate.
 
 use tidepool_actor::{
-    mount_actor_turn, ActorDescriptor, ActorRegistry, ActorSessionContext, ActorTurnKind,
-    StartInitiator,
+    mount_actor_turn, ActorDescriptor, ActorPlacement, ActorRegistry, ActorTurnKind, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -59,23 +58,6 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
         .compile(&source, "result")
         .expect("compile actor turn");
 
-    let registry = ActorRegistry::new();
-    let starting = registry
-        .begin_start(
-            None,
-            ActorDescriptor {
-                label: "literal actor".into(),
-                effect_stack: mock::EFFECT_NAMES
-                    .iter()
-                    .map(|name| (*name).to_string())
-                    .collect(),
-                session: tidepool_repr::SessionId(1),
-            },
-            StartInitiator::Runtime,
-        )
-        .expect("begin actor startup");
-    let actor = registry.publish_ready(starting).expect("publish actor");
-
     let effect_names = mock::EFFECT_NAMES
         .iter()
         .map(|name| (*name).to_string())
@@ -95,12 +77,28 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
     let lexical_scope = session
         .mint_scope(ScopeId::ROOT)
         .expect("mint actor lexical scope");
-    let context = ActorSessionContext {
-        actor,
-        resource_scope: RealmId::fresh(),
-        lexical_scope,
-    };
-    let lease = mount_actor_turn(&registry, &mut session, context, ActorTurnKind::Haskell)
+    let registry = ActorRegistry::new();
+    let starting = registry
+        .begin_start(
+            None,
+            ActorDescriptor {
+                label: "literal actor".into(),
+                effect_stack: mock::EFFECT_NAMES
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+                placement: ActorPlacement {
+                    session: tidepool_repr::SessionId(1),
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope,
+                },
+            },
+            StartInitiator::Runtime,
+        )
+        .expect("begin actor startup");
+    let actor = registry.publish_ready(starting).expect("publish actor");
+    let context = registry.session_context(actor).expect("actor context");
+    let lease = mount_actor_turn(&registry, &mut session, actor, ActorTurnKind::Haskell)
         .expect("mount actor turn");
 
     assert_eq!(session.run_context(), context.run_context());

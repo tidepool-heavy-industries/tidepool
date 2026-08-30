@@ -63,8 +63,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tidepool_actor::{
-    ActorDescriptor, ActorRegistry, MailboxDelivery, MailboxValue, StartInitiator,
+    ActorDescriptor, ActorPlacement, ActorRegistry, MailboxDelivery, MailboxValue, StartInitiator,
 };
+use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::harness::{AnswerContract, Session};
@@ -266,7 +267,11 @@ async fn mounted_closure_survives_retirement_and_suspension() {
             ActorDescriptor {
                 label: "closure producer".into(),
                 effect_stack: Vec::new(),
-                session: sid,
+                placement: ActorPlacement {
+                    session: sid,
+                    resource_scope: RealmId::ROOT,
+                    lexical_scope: ScopeId::ROOT,
+                },
             },
             StartInitiator::Runtime,
         )
@@ -280,7 +285,11 @@ async fn mounted_closure_survives_retirement_and_suspension() {
             ActorDescriptor {
                 label: "closure consumer".into(),
                 effect_stack: Vec::new(),
-                session: sid,
+                placement: ActorPlacement {
+                    session: sid,
+                    resource_scope: RealmId::ROOT,
+                    lexical_scope: ScopeId::ROOT,
+                },
             },
             StartInitiator::Runtime,
         )

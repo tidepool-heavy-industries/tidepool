@@ -28,6 +28,9 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
   actor turn lease.
 - Same-machine delivery is checked from the actor incarnation's `SessionId`
   before mailbox acceptance.
+- The registry owns each incarnation's session, resource scope, and lexical
+  scope. Mount callers supply an `ActorRef`; the admitted `TurnLease` carries
+  the matching immutable context and principal.
 - Exit events record whether the owner was already observing that exact exit
   through a call or wait at the terminal transition; advisory code consumes
   that fact instead of racing a later registry lookup.

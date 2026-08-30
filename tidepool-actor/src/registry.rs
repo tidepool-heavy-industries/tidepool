@@ -2,13 +2,13 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
-use tidepool_repr::{MonotonicIdIssuer, SessionId};
+use tidepool_repr::MonotonicIdIssuer;
 
 use crate::{
-    ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorRef, CallDisposition, CallFailure,
-    CallId, CallStatus, CallTicket, EventCausality, ExitObservation, MailboxFailure,
-    MailboxMessageKind, MailboxValue, MessageId, ParkedObligation, StartInitiator, WaitDisposition,
-    WaitError, WaitId, WaitTicket,
+    ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorPlacement, ActorRef,
+    ActorSessionContext, CallDisposition, CallFailure, CallId, CallStatus, CallTicket,
+    EventCausality, ExitObservation, MailboxFailure, MailboxMessageKind, MailboxValue, MessageId,
+    ParkedObligation, StartInitiator, WaitDisposition, WaitError, WaitId, WaitTicket,
 };
 
 /// Immutable attributes selected before an actor begins initialization.
@@ -16,9 +16,7 @@ use crate::{
 pub struct ActorDescriptor {
     pub label: String,
     pub effect_stack: Vec<String>,
-    /// Resident machine on which this incarnation's live values and
-    /// continuations exist.
-    pub session: SessionId,
+    pub placement: ActorPlacement,
 }
 
 /// A private initialization capability. No callable [`ActorRef`] is exposed
@@ -109,7 +107,7 @@ struct RegistryState {
 
 struct ActorEntry {
     reference: ActorRef,
-    session: SessionId,
+    placement: ActorPlacement,
     owner: Option<ActorRef>,
     children: BTreeSet<ActorRef>,
     lifecycle: ActorLifecycle,
@@ -232,7 +230,7 @@ impl ActorRegistry {
             reference.id,
             ActorEntry {
                 reference,
-                session: descriptor.session,
+                placement: descriptor.placement,
                 owner,
                 children: BTreeSet::new(),
                 lifecycle: ActorLifecycle::Initializing,
@@ -339,12 +337,28 @@ impl ActorRegistry {
         if let Some(obligation) = actor_entry.parked {
             return Err(ActorRegistryError::Parked { actor, obligation });
         }
+        let placement = actor_entry.placement;
         actor_entry.active_turn = Some(kind);
         Ok(TurnLease {
             actor,
             kind,
+            placement,
             registry: Arc::downgrade(&self.inner),
             released: false,
+        })
+    }
+
+    /// Resolve the immutable machine/scoping context registered for one exact
+    /// actor incarnation.
+    pub fn session_context(
+        &self,
+        actor: ActorRef,
+    ) -> Result<ActorSessionContext, ActorRegistryError> {
+        let state = self.inner.state.lock();
+        let actor_entry = entry(&state, actor)?;
+        Ok(ActorSessionContext {
+            actor,
+            placement: actor_entry.placement,
         })
     }
 
@@ -571,8 +585,8 @@ impl ActorRegistry {
         let wait = WaitId(self.inner.wait_ids.next_raw());
         let mut state = self.inner.state.lock();
         require_ready(&state, waiter)?;
-        let waiter_session = entry(&state, waiter)?.session;
-        let target_session = entry(&state, target)?.session;
+        let waiter_session = entry(&state, waiter)?.placement.session;
+        let target_session = entry(&state, target)?.placement.session;
         if waiter_session != target_session {
             return Err(WaitError::MachineBoundary {
                 waiter,
@@ -736,7 +750,7 @@ impl ActorRegistry {
         let target = call_entry.target;
         let caller = call_entry.caller;
         require_ready(&state, target)?;
-        let target_session = entry(&state, target)?.session;
+        let target_session = entry(&state, target)?.placement.session;
         if value.session() != target_session {
             return Err(MailboxFailure::MachineBoundary {
                 actor: target,
@@ -880,11 +894,20 @@ impl Drop for StartingActor {
 pub struct TurnLease {
     actor: ActorRef,
     kind: ActorTurnKind,
+    placement: ActorPlacement,
     registry: Weak<RegistryInner>,
     released: bool,
 }
 
 impl TurnLease {
+    #[must_use]
+    pub fn session_context(&self) -> ActorSessionContext {
+        ActorSessionContext {
+            actor: self.actor,
+            placement: self.placement,
+        }
+    }
+
     pub fn release(mut self) {
         self.release_inner();
     }
@@ -927,8 +950,8 @@ fn validate_delivery(
 ) -> Result<(), MailboxFailure> {
     require_ready(state, caller)?;
     require_ready(state, target)?;
-    let caller_session = entry(state, caller)?.session;
-    let target_session = entry(state, target)?.session;
+    let caller_session = entry(state, caller)?.placement.session;
+    let target_session = entry(state, target)?.placement.session;
     if caller_session != target_session {
         return Err(MailboxFailure::ActorMachineBoundary {
             caller,
@@ -1214,12 +1237,18 @@ fn settle_call_failure(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
+    use tidepool_repr::SessionId;
 
     fn descriptor(label: &str) -> ActorDescriptor {
         ActorDescriptor {
             label: label.into(),
             effect_stack: vec!["Deliberate".into()],
-            session: SessionId(1),
+            placement: ActorPlacement {
+                session: SessionId(1),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: ScopeId::ROOT,
+            },
         }
     }
 
@@ -1237,7 +1266,10 @@ mod tests {
             .begin_start(
                 owner,
                 ActorDescriptor {
-                    session,
+                    placement: ActorPlacement {
+                        session,
+                        ..descriptor(label).placement
+                    },
                     ..descriptor(label)
                 },
                 StartInitiator::Runtime,

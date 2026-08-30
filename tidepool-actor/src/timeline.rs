@@ -187,7 +187,11 @@ fn event_name(event: &ActorEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActorDescriptor, ActorExitKind, ActorRegistry, ActorTerminal, StartInitiator};
+    use crate::{
+        ActorDescriptor, ActorExitKind, ActorPlacement, ActorRegistry, ActorTerminal,
+        StartInitiator,
+    };
+    use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
 
     #[test]
     fn folds_registry_events_into_a_retained_timeline() {
@@ -198,7 +202,11 @@ mod tests {
                 ActorDescriptor {
                     label: "reviewer".into(),
                     effect_stack: vec!["Deliberate".into()],
-                    session: tidepool_repr::SessionId(1),
+                    placement: ActorPlacement {
+                        session: tidepool_repr::SessionId(1),
+                        resource_scope: RealmId::ROOT,
+                        lexical_scope: ScopeId::ROOT,
+                    },
                 },
                 StartInitiator::Runtime,
             )
