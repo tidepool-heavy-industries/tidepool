@@ -3,6 +3,27 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One incremental piece of a streaming model response.
+#[derive(Debug, Clone)]
+pub enum StreamDelta {
+    /// A chunk of the assistant's answer text.
+    Text(String),
+    /// A chunk of the provider's reasoning summary.
+    Reasoning(String),
+}
+
+/// Optional destination for streamed response deltas. Dropping the receiver
+/// stops observation without cancelling the provider request.
+pub type StreamSink = tokio::sync::mpsc::UnboundedSender<StreamDelta>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("provider auth invalid or expired: {0}")]
+    Auth(String),
+    #[error("provider call failed: {0}")]
+    Api(String),
+}
+
 /// A message's actual provider role. Runtime-authored actor context uses
 /// [`Role::Developer`], never a synthetic user message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +70,49 @@ pub struct TurnResponse {
     pub reasoning: Option<String>,
     #[serde(skip, default)]
     pub reasoning_items: Vec<ReasoningItem>,
+}
+
+/// One provider-neutral model round. Streaming is observational: the returned
+/// response is complete whether or not a sink is supplied.
+pub trait ModelProvider: Send + Sync {
+    fn complete(
+        &self,
+        request: TurnRequest,
+        sink: Option<StreamSink>,
+    ) -> impl std::future::Future<Output = Result<TurnResponse, ProviderError>> + Send;
+}
+
+/// Object-safe face of [`ModelProvider`] for long-lived provider ownership.
+pub trait DynModelProvider: Send + Sync {
+    fn complete_boxed<'a>(
+        &'a self,
+        request: TurnRequest,
+        sink: Option<StreamSink>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TurnResponse, ProviderError>> + Send + 'a>,
+    >;
+}
+
+impl<P: ModelProvider> DynModelProvider for P {
+    fn complete_boxed<'a>(
+        &'a self,
+        request: TurnRequest,
+        sink: Option<StreamSink>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TurnResponse, ProviderError>> + Send + 'a>,
+    > {
+        Box::pin(self.complete(request, sink))
+    }
+}
+
+impl ModelProvider for dyn DynModelProvider + '_ {
+    async fn complete(
+        &self,
+        request: TurnRequest,
+        sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        self.complete_boxed(request, sink).await
+    }
 }
 
 /// Provider-reported token accounting for one response.
@@ -122,5 +186,60 @@ mod tests {
             reasoning_items: Vec::new(),
         });
         assert_eq!(conversation.messages()[0].content, "compacted");
+    }
+
+    fn sample_reasoning_item() -> ReasoningItem {
+        ReasoningItem(serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "encrypted_content": "opaque-blob",
+        }))
+    }
+
+    #[test]
+    fn message_serialization_excludes_reasoning_items() {
+        let plain = Message {
+            role: Role::Assistant,
+            content: "hello".to_string(),
+            reasoning_items: Vec::new(),
+        };
+        let with_reasoning = Message {
+            reasoning_items: vec![sample_reasoning_item()],
+            ..plain.clone()
+        };
+        let plain_json = serde_json::to_string(&plain).expect("serialize plain message");
+        let reasoning_json =
+            serde_json::to_string(&with_reasoning).expect("serialize message with reasoning");
+        assert_eq!(plain_json, reasoning_json);
+        assert!(!plain_json.contains("reasoning_items"));
+        assert!(!plain_json.contains("encrypted"));
+    }
+
+    #[test]
+    fn usage_accepts_the_original_wire_shape() {
+        let old = serde_json::json!({"input_tokens": 7, "output_tokens": 2});
+        let usage: Usage = serde_json::from_value(old).expect("deserialize original usage");
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn response_serialization_excludes_reasoning_items() {
+        let plain = TurnResponse {
+            text: "hi".to_string(),
+            usage: Usage::default(),
+            reasoning: None,
+            reasoning_items: Vec::new(),
+        };
+        let with_reasoning = TurnResponse {
+            reasoning_items: vec![sample_reasoning_item()],
+            ..plain.clone()
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).expect("serialize plain response"),
+            serde_json::to_string(&with_reasoning).expect("serialize response with reasoning")
+        );
     }
 }
