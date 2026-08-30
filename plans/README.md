@@ -7,6 +7,12 @@ charter / glossary and the plan file is deleted (git is the archive).
 
 ## Active work
 
+- [Self-writing Haskell actors](actor-model/README.md): Rust-owned actor
+  mechanics around typed Haskell programs with resident model contexts and
+  resident GHCi-style environments; live function-valued messages, caller-
+  checked capabilities, program-image reuse, fresh and cache-preserving fork
+  construction, and a staged migration away from global
+  `State`/`render`/`loop` orchestration.
 - [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
   `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
   candidate/review/revision interpreter. The current runnable slice uses a
