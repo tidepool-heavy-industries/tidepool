@@ -386,11 +386,11 @@ fn park_finalize_fragment(
     {
         ParkedOutcome::Suspended {
             id,
-            has_finalized_closure,
+            has_live_payload,
             ..
         } => {
             assert!(
-                has_finalized_closure,
+                has_live_payload,
                 "the finalize request must carry a CLOSURE_SENTINEL for the closure field"
             );
             id
@@ -445,13 +445,13 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
 
         // Mint the handle. The answerer frame stays parked and rooted.
         let h = machine
-            .handle_from_finalized(answerer_id)
+            .handle_from_live_payload(answerer_id)
             .expect("answerer frame holds a finalized payload");
         assert_eq!(machine.handle_realm(h), Some(ANSWERER_REALM));
         assert_receipts(&machine, 2, 1);
         // Minting is once-only: the frame's stash moved into the handle.
         assert!(
-            machine.handle_from_finalized(answerer_id).is_none(),
+            machine.handle_from_live_payload(answerer_id).is_none(),
             "a finalized payload mints exactly one handle"
         );
 

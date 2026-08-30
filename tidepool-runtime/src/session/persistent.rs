@@ -42,7 +42,7 @@ use tidepool_codegen::suspension::{
     SuspensionRun,
 };
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
@@ -104,6 +104,8 @@ pub struct PersistentSession {
     turn_counter: u64,
     /// The suspension tag and its derived handled-effect prefix.
     effect_boundary: EffectBoundary,
+    /// Live-value crossing policy paired with the current effect stack.
+    live_payload: LivePayloadPolicy,
     /// Capacity-one façade state for the REPL/linear session surface.
     active_continuation: Option<ContinuationId>,
     /// A bind root completed through the registry and carried home inside the
@@ -133,6 +135,7 @@ impl PersistentSession {
             scopes: ScopeTree::new(),
             turn_counter: 0,
             effect_boundary,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             active_continuation: None,
             last_bound_root: LinearRootStash(None),
             nursery_size,
@@ -197,11 +200,21 @@ impl PersistentSession {
         &self.effect_boundary
     }
 
-    /// Select the dispatch/suspension boundary for the next mounted actor
-    /// turn. The full actor ABI is retained by the actor descriptor; this core
-    /// needs only the machine-handled prefix and suspension threshold.
-    pub fn set_effect_boundary(&mut self, boundary: EffectBoundary) {
+    #[must_use]
+    pub fn live_payload_policy(&self) -> LivePayloadPolicy {
+        self.live_payload
+    }
+
+    /// Select the execution-relevant part of the effect ABI for the next
+    /// mounted actor turn. The actor descriptor retains full identity; the
+    /// resident core installs its dispatch boundary and live-value policy.
+    pub fn set_effect_execution(
+        &mut self,
+        boundary: EffectBoundary,
+        live_payload: LivePayloadPolicy,
+    ) {
         self.effect_boundary = boundary;
+        self.live_payload = live_payload;
     }
     /// Whether the resident machine has been bootstrapped (first turn run).
     pub fn is_bootstrapped(&self) -> bool {
@@ -413,12 +426,12 @@ impl PersistentSession {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active_continuation = Some(id);
                 SuspendableOutcome::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("plain registry run returned the wrong completion policy: {other:?}"),
@@ -435,12 +448,12 @@ impl PersistentSession {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active_continuation = Some(id);
                 SuspendableOutcome::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("binding registry run returned the wrong policy: {other:?}"),
@@ -456,12 +469,12 @@ impl PersistentSession {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active_continuation = Some(id);
                 Suspendable::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("project registry run returned the wrong policy: {other:?}"),
@@ -477,12 +490,12 @@ impl PersistentSession {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active_continuation = Some(id);
                 Suspendable::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("render registry run returned the wrong policy: {other:?}"),
@@ -542,12 +555,14 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
+        let live_payload = self.live_payload;
         #[allow(clippy::expect_used, reason = "machine bootstrapped before run_entry")]
         let machine = self
             .machine
             .as_mut()
             .expect("machine bootstrapped before run_entry");
-        let run = SuspensionRun::main(run_table, &boundary, RealmId::ROOT);
+        let run = SuspensionRun::main(run_table, &boundary, RealmId::ROOT)
+            .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
@@ -571,6 +586,7 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
+        let live_payload = self.live_payload;
         #[allow(
             clippy::expect_used,
             reason = "machine bootstrapped before run_funcid_with_table"
@@ -585,7 +601,8 @@ impl PersistentSession {
             &boundary,
             RealmId::ROOT,
             ParkKind::Plain,
-        );
+        )
+        .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
@@ -627,6 +644,7 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
+        let live_payload = self.live_payload;
         let PersistentSession {
             machine,
             session_table,
@@ -645,7 +663,8 @@ impl PersistentSession {
             &boundary,
             RealmId::ROOT,
             ParkKind::Plain,
-        );
+        )
+        .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_value_outcome(outcome))
     }
@@ -704,6 +723,7 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
+        let live_payload = self.live_payload;
         let PersistentSession {
             machine,
             session_table,
@@ -722,7 +742,8 @@ impl PersistentSession {
             &boundary,
             RealmId::ROOT,
             ParkKind::Binding { forced },
-        );
+        )
+        .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_binding_outcome(outcome))
     }
@@ -768,6 +789,7 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
+        let live_payload = self.live_payload;
         let n_fields = NonZeroUsize::new(n_fields).ok_or(JitError::EmptyProjection)?;
         let PersistentSession {
             machine,
@@ -787,7 +809,8 @@ impl PersistentSession {
             &boundary,
             RealmId::ROOT,
             ParkKind::Project { n_fields },
-        );
+        )
+        .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_project_outcome(outcome))
     }
@@ -831,6 +854,7 @@ impl PersistentSession {
             "resume the active turn first"
         );
         let boundary = self.effect_boundary.clone();
+        let live_payload = self.live_payload;
         let PersistentSession {
             machine,
             session_table,
@@ -849,7 +873,8 @@ impl PersistentSession {
             &boundary,
             RealmId::ROOT,
             ParkKind::Render { field0_forced },
-        );
+        )
+        .with_live_payload(live_payload);
         let outcome = machine.run_until_suspension(run, handlers, captured)?;
         Ok(self.track_render_outcome(outcome))
     }

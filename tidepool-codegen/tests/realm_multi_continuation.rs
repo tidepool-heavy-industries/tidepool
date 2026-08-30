@@ -1282,9 +1282,9 @@ fn w2_streamed_response_tail_parks_across_gc() {
 
 // ───────────────────────────────────────────────────────────────────────────
 // W3 — FINALIZED CLOSURE PARK: suspended on a closure-valued `finalize`
-// (`ContinuationFrame::finalized_root` populated). SPLIT CASE: the finalized
+// (`ContinuationFrame::live_payload_root` populated). SPLIT CASE: the finalized
 // payload itself is tenured into old-space and persistent-rooted at SUSPEND
-// time (`tenure_finalized_payload`, BEFORE `park_continuation` even runs) —
+// time (`tenure_live_payload`, BEFORE `park_continuation` even runs) —
 // that protection is independent of `register_stowed_root` and stays green
 // under the negative control. The REST of the parked continuation (`captured`,
 // still an ordinary nursery allocation) is a safety case exactly like F3/F4.
@@ -1313,11 +1313,11 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
             }
             ParkedOutcome::Suspended {
                 id,
-                has_finalized_closure,
+                has_live_payload,
                 ..
             } => {
                 assert!(
-                    has_finalized_closure,
+                    has_live_payload,
                     "the request must carry a CLOSURE_SENTINEL for the closure field"
                 );
                 id
@@ -1340,7 +1340,7 @@ fn w3_finalized_closure_park_survives_gc_and_resume() {
         // established before this frame was even parked) — confirm it is
         // still a live, correctly-tagged closure object, not poisoned.
         let finalized = machine
-            .take_parked_finalized_root(id)
+            .take_parked_live_payload_root(id)
             .expect("w3 finalized root");
         let tag = unsafe { heap_layout::read_tag(finalized.current()) };
         assert_eq!(

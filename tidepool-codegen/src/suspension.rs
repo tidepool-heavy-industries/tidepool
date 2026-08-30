@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cranelift_module::FuncId;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 
@@ -85,6 +85,7 @@ pub struct SuspensionRun<'a> {
     pub boundary: &'a EffectBoundary,
     pub realm: RealmId,
     pub completion: ParkKind,
+    pub live_payload: LivePayloadPolicy,
 }
 
 impl<'a> SuspensionRun<'a> {
@@ -96,6 +97,7 @@ impl<'a> SuspensionRun<'a> {
             boundary,
             realm,
             completion: ParkKind::Plain,
+            live_payload: LivePayloadPolicy::None,
         }
     }
 
@@ -113,7 +115,16 @@ impl<'a> SuspensionRun<'a> {
             boundary,
             realm,
             completion,
+            live_payload: LivePayloadPolicy::None,
         }
+    }
+
+    /// Permit one request field to cross by reference when the data bridge
+    /// reports a live closure there.
+    #[must_use]
+    pub fn with_live_payload(mut self, policy: LivePayloadPolicy) -> Self {
+        self.live_payload = policy;
+        self
     }
 }
 
@@ -135,9 +146,9 @@ pub enum ParkedOutcome {
     Suspended {
         id: ContinuationId,
         request: Value,
-        /// Whether a closure-valued finalize payload is retained by reference
-        /// on the parked frame.
-        has_finalized_closure: bool,
+        /// Whether the run's declared live payload is retained by reference on
+        /// the parked frame.
+        has_live_payload: bool,
     },
 }
 
@@ -146,7 +157,7 @@ pub enum Suspendable<T> {
     Completed(T),
     Suspended {
         request: Value,
-        has_finalized_closure: bool,
+        has_live_payload: bool,
     },
 }
 

@@ -498,7 +498,7 @@ async fn escaped_closure_outlives_its_childs_window_and_scope() {
     };
 
     let handle = harness
-        .with_session(sid, |s| s.finalized_handle(&producer_hole))
+        .with_session(sid, |s| s.live_payload_handle(&producer_hole))
         .expect("session checkout")
         .expect(
             "the child's finalize hole must carry a live closure handle — if this is None, \
@@ -798,7 +798,7 @@ async fn multiple_mounts_in_one_window() {
             ),
         };
         let handle = harness
-            .with_session(sid, |s| s.finalized_handle(&hole))
+            .with_session(sid, |s| s.live_payload_handle(&hole))
             .expect("session checkout")
             .unwrap_or_else(|| {
                 panic!(

@@ -38,9 +38,9 @@
 //! The structural control builds the SAME nesting by hand
 //! (no GHC, no extract) and PASSES, including under
 //! `TIDEPOOL_GC_POISON=1 TIDEPOOL_HEAP_VERIFY=1`. So these are all sound:
-//! `ResidentSession::run_forked`; the sentinel-tenure of a closure at field 1
-//! of a suspended request; `finalized_handle` called on a frame that
-//! `run_forked` ITSELF created, while that frame is still parked; and
+//! `ResidentSession::run_rooted_entry`; the sentinel-tenure of a closure at field 1
+//! of a suspended request; `live_payload_handle` called on a frame that
+//! `run_rooted_entry` ITSELF created, while that frame is still parked; and
 //! multi-level realm nesting. The bug is not in how a nested fork is
 //! STRUCTURED.
 //!

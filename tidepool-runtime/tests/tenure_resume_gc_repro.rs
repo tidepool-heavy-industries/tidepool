@@ -429,7 +429,7 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
     // persistent root. The wrap's OWN parked continuation independently
     // captured `shared` too, and that copy is NOT touched by this tenure.
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // THE EXPERIMENT: force a real collection in the window between the
@@ -450,10 +450,10 @@ fn shared_free_variable_survives_forced_gc_between_tenure_and_resume() {
     );
 
     // The tenured body closure must also still be independently usable —
-    // `run_forked` consumes the `RootCustody` `finalized_handle` minted above.
+    // `run_rooted_entry` consumes the `RootCustody` `live_payload_handle` minted above.
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -496,7 +496,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // Multiple forced collections in the window between tenure and resume —
@@ -519,8 +519,8 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
     );
 
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -545,7 +545,7 @@ fn shared_closure_applies_correctly_after_forced_gc_between_tenure_and_resume() 
 
 /// THE REPRO, real-driver-order variant: `tidepool-harness`'s `AsyncSpawnWith`
 /// servicing (`selfharness/driver.rs`) mints the body handle, then runs the
-/// CHILD thread (`run_forked`) FIRST — letting it allocate, and possibly
+/// CHILD thread (`run_rooted_entry`) FIRST — letting it allocate, and possibly
 /// trigger a real collection — and only THEN resumes the spawner's own
 /// parked frame. Both earlier repros in this file resumed the spawner
 /// BEFORE running the child (the opposite order) and could not reproduce the
@@ -567,19 +567,19 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     };
 
     // Sentinel-tenure fires here, exactly as the driver's AsyncSpawnWith arm
-    // observes it (`finalized_handle` called on the just-suspended spawner's
+    // observes it (`live_payload_handle` called on the just-suspended spawner's
     // own frame, BEFORE the spawner is resumed).
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // REAL ORDER: run the child thread FIRST (mirrors driver.rs's
-    // `run_forked` call preceding `resume(hole, tid_value)`), forcing a
+    // `run_rooted_entry` call preceding `resume(hole, tid_value)`), forcing a
     // collection while the child's own fragment is the active run and the
     // spawner's frame sits parked in the SAME registry.
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -587,7 +587,7 @@ fn shared_closure_survives_when_child_thread_runs_before_spawner_resumes() {
     session.force_gc_for_test();
 
     // ONLY NOW resume the spawner — matching `resume(hole, tid_value)` in
-    // driver.rs, which runs AFTER `run_forked` started the child.
+    // driver.rs, which runs AFTER `run_rooted_entry` started the child.
     let outcome = session
         .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("wrap resume failed: {e}"));
@@ -827,12 +827,12 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -866,7 +866,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
                             (expect_int(&pfields[0]), expect_int(&pfields[1])),
                             (111, 222),
                             "the tenured body closure's own captured downMid/upMid must \
-                             also survive tenure + GC + resume + run_forked intact"
+                             also survive tenure + GC + resume + run_rooted_entry intact"
                         );
                     }
                     other => panic!("expected Pair(downMid, upMid), got {other:?}"),
@@ -879,7 +879,7 @@ fn handled_dependencies_survive_gc_between_tenure_and_resume() {
 }
 
 /// Build a wrap suspend whose body closure COMPLETES SYNCHRONOUSLY inside
-/// `run_forked` (dispatches one HANDLED effect, then `Val`s) — never parking
+/// `run_rooted_entry` (dispatches one HANDLED effect, then `Val`s) — never parking
 /// a second registry frame — matching `forkNode`'s real body shape
 /// (`sendUp (uplink ctx) 777; pure 0`, where `sendUp` is a handled
 /// `RepoEvent`, not a suspend). Every earlier repro in this file forced the
@@ -1017,7 +1017,7 @@ fn build_wrap_suspend_sync_child(wrap_tag: u64, dummy: i64) -> CoreExpr {
     b.build()
 }
 
-/// THE REPRO, synchronously-completing-child variant: `run_forked`'s child
+/// THE REPRO, synchronously-completing-child variant: `run_rooted_entry`'s child
 /// dispatches one handled effect and COMPLETES within that same call — never
 /// registering its own parked frame — while the spawner's frame sits parked
 /// in the registry. Matches `forkNode`'s real body (`sendUp` is handled, not
@@ -1038,15 +1038,15 @@ fn handled_dependencies_survive_when_child_completes_synchronously() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // The child dispatches a handled effect and completes SYNCHRONOUSLY here
     // — no new parked frame, but real allocation (response materialization)
     // happens while the spawner's frame is still parked in the registry.
     let child_result = session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"));
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"));
     let (child_down, child_up) = match child_result {
         ResidentOutcome::Completed { result, .. } => match result.into_value() {
             Value::Con(id, ref fields) if id.0 == RESULT_ID.0 && fields.len() == 1 => {
@@ -1234,7 +1234,7 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     session.force_gc_for_test();
@@ -1276,8 +1276,8 @@ fn shared_unforced_thunk_survives_forced_gc_between_tenure_and_resume() {
     }
 
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -1496,12 +1496,12 @@ fn event_shaped_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -1581,12 +1581,12 @@ fn event_shaped_capture_survives_real_inflight_gc_with_tiny_nursery() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -1680,7 +1680,7 @@ fn handled_either_session() -> ResidentSession<HandledEitherThenSuspend, TestSin
 /// bound by CASE-UNWRAPPING an `Either`-shaped (`Right x`) dispatch
 /// response — mirroring `mailboxNew >>= liftEither` exactly, rather than
 /// binding a dispatch response directly as every other repro in this file
-/// does. `RIGHT_ID` also gives `tenure_finalized_payload`'s transitive
+/// does. `RIGHT_ID` also gives `tenure_live_payload`'s transitive
 /// closure walk one more constructor SHAPE to evacuate.
 fn build_wrap_suspend_event_via_either_unwrap(
     wrap_tag: u64,
@@ -1882,12 +1882,12 @@ fn event_capture_survives_via_either_unwrap_binding() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -2079,12 +2079,12 @@ fn bare_list_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     let _inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -2332,7 +2332,7 @@ fn undceable_list_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // bodyInner ignores watchList but still suspends on body_tag (its own
@@ -2340,8 +2340,8 @@ fn undceable_list_capture_survives_tenure_and_resume() {
     // TENURE of bodyClosure, whose transitive graph includes the
     // genuinely-allocated, never-forced watchList thunk, alongside upMid.
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -2570,9 +2570,9 @@ fn build_wrap_suspend_with_thunked_app_capture(
 /// which is ALSO a genuine capture but re-evaluates the application every
 /// time `bodyClosure` is invoked), `bodyClosure` here captures ONLY a
 /// pre-built thunk `X`, matching `asyncSpawn`'s real `\_ -> x` shape
-/// exactly. `X` DOES get forced — `run_forked`'s own step-decoding must
+/// exactly. `X` DOES get forced — `run_rooted_entry`'s own step-decoding must
 /// force whatever `bodyClosure` returns to WHNF to classify it as `Val`/
-/// `E` — so this exercises `tenure_finalized_payload`'s transitive-closure
+/// `E` — so this exercises `tenure_live_payload`'s transitive-closure
 /// copy of a THUNK (`X`) whose own captures (`bodyInner`, `watchList`) were
 /// bound OUTSIDE it, forced only AFTER tenure + a forced collection.
 /// `watchList` itself is never read past that force.
@@ -2591,16 +2591,16 @@ fn thunked_app_capture_survives_tenure_and_resume() {
     };
 
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // Forcing X (applying bodyInner to watchList) happens HERE, inside
-    // run_forked's own drive, forking the thread through its OWN suspend --
+    // run_rooted_entry's own drive, taking the thread through its OWN suspend --
     // this is where tenure's transitive-closure copy of X (and X's own
     // captures bodyInner/watchList) gets exercised for real.
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),
@@ -2667,7 +2667,7 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
     // NOT touched by this tenure call, and (unlike every test above) NO
     // subsequent collection runs to give it a chance to self-heal.
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("wrap frame carries no untaken body closure"));
 
     // No force_gc_for_test() here -- this is the point of the test.
@@ -2696,8 +2696,8 @@ fn shared_free_variable_stale_immediately_after_tenure_with_no_intervening_gc() 
     // Consume `handle`'s RootCustody (matching repro #1's own discipline) --
     // the tenured closure must also still be independently usable.
     let inner_hole = match session
-        .run_forked("thread", handle, RealmId(1), Some(&table))
-        .unwrap_or_else(|e| panic!("run_forked failed: {e}"))
+        .run_rooted_entry("thread", handle, 0, RealmId(1), Some(&table))
+        .unwrap_or_else(|e| panic!("run_rooted_entry failed: {e}"))
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("thread body must suspend on its own effect, got {other:?}"),

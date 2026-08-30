@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
 use tidepool_repr::DataConTable;
 
 use crate::old_space::RootSlot;
@@ -23,7 +23,8 @@ pub(crate) struct ContinuationFrame {
     pub(crate) realm: RealmId,
     pub(crate) boundary: EffectBoundary,
     pub(crate) kind: ParkKind,
-    pub(crate) finalized_root: Option<RootSlot>,
+    pub(crate) live_payload_root: Option<RootSlot>,
+    pub(crate) live_payload: LivePayloadPolicy,
     pub(crate) cancel_flag: Arc<AtomicBool>,
     pub(crate) table: Arc<DataConTable>,
 }

@@ -13,7 +13,7 @@
 //!    session it shares with every other node in this test) finalizes
 //!    `Mounted { applyMounted = \x -> x + 1 }` and suspends. The runtime
 //!    mints a [`tidepool_codegen::suspension::ValueHandle`] over the
-//!    payload ([`ResidentSession::finalized_handle`]) — the SAME primitive
+//!    payload ([`ResidentSession::live_payload_handle`]) — the SAME primitive
 //!    the fn-finalize-spike suite uses to deliver a closure into a parked
 //!    continuation, reached here directly rather than through the driver.
 //! 2. The producer transfers that root through an exact-incarnation actor
@@ -242,11 +242,11 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     };
 
     // Mint the handle directly off the shared session's machine — the same
-    // primitive `Harness::take_finalized_handle_keep_open` uses internally,
+    // primitive `Harness::take_live_payload_handle_keep_open` uses internally,
     // reached here without the node-level wrapper since this spike composes
     // the mount from outside the crate's own turn loop.
     let handle = harness
-        .with_session(sid, |s| s.finalized_handle(&hole_p))
+        .with_session(sid, |s| s.live_payload_handle(&hole_p))
         .expect("session checkout")
         .expect("P's finalize hole carries a live closure handle");
     assert_eq!(

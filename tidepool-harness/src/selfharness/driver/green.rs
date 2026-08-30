@@ -363,12 +363,12 @@ impl SelfHarnessDriver {
                 // admission; a failed checkout never creates custody.
                 let thread_start = self
                     .with_session_for_host(host, sid, |s| -> Result<ResidentOutcome, String> {
-                        let body = s.finalized_handle(hole).ok_or_else(|| {
+                        let body = s.live_payload_handle(hole).ok_or_else(|| {
                             "AsyncSpawnWith: spawner frame carries no untaken body closure"
                                 .to_string()
                         })?;
-                        s.run_forked("async_thread", body, realm, Some(table))
-                            .map_err(|e| format!("run_forked failed: {e}"))
+                        s.run_rooted_entry("async_thread", body, 0, realm, Some(table))
+                            .map_err(|e| format!("run_rooted_entry failed: {e}"))
                     })
                     .await
                     .map_err(|e| DriverError::Session(e.to_string()))?
@@ -385,7 +385,7 @@ impl SelfHarnessDriver {
                 // wire path is for an `askUser` submission's `FromJSON`
                 // decode) and NOT a bare `Value::Lit` (unboxed; only
                 // tolerated by the JIT's OWN synthesized `App` in
-                // `apply_finalized`/`run_forked`, not by arbitrary compiled
+                // `apply_finalized`/`run_rooted_entry`, not by arbitrary compiled
                 // Haskell that pattern-matches `case x of I# n#`).
                 let tid_value = tid
                     .to_value(table)
@@ -431,7 +431,7 @@ impl SelfHarnessDriver {
                 let GreenChain::Thread(tid) = chain else {
                     return Err(DriverError::Session(
                         "AsyncDoneWith suspended on a non-thread chain (scheduler bug: every \
-                         thread body is reached only via run_forked)"
+                         thread body is reached only via run_rooted_entry)"
                             .into(),
                     ));
                 };

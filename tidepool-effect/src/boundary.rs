@@ -1,5 +1,26 @@
 use std::sync::Arc;
 
+/// How a suspended effect request may retain one live heap value by reference.
+///
+/// This is part of the Haskell/Rust effect ABI. The data bridge may expose a
+/// closure sentinel, but only an ABI-declared field authorizes retaining the
+/// original heap value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum LivePayloadPolicy {
+    /// Suspended requests must cross as ordinary data.
+    #[default]
+    None,
+    /// Retain this zero-based request-constructor field when its bridged value
+    /// contains a closure sentinel.
+    RequestField(usize),
+}
+
+impl LivePayloadPolicy {
+    /// Current Haskell effect-request convention: site/metadata in field 0 and
+    /// the value crossing the runtime boundary in field 1.
+    pub const HASKELL_EFFECT_VALUE: Self = Self::RequestField(1);
+}
+
 /// Immutable identity of one ordered Haskell effect stack.
 ///
 /// This is the full actor capability ABI, not the machine-handled prefix.
@@ -8,21 +29,35 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectStackAbi {
     names: Arc<[String]>,
+    live_payload: LivePayloadPolicy,
     digest: EffectAbiDigest,
 }
 
 impl EffectStackAbi {
     #[must_use]
-    pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        names: impl IntoIterator<Item = impl Into<String>>,
+        live_payload: LivePayloadPolicy,
+    ) -> Self {
         let names: Vec<String> = names.into_iter().map(Into::into).collect();
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"tidepool-effect-stack-abi-v1\0");
+        hasher.update(b"tidepool-effect-stack-abi-v2\0");
         for name in &names {
             hasher.update(&(name.len() as u64).to_le_bytes());
             hasher.update(name.as_bytes());
         }
+        match live_payload {
+            LivePayloadPolicy::None => {
+                hasher.update(&[0]);
+            }
+            LivePayloadPolicy::RequestField(field) => {
+                hasher.update(&[1]);
+                hasher.update(&(field as u64).to_le_bytes());
+            }
+        }
         Self {
             names: Arc::from(names),
+            live_payload,
             digest: EffectAbiDigest(*hasher.finalize().as_bytes()),
         }
     }
@@ -35,6 +70,11 @@ impl EffectStackAbi {
     #[must_use]
     pub fn digest(&self) -> EffectAbiDigest {
         self.digest
+    }
+
+    #[must_use]
+    pub fn live_payload(&self) -> LivePayloadPolicy {
+        self.live_payload
     }
 
     /// Derive only the runtime dispatch boundary from this full ABI.
@@ -149,13 +189,22 @@ impl EffectBoundary {
 
 #[cfg(test)]
 mod tests {
-    use super::{EffectBoundary, EffectStackAbi};
+    use super::{EffectBoundary, EffectStackAbi, LivePayloadPolicy};
 
     #[test]
     fn full_abi_identity_is_ordered_and_separate_from_boundaries() {
-        let abi = EffectStackAbi::new(["State", "Actor", "Deliberate"]);
-        let same = EffectStackAbi::new(["State", "Actor", "Deliberate"]);
-        let reordered = EffectStackAbi::new(["Actor", "State", "Deliberate"]);
+        let abi = EffectStackAbi::new(
+            ["State", "Actor", "Deliberate"],
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        let same = EffectStackAbi::new(
+            ["State", "Actor", "Deliberate"],
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
+        let reordered = EffectStackAbi::new(
+            ["Actor", "State", "Deliberate"],
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        );
         assert_eq!(abi.digest(), same.digest());
         assert_ne!(abi.digest(), reordered.digest());
 
@@ -164,6 +213,13 @@ mod tests {
         assert_eq!(all_suspended.handled_prefix(), &[] as &[String]);
         assert_eq!(state_handled.handled_prefix(), &["State"]);
         assert_eq!(abi.names(), ["State", "Actor", "Deliberate"]);
+    }
+
+    #[test]
+    fn live_payload_policy_participates_in_abi_identity() {
+        let data_only = EffectStackAbi::new(["Actor"], LivePayloadPolicy::None);
+        let live = EffectStackAbi::new(["Actor"], LivePayloadPolicy::HASKELL_EFFECT_VALUE);
+        assert_ne!(data_only.digest(), live.digest());
     }
 
     #[test]

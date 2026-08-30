@@ -168,6 +168,10 @@ fn actor_mount_installs_its_boundary_without_erasing_the_full_abi() {
     let _lease = mount_actor_turn(&registry, &mut session, actor, ActorTurnKind::Haskell)
         .expect("mount actor turn");
     assert_eq!(session.effect_boundary(), descriptor.effect_boundary());
+    assert_eq!(
+        session.live_payload_policy(),
+        descriptor.effect_abi().live_payload()
+    );
     assert!(
         matches!(
             session

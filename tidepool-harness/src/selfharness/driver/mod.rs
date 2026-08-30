@@ -15,7 +15,7 @@
 //! value never round-trips through JSON to cross: a data answer crosses via
 //! [`Harness::take_finalized_value_keep_open`] (bridged, as before); a
 //! `finalize`d CLOSURE crosses via
-//! [`Harness::take_finalized_handle_keep_open`] — a
+//! [`Harness::take_live_payload_handle_keep_open`] — a
 //! custody of the payload's own machine-side root, never deep-forced or
 //! serialized — delivered straight
 //! into the OUTER session's parked `runLLMTurn` continuation via
@@ -660,7 +660,7 @@ impl AgentSessionMode {
     /// Only a `ReusableLoop` lease may take a finalized answer and stay
     /// open for the NEXT hole — the "keep-open" family
     /// ([`Harness::take_finalized_value_keep_open`]/
-    /// [`Harness::take_finalized_handle_keep_open`]) is meaningless applied
+    /// [`Harness::take_live_payload_handle_keep_open`]) is meaningless applied
     /// to a one-shot branch, which never sees a second hole. Bug class
     /// removed: a future refactor reading [`Self::answerer`] and treating
     /// it as reusable when it actually held a one-shot branch's lease now

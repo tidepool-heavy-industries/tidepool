@@ -47,6 +47,7 @@ pub trait ActorRunTarget {
     fn install_actor_execution(
         &mut self,
         context: SessionRunContext,
+        effect_abi: EffectStackAbi,
         boundary: EffectBoundary,
     ) -> Result<(), Self::Error>;
 }
@@ -61,9 +62,10 @@ where
     fn install_actor_execution(
         &mut self,
         context: SessionRunContext,
+        effect_abi: EffectStackAbi,
         boundary: EffectBoundary,
     ) -> Result<(), Self::Error> {
-        self.set_actor_execution(context, boundary)
+        self.set_actor_execution(context, boundary, effect_abi.live_payload())
     }
 }
 
@@ -90,7 +92,11 @@ where
     let lease = registry.begin_turn(actor, kind)?;
     let context = lease.session_context();
     target
-        .install_actor_execution(context.run_context(), context.effect_boundary.clone())
+        .install_actor_execution(
+            context.run_context(),
+            context.effect_abi.clone(),
+            context.effect_boundary.clone(),
+        )
         .map_err(MountActorTurnError::Target)?;
     Ok(lease)
 }
@@ -103,6 +109,7 @@ mod tests {
     #[derive(Default)]
     struct FakeTarget {
         installed: Option<SessionRunContext>,
+        effect_abi: Option<EffectStackAbi>,
         boundary: Option<EffectBoundary>,
         fail: bool,
     }
@@ -113,12 +120,14 @@ mod tests {
         fn install_actor_execution(
             &mut self,
             context: SessionRunContext,
+            effect_abi: EffectStackAbi,
             boundary: EffectBoundary,
         ) -> Result<(), Self::Error> {
             if self.fail {
                 Err("dead scope")
             } else {
                 self.installed = Some(context);
+                self.effect_abi = Some(effect_abi);
                 self.boundary = Some(boundary);
                 Ok(())
             }
@@ -155,7 +164,12 @@ mod tests {
 
         assert_eq!(target.installed, Some(context.run_context()));
         assert_eq!(target.boundary, Some(context.effect_boundary));
+        assert_eq!(target.effect_abi, Some(context.effect_abi.clone()));
         assert_eq!(context.effect_abi.names(), &[] as &[String]);
+        assert_eq!(
+            context.effect_abi.live_payload(),
+            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE
+        );
         assert!(matches!(
             registry.begin_turn(actor, ActorTurnKind::Provider),
             Err(ActorRegistryError::Busy { .. })
@@ -172,6 +186,7 @@ mod tests {
         let actor = ready_actor(&registry);
         let mut target = FakeTarget {
             installed: None,
+            effect_abi: None,
             boundary: None,
             fail: true,
         };

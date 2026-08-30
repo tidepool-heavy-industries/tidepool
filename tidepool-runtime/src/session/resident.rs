@@ -67,7 +67,7 @@ use tidepool_codegen::suspension::{
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::error::EffectError;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::{
     BindingName, CoreExpr, DataConTable, Generation, MonotonicIdIssuer, SessionModule, SessionVarId,
@@ -237,7 +237,7 @@ impl Drop for CustodyTransfer {
 }
 
 /// A parked turn's own completion obligation, carried on the token
-/// [`ResidentSession::run`]/[`ResidentSession::run_bind`]/[`ResidentSession::run_forked`]
+/// [`ResidentSession::run`]/[`ResidentSession::run_bind`]/[`ResidentSession::run_rooted_entry`]
 /// hand back on suspension: a [`ParkKind::Plain`] turn's hole needs nothing
 /// extra to resume; a [`ParkKind::Binding`] turn's hole must materialize its
 /// binder into the value plane on completion, using the SAME binder/generation
@@ -308,7 +308,7 @@ impl ResidentHole {
     /// Construct a `Plain` hole from a bare continuation id, for a caller
     /// whose own bookkeeping stores just the id string (the self-iterating
     /// harness driver's `render`/`loop`/green-thread threads — every one of
-    /// those goes through [`ResidentSession::run`]/[`ResidentSession::run_forked`],
+    /// those goes through [`ResidentSession::run`]/[`ResidentSession::run_rooted_entry`],
     /// never [`ResidentSession::run_bind`]) rather than the [`ResidentHole`]
     /// this API otherwise hands back. NOT a backdoor around the
     /// completion-obligation guarantee: the one failure mode this type
@@ -682,12 +682,13 @@ where
         &mut self,
         context: SessionRunContext,
         boundary: EffectBoundary,
+        live_payload: LivePayloadPolicy,
     ) -> Result<(), ResidentError> {
         if !self.core.scope_tree().is_live(context.lexical_scope) {
             return Err(SessionError::DeadScope(context.lexical_scope).into());
         }
         self.run_context = context;
-        self.core.set_effect_boundary(boundary);
+        self.core.set_effect_execution(boundary, live_payload);
         Ok(())
     }
 
@@ -701,6 +702,12 @@ where
     #[must_use]
     pub fn effect_boundary(&self) -> &EffectBoundary {
         self.core.effect_boundary()
+    }
+
+    /// Live-value crossing policy currently installed with the effect stack.
+    #[must_use]
+    pub fn live_payload_policy(&self) -> LivePayloadPolicy {
+        self.core.live_payload_policy()
     }
 
     /// Scope exit for `realm`: close the realm
@@ -722,37 +729,40 @@ where
         counts
     }
 
-    /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
-    /// the frame parked on `hole` (the payload never bridges to a
+    /// Mint a [`ValueHandle`] over the declared live payload of the frame
+    /// parked on `hole` (the payload never bridges to a
     /// data `Value`; the `Send` handle is how it is passed around and
     /// eventually DELIVERED into a sibling hole via [`Self::resume_handle`]).
-    /// The frame stays parked (consume/abort it separately, as the finalize
-    /// flow always has); the handle is owned by the frame's realm. `None`
-    /// when `hole` is not parked or its frame holds no (untaken) finalized
+    /// The frame stays parked; the handle is owned by the frame's realm.
+    /// `None` when `hole` is not parked or its frame holds no untaken live
     /// payload.
-    pub fn finalized_handle(&mut self, hole: &str) -> Option<RootCustody> {
+    pub fn live_payload_handle(&mut self, hole: &str) -> Option<RootCustody> {
         self.settle_dropped_custody();
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
         self.core
             .machine_mut()?
-            .handle_from_finalized(id)
+            .handle_from_live_payload(id)
             .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup)))
     }
 
-    /// [`Self::finalized_handle`]'s sibling for a result that must outlive
+    /// [`Self::live_payload_handle`]'s sibling for a result that must outlive
     /// the frame's OWN realm: mint the handle owned by `realm` instead (a
     /// green thread's `AsyncDoneWith` payload, owned by the SESSION's realm
     /// so a waiter's handle survives the thread's own realm later closing —
-    /// see `ResidentSession::run_forked`'s doc). Same
+    /// see [`ResidentSession::run_rooted_entry`]). Same
     /// frame-stays-parked semantics; `None` under the same conditions.
-    /// Returns a [`RootCustody`] token, exactly as [`Self::finalized_handle`]
+    /// Returns a [`RootCustody`] token, exactly as [`Self::live_payload_handle`]
     /// does: minting under a different realm changes WHO owns the root, never
     /// whether the handle needs consuming exactly once.
-    pub fn finalized_handle_owned_by(&mut self, hole: &str, realm: RealmId) -> Option<RootCustody> {
+    pub fn live_payload_handle_owned_by(
+        &mut self,
+        hole: &str,
+        realm: RealmId,
+    ) -> Option<RootCustody> {
         self.settle_dropped_custody();
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
         let machine = self.core.machine_mut()?;
-        let slot = machine.take_parked_finalized_root(id)?;
+        let slot = machine.take_parked_live_payload_root(id)?;
         Some(RootCustody::new(
             machine.mint_handle_from_root(slot, realm),
             Arc::clone(&self.custody_cleanup),
@@ -951,7 +961,7 @@ where
     /// as `observe_handle`), and the root is released by its owning realm's
     /// scope exit, never by a delivery. A green thread's result is exactly
     /// that shape — the root is minted under the SESSION's realm at settle
-    /// time (see [`Self::finalized_handle_owned_by`]) and may then be read
+    /// time (see [`Self::live_payload_handle_owned_by`]) and may then be read
     /// more than once: `poll` then `wait`, or two waiters joined on one
     /// thread. Each of those is another borrow of one root, not a second
     /// transfer of one custody.
@@ -1000,7 +1010,7 @@ where
     /// Number of live [`ValueHandle`]s outstanding on this session's machine
     /// (0 before the machine is bootstrapped) — the mount seam's ownership-
     /// accounting read: a handle minted over a finalize payload
-    /// ([`Self::finalized_handle`]) counts here until [`Self::mount_handle`]
+    /// ([`Self::live_payload_handle`]) counts here until [`Self::mount_handle`]
     /// (or an ordinary bind completion / realm close) releases it.
     pub fn value_handle_count(&mut self) -> usize {
         self.settle_dropped_custody();
@@ -1171,10 +1181,12 @@ where
         );
 
         let boundary = self.core.effect_boundary().clone();
+        let live_payload = self.core.live_payload_policy();
         let realm = self.run_context.resource_scope;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain);
+            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain)
+                .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
@@ -1228,6 +1240,7 @@ where
         );
 
         let boundary = self.core.effect_boundary().clone();
+        let live_payload = self.core.live_payload_policy();
         // Tier0 data is deep-forced to NF before tenuring; a Tier1 closure is
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
@@ -1240,7 +1253,8 @@ where
                 &boundary,
                 realm,
                 ParkKind::Binding { forced },
-            );
+            )
+            .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
@@ -1301,9 +1315,11 @@ where
         // job. The shared issuer keeps it distinct from every caller scope.
         let child_realm = RealmId::fresh();
         let boundary = self.core.effect_boundary().clone();
+        let live_payload = self.core.live_payload_policy();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run =
-                SuspensionRun::fragment(func_id, table, &boundary, child_realm, ParkKind::Plain);
+                SuspensionRun::fragment(func_id, table, &boundary, child_realm, ParkKind::Plain)
+                    .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, child_realm))
@@ -1388,7 +1404,7 @@ where
     /// boxed `Int` argument, returning the (data) result. The finalized value —
     /// a closure of type `Int -> Int`, say — was tenured into old-space at
     /// suspend time and its persistent root slot stashed on the machine
-    /// ([`JitEffectMachine::take_finalized_root`]); this seeds that slot into a
+    /// ([`JitEffectMachine::take_parked_live_payload_root`]); this seeds that slot into a
     /// per-call [`ExternalEnv`] and drives a synthesized `App(Var, arg)`
     /// fragment against the SAME suspended heap via [`Self::run_child_pure`] —
     /// the closure is never bridged to a data `Value`, never leaves the heap.
@@ -1427,7 +1443,7 @@ where
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| m.take_parked_finalized_root(frame_id))
+            .and_then(|m| m.take_parked_live_payload_root(frame_id))
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     "no finalized closure to apply (session is not suspended on a \
@@ -1474,80 +1490,70 @@ where
         self.run_child_pure("apply_finalized", &expr, &table, &env)
     }
 
-    /// Run a handle-rooted BODY as a NEW suspension-capable top-level run under
-    /// `realm` — the green-thread fork entry.
+    /// Apply a handle-rooted entry closure to an integer and run it as a new
+    /// suspension-capable top-level computation under `realm`.
     ///
-    /// This is a THIRD entry beside [`Self::run_child`]/[`Self::run_child_pure`],
-    /// not a change to either: their refusal of a suspending child
-    /// ([`ResidentError::ChildSuspended`]) is a policy that protects their
-    /// value-shaped signatures and stays exactly as it is. What is new here is
-    /// a run that MAY park, whose parked frame joins the registry beside every
-    /// other, resumable by identity in any order — which is what makes two
-    /// green threads blocked on two different effects genuinely concurrent.
+    /// Unlike [`Self::run_child`] and [`Self::run_child_pure`], this operation
+    /// has a suspension-shaped result: a parked frame joins the ordinary
+    /// continuation registry and can be resumed by identity in any order.
     ///
-    /// `body` is a `ValueHandle` over a tenured `Int -> M ()` closure — in
-    /// practice the one an `AsyncSpawnWith` suspension left on its parked frame
-    /// (field 1, tenured by the machine's sentinel-keyed scan and minted via
-    /// [`Self::finalized_handle`]). It is applied through the same
-    /// `App(Var, Lit)` synthesis [`Self::apply_finalized`] uses — see that
-    /// method for why the argument crosses as a bare unboxed `Lit` and needs no
-    /// wrapper-constructor id to match. The difference is the DRIVER: this goes
-    /// through `run_until_suspension` (suspension-capable, registry-
-    /// parking) rather than the pure entry, because a green thread's whole
-    /// purpose is to park.
+    /// `entry` is a `ValueHandle` over a tenured `Int -> M a` closure. It is
+    /// applied through the same
+    /// `App(Var, Lit)` synthesis [`Self::apply_finalized`] uses. The argument
+    /// crosses as a bare unboxed `Lit`, so it does not depend on a caller-owned
+    /// wrapper-constructor id. Execution goes through the canonical
+    /// suspension entry and registry.
     ///
     /// **`realm` is the thread's, and it propagates.** `resume_continuation` replays
     /// a frame's OWN realm, so every later suspension of this thread parks under
     /// `realm` too — which is what makes `close_realm(realm)` a complete
     /// cancellation rather than a first-frame one.
     ///
-    /// The body must END by suspending on `AsyncDoneWith` carrying its result,
-    /// so a thread's value comes back through the same field-1 crossing it went
-    /// out by. Nothing here reads that result: the caller takes it off the
-    /// resulting hole exactly as it takes a `finalize` payload.
-    pub fn run_forked(
+    /// The result contract belongs to the entry program. The async adapter, for
+    /// example, ends by suspending on `AsyncDoneWith`; actor startup can use the
+    /// same rooted entry without acquiring a second execution primitive.
+    pub fn run_rooted_entry(
         &mut self,
         name_hint: &str,
-        body: RootCustody,
+        entry: RootCustody,
+        argument: i64,
         realm: RealmId,
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
-        // Forking CONSUMES the body's custody: the thread that runs it is the
-        // handle's new owner, and there is no second consumer. Taking the
-        // token by value is what makes that a compile-time fact rather than a
-        // convention.
-        let transfer = body.into_transfer();
-        let body = transfer.handle;
+        // Entry consumes custody: the computation that runs it is the handle's
+        // new owner, with no second consumer.
+        let transfer = entry.into_transfer();
+        let entry = transfer.handle;
         let slot = self
             .core
             .machine_mut()
-            .and_then(|m| m.handle_slot(body))
+            .and_then(|m| m.handle_slot(entry))
             .ok_or_else(|| {
                 ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
                     format!(
-                        "run_forked: handle {body:?} is not live (never minted, or its \
+                        "run_rooted_entry: handle {entry:?} is not live (never minted, or its \
                          realm was already closed)"
                     ),
                 ))))
             })?;
-        // `App(Var(FORKED_BODY_VAR), 0)`. Same shape and same reasoning as
+        // `App(Var(ROOTED_ENTRY_VAR), argument)`. Same shape and reasoning as
         // `apply_finalized`: the Var-miss arm keys the external override on
         // ExternalEnv MEMBERSHIP, and the argument rides as a bare `Lit` whose
         // plain `TAG_LIT` object the closure's own Lit-tolerant `I#` alt
         // accepts. Distinct id from `apply_finalized`'s so the two can never be
         // confused in a trace.
-        const FORKED_BODY_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0002);
+        const ROOTED_ENTRY_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0002);
         let mut b = tidepool_repr::TreeBuilder::new();
-        let f = b.push(tidepool_repr::CoreFrame::Var(FORKED_BODY_VAR));
+        let f = b.push(tidepool_repr::CoreFrame::Var(ROOTED_ENTRY_VAR));
         let arg = b.push(tidepool_repr::CoreFrame::Lit(
-            tidepool_repr::Literal::LitInt(0),
+            tidepool_repr::Literal::LitInt(argument),
         ));
         let _app = b.push(tidepool_repr::CoreFrame::App { fun: f, arg });
         let expr = b.build();
 
         let mut env = ExternalEnv::new();
-        env.insert(FORKED_BODY_VAR, slot.addr());
+        env.insert(ROOTED_ENTRY_VAR, slot.addr());
 
         let table = run_table
             .cloned()
@@ -1555,27 +1561,29 @@ where
         self.core
             .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
-        // A fork requires a live machine by construction (the handle came off a
+        // A rooted entry requires a live machine by construction (the handle came off a
         // parked frame on it), so this is a no-op — kept for symmetry with
         // `run`/`run_bind`.
         self.core
             .bootstrap_if_needed(&expr, &table)
             .map_err(ResidentError::Bootstrap)?;
-        // TOP-LEVEL, not `add_child_fragment_session`: a green thread is not a
-        // child run over a suspended parent's world, it is a peer.
+        // TOP-LEVEL, not `add_child_fragment_session`: this entry is a peer run,
+        // not a value-shaped nested child of a parked continuation.
         let func_id = self
             .core
             .add_fragment_session(name_hint, &expr, &env)
             .map_err(ResidentError::AddFunction)?;
 
         let boundary = self.core.effect_boundary().clone();
+        let live_payload = self.core.live_payload_policy();
         // Handle ownership on completion is the SESSION's realm, deliberately:
         // a result must outlive the thread realm that produced it, since
         // cancelling or retiring a thread closes that realm while a waiter may
         // still be holding the value.
         let owning_realm = self.run_context.resource_scope;
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
-            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain);
+            let run = SuspensionRun::fragment(func_id, table, &boundary, realm, ParkKind::Plain)
+                .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, owning_realm))
@@ -1936,9 +1944,8 @@ where
 /// [`ValueHandle`] IN-THREAD (`realm`-owned) and the id crosses instead —
 /// resolved back to its slot by `materialize_binder` on the session thread.
 /// `CompletedProject`/`CompletedRender` are unreachable on this lane (the
-/// resident session parks only `Plain`/`Binding`); the finalized-closure flag
-/// is dropped (the harness detects that case from the `CLOSURE_SENTINEL` in
-/// the request, and the payload itself is read per-frame at apply time).
+/// resident session parks only `Plain`/`Binding`); live-payload presence is
+/// dropped because the payload itself is acquired explicitly from its frame.
 enum ParkedRun {
     Completed {
         value: Value,

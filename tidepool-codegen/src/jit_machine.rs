@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 pub use cranelift_module::FuncId;
 pub use tidepool_effect::PrefixMismatch;
-use tidepool_effect::{DispatchEffect, EffectBoundary, EffectContext, EffectError};
+use tidepool_effect::{
+    DispatchEffect, EffectBoundary, EffectContext, EffectError, LivePayloadPolicy,
+};
 use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataConTable};
 
@@ -137,6 +139,8 @@ enum ParkTarget {
         kind: ParkKind,
         /// Already checked at entry; retained if the run suspends.
         boundary: EffectBoundary,
+        /// Request-field policy replayed on every suspension of this run.
+        live_payload: LivePayloadPolicy,
     },
 }
 
@@ -145,7 +149,7 @@ enum ParkedRaw {
     Completed(ParkedOutcome),
     Suspended {
         request: tidepool_eval::value::Value,
-        has_finalized_closure: bool,
+        has_live_payload: bool,
         id: ContinuationId,
     },
 }
@@ -158,12 +162,12 @@ impl ParkedRaw {
             ParkedRaw::Completed(outcome) => outcome,
             ParkedRaw::Suspended {
                 request,
-                has_finalized_closure,
+                has_live_payload,
                 id,
             } => ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             },
         }
     }
@@ -1634,28 +1638,41 @@ impl JitEffectMachine {
                 request_ptr,
                 continuation,
             } => {
-                // Finalize-by-reference: when the bridged request carries a
-                // CLOSURE_SENTINEL placeholder, its value field (field 1 of the
-                // request Con) is a live closure with no data representation.
-                // Tenure it into old-space NOW — while we still hold the run's
-                // active GC range and a valid vmctx — so it survives any later
-                // child GC as a persistent root, and hand the slot up so the
-                // harness can apply it by reference via `run_child`.
-                let has_finalized_closure = request_carries_closure_sentinel(&request);
+                let ParkTarget::Registry {
+                    realm,
+                    kind,
+                    boundary,
+                    live_payload,
+                } = park;
+                // A live request value crosses by reference only when the run
+                // ABI names its field and the tolerant bridge reported a
+                // closure there. The same field is then rooted below; there is
+                // no request-wide scan coupled to an unrelated field-1
+                // convention.
+                let live_payload_field = match live_payload {
+                    LivePayloadPolicy::None => None,
+                    LivePayloadPolicy::RequestField(field)
+                        if request_field_carries_closure_sentinel(&request, field) =>
+                    {
+                        Some(field)
+                    }
+                    LivePayloadPolicy::RequestField(_) => None,
+                };
+                let has_live_payload = live_payload_field.is_some();
                 // The root rides into `park_continuation` and lands on the
                 // frame, so another realm cannot overwrite it.
-                let mut parked_finalized_root = None;
+                let mut live_payload_root = None;
                 // `continuation` is a raw heap pointer used AFTER this block
                 // (stored below, or handed to `park_continuation`).
-                // `tenure_finalized_payload` now folds a real minor
-                // collection into its own tenure call (see
-                // `OldSpace::tenure`'s doc) to fix up sibling references, so
-                // it can relocate other live nursery objects — root
+                // `tenure_live_payload` folds a real minor collection into its
+                // own tenure call (see `OldSpace::tenure`'s doc) to fix up
+                // sibling references, so it can relocate other live nursery
+                // objects — root
                 // `continuation` across it exactly like `field0_ptr` is
                 // rooted across the field1 bridge in `materialize`'s Render
                 // arm.
                 let mut continuation = continuation;
-                if has_finalized_closure {
+                if let Some(field) = live_payload_field {
                     let vmctx_ptr = machine.vmctx_mut() as *mut VMContext;
                     // SAFETY: vmctx_ptr is the active run's VMContext; the
                     // scope covers exactly the tenure call below.
@@ -1667,68 +1684,64 @@ impl JitEffectMachine {
                             &mut continuation as *mut *mut u8,
                         );
                     }
-                    let slot = self.tenure_finalized_payload(machine, request_ptr)?;
-                    parked_finalized_root = Some(slot);
+                    let slot = self.tenure_live_payload(machine, request_ptr, field)?;
+                    live_payload_root = Some(slot);
                 }
-                let ParkTarget::Registry {
-                    realm,
-                    kind,
-                    boundary,
-                } = park;
                 let id = self.park_continuation(
                     continuation,
                     realm,
                     kind,
                     park_cancel_flag,
                     Arc::new(table.clone()),
-                    parked_finalized_root,
+                    live_payload_root,
                     boundary,
+                    live_payload,
                 );
                 Ok(ParkedRaw::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                     id,
                 })
             }
         }
     }
 
-    /// Tenure the finalized VALUE (field 1) out of a suspended `finalize @T x`
-    /// request Con into old-space, returning its persistent GC root slot.
-    /// The finalized value stays LIVE in the session heap (never deep-forced to
-    /// data) and is applied later by reference. Runs during the suspending turn,
-    /// so `gc_active_range`/`vmctx` are valid.
-    fn tenure_finalized_payload(
+    /// Tenure one declared request field into old-space, returning its
+    /// persistent GC root slot. The value stays live in the session heap and
+    /// can later be delivered by reference. Runs during the suspending turn,
+    /// so `gc_active_range` and `vmctx` are valid.
+    fn tenure_live_payload(
         &mut self,
         machine: &mut CompiledEffectMachine,
         request_ptr: *mut u8,
+        field: usize,
     ) -> Result<crate::old_space::RootSlot, JitError> {
         if request_ptr.is_null() {
             return Err(JitError::Yield(crate::yield_type::YieldError::NullPointer));
         }
-        // FinalizeWith(site, value): the value is field index 1. Read its pointer
-        // out of the (WHNF Con) request. SAFETY: request_ptr is the rooted request
-        // Con from the suspend arm; a `FinalizeWith` always has >= 2 fields.
+        // SAFETY: request_ptr is the rooted, WHNF request Con from the suspend
+        // arm. Check the declared ABI index before reading its field.
         let value_ptr = unsafe {
             let nf = *(request_ptr.add(crate::layout::CON_NUM_FIELDS_OFFSET as usize) as *const u16)
                 as usize;
-            if nf < 2 {
+            if field >= nf {
                 return Err(JitError::Yield(crate::yield_type::YieldError::Runtime(
                     crate::host_fns::RuntimeError::UserErrorMsg(format!(
-                        "finalize request Con has {nf} fields, expected >= 2 (FinalizeWith site value)"
+                        "live-payload field {field} is outside request Con with {nf} fields"
                     )),
                 )));
             }
-            *(request_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + 8) as *const *mut u8)
+            *(request_ptr.add(crate::layout::CON_FIELDS_OFFSET as usize + field * 8)
+                as *const *mut u8)
         };
         #[allow(
             clippy::expect_used,
-            reason = "GC state installed for the suspending finalize run"
+            reason = "GC state installed for the suspending live-payload run"
         )]
         let from = self
             .machine_state
             .gc_active_range()
-            .expect("GC state installed for the suspending finalize run");
+            .expect("GC state installed for the suspending live-payload run");
         let from_range = (from.0 as *const u8, unsafe {
             from.0.add(from.1) as *const u8
         });
@@ -1738,10 +1751,13 @@ impl JitEffectMachine {
         // persistent root valid for the machine's life. `self.session` is
         // unaliased (reclaim not yet armed on the suspend path).
         let slot = unsafe {
-            #[allow(clippy::expect_used, reason = "session machine for a finalize tenure")]
+            #[allow(
+                clippy::expect_used,
+                reason = "session machine for live-payload tenure"
+            )]
             self.session
                 .as_mut()
-                .expect("session machine for a finalize tenure")
+                .expect("session machine for live-payload tenure")
                 .old_space
                 .tenure(vmctx_ptr, value_ptr, from_range)
         };
@@ -2199,7 +2215,7 @@ impl JitEffectMachine {
     /// between two calls — every real collection fires from inside compiled
     /// code, mid-allocation (`gc_trigger`). This exists to close that gap for
     /// diagnosing whether a collection LANDING BETWEEN a suspend-time tenure
-    /// (`Self::tenure_finalized_payload`) and a later resume corrupts a parked
+    /// (`Self::tenure_live_payload`) and a later resume corrupts a parked
     /// frame's own reference into what tenuring evacuated. Calling it while
     /// frames are parked is exactly the intended use.
     ///
@@ -2301,8 +2317,9 @@ impl JitEffectMachine {
         kind: ParkKind,
         cancel_flag: Arc<AtomicBool>,
         table: Arc<DataConTable>,
-        finalized_root: Option<crate::old_space::RootSlot>,
+        live_payload_root: Option<crate::old_space::RootSlot>,
         boundary: EffectBoundary,
+        live_payload: LivePayloadPolicy,
     ) -> ContinuationId {
         let mut cell = Box::new(continuation);
         let slot: *mut *mut u8 = &mut *cell;
@@ -2317,7 +2334,8 @@ impl JitEffectMachine {
             realm,
             boundary,
             kind,
-            finalized_root,
+            live_payload_root,
+            live_payload,
             cancel_flag,
             table,
         });
@@ -2352,6 +2370,7 @@ impl JitEffectMachine {
                 realm: run.realm,
                 kind: run.completion,
                 boundary: run.boundary.clone(),
+                live_payload: run.live_payload,
             },
         )
         .map(ParkedRaw::into_parked)
@@ -2380,8 +2399,13 @@ impl JitEffectMachine {
     ) -> Result<ParkedOutcome, JitError> {
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
-        let (realm, kind, boundary) = match self.resources.continuation(id) {
-            Some(frame) => (frame.realm, frame.kind, frame.boundary.clone()),
+        let (realm, kind, boundary, live_payload) = match self.resources.continuation(id) {
+            Some(frame) => (
+                frame.realm,
+                frame.kind,
+                frame.boundary.clone(),
+                frame.live_payload,
+            ),
             None => {
                 return Err(JitError::Effect(EffectError::Handler(format!(
                     "resume_continuation: no continuation parked under {id:?}"
@@ -2420,9 +2444,9 @@ impl JitEffectMachine {
         // neither re-derives them nor accepts substitutes from the caller.
         let cancel_flag = frame.cancel_flag.clone();
         let table = frame.table.clone();
-        // A finalized payload not claimed before resume is no longer
+        // A live payload not claimed before resume is no longer
         // externally reachable, so discard the frame's root with the frame.
-        let _ = frame.finalized_root.take();
+        let _ = frame.live_payload_root.take();
         drop(frame);
         self.resume_applied(
             continuation,
@@ -2436,23 +2460,24 @@ impl JitEffectMachine {
                 realm,
                 kind,
                 boundary: boundary.clone(),
+                live_payload,
             },
             cancel_flag,
         )
         .map(ParkedRaw::into_parked)
     }
 
-    /// Take the root of a parked frame's closure-valued `finalize` payload.
+    /// Take the root of a parked frame's declared live request payload.
     ///
     /// The continuation itself stays parked and rooted. Returns `None` when
     /// the frame has no such payload or the payload was already taken.
-    pub fn take_parked_finalized_root(
+    pub fn take_parked_live_payload_root(
         &mut self,
         id: ContinuationId,
     ) -> Option<crate::old_space::RootSlot> {
         self.resources
             .continuation_mut(id)
-            .and_then(|frame| frame.finalized_root.take())
+            .and_then(|frame| frame.live_payload_root.take())
     }
 
     /// Number of continuations currently parked in the registry. Equal to
@@ -2476,15 +2501,15 @@ impl JitEffectMachine {
 
     // --- value handles + scope exit ---------------------------------------
 
-    /// Mint a [`ValueHandle`] over the closure-valued `finalize` payload of
-    /// the frame parked under `id` (tenured + persistent-rooted at park time).
+    /// Mint a [`ValueHandle`] over the declared live payload of the frame
+    /// parked under `id` (tenured and persistent-rooted at park time).
     /// The frame STAYS parked and rooted; only its own stash of the slot is
     /// moved into the handle registry, owned by the frame's runtime resource scope — so
     /// [`Self::close_realm`] of that runtime resource scope releases the payload exactly once,
     /// whether or not the handle was ever observed or delivered. `None`
-    /// unless `id` names a parked frame holding an untaken finalized payload.
+    /// unless `id` names a parked frame holding an untaken live payload.
     ///
-    /// Supersedes [`Self::take_parked_finalized_root`] for new callers: a
+    /// Supersedes [`Self::take_parked_live_payload_root`] for new callers: a
     /// handle is `Send`, releasable, and deliverable via
     /// [`ResumeInput::Handle`]; a raw `RootSlot` is none of those.
     ///
@@ -2493,13 +2518,13 @@ impl JitEffectMachine {
     /// primitive is also exercised directly by tests that read a handle
     /// non-linearly (`observe_handle`, `handle_realm`, repeated
     /// `ResumeInput::Handle` — all borrows, never a consuming transfer). The
-    /// session layer (`tidepool_runtime`'s `ResidentSession::finalized_handle`)
+    /// session layer (`tidepool_runtime`'s `ResidentSession::live_payload_handle`)
     /// is where a caller-visible consume-once obligation actually begins — see
     /// the runtime session boundary is where the linear wrapper is applied.
-    pub fn handle_from_finalized(&mut self, id: ContinuationId) -> Option<ValueHandle> {
+    pub fn handle_from_live_payload(&mut self, id: ContinuationId) -> Option<ValueHandle> {
         let frame = self.resources.continuation_mut(id)?;
         let realm = frame.realm;
-        let slot = frame.finalized_root.take()?;
+        let slot = frame.live_payload_root.take()?;
         Some(self.resources.insert_handle(slot, realm))
     }
 
@@ -2654,7 +2679,7 @@ impl JitEffectMachine {
         for mut frame in closed.frames {
             let slot: *mut *mut u8 = &mut *frame.cell;
             self.machine_state.deregister_stowed_root(slot);
-            if let Some(root) = frame.finalized_root.take() {
+            if let Some(root) = frame.live_payload_root.take() {
                 self.machine_state.deregister_persistent_root(root.addr());
             }
         }
@@ -2817,23 +2842,17 @@ enum DriveOutcome {
 }
 
 /// Whether a bridged suspend request carries a [`heap_bridge::CLOSURE_SENTINEL`]
-/// placeholder among its top-level Con fields — the tolerant bridge's marker
-/// that a field was a live closure it declined to materialize. Only the
-/// direct fields of the request Con are checked: a `finalize`'s value is field
-/// 1 of `FinalizeWith`, and no other suspend request (`Ask`/`RunLLMTurn`) can
-/// legally contain a closure, so a nested sentinel would itself be a bug.
-///
-/// A closure nested inside a finalized product — a record of functions or a
-/// pair of lenses — must trigger by-reference tenure exactly like a top-level
-/// closure, or the payload takes
-/// the lossy bridge path and its nested closures arrive as sentinels. The
-/// request's own Con head is skipped (only its FIELDS can carry the payload);
-/// everything below is walked by [`heap_bridge::contains_closure_sentinel`].
-fn request_carries_closure_sentinel(request: &tidepool_eval::value::Value) -> bool {
+/// Whether one ABI-declared request field contains the tolerant bridge's
+/// closure sentinel. Nested closure-bearing products count: the entire field
+/// must cross by reference or its nested live values would be lost.
+fn request_field_carries_closure_sentinel(
+    request: &tidepool_eval::value::Value,
+    field: usize,
+) -> bool {
     match request {
-        tidepool_eval::value::Value::Con(_, fields) => {
-            fields.iter().any(heap_bridge::contains_closure_sentinel)
-        }
+        tidepool_eval::value::Value::Con(_, fields) => fields
+            .get(field)
+            .is_some_and(heap_bridge::contains_closure_sentinel),
         _ => false,
     }
 }

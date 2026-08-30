@@ -47,7 +47,7 @@
 //! tycon the generated effects module declares, since those live in the
 //! STABLE `Tidepool.Effects.Core` module), with error text "effectful
 //! function answers not supported (the row varies per compile): ...".
-//! `take_finalized_handle_keep_open` is the closure-aware branch of
+//! `take_live_payload_handle_keep_open` is the closure-aware branch of
 //! `Harness`'s finalize-value extraction path (deep sentinel scan — nested
 //! closures included), and `resume_handle` delivers the closure on the
 //! shared heap that produced it.

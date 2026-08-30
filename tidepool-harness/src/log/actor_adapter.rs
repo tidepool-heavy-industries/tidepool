@@ -10,7 +10,7 @@ use tidepool_actor::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorRef, ActorRole, AnswerDisposition,
     EventCausality, ModelUsage, StartInitiator,
 };
-use tidepool_effect::EffectStackAbi;
+use tidepool_effect::{EffectStackAbi, LivePayloadPolicy};
 
 use super::{Actor, AnswerOutcome, Event, EventRecord, LogHeader, LogReader, ReadError};
 use crate::provider::{Role, Usage};
@@ -92,7 +92,12 @@ fn adapt_event(event: &Event) -> (EventCausality, ActorEvent) {
                 owner,
                 label: teaser.clone(),
                 effect_stack: effect_row.clone(),
-                effect_abi: EffectStackAbi::new(effect_row.clone()).digest().to_string(),
+                effect_abi: EffectStackAbi::new(
+                    effect_row.clone(),
+                    LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+                )
+                .digest()
+                .to_string(),
             }
         }
         Event::Forced { actor, .. } => ActorEvent::Started {

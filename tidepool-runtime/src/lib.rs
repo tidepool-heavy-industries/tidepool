@@ -22,7 +22,7 @@ pub use tidepool_codegen::jit_machine::{CancelHandle, JitError};
 pub use tidepool_codegen::suspension::ResumeInput;
 use tidepool_codegen::suspension::{ContinuationId, ParkedOutcome, RealmId, SuspensionRun};
 pub use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_effect::EffectBoundary;
+use tidepool_effect::{EffectBoundary, LivePayloadPolicy};
 pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -297,7 +297,8 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
     let realm = RealmId::ROOT;
     on_ready(machine.realm_cancel_handle(realm));
     let boundary = EffectBoundary::new(ask_tag, effect_names);
-    let run = SuspensionRun::main(&table, &boundary, realm);
+    let run = SuspensionRun::main(&table, &boundary, realm)
+        .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
     match machine.run_until_suspension(run, handlers, user)? {
         ParkedOutcome::CompletedValue(value) => Ok(SuspendableRun::Completed(EvalResult::new(
             value,
@@ -307,7 +308,7 @@ pub fn compile_and_run_suspendable<U, H: DispatchEffect<U>>(
         ParkedOutcome::Suspended {
             id,
             request,
-            has_finalized_closure: _,
+            has_live_payload: _,
         } => Ok(SuspendableRun::Suspended {
             machine,
             table,
@@ -348,7 +349,7 @@ pub fn resume_suspended_turn<U, H: DispatchEffect<U>>(
         ParkedOutcome::Suspended {
             id,
             request,
-            has_finalized_closure: _,
+            has_live_payload: _,
         } => Ok(ResumedRun::Suspended {
             continuation: id,
             request,

@@ -6,7 +6,7 @@ use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, Suspendable, SuspendableOutcome,
     SuspensionRun,
 };
-use tidepool_effect::{DispatchEffect, EffectBoundary};
+use tidepool_effect::{DispatchEffect, EffectBoundary, LivePayloadPolicy};
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
 
@@ -49,7 +49,9 @@ impl SuspensionTestExt for JitEffectMachine {
         effect_names: &[String],
     ) -> Result<ParkedOutcome, JitError> {
         let boundary = EffectBoundary::new(suspend_tag, effect_names);
-        self.run_until_suspension(SuspensionRun::main(table, &boundary, realm), handlers, user)
+        let run = SuspensionRun::main(table, &boundary, realm)
+            .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
+        self.run_until_suspension(run, handlers, user)
     }
 
     fn run_fragment_suspendable_parked<U, H: DispatchEffect<U>>(
@@ -64,7 +66,8 @@ impl SuspensionTestExt for JitEffectMachine {
         effect_names: &[String],
     ) -> Result<ParkedOutcome, JitError> {
         let boundary = EffectBoundary::new(suspend_tag, effect_names);
-        let run = SuspensionRun::fragment(func_id, table, &boundary, realm, completion);
+        let run = SuspensionRun::fragment(func_id, table, &boundary, realm, completion)
+            .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         self.run_until_suspension(run, handlers, user)
     }
 }
@@ -100,7 +103,8 @@ impl LinearMachine {
     ) -> Result<SuspendableOutcome, JitError> {
         self.assert_idle();
         let boundary = EffectBoundary::new(suspend_tag, &[]);
-        let run = SuspensionRun::main(table, &boundary, RealmId(0));
+        let run = SuspensionRun::main(table, &boundary, RealmId(0))
+            .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         let outcome = self.machine.run_until_suspension(run, handlers, user)?;
         Ok(self.track_value(outcome))
     }
@@ -123,7 +127,8 @@ impl LinearMachine {
             &boundary,
             RealmId(0),
             ParkKind::Project { n_fields },
-        );
+        )
+        .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         let outcome = self.machine.run_until_suspension(run, handlers, user)?;
         Ok(self.track_project(outcome))
     }
@@ -145,7 +150,8 @@ impl LinearMachine {
             &boundary,
             RealmId(0),
             ParkKind::Render { field0_forced },
-        );
+        )
+        .with_live_payload(LivePayloadPolicy::HASKELL_EFFECT_VALUE);
         let outcome = self.machine.run_until_suspension(run, handlers, user)?;
         Ok(self.track_render(outcome))
     }
@@ -228,12 +234,12 @@ impl LinearMachine {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active = Some(id);
                 Suspendable::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("expected value completion, got {other:?}"),
@@ -249,12 +255,12 @@ impl LinearMachine {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active = Some(id);
                 Suspendable::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("expected projected completion, got {other:?}"),
@@ -270,12 +276,12 @@ impl LinearMachine {
             ParkedOutcome::Suspended {
                 id,
                 request,
-                has_finalized_closure,
+                has_live_payload,
             } => {
                 self.active = Some(id);
                 Suspendable::Suspended {
                     request,
-                    has_finalized_closure,
+                    has_live_payload,
                 }
             }
             other => panic!("expected render completion, got {other:?}"),

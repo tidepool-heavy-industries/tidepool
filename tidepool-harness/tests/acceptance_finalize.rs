@@ -23,7 +23,7 @@
 //! substitutes a `CLOSURE_SENTINEL` placeholder for the closure field so the
 //! surrounding `FinalizeWith(site, _)` still bridges for the classifier, while
 //! the REAL closure stays LIVE in the suspended session's heap (tenured into
-//! old-space at suspend time, `JitEffectMachine::tenure_finalized_payload`, and
+//! old-space at suspend time, `JitEffectMachine::tenure_live_payload`, and
 //! its persistent root stashed on the machine). The harness then APPLIES it in
 //! place — `ResidentSession::apply_finalized` seeds the root slot into an
 //! `ExternalEnv` and drives a synthesized `App(Var, I# arg)` fragment through

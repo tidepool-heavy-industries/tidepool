@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
-use tidepool_effect::{EffectBoundary, EffectStackAbi};
+use tidepool_effect::{EffectBoundary, EffectStackAbi, LivePayloadPolicy};
 use tidepool_repr::MonotonicIdIssuer;
 
 use crate::agent_session::AgentSessionState;
@@ -49,7 +49,12 @@ impl ActorDescriptor {
         effect_names: impl IntoIterator<Item = impl Into<String>>,
         placement: ActorPlacement,
     ) -> Self {
-        Self::new(label, EffectStackAbi::new(effect_names), 0, placement)
+        Self::new(
+            label,
+            EffectStackAbi::new(effect_names, LivePayloadPolicy::HASKELL_EFFECT_VALUE),
+            0,
+            placement,
+        )
     }
 
     #[must_use]

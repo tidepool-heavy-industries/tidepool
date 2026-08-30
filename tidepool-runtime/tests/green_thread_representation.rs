@@ -3,12 +3,12 @@
 //! session's multi-hole registry SIMULTANEOUSLY, and resuming them in
 //! EITHER order produces identical results.**
 //!
-//! Exercises [`ResidentSession::run_forked`] directly — the green-thread
+//! Exercises [`ResidentSession::run_rooted_entry`] directly — the green-thread
 //! fork entry — rather than going through the driver's `Green` scheduler
 //! (`tidepool-harness/src/selfharness/driver.rs`), so this is the substrate
 //! claim alone: a hand-built program suspends carrying a closure at field 1
 //! of its request (the SAME sentinel-tenure mechanism `finalize` already
-//! uses, `finalized_handle`), and that closure is forked as a NEW
+//! uses, `live_payload_handle`), and that closure is forked as a NEW
 //! suspension-capable top-level run under its own realm. No GHC extract is
 //! needed — every `CoreExpr` here is hand-built, the same style
 //! `tidepool-codegen/tests/realm_handles.rs` uses for the codegen layer.
@@ -77,22 +77,23 @@ fn table() -> DataConTable {
 }
 
 /// Build a program that suspends on `wrap_tag` carrying
-/// `SpawnWrap dummy bodyClosure`, where `bodyClosure` is `\_ignored -> E
-/// (Union body_tag body_lit) (Leaf (\v -> Val (ThreadResult v)))` — i.e. a
-/// thread body that, once `run_forked` applies it, immediately suspends on
-/// `body_tag`/`body_lit` and completes with `ThreadResult answer` on resume.
+/// `SpawnWrap dummy bodyClosure`, where `bodyClosure` is `\entryArg -> E
+/// (Union body_tag entryArg) (Leaf (\v -> Val (ThreadResult v)))` — i.e. a
+/// thread body that, once `run_rooted_entry` applies it, immediately suspends
+/// with the supplied entry argument and completes with `ThreadResult answer`
+/// on resume.
 /// Mirrors `realm_handles.rs`'s `build_finalize_suspend`, generalized so the
 /// closure field is a genuine suspending body instead of the identity.
-fn build_wrap_suspend(wrap_tag: u64, dummy: i64, body_tag: u64, body_lit: i64) -> CoreExpr {
+fn build_wrap_suspend(wrap_tag: u64, dummy: i64, body_tag: u64) -> CoreExpr {
     let mut b = TreeBuilder::new();
 
-    // The thread body: `\_ -> E (Union body_tag body_lit) (Leaf (\v -> Val
-    // (ThreadResult v)))`. The arg binder is never referenced (a spawn body
-    // ignores its dummy `Int` — `AsyncSpawnWith`'s own shape).
+    // The thread body uses its integer entry argument as the effect request.
+    // This pins the generic rooted-entry application, not merely the
+    // historical async-body-at-zero case.
     const ARG_VAR: VarId = VarId(1);
     const CONT_VAR: VarId = VarId(0);
     let body_tag_lit = b.push(CoreFrame::Lit(Literal::LitWord(body_tag)));
-    let body_req_lit = b.push(CoreFrame::Lit(Literal::LitInt(body_lit)));
+    let body_req_lit = b.push(CoreFrame::Var(ARG_VAR));
     let body_union = b.push(CoreFrame::Con {
         tag: UNION_ID,
         fields: vec![body_tag_lit, body_req_lit],
@@ -219,10 +220,10 @@ fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
 }
 
 /// Fork one green thread: run the scratch wrapper suspension, take its
-/// tenured body as a handle (`finalized_handle` — the same call the
+/// tenured body as a handle (`live_payload_handle` — the same call the
 /// finalize-by-reference path uses), retire the scratch hole immediately
 /// (spawner-continues-first, mirroring the driver's own discipline), then
-/// `run_forked` the body under `realm`. Returns the thread's OWN pending
+/// `run_rooted_entry` the body under `realm`. Returns the thread's OWN pending
 /// hole (parked on `body_tag`/`body_lit`).
 #[allow(clippy::too_many_arguments)]
 fn spawn_thread(
@@ -235,7 +236,7 @@ fn spawn_thread(
     body_lit: i64,
     realm: RealmId,
 ) -> ResidentHole {
-    let expr = build_wrap_suspend(wrap_tag, dummy, body_tag, body_lit);
+    let expr = build_wrap_suspend(wrap_tag, dummy, body_tag);
     let outcome = session
         .run(label, &expr, table)
         .unwrap_or_else(|e| panic!("{label}: wrap suspend run failed: {e}"));
@@ -244,14 +245,20 @@ fn spawn_thread(
         other => panic!("{label}: wrap suspend must suspend, got {other:?}"),
     };
     let handle = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .unwrap_or_else(|| panic!("{label}: wrap frame carries no untaken body closure"));
     let _ = session
         .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
         .unwrap_or_else(|e| panic!("{label}: wrap suspend failed to resume to completion: {e}"));
     let outcome = session
-        .run_forked(&format!("{label}_thread"), handle, realm, Some(table))
-        .unwrap_or_else(|e| panic!("{label}: run_forked failed: {e}"));
+        .run_rooted_entry(
+            &format!("{label}_thread"),
+            handle,
+            body_lit,
+            realm,
+            Some(table),
+        )
+        .unwrap_or_else(|e| panic!("{label}: run_rooted_entry failed: {e}"));
     match outcome {
         ResidentOutcome::Suspended { hole, .. } => hole,
         other => panic!("{label}: thread body must suspend on its own effect, got {other:?}"),
@@ -342,9 +349,9 @@ fn two_green_threads_pend_simultaneously_and_resume_order_is_free() {
 // narrowing result, not a contradiction:
 //
 //   RULED OUT — the fork crossing itself. Tenuring a closure off a frame that
-//   `run_forked` created, while that frame is still parked, and forking it
-//   under a second realm is sound. So `run_forked`, the sentinel-tenure step,
-//   `finalized_handle` on a thread's own frame, and multi-level realm nesting
+//   `run_rooted_entry` created, while that frame is still parked, and forking it
+//   under a second realm is sound. So `run_rooted_entry`, the sentinel-tenure step,
+//   `live_payload_handle` on a thread's own frame, and multi-level realm nesting
 //   are all fine.
 //
 //   STILL SUSPECT — a collection RUNNING while nested frames are parked. The
@@ -501,7 +508,7 @@ fn a_green_thread_can_fork_another_green_thread() {
         other => panic!("wrap suspend must suspend, got {other:?}"),
     };
     let outer_body = session
-        .finalized_handle(wrap_hole.cont_id())
+        .live_payload_handle(wrap_hole.cont_id())
         .expect("wrap frame carries the outer thread body");
     session
         .resume(wrap_hole, Value::Lit(Literal::LitInt(0)))
@@ -510,7 +517,7 @@ fn a_green_thread_can_fork_another_green_thread() {
     // Level 1: the outer thread. Its own body suspends carrying ANOTHER
     // closure at field 1 — the nested `async`.
     let outer_hole = match session
-        .run_forked("outer_thread", outer_body, RealmId(1), Some(&table))
+        .run_rooted_entry("outer_thread", outer_body, 0, RealmId(1), Some(&table))
         .expect("outer thread forks")
     {
         ResidentOutcome::Suspended { hole, .. } => hole,
@@ -518,16 +525,16 @@ fn a_green_thread_can_fork_another_green_thread() {
     };
 
     // Level 2: THE STEP UNDER TEST — tenure the inner body off a frame that
-    // `run_forked` itself created, while that frame is still parked, and fork
+    // `run_rooted_entry` itself created, while that frame is still parked, and fork
     // it under its own realm.
     let inner_body = session
-        .finalized_handle(outer_hole.cont_id())
+        .live_payload_handle(outer_hole.cont_id())
         .expect("the outer THREAD's frame must carry its nested spawn's closure");
     session
         .resume(outer_hole, Value::Lit(Literal::LitInt(0)))
         .expect("outer thread resumes past its spawn");
     let inner_hole = match session
-        .run_forked("inner_thread", inner_body, RealmId(2), Some(&table))
+        .run_rooted_entry("inner_thread", inner_body, 0, RealmId(2), Some(&table))
         .expect("inner thread forks from inside the outer thread")
     {
         ResidentOutcome::Suspended { hole, .. } => hole,

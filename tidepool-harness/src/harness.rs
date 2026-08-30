@@ -2747,7 +2747,7 @@ impl Harness {
     /// set, `hole_consumed` the tree). The caller delivers custody into
     /// the awaiting hole via `ResidentSession::resume_handle`. The node and
     /// its session stay live and reusable.
-    pub(crate) async fn take_finalized_handle_keep_open(
+    pub(crate) async fn take_live_payload_handle_keep_open(
         &self,
         node: NodeId,
     ) -> Result<tidepool_runtime::session::RootCustody, HarnessError> {
@@ -2770,7 +2770,7 @@ impl Harness {
         }
         let hole = pending.hole;
         let mut co = self.checkout_resume_waiting(node, &hole).await?;
-        let handle = co.machine().finalized_handle(&hole.0);
+        let handle = co.machine().live_payload_handle(&hole.0);
         let handle = match handle {
             Some(h) => h,
             None => {

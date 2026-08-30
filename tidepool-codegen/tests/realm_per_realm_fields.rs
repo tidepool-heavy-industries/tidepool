@@ -1,6 +1,6 @@
 //! Lane A — per-realm fields onto the frame (realm-verdict §7 step 2).
 //!
-//! `last_bound_root`, `suspended_finalized_root`, and `cancel_flag` used to be
+//! binding roots, live payloads, and cancellation used to be
 //! MACHINE-LEVEL singletons written by whichever realm ran last. With two
 //! realms live, realm B's bind would silently overwrite realm A's —
 //! `materialize_binder` binding the WRONG value under realm A's name, with
@@ -27,10 +27,13 @@ use support::SuspensionTestExt;
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::JitEffectMachine;
-use tidepool_codegen::suspension::{ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput};
+use tidepool_codegen::suspension::{
+    ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspensionRun,
+};
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
+use tidepool_effect::EffectBoundary;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value;
 use tidepool_repr::datacon::DataCon;
@@ -56,9 +59,9 @@ const LEAF_ID: DataConId = DataConId(13);
 const NODE_ID: DataConId = DataConId(14);
 
 /// `FinalizeWith site closure` shape (W4) — a 2-field Con whose field 1 is a
-/// raw closure. Structural only: `request_carries_closure_sentinel` and
-/// `tenure_finalized_payload` key off shape (>= 2 fields, field 1 a
-/// `TAG_CLOSURE` heap object), not this constructor's identity.
+/// raw closure. Structural only: the explicit live-payload policy and
+/// `tenure_live_payload` key off the declared field and closure sentinel, not
+/// this constructor's identity.
 const FINALIZE_ID: DataConId = DataConId(16);
 
 /// The `Ask`/finalize union tag the suspend driver intercepts.
@@ -206,7 +209,7 @@ fn build_suspending_parent(captured_n: i64, req: i64) -> CoreExpr {
 ///
 /// The request's field 1 is a raw closure (`\v -> v`), not data — the
 /// tolerant bridge substitutes a `CLOSURE_SENTINEL` for it
-/// (`has_finalized_closure = true`), and the real closure crosses by
+/// (`has_live_payload = true`), and the real closure crosses by
 /// reference via the finalized-root machinery (A2).
 fn build_suspending_finalize(captured_n: i64, site: i64) -> CoreExpr {
     let mut b = TreeBuilder::new();
@@ -561,14 +564,52 @@ fn a1_bound_root_returns_inline_never_touches_the_machine_level_field() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// A2 — suspended_finalized_root: relocated onto the frame. Two realms parked
+// A2 — live payload roots belong to frames. Two realms parked
 // on a closure-valued finalize each get their OWN slot; taking one leaves the
 // other's frame parked and rooted.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[test]
 #[serial]
-fn a2_finalized_root_is_per_frame_not_per_machine() {
+fn a2_live_payload_requires_an_explicit_run_policy() {
+    in_test_thread(|| {
+        arm_gc_hazards();
+        let table = adversarial_table();
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspending_finalize(10, 100), &table, 1 << 16)
+                .expect("compile_session");
+        let boundary = EffectBoundary::new(ASK_TAG, &[]);
+
+        let outcome = machine
+            .run_until_suspension(
+                SuspensionRun::main(&table, &boundary, RealmId(0)),
+                &mut NoDispatch,
+                &(),
+            )
+            .expect("run parks without a live-payload ABI");
+        let id = match outcome {
+            ParkedOutcome::Suspended {
+                id,
+                has_live_payload,
+                ..
+            } => {
+                assert!(!has_live_payload);
+                id
+            }
+            other => panic!("finalize-shaped request must suspend, got {other:?}"),
+        };
+        assert!(
+            machine.take_parked_live_payload_root(id).is_none(),
+            "a closure sentinel alone must not authorize rooting a request field"
+        );
+        assert_eq!(machine.close_realm(RealmId(0)), (1, 0));
+        disarm_gc_hazards();
+    });
+}
+
+#[test]
+#[serial]
+fn a2_live_payload_root_is_per_frame_not_per_machine() {
     in_test_thread(|| {
         arm_gc_hazards();
         let table = adversarial_table();
@@ -589,11 +630,11 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
             }
             ParkedOutcome::Suspended {
                 id,
-                has_finalized_closure,
+                has_live_payload,
                 ..
             } => {
                 assert!(
-                    has_finalized_closure,
+                    has_live_payload,
                     "the request must carry a CLOSURE_SENTINEL for the closure field"
                 );
                 id
@@ -633,10 +674,10 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
             }
             ParkedOutcome::Suspended {
                 id,
-                has_finalized_closure,
+                has_live_payload,
                 ..
             } => {
-                assert!(has_finalized_closure);
+                assert!(has_live_payload);
                 id
             }
             ParkedOutcome::CompletedValue(..) | ParkedOutcome::CompletedBinding { .. } => {
@@ -648,18 +689,18 @@ fn a2_finalized_root_is_per_frame_not_per_machine() {
 
         // Taking A's finalized root must not disturb B's frame at all.
         let slot_a = machine
-            .take_parked_finalized_root(id_a)
+            .take_parked_live_payload_root(id_a)
             .expect("A's finalized root");
         assert_rooting_receipt(&machine, 2);
         assert!(
-            machine.take_parked_finalized_root(id_a).is_none(),
+            machine.take_parked_live_payload_root(id_a).is_none(),
             "a second take on the same id is None — the frame's handle is cleared, \
              not re-derived"
         );
         assert_rooting_receipt(&machine, 2);
 
         let slot_b = machine
-            .take_parked_finalized_root(id_b)
+            .take_parked_live_payload_root(id_b)
             .expect("B's finalized root — its OWN, not A's");
         assert_ne!(
             slot_a.addr(),

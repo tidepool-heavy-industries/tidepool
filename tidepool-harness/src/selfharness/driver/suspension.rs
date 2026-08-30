@@ -130,7 +130,7 @@ impl SelfHarnessDriver {
         // it is delivered verbatim into the loop's parked continuation on the
         // shared heap); data keeps the bridged-value path.
         let answer = if self.agent.finalize_is_closure(node) {
-            let handle = self.agent.take_finalized_handle_keep_open(node).await?;
+            let handle = self.agent.take_live_payload_handle_keep_open(node).await?;
             self.emit(Event::Finalize {
                 node,
                 value: "\"<closure>\"".to_string(),
