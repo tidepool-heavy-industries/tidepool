@@ -337,6 +337,68 @@ fn a_sibling_define_between_mint_and_first_use_does_not_leak() {
     );
 }
 
+/// A fresh actor scope starts from an empty declaration view. Its descendants
+/// inherit declarations authored inside that actor, but neither direction can
+/// observe declarations from the session root.
+#[test]
+fn isolated_scope_has_an_empty_independent_declaration_chain() {
+    let lib_dir = setup();
+    let cache_root = tempfile::tempdir().unwrap();
+    // SAFETY: nextest runs this test in its own process and this is set before
+    // the first compile.
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache_root.path()) };
+
+    let session_root = tempfile::tempdir().unwrap();
+    let lib = SessionLib::open(
+        SessionId(46),
+        session_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("open session")
+    .with_validation_include(vec![lib_dir.clone()]);
+    let mut core = PersistentSession::new(Some(lib), ASK_TAG, Vec::new(), NURSERY);
+
+    let root_generation = core
+        .define_scoped(&["rootOnly = 41 :: Int"])
+        .expect("define at session root");
+    let isolated = core.mint_isolated_scope();
+    assert_eq!(
+        core.lib().scope_tip(isolated),
+        Generation(0),
+        "an isolated root is not seeded from the ambient declaration tip"
+    );
+    assert_eq!(core.current_lib_module_in(isolated), None);
+
+    let actor_generation = core
+        .define_scoped_in(isolated, &["actorOnly = 42 :: Int"])
+        .expect("define in isolated actor scope");
+    let actor_child = core
+        .mint_scope(isolated)
+        .expect("isolated actor scope is live");
+    assert_eq!(core.lib().scope_tip(actor_child), actor_generation);
+
+    let actor_result = run_probe(
+        &lib_dir,
+        core.lib().include_dir(),
+        &core.lib().cache_salt(),
+        &probe(actor_generation, "Int", "actorOnly"),
+    );
+    assert_eq!(actor_result, serde_json::json!(42));
+    let root_result = run_probe(
+        &lib_dir,
+        core.lib().include_dir(),
+        &core.lib().cache_salt(),
+        &probe(root_generation, "Int", "rootOnly"),
+    );
+    assert_eq!(root_result, serde_json::json!(41));
+
+    assert_eq!(
+        core.lib().scope_tip(ScopeId::ROOT),
+        root_generation,
+        "actor declarations never advance the ambient root"
+    );
+}
+
 /// `define_scoped_in`/`retract_in` on a dead scope (never minted, or already
 /// retired) must reject with a typed [`SessionError::DeadScope`] rather than
 /// silently accumulating decl-plane state under a `ScopeId` no session-owned

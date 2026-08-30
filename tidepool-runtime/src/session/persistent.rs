@@ -93,10 +93,10 @@ pub struct PersistentSession {
     /// `Val.G<g>` so its `stableVarId` is collision-free and a rebind shadows
     /// without clobbering the prior root.
     val_gen: Generation,
-    /// THE scope tree — one per session, shared by BOTH
+    /// The scope forest — one per session, shared by BOTH
     /// planes. The value plane hangs [`BindingTable`] frames off these ids and
     /// the decl plane keys its per-scope tips off the SAME ids, which is why
-    /// neither owns a tree of its own: two trees would be two answers to "is
+    /// neither owns a forest of its own: two forests would be two answers to "is
     /// this scope live", and a scoped decl and a scoped binding would drift.
     /// [`ScopeId::ROOT`] is the flat session every pre-C2 caller lives in.
     scopes: ScopeTree,
@@ -1129,7 +1129,17 @@ impl PersistentSession {
         Some(child)
     }
 
-    /// The session's one scope tree — read by both planes for their lookup
+    /// Mint a fresh lexical root with an empty declaration and value view.
+    ///
+    /// This is the fresh-actor boundary: unlike [`Self::mint_scope`], it does
+    /// not seed a declaration tip from another scope and its binding lookup
+    /// chain never reaches [`ScopeId::ROOT`]. Exact program-image facades are
+    /// added later as explicit source imports rather than ambient ancestry.
+    pub fn mint_isolated_scope(&mut self) -> ScopeId {
+        self.scopes.mint_isolated()
+    }
+
+    /// The session's one scope forest — read by both planes for their lookup
     /// walks. There is no `_mut` sibling on purpose: minting and retiring are
     /// the only writes, and both go through this type so the value plane's
     /// frames and roots are released in the same step as the tree edge.
@@ -1159,7 +1169,7 @@ impl PersistentSession {
     }
 
     /// Resolve `name` as seen FROM `scope`: local frame first, then each
-    /// ancestor up to ROOT.
+    /// ancestor up to its lexical root.
     pub fn resolve_in(&self, scope: ScopeId, name: &str) -> Option<&BindingEntry> {
         self.bindings.resolve_in(&self.scopes, scope, name)
     }

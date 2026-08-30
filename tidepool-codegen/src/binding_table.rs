@@ -268,10 +268,11 @@ impl BindingTable {
         self.live.get(id)
     }
 
-    /// Scoped [`Self::resolve`]: walk `scope → parent → … → ROOT` and take the
-    /// FIRST frame that has `name` — children read parent bindings, a local
-    /// bind shadows an inherited one, and a sibling's frame is never on the
-    /// walk. `resolve(n) == resolve_in(tree, ScopeId::ROOT, n)` for any tree.
+    /// Scoped [`Self::resolve`]: walk `scope → parent → … → lexical root` and
+    /// take the FIRST frame that has `name` — children read parent bindings,
+    /// a local bind shadows an inherited one, and a sibling's frame is never
+    /// on the walk. `resolve(n) == resolve_in(tree, ScopeId::ROOT, n)` for any
+    /// tree.
     ///
     /// `None` for a retired or never-minted `scope` (its lookup chain is
     /// empty) — a stale scope reference resolves nothing rather than silently

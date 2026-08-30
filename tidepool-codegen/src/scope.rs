@@ -1,10 +1,12 @@
-//! The scope tree — one shared spine for both the persistent binding store
+//! The scope forest — one shared spine for both the persistent binding store
 //! and the persistent declaration environment.
 //!
 //! This module implements a *persistent lexical environment*: everything
 //! immutable, "write" meaning "create a descendant scope", lookup walking
 //! local → parent, siblings shadowing freely and never colliding, and the
-//! parent never gaining a child's names. This module is the whole of that
+//! parent never gaining a child's names. Isolated roots provide the empty
+//! lexical environment used by fresh actors; ordinary children retain the
+//! existing inheritance semantics. This module is the whole of that
 //! structure; the persistent binding store ([`crate::binding_table::BindingTable`]) and
 //! the persistent declaration environment (`tidepool_runtime::session::SessionLib`) each hang their
 //! own frames off these ids rather than growing separate nesting.
@@ -25,7 +27,7 @@
 
 use std::collections::HashMap;
 
-/// A node in the scope tree — an invocation-local declaration/binding frame.
+/// A node in the scope forest — an invocation-local declaration/binding frame.
 ///
 /// Monotone and never reused (see the module docs). [`ScopeId::ROOT`] is the
 /// flat session.
@@ -33,8 +35,8 @@ use std::collections::HashMap;
 pub struct ScopeId(pub u64);
 
 impl ScopeId {
-    /// The flat session — every pre-C2 caller's scope, and the root of every
-    /// lookup walk.
+    /// The flat session — every pre-C2 caller's scope and the root of every
+    /// ordinary lookup walk.
     pub const ROOT: ScopeId = ScopeId(0);
 
     /// Whether this is the root scope.
@@ -44,17 +46,17 @@ impl ScopeId {
     }
 }
 
-/// The parent map. `ROOT` is present from construction and has no parent;
-/// every other scope is minted as some existing scope's child.
+/// The parent map. `ROOT` is implicit and has no parent. Every other live scope
+/// is present: `Some(parent)` for an inheriting child, `None` for an isolated
+/// root.
 ///
 /// Retirement removes a scope from the tree but never reclaims its id, so a
-/// [`ScopeTree::parent_of`] on a retired scope answers `None` — the same
-/// answer as for an id that was never minted, which is the correct one: in
-/// both cases there is no live frame to resolve through.
+/// [`ScopeTree::parent_of`] answers `None` for all lexical roots and for a
+/// non-live id. Use [`ScopeTree::is_live`] when that distinction matters.
 #[derive(Debug, Clone)]
 pub struct ScopeTree {
-    /// child → parent. `ROOT` is never a key.
-    parent: HashMap<ScopeId, ScopeId>,
+    /// scope → optional parent. `ROOT` is never a key.
+    parent: HashMap<ScopeId, Option<ScopeId>>,
     /// Next id to mint. Monotone; never decremented by retirement.
     next: u64,
 }
@@ -66,7 +68,7 @@ impl Default for ScopeTree {
 }
 
 impl ScopeTree {
-    /// A tree containing only [`ScopeId::ROOT`].
+    /// A forest containing only [`ScopeId::ROOT`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -77,16 +79,26 @@ impl ScopeTree {
 
     /// Mint a fresh child of `parent`. Returns `None` if `parent` is not live
     /// (never minted, or already retired) — a scope can never be born under a
-    /// dead ancestor, which is what keeps every live scope's walk terminating
-    /// at ROOT.
+    /// dead ancestor, which keeps every live scope's walk terminating at its
+    /// lexical root.
     pub fn mint_child(&mut self, parent: ScopeId) -> Option<ScopeId> {
         if !self.is_live(parent) {
             return None;
         }
         let id = ScopeId(self.next);
         self.next += 1;
-        self.parent.insert(id, parent);
+        self.parent.insert(id, Some(parent));
         Some(id)
+    }
+
+    /// Mint a fresh lexical root that inherits no declarations or values from
+    /// [`ScopeId::ROOT`] or any other scope. Descendants may still be minted
+    /// beneath it normally.
+    pub fn mint_isolated(&mut self) -> ScopeId {
+        let id = ScopeId(self.next);
+        self.next += 1;
+        self.parent.insert(id, None);
+        id
     }
 
     /// Whether `scope` is a live node of this tree.
@@ -95,15 +107,16 @@ impl ScopeTree {
         scope.is_root() || self.parent.contains_key(&scope)
     }
 
-    /// `scope`'s parent, or `None` for ROOT and for any non-live scope.
+    /// `scope`'s parent, or `None` for a lexical root or any non-live scope.
     #[must_use]
     pub fn parent_of(&self, scope: ScopeId) -> Option<ScopeId> {
-        self.parent.get(&scope).copied()
+        self.parent.get(&scope).copied().flatten()
     }
 
-    /// `scope` then each ancestor up to and including ROOT — the resolution
-    /// order both planes walk (local first, parent last). Empty for a
-    /// non-live scope.
+    /// `scope` then each ancestor up to its lexical root — the resolution order
+    /// both planes walk (local first, parent last). An ordinary chain ends at
+    /// [`ScopeId::ROOT`]; an isolated chain ends at its isolated root. Empty
+    /// for a non-live scope.
     #[must_use]
     pub fn lookup_chain(&self, scope: ScopeId) -> Vec<ScopeId> {
         if !self.is_live(scope) {
@@ -207,6 +220,30 @@ mod tests {
         assert!(!t.lookup_chain(l).contains(&r));
         assert!(!t.lookup_chain(r).contains(&l));
         assert_eq!(t.lookup_chain(l), vec![l, ScopeId::ROOT]);
+    }
+
+    #[test]
+    fn isolated_root_never_walks_into_session_root() {
+        let mut t = ScopeTree::new();
+        let isolated = t.mint_isolated();
+        let child = t.mint_child(isolated).expect("isolated root is live");
+        assert_eq!(t.lookup_chain(isolated), vec![isolated]);
+        assert_eq!(t.lookup_chain(child), vec![child, isolated]);
+        assert!(!t.lookup_chain(child).contains(&ScopeId::ROOT));
+    }
+
+    #[test]
+    fn isolated_subtree_retires_without_touching_other_roots() {
+        let mut t = ScopeTree::new();
+        let ordinary = t.mint_child(ScopeId::ROOT).expect("root is live");
+        let isolated = t.mint_isolated();
+        let child = t.mint_child(isolated).expect("isolated root is live");
+
+        assert_eq!(t.retire(isolated), vec![child, isolated]);
+        assert!(t.is_live(ScopeId::ROOT));
+        assert!(t.is_live(ordinary));
+        assert!(!t.is_live(isolated));
+        assert!(!t.is_live(child));
     }
 
     /// Nothing ever walks downward — the parent's chain is unchanged by a

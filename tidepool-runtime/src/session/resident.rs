@@ -845,9 +845,9 @@ where
     }
 
     /// Scoped read-only query: the binding `name` resolves to as seen FROM
-    /// `scope` — its own frame first, then each ancestor up to ROOT, so a
-    /// child reads a parent's mounts and a local mount shadows an inherited
-    /// one. Independent of the mount seam ([`Self::mount_handle_in`]
+    /// `scope` — its own frame first, then each ancestor up to its lexical
+    /// root, so a child reads a parent's mounts and a local mount shadows an
+    /// inherited one. Independent of the mount seam ([`Self::mount_handle_in`]
     /// resolves its own target internally — see that method's doc); this is
     /// a plain existence/identity probe for callers that need to know what
     /// `name` is bound to without mounting anything.
@@ -1051,6 +1051,12 @@ where
     /// invocation scope). `None` if `parent` is not live.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
         self.core.mint_scope(parent)
+    }
+
+    /// Mint a fresh actor lexical root with no ambient declaration or value
+    /// ancestry. Program visibility must be supplied through exact imports.
+    pub fn mint_isolated_scope(&mut self) -> ScopeId {
+        self.core.mint_isolated_scope()
     }
 
     /// The value-plane names VISIBLE at `scope` — its own frame plus every

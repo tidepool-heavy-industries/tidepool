@@ -160,6 +160,32 @@ fn classes_1_and_2(core: &PersistentSession) -> (usize, usize, usize) {
     )
 }
 
+#[test]
+fn isolated_scope_has_an_independent_value_chain() {
+    let mut core = session();
+    let root_slot = tenure(&mut core, "root_value", 7);
+    mount(&mut core, ScopeId::ROOT, "rootValue", 1, root_slot);
+
+    let isolated = core.mint_isolated_scope();
+    assert!(core.resolve_in(isolated, "rootValue").is_none());
+    assert!(core.current_val_modules_in(isolated).is_empty());
+
+    let actor_slot = tenure(&mut core, "actor_value", 8);
+    mount(&mut core, isolated, "actorValue", 2, actor_slot);
+    let child = core
+        .mint_scope(isolated)
+        .expect("isolated scope is a live lexical root");
+    assert!(core.resolve_in(child, "actorValue").is_some());
+    assert!(core.resolve_in(child, "rootValue").is_none());
+    assert!(core.resolve_in(ScopeId::ROOT, "actorValue").is_none());
+
+    let receipt = core.retire_scope(isolated);
+    assert_eq!(receipt.scopes_retired, 2);
+    assert_eq!(receipt.bindings_retired, 1);
+    assert_eq!(receipt.roots_released, 1);
+    assert!(core.resolve_in(ScopeId::ROOT, "rootValue").is_some());
+}
+
 // ---------------------------------------------------------------------------
 // (a) + (b) + (c): the ledger drops by exactly what the receipt reports, the
 // other classes do not move, and class 3 returns to baseline.
