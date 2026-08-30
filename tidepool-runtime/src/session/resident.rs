@@ -634,6 +634,16 @@ where
         self.core.compile_view_in(scope)
     }
 
+    /// Capture an exact, selective declaration surface from `scope` for a
+    /// fresh actor's model-visible environment.
+    pub fn exact_exports_in(
+        &self,
+        scope: ScopeId,
+        heads: &[&str],
+    ) -> Result<super::ExactExportSurface, super::ExactExportError> {
+        self.core.exact_exports_in(scope, heads)
+    }
+
     /// The most recently parked hole (top of the stack), if any.
     ///
     /// Use [`Self::parked_holes`] when the caller needs the complete registry.

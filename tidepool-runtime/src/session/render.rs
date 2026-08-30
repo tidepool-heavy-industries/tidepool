@@ -191,6 +191,24 @@ impl DeclLog {
         map.into_iter().collect()
     }
 
+    /// Exact export items visible at `tip`, latest definition winning by head
+    /// name and retractions removing the head. Unlike `current_heads_at`, this
+    /// preserves GHC's constructor/method metadata for selective imports.
+    pub(crate) fn exports_at(&self, tip: Generation) -> Vec<ExportItem> {
+        let mut exports = Vec::new();
+        for g in self.chain_from_root(tip) {
+            let turn = &self.turns[(g.0 - 1) as usize];
+            for retracted in &turn.retracts {
+                exports.retain(|item: &ExportItem| item.head_name() != retracted);
+            }
+            for item in &turn.items {
+                exports.retain(|prior| prior.head_name() != item.head_name());
+                exports.push(item.clone());
+            }
+        }
+        exports
+    }
+
     /// The declaration source texts of a **replayable** notebook skeleton: turn
     /// sources in log order, but with fully-superseded turns dropped so a name
     /// redefined across SEPARATE turns emits only its LATEST definition.

@@ -47,7 +47,7 @@ use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
 use super::engine::OutputSink;
-use super::{SessionCompileView, SessionError, SessionLib};
+use super::{ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib};
 use crate::JitError;
 
 /// Cross-thread custody for one completed bind root. The root never moves
@@ -978,6 +978,24 @@ impl PersistentSession {
             injected_values,
             self.val_gen.next(),
         ))
+    }
+
+    /// Capture selected declaration heads from `scope` as an exact export
+    /// surface. This is source/interface identity only; it acquires no live
+    /// roots and creates no deployment registry entry.
+    pub fn exact_exports_in(
+        &self,
+        scope: ScopeId,
+        heads: &[&str],
+    ) -> Result<ExactExportSurface, ExactExportError> {
+        if !self.scopes.is_live(scope) {
+            return Err(ExactExportError::DeadScope(scope));
+        }
+        let lib = self
+            .lib
+            .as_ref()
+            .ok_or(ExactExportError::NoDeclarationPlane)?;
+        lib.exact_exports_in(scope, heads)
     }
 
     /// The decl-plane include directory (where `Lib.G<g>.hs` modules live), for

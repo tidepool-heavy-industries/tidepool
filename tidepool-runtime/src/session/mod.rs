@@ -17,6 +17,7 @@
 //! declaration REPL on its own.
 
 pub mod engine;
+pub mod facade;
 pub mod kernel;
 pub mod persistent;
 pub mod registry;
@@ -37,6 +38,10 @@ pub use registry::{
 pub use engine::{
     extract_ask_request, AbortOutcome, EngineConfig, GateDispatcher, OutputSink, ResumeOutcome,
     SessionEngine, StartError, StartTurn, TurnOutcome,
+};
+
+pub use facade::{
+    ExactExportError, ExactExportSurface, ExactFacadeError, FacadeIdentity, MaterializedFacade,
 };
 
 pub use supervisor::{GraceOutcome, TurnSupervisor};
@@ -430,6 +435,44 @@ impl SessionLib {
     #[must_use]
     pub fn current_decl_heads_in(&self, scope: ScopeId) -> Vec<(String, u64)> {
         self.log.current_heads_at(self.scope_tip(scope))
+    }
+
+    /// Select a model-visible export membrane from the exact declaration
+    /// module currently visible in `scope`. Names are declaration heads; a
+    /// selected data type or class carries all GHC-reported constructors or
+    /// methods through [`ExportItem`].
+    pub fn exact_exports_in(
+        &self,
+        scope: ScopeId,
+        heads: &[&str],
+    ) -> Result<ExactExportSurface, ExactExportError> {
+        let available = self.log.exports_at(self.scope_tip(scope));
+        let mut selected = Vec::new();
+        for head in heads
+            .iter()
+            .map(|head| head.trim())
+            .filter(|head| !head.is_empty())
+        {
+            let item = available
+                .iter()
+                .find(|item| item.head_name() == head)
+                .cloned()
+                .ok_or_else(|| ExactExportError::UnknownExport {
+                    scope,
+                    name: head.to_string(),
+                })?;
+            if !selected
+                .iter()
+                .any(|prior: &ExportItem| prior.head_name() == item.head_name())
+            {
+                selected.push(item);
+            }
+        }
+        Ok(ExactExportSurface::new(
+            self.id,
+            self.current_module_in(scope),
+            selected,
+        ))
     }
 
     /// A cache salt unique to `(session, generation)`. Threaded into

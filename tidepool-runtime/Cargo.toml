@@ -11,6 +11,7 @@ readme = "../README.md"
 
 [dependencies]
 tidepool-atomic-write.workspace = true
+blake3.workspace = true
 thiserror.workspace = true
 tidepool-repr.workspace = true
 tidepool-eval.workspace = true
