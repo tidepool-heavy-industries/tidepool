@@ -20,7 +20,9 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
   registry and never serialize live heap values.
 - Every event has both stream ordering and per-actor ordering. Adapters must
   preserve source ordering without inventing runtime facts.
-- One actor admits at most one active turn of any kind.
+- One actor admits at most one active turn of any kind. An admitted agent
+  session spans all of its provider rounds, fenced-Haskell execution, retries,
+  and corrective rounds; those are not separately admitted actor turns.
 - Mailbox envelopes own the existing `RootCustody` token. Never serialize a
   live value or add a second root registry for actor messaging.
 - `CallTicket`, `WaitTicket`, `CallDelivery`, and mailbox deliveries are
@@ -40,6 +42,9 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
 - The registry also retains exactly one accumulating `ActorAgentSession`
   state per incarnation. Reattachment shares that transcript; it never opens
   a parallel model context for the same actor.
+- Mount fenced Haskell through the existing `AdmittedAgentSession` lease. Do
+  not acquire a nested `Haskell` turn or release admission between a provider
+  response and execution of its blocks.
 - Exit events record whether the owner was already observing that exact exit
   through a call or wait at the terminal transition; advisory code consumes
   that fact instead of racing a later registry lookup.

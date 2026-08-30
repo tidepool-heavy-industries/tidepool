@@ -149,6 +149,12 @@ operations; evaluating the actor's Haskell is not modeled as one.
 The common agent-session executor owns this response-to-block-to-resident-run
 loop. Deliberation, startup, and advisory provide different typed goals and
 settlement rules but do not grow separate parsers or execution engines.
+One admitted agent session owns the actor for the complete interaction: its
+provider rounds, ordered fenced-Haskell execution, transport retries, and
+corrective rounds. A provider response is only a borrowed round inside that
+session; completing or dropping the response does not create an interleaving
+point. Mailbox work, advisories, and another model interaction may begin only
+after the enclosing session settles or is abandoned.
 
 ### Actor events and observability
 

@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 use tidepool_model::{Conversation, Message, Role, TurnRequest, TurnResponse, Usage};
 use tidepool_model_output::extract_haskell_blocks;
 
+use crate::mount::{install_actor_context, ActorRunTarget};
 use crate::{
     ActorEvent, ActorRef, ActorRegistry, ActorRegistryError, ActorRole, ActorTurnKind,
     EventCausality, ModelUsage, StartingActor, TurnLease,
@@ -75,28 +76,27 @@ impl ActorAgentSession {
         });
     }
 
-    /// Admit one provider turn and inject all queued inputs immediately before
-    /// assembling its request. The returned guard holds the actor's exclusive
-    /// turn lease until completion or transport failure.
-    pub fn begin_provider_turn(
-        &self,
-        max_tokens: Option<u32>,
-    ) -> Result<PendingProviderTurn, ActorRegistryError> {
+    /// Admit one complete, possibly multi-round model/Haskell interaction.
+    /// The returned lease remains exclusive across provider retries,
+    /// fenced-Haskell execution, and corrective rounds.
+    pub fn begin_agent_session(&self) -> Result<AdmittedAgentSession, ActorRegistryError> {
         let lease = self
             .registry
-            .begin_turn(self.actor, ActorTurnKind::Provider)?;
-        self.begin_provider_turn_with_lease(max_tokens, lease)
+            .begin_turn(self.actor, ActorTurnKind::AgentSession)?;
+        Ok(AdmittedAgentSession {
+            session: self.clone(),
+            lease,
+        })
     }
 
-    /// Begin the prompted startup session before readiness publication. The
+    /// Admit the prompted startup session before readiness publication. The
     /// private capability, rather than an `ActorRef`, authorizes this one
-    /// initializing actor's provider turn.
-    pub fn begin_startup_provider_turn(
+    /// initializing actor's entire model/Haskell interaction.
+    pub fn begin_startup_agent_session(
         &self,
         starting: &StartingActor,
-        max_tokens: Option<u32>,
-    ) -> Result<PendingProviderTurn, ActorRegistryError> {
-        let lease = self.registry.begin_startup_provider_turn(starting)?;
+    ) -> Result<AdmittedAgentSession, ActorRegistryError> {
+        let lease = self.registry.begin_startup_agent_session(starting)?;
         let capability = lease.session_context().actor;
         if capability != self.actor {
             return Err(ActorRegistryError::StartupSessionMismatch {
@@ -104,16 +104,47 @@ impl ActorAgentSession {
                 capability,
             });
         }
-        self.begin_provider_turn_with_lease(max_tokens, lease)
+        Ok(AdmittedAgentSession {
+            session: self.clone(),
+            lease,
+        })
     }
 
-    fn begin_provider_turn_with_lease(
-        &self,
+    #[must_use]
+    pub fn transcript(&self) -> Vec<Message> {
+        self.state.lock().conversation.messages().to_vec()
+    }
+}
+
+/// Exclusive admission for one complete agent session. Provider calls borrow
+/// this guard; dropping an individual call never releases actor admission.
+pub struct AdmittedAgentSession {
+    session: ActorAgentSession,
+    lease: TurnLease,
+}
+
+impl AdmittedAgentSession {
+    /// Install this actor's exact execution context on a checked-out resident
+    /// target without acquiring a second actor turn. Fenced Haskell executed
+    /// through the target remains part of this admitted agent session.
+    pub fn install_execution<Target>(&self, target: &mut Target) -> Result<(), Target::Error>
+    where
+        Target: ActorRunTarget,
+    {
+        let context = self.lease.session_context();
+        install_actor_context(target, &context)
+    }
+
+    /// Inject queued inputs at a legal provider boundary and assemble one
+    /// request inside this admitted session. A transport failure consumes only
+    /// the pending round; the caller may retry without releasing admission or
+    /// duplicating already-injected input.
+    pub fn begin_provider_round(
+        &mut self,
         max_tokens: Option<u32>,
-        lease: TurnLease,
-    ) -> Result<PendingProviderTurn, ActorRegistryError> {
+    ) -> Result<PendingProviderRound<'_>, ActorRegistryError> {
         let (turn, request, injected) = {
-            let mut state = self.state.lock();
+            let mut state = self.session.state.lock();
             let queued = std::mem::take(&mut state.queued);
             let mut injected = Vec::with_capacity(queued.len());
             for message in queued {
@@ -129,9 +160,9 @@ impl ActorAgentSession {
         for message in injected {
             // The actor can reach a terminal state after turn admission. The
             // transcript still audits the request we prepared; returning here
-            // drops the lease before any provider request escapes.
-            self.registry.record_event(
-                self.actor,
+            // prevents a provider request from escaping this admitted session.
+            self.session.registry.record_event(
+                self.session.actor,
                 turn_causality(turn),
                 ActorEvent::ModelMessage {
                     turn,
@@ -143,38 +174,31 @@ impl ActorAgentSession {
                 },
             )?;
         }
-        Ok(PendingProviderTurn {
-            session: self.clone(),
+        Ok(PendingProviderRound {
+            admitted: self,
             request,
             turn,
-            _lease: lease,
         })
     }
-
-    #[must_use]
-    pub fn transcript(&self) -> Vec<Message> {
-        self.state.lock().conversation.messages().to_vec()
-    }
 }
 
-/// Holds actor admission across one provider request. Dropping it after a
-/// transport failure releases the actor turn.
-pub struct PendingProviderTurn {
-    session: ActorAgentSession,
+/// One provider request borrowed from an admitted agent session.
+pub struct PendingProviderRound<'a> {
+    admitted: &'a mut AdmittedAgentSession,
     request: TurnRequest,
     turn: u64,
-    _lease: TurnLease,
 }
 
-impl PendingProviderTurn {
+impl PendingProviderRound<'_> {
     #[must_use]
     pub fn request(&self) -> &TurnRequest {
         &self.request
     }
 
-    /// Append the provider response, release turn admission, and expose every
-    /// fenced Haskell block in source order for the resident executor.
+    /// Append the provider response and expose every fenced Haskell block in
+    /// source order. The enclosing agent-session admission remains held.
     pub fn complete(self, response: TurnResponse) -> Result<AssistantTurn, ActorRegistryError> {
+        let session = &self.admitted.session;
         let reply = response.text;
         let usage = response.usage;
         let reasoning = response.reasoning;
@@ -184,12 +208,12 @@ impl PendingProviderTurn {
             reasoning_items: response.reasoning_items,
         };
         {
-            let mut state = self.session.state.lock();
+            let mut state = session.state.lock();
             state.conversation.append(message);
             state.next_turn += 1;
         }
-        self.session.registry.record_event(
-            self.session.actor,
+        session.registry.record_event(
+            session.actor,
             turn_causality(self.turn),
             ActorEvent::ModelMessage {
                 turn: self.turn,
@@ -240,6 +264,27 @@ mod tests {
     use super::*;
     use crate::{ActorDescriptor, ActorPlacement, StartInitiator};
     use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
+    use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_runtime::session::SessionRunContext;
+
+    #[derive(Default)]
+    struct RecordingTarget {
+        context: Option<SessionRunContext>,
+    }
+
+    impl ActorRunTarget for RecordingTarget {
+        type Error = std::convert::Infallible;
+
+        fn install_actor_execution(
+            &mut self,
+            context: SessionRunContext,
+            _effect_policy: EffectRunPolicy,
+            _live_payload: LivePayloadPolicy,
+        ) -> Result<(), Self::Error> {
+            self.context = Some(context);
+            Ok(())
+        }
+    }
 
     fn ready_actor(registry: &ActorRegistry) -> ActorRef {
         let starting = registry
@@ -275,9 +320,10 @@ mod tests {
         let actor = ready_actor(&registry);
         let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
         session.queue_user("review this");
-        let pending = session
-            .begin_provider_turn(None)
-            .expect("begin provider turn");
+        let mut admitted = session.begin_agent_session().expect("admit agent session");
+        let pending = admitted
+            .begin_provider_round(None)
+            .expect("begin provider round");
         assert_eq!(pending.request().messages.len(), 1);
         session.queue_developer("child exited");
         let assistant = pending
@@ -285,9 +331,9 @@ mod tests {
             .expect("complete provider turn");
         assert_eq!(assistant.blocks, ["pure ()"]);
 
-        let next = session
-            .begin_provider_turn(None)
-            .expect("begin next provider turn");
+        let next = admitted
+            .begin_provider_round(None)
+            .expect("begin next provider round");
         let roles: Vec<_> = next.request().messages.iter().map(|m| m.role).collect();
         assert_eq!(roles, [Role::User, Role::Assistant, Role::Developer]);
 
@@ -303,18 +349,28 @@ mod tests {
     }
 
     #[test]
-    fn dropped_provider_turn_releases_admission_without_duplicating_input() {
+    fn dropped_provider_round_keeps_session_admission_without_duplicating_input() {
         let registry = ActorRegistry::new();
         let actor = ready_actor(&registry);
         let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
         session.queue_user("start");
-        let pending = session
-            .begin_provider_turn(None)
-            .expect("begin provider turn");
+        let mut admitted = session.begin_agent_session().expect("admit agent session");
+        let pending = admitted
+            .begin_provider_round(None)
+            .expect("begin provider round");
         drop(pending);
-        session
-            .begin_provider_turn(None)
-            .expect("transport failure released admission");
+        assert!(matches!(
+            registry.begin_turn(actor, ActorTurnKind::Haskell),
+            Err(ActorRegistryError::Busy {
+                active: ActorTurnKind::AgentSession,
+                ..
+            })
+        ));
+        let retry = admitted
+            .begin_provider_round(None)
+            .expect("transport failure leaves the session retryable");
+        assert_eq!(retry.request().messages.len(), 1);
+        drop(retry);
         let user_events = registry
             .events()
             .into_iter()
@@ -329,6 +385,36 @@ mod tests {
             })
             .count();
         assert_eq!(user_events, 1, "transport retry must not duplicate input");
+        drop(admitted);
+        registry
+            .begin_turn(actor, ActorTurnKind::Haskell)
+            .expect("dropping the admitted session releases actor admission");
+    }
+
+    #[test]
+    fn fenced_execution_uses_the_agent_sessions_existing_admission() {
+        let registry = ActorRegistry::new();
+        let actor = ready_actor(&registry);
+        let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
+        let admitted = session.begin_agent_session().expect("admit agent session");
+        let mut target = RecordingTarget::default();
+
+        admitted
+            .install_execution(&mut target)
+            .expect("install exact actor execution context");
+
+        let expected = registry
+            .session_context(actor)
+            .expect("actor context")
+            .run_context();
+        assert_eq!(target.context, Some(expected));
+        assert!(matches!(
+            registry.begin_turn(actor, ActorTurnKind::Haskell),
+            Err(ActorRegistryError::Busy {
+                active: ActorTurnKind::AgentSession,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -339,13 +425,15 @@ mod tests {
         first.queue_user("shared opening");
         let second = ActorAgentSession::attach(registry.clone(), actor).expect("second attachment");
 
-        let pending = second
-            .begin_provider_turn(None)
-            .expect("shared provider turn");
+        let mut admitted = second.begin_agent_session().expect("shared agent session");
+        let pending = admitted
+            .begin_provider_round(None)
+            .expect("shared provider round");
         assert_eq!(pending.request().messages.len(), 1);
         pending
             .complete(response("shared reply"))
             .expect("complete shared turn");
+        drop(admitted);
         assert_eq!(first.transcript(), second.transcript());
 
         registry
@@ -387,16 +475,21 @@ mod tests {
         startup.queue_user("configure behavior");
 
         assert!(matches!(
-            startup.begin_provider_turn(None),
+            startup.begin_agent_session(),
             Err(ActorRegistryError::Initializing(_))
         ));
-        let pending = startup
-            .begin_startup_provider_turn(&starting, None)
-            .expect("startup capability admits provider turn");
+        let mut admitted = startup
+            .begin_startup_agent_session(&starting)
+            .expect("startup capability admits the agent session");
+        let pending = admitted
+            .begin_provider_round(None)
+            .expect("begin startup provider round");
         assert_eq!(pending.request().messages[0].content, "configure behavior");
         pending
             .complete(response("```haskell\ninitialPolicy\n```"))
             .expect("record startup response");
+
+        drop(admitted);
 
         let actor = registry.publish_ready(starting).expect("publish ready");
         let ready = ActorAgentSession::attach(registry, actor).expect("reattach after readiness");
@@ -445,7 +538,7 @@ mod tests {
             .expect("attach second session");
 
         assert!(matches!(
-            second_session.begin_startup_provider_turn(&first, None),
+            second_session.begin_startup_agent_session(&first),
             Err(ActorRegistryError::StartupSessionMismatch { .. })
         ));
     }

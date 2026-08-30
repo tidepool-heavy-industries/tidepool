@@ -103,7 +103,7 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
     drop(lease);
 
     registry
-        .begin_turn(actor, ActorTurnKind::Provider)
+        .begin_turn(actor, ActorTurnKind::AgentSession)
         .expect("actor admission restored after resident execution");
 }
 

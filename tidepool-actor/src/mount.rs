@@ -161,6 +161,20 @@ pub trait ActorRunTarget {
     ) -> Result<(), Self::Error>;
 }
 
+pub(crate) fn install_actor_context<Target>(
+    target: &mut Target,
+    context: &ActorSessionContext,
+) -> Result<(), Target::Error>
+where
+    Target: ActorRunTarget,
+{
+    target.install_actor_execution(
+        context.run_context(),
+        context.effect_policy,
+        context.live_payload,
+    )
+}
+
 impl<H, O> ActorRunTarget for ResidentSession<H, O>
 where
     H: DispatchEffect<O> + Send,
@@ -200,13 +214,7 @@ where
 {
     let lease = registry.begin_turn(actor, kind)?;
     let context = lease.session_context();
-    target
-        .install_actor_execution(
-            context.run_context(),
-            context.effect_policy,
-            context.live_payload,
-        )
-        .map_err(MountActorTurnError::Target)?;
+    install_actor_context(target, &context).map_err(MountActorTurnError::Target)?;
     Ok(lease)
 }
 
@@ -280,12 +288,12 @@ mod tests {
             tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE
         );
         assert!(matches!(
-            registry.begin_turn(actor, ActorTurnKind::Provider),
+            registry.begin_turn(actor, ActorTurnKind::AgentSession),
             Err(ActorRegistryError::Busy { .. })
         ));
         drop(lease);
         registry
-            .begin_turn(actor, ActorTurnKind::Provider)
+            .begin_turn(actor, ActorTurnKind::AgentSession)
             .expect("lease released");
     }
 
@@ -305,7 +313,7 @@ mod tests {
             Err(MountActorTurnError::Target("dead scope"))
         ));
         registry
-            .begin_turn(actor, ActorTurnKind::Provider)
+            .begin_turn(actor, ActorTurnKind::AgentSession)
             .expect("failed mount released lease");
     }
 }

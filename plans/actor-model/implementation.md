@@ -221,6 +221,8 @@ drivers.
 
 Deliver:
 
+- one actor-admission guard spanning the complete agent session, including
+  provider retries, every fenced-Haskell block, and corrective rounds;
 - one assistant-response transport carrying prose plus ordered fenced Haskell,
   with compile and execution results returned as conversation context;
 - actor-bound lexical scope and execution principal;

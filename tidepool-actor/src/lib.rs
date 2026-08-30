@@ -18,7 +18,9 @@ mod sequence;
 mod timeline;
 mod wait;
 
-pub use agent_session::{ActorAgentSession, AssistantTurn, PendingProviderTurn};
+pub use agent_session::{
+    ActorAgentSession, AdmittedAgentSession, AssistantTurn, PendingProviderRound,
+};
 pub use event::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,
     EventCausality, MailboxMessageKind, ModelUsage, StartInitiator, WaitDisposition,

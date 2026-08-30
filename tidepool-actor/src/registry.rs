@@ -114,7 +114,7 @@ pub struct ActorTerminal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorTurnKind {
     Haskell,
-    Provider,
+    AgentSession,
     Advisory,
     Mailbox,
 }
@@ -357,6 +357,9 @@ impl ActorRegistry {
             ActorLifecycle::Ready => return Err(ActorRegistryError::AlreadyReady(actor)),
             ActorLifecycle::Exited => return Err(ActorRegistryError::Exited(actor)),
         }
+        if let Some(active) = entry(&state, actor)?.active_turn {
+            return Err(ActorRegistryError::Busy { actor, active });
+        }
         entry_mut(&mut state, actor)?.lifecycle = ActorLifecycle::Ready;
         record(
             &mut state,
@@ -437,10 +440,10 @@ impl ActorRegistry {
         })
     }
 
-    /// Admit the initializing actor's sole provider turn through its private
+    /// Admit the initializing actor's sole agent session through its private
     /// startup capability. Ordinary actor references remain unusable until
     /// readiness; this is the only pre-publication turn-admission path.
-    pub(crate) fn begin_startup_provider_turn(
+    pub(crate) fn begin_startup_agent_session(
         &self,
         starting: &StartingActor,
     ) -> Result<TurnLease, ActorRegistryError> {
@@ -456,10 +459,10 @@ impl ActorRegistry {
         if let Some(active) = actor_entry.active_turn {
             return Err(ActorRegistryError::Busy { actor, active });
         }
-        actor_entry.active_turn = Some(ActorTurnKind::Provider);
+        actor_entry.active_turn = Some(ActorTurnKind::AgentSession);
         Ok(TurnLease {
             actor,
-            kind: ActorTurnKind::Provider,
+            kind: ActorTurnKind::AgentSession,
             placement: actor_entry.descriptor.placement,
             effect_policy: actor_entry.descriptor.effect_policy,
             live_payload: actor_entry.descriptor.live_payload,
@@ -868,7 +871,7 @@ impl ActorRegistry {
         let actor_entry = entry(&state, actor)?;
         match actor_entry.lifecycle {
             ActorLifecycle::Initializing
-                if actor_entry.active_turn == Some(ActorTurnKind::Provider) => {}
+                if actor_entry.active_turn == Some(ActorTurnKind::AgentSession) => {}
             ActorLifecycle::Initializing => return Err(ActorRegistryError::Initializing(actor)),
             ActorLifecycle::Exited => return Err(ActorRegistryError::Exited(actor)),
             ActorLifecycle::Ready => {}
@@ -1480,13 +1483,13 @@ mod tests {
         let registry = ActorRegistry::new();
         let actor = ready_root(&registry);
         let lease = registry
-            .begin_turn(actor, ActorTurnKind::Provider)
+            .begin_turn(actor, ActorTurnKind::AgentSession)
             .expect("first turn");
         assert_eq!(
             registry.begin_turn(actor, ActorTurnKind::Haskell).err(),
             Some(ActorRegistryError::Busy {
                 actor,
-                active: ActorTurnKind::Provider,
+                active: ActorTurnKind::AgentSession,
             })
         );
         drop(lease);
@@ -1583,7 +1586,7 @@ mod tests {
 
         assert!(matches!(owner_wait.poll(), Ok(ExitObservation::Pending)));
         assert!(matches!(
-            registry.begin_turn(owner, ActorTurnKind::Provider),
+            registry.begin_turn(owner, ActorTurnKind::AgentSession),
             Err(ActorRegistryError::Parked {
                 actor,
                 obligation: ParkedObligation::Wait(wait),
