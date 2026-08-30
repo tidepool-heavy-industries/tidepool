@@ -10,10 +10,12 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tidepool-actor.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 tidepool-mcp.workspace = true
+tidepool-model-output.workspace = true
 tidepool-handlers.workspace = true
 tidepool-eval.workspace = true
 tidepool-extract-cmd.workspace = true

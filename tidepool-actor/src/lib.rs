@@ -1,0 +1,28 @@
+//! Rust-owned substrate for self-writing Haskell actors.
+//!
+//! The first landed boundary is deliberately small: exact-incarnation
+//! identity and the neutral event vocabulary consumed by journals, timelines,
+//! and compatibility adapters. Machine execution remains in
+//! `tidepool-runtime`; provider transport remains behind its existing seams.
+
+#![warn(clippy::unwrap_used, clippy::expect_used)]
+
+mod event;
+mod identity;
+mod registry;
+mod sequence;
+mod timeline;
+
+pub use event::{
+    ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, EventCausality,
+    ModelUsage, StartInitiator,
+};
+pub use identity::{ActorId, ActorRef, Incarnation};
+pub use registry::{
+    ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
+    ActorTurnKind, StartingActor, TurnLease,
+};
+pub use sequence::{
+    run_block_sequence, BlockExecution, BlockSequenceOutcome, CommittedBlock, ParsedBlock,
+};
+pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};

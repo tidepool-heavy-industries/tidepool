@@ -77,6 +77,7 @@ use crate::timing;
 use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
 
 use tidepool_codegen::scope::ScopeId;
+use tidepool_repr::PrincipalId;
 
 use super::engine::OutputSink;
 use super::persistent::{PersistentSession, ScopeRetirement};
@@ -85,28 +86,36 @@ use super::{SessionError, SessionLib};
 
 /// Runtime context applied to every entry into a resident session.
 ///
-/// These two scopes describe one logical execution window: `resource_scope`
+/// These fields describe one logical execution window: `resource_scope`
 /// owns parked frames and live handles, while `lexical_scope` selects the
-/// declarations and bindings visible to compilation. Keeping them in one
-/// value prevents a shared session from accidentally combining one caller's
-/// heap ownership with another caller's lexical environment.
+/// declarations and bindings visible to compilation, and `principal` names
+/// the exact runtime authority used by effect handlers. Keeping them in one
+/// value prevents a shared session from combining one caller's heap ownership,
+/// lexical environment, and privileges with another caller's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionRunContext {
     pub resource_scope: RealmId,
     pub lexical_scope: ScopeId,
+    pub principal: PrincipalId,
 }
 
 impl SessionRunContext {
     pub const ROOT: Self = Self {
         resource_scope: RealmId::ROOT,
         lexical_scope: ScopeId::ROOT,
+        principal: PrincipalId::SYSTEM,
     };
 
     #[must_use]
-    pub const fn new(resource_scope: RealmId, lexical_scope: ScopeId) -> Self {
+    pub const fn new(
+        resource_scope: RealmId,
+        lexical_scope: ScopeId,
+        principal: PrincipalId,
+    ) -> Self {
         Self {
             resource_scope,
             lexical_scope,
+            principal,
         }
     }
 }
@@ -2029,7 +2038,7 @@ mod tests {
     fn run_context_rejects_a_dead_scope_atomically() {
         let mut session = bootstrap_trivial_session();
         let live = session.mint_scope(ScopeId::ROOT).expect("ROOT is live");
-        let live_context = SessionRunContext::new(RealmId(41), live);
+        let live_context = SessionRunContext::new(RealmId(41), live, PrincipalId::new(7, 1));
         session
             .set_run_context(live_context)
             .expect("freshly-minted scope is live");
@@ -2038,7 +2047,11 @@ mod tests {
         session.retire_scope(live);
         let now_dead = live;
 
-        let result = session.set_run_context(SessionRunContext::new(RealmId(42), now_dead));
+        let result = session.set_run_context(SessionRunContext::new(
+            RealmId(42),
+            now_dead,
+            PrincipalId::new(8, 1),
+        ));
         assert!(
             matches!(
                 result,
@@ -2054,7 +2067,11 @@ mod tests {
 
         let never_minted = ScopeId(999_999);
         assert!(matches!(
-            session.set_run_context(SessionRunContext::new(RealmId(43), never_minted)),
+            session.set_run_context(SessionRunContext::new(
+                RealmId(43),
+                never_minted,
+                PrincipalId::new(9, 1),
+            )),
             Err(ResidentError::Session(SessionError::DeadScope(s))) if s == never_minted
         ));
 

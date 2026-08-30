@@ -3862,6 +3862,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidepool-actor"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tidepool-repr",
+ "tokio",
+]
+
+[[package]]
 name = "tidepool-agent"
 version = "0.1.0"
 dependencies = [
@@ -4061,6 +4073,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror",
+ "tidepool-actor",
  "tidepool-agent",
  "tidepool-atomic-write",
  "tidepool-bridge",
@@ -4072,6 +4085,7 @@ dependencies = [
  "tidepool-extract-cmd",
  "tidepool-handlers",
  "tidepool-mcp",
+ "tidepool-model-output",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
@@ -4129,6 +4143,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "tidepool-model-output"
+version = "0.1.0"
 
 [[package]]
 name = "tidepool-optimize"

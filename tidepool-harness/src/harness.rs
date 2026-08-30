@@ -38,10 +38,12 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value as Json;
+use tidepool_actor::{run_block_sequence, BlockExecution, BlockSequenceOutcome};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::value::Value;
 use tidepool_mcp::CapturedOutput;
+use tidepool_repr::PrincipalId;
 use tidepool_repr::{DataConTable, Generation, SessionId};
 use tidepool_runtime::session::{
     classify_block, run_turn, Aged, BoundBinder, CompiledTurn, ResidentError, ResidentHole,
@@ -1434,79 +1436,90 @@ impl Harness {
             convo.last_turn_source = Some(joined);
         }
 
-        // Run the blocks in order as ONE sequence (the multi-block contract:
-        // every ```haskell block runs; later blocks see earlier blocks'
-        // declarations and bindings). Stop at the first failure — a later
-        // block's compile can depend on an earlier bind's LIVE value (the
-        // Val-module mechanism), so pre-compiling the whole sequence is not
-        // possible, and stop-at-first-error with an explicit resume point is
-        // the honest contract. A suspension parks the sequence: unrun blocks
-        // are dropped, with a transcript note so the model resends them when
-        // the window continues (a `finalize` ends the window — the model
-        // never sees another turn, so that case is observer-only).
-        let total = blocks.len();
-        let mut receipts: Vec<String> = Vec::new();
-        let mut last_rendered = String::new();
-        for (ix, block) in blocks.iter().enumerate() {
-            let n = ix + 1;
-            if ix > 0 {
+        // The actor-level sequencer owns ordered prefix commit. This adapter
+        // retains the historical node transitions and corrective wording.
+        let sequence = run_block_sequence(blocks, |block| async move {
+            if block.ordinal > 1 {
                 // The previous block's completion left the node `Done`.
                 self.reopen_node(node)?;
             }
-            let (imports, body) = engine::split_imports(block);
-            match self.run_block(node, &body, &imports, "").await {
-                Ok(engine::TurnOutcome::Completed { rendered }) => {
-                    receipts.push(engine::block_receipt(n, block, &rendered));
-                    last_rendered = rendered;
+            let (imports, body) = engine::split_imports(&block.source);
+            match self.run_block(node, &body, &imports, "").await? {
+                engine::TurnOutcome::Completed { rendered } => {
+                    Ok(BlockExecution::Committed(rendered))
                 }
-                Ok(out @ engine::TurnOutcome::Suspended { .. }) => {
-                    if n < total {
-                        let is_finalize = matches!(
-                            &out,
-                            engine::TurnOutcome::Suspended { classified, .. }
-                                if matches!(
-                                    classified.routing,
-                                    engine::SuspensionRouting::Finalize { .. }
-                                )
-                        );
-                        if is_finalize {
-                            tracing::warn!(
-                                node = node.0,
-                                unrun = total - n,
-                                "finalize in block {n} of {total} — later blocks never run"
-                            );
-                        } else {
-                            self.push_user_turn(
-                                node,
-                                &format!(
-                                    "Note: block {n} of {total} suspended awaiting an \
-                                     answer, so the blocks after it did not run. Blocks \
-                                     1–{n} ran and persist — when your window continues, \
-                                     pick up from block {}.",
-                                    n + 1
-                                ),
-                            )?;
-                        }
-                    }
-                    return Ok(out);
-                }
-                // `run_block` never yields `NoBlock`; pass it through if it ever does.
-                Ok(out @ engine::TurnOutcome::NoBlock { .. }) => return Ok(out),
-                // A compile-class failure mid-sequence: wrap the GHC error in
-                // the sequence context (what ran, what didn't, where to resume)
-                // so every corrective wrapper carries it verbatim. A
-                // single-block turn keeps the bare error — today's shape.
-                Err(HarnessError::Compile(msg)) if total > 1 => {
-                    return Err(HarnessError::Compile(engine::sequence_failure_context(
-                        &receipts, n, total, &msg,
-                    )));
-                }
-                Err(e) => return Err(e),
+                outcome => Ok(BlockExecution::Stopped(outcome)),
             }
-        }
-        Ok(engine::TurnOutcome::Completed {
-            rendered: last_rendered,
         })
+        .await;
+
+        match sequence {
+            BlockSequenceOutcome::Completed { committed } => {
+                let rendered = committed
+                    .last()
+                    .map(|block| block.output.clone())
+                    .unwrap_or_default();
+                Ok(engine::TurnOutcome::Completed { rendered })
+            }
+            BlockSequenceOutcome::Stopped { block, outcome, .. } => {
+                let n = block.ordinal;
+                let total = block.total;
+                if n < total {
+                    let is_finalize = matches!(
+                        &outcome,
+                        engine::TurnOutcome::Suspended { classified, .. }
+                            if matches!(
+                                classified.routing,
+                                engine::SuspensionRouting::Finalize { .. }
+                            )
+                    );
+                    if is_finalize {
+                        tracing::warn!(
+                            node = node.0,
+                            unrun = total - n,
+                            "finalize in block {n} of {total} — later blocks never run"
+                        );
+                    } else if matches!(outcome, engine::TurnOutcome::Suspended { .. }) {
+                        self.push_user_turn(
+                            node,
+                            &format!(
+                                "Note: block {n} of {total} suspended awaiting an \
+                                 answer, so the blocks after it did not run. Blocks \
+                                 1–{n} ran and persist — when your window continues, \
+                                 pick up from block {}.",
+                                n + 1
+                            ),
+                        )?;
+                    }
+                }
+                Ok(outcome)
+            }
+            BlockSequenceOutcome::Failed {
+                committed,
+                block,
+                error,
+            } => match error {
+                HarnessError::Compile(message) if block.total > 1 => {
+                    let receipts = committed
+                        .iter()
+                        .map(|committed| {
+                            engine::block_receipt(
+                                committed.block.ordinal,
+                                &committed.block.source,
+                                &committed.output,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    Err(HarnessError::Compile(engine::sequence_failure_context(
+                        &receipts,
+                        block.ordinal,
+                        block.total,
+                        &message,
+                    )))
+                }
+                error => Err(error),
+            },
+        }
     }
 
     /// Drive ONE plain model turn on `node`: push `prompt` as a User message,
@@ -3498,7 +3511,9 @@ impl Harness {
         let sid = checkout.session_id();
         let mut machine = checkout.take();
         self.drain_pending_session_exits(sid, &mut machine);
-        if let Err(error) = machine.set_run_context(SessionRunContext::new(realm, scope)) {
+        let principal = PrincipalId::new(node.0, 1);
+        if let Err(error) = machine.set_run_context(SessionRunContext::new(realm, scope, principal))
+        {
             let holes = machine
                 .parked_holes()
                 .into_iter()

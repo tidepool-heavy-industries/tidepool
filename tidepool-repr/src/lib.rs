@@ -32,7 +32,7 @@ pub use frame::*;
 pub use id_issuer::MonotonicIdIssuer;
 pub use normalize::normalize;
 pub use session_ids::{
-    BindingName, Generation, SessionId, SessionModule, SessionModuleKind, SessionVarId,
+    BindingName, Generation, PrincipalId, SessionId, SessionModule, SessionModuleKind, SessionVarId,
 };
 pub use tree::*;
 pub use types::*;

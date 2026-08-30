@@ -1083,79 +1083,9 @@ pub fn available_effects_section(decls: &[tidepool_mcp::EffectDecl]) -> String {
     format!("Available effects this turn:\n{}", cards.join("\n"))
 }
 
-// ---------------------------------------------------------------------------
-// Eval-block extraction
-// ---------------------------------------------------------------------------
-
-/// Extract EVERY fenced ```haskell block from a model reply, in order.
-/// Empty when the reply has no fenced haskell block (a pure-prose turn — the
-/// engine treats that as "no eval to run", loops or completes per policy).
-///
-/// Matches ```haskell / ```hs (case-insensitive) opening fences; a bare ```
-/// fence is NOT treated as haskell (avoids grabbing a shell/text block).
-/// Every block is `trim_end()`ed — the turn templates' `{{TURN}}` splice
-/// relies on turn text never carrying a trailing newline.
-///
-/// A closing fence and the next block's opener on one line
-/// (` ``````haskell `, no newline between them) closes the current block and
-/// opens the next.
-///
-/// An opening fence is recognized anywhere on a line, not just at column 0
-/// (`Here's the code: ```haskell`), and the language tag is a PREFIX-WORD
-/// match — `haskell`/`hs` as the tag's first whitespace-delimited word, with
-/// trailing chatter ignored (`` ```haskell (round 3) ``). Before this, either
-/// shape would otherwise be invisible to extraction. Only the not-yet-open
-/// scan has this leniency; a close (and
-/// the fused close-then-reopen arm above) still requires the fence at the
-/// trimmed line's start, unchanged.
-///
-/// ACCEPTED FALSE-POSITIVE TRADE: prose that mentions `` ```haskell `` inline
-/// (documenting the fence syntax itself, say) now reads as an opener too. If
-/// nothing after it ever closes, the existing "an unterminated final block
-/// still counts" rule captures the rest of the reply as if it were code. This
-/// mirrors the pre-existing risk a line-start opener with no close already
-/// carried; it is not made categorically worse, so it is accepted rather than
-/// guarded against — see the `mentions_fence_inline_without_closing` test.
-pub fn extract_haskell_blocks(reply: &str) -> Vec<String> {
-    fn opens_haskell(s: &str) -> bool {
-        let Some(lang) = s.strip_prefix("```") else {
-            return false;
-        };
-        let word = lang.split_whitespace().next().unwrap_or("");
-        matches!(word.to_ascii_lowercase().as_str(), "haskell" | "hs")
-    }
-    fn close(blocks: &mut Vec<String>, body: &mut Option<String>) {
-        if let Some(b) = body.take() {
-            let b = b.trim_end().to_string();
-            if !b.is_empty() {
-                blocks.push(b);
-            }
-        }
-    }
-    let mut blocks = Vec::new();
-    let mut body: Option<String> = None;
-    for line in reply.lines() {
-        let trimmed = line.trim_start();
-        if body.is_some() {
-            if let Some(rest) = trimmed.strip_prefix("```") {
-                close(&mut blocks, &mut body);
-                if opens_haskell(rest.trim_start()) {
-                    body = Some(String::new());
-                }
-            } else if let Some(b) = body.as_mut() {
-                b.push_str(line);
-                b.push('\n');
-            }
-        } else if let Some(idx) = trimmed.find("```") {
-            if opens_haskell(&trimmed[idx..]) {
-                body = Some(String::new());
-            }
-        }
-    }
-    // An unterminated final block still counts.
-    close(&mut blocks, &mut body);
-    blocks
-}
+// Compatibility re-export while the provider/session driver migrates out of
+// this crate. The fenced-Haskell protocol has one implementation.
+pub use tidepool_model_output::extract_haskell_blocks;
 
 // ---------------------------------------------------------------------------
 // Multi-block sequences

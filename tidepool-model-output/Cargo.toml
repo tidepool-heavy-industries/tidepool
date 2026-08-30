@@ -1,0 +1,12 @@
+[package]
+name = "tidepool-model-output"
+description = "Provider-neutral parsing of model-authored output protocols"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]

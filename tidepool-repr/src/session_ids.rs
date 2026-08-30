@@ -12,6 +12,31 @@ use std::fmt;
 
 use crate::types::VarId;
 
+/// Runtime authority installed for one execution entry. The pair is opaque to
+/// Haskell: Rust handlers use it to distinguish an exact actor incarnation
+/// from a later incarnation with the same stable identity.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct PrincipalId {
+    pub identity: u64,
+    pub incarnation: u64,
+}
+
+impl PrincipalId {
+    /// Authority used by non-actor compatibility paths during migration.
+    pub const SYSTEM: Self = Self {
+        identity: 0,
+        incarnation: 0,
+    };
+
+    #[must_use]
+    pub const fn new(identity: u64, incarnation: u64) -> Self {
+        Self {
+            identity,
+            incarnation,
+        }
+    }
+}
+
 /// Monotonic per-session generation counter (= GHCi's `ic_mod_index`).
 ///
 /// Only ever bumped. `Generation(0)` is the empty session — no `Lib`/`Val`

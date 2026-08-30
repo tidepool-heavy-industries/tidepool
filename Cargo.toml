@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "tidepool-actor",
+    "tidepool-model-output",
     "tidepool-repr",
     "tidepool-bignum",
     "tidepool-eval",
@@ -41,6 +43,7 @@ authors = ["Inanna Malick <inanna@recursion.wtf>"]
 rust-version = "1.89"
 
 [workspace.dependencies]
+tidepool-actor = { version = "0.1.0", path = "tidepool-actor" }
 tidepool-agent = { version = "0.1.0", path = "tidepool-agent" }
 tidepool-atomic-write = { path = "tidepool-atomic-write" }
 tidepool-bignum = { version = "0.1.0", path = "tidepool-bignum" }
@@ -56,6 +59,7 @@ tidepool-harness = { version = "0.1.0", path = "tidepool-harness" }
 tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }
 tidepool-macro = { version = "0.1.0", path = "tidepool-macro" }
 tidepool-mcp = { version = "0.1.0", path = "tidepool-mcp" }
+tidepool-model-output = { version = "0.1.0", path = "tidepool-model-output" }
 tidepool-optimize = { version = "0.1.0", path = "tidepool-optimize" }
 tidepool-protocol = { version = "0.1.0", path = "tidepool-protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool-repr" }
