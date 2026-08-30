@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tidepool_model::{Conversation, Message, Role, TurnRequest, TurnResponse, Usage};
+use tidepool_model::{
+    Conversation, DynModelProvider, Message, ProviderError, Role, StreamSink, TurnRequest,
+    TurnResponse, Usage,
+};
 use tidepool_model_output::extract_haskell_blocks;
 
 use crate::mount::{install_actor_context, ActorRunTarget};
@@ -41,6 +44,14 @@ pub struct AssistantTurn {
     pub blocks: Vec<String>,
     pub usage: Usage,
     pub reasoning: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AgentSessionError {
+    #[error(transparent)]
+    Registry(#[from] ActorRegistryError),
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
 }
 
 impl ActorAgentSession {
@@ -180,6 +191,22 @@ impl AdmittedAgentSession {
             turn,
         })
     }
+
+    /// Run one provider round inside this admitted session. Transport failure
+    /// leaves the enclosing admission and transcript available for an exact
+    /// retry; only a completed response is appended as an assistant message.
+    pub async fn run_provider_round(
+        &mut self,
+        provider: &dyn DynModelProvider,
+        max_tokens: Option<u32>,
+        sink: Option<StreamSink>,
+    ) -> Result<AssistantTurn, AgentSessionError> {
+        let pending = self.begin_provider_round(max_tokens)?;
+        let response = provider
+            .complete_boxed(pending.request().clone(), sink)
+            .await?;
+        Ok(pending.complete(response)?)
+    }
 }
 
 /// One provider request borrowed from an admitted agent session.
@@ -265,11 +292,34 @@ mod tests {
     use crate::{ActorDescriptor, ActorPlacement, StartInitiator};
     use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
     use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest};
     use tidepool_runtime::session::SessionRunContext;
 
     #[derive(Default)]
     struct RecordingTarget {
         context: Option<SessionRunContext>,
+    }
+
+    struct FailsOnce {
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModelProvider for FailsOnce {
+        async fn complete(
+            &self,
+            _request: TurnRequest,
+            _sink: Option<StreamSink>,
+        ) -> Result<TurnResponse, ProviderError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                Err(ProviderError::Api("temporary".into()))
+            } else {
+                Ok(response("```haskell\npure ()\n```"))
+            }
+        }
     }
 
     impl ActorRunTarget for RecordingTarget {
@@ -415,6 +465,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn provider_transport_retry_stays_in_one_admitted_session() {
+        let registry = ActorRegistry::new();
+        let actor = ready_actor(&registry);
+        let session = ActorAgentSession::attach(registry.clone(), actor).expect("attach session");
+        session.queue_user("start");
+        let mut admitted = session.begin_agent_session().expect("admit agent session");
+        let provider = FailsOnce {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        assert!(matches!(
+            admitted.run_provider_round(&provider, None, None).await,
+            Err(AgentSessionError::Provider(ProviderError::Api(_)))
+        ));
+        assert!(matches!(
+            registry.begin_turn(actor, ActorTurnKind::Mailbox),
+            Err(ActorRegistryError::Busy {
+                active: ActorTurnKind::AgentSession,
+                ..
+            })
+        ));
+
+        let assistant = admitted
+            .run_provider_round(&provider, None, None)
+            .await
+            .expect("retry provider round");
+        assert_eq!(assistant.blocks, ["pure ()"]);
+        assert_eq!(session.transcript().len(), 2);
     }
 
     #[test]
