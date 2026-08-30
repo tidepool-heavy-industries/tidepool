@@ -263,7 +263,7 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     let producer_start = actors
         .begin_start(
             None,
-            ActorDescriptor::all_suspended(
+            ActorDescriptor::new(
                 "closure producer",
                 std::iter::empty::<String>(),
                 ActorPlacement {
@@ -281,7 +281,7 @@ async fn mounted_closure_survives_retirement_and_suspension() {
     let consumer_start = actors
         .begin_start(
             Some(producer),
-            ActorDescriptor::all_suspended(
+            ActorDescriptor::new(
                 "closure consumer",
                 std::iter::empty::<String>(),
                 ActorPlacement {

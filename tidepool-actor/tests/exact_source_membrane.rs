@@ -36,12 +36,12 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
         .expect("materialize facade");
 
     let actor_scope = session.mint_isolated_scope();
-    let actor_view = session
+    let isolated_view = session
         .compile_view_in(actor_scope)
         .expect("isolated compile view");
-    assert_eq!(actor_view.library(), None, "ambient Lib.G must not leak");
+    assert_eq!(isolated_view.library(), None, "ambient Lib.G must not leak");
 
-    let descriptor = ActorDescriptor::all_suspended(
+    let descriptor = ActorDescriptor::new(
         "fresh reviewer",
         ["Actor"],
         ActorPlacement {
@@ -57,10 +57,18 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
         .expect("begin actor startup");
     let actor = registry.publish_ready(starting).expect("publish actor");
     let context = registry.session_context(actor).expect("actor context");
+    let actor_view = context
+        .compile_view(isolated_view)
+        .expect("bind isolated source view to actor");
 
     assert_eq!(
-        actor_view.turn_imports(context.source_imports.source_imports()),
+        actor_view.turn_imports(),
         facade.module_name(),
         "the exact facade is the actor's sole session-specific source import"
     );
+
+    assert!(matches!(
+        context.compile_view(source_view),
+        Err(tidepool_actor::ActorCompileViewError::WrongLexicalScope { .. })
+    ));
 }

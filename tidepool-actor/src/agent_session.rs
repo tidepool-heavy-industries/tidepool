@@ -245,7 +245,7 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     "agent",
                     std::iter::empty::<String>(),
                     ActorPlacement {
@@ -369,7 +369,7 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     "starting agent",
                     std::iter::empty::<String>(),
                     ActorPlacement {
@@ -413,7 +413,7 @@ mod tests {
         let first = registry
             .begin_start(
                 None,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     "first",
                     std::iter::empty::<String>(),
                     ActorPlacement {
@@ -428,7 +428,7 @@ mod tests {
         let second = registry
             .begin_start(
                 None,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     "second",
                     std::iter::empty::<String>(),
                     ActorPlacement {

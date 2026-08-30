@@ -34,6 +34,9 @@ handlers, durable JSONL mechanics (`tidepool-repr`), or observability UI.
 - The registry owns each incarnation's session, resource scope, and lexical
   scope. Mount callers supply an `ActorRef`; the admitted `TurnLease` carries
   the matching immutable context and principal.
+- Actor-authored compilation binds a `SessionCompileView` through
+  `ActorSessionContext::compile_view`. Do not pass an ambient session view or
+  caller-authored import list around that exact-source membrane.
 - The registry also retains exactly one accumulating `ActorAgentSession`
   state per incarnation. Reattachment shares that transcript; it never opens
   a parallel model context for the same actor.

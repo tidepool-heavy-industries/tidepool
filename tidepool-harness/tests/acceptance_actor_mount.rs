@@ -72,7 +72,7 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
     let starting = registry
         .begin_start(
             None,
-            ActorDescriptor::all_suspended(
+            ActorDescriptor::new(
                 "literal actor",
                 mock::EFFECT_NAMES.iter().copied(),
                 ActorPlacement {
@@ -138,7 +138,7 @@ fn actor_mount_installs_its_request_policy_and_effect_metadata() {
     let starting = registry
         .begin_start(
             None,
-            ActorDescriptor::all_suspended(
+            ActorDescriptor::new(
                 "effect actor",
                 effect_names.clone(),
                 ActorPlacement {

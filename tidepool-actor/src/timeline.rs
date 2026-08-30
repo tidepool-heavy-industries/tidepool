@@ -199,7 +199,7 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     "reviewer",
                     ["Deliberate"],
                     ActorPlacement {

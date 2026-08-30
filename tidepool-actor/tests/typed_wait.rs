@@ -53,7 +53,7 @@ fn ready_actor(
     let starting = registry
         .begin_start(
             owner,
-            ActorDescriptor::all_suspended(
+            ActorDescriptor::new(
                 label,
                 ["Actor"],
                 ActorPlacement {

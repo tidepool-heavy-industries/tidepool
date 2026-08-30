@@ -29,8 +29,8 @@ pub use mailbox::{
     MessageId, ParkedObligation, WaitError, WaitId, WaitTicket,
 };
 pub use mount::{
-    mount_actor_turn, ActorPlacement, ActorRunTarget, ActorSessionContext, ActorSourceImports,
-    MountActorTurnError,
+    mount_actor_turn, ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget,
+    ActorSessionContext, ActorSourceImports, MountActorTurnError,
 };
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,

@@ -1818,39 +1818,19 @@ impl Harness {
     ) -> Result<LiveTurnContext, HarnessError> {
         let session_view = self.session_compile_view(node);
 
-        let mut expr_import_lines = Vec::new();
-        let external_imports = compile_imports.template_text();
-        if !external_imports.is_empty() {
-            expr_import_lines.push(external_imports.clone());
-        }
-        if let Some(view) = &session_view {
-            if let Some(module) = view.library() {
-                expr_import_lines.push(module.module_name());
-            }
-            for module in view.visible_values() {
-                expr_import_lines.push(module.module_name());
-            }
-        }
-        let expr_imports = expr_import_lines.join("\n");
-
-        let mut bind_import_lines = Vec::new();
-        if !external_imports.is_empty() {
-            bind_import_lines.push(external_imports);
-        }
-        if let Some(view) = &session_view {
-            if let Some(module) = view.library() {
-                bind_import_lines.push(module.module_name());
-            }
-            for module in view.visible_values() {
-                bind_import_lines.push(module.module_name());
-            }
-        }
-        let bind_imports = bind_import_lines.join("\n");
+        // SessionCompileView is the one source of truth for the exact lexical
+        // modules visible to this scope. Keep the authored/exact-facade imports
+        // separate for declaration persistence, but render one identical turn
+        // view for expression and bind templates.
+        let turn_imports = session_view.as_ref().map_or_else(
+            || compile_imports.template_text(),
+            |view| view.turn_imports(compile_imports),
+        );
 
         let bind_source =
-            engine::session_bind_template(&self.cfg, "{{BINDERS}}", &bind_imports, helpers);
+            engine::session_bind_template(&self.cfg, "{{BINDERS}}", &turn_imports, helpers);
         let binddiscard_source =
-            engine::session_bind_template(&self.cfg, "()", &bind_imports, helpers);
+            engine::session_bind_template(&self.cfg, "()", &turn_imports, helpers);
 
         let mut include = target_include.to_vec();
         let scratch_root;
@@ -1873,7 +1853,7 @@ impl Harness {
         };
 
         Ok(LiveTurnContext {
-            expr_imports,
+            expr_imports: turn_imports,
             include,
             session_root,
             inject_modules,

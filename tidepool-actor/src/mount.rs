@@ -1,11 +1,13 @@
+use std::path::{Path, PathBuf};
+
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::{PrincipalId, SessionId};
+use tidepool_repr::{Generation, PrincipalId, SessionId};
 use tidepool_runtime::session::{
-    MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionRunContext,
-    SourceImports,
+    MaterializedFacade, OutputSink, ResidentError, ResidentSession, SessionCompileView,
+    SessionRunContext, SourceImports,
 };
 
 use crate::{ActorRef, ActorRegistry, ActorRegistryError, ActorTurnKind, TurnLease};
@@ -38,11 +40,64 @@ impl ActorSourceImports {
             facades.into_iter().map(MaterializedFacade::module_name),
         ))
     }
+}
+
+/// An actor's exact, owned source-side compilation snapshot.
+///
+/// Construction validates the session and lexical scope against the registry
+/// context before pairing them with the actor's explicit facade imports. A
+/// compiler can therefore consume this value without separately carrying an
+/// ambient session view or caller-selected import set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorCompileView {
+    session: SessionCompileView,
+    external: SourceImports,
+}
+
+impl ActorCompileView {
+    /// Exact external, declaration, and live-value imports for a turn template.
+    #[must_use]
+    pub fn turn_imports(&self) -> String {
+        self.session.turn_imports(&self.external)
+    }
+
+    /// Preserve only explicit actor imports with a declaration. Session
+    /// ancestry is supplied by the declaration plane itself.
+    #[must_use]
+    pub fn declaration_source(&self, body: &str) -> String {
+        self.external.declaration_source(body)
+    }
 
     #[must_use]
-    pub fn source_imports(&self) -> &SourceImports {
-        &self.0
+    pub fn include_paths(&self, base: &[PathBuf]) -> Vec<PathBuf> {
+        self.session.include_paths(base)
     }
+
+    #[must_use]
+    pub fn session_root(&self) -> &Path {
+        self.session.session_root()
+    }
+
+    #[must_use]
+    pub fn injected_module_names(&self) -> Vec<String> {
+        self.session.injected_module_names()
+    }
+
+    #[must_use]
+    pub fn next_value_generation(&self) -> Generation {
+        self.session.next_value_generation()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ActorCompileViewError {
+    #[error("actor source view belongs to session {actual:?}, expected {expected:?}")]
+    WrongSession {
+        expected: SessionId,
+        actual: SessionId,
+    },
+    #[error("actor source view belongs to lexical scope {actual:?}, expected {expected:?}")]
+    WrongLexicalScope { expected: ScopeId, actual: ScopeId },
 }
 
 /// Actor-owned portion of a resident machine mount. Machine checkout remains
@@ -65,6 +120,31 @@ impl ActorSessionContext {
             self.placement.lexical_scope,
             PrincipalId::from(self.actor),
         )
+    }
+
+    /// Bind an immutable session snapshot to this actor's exact import
+    /// membrane. A parent, sibling, or foreign-session view is rejected before
+    /// any source is rendered.
+    pub fn compile_view(
+        &self,
+        session: SessionCompileView,
+    ) -> Result<ActorCompileView, ActorCompileViewError> {
+        if session.session() != self.placement.session {
+            return Err(ActorCompileViewError::WrongSession {
+                expected: self.placement.session,
+                actual: session.session(),
+            });
+        }
+        if session.lexical_scope() != self.placement.lexical_scope {
+            return Err(ActorCompileViewError::WrongLexicalScope {
+                expected: self.placement.lexical_scope,
+                actual: session.lexical_scope(),
+            });
+        }
+        Ok(ActorCompileView {
+            session,
+            external: self.source_imports.0.clone(),
+        })
     }
 }
 
@@ -167,7 +247,7 @@ mod tests {
         let starting = registry
             .begin_start(
                 None,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     "actor",
                     std::iter::empty::<String>(),
                     ActorPlacement {

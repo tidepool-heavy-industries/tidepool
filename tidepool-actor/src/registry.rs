@@ -26,40 +26,23 @@ pub struct ActorDescriptor {
 }
 
 impl ActorDescriptor {
-    /// Build an immutable actor execution contract.
+    /// Build the initial actor execution contract. Every Haskell request
+    /// suspends into the actor-local Rust interpreter, and effect payloads use
+    /// the shared Haskell request convention.
     #[must_use]
     pub fn new(
         label: impl Into<String>,
         effect_names: impl IntoIterator<Item = impl Into<String>>,
-        effect_policy: EffectRunPolicy,
-        live_payload: LivePayloadPolicy,
         placement: ActorPlacement,
     ) -> Self {
         Self {
             label: label.into(),
             effect_names: effect_names.into_iter().map(Into::into).collect(),
-            effect_policy,
-            live_payload,
+            effect_policy: EffectRunPolicy::SuspendAll,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
             source_imports: ActorSourceImports::default(),
         }
-    }
-
-    /// V0 actor contract: every actor effect suspends to its actor-local Rust
-    /// interpreter; the shared machine handles no prefix effects.
-    #[must_use]
-    pub fn all_suspended(
-        label: impl Into<String>,
-        effect_names: impl IntoIterator<Item = impl Into<String>>,
-        placement: ActorPlacement,
-    ) -> Self {
-        Self::new(
-            label,
-            effect_names,
-            EffectRunPolicy::SuspendAll,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-            placement,
-        )
     }
 
     #[must_use]
@@ -1412,7 +1395,7 @@ mod tests {
     use tidepool_repr::SessionId;
 
     fn descriptor(label: &str) -> ActorDescriptor {
-        ActorDescriptor::all_suspended(
+        ActorDescriptor::new(
             label,
             ["Deliberate"],
             ActorPlacement {
@@ -1436,7 +1419,7 @@ mod tests {
         let starting = registry
             .begin_start(
                 owner,
-                ActorDescriptor::all_suspended(
+                ActorDescriptor::new(
                     label,
                     ["Deliberate"],
                     ActorPlacement {
