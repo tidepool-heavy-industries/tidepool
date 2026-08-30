@@ -9,6 +9,7 @@
 
 mod event;
 mod identity;
+mod mount;
 mod registry;
 mod sequence;
 mod timeline;
@@ -18,6 +19,7 @@ pub use event::{
     ModelUsage, StartInitiator,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
+pub use mount::{mount_actor_turn, ActorRunTarget, ActorSessionContext, MountActorTurnError};
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
     ActorTurnKind, StartingActor, TurnLease,

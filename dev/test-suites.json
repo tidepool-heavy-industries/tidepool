@@ -1,6 +1,6 @@
 {
   "tidepool-harness": [
-    ["acceptance_askuser", "acceptance_boot_compile_count", "acceptance_cross_turn", "acceptance_finalize", "acceptance_lazy_boot", "acceptance_multi_target", "acceptance_selfharness"],
+    ["acceptance_actor_mount", "acceptance_askuser", "acceptance_boot_compile_count", "acceptance_cross_turn", "acceptance_finalize", "acceptance_lazy_boot", "acceptance_multi_target", "acceptance_selfharness"],
     ["selfharness_budget", "selfharness_compaction_fixes", "selfharness_compaction", "selfharness_context_window", "selfharness_framing", "selfharness_lifecycle", "selfharness_spine", "companion_mount_spike", "companion_scope_trees"],
     ["selfharness_persistence", "selfharness_fn_finalize_spike", "persistence_migration_corpus"],
     ["companion_collapsed_slice", "answerer_async_fork", "fork_child_decl_plane_type", "listen_channel"],

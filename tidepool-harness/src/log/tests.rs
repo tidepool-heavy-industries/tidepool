@@ -85,6 +85,14 @@ fn sample_events() -> Vec<Event> {
         Event::TurnDelta {
             node: NodeId(1),
             turn: 1,
+            role: crate::provider::Role::Developer,
+            content: "child reviewer exited unexpectedly".to_string(),
+            usage: None,
+            reasoning: None,
+        },
+        Event::TurnDelta {
+            node: NodeId(1),
+            turn: 2,
             role: crate::provider::Role::Assistant,
             content: "```haskell\nresume Approve\n```".to_string(),
             usage: Some(crate::provider::Usage {
@@ -98,11 +106,11 @@ fn sample_events() -> Vec<Event> {
         Event::TurnForked {
             node: NodeId(2),
             parent: NodeId(1),
-            parent_turn: 1,
+            parent_turn: 2,
         },
         Event::TurnSpliced {
             node: NodeId(1),
-            turn: 2,
+            turn: 3,
             role: crate::provider::Role::User,
             content: "operator: also check the edge case".to_string(),
         },

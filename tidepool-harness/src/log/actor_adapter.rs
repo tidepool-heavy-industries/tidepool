@@ -223,6 +223,7 @@ fn adapt_event(event: &Event) -> (EventCausality, ActorEvent) {
 fn adapt_role(role: &Role) -> ActorRole {
     match role {
         Role::System => ActorRole::System,
+        Role::Developer => ActorRole::Developer,
         Role::User => ActorRole::User,
         Role::Assistant => ActorRole::Assistant,
     }

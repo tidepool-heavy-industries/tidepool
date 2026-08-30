@@ -46,6 +46,11 @@ pub(crate) fn to_chat_request(req: &TurnRequest) -> ChatRequest {
             .iter()
             .map(|m: &Message| match m.role {
                 Role::System => ChatMessage::system(m.content.clone()),
+                // genai's provider-neutral role enum has no Developer
+                // variant. Preserve instruction precedence by degrading to
+                // System on this adapter; the Responses adapter below carries
+                // Developer exactly.
+                Role::Developer => ChatMessage::system(m.content.clone()),
                 Role::User => ChatMessage::user(m.content.clone()),
                 Role::Assistant => ChatMessage::assistant(m.content.clone()),
             })
@@ -125,6 +130,11 @@ mod tests {
                     reasoning_items: Vec::new(),
                 },
                 Message {
+                    role: Role::Developer,
+                    content: "child reviewer exited".into(),
+                    reasoning_items: Vec::new(),
+                },
+                Message {
                     role: Role::User,
                     content: "hi".into(),
                     reasoning_items: Vec::new(),
@@ -133,7 +143,10 @@ mod tests {
             max_tokens: None,
         };
         let chat_req = to_chat_request(&req);
-        assert_eq!(chat_req.join_systems(), Some("be terse".to_string()));
+        assert_eq!(
+            chat_req.join_systems(),
+            Some("be terse\n\nchild reviewer exited".to_string())
+        );
     }
 
     #[test]

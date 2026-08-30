@@ -763,7 +763,7 @@ fn session_id_for(instructions: &str, opening: Option<&str>) -> String {
 /// message (see [`Message::reasoning_items`]), verbatim and in original
 /// order, followed by the message item itself — stateless Responses usage
 /// requires echoing prior reasoning back in the next call's input, in
-/// position. Only user/assistant reach here: the Codex backend rejects
+/// position. Developer/user/assistant reach here: the Codex backend rejects
 /// `role: "system"` in `input` (`400 "System messages are not allowed"`) —
 /// system content rides the top-level `instructions` field instead (see
 /// [`codex_responses`]). User carries an `input_text` content part;
@@ -776,6 +776,7 @@ fn session_id_for(instructions: &str, opening: Option<&str>) -> String {
 /// could drift from what this function really does.
 pub(crate) fn to_input_items(m: &Message) -> Vec<serde_json::Value> {
     let (role, content_type) = match m.role {
+        Role::Developer => ("developer", "input_text"),
         Role::User => ("user", "input_text"),
         Role::Assistant => ("assistant", "output_text"),
         // Unreachable: system is partitioned into `instructions` upstream.
@@ -1246,6 +1247,14 @@ mod tests {
         assert_eq!(user.len(), 1);
         assert_eq!(user[0]["role"], "user");
         assert_eq!(user[0]["content"][0]["type"], "input_text");
+        let developer = to_input_items(&Message {
+            role: Role::Developer,
+            content: "child failed".into(),
+            reasoning_items: Vec::new(),
+        });
+        assert_eq!(developer.len(), 1);
+        assert_eq!(developer[0]["role"], "developer");
+        assert_eq!(developer[0]["content"][0]["type"], "input_text");
         let asst = to_input_items(&Message {
             role: Role::Assistant,
             content: "yo".into(),

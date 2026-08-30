@@ -3709,19 +3709,35 @@ impl Harness {
     /// window). Also the corrective-retry mechanism inside
     /// [`Self::run_to_hole_or_done`].
     pub(crate) fn push_user_turn(&self, node: NodeId, content: &str) -> Result<(), HarnessError> {
+        self.push_context_turn(node, Role::User, content)
+    }
+
+    /// Append a runtime-authored lifecycle or authority fact without
+    /// pretending it came from the user. This queues context only; the actor
+    /// scheduler decides when a new provider response may begin.
+    pub fn push_developer_turn(&self, node: NodeId, content: &str) -> Result<(), HarnessError> {
+        self.push_context_turn(node, Role::Developer, content)
+    }
+
+    fn push_context_turn(
+        &self,
+        node: NodeId,
+        role: Role,
+        content: &str,
+    ) -> Result<(), HarnessError> {
         let mut convos = self.convos.lock();
         let convo = convos.get_mut(&node).ok_or(HarnessError::NoSession(node))?;
         let turn = convo.turn_seq;
         convo.transcript.push(Message {
-            role: Role::User,
+            role,
             content: content.to_string(),
             reasoning_items: Vec::new(),
         });
         convo.turn_seq += 1;
         drop(convos);
-        tracing::info!(node = node.0, "user turn to model:\n{content}");
+        tracing::info!(node = node.0, ?role, "context turn to model:\n{content}");
         self.tree
-            .turn_delta(node, turn, Role::User, content.to_string(), None)?;
+            .turn_delta(node, turn, role, content.to_string(), None)?;
         Ok(())
     }
 }

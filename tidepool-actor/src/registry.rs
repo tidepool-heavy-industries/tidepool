@@ -20,6 +20,7 @@ pub struct ActorDescriptor {
 pub struct StartingActor {
     actor: ActorRef,
     registry: Weak<RegistryInner>,
+    armed: bool,
 }
 
 impl std::fmt::Debug for StartingActor {
@@ -170,11 +171,15 @@ impl ActorRegistry {
         Ok(StartingActor {
             actor: reference,
             registry: Arc::downgrade(&self.inner),
+            armed: true,
         })
     }
 
     /// Linearize readiness and reveal the exact-incarnation reference.
-    pub fn publish_ready(&self, starting: StartingActor) -> Result<ActorRef, ActorRegistryError> {
+    pub fn publish_ready(
+        &self,
+        mut starting: StartingActor,
+    ) -> Result<ActorRef, ActorRegistryError> {
         self.validate_starting(&starting)?;
         let mut state = self.inner.state.lock();
         let actor = starting.actor;
@@ -190,6 +195,7 @@ impl ActorRegistry {
             EventCausality::default(),
             ActorEvent::Ready,
         )?;
+        starting.armed = false;
         Ok(actor)
     }
 
@@ -198,16 +204,20 @@ impl ActorRegistry {
     /// handle is returned to the starter.
     pub fn abort_start(
         &self,
-        starting: StartingActor,
+        mut starting: StartingActor,
         terminal: ActorTerminal,
     ) -> Result<(), ActorRegistryError> {
         self.validate_starting(&starting)?;
         let mut state = self.inner.state.lock();
-        match entry(&state, starting.actor)?.lifecycle {
+        let result = match entry(&state, starting.actor)?.lifecycle {
             ActorLifecycle::Initializing => exit_subtree(&mut state, starting.actor, terminal),
             ActorLifecycle::Ready => Err(ActorRegistryError::AlreadyReady(starting.actor)),
             ActorLifecycle::Exited => Err(ActorRegistryError::Exited(starting.actor)),
+        };
+        if result.is_ok() {
+            starting.armed = false;
         }
+        result
     }
 
     /// Admit one serialized actor turn. Dropping the lease restores admission
@@ -290,6 +300,31 @@ impl ActorRegistry {
 impl Default for ActorRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for StartingActor {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let mut state = registry.state.lock();
+        if matches!(
+            entry(&state, self.actor).map(|entry| entry.lifecycle),
+            Ok(ActorLifecycle::Initializing)
+        ) {
+            let _ = exit_subtree(
+                &mut state,
+                self.actor,
+                ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "startup capability dropped before readiness".into(),
+                },
+            );
+        }
     }
 }
 
@@ -555,6 +590,22 @@ mod tests {
                 kind: ActorExitKind::Failed,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn dropped_startup_capability_cannot_leak_initializing_actor() {
+        let registry = ActorRegistry::new();
+        let starting = registry
+            .begin_start(None, descriptor("abandoned"), StartInitiator::Runtime)
+            .expect("begin startup");
+        drop(starting);
+        assert!(matches!(
+            registry.events().last().map(|record| &record.event),
+            Some(ActorEvent::Exited {
+                kind: ActorExitKind::Cancelled,
+                summary,
+            }) if summary.contains("startup capability dropped")
         ));
     }
 }
