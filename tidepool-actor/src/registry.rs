@@ -2303,6 +2303,76 @@ mod tests {
     }
 
     #[test]
+    fn target_exit_before_reply_fails_a_delivered_call_and_releases_its_request() {
+        let registry = ActorRegistry::new();
+        let caller = ready_root(&registry);
+        let target = ready_in(&registry, Some(caller), "target", SessionId(1));
+        let (request, request_dropped) = probe(SessionId(1));
+        let mut ticket = registry.call(caller, target, request).expect("call");
+        let delivery = registry
+            .dequeue(target)
+            .expect("dequeue")
+            .expect("delivery");
+
+        registry
+            .finish(
+                target,
+                ActorTerminal {
+                    kind: ActorExitKind::Failed,
+                    summary: "failed while handling".into(),
+                },
+            )
+            .expect("finish target");
+        assert!(matches!(
+            ticket.poll(),
+            Ok(CallStatus::Failed(CallFailure::TargetExited(actor))) if actor == target
+        ));
+        assert_eq!(
+            request_dropped.load(Ordering::SeqCst),
+            0,
+            "the admitted delivery retains its request until its handler releases custody"
+        );
+        drop(delivery);
+        assert_eq!(request_dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn reply_published_before_target_exit_remains_observable() {
+        let registry = ActorRegistry::new();
+        let caller = ready_root(&registry);
+        let target = ready_in(&registry, Some(caller), "target", SessionId(1));
+        let mut ticket = registry
+            .call(caller, target, probe(SessionId(1)).0)
+            .expect("call");
+        let MailboxDelivery::Call(mut delivery) = registry
+            .dequeue(target)
+            .expect("dequeue")
+            .expect("delivery")
+        else {
+            panic!("expected call");
+        };
+        drop(delivery.take_value());
+        let (reply, reply_dropped) = probe(SessionId(1));
+        delivery.reply(reply).expect("publish reply");
+
+        registry
+            .finish(
+                target,
+                ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "completed after replying".into(),
+                },
+            )
+            .expect("finish target");
+        let CallStatus::Reply(reply) = ticket.poll().expect("poll published reply") else {
+            panic!("reply must win its earlier linearization point");
+        };
+        assert_eq!(reply_dropped.load(Ordering::SeqCst), 0);
+        drop(reply);
+        assert_eq!(reply_dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn dropping_an_unconsumed_reply_releases_it_without_double_settlement() {
         let registry = ActorRegistry::new();
         let caller = ready_root(&registry);

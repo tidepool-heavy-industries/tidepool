@@ -475,11 +475,15 @@ The remaining work in this stage is the typed shutdown hook and adversarial
 lifecycle/cancellation coverage—not another scheduler, mailbox execution,
 forced-cleanup, or exit-value retention mechanism.
 
-Remaining acceptance covers call/cancel/reply races, queued-root teardown, stale
-incarnations, call cycles, subtree termination, quiet normal completion, and
-shutdown that cannot obtain Haskell execution before the watchdog. The first
-real request/reply child vertical is landed; advisory inference is not a gate
-for proving application-message semantics.
+The call/cancel/reply linearization cases are now pinned: caller cancellation
+after handler admission does not fail the callee, target exit before reply
+fails the exact call while delivery retains its request until released, and a
+reply published before target exit remains observable. Remaining acceptance
+covers the rest of queued-root teardown, stale incarnations, subtree
+termination, quiet normal completion, and shutdown that cannot obtain Haskell
+execution before the watchdog. The first real request/reply child vertical is
+landed; advisory inference is not a gate for proving application-message
+semantics.
 
 ## 8. Stage 5 — profiles, dynamic sealing, and caller-checked authority
 
