@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use tidepool_repr::SessionId;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 /// Why a machine checkout was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -151,12 +151,21 @@ struct Entry<M, H> {
     slot: Slot<M, H>,
 }
 
+#[derive(Default)]
+struct SessionAvailability {
+    /// Tokio's mutex admits lock waiters in FIFO order. The guard is held
+    /// until this queue head actually checks the machine out, preventing a
+    /// freshly arriving waiter from barging ahead after a settlement wakeup.
+    queue: AsyncMutex<()>,
+    changed: Notify,
+}
+
 /// The resident-session registry: owns every session's [`Slot`] and gates all
 /// machine access through atomic checkout/settlement transitions.
 pub struct SessionRegistry<M, H> {
     slots: Mutex<HashMap<SessionId, Entry<M, H>>>,
     next_epoch: AtomicU64,
-    availability: Notify,
+    availability: Mutex<HashMap<SessionId, std::sync::Arc<SessionAvailability>>>,
 }
 
 impl<M, H> Default for SessionRegistry<M, H> {
@@ -164,12 +173,21 @@ impl<M, H> Default for SessionRegistry<M, H> {
         SessionRegistry {
             slots: Mutex::new(HashMap::new()),
             next_epoch: AtomicU64::new(1),
-            availability: Notify::new(),
+            availability: Mutex::new(HashMap::new()),
         }
     }
 }
 
 impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
+    fn availability_for(&self, id: SessionId) -> std::sync::Arc<SessionAvailability> {
+        std::sync::Arc::clone(
+            self.availability
+                .lock()
+                .entry(id)
+                .or_insert_with(|| std::sync::Arc::new(SessionAvailability::default())),
+        )
+    }
+
     /// A fresh, empty registry.
     pub fn new() -> Self {
         Self::default()
@@ -193,7 +211,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
                 },
             )
             .map(|e| e.slot);
-        self.availability.notify_waiters();
+        self.availability_for(id).changed.notify_waiters();
         previous
     }
 
@@ -204,7 +222,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     pub fn remove(&self, id: SessionId) -> Option<Slot<M, H>> {
         let removed = self.slots.lock().remove(&id).map(|e| e.slot);
         if removed.is_some() {
-            self.availability.notify_waiters();
+            self.availability_for(id).changed.notify_waiters();
         }
         removed
     }
@@ -284,24 +302,28 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
     /// Wait until `id`'s machine can be checked out for a run.
     ///
     /// Only [`CheckoutError::Running`] waits. Unknown, terminal, and other
-    /// structural refusals return immediately. Settlement wakes one waiter;
-    /// no polling interval or caller-maintained retry flag is involved.
+    /// structural refusals return immediately. Waiters for this session enter
+    /// one FIFO admission gate; settlement wakes that queue head without
+    /// disturbing unrelated sessions. No polling interval or
+    /// caller-maintained retry flag is involved.
     pub async fn checkout_wait(
         &self,
         id: SessionId,
         request: CheckoutRequest<'_, H>,
         max_wait: std::time::Duration,
     ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
+        let availability = self.availability_for(id);
         let wait = async {
+            let _position = availability.queue.lock().await;
             loop {
-                let available = self.availability.notified();
+                let changed = availability.changed.notified();
                 let checkout = match request {
                     CheckoutRequest::Run => self.checkout_run(id),
                     CheckoutRequest::Resume(hole) => self.checkout_resume(id, hole),
                     CheckoutRequest::Child => self.checkout_child(id),
                 };
                 match checkout {
-                    Err(CheckoutError::Running(_)) => available.await,
+                    Err(CheckoutError::Running(_)) => changed.await,
                     result => return result,
                 }
             }
@@ -408,7 +430,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
             _ => drop(machine),
         }
         drop(slots);
-        self.availability.notify_one();
+        self.availability_for(id).changed.notify_one();
     }
 
     /// Settle a checked-out machine as `Wedged{since}` — the turn never gave
@@ -425,7 +447,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
             }
         }
         drop(slots);
-        self.availability.notify_waiters();
+        self.availability_for(id).changed.notify_waiters();
     }
 }
 
@@ -668,7 +690,7 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
             slots.remove(&id);
         }
         drop(slots);
-        self.availability.notify_waiters();
+        self.availability_for(id).changed.notify_waiters();
     }
 }
 
@@ -1057,6 +1079,87 @@ mod tests {
         tokio::task::yield_now().await;
         running.restore_suspended(Vec::new());
         waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn waiting_checkouts_are_fifo_within_one_session() {
+        let reg: std::sync::Arc<SessionRegistry<FakeMachine, Hole>> =
+            std::sync::Arc::new(SessionRegistry::new());
+        let order = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let id = SessionId(33);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        let running = reg.checkout_run(id).expect("hold the machine");
+
+        let mut waiters = Vec::new();
+        for ordinal in 0..3 {
+            let waiter_registry = std::sync::Arc::clone(&reg);
+            let observed = std::sync::Arc::clone(&order);
+            waiters.push(tokio::spawn(async move {
+                let checkout = waiter_registry
+                    .checkout_wait(id, CheckoutRequest::Run, std::time::Duration::from_secs(1))
+                    .await
+                    .expect("FIFO waiter acquires");
+                observed.lock().push(ordinal);
+                checkout.restore_suspended(Vec::new());
+            }));
+            tokio::task::yield_now().await;
+        }
+
+        running.restore_suspended(Vec::new());
+        for waiter in waiters {
+            waiter.await.expect("waiter task");
+        }
+        assert_eq!(*order.lock(), vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn settlement_wakes_only_the_matching_sessions_queue() {
+        let reg: std::sync::Arc<SessionRegistry<FakeMachine, Hole>> =
+            std::sync::Arc::new(SessionRegistry::new());
+        let first = SessionId(34);
+        let second = SessionId(35);
+        reg.insert_idle(first, FakeMachine { turns: 0 });
+        reg.insert_idle(second, FakeMachine { turns: 0 });
+        let first_running = reg.checkout_run(first).expect("hold first machine");
+        let second_running = reg.checkout_run(second).expect("hold second machine");
+
+        let first_registry = std::sync::Arc::clone(&reg);
+        let first_waiter = tokio::spawn(async move {
+            let checkout = first_registry
+                .checkout_wait(
+                    first,
+                    CheckoutRequest::Run,
+                    std::time::Duration::from_secs(1),
+                )
+                .await
+                .expect("first waiter acquires");
+            checkout.restore_suspended(Vec::new());
+        });
+        let second_registry = std::sync::Arc::clone(&reg);
+        let second_waiter = tokio::spawn(async move {
+            let checkout = second_registry
+                .checkout_wait(
+                    second,
+                    CheckoutRequest::Run,
+                    std::time::Duration::from_secs(1),
+                )
+                .await
+                .expect("second waiter acquires");
+            checkout.restore_suspended(Vec::new());
+        });
+        tokio::task::yield_now().await;
+
+        first_running.restore_suspended(Vec::new());
+        tokio::time::timeout(std::time::Duration::from_millis(250), first_waiter)
+            .await
+            .expect("first settlement wakes first waiter")
+            .expect("first waiter task");
+        assert!(
+            !second_waiter.is_finished(),
+            "a first-session settlement must not wake the second session"
+        );
+        second_running.restore_suspended(Vec::new());
+        second_waiter.await.expect("second waiter task");
     }
 
     #[tokio::test]

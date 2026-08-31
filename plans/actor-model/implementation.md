@@ -113,6 +113,10 @@ This is the canonical status inventory for the plan.
   resumes with terminal metadata only. A real mailbox-driven child fills its
   shared Haskell `ExitCell`, replies, exits, and is then observed with the same
   typed value; no Rust exit-value store or second root registry exists.
+- Shared resident-machine `checkout_wait` now provides one FIFO admission gate
+  and notification channel per session. This is the actor runnable-segment
+  queue and the existing harness checkout path at once; the former global
+  notification could wake the wrong session and has been removed.
 - Effect-schema metadata centrally curates authored constructors, supporting
   types, and helpers. The generated public shim and model-facing descriptions
   consume the same allowlists; internal Core retains the full nominal
@@ -134,8 +138,7 @@ This is the canonical status inventory for the plan.
 - full sealing validation for explicit model-visible value exports and
   shadow-drift/type-coherence probes beyond the landed nominal-head facade;
 - lifecycle advisories and typed shutdown execution;
-- FIFO runnable-segment scheduling above shared-machine checkout, plus the
-  remaining mailbox cancellation/failure race matrix;
+- the remaining mailbox cancellation/failure race matrix;
 - model-authored dynamic definitions and internally sealed child deployments;
 - immutable live-binding snapshots or structural context fork;
 - the DevSwarm actor entry and deletion of the old selfharness path.
@@ -438,23 +441,24 @@ the program's next state, while the runtime-private reply obligation cannot
 escape into model-authored Haskell. `serve` and state-machine loops are library
 code over this primitive.
 
-Finish the Rust lifecycle behavior:
+The Rust registry already provides:
 
-- one FIFO runnable-segment queue per shared machine, above the existing
-  checkout owner;
 - synchronous wait-edge tracking and `A -> B -> A` cycle rejection;
-- owner termination recursively stopping its subtree;
-- closing-phase shutdown execution, followed by Rust-owned forced cleanup.
+- owner termination recursively stopping its subtree.
 
-The resident call/cast/receive/serve vertical and atomic reply-plus-next-state
-settlement are landed. The remaining work in this stage is scheduling,
-shutdown, and adversarial lifecycle/cancellation coverage—not another mailbox
-execution or exit-value retention mechanism.
+Still add closing-phase shutdown execution, followed by Rust-owned forced
+cleanup.
 
-Acceptance covers call/cancel/reply races, queued-root teardown, stale
+The resident call/cast/receive/serve vertical, atomic reply-plus-next-state
+settlement, exact waits, and per-session FIFO machine admission are landed.
+The remaining work in this stage is shutdown and adversarial
+lifecycle/cancellation coverage—not another scheduler, mailbox execution, or
+exit-value retention mechanism.
+
+Remaining acceptance covers call/cancel/reply races, queued-root teardown, stale
 incarnations, call cycles, subtree termination, quiet normal completion, and
 shutdown that cannot obtain Haskell execution before the watchdog. The first
-real request/reply child vertical lands here; advisory inference is not a gate
+real request/reply child vertical is landed; advisory inference is not a gate
 for proving application-message semantics.
 
 ## 8. Stage 5 — profiles, dynamic sealing, and caller-checked authority
