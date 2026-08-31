@@ -4018,6 +4018,15 @@ name = "tidepool-extract-cmd"
 version = "0.1.0"
 
 [[package]]
+name = "tidepool-extract-report"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "tidepool-guess"
 version = "0.1.0"
 dependencies = [
@@ -4120,10 +4129,10 @@ dependencies = [
  "blake3",
  "proc-macro2",
  "quote",
- "serde_json",
  "syn 3.0.3",
  "tidepool-eval",
  "tidepool-extract-cmd",
+ "tidepool-extract-report",
  "tidepool-repr",
 ]
 
@@ -4333,6 +4342,7 @@ dependencies = [
  "tidepool-atomic-write",
  "tidepool-codegen",
  "tidepool-extract-cmd",
+ "tidepool-extract-report",
  "tidepool-repr",
  "tracing",
  "which",

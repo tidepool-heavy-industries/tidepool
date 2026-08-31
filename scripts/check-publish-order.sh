@@ -20,8 +20,8 @@ metadata="$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT_DI
 
 # Declared order: strip "N. " / "N.  " prefixes and any trailing "(binary)" annotation.
 mapfile -t declared_order < <(
-    grep -E '^[0-9]+\.[[:space:]]+' "$PUBLISHING_MD" \
-        | sed -E 's/^[0-9]+\.[[:space:]]+//; s/[[:space:]]+\(binary\)[[:space:]]*$//'
+    grep -E '^[[:space:]]*[0-9]+\.[[:space:]]+' "$PUBLISHING_MD" \
+        | sed -E 's/^[[:space:]]*[0-9]+\.[[:space:]]+//; s/[[:space:]]+\(binary\)[[:space:]]*$//'
 )
 
 if [[ ${#declared_order[@]} -eq 0 ]]; then

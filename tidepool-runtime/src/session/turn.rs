@@ -672,12 +672,10 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     if !module_timings.is_empty() {
         timing::log_module_timings(&module_timings);
     }
-    if !run.success() {
+    if let Err(error) =
+        crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
+    {
         let attempted_source = std::fs::read_to_string(temp.path().join("turn-attempt.hs")).ok();
-        let error = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-            Ok(report) => CompileError::Diagnostics(report.diagnostics),
-            Err(msg) => CompileError::MalformedDiagnostics(msg),
-        };
         return Err(TurnFailure {
             error,
             attempted_source,
@@ -1055,42 +1053,27 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     // its extract phases the same as a successful one, before the early
     // return below.
     forward_extract_timing(&run.stderr_lossy(), "classify");
-    // THIS LANE HAS NO USER-ERROR MODE, so a non-zero exit is always an
-    // infrastructure problem and never the user's Haskell (unlike every
-    // other extract call site, which parses the stdout report to tell a real
-    // GHC diagnostic from a stale/skewed extractor). `classifyTurn`'s rule 6
-    // turns an item that parses as neither a declaration nor a statement
-    // into an `expr` verdict — the classify itself cannot reject input. What
-    // a non-zero exit really means is a stale extract: one predating
-    // `--classify` swallows the flag as a positional file and falls through
-    // to the ordinary compile path, which then reports a perfectly
-    // parseable GHC diagnostic about a target it cannot find. Classifying
-    // that as a user-Haskell failure would route a version skew into the
-    // caller's user-Haskell lane, where the repl degrades resiliently and
-    // the operator sees `parse error on input '<-'` on every bind instead of
-    // "your extract is stale" — so both shapes are reported as version skew
-    // here, unconditionally.
-    if !run.success() {
-        // Both shapes — a parseable report and an unparseable one — are
-        // `MalformedDiagnostics` (→ VersionSkew), the same fails-loud reading
-        // every other call site gives an unparseable report. This is what
-        // makes the one-format wire policy true here: `--emit-stmt-binders`'
-        // removal means a new runtime REQUIRES a matching extract, and
-        // `scripts/redeploy.sh` ships both together.
-        let detail = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-            Ok(report) => report
-                .diagnostics
-                .iter()
-                .map(|d| d.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-            Err(msg) => msg,
+    // `classifyBlock` is total over source text: if neither declaration nor
+    // statement parsing succeeds it returns `Expr`. A typed worker failure is
+    // therefore infrastructure, while a claimed source failure or malformed
+    // response means the deployed classifier does not implement this
+    // protocol and is reported as version skew.
+    if let Err(error) =
+        crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
+    {
+        return match error {
+            CompileError::WorkerFailure(_) => Err(error),
+            CompileError::Diagnostics(diags) => {
+                let detail = diags
+                    .iter()
+                    .map(|d| d.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                Err(classify_protocol_failure(detail))
+            }
+            CompileError::MalformedDiagnostics(detail) => Err(classify_protocol_failure(detail)),
+            other => Err(other),
         };
-        return Err(CompileError::MalformedDiagnostics(format!(
-            "block classify failed; the deployed tidepool-extract is probably stale \
-             (it must support --classify). Redeploy both sides — scripts/redeploy.sh. \
-             Extract reported: {detail}"
-        )));
     }
 
     let json = std::fs::read_to_string(&out_path).map_err(|error| {
@@ -1101,6 +1084,14 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
         }
     })?;
     parse_classify_json(&json, items.len())
+}
+
+fn classify_protocol_failure(detail: String) -> CompileError {
+    CompileError::MalformedDiagnostics(format!(
+        "block classify failed; the deployed tidepool-extract is probably stale \
+         (it must support --classify). Redeploy both sides — scripts/redeploy.sh. \
+         Extract reported: {detail}"
+    ))
 }
 
 /// Parse `{"verdicts":[{kind,binders}, ...]}`. A verdict count that does not
@@ -1242,14 +1233,7 @@ pub fn compile_session_turn(
     // "extract", not "classify": this is a full-pipeline spawn, the same lane
     // `compile.rs::compile_turn` instruments.
     forward_extract_timing(&stderr, "extract");
-    if !run.success() {
-        return Err(
-            match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-                Ok(report) => CompileError::Diagnostics(report.diagnostics),
-                Err(msg) => CompileError::MalformedDiagnostics(msg),
-            },
-        );
-    }
+    crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)?;
 
     let expr_path = temp.path().join("result.cbor");
     let meta_path = temp.path().join("meta.cbor");
@@ -1430,22 +1414,17 @@ mod tests {
         );
     }
 
-    /// A STALE extract — one predating `--classify` — swallows the flag as a
-    /// positional file, falls through to the ordinary compile path, and exits
-    /// non-zero with a perfectly PARSEABLE diagnostics report about a target
-    /// it cannot find. That must still read as version skew, not as the
-    /// user's Haskell: routing it into the user lane makes the repl degrade
-    /// resiliently and the operator sees a parse error on every bind instead
-    /// of "your extract is stale". Reproduced here with the exact stdout a
-    /// pre-`--classify` extract emits.
+    /// Source rejection is impossible in parse-only classification. Even a
+    /// well-formed report claiming it is therefore a protocol mismatch, not
+    /// authored Haskell.
     #[test]
-    fn classify_block_stale_extract_parseable_report_is_still_version_skew() {
+    fn classify_block_impossible_source_failure_is_version_skew() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let fake = dir.path().join("fake-extract");
         std::fs::write(
             &fake,
-            "#!/bin/sh\necho '{\"version\":1,\"diagnostics\":[{\"span\":null,\
+            "#!/bin/sh\necho '{\"version\":2,\"outcome\":\"source-failure\",\"diagnostics\":[{\"span\":null,\
              \"severity\":\"error\",\"message\":\"target is not a module name or a source file\"}]}'\nexit 1\n",
         )
         .unwrap();
@@ -1454,11 +1433,33 @@ mod tests {
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
         let err = classify_block(&["x <- pure 1"]).unwrap_err();
         let CompileError::MalformedDiagnostics(msg) = &err else {
-            panic!("a parseable report from a stale extract must be MalformedDiagnostics (version skew), got {err:?}");
+            panic!("an impossible source-failure report must be version skew, got {err:?}");
         };
         assert!(
             msg.contains("--classify") && msg.contains("redeploy.sh"),
             "the skew message must name the missing flag and the redeploy path: {msg}"
+        );
+    }
+
+    #[test]
+    fn classify_block_worker_failure_remains_infrastructure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho '{\"version\":2,\"outcome\":\"worker-failure\",\"diagnostics\":[{\"span\":null,\"severity\":\"error\",\"message\":\"disk unavailable\"}]}'\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
+
+        let error = classify_block(&["x <- pure 1"]).unwrap_err();
+        assert!(matches!(error, CompileError::WorkerFailure(_)));
+        assert_eq!(
+            crate::classify_compile(&error).class,
+            crate::FailureClass::Infra
         );
     }
 
@@ -1497,7 +1498,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let fake = dir.path().join("fake-extract");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho '{\"version\":2,\"outcome\":\"success\",\"diagnostics\":[]}'\nexit 0\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
@@ -1854,8 +1859,12 @@ mod tests {
         })
         .expect_err("an infrastructure exception must not select the valid fallback template");
         assert!(
-            matches!(err.error, CompileError::Diagnostics(_)),
-            "worker infrastructure failure should retain its diagnostic envelope: {err:?}"
+            matches!(err.error, CompileError::WorkerFailure(_)),
+            "worker infrastructure failure must remain distinct from source rejection: {err:?}"
+        );
+        assert_eq!(
+            crate::classify_compile(&err.error).class,
+            crate::FailureClass::Infra
         );
     }
 

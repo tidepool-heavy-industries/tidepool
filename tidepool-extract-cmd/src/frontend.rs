@@ -12,9 +12,7 @@ const USAGE: &str = "Usage: tidepool-extract [OPTIONS] <file.hs> ...";
 pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
     crate::process::current_process_dies_with_parent().map_err(FrontendError::Io)?;
     if args.is_empty() {
-        eprintln!("{USAGE}");
-        println!("{{\"version\":1,\"diagnostics\":[]}}");
-        return Ok(0);
+        return Err(FrontendError::Usage(USAGE.to_owned()));
     }
     if args.first().is_some_and(|arg| arg == "--daemon") {
         return daemon::serve(parse_daemon(&args[1..])?, worker_bin()?);

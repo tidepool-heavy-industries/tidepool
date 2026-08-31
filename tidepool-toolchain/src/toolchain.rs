@@ -877,6 +877,7 @@ mod tests {
     /// side of the pair moves, and startup says so loudly instead of serving a
     /// mixed toolchain that fails at eval time.
     #[test]
+    #[serial]
     fn handshake_detects_a_skewed_extract_and_names_the_redeploy_script() {
         let tmp = tempfile::TempDir::new().unwrap();
         isolate_cache(tmp.path());
@@ -931,6 +932,7 @@ mod tests {
     /// and must be caught the same way — this is the "edited haskell/lib, never
     /// redeployed" case.
     #[test]
+    #[serial]
     fn handshake_detects_a_skewed_stdlib() {
         let tmp = tempfile::TempDir::new().unwrap();
         isolate_cache(tmp.path());
@@ -956,6 +958,7 @@ mod tests {
     /// machine (or the cache was hand-cleared). That is informational — a fresh
     /// checkout must not be unable to start.
     #[test]
+    #[serial]
     fn handshake_without_a_stamp_is_informational() {
         let tmp = tempfile::TempDir::new().unwrap();
         isolate_cache(tmp.path());
@@ -974,6 +977,7 @@ mod tests {
     /// A stamp from a future (or ancient) schema is treated as absent, not as a
     /// skew: an old stamp must never brick a newer server.
     #[test]
+    #[serial]
     fn stamp_with_a_foreign_schema_reads_as_absent() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("stamp.json");
@@ -998,6 +1002,7 @@ mod tests {
     /// succeed (its own uniquely-named temp file never collides with the
     /// leftover).
     #[test]
+    #[serial]
     fn write_stamp_is_atomic_against_an_interrupted_write() {
         let tmp = tempfile::TempDir::new().unwrap();
         isolate_cache(tmp.path());
@@ -1034,6 +1039,7 @@ mod tests {
     /// file) must fail closed under the default `Error` severity, and be
     /// reported — not silently swallowed as "no stamp" — under `Warn`.
     #[test]
+    #[serial]
     fn corrupt_stamp_fails_closed_in_error_and_warns_in_warn() {
         let tmp = tempfile::TempDir::new().unwrap();
         isolate_cache(tmp.path());

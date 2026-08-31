@@ -786,16 +786,11 @@ impl SessionLib {
         })?;
         let output = &run.output;
 
-        if !run.success() {
-            // An unparseable report is a stale/skewed extractor, not the
-            // user's declaration — the same split every extract call site makes.
-            let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-                Ok(r) => r,
-                Err(msg) => {
-                    return Err(SessionError::Compile(
-                        crate::CompileError::MalformedDiagnostics(msg),
-                    ))
-                }
+        if let Err(error) =
+            crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)
+        {
+            let crate::CompileError::Diagnostics(diags) = error else {
+                return Err(SessionError::Compile(error));
             };
             let rel = rendered.module.relative_hs_path();
             // Speak item-relative coordinates: GHC's line numbers point into
@@ -808,7 +803,7 @@ impl SessionLib {
                 0
             };
             let rendered_text = crate::diag::render_diagnostics(
-                &report.diagnostics,
+                &diags,
                 &crate::diag::RenderOpts {
                     anchor: &rel,
                     label: "<decl>",

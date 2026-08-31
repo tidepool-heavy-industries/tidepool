@@ -1705,7 +1705,7 @@ impl Harness {
         .map_err(|e| HarnessError::Resident(format!("turn compile task join: {e}")))?
         .map_err(|e| {
             HarnessError::Compile(render_compile_error(
-                &e,
+                &e.error,
                 block,
                 &expr_source,
                 &ctx.bind_source,
@@ -2131,7 +2131,7 @@ impl Harness {
                 Err(e) => {
                     if pending_failure.is_none() {
                         pending_failure = Some(HarnessError::Compile(render_compile_error(
-                            &e,
+                            &e.error,
                             &item_text,
                             &expr_source,
                             &ctx.bind_source,
@@ -3807,7 +3807,7 @@ mod tests {
                 end_line: line,
                 end_col: col + 1,
             }),
-            severity: "error".to_string(),
+            severity: tidepool_runtime::diag::DiagnosticSeverity::Error,
             message: message.to_string(),
         }
     }
@@ -4022,7 +4022,7 @@ mod tests {
                 end_line: 3,
                 end_col: 5,
             }),
-            severity: "warning".into(),
+            severity: tidepool_runtime::diag::DiagnosticSeverity::Warning,
             message: "Pattern match(es) are non-exhaustive".into(),
         };
         let err = tidepool_runtime::CompileError::Diagnostics(vec![user_err, lib_warning]);

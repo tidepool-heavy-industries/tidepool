@@ -3,7 +3,9 @@
 -- @app/Main.hs@. Hand-rolled serializer (no @aeson@ dependency): the shape is
 -- small and fixed, so a dependency buys nothing here.
 module Tidepool.DiagJson
-  ( Diag(..)
+  ( ReportOutcome(..)
+  , DiagSeverity(..)
+  , Diag(..)
   , diagsFromSourceError
   , diagFromException
   , renderDiagsJson
@@ -25,14 +27,22 @@ import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, SDocContext(
 import GHC.Data.FastString (unpackFS)
 import Tidepool.Json (jsonString)
 
+-- | The result of one accepted compiler-worker request.
+data ReportOutcome
+  = ReportSuccess
+  | ReportSourceFailure
+  | ReportWorkerFailure
+
+-- | Severity carried by one structured diagnostic.
+data DiagSeverity = DiagError | DiagWarning
+
 -- | One diagnostic: an optional source span, a severity ("error"/"warning"),
 -- and the rendered message text.
 data Diag = Diag
   { dFile     :: Maybe (String, Int, Int, Int, Int)
   -- ^ @(file, startLine, startCol, endLine, endCol)@; 'Nothing' when GHC has
   -- no real span for the diagnostic ('UnhelpfulSpan').
-  , dSeverity :: String
-  -- ^ @"error"@ or @"warning"@.
+  , dSeverity :: DiagSeverity
   , dMessage  :: String
   }
 
@@ -86,27 +96,37 @@ spanOf (RealSrcSpan rss _) =
   Just (unpackFS (srcSpanFile rss), srcSpanStartLine rss, srcSpanStartCol rss, srcSpanEndLine rss, srcSpanEndCol rss)
 spanOf (UnhelpfulSpan _) = Nothing
 
-severityOf :: Severity -> String
-severityOf SevError   = "error"
-severityOf SevWarning = "warning"
-severityOf SevIgnore  = "warning"
+severityOf :: Severity -> DiagSeverity
+severityOf SevError   = DiagError
+severityOf SevWarning = DiagWarning
+severityOf SevIgnore  = DiagWarning
 
 -- | A non-'SourceError' exception (parse failure before a GHC diagnostic
 -- session exists, an @error@ call, IO failure, ...): no real span, always
 -- severity @"error"@, message is @show@ of the exception.
 diagFromException :: SomeException -> Diag
-diagFromException e = Diag { dFile = Nothing, dSeverity = "error", dMessage = show e }
+diagFromException e = Diag { dFile = Nothing, dSeverity = DiagError, dMessage = show e }
 
 -- | Render the fixed-shape report:
--- @{"version":1,"diagnostics":[{"span":{...}|null,"severity":"...","message":"..."}]}@
-renderDiagsJson :: [Diag] -> String
-renderDiagsJson diags =
-  "{\"version\":1,\"diagnostics\":[" ++ intercalate "," (map renderDiag diags) ++ "]}"
+-- @{"version":2,"outcome":"...","diagnostics":[{"span":{...}|null,"severity":"...","message":"..."}]}@
+renderDiagsJson :: ReportOutcome -> [Diag] -> String
+renderDiagsJson outcome diags =
+  "{\"version\":2,\"outcome\":" ++ jsonString (renderOutcome outcome)
+    ++ ",\"diagnostics\":[" ++ intercalate "," (map renderDiag diags) ++ "]}"
+
+renderOutcome :: ReportOutcome -> String
+renderOutcome ReportSuccess       = "success"
+renderOutcome ReportSourceFailure = "source-failure"
+renderOutcome ReportWorkerFailure = "worker-failure"
+
+renderSeverity :: DiagSeverity -> String
+renderSeverity DiagError   = "error"
+renderSeverity DiagWarning = "warning"
 
 renderDiag :: Diag -> String
 renderDiag (Diag mspan sev msg) =
   "{\"span\":" ++ renderSpan mspan
-    ++ ",\"severity\":" ++ jsonString sev
+    ++ ",\"severity\":" ++ jsonString (renderSeverity sev)
     ++ ",\"message\":" ++ jsonString msg ++ "}"
 
 renderSpan :: Maybe (String, Int, Int, Int, Int) -> String

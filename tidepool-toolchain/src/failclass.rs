@@ -137,6 +137,15 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
                 .collect::<Vec<_>>()
                 .join("\n\n"),
         ),
+        CompileError::WorkerFailure(diags) => FailureEnvelope::new(
+            FailureClass::Infra,
+            Phase::Compile,
+            diags
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
         // The extractor's stdout did not parse as the diagnostics report — a
         // toolchain/version problem, not the user's code.
         CompileError::MalformedDiagnostics(msg) => {
@@ -215,6 +224,13 @@ mod tests {
             std::io::ErrorKind::NotFound,
             "tidepool-extract not found on PATH",
         )));
+        assert_eq!(env.class, FailureClass::Infra);
+        assert_eq!(env.phase, Phase::Compile);
+    }
+
+    #[test]
+    fn compiler_worker_failure_is_infra_compile() {
+        let env = classify_compile(&CompileError::WorkerFailure(vec![]));
         assert_eq!(env.class, FailureClass::Infra);
         assert_eq!(env.phase, Phase::Compile);
     }

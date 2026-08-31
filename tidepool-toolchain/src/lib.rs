@@ -51,6 +51,11 @@ pub enum CompileError {
     /// diagnostics report — this is a real GHC compile failure with real spans.
     #[error("Haskell compilation failed ({} diagnostic(s))", .0.len())]
     Diagnostics(Vec<crate::diag::ExtractDiag>),
+    /// The accepted compiler-worker request failed outside GHC's
+    /// `SourceError` path (for example an I/O failure, missing external tool,
+    /// or internal exception). This is infrastructure, never authored code.
+    #[error("compiler worker failed ({} diagnostic(s))", .0.len())]
+    WorkerFailure(Vec<crate::diag::ExtractDiag>),
     /// The extractor's stdout did not parse as the diagnostics report (a
     /// stale binary predating the contract, or a genuine wire mismatch) — an
     /// infra/toolchain problem, not the user's Haskell.

@@ -37,7 +37,7 @@ fn named_profile_compile_failures() {
         target: None,
     })
     .expect_err("a ReadOnly actor definition must not admit FsWrite");
-    let failure = tidepool_runtime::classify_compile(&error);
+    let failure = tidepool_runtime::classify_compile(&error.error);
     assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
     assert!(
         failure.message.contains("FsWrite"),

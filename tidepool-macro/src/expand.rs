@@ -1056,24 +1056,27 @@ fn publish_extract_dir(tmp_dir: &Path, output_dir: &Path) -> Result<(), String> 
     }
 }
 
-/// Render a failed extract invocation's diagnostic text: parse `stdout` as the
-/// structured diagnostics report (`{"version":1,"diagnostics":[...]}`) and
-/// join the messages when it parses; otherwise (an older `tidepool-extract`
+/// Render a failed extract invocation's diagnostic text from the shared typed
+/// worker report and join its messages. Otherwise (an older `tidepool-extract`
 /// predating the structured contract, or any other malformed stdout) fall
 /// back to the raw stderr text. This is the ONE call site in the workspace
 /// allowed that graceful fallback — a dev-convenience macro-expansion tool
 /// talking to whatever `tidepool-extract` happens to be on a user's PATH,
 /// potentially a much older build.
 fn extract_failure_text(stdout: &[u8], stderr: &[u8]) -> String {
-    let parsed = serde_json::from_slice::<serde_json::Value>(stdout)
+    let parsed = tidepool_extract_report::decode_report(stdout)
         .ok()
-        .and_then(|v| {
-            let diags = v.get("diagnostics")?.as_array()?;
-            let messages: Vec<String> = diags
-                .iter()
-                .filter_map(|d| d.get("message")?.as_str().map(str::to_string))
-                .collect();
-            (!messages.is_empty()).then(|| messages.join("\n\n"))
+        .and_then(|report| {
+            (report.outcome != tidepool_extract_report::ExtractOutcome::Success)
+                .then(|| {
+                    report
+                        .diagnostics
+                        .iter()
+                        .map(|diagnostic| diagnostic.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                })
+                .filter(|messages| !messages.is_empty())
         });
     parsed.unwrap_or_else(|| String::from_utf8_lossy(stderr).into_owned())
 }

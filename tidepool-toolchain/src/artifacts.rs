@@ -669,7 +669,7 @@ pub(crate) struct RawTargetOutput {
 /// `compile_targets` only warns on failure).
 ///
 /// A nonzero exit is read through the structured diagnostics contract
-/// ([`diag::parse_diag_report`]) — the SAME reading `tidepool_runtime::compile_haskell`
+/// ([`diag::decode_extract_result`]) — the SAME reading `tidepool_runtime::compile_haskell`
 /// already gives an ordinary eval compile, so a bad target name or any other
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
@@ -714,14 +714,7 @@ pub(crate) fn extract_and_read(
     }
     log_stderr(&stderr, run.success());
 
-    if !run.success() {
-        return Err(
-            match diag::parse_diag_report(&run.output.stdout, &run.output.stderr) {
-                Ok(report) => CompileError::Diagnostics(report.diagnostics),
-                Err(msg) => CompileError::MalformedDiagnostics(msg),
-            },
-        );
-    }
+    diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
 
     let cbor_read_start = Instant::now();
     let meta_path = temp_dir.join("meta.cbor");

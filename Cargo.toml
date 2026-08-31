@@ -15,6 +15,7 @@ members = [
     "tidepool-macro",
     "tidepool-effect",
     "tidepool-extract-cmd",
+    "tidepool-extract-report",
     "tidepool-atomic-write",
     "tidepool-codegen",
     "tidepool-toolchain",
@@ -55,6 +56,7 @@ tidepool-codegen = { version = "0.1.0", path = "tidepool-codegen" }
 tidepool-effect = { version = "0.1.0", path = "tidepool-effect" }
 tidepool-eval = { version = "0.1.0", path = "tidepool-eval" }
 tidepool-extract-cmd = { version = "0.1.0", path = "tidepool-extract-cmd" }
+tidepool-extract-report = { version = "0.1.0", path = "tidepool-extract-report" }
 tidepool-handlers = { version = "0.1.0", path = "tidepool-handlers" }
 tidepool-harness = { version = "0.1.0", path = "tidepool-harness" }
 tidepool-heap = { version = "0.1.0", path = "tidepool-heap" }

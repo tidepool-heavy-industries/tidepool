@@ -1,10 +1,7 @@
 # Publishing to crates.io
 
-**Verified as of commit `e49b8cb0` (2026-08-20)** against `cargo metadata`;
-updated 2026-08-24 to drop `tidepool-lsp` (crate deleted — see root
-`CLAUDE.md`'s project structure). Re-run the recipe below after adding a
-crate or changing inter-crate dependencies — don't hand-edit this list and
-let it drift.
+**Verified 2026-08-31** against `cargo metadata`. Re-run the recipe below
+after adding a crate or changing inter-crate dependencies.
 
 ## Publish Order
 
@@ -15,25 +12,30 @@ Crates must be published in dependency order. Wait for each crate to appear on c
  2.  tidepool-repr
  3.  tidepool-eval
  4.  tidepool-bridge
- 5.  tidepool-effect
- 6.  tidepool-heap
- 7.  tidepool-codegen
- 8.  tidepool-atomic-write
- 9.  tidepool-worktree
-10.  tidepool-agent
-11.  tidepool-bridge-derive
-12.  tidepool-bridge-effects
-13.  tidepool-extract-cmd
-14.  tidepool-runtime
-15.  tidepool-mcp
-16.  tidepool-handlers
-17.  tidepool-repl (binary)
-18.  tidepool-optimize
-19.  tidepool-protocol
-20.  tidepool-macro
-21.  tidepool-harness
-22.  tidepool-web (binary)
-23.  tidepool (binary)
+ 5.  tidepool-bridge-derive
+ 6.  tidepool-effect
+ 7.  tidepool-heap
+ 8.  tidepool-codegen
+ 9.  tidepool-extract-cmd
+10.  tidepool-extract-report
+11.  tidepool-macro
+12.  tidepool-atomic-write
+13.  tidepool-worktree
+14.  tidepool-agent
+15.  tidepool-bridge-effects
+16.  tidepool-toolchain
+17.  tidepool-runtime
+18.  tidepool-mcp
+19.  tidepool-handlers
+20.  tidepool-model
+21.  tidepool-model-output
+22.  tidepool-actor
+23.  tidepool-harness
+24.  tidepool-web (binary)
+25.  tidepool (binary)
+26.  tidepool-optimize
+27.  tidepool-protocol
+28.  tidepool-repl (binary)
 ```
 
 This order is topologically sorted from the workspace dependency graph
@@ -44,7 +46,7 @@ such order, not the only one.
 
 `tidepool-testing` and the two example crates (`tidepool-guess`,
 `tidepool-tide`) have `publish = false` — crates.io ignores them. Everything
-else in the workspace publishes, including the four binaries in the list
+else in the workspace publishes, including the binary packages in the list
 above (each depends on library crates that publish earlier).
 
 ## Known blocker: two publishable crates are path-only

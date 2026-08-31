@@ -1,58 +1,22 @@
-//! The structured diagnostics contract with `tidepool-extract-bin`: parse the
-//! extractor's fixed-shape stdout JSON report, and render surviving
-//! diagnostics into human-facing text.
+//! Compiler-worker response policy and human-facing diagnostic rendering.
 //!
-//! `tidepool-extract-bin` prints exactly one JSON value to stdout on EVERY
-//! invocation (success or failure): `{"version":1,"diagnostics":[...]}`, empty
-//! `diagnostics` on success. Every diagnostic carries a real `(file, line,
-//! col)` span (or `null` when GHC has none) plus a severity and message —
-//! Rust answers "is this in the user's own code, or wrapper scaffolding?" by
-//! comparing spans against known line ranges, never by pattern-matching GHC's
-//! rendered wording.
+//! The schema itself lives in `tidepool-extract-report` so the procedural
+//! macro and runtime compile paths cannot drift. This module owns the process
+//! status/outcome contract and source-aware rendering policy.
 
-/// A source span on the extractor's stdout report: `(file, startLine,
-/// startCol, endLine, endCol)`.
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct DiagSpan {
-    pub file: String,
-    #[serde(rename = "startLine")]
-    pub start_line: u32,
-    #[serde(rename = "startCol")]
-    pub start_col: u32,
-    #[serde(rename = "endLine")]
-    pub end_line: u32,
-    #[serde(rename = "endCol")]
-    pub end_col: u32,
-}
+use crate::CompileError;
 
-/// One diagnostic from the extractor's stdout report.
-#[derive(serde::Deserialize, Debug, Clone)]
-pub struct ExtractDiag {
-    /// `None` when GHC has no real span for the diagnostic (`UnhelpfulSpan`).
-    pub span: Option<DiagSpan>,
-    /// `"error"` or `"warning"`.
-    pub severity: String,
-    pub message: String,
-}
-
-/// The fixed-shape stdout report.
-#[derive(serde::Deserialize, Debug)]
-pub struct DiagReport {
-    pub version: u32,
-    pub diagnostics: Vec<ExtractDiag>,
-}
-
-/// The wire version this server's reader understands. A mismatch is a
-/// version skew between the deployed `tidepool-extract-bin` and this server,
-/// not a user Haskell error.
-const SUPPORTED_VERSION: u32 = 1;
+pub use tidepool_extract_report::{
+    DiagnosticSeverity, DiagnosticSpan as DiagSpan, ExtractDiagnostic as ExtractDiag,
+    ExtractOutcome, ExtractReport,
+};
 
 /// Parse the extract binary's stdout as the fixed-shape diagnostics report.
 /// Fails LOUD (never falls back to reading stderr) on malformed JSON or an
 /// unexpected `version` — the error names the likely cause (a stale deployed
 /// `tidepool-extract-bin` vs. this server's expectations) and includes a short
 /// stderr tail for debugging.
-pub fn parse_diag_report(stdout: &[u8], stderr: &[u8]) -> Result<DiagReport, String> {
+pub fn parse_extract_report(stdout: &[u8], stderr: &[u8]) -> Result<ExtractReport, String> {
     let text = String::from_utf8_lossy(stdout);
     let malformed_err = |e: &dyn std::fmt::Display| {
         format!(
@@ -63,21 +27,35 @@ pub fn parse_diag_report(stdout: &[u8], stderr: &[u8]) -> Result<DiagReport, Str
             truncate_tail(&String::from_utf8_lossy(stderr), 500)
         )
     };
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| malformed_err(&e))?;
-    // Check the wire version BEFORE the strict shape parse: a future version
-    // with a different field shape must still report the accurate
-    // version-skew message, not a generic "did not parse" guess.
-    if let Some(v) = value.get("version").and_then(serde_json::Value::as_u64) {
-        if v as u32 != SUPPORTED_VERSION {
-            return Err(format!(
-                "extract emitted diagnostics wire version {}, this server expects {} — \
-                 rebuild/redeploy tidepool-extract-bin so both sides agree.",
-                v, SUPPORTED_VERSION
-            ));
+    tidepool_extract_report::decode_report(stdout).map_err(|e| malformed_err(&e))
+}
+
+/// Decode and validate the response from one completed extractor process.
+///
+/// Every accepted request emits exactly one report. The process status and
+/// typed outcome must agree; disagreement is a deployed protocol mismatch,
+/// never a source error. This is the sole conversion from worker outcomes to
+/// [`CompileError`].
+pub fn decode_extract_result(
+    process_succeeded: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<ExtractReport, CompileError> {
+    let report =
+        parse_extract_report(stdout, stderr).map_err(CompileError::MalformedDiagnostics)?;
+    match (process_succeeded, report.outcome) {
+        (true, ExtractOutcome::Success) => Ok(report),
+        (false, ExtractOutcome::SourceFailure) => {
+            Err(CompileError::Diagnostics(report.diagnostics))
         }
+        (false, ExtractOutcome::WorkerFailure) => {
+            Err(CompileError::WorkerFailure(report.diagnostics))
+        }
+        (succeeded, outcome) => Err(CompileError::MalformedDiagnostics(format!(
+            "extract process/report disagreement: process {} but report outcome was {outcome:?}",
+            if succeeded { "succeeded" } else { "failed" }
+        ))),
     }
-    let report: DiagReport = serde_json::from_value(value).map_err(|e| malformed_err(&e))?;
-    Ok(report)
 }
 
 fn truncate_tail(s: &str, max: usize) -> &str {
@@ -215,7 +193,9 @@ fn is_dropped_foreign_gen_warning(d: &ExtractDiag, keep_path: Option<&str>) -> b
     let Some(span) = &d.span else {
         return false;
     };
-    d.severity == "warning" && span.file.contains("Tidepool/Session/Lib/G") && span.file != keep
+    d.severity == DiagnosticSeverity::Warning
+        && span.file.contains("Tidepool/Session/Lib/G")
+        && span.file != keep
 }
 
 fn is_in_anchor_file(d: &ExtractDiag, anchor: &str) -> bool {
@@ -622,7 +602,15 @@ fn extract_one_marked_range(source: &str, needle: &str) -> Option<(usize, usize)
 mod tests {
     use super::*;
 
-    fn diag(file: &str, sl: u32, sc: u32, el: u32, ec: u32, sev: &str, msg: &str) -> ExtractDiag {
+    fn diag(
+        file: &str,
+        sl: u32,
+        sc: u32,
+        el: u32,
+        ec: u32,
+        severity: DiagnosticSeverity,
+        msg: &str,
+    ) -> ExtractDiag {
         ExtractDiag {
             span: Some(DiagSpan {
                 file: file.to_string(),
@@ -631,28 +619,28 @@ mod tests {
                 end_line: el,
                 end_col: ec,
             }),
-            severity: sev.to_string(),
+            severity,
             message: msg.to_string(),
         }
     }
 
-    // ---- parse_diag_report ----
+    // ---- worker report ----
 
     #[test]
     fn parse_clean_success_report_round_trip() {
-        let stdout = br#"{"version":1,"diagnostics":[]}"#;
-        let report = parse_diag_report(stdout, b"").unwrap();
-        assert_eq!(report.version, 1);
+        let stdout = br#"{"version":2,"outcome":"success","diagnostics":[]}"#;
+        let report = parse_extract_report(stdout, b"").unwrap();
+        assert_eq!(report.outcome, ExtractOutcome::Success);
         assert!(report.diagnostics.is_empty());
     }
 
     #[test]
     fn parse_single_error_report() {
-        let stdout = br#"{"version":1,"diagnostics":[{"span":{"file":"Bad.hs","startLine":3,"startCol":7,"endLine":3,"endCol":14},"severity":"error","message":"Variable not in scope: garbage"}]}"#;
-        let report = parse_diag_report(stdout, b"").unwrap();
+        let stdout = br#"{"version":2,"outcome":"source-failure","diagnostics":[{"span":{"file":"Bad.hs","startLine":3,"startCol":7,"endLine":3,"endCol":14},"severity":"error","message":"Variable not in scope: garbage"}]}"#;
+        let report = parse_extract_report(stdout, b"").unwrap();
         assert_eq!(report.diagnostics.len(), 1);
         let d = &report.diagnostics[0];
-        assert_eq!(d.severity, "error");
+        assert_eq!(d.severity, DiagnosticSeverity::Error);
         let span = d.span.as_ref().unwrap();
         assert_eq!(span.file, "Bad.hs");
         assert_eq!(span.start_line, 3);
@@ -661,14 +649,14 @@ mod tests {
     #[test]
     fn parse_null_span_diagnostic() {
         let stdout =
-            br#"{"version":1,"diagnostics":[{"span":null,"severity":"error","message":"boom"}]}"#;
-        let report = parse_diag_report(stdout, b"").unwrap();
+            br#"{"version":2,"outcome":"worker-failure","diagnostics":[{"span":null,"severity":"error","message":"boom"}]}"#;
+        let report = parse_extract_report(stdout, b"").unwrap();
         assert!(report.diagnostics[0].span.is_none());
     }
 
     #[test]
     fn malformed_stdout_produces_clear_error() {
-        let err = parse_diag_report(b"not json", b"some stderr").unwrap_err();
+        let err = parse_extract_report(b"not json", b"some stderr").unwrap_err();
         assert!(err.contains("did not parse"), "{err}");
         assert!(err.contains("stderr tail"), "{err}");
     }
@@ -676,9 +664,39 @@ mod tests {
     #[test]
     fn wrong_version_produces_clear_error() {
         let stdout = br#"{"version":99,"diagnostics":[]}"#;
-        let err = parse_diag_report(stdout, b"").unwrap_err();
+        let err = parse_extract_report(stdout, b"").unwrap_err();
         assert!(err.contains("version 99"), "{err}");
-        assert!(err.contains("expects 1"), "{err}");
+        assert!(err.contains("expects 2"), "{err}");
+    }
+
+    #[test]
+    fn process_status_and_typed_outcome_have_one_mapping() {
+        let success = br#"{"version":2,"outcome":"success","diagnostics":[]}"#;
+        assert!(decode_extract_result(true, success, b"").is_ok());
+        assert!(matches!(
+            decode_extract_result(false, success, b""),
+            Err(CompileError::MalformedDiagnostics(_))
+        ));
+
+        let source = br#"{"version":2,"outcome":"source-failure","diagnostics":[]}"#;
+        assert!(matches!(
+            decode_extract_result(false, source, b""),
+            Err(CompileError::Diagnostics(_))
+        ));
+        assert!(matches!(
+            decode_extract_result(true, source, b""),
+            Err(CompileError::MalformedDiagnostics(_))
+        ));
+
+        let worker = br#"{"version":2,"outcome":"worker-failure","diagnostics":[]}"#;
+        assert!(matches!(
+            decode_extract_result(false, worker, b""),
+            Err(CompileError::WorkerFailure(_))
+        ));
+        assert!(matches!(
+            decode_extract_result(true, worker, b""),
+            Err(CompileError::MalformedDiagnostics(_))
+        ));
     }
 
     // ---- render_diagnostics ----
@@ -692,7 +710,7 @@ mod tests {
             8,
             35,
             14,
-            "error",
+            DiagnosticSeverity::Error,
             "No instance for HasField",
         );
         let got = render_diagnostics(
@@ -714,14 +732,22 @@ mod tests {
     #[test]
     fn fallout_outside_range_collapses_to_footer_in_range_survives() {
         let source = "line1\n";
-        let in_range = diag("Expr.hs", 2, 10, 2, 10, "error", "Ambiguous type variable");
+        let in_range = diag(
+            "Expr.hs",
+            2,
+            10,
+            2,
+            10,
+            DiagnosticSeverity::Error,
+            "Ambiguous type variable",
+        );
         let fallout = diag(
             "Expr.hs",
             9,
             5,
             9,
             5,
-            "error",
+            DiagnosticSeverity::Error,
             "Overlapping instances for ToWire",
         );
         let got = render_diagnostics(
@@ -757,7 +783,7 @@ mod tests {
             5,
             9,
             5,
-            "error",
+            DiagnosticSeverity::Error,
             "Overlapping instances for ToWire",
         );
         let got = render_diagnostics(
@@ -791,8 +817,24 @@ mod tests {
     #[test]
     fn all_wrapper_batch_counts_and_includes_every_diagnostic() {
         let source = "line1\n";
-        let a = diag("Expr.hs", 9, 5, 9, 5, "error", "Overlapping instances");
-        let b = diag("Expr.hs", 10, 1, 10, 1, "error", "No instance for ToJSON");
+        let a = diag(
+            "Expr.hs",
+            9,
+            5,
+            9,
+            5,
+            DiagnosticSeverity::Error,
+            "Overlapping instances",
+        );
+        let b = diag(
+            "Expr.hs",
+            10,
+            1,
+            10,
+            1,
+            DiagnosticSeverity::Error,
+            "No instance for ToJSON",
+        );
         let got = render_diagnostics(
             &[a, b],
             &RenderOpts {
@@ -821,7 +863,7 @@ mod tests {
                 end_line: 33,
                 end_col: 40,
             }),
-            severity: "warning".into(),
+            severity: DiagnosticSeverity::Warning,
             message: "partial head".into(),
         };
         let own = ExtractDiag {
@@ -832,7 +874,7 @@ mod tests {
                 end_line: 3,
                 end_col: 5,
             }),
-            severity: "warning".into(),
+            severity: DiagnosticSeverity::Warning,
             message: "user warning".into(),
         };
         let got = render_diagnostics(
@@ -869,7 +911,15 @@ mod tests {
 
     #[test]
     fn embedded_suffix_anchor_is_not_matched() {
-        let d = diag("SomeExpr.hs", 3, 1, 3, 1, "error", "whatever");
+        let d = diag(
+            "SomeExpr.hs",
+            3,
+            1,
+            3,
+            1,
+            DiagnosticSeverity::Error,
+            "whatever",
+        );
         let got = render_diagnostics(
             &[d],
             &RenderOpts {
@@ -904,7 +954,7 @@ mod tests {
             1,
             2,
             5,
-            "error",
+            DiagnosticSeverity::Error,
             "* Ambiguous type variable `f0' arising from a use of `pure'\n\
              Relevant bindings include\n  __b :: f0 (Value, b0) (bound at Expr.hs:1:2)\n  \
              (Some bindings suppressed; use -fmax-relevant-binds=N or -fno-max-relevant-binds)\n\
@@ -1057,7 +1107,7 @@ mod tests {
             1,
             2,
             5,
-            "error",
+            DiagnosticSeverity::Error,
             "(!!) is partial — use atMay xs i :: Maybe a",
         );
         let got = render_diagnostics(
@@ -1091,7 +1141,7 @@ mod tests {
             1,
             1,
             10,
-            "error",
+            DiagnosticSeverity::Error,
             "Could not find module `Data.Aeson'",
         );
         let got = render_diagnostics(
@@ -1119,7 +1169,15 @@ mod tests {
     #[test]
     fn gutter_line_number_matches_remapped_header_line() {
         let source = "preamble0\npreamble1\nuserLine1\n";
-        let d = diag("Expr.hs", 3, 1, 3, 5, "error", "Not in scope: `Foo'");
+        let d = diag(
+            "Expr.hs",
+            3,
+            1,
+            3,
+            5,
+            DiagnosticSeverity::Error,
+            "Not in scope: `Foo'",
+        );
         let got = render_diagnostics(
             &[d],
             &RenderOpts {
@@ -1147,7 +1205,15 @@ mod tests {
     #[test]
     fn scaffold_content_at_a_kept_position_omits_the_snippet() {
         let source = "userLine0\n__anchor :: P.Show a => a -> a\n";
-        let d = diag("Expr.hs", 2, 1, 2, 5, "error", "Ambiguous type variable");
+        let d = diag(
+            "Expr.hs",
+            2,
+            1,
+            2,
+            5,
+            DiagnosticSeverity::Error,
+            "Ambiguous type variable",
+        );
         let got = render_diagnostics(
             &[d],
             &RenderOpts {

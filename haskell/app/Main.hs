@@ -34,7 +34,8 @@ import Tidepool.GhcPipeline
   ( runPipelineSession, PipelineResult(..), dumpCore
   , withResidentPipeline )
 import qualified Tidepool.WorkerServer as WorkerServer
-import Tidepool.DiagJson (diagsFromSourceError, diagFromException, renderDiagsJson)
+import Tidepool.DiagJson
+  ( ReportOutcome(..), diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Session
@@ -155,17 +156,17 @@ harnessProfilePragmaLine =
 -- 'Nothing' branch there.
 reportDiags :: Either SomeException () -> IO ExitCode
 reportDiags (Left e) = do
-  let diags = case fromException e of
-        Just (se :: SourceError) -> diagsFromSourceError se
-        Nothing                  -> [diagFromException e]
-  putStrLn (renderDiagsJson diags)
+  let (outcome, diags) = case fromException e of
+        Just (se :: SourceError) -> (ReportSourceFailure, diagsFromSourceError se)
+        Nothing                  -> (ReportWorkerFailure, [diagFromException e])
+  putStrLn (renderDiagsJson outcome diags)
   -- Debug copy for humans only; stdout (above) is the authoritative machine
   -- contract.
   case fromException e of
     Just (se :: SourceError) -> hPutStrLn stderr ("Compilation failed.\n" ++ show se)
     Nothing -> hPutStrLn stderr $ "Error: " ++ show e
   pure (ExitFailure 1)
-reportDiags (Right ()) = putStrLn (renderDiagsJson []) >> pure ExitSuccess
+reportDiags (Right ()) = putStrLn (renderDiagsJson ReportSuccess []) >> pure ExitSuccess
 
 -- | A session-aware turn: any of the @--session-*@ flags are present. Reference
 -- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
