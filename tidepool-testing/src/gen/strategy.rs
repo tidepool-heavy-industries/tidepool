@@ -70,6 +70,25 @@ pub fn arb_core_expr_weighted(
     arb_simple_type().prop_flat_map(move |ty| arb_typed_expr_weighted(ty, depth, weights))
 }
 
+/// Generate a ground-result expression with custom Join, LetRec, and Case
+/// weights. Internal expressions may still contain functions, but the root is
+/// structurally comparable rather than being discarded as a closure by deep
+/// differential tests.
+pub fn arb_ground_expr_weighted(
+    depth: u32,
+    join_w: u32,
+    letrec_w: u32,
+    case_w: u32,
+) -> impl Strategy<Value = RecursiveTree<CoreFrame<usize>>> {
+    let weights = Weights {
+        join: join_w,
+        letrec: letrec_w,
+        case: case_w,
+        ..Weights::default()
+    };
+    arb_ground_type().prop_flat_map(move |ty| arb_typed_expr_weighted(ty, depth, weights))
+}
+
 /// Generate a CoreExpr at `depth` where `shadow_pct` (0..=100) percent of
 /// Lam/Let/Case/Join binders deliberately reuse an in-scope `VarId` of the
 /// same type instead of minting a fresh one — the shadowed-binder programs

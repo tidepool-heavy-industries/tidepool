@@ -48,7 +48,9 @@ use tidepool_eval::{env_from_datacon_table, eval::eval, heap::VecHeap};
 use tidepool_optimize::pipeline::optimize;
 use tidepool_repr::CoreExpr;
 use tidepool_testing::compare;
-use tidepool_testing::gen::{arb_core_expr_weighted, arb_ground_expr_depth};
+use tidepool_testing::gen::{
+    arb_core_expr_weighted, arb_ground_expr_depth, arb_ground_expr_weighted,
+};
 use tidepool_testing::proptest::build_table_for_expr;
 
 /// Name of the `#[ignore]`d worker test, selected with `--exact`.
@@ -555,14 +557,15 @@ fn deep_diff_ground_depth5_optimized() {
     );
 }
 
-/// P3 — depth-7, Join/LetRec/Case-heavy. Must complete all cases with no host
-/// stack overflow (subprocess containment guarantees the parent survives any
-/// child fault).
+/// P3 — depth-7, ground-result, Join/LetRec/Case-heavy. Grounding only the
+/// result keeps the internal stress shape while avoiding vacuous closure
+/// skips. Must complete all cases with no host stack overflow (subprocess
+/// containment guarantees the parent survives any child fault).
 #[test]
 fn deep_diff_join_letrec_heavy_depth7() {
     drive(
         "join-letrec-d7",
-        || arb_core_expr_weighted(7, 5, 4, 4),
+        || arb_ground_expr_weighted(7, 5, 4, 4),
         64 * 1024,
         false,
     );
