@@ -2542,6 +2542,135 @@ mod tests {
     }
 
     #[test]
+    fn owner_exit_recursively_settles_descendant_mailboxes_and_waits_once() {
+        let registry = ActorRegistry::new();
+        let owner = ready_root(&registry);
+        let child = ready_in(&registry, Some(owner), "child", SessionId(1));
+        let grandchild = ready_in(&registry, Some(child), "grandchild", SessionId(1));
+        let observer = ready_in(&registry, None, "observer", SessionId(1));
+
+        let (child_request, child_request_dropped) = probe(SessionId(1));
+        let mut child_call = registry
+            .call(observer, child, child_request)
+            .expect("queue call to child");
+        let child_call_id = child_call.id();
+        let (grandchild_request, grandchild_request_dropped) = probe(SessionId(1));
+        let grandchild_call = registry
+            .call(owner, grandchild, grandchild_request)
+            .expect("queue owner call to grandchild");
+        let grandchild_call_id = grandchild_call.id();
+        let mut grandchild_wait = registry
+            .register_wait(child, grandchild)
+            .expect("child waits on grandchild");
+        let grandchild_wait_id = grandchild_wait.id();
+
+        registry
+            .finish(
+                owner,
+                ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "owner stopped".into(),
+                },
+            )
+            .expect("finish owned subtree");
+
+        assert_eq!(child_request_dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(grandchild_request_dropped.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            child_call.poll(),
+            Ok(CallStatus::Failed(CallFailure::TargetExited(actor))) if actor == child
+        ));
+        assert!(matches!(
+            grandchild_wait.poll(),
+            Err(WaitError::UnknownWait(id)) if id == grandchild_wait_id
+        ));
+        drop(grandchild_call);
+
+        let events = registry.events();
+        for actor in [owner, child, grandchild] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|record| {
+                        record.actor == actor && matches!(record.event, ActorEvent::Exited { .. })
+                    })
+                    .count(),
+                1,
+                "each descendant has one terminal linearization"
+            );
+        }
+        for call in [child_call_id, grandchild_call_id] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|record| {
+                        matches!(
+                            record.event,
+                            ActorEvent::CallSettled { call: found, .. } if found == call
+                        )
+                    })
+                    .count(),
+                1,
+                "each call obligation settles once"
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.event,
+                        ActorEvent::WaitSettled { wait, .. } if wait == grandchild_wait_id
+                    )
+                })
+                .count(),
+            1,
+            "the descendant wait unregisters once"
+        );
+    }
+
+    #[test]
+    fn stale_exact_incarnation_is_rejected_by_every_lifecycle_entry_point() {
+        let registry = ActorRegistry::new();
+        let actor = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        let stale = ActorRef {
+            id: target.id,
+            incarnation: crate::Incarnation(target.incarnation.0 + 1),
+        };
+
+        let (request, request_dropped) = probe(SessionId(1));
+        assert!(matches!(
+            registry.call(actor, stale, request),
+            Err(MailboxFailure::Registry(ActorRegistryError::Stale { given, current }))
+                if given == stale && current == target
+        ));
+        assert_eq!(request_dropped.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            registry.register_wait(actor, stale),
+            Err(WaitError::Registry(ActorRegistryError::Stale { given, current }))
+                if given == stale && current == target
+        ));
+        assert!(matches!(
+            registry.begin_turn(stale, ActorTurnKind::Haskell),
+            Err(ActorRegistryError::Stale { given, current })
+                if given == stale && current == target
+        ));
+        assert!(matches!(
+            registry.finish(
+                stale,
+                ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "stale cancellation".into(),
+                }
+            ),
+            Err(ActorRegistryError::Stale { given, current })
+                if given == stale && current == target
+        ));
+        assert_eq!(registry.lifecycle(target), Ok(ActorLifecycle::Ready));
+    }
+
+    #[test]
     fn cross_machine_delivery_and_synchronous_cycles_are_rejected() {
         let registry = ActorRegistry::new();
         let a = ready_in(&registry, None, "a", SessionId(1));
