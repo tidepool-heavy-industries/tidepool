@@ -717,6 +717,16 @@ where
         self.core.exact_exports_in(scope, heads)
     }
 
+    /// Exact declaration-head incarnations visible from `scope`.
+    ///
+    /// Actor sealing pairs this with compiler-produced nominal heads so a
+    /// same-spelled declaration introduced after a live program was compiled
+    /// cannot replace the program's original type.
+    #[must_use]
+    pub fn current_decl_heads_in(&self, scope: ScopeId) -> Vec<(String, u64)> {
+        self.core.lib().current_decl_heads_in(scope)
+    }
+
     /// The most recently parked hole (top of the stack), if any.
     ///
     /// Use [`Self::parked_holes`] when the caller needs the complete registry.

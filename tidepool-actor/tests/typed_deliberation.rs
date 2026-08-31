@@ -20,6 +20,7 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
 use tidepool_eval::Value;
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage};
+use tidepool_repr::SessionId;
 use tidepool_runtime::session::registry::{CheckoutRequest, SlotKind};
 use tidepool_runtime::session::{
     ModuleEnv, OutputSink, ResidentOutcome, ResidentSession, SessionLib,

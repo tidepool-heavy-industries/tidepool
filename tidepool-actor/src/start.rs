@@ -12,7 +12,7 @@ use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_eval::Value;
 use tidepool_model::{DynModelProvider, StreamSink};
-use tidepool_repr::DataConTable;
+use tidepool_repr::{DataConTable, Generation, SessionModule};
 use tidepool_runtime::session::{
     MaterializedFacade, OutputSink, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
 };
@@ -45,6 +45,16 @@ pub enum ActorStartCaptureError {
     ExactExports(#[from] tidepool_runtime::session::ExactExportError),
     #[error(transparent)]
     Facade(#[from] tidepool_runtime::session::ExactFacadeError),
+    #[error(
+        "actor export `{head}` drifted from rooted definition module `{expected}` to `{actual}`"
+    )]
+    ShadowDrift {
+        head: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("actor export `{head}` has more than one rooted nominal incarnation: {modules:?}")]
+    AmbiguousIncarnation { head: String, modules: Vec<String> },
     #[error("actor start has no live declaration plane")]
     NoCompileView,
     #[error("actor start carried unknown effect profile {0}")]
@@ -118,12 +128,66 @@ where
 {
     let heads = facade_heads(entry.provenance(), explicit_exports);
     let scope = session.run_context().lexical_scope;
+    validate_head_incarnations(session, scope, entry.provenance(), &heads)?;
     let names: Vec<_> = heads.iter().map(String::as_str).collect();
     let surface = session.exact_exports_in(scope, &names)?;
     let view = session
         .compile_view_in(scope)
         .ok_or(ActorStartCaptureError::NoCompileView)?;
     Ok(surface.materialize(&view)?)
+}
+
+fn validate_head_incarnations<H, O>(
+    session: &ResidentSession<H, O>,
+    scope: tidepool_codegen::scope::ScopeId,
+    provenance: &tidepool_runtime::session::ProgramProvenance,
+    selected: &BTreeSet<String>,
+) -> Result<(), ActorStartCaptureError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let mut rooted: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for site in provenance.sites() {
+        for head in site
+            .heads
+            .iter()
+            .chain(site.inputs.iter().flat_map(|input| input.heads.iter()))
+            .filter(|head| head.module.starts_with("Tidepool.Session.Lib.G"))
+        {
+            if selected.contains(&head.name) {
+                rooted
+                    .entry(head.name.clone())
+                    .or_default()
+                    .insert(head.module.clone());
+            }
+        }
+    }
+
+    let visible: std::collections::BTreeMap<_, _> =
+        session.current_decl_heads_in(scope).into_iter().collect();
+    for (head, modules) in rooted {
+        if modules.len() != 1 {
+            return Err(ActorStartCaptureError::AmbiguousIncarnation {
+                head,
+                modules: modules.into_iter().collect(),
+            });
+        }
+        let expected = modules.into_iter().next().expect("one rooted module");
+        let Some(generation) = visible.get(&head) else {
+            continue;
+        };
+        let actual = SessionModule::lib(Generation(*generation)).module_name();
+        if actual != expected {
+            return Err(ActorStartCaptureError::ShadowDrift {
+                head,
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn facade_heads(
