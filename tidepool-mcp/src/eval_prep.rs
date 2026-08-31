@@ -46,7 +46,8 @@ macro_rules! base_effects {
         $callback! {
             (Console, console_decl),
             (KV,      kv_decl),
-            (Fs,      fs_decl),
+            (FsRead,  fs_read_decl),
+            (FsWrite, fs_write_decl),
             (Http,    http_decl),
             (Exec,    exec_decl),
             (Llm,     llm_decl),
@@ -106,7 +107,8 @@ pub fn all_decls() -> Vec<EffectDecl> {
     let mut declarations = vec![
         crate::console_decl(),
         crate::kv_decl(),
-        crate::fs_decl(),
+        crate::fs_read_decl(),
+        crate::fs_write_decl(),
         crate::http_decl(),
         crate::git_decl(),
         crate::time_decl(),
@@ -1241,9 +1243,9 @@ mod tests {
         // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
         // harness Agent turn's own roster (`agent_decls`) adds Fork on top
         // of this one explicitly.
-        assert_eq!(a[9], "Ask");
+        assert_eq!(a[10], "Ask");
         assert_eq!(a.last(), Some(&"RunLLMTurn"));
-        assert_eq!(a.len(), 11);
+        assert_eq!(a.len(), 12);
         // SG is not part of the supported effect stack.
         assert!(
             !a.contains(&"SG"),

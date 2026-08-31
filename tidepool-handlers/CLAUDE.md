@@ -1,13 +1,13 @@
 # tidepool-handlers — concrete effect handlers (per-effect modules)
 
 **Charter.** Belongs: the concrete Rust `<Eff>Req` handler implementations
-(Console/KV/Fs/Http/Exec/Llm/Git/Time/Meta/Event/Worktree/Subagent) and stack
+(Console/KV/FsRead/FsWrite/Http/Exec/Llm/Git/Time/Meta/Event/Worktree/Subagent) and stack
 assembly (`build_base_stack`). Does NOT belong: effect/verb type definitions
 (`tidepool-mcp`'s `effect_defs.rs` / `tidepool-protocol`'s schema), the git
 primitives a `WorktreeHandler` call wraps (`tidepool-worktree`), the coding
 backend a `SubagentHandler` drives (`tidepool-agent`).
 
-The Rust side of every `<Eff>Req` — Console, KV, Fs, Http, Exec, Llm, Git,
+The Rust side of every `<Eff>Req` — Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git,
 Time, plus the debug-only Meta handler. `build_base_stack`/`base_decls`
 assemble the fully-wired server. See root `CLAUDE.md` for the project map;
 `tidepool-mcp/CLAUDE.md` for the Haskell-facing half of the effect contract
@@ -20,7 +20,8 @@ One module per effect under `src/handlers/`:
 
 - `src/handlers/console.rs` — `ConsoleReq`/`ConsoleHandler`
 - `src/handlers/kv.rs` — `KvReq`/`KvHandler` (JSON-file-backed store)
-- `src/handlers/fs.rs` — `FsReq`/`FsHandler` + the shared glob/sandbox helpers
+- `src/handlers/fs.rs` — the shared `FsBackend`, `FsReadHandler`, and
+  `FsWriteHandler`, plus glob/sandbox helpers
   (`expand_glob`, `component_filter`, `pattern_mentions`, `is_glob`, `blake3_hex`)
 - `src/handlers/http.rs` — `HttpReq`/`HttpHandler`
 - `src/handlers/exec.rs` — `ExecReq`/`ExecHandler`
@@ -41,7 +42,7 @@ One module per effect under `src/handlers/`:
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
 `build_base_stack`, `build_minimal_stack`, `base_decls`) and
 re-exports everything via `pub use handlers::*;`, so the external surface is
-flat (`tidepool_handlers::FsHandler`). Each module carries its own `#[cfg(test)] mod tests`;
+flat (`tidepool_handlers::FsReadHandler`). Each module carries its own `#[cfg(test)] mod tests`;
 shared test helpers (`full_effect_test_table`, `jit_eval`, `response_value`, …)
 live in `src/test_support.rs` (`pub(crate)`, test builds only).
 
@@ -74,7 +75,7 @@ the Haskell union position is not a handler slot.
 - **`respond_list(vec)`** — an owned `Vec<T>` returned as a Haskell list.
   Every element converts eagerly at dispatch time; what stays special is
   that the machine builds the heap spine ITERATIVELY (stack safety on long
-  lists — `host_fns::list_materialize`). The Fs `readGlob` verb
+  lists — `host_fns::list_materialize`). The FsRead `readGlob` verb
   (`fs_read_glob`, `src/handlers/fs.rs`) is the live call site. There is no
   lazy/streaming response channel; if an unbounded source ever needs
   exposure, add explicit pagination at the verb level.
@@ -143,9 +144,9 @@ Two consequences that survive the cycle table unchanged:
   `Drop` reaps every live async cycle rather than orphaning threads, and a
   durable mailbox or a cross-cycle agent still cannot live here.
 
-## Sandboxing (Fs) — and Exec's honest non-sandbox
+## Sandboxing (FsRead/FsWrite) — and Exec's honest non-sandbox
 
-**Fs is rooted at `HandlerConfig.cwd`** (the workspace/session
+**FsRead and FsWrite share one backend rooted at `HandlerConfig.cwd`** (the workspace/session
 sandbox). Path resolution canonicalizes both the sandbox root and the target
 path, then checks `starts_with` — any path resolving outside the root is a
 loud `"path escape: ... is outside sandbox"` / `"Path escapes sandbox: ..."`
@@ -169,7 +170,7 @@ anything the host user can). Exec's actual robustness controls are process-
 level, not filesystem-level: bounded streaming output capture, a timeout, and
 process-group termination on timeout — see `src/handlers/exec.rs`.
 
-`FsReq::Write` has **mkdir-p semantics**: missing parent directories are
+`FsWriteReq::FsWrite` has **mkdir-p semantics**: missing parent directories are
 created automatically (`std::fs::create_dir_all`) before writing. Parent
 creation is subject to the same sandbox check — the check validates the target
 path first, and any ancestor inside the sandbox root is safe by construction.

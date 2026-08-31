@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use tidepool_effect::{EffectContext, EffectError, EffectHandler};
-use tidepool_testing::eval_harness::mock::{self, FsReq};
+use tidepool_testing::eval_harness::mock::{self, FsReadReq};
 use tidepool_testing::eval_harness::EvalHarness;
 
 // ---------------------------------------------------------------------------
@@ -39,19 +39,18 @@ impl RealFs {
     }
 }
 impl EffectHandler for RealFs {
-    type Request = FsReq;
+    type Request = FsReadReq;
     fn handle(
         &mut self,
-        req: FsReq,
+        req: FsReadReq,
         cx: &EffectContext,
     ) -> Result<tidepool_effect::Response, EffectError> {
         match req {
-            FsReq::FsRead(path) => {
+            FsReadReq::FsRead(path) => {
                 let content = std::fs::read_to_string(self.resolve(&path)).unwrap_or_default();
                 cx.respond(Ok::<String, String>(content))
             }
-            FsReq::FsWrite(_, _) => cx.respond(Ok::<(), String>(())),
-            FsReq::FsListDir(path) => {
+            FsReadReq::FsListDir(path) => {
                 let entries: Vec<String> = std::fs::read_dir(self.resolve(&path))
                     .map(|rd| {
                         rd.filter_map(|e| e.ok())
@@ -61,7 +60,7 @@ impl EffectHandler for RealFs {
                     .unwrap_or_default();
                 cx.respond(Ok::<Vec<String>, String>(entries))
             }
-            FsReq::FsGlob(pattern) => {
+            FsReadReq::FsGlob(pattern) => {
                 let full = self.root.join(pattern.as_str());
                 let root = self.root.clone();
                 let entries: Vec<String> = glob::glob(full.to_str().unwrap_or(""))
@@ -78,8 +77,10 @@ impl EffectHandler for RealFs {
                     .unwrap_or_default();
                 cx.respond(Ok::<Vec<String>, String>(entries))
             }
-            FsReq::FsExists(path) => cx.respond(Ok::<bool, String>(self.resolve(&path).exists())),
-            FsReq::FsMetadata(path) => {
+            FsReadReq::FsExists(path) => {
+                cx.respond(Ok::<bool, String>(self.resolve(&path).exists()))
+            }
+            FsReadReq::FsMetadata(path) => {
                 let p = self.resolve(&path);
                 match std::fs::metadata(&p) {
                     Ok(m) => cx.respond(Some(tidepool_bridge_effects::FileMeta {
@@ -147,6 +148,7 @@ pure stats
         mock::MockConsole,
         mock::MockKv::new(),
         RealFs::new(),
+        mock::MockFsWrite,
         mock::MockHttp,
         mock::MockExec,
         mock::MockLlm,

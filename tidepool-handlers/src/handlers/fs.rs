@@ -30,13 +30,13 @@ pub(crate) fn with_dir_flock<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> std::
 }
 
 // ============================================================================
-// Tag 2: File I/O (sandboxed to working directory)
+// Tags 2-3: filesystem reads and writes (sandboxed to working directory)
 // ============================================================================
 
-// FsReq + DescribeEffect + EffectHandler dispatch are generated from the
+// FsReadReq + DescribeEffect + EffectHandler dispatch are generated from the
 // single-source definition; only the handler struct and the per-verb method
 // bodies below are hand-written.
-tidepool_mcp::fs_effect_def!(crate::effect_glue::effect_rust_projection);
+tidepool_mcp::fs_read_effect_def!(crate::effect_glue::effect_rust_projection);
 
 /// The record `readGlob` (`FsReadGlob`) yields per matched file (#335): a
 /// `path` plus a typed `contents` — `Right text` on a clean UTF-8 read, `Left
@@ -160,7 +160,7 @@ fn truncate_hit_text(line: &str) -> String {
 
 /// Expand a glob pattern relative to `root` with sandbox and component filtering.
 ///
-/// Used by [`FsHandler`] (glob/grep) for `**`-normalisation, sandbox check,
+/// Used by [`FsBackend`] (glob/grep) for `**`-normalisation, sandbox check,
 /// and hidden-dir filter. Walks via [`ignore::WalkBuilder`] (#343) so
 /// gitignored and always-heavy (`target`/`.git`/`node_modules`/
 /// `dist-newstyle`) directories are pruned DURING traversal — never
@@ -285,11 +285,11 @@ pub fn expand_glob(root: &std::path::Path, pattern: &str) -> Result<Vec<PathBuf>
 }
 
 #[derive(Clone)]
-pub struct FsHandler {
+pub struct FsBackend {
     root: PathBuf,
 }
 
-impl FsHandler {
+impl FsBackend {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -374,7 +374,7 @@ fn fs_err_to_effect(e: FsError) -> EffectError {
     EffectError::Handler(e.to_string())
 }
 
-impl FsHandler {
+impl FsBackend {
     // Errors-tagged verbs: total in `FsError`, no `cx` — the dispatch arm wraps
     // the `Result` via `cx.respond` (Ok→Right, Err→Left). See #335.
     fn fs_read(&mut self, path: String) -> Result<String, FsError> {
@@ -596,6 +596,60 @@ impl FsHandler {
     }
 }
 
+/// Public read-only handler name; the backend itself is exactly the read
+/// interpreter, while the write side is a narrow newtype over the same code.
+pub type FsReadHandler = FsBackend;
+
+/// Filesystem mutation interpreter over the same backend implementation.
+#[derive(Clone)]
+pub struct FsWriteHandler {
+    backend: FsBackend,
+}
+
+impl FsWriteHandler {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            backend: FsBackend::new(root),
+        }
+    }
+}
+
+#[derive(tidepool_bridge_derive::FromCore)]
+pub enum FsWriteReq {
+    FsWrite(String, String),
+    FsWriteCas(String, Option<String>, String),
+}
+
+// This small projection is handwritten because FsRead and FsWrite share the
+// same Rust `FsError` type. Expanding the generic projection twice would emit
+// that enum twice; the Haskell declarations remain generated from the two
+// single-source effect definitions.
+
+impl tidepool_mcp::DescribeEffect for FsWriteHandler {
+    fn effect_decl() -> tidepool_mcp::EffectDecl {
+        tidepool_mcp::fs_write_decl()
+    }
+}
+
+impl tidepool_effect::dispatch::EffectHandler<CapturedOutput> for FsWriteHandler {
+    type Request = FsWriteReq;
+
+    fn handle(
+        &mut self,
+        request: Self::Request,
+        cx: &EffectContext<'_, CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, EffectError> {
+        match request {
+            FsWriteReq::FsWrite(path, contents) => {
+                cx.respond(self.backend.fs_write(path, contents))
+            }
+            FsWriteReq::FsWriteCas(path, expected, contents) => {
+                self.backend.fs_write_cas(cx, path, expected, contents)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,7 +706,7 @@ mod tests {
         std::fs::create_dir_all(root.join("src/inner")).unwrap();
         std::fs::write(root.join("src/a.rs"), "x").unwrap();
         std::fs::write(root.join("src/inner/b.rs"), "y").unwrap();
-        let handler = FsHandler::new(root.clone());
+        let handler = FsBackend::new(root.clone());
 
         // rg-style: a bare directory (no metachars) recurses (friction #20 —
         // previously returned []).
@@ -703,7 +757,7 @@ mod tests {
         std::fs::create_dir_all(root.join("target/debug")).unwrap();
         std::fs::write(root.join("target/debug/build.rs"), "junk").unwrap();
 
-        let handler = FsHandler::new(root.clone());
+        let handler = FsBackend::new(root.clone());
         let names: Vec<String> = handler
             .expand_glob("**/*.rs")
             .unwrap()
@@ -726,7 +780,7 @@ mod tests {
         std::fs::write(root.join("a/top.txt"), "x").unwrap();
         std::fs::write(root.join("a/b/deep.txt"), "y").unwrap();
 
-        let handler = FsHandler::new(root.clone());
+        let handler = FsBackend::new(root.clone());
         let paths = handler.expand_glob("a/**").unwrap();
         let names: Vec<String> = paths
             .iter()
@@ -747,12 +801,12 @@ mod tests {
         // by a wide glob must not fail the whole batch.
         std::fs::write(root.join("bad.bin"), vec![0xff, 0xfe, 0x00, 0x01]).unwrap();
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let req = FsReq::FsReadGlob("*".to_string());
+        let req = FsReadReq::FsReadGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let mut results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
         results.sort_by(|a, b| a.path.cmp(&b.path));
@@ -812,12 +866,12 @@ mod tests {
         let bad_name = OsString::from_vec(vec![b'b', b'a', b'd', 0x80, b'.', b't', b'x', b't']);
         std::fs::write(root.join(&bad_name), "x").unwrap();
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let req = FsReq::FsListDir(".".to_string());
+        let req = FsReadReq::FsListDir(".".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
         assert!(
@@ -851,22 +905,22 @@ mod tests {
         let bad_name = OsString::from_vec(vec![b'b', b'a', b'd', 0x80, b'.', b't', b'x', b't']);
         std::fs::write(root.join(&bad_name), "won't be read").unwrap();
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let req = FsReq::FsGlob("*".to_string());
+        let req = FsReadReq::FsGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(decoded, Ok(vec!["good.txt".to_string()]), "{decoded:?}");
 
-        let req = FsReq::FsGrep("won".to_string(), "*".to_string());
+        let req = FsReadReq::FsGrep("won".to_string(), "*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(decoded, Ok(Vec::new()), "{decoded:?}");
 
-        let req = FsReq::FsReadGlob("*".to_string());
+        let req = FsReadReq::FsReadGlob("*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let results: Vec<FileRead> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(results.len(), 1, "{results:?}");
@@ -881,7 +935,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         std::fs::write(root.join("a.txt"), "x").unwrap();
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
@@ -895,8 +949,8 @@ mod tests {
         // `Left (FsSandbox _)` — not an abort (#335). FsReadGlob is untagged, so
         // its verb-level guard still aborts (per-item Eithers ride the list).
         for req in [
-            FsReq::FsGlob(String::new()),
-            FsReq::FsGrep("x".to_string(), String::new()),
+            FsReadReq::FsGlob(String::new()),
+            FsReadReq::FsGrep("x".to_string(), String::new()),
         ] {
             let res = response_value(handler.handle(req, &cx).unwrap(), &table);
             let decoded: Result<Value, FsError> = FromCore::from_value(&res, &table).unwrap();
@@ -910,7 +964,7 @@ mod tests {
         }
 
         let e = handler
-            .handle(FsReq::FsReadGlob(String::new()), &cx)
+            .handle(FsReadReq::FsReadGlob(String::new()), &cx)
             .unwrap_err();
         assert!(
             format!("{e}").contains("matches EVERYTHING"),
@@ -924,7 +978,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::write(root.join("notes"), "").unwrap();
-        let handler = FsHandler::new(root.clone());
+        let handler = FsBackend::new(root.clone());
 
         // A literal (non-traversal) filename containing ".." must not be
         // swallowed into a false-positive empty result.
@@ -941,7 +995,8 @@ mod tests {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
+        let mut writer = FsWriteHandler::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
@@ -952,33 +1007,33 @@ mod tests {
             };
 
         // create-only (expected = None): file absent → writes.
-        let req = FsReq::FsWriteCas("f.txt".to_string(), None, "v1".to_string());
-        assert_eq!(decode(handler.handle(req, &cx).unwrap(), &table), Ok(()));
+        let req = FsWriteReq::FsWriteCas("f.txt".to_string(), None, "v1".to_string());
+        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(()));
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v1");
 
         // fileHash (FsHash): current digest of an existing file. Now errors-
         // tagged, so the digest arrives as `Right (Just hash)`.
-        let req = FsReq::FsHash("f.txt".to_string());
+        let req = FsReadReq::FsHash("f.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let h: Result<Option<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let h = h.unwrap().expect("hash of an existing file");
         assert_eq!(h, blake3_hex(b"v1"));
 
         // FsHash on an absent file → Right Nothing (absence is data, not error).
-        let req = FsReq::FsHash("missing.txt".to_string());
+        let req = FsReadReq::FsHash("missing.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let none: Result<Option<String>, FsError> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(none.unwrap(), None);
 
         // CAS HIT: expected == current hash → writes v2.
-        let req = FsReq::FsWriteCas("f.txt".to_string(), Some(h.clone()), "v2".to_string());
-        assert_eq!(decode(handler.handle(req, &cx).unwrap(), &table), Ok(()));
+        let req = FsWriteReq::FsWriteCas("f.txt".to_string(), Some(h.clone()), "v2".to_string());
+        assert_eq!(decode(writer.handle(req, &cx).unwrap(), &table), Ok(()));
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "v2");
 
         // CAS MISS: stale expected hash (of v1) → Left(actual = hash of v2), no write.
-        let req = FsReq::FsWriteCas("f.txt".to_string(), Some(h), "v3".to_string());
+        let req = FsWriteReq::FsWriteCas("f.txt".to_string(), Some(h), "v3".to_string());
         assert_eq!(
-            decode(handler.handle(req, &cx).unwrap(), &table),
+            decode(writer.handle(req, &cx).unwrap(), &table),
             Err(Some(blake3_hex(b"v2"))),
             "conflict must carry the ACTUAL hash"
         );
@@ -989,9 +1044,9 @@ mod tests {
         );
 
         // create-only MISS: expected None but file exists → Left(actual).
-        let req = FsReq::FsWriteCas("f.txt".to_string(), None, "v4".to_string());
+        let req = FsWriteReq::FsWriteCas("f.txt".to_string(), None, "v4".to_string());
         assert_eq!(
-            decode(handler.handle(req, &cx).unwrap(), &table),
+            decode(writer.handle(req, &cx).unwrap(), &table),
             Err(Some(blake3_hex(b"v2")))
         );
     }
@@ -1011,12 +1066,12 @@ mod tests {
         std::fs::create_dir(&target_dir).unwrap();
         std::fs::write(target_dir.join("ignored.txt"), "hello").unwrap();
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let req = FsReq::FsGrep("hello".to_string(), "**/*.txt".to_string());
+        let req = FsReadReq::FsGrep("hello".to_string(), "**/*.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
@@ -1038,7 +1093,7 @@ mod tests {
             }
         );
 
-        let req = FsReq::FsGrep("hello".to_string(), "**/*".to_string());
+        let req = FsReadReq::FsGrep("hello".to_string(), "**/*".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         assert_eq!(decoded.unwrap().len(), 2);
@@ -1056,12 +1111,12 @@ mod tests {
         }
         std::fs::write(&file_path, content).unwrap();
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let req = FsReq::FsGrep("match".to_string(), "large.txt".to_string());
+        let req = FsReadReq::FsGrep("match".to_string(), "large.txt".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
@@ -1092,12 +1147,12 @@ mod tests {
         std::fs::write(&file_path, &content).unwrap();
         assert!(content.chars().count() > GREP_HIT_MAX_CHARS);
 
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsBackend::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
 
-        let req = FsReq::FsGrep("req-0002".to_string(), "batch.json".to_string());
+        let req = FsReadReq::FsGrep("req-0002".to_string(), "batch.json".to_string());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<Vec<Hit>, FsError> = FromCore::from_value(&res, &table).unwrap();
         let results = decoded.unwrap();
@@ -1184,7 +1239,7 @@ mod tests {
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        let mut handlers = frunk::hlist![FsHandler::new(repo_root())];
+        let mut handlers = frunk::hlist![FsBackend::new(repo_root())];
         let con_id = table.get_by_name("FsExists").unwrap();
         let path = "Cargo.toml".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
@@ -1205,7 +1260,7 @@ mod tests {
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        let mut handlers = frunk::hlist![FsHandler::new(repo_root())];
+        let mut handlers = frunk::hlist![FsBackend::new(repo_root())];
         let con_id = table.get_by_name("FsListDir").unwrap();
         let path = ".".to_string().to_value(&table).unwrap();
         let request = Value::Con(con_id, vec![path]);
@@ -1230,11 +1285,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
         // a/b/ does not exist — write must create it
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsWriteHandler::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        let req = FsReq::FsWrite("a/b/c.txt".into(), "hello mkdir-p".into());
+        let req = FsWriteReq::FsWrite("a/b/c.txt".into(), "hello mkdir-p".into());
         handler
             .handle(req, &cx)
             .expect("write into missing subtree must succeed");
@@ -1247,14 +1302,14 @@ mod tests {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let mut handler = FsHandler::new(root.clone());
+        let mut handler = FsWriteHandler::new(root.clone());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         // Attempt to escape via `..` into a sibling directory that doesn't exist.
         // FsWrite is errors-tagged: the escape now comes back as `Left
         // (FsSandbox _)` DATA, not an abort (#335).
-        let req = FsReq::FsWrite("../../escape/evil.txt".into(), "bad".into());
+        let req = FsWriteReq::FsWrite("../../escape/evil.txt".into(), "bad".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let decoded: Result<(), FsError> = FromCore::from_value(&res, &table).unwrap();
         match decoded {
@@ -1275,12 +1330,12 @@ mod tests {
     fn test_fs_metadata_out_of_sandbox_is_none() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
-        let mut handler = FsHandler::new(dir.path().to_path_buf());
+        let mut handler = FsBackend::new(dir.path().to_path_buf());
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
         for escape in ["/etc/passwd", "../../escape.txt"] {
-            let req = FsReq::FsMetadata(escape.into());
+            let req = FsReadReq::FsMetadata(escape.into());
             let res = response_value(handler.handle(req, &cx).unwrap(), &table);
             let decoded: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
             assert_eq!(decoded, None, "escape path {escape} must be None");
@@ -1295,15 +1350,15 @@ mod tests {
         let table = full_effect_test_table();
         let captured = CapturedOutput::new();
         let cx = EffectContext::with_user(&table, &captured);
-        let mut handler = FsHandler::new(repo_root());
+        let mut handler = FsBackend::new(repo_root());
         // A file: is_file, not is_dir.
-        let req = FsReq::FsMetadata("Cargo.toml".into());
+        let req = FsReadReq::FsMetadata("Cargo.toml".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let meta: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
         let meta = meta.expect("Cargo.toml has metadata");
         assert!(meta.is_file && !meta.is_dir);
         // A directory: is_dir, not is_file (doesFileExist folds this to False).
-        let req = FsReq::FsMetadata("tidepool-handlers".into());
+        let req = FsReadReq::FsMetadata("tidepool-handlers".into());
         let res = response_value(handler.handle(req, &cx).unwrap(), &table);
         let meta: Option<FileMeta> = FromCore::from_value(&res, &table).unwrap();
         let meta = meta.expect("tidepool-handlers/ has metadata");
@@ -1379,7 +1434,7 @@ mod tests {
         let handlers = frunk::hlist![
             crate::ConsoleHandler,
             crate::KvHandler::new(kv_path),
-            FsHandler::new(root),
+            FsBackend::new(root),
         ];
 
         let harness = EvalHarness::new().with_stdlib().with_effects_module();

@@ -104,7 +104,8 @@ mod tests {
     const EXPECTED_ORDER: &[&str] = &[
         "Console",
         "KV",
-        "Fs",
+        "FsRead",
+        "FsWrite",
         "Http",
         "Exec",
         "Llm",

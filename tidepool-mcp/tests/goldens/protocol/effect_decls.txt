@@ -172,58 +172,50 @@ kvCas k e n = send (KvCas k e n)
 true
 -- end helpers_row_polymorphic --
 
-=============================== EFFECT: Fs ===============================
+=============================== EFFECT: FsRead ===============================
 
--- type_name (2 bytes) --
-Fs
+-- type_name (6 bytes) --
+FsRead
 -- end type_name --
 
--- description (61 bytes) --
-Read and write files (sandboxed to server working directory).
+-- description (75 bytes) --
+Read files and filesystem metadata (sandboxed to server working directory).
 -- end description --
 
 -- prompt_card: None --
 
--- constructors (10 items) --
--- constructors[0] (42 bytes) --
-FsRead :: Text -> Fs (Either FsError Text)
+-- constructors (8 items) --
+-- constructors[0] (46 bytes) --
+FsRead :: Text -> FsRead (Either FsError Text)
 -- end constructors[0] --
 
--- constructors[1] (49 bytes) --
-FsWrite :: Text -> Text -> Fs (Either FsError ())
+-- constructors[1] (51 bytes) --
+FsListDir :: Text -> FsRead (Either FsError [Text])
 -- end constructors[1] --
 
--- constructors[2] (47 bytes) --
-FsListDir :: Text -> Fs (Either FsError [Text])
+-- constructors[2] (48 bytes) --
+FsGlob :: Text -> FsRead (Either FsError [Text])
 -- end constructors[2] --
 
--- constructors[3] (44 bytes) --
-FsGlob :: Text -> Fs (Either FsError [Text])
+-- constructors[3] (55 bytes) --
+FsGrep :: Text -> Text -> FsRead (Either FsError [Hit])
 -- end constructors[3] --
 
--- constructors[4] (51 bytes) --
-FsGrep :: Text -> Text -> Fs (Either FsError [Hit])
+-- constructors[4] (48 bytes) --
+FsExists :: Text -> FsRead (Either FsError Bool)
 -- end constructors[4] --
 
--- constructors[5] (44 bytes) --
-FsExists :: Text -> Fs (Either FsError Bool)
+-- constructors[5] (45 bytes) --
+FsMetadata :: Text -> FsRead (Maybe FileMeta)
 -- end constructors[5] --
 
--- constructors[6] (41 bytes) --
-FsMetadata :: Text -> Fs (Maybe FileMeta)
+-- constructors[6] (39 bytes) --
+FsReadGlob :: Text -> FsRead [FileRead]
 -- end constructors[6] --
 
--- constructors[7] (35 bytes) --
-FsReadGlob :: Text -> Fs [FileRead]
+-- constructors[7] (54 bytes) --
+FsHash :: Text -> FsRead (Either FsError (Maybe Text))
 -- end constructors[7] --
-
--- constructors[8] (50 bytes) --
-FsHash :: Text -> Fs (Either FsError (Maybe Text))
--- end constructors[8] --
-
--- constructors[9] (71 bytes) --
-FsWriteCas :: Text -> Maybe Text -> Text -> Fs (Either (Maybe Text) ())
--- end constructors[9] --
 
 -- end constructors --
 
@@ -233,91 +225,67 @@ FsWriteCas :: Text -> Maybe Text -> Text -> Fs (Either (Maybe Text) ())
 -- extra_imports (0 items) --
 -- end extra_imports --
 
--- helpers (20 items) --
--- helpers[0] (350 bytes) --
+-- helpers (11 items) --
+-- helpers[0] (354 bytes) --
 -- | Read a file. Failure is TYPED (#335): `Left (FsNotFound p)` / `Left
 -- (FsNotUtf8 p)` / `Left (FsIo _)`. The natural spelling unwraps-or-aborts with
 -- a failable bind: `Right src <- readFile path` (or `readFile path >>= liftEither`).
-readFile :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError Text)
+readFile :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)
 readFile = send . FsRead
 -- end helpers[0] --
 
--- helpers[1] (273 bytes) --
--- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path
--- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.
-writeFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())
-writeFile f c = send (FsWrite f c)
+-- helpers[1] (217 bytes) --
+-- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.
+listDirectory :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])
+listDirectory = send . FsListDir
 -- end helpers[1] --
 
--- helpers[2] (440 bytes) --
--- | Append to a file (reads then writes). Failure is TYPED (#335): a read
--- or write failure comes back as `Left (FsError)` DATA, nothing partially
--- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.
-appendFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())
-appendFile p t = do
-  er <- readFile p
-  case er of
-    Left e -> pure (Left e)
-    Right old -> writeFile p (old <> t)
--- end helpers[2] --
-
--- helpers[3] (213 bytes) --
--- | List a directory. `Left (FsNotFound _)` when absent; unwrap with `liftEither`.
-listDirectory :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])
-listDirectory = send . FsListDir
--- end helpers[3] --
-
--- helpers[4] (295 bytes) --
+-- helpers[2] (299 bytes) --
 -- | TOTAL existence predicate (System.Directory semantics): False for a
 -- missing path, a directory, or a path outside the sandbox — never throws.
-doesFileExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool
+doesFileExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool
 doesFileExist p = send (FsMetadata p) <&> maybe False (\m -> m.isFile)
+-- end helpers[2] --
+
+-- helpers[3] (231 bytes) --
+-- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.
+doesDirectoryExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool
+doesDirectoryExist p = send (FsMetadata p) <&> maybe False (\m -> m.isDir)
+-- end helpers[3] --
+
+-- helpers[4] (204 bytes) --
+-- | File size in bytes, or `Nothing` if the path is missing.
+getFileSize :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Int)
+getFileSize p = send (FsMetadata p) <&> fmap (\m -> m.size)
 -- end helpers[4] --
 
--- helpers[5] (227 bytes) --
--- | TOTAL existence predicate: False for missing/non-dir/out-of-sandbox.
-doesDirectoryExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool
-doesDirectoryExist p = send (FsMetadata p) <&> maybe False (\m -> m.isDir)
--- end helpers[5] --
-
--- helpers[6] (200 bytes) --
--- | File size in bytes, or `Nothing` if the path is missing.
-getFileSize :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Int)
-getFileSize p = send (FsMetadata p) <&> fmap (\m -> m.size)
--- end helpers[6] --
-
--- helpers[7] (259 bytes) --
+-- helpers[5] (263 bytes) --
 -- | File metadata as a `FileMeta` record {size, isFile, isDir}, or `Nothing`
 -- if the path is missing/unreadable (use record-dot: `m.size`, `m.isDir`).
-fsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)
+fsMeta :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe FileMeta)
 fsMeta = send . FsMetadata
--- end helpers[7] --
+-- end helpers[5] --
 
--- helpers[8] (157 bytes) --
-getCurrentDirectory :: forall effs. Member Exec effs => Eff effs FilePath
-getCurrentDirectory = do { p <- run "pwd" >>= liftEither; pure (T.strip p.stdout) }
--- end helpers[8] --
-
--- helpers[9] (324 bytes) --
+-- helpers[6] (328 bytes) --
 -- | Expand a glob to matching file paths. `Left (FsSandbox _)` on an empty
 -- or absolute pattern, `Left (FsNotFound _)` on a missing search root; unwrap
 -- with `Right ps <- glob pat` or `glob pat >>= liftEither`.
-glob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])
+glob :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])
 glob = send . FsGlob
--- end helpers[9] --
+-- end helpers[6] --
 
--- helpers[10] (578 bytes) --
+-- helpers[7] (582 bytes) --
 -- | Regex-search files matching a path glob. ARG ORDER: regex FIRST, glob
 -- SECOND — a path glob like "*.rs" goes in arg 2, not arg 1. Returns [Hit]
 -- {path, line, text} (the shared Hit shape, so it composes with
 -- hitsByFile/refs). Failure is typed: `Left (FsBadRegex _)` on a bad regex.
 -- NB regex metachars are double-escaped here (JSON x Haskell), so a literal dot
 -- needs four backslashes; the FsBadRegex detail shows the exact form.
-grepGlob :: forall effs. Member Fs effs => Text -> FilePath -> Eff effs (Either FsError [Hit])
+grepGlob :: forall effs. Member FsRead effs => Text -> FilePath -> Eff effs (Either FsError [Hit])
 grepGlob pat g = send (FsGrep pat g)
--- end helpers[10] --
+-- end helpers[7] --
 
--- helpers[11] (720 bytes) --
+-- helpers[8] (724 bytes) --
 -- | Read every file matching a glob with PER-FILE failure isolation: one
 -- `FileRead {path, contents}` per match — `contents` is `Right text` on a clean
 -- UTF-8 read, `Left err` on a per-file failure (binary / non-UTF-8, permission).
@@ -327,55 +295,15 @@ grepGlob pat g = send (FsGrep pat g)
 -- the readable files with
 -- `[r.path | r <- rs, isRight r.contents]`, or split all outcomes with
 -- `partitionEithers (map (.contents) rs)`.
-readGlob :: forall effs. Member Fs effs => Text -> Eff effs [FileRead]
+readGlob :: forall effs. Member FsRead effs => Text -> Eff effs [FileRead]
 readGlob = send . FsReadGlob
--- end helpers[11] --
+-- end helpers[8] --
 
--- helpers[12] (1175 bytes) --
--- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an
--- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):
--- empty `old`, a missing file, `old` not found, or `old` matching 2+ places
--- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.
--- Pass enough surrounding text that `old` is unique. Use planUpdate to review
--- the diff first; the full editing surface is in tidepool://edits.
-update :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome
-update path old new
-  | T.null old = pure (UpdateOneRejected "'old' must be non-empty" Nothing)
-  | otherwise = do
-      er <- readFile path
-      case er of
-        Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
-        Right src ->
-          case length (T.splitOn old src) - 1 of
-            0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
-            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
-            n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
--- end helpers[12] --
-
--- helpers[13] (874 bytes) --
--- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an
--- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
--- or zero matches is `UpdateAllRejected` (nothing written); otherwise
--- `UpdateAllApplied` carries the replacement count.
-updateAll :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome
-updateAll path old new
-  | T.null old = pure (UpdateAllRejected "'old' must be non-empty")
-  | otherwise = do
-      er <- readFile path
-      case er of
-        Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
-        Right src ->
-          let n = length (T.splitOn old src) - 1
-          in if n == 0
-               then pure (UpdateAllRejected ("'old' not found in " <> path))
-               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)
--- end helpers[13] --
-
--- helpers[14] (940 bytes) --
+-- helpers[9] (944 bytes) --
 -- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the
 -- reason it can't apply), writes NOTHING. Never errors — the conflict comes
 -- back as data so you can branch before committing.
-planUpdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome
+planUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome
 planUpdate path old new = do
   er <- readFile path
   case er of
@@ -388,26 +316,135 @@ planUpdate path old new = do
          else case Patch.genPatch path src (replace old new src) of
                 Left _ -> pure UpdateNoChange
                 Right fp -> pure (UpdateDiff (Patch.renderPatch [fp]))
--- end helpers[14] --
+-- end helpers[9] --
 
--- helpers[15] (640 bytes) --
+-- helpers[10] (343 bytes) --
+-- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.
+-- The compare-and-swap token for writeCheckedIf: read it, compute your new
+-- content, then write back only if the file still hashes the same.
+fileHash :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Text)
+fileHash p = send (FsHash p) >>= liftEither
+-- end helpers[10] --
+
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: FsWrite ===============================
+
+-- type_name (7 bytes) --
+FsWrite
+-- end type_name --
+
+-- description (53 bytes) --
+Mutate files (sandboxed to server working directory).
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (2 items) --
+-- constructors[0] (54 bytes) --
+FsWrite :: Text -> Text -> FsWrite (Either FsError ())
+-- end constructors[0] --
+
+-- constructors[1] (76 bytes) --
+FsWriteCas :: Text -> Maybe Text -> Text -> FsWrite (Either (Maybe Text) ())
+-- end constructors[1] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (8 items) --
+-- helpers[0] (278 bytes) --
+-- | Write a file (mkdir -p on the parent). `Left (FsSandbox _)` on a path
+-- escape, `Left (FsIo _)` on write failure; unwrap with `liftEither`.
+writeFile :: forall effs. Member FsWrite effs => FilePath -> Text -> Eff effs (Either FsError ())
+writeFile f c = send (FsWrite f c)
+-- end helpers[0] --
+
+-- helpers[1] (457 bytes) --
+-- | Append to a file (reads then writes). Failure is TYPED (#335): a read
+-- or write failure comes back as `Left (FsError)` DATA, nothing partially
+-- applied; unwrap with `Right () <- appendFile path t` or `>>= liftEither`.
+appendFile :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Eff effs (Either FsError ())
+appendFile p t = do
+  er <- readFile p
+  case er of
+    Left e -> pure (Left e)
+    Right old -> writeFile p (old <> t)
+-- end helpers[1] --
+
+-- helpers[2] (1192 bytes) --
+-- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an
+-- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):
+-- empty `old`, a missing file, `old` not found, or `old` matching 2+ places
+-- is `UpdateOneRejected` (nothing written); otherwise `UpdateOneApplied`.
+-- Pass enough surrounding text that `old` is unique. Use planUpdate to review
+-- the diff first; the full editing surface is in tidepool://edits.
+update :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome
+update path old new
+  | T.null old = pure (UpdateOneRejected "'old' must be non-empty" Nothing)
+  | otherwise = do
+      er <- readFile path
+      case er of
+        Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
+        Right src ->
+          case length (T.splitOn old src) - 1 of
+            0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
+            1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
+            n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
+-- end helpers[2] --
+
+-- helpers[3] (891 bytes) --
+-- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an
+-- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
+-- or zero matches is `UpdateAllRejected` (nothing written); otherwise
+-- `UpdateAllApplied` carries the replacement count.
+updateAll :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome
+updateAll path old new
+  | T.null old = pure (UpdateAllRejected "'old' must be non-empty")
+  | otherwise = do
+      er <- readFile path
+      case er of
+        Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
+        Right src ->
+          let n = length (T.splitOn old src) - 1
+          in if n == 0
+               then pure (UpdateAllRejected ("'old' not found in " <> path))
+               else writeFile path (replace old new src) >>= liftEither >> pure (UpdateAllApplied n)
+-- end helpers[3] --
+
+-- helpers[4] (657 bytes) --
 -- | `update` from the `input` JSON parameter: {file, old, new} (for big/quote-heavy
 -- fragments). Reports the outcome as an `UpdateOneOutcome` DATA value (never
 -- throws, same contract as `update`): a malformed payload (missing or
 -- non-string file/old/new key) is `UpdateOneRejected` — one bad item never
 -- aborts a batch.
-updateJ :: forall effs. Member Fs effs => Value -> Eff effs UpdateOneOutcome
+updateJ :: forall effs. Members '[FsRead, FsWrite] effs => Value -> Eff effs UpdateOneOutcome
 updateJ v = case (v ^? key "file" . _String, v ^? key "old" . _String, v ^? key "new" . _String) of
   (Just f, Just o, Just n) -> update f o n
   _ -> pure (UpdateOneRejected "updateJ: need {file, old, new} strings in input" Nothing)
--- end helpers[15] --
+-- end helpers[4] --
 
--- helpers[16] (921 bytes) --
+-- helpers[5] (938 bytes) --
 -- | Insert a block after the unique line containing `anchor`. Reports the
 -- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing
 -- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`
 -- (nothing written); otherwise `InsertAfterApplied`.
-insertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome
+insertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome
 insertAfter path anchor block = do
   er <- readFile path
   case er of
@@ -419,28 +456,20 @@ insertAfter path anchor block = do
            1 -> writeFile path (unlines (concatMap (\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))
                   >>= liftEither >> pure InsertAfterApplied
            _ -> pure (InsertAfterRejected ("anchor matched " <> show n <> " lines in " <> path) (Just n))
--- end helpers[16] --
+-- end helpers[5] --
 
--- helpers[17] (479 bytes) --
+-- helpers[6] (484 bytes) --
 -- | Compute-check-commit: write only if every named check holds; failures
 -- come back as a `WriteOutcome` (nothing written on failure).
-writeChecked :: forall effs. Member Fs effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome
+writeChecked :: forall effs. Member FsWrite effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome
 writeChecked path checks content = do
   let failed = [name | (name, ok) <- checks, not ok]
   if null failed
     then writeFile path content >>= liftEither >> pure (Written path (length checks))
     else pure (WriteBlocked path failed)
--- end helpers[17] --
+-- end helpers[6] --
 
--- helpers[18] (339 bytes) --
--- | Blake3 content hash (hex) of a file, or Nothing if it does not exist.
--- The compare-and-swap token for writeCheckedIf: read it, compute your new
--- content, then write back only if the file still hashes the same.
-fileHash :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Text)
-fileHash p = send (FsHash p) >>= liftEither
--- end helpers[18] --
-
--- helpers[19] (847 bytes) --
+-- helpers[7] (852 bytes) --
 -- | Content-hash compare-and-swap write (#330). Writes CONTENT only if the
 -- file's current blake3 hash equals EXPECTED (Nothing = expect the file ABSENT,
 -- i.e. create-only). The compare-and-write is atomic within the handler, closing
@@ -448,13 +477,13 @@ fileHash p = send (FsHash p) >>= liftEither
 -- on success, or 'WriteConflict' (carrying expected vs actual hash) if the
 -- precondition failed — conflicts come back as DATA, nothing is written. Get
 -- EXPECTED from fileHash; on a conflict re-read, recompute, and retry.
-writeCheckedIf :: forall effs. Member Fs effs => Maybe Text -> FilePath -> Text -> Eff effs WriteOutcome
+writeCheckedIf :: forall effs. Member FsWrite effs => Maybe Text -> FilePath -> Text -> Eff effs WriteOutcome
 writeCheckedIf expected path content = do
   r <- send (FsWriteCas path expected content)
   pure $ case r of
     Right () -> Written path 1
     Left actual -> WriteConflict path expected actual
--- end helpers[19] --
+-- end helpers[7] --
 
 -- end helpers --
 

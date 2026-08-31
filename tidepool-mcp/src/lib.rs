@@ -199,7 +199,7 @@ pub struct AbortRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HelpRequest {
     /// The topic to fetch. One of `guide`, `schema`, `edits`, `vocab`,
-    /// `patterns`, `effect <Name>` (e.g. `effect Fs`), or `stdlib <Module>`
+    /// `patterns`, `effect <Name>` (e.g. `effect FsRead`), or `stdlib <Module>`
     /// (e.g. `stdlib Tidepool.Prelude`). Omit (or pass empty) to list topics.
     #[serde(default)]
     pub topic: Option<String>,
@@ -566,11 +566,11 @@ mod tests {
 
     #[test]
     fn test_preamble_grep_glob_present() {
-        let effects = vec![fs_decl()];
+        let effects = vec![fs_read_decl()];
         let preamble = generated_sources(&effects, false);
-        // grepGlob is the Fs structured text-search verb (the SG structural
+        // grepGlob is the FsRead structured text-search verb (the SG structural
         // combinators it used to sit beside were cut with the SG effect).
-        assert!(preamble.contains("grepGlob :: forall effs. Member Fs effs => Text -> FilePath -> Eff effs (Either FsError [Hit])"));
+        assert!(preamble.contains("grepGlob :: forall effs. Member FsRead effs => Text -> FilePath -> Eff effs (Either FsError [Hit])"));
     }
 
     #[test]
@@ -581,7 +581,7 @@ mod tests {
         // requirement it implies.
         for (src, name) in [
             (build_preamble(&[], false), "preamble"),
-            (build_preamble(&[fs_decl()], true), "preamble+lib"),
+            (build_preamble(&[fs_read_decl()], true), "preamble+lib"),
         ] {
             let pragma_line = src.lines().next().unwrap();
             assert!(
@@ -940,30 +940,31 @@ data Console a where
         // not the `= send . …` bodies (body wording is volatile; the
         // signature is the stable contract eval authors depend on).
         assert!(preamble.contains("putStrLn :: Text -> M ()"));
-        // #335: the primitive Fs verbs expose typed failure; the composite
+        // #335: the primitive filesystem verbs expose typed failure; the composite
         // helpers below (appendFile/doesFileExist/…) absorb it and keep their
         // shape.
         assert!(preamble.contains(
-            "readFile :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError Text)"
+            "readFile :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError Text)"
         ));
-        assert!(preamble.contains("writeFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())"));
-        assert!(preamble.contains("appendFile :: forall effs. Member Fs effs => FilePath -> Text -> Eff effs (Either FsError ())"));
-        assert!(preamble.contains("listDirectory :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])"));
-        assert!(preamble
-            .contains("doesFileExist :: forall effs. Member Fs effs => FilePath -> Eff effs Bool"));
+        assert!(preamble.contains("writeFile :: forall effs. Member FsWrite effs => FilePath -> Text -> Eff effs (Either FsError ())"));
+        assert!(preamble.contains("appendFile :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Eff effs (Either FsError ())"));
+        assert!(preamble.contains("listDirectory :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])"));
         assert!(preamble.contains(
-            "getFileSize :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe Int)"
+            "doesFileExist :: forall effs. Member FsRead effs => FilePath -> Eff effs Bool"
         ));
         assert!(preamble.contains(
-            "fsMeta :: forall effs. Member Fs effs => FilePath -> Eff effs (Maybe FileMeta)"
+            "getFileSize :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe Int)"
         ));
-        assert!(preamble.contains("glob :: forall effs. Member Fs effs => FilePath -> Eff effs (Either FsError [FilePath])"));
+        assert!(preamble.contains(
+            "fsMeta :: forall effs. Member FsRead effs => FilePath -> Eff effs (Maybe FileMeta)"
+        ));
+        assert!(preamble.contains("glob :: forall effs. Member FsRead effs => FilePath -> Eff effs (Either FsError [FilePath])"));
         // Core editing verbs (the str-replace common case + dry-run).
-        assert!(preamble.contains("update :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome"));
-        assert!(preamble.contains("updateAll :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome"));
-        assert!(preamble.contains("planUpdate :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome"));
+        assert!(preamble.contains("update :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateOneOutcome"));
+        assert!(preamble.contains("updateAll :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs UpdateAllOutcome"));
+        assert!(preamble.contains("planUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff effs UpdateOutcome"));
         assert!(
-            preamble.contains("insertAfter :: forall effs. Member Fs effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome")
+            preamble.contains("insertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text -> Text -> Eff effs InsertAfterOutcome")
         );
         assert!(preamble.contains(
             "run :: forall effs. Member Exec effs => Text -> Eff effs (Either ExecError Proc)"
@@ -1025,20 +1026,22 @@ data Console a where
     #[test]
     fn test_standard_decls_includes_ask() {
         let decls = standard_decls();
-        assert_eq!(decls.len(), 11);
-        assert_eq!(decls[3].type_name, "Http");
-        assert_eq!(decls[4].type_name, "Exec");
-        assert_eq!(decls[5].type_name, "Llm");
-        assert_eq!(decls[6].type_name, "Git");
-        assert_eq!(decls[7].type_name, "Time");
-        assert_eq!(decls[8].type_name, "Entropy");
-        assert_eq!(decls[9].type_name, "Ask");
+        assert_eq!(decls.len(), 12);
+        assert_eq!(decls[2].type_name, "FsRead");
+        assert_eq!(decls[3].type_name, "FsWrite");
+        assert_eq!(decls[4].type_name, "Http");
+        assert_eq!(decls[5].type_name, "Exec");
+        assert_eq!(decls[6].type_name, "Llm");
+        assert_eq!(decls[7].type_name, "Git");
+        assert_eq!(decls[8].type_name, "Time");
+        assert_eq!(decls[9].type_name, "Entropy");
+        assert_eq!(decls[10].type_name, "Ask");
         // RunLLMTurn (self-iterating-harness WS-B) was split out of Ask into
         // its own interposed effect, appended right after it. No Fork: the
         // ordinary session engine this roster serves never accepts
         // ForkWith/ForkAllWith (vestigial-subsystems review §4) — the
         // harness Agent turn's roster adds Fork on top of this one.
-        assert_eq!(decls[10].type_name, "RunLLMTurn");
+        assert_eq!(decls[11].type_name, "RunLLMTurn");
     }
 
     #[test]
@@ -1059,7 +1062,7 @@ data Console a where
         assert!(preamble.contains("data Ask a where"));
         assert!(preamble.contains("  AskWith :: Text -> Value -> Ask Value"));
         assert!(preamble.contains(
-            "type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]"
+            "type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]"
         ));
     }
 
@@ -1069,7 +1072,7 @@ data Console a where
         let stack = build_effect_stack_type(&decls);
         assert_eq!(
             stack,
-            "'[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]"
+            "'[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn]"
         );
     }
 
@@ -1378,8 +1381,8 @@ data Console a where
         assert_eq!(kv.type_name, "KV");
         assert!(kv.constructors.iter().any(|c| c.contains("KvGet")));
 
-        let fs = fs_decl();
-        assert_eq!(fs.type_name, "Fs");
+        let fs = fs_read_decl();
+        assert_eq!(fs.type_name, "FsRead");
         assert!(fs.constructors.iter().any(|c| c.contains("FsRead")));
 
         let http = http_decl();

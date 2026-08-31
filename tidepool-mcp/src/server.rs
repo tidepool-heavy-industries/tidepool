@@ -539,7 +539,7 @@ fn record_eval_failure(op: &str, class: FailureClass, phase: Phase, detail: &str
     // `append_new_line` deliberately does not mkdir-p its parent (see its
     // doc) — this is the first durable write under `cache_dir()` on some
     // startup paths (a fresh cache dir, or a wiped one), so create it here,
-    // the same mkdir-p-on-append discipline `FsReq::Write` already uses.
+    // the same mkdir-p-on-write discipline `FsWriteReq::FsWrite` uses.
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::debug!("failed to create {parent:?} for the eval-failure log: {e}");
@@ -712,7 +712,7 @@ impl ServerHandler for TidepoolMcpServerImpl {
                  resources/read support needed). topic: `guide` (how to write eval code), \
                  `schema` (Schema + ask/llm), `edits` (editing verbs), `vocab` (every verb \
                  signature in scope), `patterns` (worked examples), `effect <Name>` (e.g. \
-                 `effect Fs` — one effect's constructors + helpers), or `stdlib <Module>` \
+                 `effect FsRead` — one effect's constructors + helpers), or `stdlib <Module>` \
                  (e.g. `stdlib Tidepool.Prelude` — vendored source). Omit topic to list topics.",
                 crate::server_common::schema_to_map(schemars::schema_for!(HelpRequest))
                     .map_err(|e| McpError::internal_error(e, None))?,

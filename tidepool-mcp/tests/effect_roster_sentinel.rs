@@ -20,7 +20,7 @@
 
 /// `base_effects!`'s own roster (`tidepool-mcp/src/eval_prep.rs`), in order.
 const BASE_EFFECTS: &[&str] = &[
-    "Console", "KV", "Fs", "Http", "Exec", "Llm", "Git", "Time", "Entropy",
+    "Console", "KV", "FsRead", "FsWrite", "Http", "Exec", "Llm", "Git", "Time", "Entropy",
 ];
 
 /// `standard_decls()`'s interposed tail, appended after `BASE_EFFECTS`.

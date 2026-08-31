@@ -344,7 +344,8 @@ The `tidepool` binary provides these effect handlers:
 |--------|-----------|
 | **Console** | `Print :: Text -> Console ()` |
 | **KV** | `KvGet`, `KvSet`, `KvDelete`, `KvKeys` — persistent key-value store |
-| **Fs** | `FsRead`, `FsWrite`, `FsGlob`, `FsReadGlob` (batch read, per-file failure isolation), `FsGrep`, `FsListDir`, `FsExists`, `FsMetadata` — sandboxed file I/O + editing verbs |
+| **FsRead** | `FsRead`, `FsGlob`, `FsReadGlob` (batch read, per-file failure isolation), `FsGrep`, `FsListDir`, `FsExists`, `FsMetadata` — sandboxed filesystem queries |
+| **FsWrite** | `FsWrite`, `FsWriteCas` — sandboxed writes and compare-and-swap edits |
 | **Http** | `HttpGet`, `HttpPost` — outbound HTTP (no localhost) |
 | **Exec** | `Run`, `RunIn` — shell commands returning typed `Proc` records |
 | **Llm** | `LlmStructured` — schema-validated LLM call for classification/extraction |

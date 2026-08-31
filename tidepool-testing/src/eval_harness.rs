@@ -605,7 +605,7 @@ impl EvalHarness {
     }
 }
 
-/// The base MCP effect stack (Console, KV, Fs, Http, Exec, Llm, Git, Time,
+/// The base MCP effect stack (Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time,
 /// Entropy, Ask, RunLLMTurn) as a hand-maintained GADT preamble, plus matching
 /// stub handlers and a ready-made [`mock::min_stack`] `frunk` HList.
 ///
@@ -683,13 +683,14 @@ data KV a where
   KvSet :: Text -> Value -> KV ()
   KvDelete :: Text -> KV ()
   KvKeys :: KV [Text]
-data Fs a where
-  FsRead :: Text -> Fs Text
-  FsWrite :: Text -> Text -> Fs ()
-  FsListDir :: Text -> Fs [Text]
-  FsGlob :: Text -> Fs [Text]
-  FsExists :: Text -> Fs Bool
-  FsMetadata :: Text -> Fs (Maybe FileMeta)
+data FsRead a where
+  FsRead :: Text -> FsRead Text
+  FsListDir :: Text -> FsRead [Text]
+  FsGlob :: Text -> FsRead [Text]
+  FsExists :: Text -> FsRead Bool
+  FsMetadata :: Text -> FsRead (Maybe FileMeta)
+data FsWrite a where
+  FsWrite :: Text -> Text -> FsWrite ()
 data Http a where
   HttpGet :: Text -> Http (Either HttpError Value)
   HttpPost :: Text -> Value -> Http (Either HttpError Value)
@@ -718,11 +719,11 @@ data Fork a where
   ForkWith :: Int -> Text -> Fork Value
   ForkAllWith :: Int -> [Text] -> Fork Value
 
-type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn, Fork]
+type M = Eff '[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLMTurn, Fork]
 "#;
 
     /// [`MCP_PREAMBLE`] followed by `body` (your helper defs + `result`). The
-    /// standard way to build a source string for the 12-effect stack.
+    /// standard way to build a source string for the 13-effect stack.
     pub fn mcp_module(body: &str) -> String {
         format!("{MCP_PREAMBLE}\n{body}\n")
     }
@@ -791,14 +792,12 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 2: Fs (stub)
+    // 2: FsRead (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
-    pub enum FsReq {
+    pub enum FsReadReq {
         #[core(name = "FsRead")]
         FsRead(String),
-        #[core(name = "FsWrite")]
-        FsWrite(String, String),
         #[core(name = "FsListDir")]
         FsListDir(String),
         #[core(name = "FsGlob")]
@@ -808,19 +807,18 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         #[core(name = "FsMetadata")]
         FsMetadata(String),
     }
-    pub struct MockFs;
-    impl EffectHandler for MockFs {
-        type Request = FsReq;
-        fn handle(&mut self, req: FsReq, cx: &EffectContext) -> Result<Response, EffectError> {
+    pub struct MockFsRead;
+    impl EffectHandler for MockFsRead {
+        type Request = FsReadReq;
+        fn handle(&mut self, req: FsReadReq, cx: &EffectContext) -> Result<Response, EffectError> {
             match req {
-                FsReq::FsRead(_) => cx.respond(String::new()),
-                FsReq::FsWrite(_, _) => cx.respond(()),
-                FsReq::FsListDir(_) | FsReq::FsGlob(_) => {
+                FsReadReq::FsRead(_) => cx.respond(String::new()),
+                FsReadReq::FsListDir(_) | FsReadReq::FsGlob(_) => {
                     let empty: Vec<String> = vec![];
                     cx.respond(empty)
                 }
-                FsReq::FsExists(_) => cx.respond(false),
-                FsReq::FsMetadata(_) => cx.respond(Some(FileMeta {
+                FsReadReq::FsExists(_) => cx.respond(false),
+                FsReadReq::FsMetadata(_) => cx.respond(Some(FileMeta {
                     size: 0,
                     is_file: false,
                     is_dir: false,
@@ -829,7 +827,26 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 3: Http (stub)
+    // 3: FsWrite (stub)
+    #[derive(FromCore)]
+    #[allow(dead_code)]
+    pub enum FsWriteReq {
+        #[core(name = "FsWrite")]
+        FsWrite(String, String),
+    }
+    pub struct MockFsWrite;
+    impl EffectHandler for MockFsWrite {
+        type Request = FsWriteReq;
+        fn handle(
+            &mut self,
+            _req: FsWriteReq,
+            cx: &EffectContext,
+        ) -> Result<Response, EffectError> {
+            cx.respond(())
+        }
+    }
+
+    // 4: Http (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum HttpReq {
@@ -853,7 +870,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 4: Exec (stub)
+    // 5: Exec (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum ExecReq {
@@ -879,7 +896,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 5: Git (stub)
+    // 7: Git (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum GitReq {
@@ -936,7 +953,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 7: Time (stub)
+    // 8: Time (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum TimeReq {
@@ -953,7 +970,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 8: Entropy (stub — fixed deterministic seed, never real OS entropy).
+    // 9: Entropy (stub — fixed deterministic seed, never real OS entropy).
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum EntropyReq {
@@ -970,7 +987,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 9: Ask (stub)
+    // 10: Ask (stub)
     #[derive(FromCore)]
     #[allow(dead_code)]
     pub enum AskReq {
@@ -985,7 +1002,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 10: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
+    // 11: RunLLMTurn (stub — self-iterating-harness WS-B split this out of
     // Ask; this mock harness dispatches every tag through the handler HList
     // (no suspend-tag threshold), so it needs its own stub same as MockAsk).
     #[derive(FromCore)]
@@ -1006,7 +1023,7 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         }
     }
 
-    // 11: Fork (stub — the answerer parallel-delegation effect; same
+    // 12: Fork (stub — the answerer parallel-delegation effect; same
     // dispatch-every-tag reasoning as MockRunLLMTurn).
     #[derive(FromCore)]
     #[allow(dead_code)]
@@ -1025,13 +1042,14 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
     }
 
     /// The base-stack mock handler HList, in stack order (matches
-    /// [`EFFECT_NAMES`]) `[Console, KV, Fs, Http, Exec, Llm, Git, Time,
+    /// [`EFFECT_NAMES`]) `[Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time,
     /// Entropy, Ask, RunLLMTurn, Fork]` — pass straight to
     /// [`super::EvalHarness::run`].
     pub fn min_stack() -> frunk::HList!(
         MockConsole,
         MockKv,
-        MockFs,
+        MockFsRead,
+        MockFsWrite,
         MockHttp,
         MockExec,
         MockLlm,
@@ -1045,7 +1063,8 @@ type M = Eff '[Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy, Ask, RunLLM
         frunk::hlist![
             MockConsole,
             MockKv::new(),
-            MockFs,
+            MockFsRead,
+            MockFsWrite,
             MockHttp,
             MockExec,
             MockLlm,

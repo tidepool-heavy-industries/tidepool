@@ -1,5 +1,5 @@
 // ============================================================================
-// Tag 6 (base stack position 6): Llm
+// Tag 6: Llm
 // ============================================================================
 
 // LlmReq + DescribeEffect + EffectHandler dispatch are generated from the
@@ -214,7 +214,9 @@ impl LlmHandler {
 mod tests {
     use super::*;
     use crate::test_support::*;
-    use crate::{ConsoleHandler, ExecHandler, FsHandler, HttpHandler, KvHandler};
+    use crate::{
+        ConsoleHandler, ExecHandler, FsReadHandler, FsWriteHandler, HttpHandler, KvHandler,
+    };
     use tidepool_effect::dispatch::EffectContext;
     use tidepool_effect::dispatch::EffectHandler;
     use tidepool_effect::error::EffectError;
@@ -270,7 +272,8 @@ mod tests {
         let mut handlers = frunk::hlist![
             ConsoleHandler,
             KvHandler::new(kv_path),
-            FsHandler::new(cwd.clone()),
+            FsReadHandler::new(cwd.clone()),
+            FsWriteHandler::new(cwd.clone()),
             HttpHandler,
             ExecHandler::new(cwd.clone()),
             MockLlmHandler {

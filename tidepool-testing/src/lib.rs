@@ -8,7 +8,7 @@
 //!
 //! New `tidepool-runtime` / `tidepool-repl` integration tests should build their
 //! setup through [`eval_harness::EvalHarness`] rather than hand-rolling the
-//! include path, the 8-256 MiB eval thread, the 12-effect GADT preamble, and the
+//! include path, the 8-256 MiB eval thread, the 13-effect GADT preamble, and the
 //! mock handler stack. The harness wraps the real `tidepool_runtime` entry points
 //! (`compile_and_run` / `compile_and_run_pure` / `compile_haskell`), so tests
 //! keep driving the production compile→JIT→dispatch path. See that module's docs

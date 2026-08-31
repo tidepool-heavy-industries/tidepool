@@ -1,6 +1,6 @@
 //! Concrete effect handlers for the Tidepool eval server.
 //!
-//! Provides the base handlers (Console, KV, Fs, Http, Exec, Llm, Git, Time, Entropy),
+//! Provides the base handlers (Console, KV, FsRead, FsWrite, Http, Exec, Llm, Git, Time, Entropy),
 //! the debug-only MetaHandler, and the [`build_base_stack`] / [`base_decls`]
 //! convenience functions for assembling a fully-wired eval server.
 //!
@@ -50,7 +50,7 @@ pub use tidepool_bridge_effects::{
 
 /// Configuration for building the base effect handler stack.
 pub struct HandlerConfig {
-    /// Working directory (sandbox root for Fs/Git; Exec's initial cwd
+    /// Working directory (sandbox root for FsRead/FsWrite/Git; Exec's initial cwd
     /// only — Exec itself is not filesystem-sandboxed, see
     /// `tidepool-handlers/CLAUDE.md`'s Sandboxing section).
     pub cwd: PathBuf,
@@ -71,8 +71,11 @@ macro_rules! handler_for {
     (KV,      $cfg:ident) => {
         KvHandler::new($cfg.kv_path.clone())
     };
-    (Fs,      $cfg:ident) => {
-        FsHandler::new($cfg.cwd.clone())
+    (FsRead,  $cfg:ident) => {
+        FsReadHandler::new($cfg.cwd.clone())
+    };
+    (FsWrite, $cfg:ident) => {
+        FsWriteHandler::new($cfg.cwd.clone())
     };
     (Http,    $cfg:ident) => {
         HttpHandler
@@ -156,7 +159,7 @@ pub fn build_debug_stack(
 ///
 /// For cheap-startup sessions and tests that exercise the session mechanism
 /// rather than the effects — it avoids constructing the heavier handlers (Llm's
-/// genai client, the cwd-bound Fs/Exec). Ask is interposed rather than handled
+/// genai client, the cwd-bound filesystem/Exec handlers). Ask is interposed rather than handled
 /// here. Pair with [`base_decls`] to build the Haskell effect row.
 pub fn build_minimal_stack() -> impl tidepool_effect::dispatch::DispatchEffect<CapturedOutput>
        + CollectEffectDecls
@@ -213,7 +216,7 @@ mod tests {
     // bundle returns the list of FAILED check names (empty on success) so a
     // regression still names which behavior broke — see
     // tidepool-runtime/tests/generic_form_roundtrip.rs's `check` helper for
-    // the idiom. Fs's own roundtrips live in `handlers::fs::tests`.
+    // the idiom. FsRead/FsWrite roundtrips live in `handlers::fs::tests`.
 
     /// Checks Console (`putStrLn` dispatches without aborting the eval) and
     /// KV (`kvSet`/`kvGet` round-trips a JSON value) in one compile.

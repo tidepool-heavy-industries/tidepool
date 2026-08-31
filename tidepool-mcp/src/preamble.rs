@@ -389,7 +389,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     let has_ask = names.contains("Ask");
     let has_console = names.contains("Console");
     let has_kv = names.contains("KV");
-    let has_fs = names.contains("Fs");
+    let has_fs = names.contains("FsRead") && names.contains("FsWrite");
 
     out.push_str("-- Pagination\n");
     out.push_str(concat!("showI :: Int -> Text\n", "showI n = show n\n",));
@@ -597,10 +597,10 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         ));
     }
     if has_fs {
-        // The primitive Fs verbs return typed failure (#335); these orchestration
+        // The primitive filesystem verbs return typed failure (#335); these orchestration
         // helpers abort-on-failure via `liftEither` (in scope from Tidepool.Effects),
         // preserving their pre-#335 throw-on-read-error behaviour. The per-file
-        // isolating read lives on the Fs `readGlob :: Text -> M [FileRead]`.
+        // isolating read lives on `FsRead`; mutation requires `FsWrite` too.
         out.push_str("-- File orchestration helpers\n");
         out.push_str(concat!(
             "mapFiles :: [Text] -> (Text -> Text -> M Text) -> M [Text]\n",
@@ -797,7 +797,7 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
 
     if !effects.is_empty() {
         desc.push_str(concat!(
-            "\nTyped effects cover the common operations directly: `glob`/`grepGlob` (Fs) ",
+            "\nTyped effects cover the common operations directly: `glob`/`grepGlob` (FsRead) ",
             "for filesystem and structured text search; `run \"...\"` runs any shell command for the rest.\n",
             "For a JSON FILE, `readGlob` + `eitherDecode` + optics (`key`/`_String`/`values`/`cosmos`) is ",
             "the canonical query pattern \u{2014} decode each file to a `Value` and walk it with lenses; ",

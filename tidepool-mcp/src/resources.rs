@@ -352,11 +352,12 @@ fn guide_md(ctx: &ResourceCtx) -> String {
         "```\n",
         "In the REPL (`session_run`) a stubbed subtree also stays fetchable in full via `:stub <n>`.\n",
     ));
-    if ctx
-        .effects
-        .iter()
-        .any(|e| matches!(e.type_name, "Http" | "Exec" | "Llm" | "Fs" | "Git"))
-    {
+    if ctx.effects.iter().any(|e| {
+        matches!(
+            e.type_name,
+            "Http" | "Exec" | "Llm" | "FsRead" | "FsWrite" | "Git"
+        )
+    }) {
         s.push_str(concat!(
             "\n## Failure shapes — by signature, not one universal rule\n",
             "A verb's own type tells you its failure shape; three shapes cover the surface — trust the ",
@@ -791,7 +792,8 @@ mod tests {
         assert!(help(&ctx, "schema").to_lowercase().contains("schema"));
         assert!(help(&ctx, "edits").contains("update"));
         // Effect topics: bare name and `effect <Name>` both resolve.
-        assert!(help(&ctx, "Fs").contains("readFile"));
+        assert!(help(&ctx, "FsRead").contains("readFile"));
+        assert!(help(&ctx, "FsWrite").contains("writeFile"));
         // `llm` itself (schema-composed) now lives in the stdlib, its own
         // `Tidepool.Llm` module (separate from `Tidepool.Form.Schema`, since
         // `Llm` and `Ask` are independently-gated effects); only the thin

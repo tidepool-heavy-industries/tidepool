@@ -829,7 +829,8 @@ c7\x00Trailing commit\x00Alice\x002024-01-07T00:00:00+00:00\n\
         let mut handlers = frunk::hlist![
             crate::ConsoleHandler,
             crate::KvHandler::new(kv_path),
-            crate::FsHandler::new(cwd.clone()),
+            crate::FsReadHandler::new(cwd.clone()),
+            crate::FsWriteHandler::new(cwd.clone()),
             crate::HttpHandler,
             crate::ExecHandler::new(cwd.clone()),
             crate::LlmHandler::new("ollama:llama3.2".to_string()),

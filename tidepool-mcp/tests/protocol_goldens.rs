@@ -39,7 +39,8 @@ fn all_declaration_names_and_order_are_explicit() {
         vec![
             "Console",
             "KV",
-            "Fs",
+            "FsRead",
+            "FsWrite",
             "Http",
             "Git",
             "Time",

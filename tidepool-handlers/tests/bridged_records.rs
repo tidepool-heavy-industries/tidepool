@@ -116,7 +116,8 @@ fn stable_records_decl_matches_fs_effect_def() {
     assert!(tidepool_mcp::FILE_READ_STABLE_DECL.starts_with("data FileRead = "));
     // `fs_decl()` reuses the nominal types exported by Records/Prelude rather
     // than declaring a duplicate copy in Core.
-    assert!(tidepool_mcp::fs_decl().type_defs.is_empty());
+    assert!(tidepool_mcp::fs_read_decl().type_defs.is_empty());
+    assert!(tidepool_mcp::fs_write_decl().type_defs.is_empty());
 }
 
 #[test]

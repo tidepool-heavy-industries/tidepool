@@ -72,7 +72,8 @@ pub(crate) fn jit_eval(code: &[&str]) -> serde_json::Value {
     let mut handlers = frunk::hlist![
         ConsoleHandler,
         KvHandler::new(kv_path),
-        FsHandler::new(cwd.clone()),
+        FsReadHandler::new(cwd.clone()),
+        FsWriteHandler::new(cwd.clone()),
         HttpHandler,
         ExecHandler::new(cwd.clone()),
         LlmHandler::new("ollama:llama3.2".to_string())
