@@ -210,7 +210,8 @@ impl WorktreeMonitor {
         entries
             .into_iter()
             .rev()
-            .find_map(|entry| match entry.event {
+            .flat_map(|entry| entry.events.into_iter().rev())
+            .find_map(|event| match event {
                 RepositoryEvent::HeadChanged(r) if &r.worktree == worktree => {
                     Some((Some(r.new_head), r.branch))
                 }
@@ -305,60 +306,11 @@ impl WorktreeMonitor {
             observed_at_ms,
         }));
 
-        // Append idempotently. A pass that failed mid-batch retained its old
-        // baseline, so the retry rebuilds the same observations — any row the
-        // failed pass already journalled is DELIVERED again (the failed pass
-        // returned Err, so subscribers never saw it) but NOT re-journalled,
-        // and it keeps its journalled EventId so id-based dedup downstream
-        // stays sound.
-        //
-        // The dedup window is NOT the whole journal — a transition can
-        // legitimately recur (A -> B, rewound, A -> B again) and a full-history
-        // match would swallow the genuine second observation. It is exactly
-        // the rows a failed pass can leave: `HeadChanged` is appended last and
-        // the baseline insert after it is infallible, so a pass that
-        // journalled its `HeadChanged` always advanced the baseline and is
-        // not being retried. Leftovers are therefore only COMMIT rows for
-        // this worktree sitting AFTER this worktree's last `HeadChanged`.
-        let worktree_key = worktree.clone();
-        let leftover_commits: Vec<(GitOid, EventId)> = self
-            .journal
-            .iter()
-            .rev()
-            .take_while(|entry| {
-                !matches!(&entry.event, RepositoryEvent::HeadChanged(h) if h.worktree == worktree_key)
-            })
-            .filter_map(|entry| match &entry.event {
-                RepositoryEvent::Commit(c) if c.worktree == worktree_key => {
-                    Some((c.oid.clone(), entry.event_id))
-                }
-                _ => None,
-            })
+        self.journal.append(&batch, event_id)?;
+        let events = batch
+            .into_iter()
+            .map(|value| Observed { event_id, value })
             .collect();
-
-        let mut events = Vec::new();
-        for ev in batch {
-            let prior_id = match &ev {
-                RepositoryEvent::Commit(c) => leftover_commits
-                    .iter()
-                    .find(|(oid, _)| *oid == c.oid)
-                    .map(|(_, id)| *id),
-                RepositoryEvent::HeadChanged(_) => None,
-            };
-            match prior_id {
-                Some(prior_id) => events.push(Observed {
-                    event_id: prior_id,
-                    value: ev,
-                }),
-                None => {
-                    self.journal.append(&ev, event_id)?;
-                    events.push(Observed {
-                        event_id,
-                        value: ev,
-                    });
-                }
-            }
-        }
 
         self.baselines.insert(
             worktree.clone(),

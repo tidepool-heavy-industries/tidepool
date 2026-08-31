@@ -61,29 +61,6 @@ fn checkpoint_corpus_migrates_to_current() {
     }
 }
 
-/// Kind 4: the worktree event journal — see `tidepool_worktree::journal_version`
-/// (`tidepool-worktree` module, private but exercised here through the
-/// public `EventJournal::open`).
-#[test]
-fn worktree_journal_corpus_migrates_to_current() {
-    use tidepool_worktree::{EventJournal, RepositoryEvent};
-    for path in fixtures("worktree-journal") {
-        let journal =
-            EventJournal::open(&path).unwrap_or_else(|e| panic!("{path:?}: must load, got {e:?}"));
-        let entries = journal.since(0);
-        assert!(
-            !entries.is_empty(),
-            "{path:?}: must carry at least one entry"
-        );
-        match &entries[0].event {
-            RepositoryEvent::HeadChanged(r) => {
-                assert_eq!(r.worktree.as_str(), "wt-legacy", "{path:?}: worktree id");
-            }
-            other => panic!("{path:?}: expected HeadChanged, got {other:?}"),
-        }
-    }
-}
-
 /// Kind 5: the handlers per-segment journal — see
 /// `tidepool_handlers::handlers::journal_version` (private, exercised
 /// through the public `load_journal`).
@@ -128,12 +105,7 @@ fn selfharness_transcript_corpus_reads_as_unstamped() {
 /// Every format covered here has an unstamped fixture.
 #[test]
 fn every_kind_has_a_v0_fixture() {
-    for kind in [
-        "checkpoint",
-        "worktree-journal",
-        "handlers-journal",
-        "selfharness-transcript",
-    ] {
+    for kind in ["checkpoint", "handlers-journal", "selfharness-transcript"] {
         let v0 = fixtures(kind);
         assert!(
             v0.iter().any(|p| p

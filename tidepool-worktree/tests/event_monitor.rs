@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
-    EventId, EventJournal, GitCli, GitOid, HeadChangeKind, HeadChangeReceipt, Observed,
-    RepositoryEvent, WorktreeError, WorktreeId, WorktreeMonitor,
+    EventJournal, GitCli, HeadChangeKind, Observed, RepositoryEvent, WorktreeError, WorktreeId,
+    WorktreeMonitor,
 };
 
 /// A fresh journal path inside its own temp dir, and a monitor over it.
@@ -125,24 +125,25 @@ fn commit_yields_commit_and_head_changed_sharing_one_event_id() {
     // Event id sharing, cross-checked against the journal (not just the
     // returned Observed values above) — the journal is what a restart
     // diagnosis reads, so it must agree with what the caller was handed.
+    drop(monitor);
     let entries = EventJournal::open(&_journal_path)
         .expect("reopen journal")
         .since(0);
     let ids: Vec<_> = entries
         .iter()
-        .filter(|e| e.event.worktree() == &id)
+        .filter(|e| e.events.iter().all(|event| event.worktree() == &id))
         .map(|e| e.event_id)
         .collect();
-    // Two entries from the priming-less second reconcile (priming emitted
-    // nothing, so all recorded rows belong to this pass).
+    // One atomic batch from the priming-less second reconcile.
     assert_eq!(
         ids.len(),
-        2,
-        "both observations should be journalled: {ids:?}"
+        1,
+        "both observations should be journalled in one batch: {ids:?}"
     );
     assert_eq!(
-        ids[0], ids[1],
-        "Commit and HeadChanged must share one EventId"
+        entries[0].events.len(),
+        2,
+        "Commit and HeadChanged must share one durable batch"
     );
     assert_eq!(
         events[0].event_id, ids[0],
@@ -445,25 +446,32 @@ fn fresh_subscription_sees_none_of_the_prior_rows() {
     monitor.reconcile(&id).expect("reconcile 1").len();
 
     // A handler subscribes NOW: it stores the journal's current end.
+    drop(monitor);
     let subscribed_at = EventJournal::open(&journal_path)
         .expect("reopen journal")
         .end_cursor();
+    let journal = EventJournal::open(&journal_path).expect("reopen writer");
+    let mut monitor = WorktreeMonitor::new(GitCli::new(), journal);
+    monitor
+        .register(id.clone(), repo.path().to_path_buf())
+        .expect("register after restart");
 
     w.commit_file("c.txt", "three", "third").expect("commit");
     let later_events = monitor.reconcile(&id).expect("reconcile 2");
     assert!(!later_events.is_empty());
 
+    drop(monitor);
     let visible = EventJournal::open(&journal_path)
         .expect("reopen journal")
         .since(subscribed_at);
 
     assert_eq!(
         visible.len(),
-        later_events.len(),
-        "a fresh subscription must see only rows written after it registered"
+        1,
+        "a fresh subscription must see only the one batch written after it registered"
     );
-    for entry in &visible {
-        if let RepositoryEvent::Commit(c) = &entry.event {
+    for event in &visible[0].events {
+        if let RepositoryEvent::Commit(c) = event {
             assert_ne!(
                 c.subject, "second",
                 "the pre-subscription commit must not replay"
@@ -488,11 +496,12 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
     w.commit_file("b.txt", "two", "second").expect("commit");
     let events = monitor.reconcile(&id).expect("reconcile");
     assert!(!events.is_empty());
+    drop(monitor);
 
     let before_restart = EventJournal::open(&journal_path)
         .expect("reopen journal")
         .since(0);
-    assert_eq!(before_restart.len(), events.len());
+    assert_eq!(before_restart.len(), 1, "one reconcile is one batch");
 
     // Simulate a crash mid-write: append a syntactically-broken trailing line
     // directly, bypassing EventJournal::append.
@@ -516,59 +525,15 @@ fn journal_survives_restart_and_skips_a_torn_final_row() {
     assert_eq!(recovered, before_restart);
 }
 
-/// Mirrors `tidepool-atomic-write`'s `concurrent_writers_never_observe_a_torn_file`:
-/// several independent writers appending to the SAME journal file at once.
-/// Each writer opens its own [`EventJournal`] handle (never a shared,
-/// in-process-mutex-serialized one) so this actually exercises the O_APPEND
-/// write path across independent file descriptors — the same shape as
-/// separate processes appending, which is the guarantee `EventJournal::append`
-/// documents relying on.
 #[test]
-fn concurrent_appends_never_produce_a_torn_row() {
+fn concurrent_journal_writer_is_rejected_while_owner_lives() {
     let journal_dir = tempfile::TempDir::new().expect("create journal temp dir");
     let journal_path = journal_dir.path().join("events.jsonl");
-    // Create the file up front so every writer thread opens an existing path.
-    EventJournal::open(&journal_path).expect("open journal");
-
-    const WRITERS: u64 = 8;
-    const ROWS_PER_WRITER: u64 = 25;
-
-    let handles: Vec<_> = (0..WRITERS)
-        .map(|w| {
-            let journal_path = journal_path.clone();
-            std::thread::spawn(move || {
-                let mut journal = EventJournal::open(&journal_path).expect("open journal");
-                for row in 0..ROWS_PER_WRITER {
-                    let event = RepositoryEvent::HeadChanged(HeadChangeReceipt {
-                        worktree: wt(&format!("writer-{w}")),
-                        old_head: None,
-                        new_head: GitOid::from_raw(format!("oid-{w}-{row}")),
-                        kind: HeadChangeKind::Switched,
-                        branch: None,
-                        observed_at_ms: (w * ROWS_PER_WRITER + row) as i64,
-                    });
-                    journal
-                        .append(&event, EventId(w * ROWS_PER_WRITER + row))
-                        .expect("append");
-                }
-            })
-        })
-        .collect();
-    for h in handles {
-        h.join().expect("writer thread panicked");
-    }
-
-    // A torn row would either fail this open outright (mid-journal corruption
-    // is fatal — see the module docs) or silently drop a row; either way the
-    // count below would not match.
-    let reopened =
-        EventJournal::open(&journal_path).expect("reopen journal after concurrent writes");
-    let rows = reopened.since(0);
-    assert_eq!(
-        rows.len() as u64,
-        WRITERS * ROWS_PER_WRITER,
-        "every concurrently-appended row must be present and parseable"
-    );
+    let owner = EventJournal::open(&journal_path).expect("first owner");
+    let err = EventJournal::open(&journal_path).expect_err("second writer must be refused");
+    assert!(format!("{err}").contains("exactly one lifetime-owned writer"));
+    drop(owner);
+    EventJournal::open(&journal_path).expect("lock is released when owner drops");
 }
 
 #[test]
@@ -716,6 +681,7 @@ fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
         "every observation the second pass returns must carry that pass's id"
     );
 
+    drop(monitor);
     let entries = EventJournal::open(&journal_path)
         .expect("reopen journal")
         .since(0);
@@ -723,16 +689,14 @@ fn reconcile_returned_event_id_matches_the_journalled_event_id_for_that_pass() {
         entries.iter().filter(|e| e.event_id == second_id).collect();
     assert_eq!(
         journalled_under_second_id.len(),
-        second_pass.len(),
-        "the journal must carry exactly the rows the second pass returned, under the id it \
-         returned — a disconnected fresh id, or a journal that recorded nothing for it, fails \
-         this count"
+        1,
+        "the journal must carry one batch for the second pass under its returned id"
     );
     for observed in &second_pass {
         assert!(
             journalled_under_second_id
                 .iter()
-                .any(|e| e.event == observed.value),
+                .any(|e| e.events.contains(&observed.value)),
             "returned event {:?} must appear in the journal under the id reconcile returned \
              for it: {observed:?}",
             observed.value
@@ -759,6 +723,7 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
     monitor.reconcile(&id).expect("priming reconcile");
     w.commit_file("b.txt", "two", "second").expect("commit");
     monitor.reconcile(&id).expect("reconcile");
+    drop(monitor);
 
     {
         use std::io::Write;
@@ -776,8 +741,9 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
         .expect("at least one surviving row")
         .clone();
     repaired
-        .append(&sample.event, sample.event_id)
+        .append(&sample.events, sample.event_id)
         .expect("append after repair");
+    drop(repaired);
 
     let reopened = EventJournal::open(&journal_path)
         .expect("append-after-tear must not corrupt the journal for the next open");
@@ -788,107 +754,33 @@ fn journal_append_after_torn_row_recovery_keeps_the_journal_openable() {
     );
 }
 
-/// Retry idempotency for a mid-batch failure. A pass that died AFTER
-/// journalling a gained commit but BEFORE its `HeadChanged` never advanced
-/// the baseline, so the retry (or a restarted process — `register` recovers
-/// baselines from `HeadChanged` rows only) rebuilds the same observations.
-/// The already-journalled commit must be DELIVERED (nobody saw the failed
-/// pass's events) but NOT journalled twice, and it keeps its journalled
-/// EventId.
+/// A completed reconciliation survives restart as one row and retains one id
+/// across its Commit and HeadChanged views. There is no representable
+/// commit-only prefix for recovery code to guess about.
 #[test]
-fn reconcile_retry_delivers_but_does_not_rejournal_a_failed_pass_leftover() {
-    use tidepool_worktree::{CommitReceipt, EventId, EventJournal, WorktreeMonitor};
-
+fn reconciliation_batch_survives_restart_with_one_shared_event_id() {
     let repo = TestRepo::init().expect("init");
     let w = repo.writer();
     w.commit_file("a.txt", "one", "first").expect("commit");
-    let first = repo
-        .git()
-        .try_run(repo.path(), &["rev-parse", "HEAD"])
-        .expect("rev-parse")
-        .trimmed()
-        .to_string();
-    w.commit_file("b.txt", "two", "second").expect("commit");
-    let second = repo
-        .git()
-        .try_run(repo.path(), &["rev-parse", "HEAD"])
-        .expect("rev-parse")
-        .trimmed()
-        .to_string();
-
-    // Wind HEAD back so registration establishes the PRE-movement baseline.
-    repo.git()
-        .try_run(repo.path(), &["reset", "--hard", &first])
-        .expect("reset to first");
-
-    // The failed pass's leftover: the gained commit's row, journalled, with
-    // no HeadChanged after it.
-    let journal_dir = tempfile::TempDir::new().expect("journal dir");
-    let journal_path = journal_dir.path().join("events.jsonl");
-    let planted_id = EventId(424242);
-    {
-        let mut journal = EventJournal::open(&journal_path).expect("open journal");
-        journal
-            .append(
-                &RepositoryEvent::Commit(CommitReceipt {
-                    worktree: wt("w1"),
-                    oid: tidepool_worktree::GitOid::from_raw(second.clone()),
-                    parents: vec![tidepool_worktree::GitOid::from_raw(first.clone())],
-                    subject: "second".to_string(),
-                    author: "test".to_string(),
-                    committed_at_ms: 0,
-                    files: vec!["b.txt".to_string()],
-                }),
-                planted_id,
-            )
-            .expect("plant leftover row");
-    }
-
-    let journal = EventJournal::open(&journal_path).expect("reopen journal");
-    let mut monitor = WorktreeMonitor::new(GitCli::new(), journal);
+    let (mut monitor, journal_path, _tmp) = open_monitor();
     let id = wt("w1");
     monitor
         .register(id.clone(), repo.path().to_path_buf())
         .expect("register");
+    w.commit_file("b.txt", "two", "second").expect("commit");
+    let observed = monitor.reconcile(&id).expect("reconcile");
+    assert_eq!(observed.len(), 2);
+    let shared_id = observed[0].event_id;
+    assert!(observed.iter().all(|event| event.event_id == shared_id));
+    drop(monitor);
 
-    // The movement happens again (the same transition the failed pass saw).
-    repo.git()
-        .try_run(repo.path(), &["reset", "--hard", &second])
-        .expect("reset forward to second");
-
-    let events = monitor.reconcile(&id).expect("retry reconcile");
-
-    // Delivered: the commit (with the PLANTED id — id-based dedup downstream
-    // stays sound) and the HeadChanged (fresh id).
-    let delivered_commits = commits(&events);
-    assert_eq!(delivered_commits.len(), 1, "the gained commit is delivered");
-    assert_eq!(delivered_commits[0].oid.as_str(), second);
-    let commit_event_id = events
-        .iter()
-        .find(|o| matches!(o.value, RepositoryEvent::Commit(_)))
-        .expect("commit observed")
-        .event_id;
-    assert_eq!(
-        commit_event_id, planted_id,
-        "a re-delivered leftover keeps its journalled EventId"
-    );
-
-    // Journalled: exactly ONE commit row for that oid (the planted one), plus
-    // the HeadChanged. No duplicate receipt under a fresh id.
-    let rows = EventJournal::open(&journal_path)
-        .expect("reopen for audit")
-        .since(0);
-    let commit_rows: Vec<_> = rows
-        .iter()
-        .filter(|e| matches!(&e.event, RepositoryEvent::Commit(c) if c.oid.as_str() == second))
-        .collect();
-    assert_eq!(commit_rows.len(), 1, "no duplicate commit row");
-    assert_eq!(commit_rows[0].event_id, planted_id);
-    assert_eq!(
-        rows.iter()
-            .filter(|e| matches!(e.event, RepositoryEvent::HeadChanged(_)))
-            .count(),
-        1,
-        "the retry journalled its HeadChanged"
-    );
+    let recovered = EventJournal::open(&journal_path).expect("restart").since(0);
+    assert_eq!(recovered.len(), 1, "one reconciliation is one row");
+    assert_eq!(recovered[0].event_id, shared_id);
+    assert_eq!(recovered[0].events.len(), 2);
+    assert!(matches!(recovered[0].events[0], RepositoryEvent::Commit(_)));
+    assert!(matches!(
+        recovered[0].events[1],
+        RepositoryEvent::HeadChanged(_)
+    ));
 }

@@ -27,11 +27,11 @@
 //!    Closure: `Binding { `[`WorktreeId`]`, `[`AgentRef`]`, `[`BindingState`]`
 //!    (`Active` | `Terminal` | `Released`), i64 }`.
 //!
-//! 3. **[`JournalEntry`]** — `tidepool-worktree/src/journal.rs`. One JSON
-//!    object per line (JSONL), appended to the event-journal file. Write:
+//! 3. **[`ObservationBatch`]** — `tidepool-worktree/src/journal.rs`. One
+//!    reconciliation per JSONL line. Write:
 //!    `EventJournal::append` via `serde_json::to_string`. Read:
 //!    `EventJournal::open` via `serde_json::from_str`, one call per line.
-//!    Closure: `u64`, [`EventId`]`(u64)`, [`RepositoryEvent`]
+//!    Closure: `u64`, [`EventId`]`(u64)`, `Vec<`[`RepositoryEvent`]`>`
 //!    (`HeadChanged(`[`HeadChangeReceipt`]`)` | `Commit(`[`CommitReceipt`]`)`),
 //!    `i64`. `HeadChangeReceipt`: [`WorktreeId`], `Option<GitOid>`, `GitOid`,
 //!    [`HeadChangeKind`] (`Advanced(Vec<GitOid>)` | `Amended(GitOid, GitOid)`
@@ -58,9 +58,10 @@
 //!   the argument to a `serde_json::to_*`/`from_*` call anywhere in this
 //!   crate.
 //! - **`Observed<T>`** (`monitor.rs`) — the runtime envelope
-//!   `WorktreeMonitor::reconcile` returns to its caller. `JournalEntry` is
-//!   what actually gets persisted (its `event`/`event_id` fields are lifted
-//!   out of `Observed`, and `cursor`/`recorded_at_ms` are added); `Observed`
+//!   `WorktreeMonitor::reconcile` returns to its caller. `ObservationBatch` is
+//!   what actually gets persisted (the values from every co-emitted
+//!   `Observed` are collected under their shared `event_id`, and
+//!   `cursor`/`recorded_at_ms` are added); `Observed`
 //!   itself is never serialized.
 //! - **`SubscriptionId`** (`id.rs`) — runtime identity of one live
 //!   subscription (`withHandler`'s registration). Process-local by design;
@@ -85,8 +86,8 @@ use std::path::{Path, PathBuf};
 use tidepool_worktree::testing::binding_row;
 use tidepool_worktree::{
     AgentRef, Binding, BindingState, BranchName, CommitReceipt, EventId, GitOid, GitRef,
-    HeadChangeKind, HeadChangeReceipt, JournalEntry, RepositoryEvent, WorktreeError, WorktreeId,
-    WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
+    HeadChangeKind, HeadChangeReceipt, ObservationBatch, RepositoryEvent, WorktreeError,
+    WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
 };
 
 // --- golden plumbing, mirroring tidepool-handlers/tests/bridged_records.rs --
@@ -224,10 +225,17 @@ fn binding_rows() -> Vec<Binding> {
 // --- Option<BranchName> Some AND None, and both Commit shapes (root commit
 // --- with no parents, merge commit with two). ------------------------------
 
-fn journal_entries() -> Vec<JournalEntry> {
+struct EventSample {
+    cursor: u64,
+    event_id: EventId,
+    event: RepositoryEvent,
+    recorded_at_ms: i64,
+}
+
+fn journal_entries() -> Vec<ObservationBatch> {
     let wt = WorktreeId::from_raw("wt-finalized-0002");
-    vec![
-        JournalEntry {
+    let samples = vec![
+        EventSample {
             cursor: 1,
             event_id: EventId(1),
             event: RepositoryEvent::HeadChanged(HeadChangeReceipt {
@@ -242,7 +250,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_010_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 2,
             event_id: EventId(2),
             event: RepositoryEvent::HeadChanged(HeadChangeReceipt {
@@ -256,7 +264,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_020_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 3,
             event_id: EventId(3),
             event: RepositoryEvent::HeadChanged(HeadChangeReceipt {
@@ -271,7 +279,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_030_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 4,
             event_id: EventId(4),
             event: RepositoryEvent::HeadChanged(HeadChangeReceipt {
@@ -291,7 +299,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_040_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 5,
             event_id: EventId(5),
             event: RepositoryEvent::HeadChanged(HeadChangeReceipt {
@@ -304,7 +312,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_050_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 6,
             event_id: EventId(6),
             event: RepositoryEvent::HeadChanged(HeadChangeReceipt {
@@ -317,7 +325,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_060_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 7,
             event_id: EventId(7),
             event: RepositoryEvent::Commit(CommitReceipt {
@@ -331,7 +339,7 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_070_001,
         },
-        JournalEntry {
+        EventSample {
             cursor: 8,
             event_id: EventId(8),
             event: RepositoryEvent::Commit(CommitReceipt {
@@ -345,7 +353,19 @@ fn journal_entries() -> Vec<JournalEntry> {
             }),
             recorded_at_ms: 1_700_000_080_001,
         },
-    ]
+    ];
+    let mut batches: Vec<ObservationBatch> = samples
+        .into_iter()
+        .map(|sample| ObservationBatch {
+            cursor: sample.cursor,
+            event_id: sample.event_id,
+            events: vec![sample.event],
+            recorded_at_ms: sample.recorded_at_ms,
+        })
+        .collect();
+    let co_emitted_view = batches[7].events[0].clone();
+    batches[0].events.push(co_emitted_view);
+    batches
 }
 
 // --- Layer 1: whole-file golden compare + Layer 3: deserialize round-trip. -
@@ -416,12 +436,12 @@ fn binding_rows_golden_round_trips() {
 fn journal_entries_golden_round_trips() {
     let sample = journal_entries();
     let json = assert_golden("journal_entries.json", &sample);
-    let back: Vec<JournalEntry> = serde_json::from_str(&json).unwrap_or_else(|e| {
-        panic!("Vec<JournalEntry> failed to deserialize from journal_entries.json: {e}")
+    let back: Vec<ObservationBatch> = serde_json::from_str(&json).unwrap_or_else(|e| {
+        panic!("Vec<ObservationBatch> failed to deserialize from journal_entries.json: {e}")
     });
     assert_eq!(
         back, sample,
-        "Vec<JournalEntry> round-trip through journal_entries.json produced a \
+        "Vec<ObservationBatch> round-trip through journal_entries.json produced a \
          different value than the original sample"
     );
 }

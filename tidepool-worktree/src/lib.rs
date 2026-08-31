@@ -43,7 +43,7 @@ pub use create::{
 pub use error::{DirtySummary, GitFailureReceipt, InProgressKind, WorktreeError};
 pub use git::{GitCli, GitOutput};
 pub use id::{BranchName, EventId, GitOid, GitRef, SubscriptionId, WorktreeId};
-pub use journal::{EventJournal, JournalEntry};
+pub use journal::{EventJournal, ObservationBatch};
 pub use label::{sanitize_agent_label, sanitize_branch_label};
 pub use merge::{merge_branch_into, MergeOutcome};
 pub use monitor::{

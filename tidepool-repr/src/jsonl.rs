@@ -13,9 +13,10 @@
 //! given consumer fsyncs). Each consumer keeps its own row type, its own
 //! seq/cursor bookkeeping, and its own choice of [`SyncPolicy`]:
 //!
-//! - `EventJournal` — row `JournalEntry{cursor,event_id,event,recorded_at_ms}`,
-//!   cursor derived from the last entry, [`SyncPolicy::All`], no in-process
-//!   lock needed (`&mut self` is already exclusive).
+//! - `EventJournal` — row
+//!   `ObservationBatch{cursor,event_id,events,recorded_at_ms}`, cursor derived
+//!   from the last batch, [`SyncPolicy::All`], with its single-writer contract
+//!   enforced by a lifetime lock owned by the journal.
 //! - `JournalHandler`/`load_journal` — row `JournalEntry{seq,kind,key,payload}`,
 //!   seq composed from a segment ordinal + a per-handler local counter,
 //!   [`SyncPolicy::Data`], appends serialized under the handler's OWN

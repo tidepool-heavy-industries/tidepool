@@ -297,7 +297,7 @@ fn journal_append_reports_typed_failure_when_its_directory_is_gone() {
     });
 
     let err = journal
-        .append(&event, EventId(1))
+        .append(&[event], EventId(1))
         .expect_err("append into a missing directory must fail");
     match err {
         WorktreeError::StorageFailure { path, detail } => {
@@ -365,8 +365,9 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
         branch: None,
         observed_at_ms: 1,
     });
-    journal.append(&ev, EventId(1)).expect("append 1");
-    journal.append(&ev, EventId(2)).expect("append 2");
+    journal.append(&[ev.clone()], EventId(1)).expect("append 1");
+    journal.append(&[ev], EventId(2)).expect("append 2");
+    drop(journal);
 
     // Corrupt the first EVENT row (line 1 is the version-stamp header;
     // line 2 is the first entry), leaving the second entry intact after it.
@@ -416,7 +417,8 @@ fn journal_torn_final_row_is_still_tolerated_after_the_middle_row_fix() {
         branch: None,
         observed_at_ms: 1,
     });
-    journal.append(&ev, EventId(1)).expect("append");
+    journal.append(&[ev], EventId(1)).expect("append");
+    drop(journal);
 
     let text = fs::read_to_string(&path).expect("read journal");
     fs::write(&path, format!("{text}{{ torn")).expect("append torn final row");
