@@ -13,7 +13,9 @@ Options:
   --session NAME   tmux session to create/use (default: current session when
                    inside tmux, otherwise tidepool-codex)
   --window NAME    new tmux window name (default: codex-<timestamp>)
-  --model MODEL    Codex model (default: gpt-5.6-terra)
+  --sol            use gpt-5.6-sol (default)
+  --terra          use gpt-5.6-terra for clearly bounded mechanical work
+  --model MODEL    use an explicit Codex model
   --effort LEVEL   reasoning_effort value (default: medium)
   --attach          attach after creating the window when outside tmux
   --dry-run         validate and print the pane plan without changing tmux
@@ -22,6 +24,9 @@ Options:
 Examples:
   scripts/spawn-codex-worktrees.sh \
     actor-test-hygiene repl-name-plane-atomicity
+
+  scripts/spawn-codex-worktrees.sh --terra --effort medium \
+    actor-test-hygiene
 
   scripts/spawn-codex-worktrees.sh --session overnight --attach \
     .exo/worktrees/compiler-endpoint-identity
@@ -38,7 +43,7 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 
 session=""
 window="codex-$(date +%Y%m%d-%H%M%S)"
-model="gpt-5.6-terra"
+model="gpt-5.6-sol"
 effort="medium"
 attach=false
 dry_run=false
@@ -60,6 +65,14 @@ while (($#)); do
       (($# >= 2)) || die "--model requires a value"
       model=$2
       shift 2
+      ;;
+    --sol)
+      model="gpt-5.6-sol"
+      shift
+      ;;
+    --terra)
+      model="gpt-5.6-terra"
+      shift
       ;;
     --effort)
       (($# >= 2)) || die "--effort requires a value"
