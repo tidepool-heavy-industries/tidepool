@@ -36,6 +36,7 @@ import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName)
@@ -57,7 +58,7 @@ import Data.Maybe (fromMaybe, isNothing)
 import Data.List (nub, sortOn)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Environment (lookupEnv)
-import System.FilePath (takeBaseName)
+import System.FilePath (takeBaseName, takeFileName)
 import System.IO (hPutStrLn, stderr)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
@@ -738,7 +739,14 @@ diagnosticCollectorHook targetPath warningRef errorRef fallback flags msgClass s
     _ -> pure ()
   fallback flags msgClass srcSpan msg
   where
-    rendered = renderWithContext defaultSDocContext (mkLocMessage msgClass srcSpan msg)
+    -- The target lives in a per-invocation temporary directory which is not
+    -- part of either content-addressed key. Normalize every occurrence before
+    -- metadata serialization so a cache hit cannot return another process's
+    -- deleted temp path, while retaining the useful module filename and exact
+    -- source coordinates.
+    rendered = Text.unpack $ Text.replace (Text.pack targetPath)
+      (Text.pack (takeFileName targetPath)) (Text.pack renderedRaw)
+    renderedRaw = renderWithContext defaultSDocContext (mkLocMessage msgClass srcSpan msg)
     inTarget (RealSrcSpan rss _) = unpackFS (srcSpanFile rss) == targetPath
     inTarget _ = False
 

@@ -15,7 +15,7 @@
 //! [`CompileInvocation::cache`] ([`CacheStrategy`]) is the one remaining
 //! policy delta between the lanes. The eval lane
 //! (`tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`) keys
-//! through [`crate::cache::cache_key_salted`] / [`crate::cache::cache_load`] /
+//! through [`crate::cache::eval_cache_key`] / [`crate::cache::cache_load`] /
 //! [`crate::cache::cache_store`] (a single `(expr, meta)` pair, optionally
 //! salted per session/generation); the turn lane ([`compile_targets`]) keys
 //! through [`crate::cache::invocation_key`] / [`crate::cache::artifacts_load`]
@@ -291,7 +291,7 @@ pub struct CompiledArtifacts {
 /// policy delta between the two lanes; see the module doc.
 pub enum CacheStrategy<'a> {
     /// `tidepool_runtime::compile_haskell`/`tidepool_runtime::compile_haskell_salted`'s scheme:
-    /// a single `(expr, meta)` pair keyed by [`cache::cache_key_salted`].
+    /// a single `(expr, meta)` pair keyed by [`cache::eval_cache_key`].
     Eval { salt: Option<&'a str> },
     /// [`compile_targets`]'s scheme: a whole artifact SET keyed by
     /// [`cache::invocation_key`] over the built argv.
@@ -384,25 +384,27 @@ pub fn compile_invocation(
     // looks at what gets spawned), so it is computed and checked up front —
     // the same ordering `compile_haskell` always used, and it is reused
     // below for the cache-store call after a real compile.
-    let eval_key = if let CacheStrategy::Eval { salt } = &inv.cache {
-        let include_refs: Vec<&Path> = inv.include.iter().map(PathBuf::as_path).collect();
-        let key = cache::cache_key_salted(inv.source, inv.targets[0], &include_refs, *salt);
-        if let Some((expr_bytes, meta_bytes, asks_bytes)) = cache::cache_load(&key) {
-            // Attempt to deserialize cached data. If this fails, treat it as
-            // a cache miss and fall through to recompilation instead of
-            // propagating the error.
-            let raw = vec![RawTargetOutput {
-                target: inv.targets[0].to_string(),
-                expr_bytes,
-                asks_bytes,
-            }];
-            if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
-                return Ok(artifacts);
+    let eval_key = match &inv.cache {
+        CacheStrategy::Eval { salt } => {
+            let key = cache::eval_cache_key(inv.source, inv.targets[0], inv.include, *salt);
+            if let Some(key) = &key {
+                if let Some((expr_bytes, meta_bytes, asks_bytes)) = cache::cache_load(key) {
+                    // Attempt to deserialize cached data. If this fails, treat it as
+                    // a cache miss and fall through to recompilation instead of
+                    // propagating the error.
+                    let raw = vec![RawTargetOutput {
+                        target: inv.targets[0].to_string(),
+                        expr_bytes,
+                        asks_bytes,
+                    }];
+                    if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
+                        return Ok(artifacts);
+                    }
+                }
             }
+            key
         }
-        Some(key)
-    } else {
-        None
+        _ => None,
     };
 
     let temp_dir = TempDir::new()?;

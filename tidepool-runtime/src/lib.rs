@@ -511,6 +511,22 @@ mod tests {
             "expected an overlapping-patterns warning, got: {:?}",
             warnings.warnings
         );
+        assert!(
+            warnings.warnings.iter().all(|warning| {
+                warning.contains("WarnProbe.hs:")
+                    && !warning.contains(std::env::temp_dir().to_string_lossy().as_ref())
+            }),
+            "warnings must retain the module-relative source location without a temporary path: {:?}",
+            warnings.warnings
+        );
+
+        // The second compile is the cache-hit half of the relocation proof:
+        // it must return byte-equivalent warning text that is meaningful in
+        // this process rather than the first producer's temporary directory.
+        let CompileResult {
+            warnings: cached, ..
+        } = compile_haskell(source, "result", &[]).expect("Failed to reload cached result");
+        assert_eq!(warnings.warnings, cached.warnings);
     }
 
     /// A clean compile (no diagnostics) reports no warnings.

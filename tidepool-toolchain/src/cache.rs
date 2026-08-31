@@ -26,28 +26,42 @@ impl std::fmt::Display for CacheKey {
     }
 }
 
-/// Computes a unique cache key for a compilation request.
-/// The key includes the source code, the target binder, and a fingerprint of
-/// all include directories to ensure cache invalidation when dependencies change.
-/// The unsalted cache key (the common eval path). Retained as the thin,
-/// named entry point used by the cache tests; production calls go through
-/// [`cache_key_salted`].
-#[cfg_attr(not(test), allow(dead_code))]
+/// Test-only convenience for a cacheable, unsalted eval request.
+#[cfg(test)]
 pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> CacheKey {
-    cache_key_salted(source, target, include, None)
+    let include: Vec<PathBuf> = include.iter().map(|path| path.to_path_buf()).collect();
+    eval_cache_key(source, target, &include, None).expect("test fixture must be cacheable")
 }
 
-/// As [`cache_key`], but additionally mixes an optional `salt` into the key.
+/// Test-only salted convenience for cacheable requests.
+#[cfg(test)]
+fn cache_key_salted(source: &str, target: &str, include: &[&Path], salt: Option<&str>) -> CacheKey {
+    let include: Vec<PathBuf> = include.iter().map(|path| path.to_path_buf()).collect();
+    eval_cache_key(source, target, &include, salt).expect("test fixture must be cacheable")
+}
+
+/// The single production eval-cache decision. Returns `None` when the target
+/// or any dependency uses CPP side inputs the dependency manifest cannot key;
+/// callers must use this one decision for both lookup and eventual store.
+///
 /// Sessions pass `Some("session:<id>:gen:<g>")` so two sessions' identical-text
 /// `Lib.G<g>` modules never share an entry and a generation bump invalidates
-/// correctly. `None` must reproduce `cache_key`'s output byte-for-byte, so
-/// existing non-session cache entries stay valid.
-pub(crate) fn cache_key_salted(
+/// correctly. `None` preserves the existing unsalted digest bytes.
+pub(crate) fn eval_cache_key(
     source: &str,
     target: &str,
-    include: &[&Path],
+    include: &[PathBuf],
     salt: Option<&str>,
-) -> CacheKey {
+) -> Option<CacheKey> {
+    if has_untracked_cpp_inputs(source, include) {
+        return None;
+    }
+    Some(cache_key_raw(source, target, include, salt))
+}
+
+/// Digest builder beneath [`eval_cache_key`]. Kept private so production code
+/// cannot mint a key without first applying the cacheability policy.
+fn cache_key_raw(source: &str, target: &str, include: &[PathBuf], salt: Option<&str>) -> CacheKey {
     let mut hasher = blake3::Hasher::new();
     // Length-prefixed framing: NUL separators alone let a NUL embedded in one
     // field shift bytes across the boundary (key("a\0b","c") == key("a","b\0c")),
@@ -293,23 +307,40 @@ fn extract_exec_target(line: &str) -> Option<&str> {
     }
 }
 
-/// Recursively walks a directory to fingerprint its contents.
-/// Hashes the CONTENT (not size/mtime — see the content-hash note below) of
-/// every `.hs` and `.hs-boot` file, keyed by path.
+/// Recursively walks a directory to fingerprint its Haskell dependency
+/// sources. The source manifest is shared with invocation keying so the two
+/// cache generations cannot drift onto different extension allowlists.
 fn fingerprint_dir(dir: &Path, hasher: &mut blake3::Hasher) {
-    let mut visited = std::collections::HashSet::new();
-    fingerprint_dir_inner(dir, hasher, &mut visited);
+    let files = dependency_source_manifest(dir);
+    frame(hasher, &(files.len() as u64).to_le_bytes());
+    for (rel, digest) in files {
+        frame(hasher, dir.join(rel).as_os_str().as_encoded_bytes());
+        frame(hasher, &digest);
+    }
 }
 
+/// Enumerate every source form GHC can resolve as a Haskell home module from
+/// an import path. Entries are relative to `root`, globally sorted, and carry
+/// a tagged content digest (`1 || blake3(content)`, or `0` when unreadable).
+///
 /// `visited` holds the CANONICALIZED path of every directory already walked:
 /// `path.is_dir()` follows symlinks, so a directory symlink under an include
 /// dir that (directly or transitively) points back at an ancestor would
 /// otherwise recurse forever. Canonicalizing and checking membership before
 /// descending breaks the cycle (and, as a side effect, a diamond of two
 /// symlinks to the same real directory is only hashed once).
-fn fingerprint_dir_inner(
+fn dependency_source_manifest(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    collect_dependency_sources(root, root, &mut files, &mut visited);
+    files.sort_by(|(a, _), (b, _)| a.cmp(b));
+    files
+}
+
+fn collect_dependency_sources(
+    root: &Path,
     dir: &Path,
-    hasher: &mut blake3::Hasher,
+    out: &mut Vec<(PathBuf, Vec<u8>)>,
     visited: &mut std::collections::HashSet<PathBuf>,
 ) {
     if let Ok(canon) = fs::canonicalize(dir) {
@@ -321,32 +352,70 @@ fn fingerprint_dir_inner(
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let mut paths: Vec<_> = entries.filter_map(std::result::Result::ok).collect();
-    paths.sort_by_key(std::fs::DirEntry::path);
-
-    for entry in paths {
+    let mut entries: Vec<_> = entries.filter_map(std::result::Result::ok).collect();
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            fingerprint_dir_inner(&path, hasher, visited);
+            collect_dependency_sources(root, &path, out, visited);
             continue;
         }
-        let Some(ext) = path.extension() else {
+        if !is_haskell_dependency_source(&path) {
             continue;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        // `fs::read` follows source symlinks, matching what GHC compiles.
+        let digest = match fs::read(&path) {
+            Ok(bytes) => {
+                let mut digest = vec![1];
+                digest.extend_from_slice(blake3::hash(&bytes).as_bytes());
+                digest
+            }
+            Err(_) => vec![0],
         };
-        if ext != "hs" && ext != "hs-boot" {
-            continue;
-        }
-        // Content hash: (size, mtime) misses same-size edits, and
-        // `DirEntry::metadata()` is lstat — fingerprinting a symlinked .hs by
-        // the LINK's metadata would miss edits to the real file. `fs::read`
-        // follows symlinks and hashes what GHC will actually compile. Source
-        // files are small; no memo needed.
-        frame(hasher, path.as_os_str().as_encoded_bytes());
-        match fs::read(&path) {
-            Ok(bytes) => frame(hasher, blake3::hash(&bytes).as_bytes()),
-            Err(_) => frame(hasher, b"<unreadable>"),
-        }
+        out.push((rel, digest));
     }
+}
+
+fn is_haskell_dependency_source(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    [b".hs".as_slice(), b".hs-boot", b".lhs", b".lhs-boot"]
+        .iter()
+        .any(|suffix| name.as_encoded_bytes().ends_with(suffix))
+}
+
+/// CPP can read arbitrary files named by `#include` (including paths outside
+/// every GHC import root), so directory manifests cannot honestly key it.
+/// Any preprocessor directive makes the compile cold. This deliberately
+/// favors false misses over false hits; ordinary Haskell operators do not
+/// begin a line with `#` in the accepted dialect.
+fn source_has_untracked_cpp_inputs(source: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('#')
+            || line
+                .strip_prefix('>')
+                .is_some_and(|bird| bird.trim_start().starts_with('#'))
+    })
+}
+
+/// Whether the target or any Haskell dependency source can reach arbitrary
+/// CPP side inputs. Dependency files are read from the same shared manifest
+/// used for both key generations; a non-UTF-8 source is conservatively cold.
+fn has_untracked_cpp_inputs(source: &str, include: &[PathBuf]) -> bool {
+    source_has_untracked_cpp_inputs(source)
+        || include.iter().any(|root| {
+            dependency_source_manifest(root)
+                .into_iter()
+                .any(|(rel, _)| match fs::read(root.join(rel)) {
+                    Ok(bytes) => std::str::from_utf8(&bytes)
+                        .map(source_has_untracked_cpp_inputs)
+                        .unwrap_or(true),
+                    Err(_) => true,
+                })
+        })
 }
 
 /// Sentinel payload: blake3(expr_bytes) || blake3(meta_bytes) ||
@@ -450,7 +519,7 @@ pub(crate) fn cache_store(key: &CacheKey, expr_bytes: &[u8], meta_bytes: &[u8], 
 // ---------------------------------------------------------------------------
 // Invocation-keyed artifact sets
 //
-// The second consumer of this module. `cache_key_salted` above memoizes ONE
+// The second consumer of this module. `eval_cache_key` above memoizes ONE
 // eval compile as a fixed (expr, meta) pair keyed by (source, target,
 // includes-by-path, binary). `crate::artifacts::compile_targets` needs a
 // memo for a whole `tidepool-extract` INVOCATION: N targets, a variable artifact set
@@ -570,6 +639,9 @@ pub struct Invocation<'a> {
 /// see that field's doc) — every other `--inject-val`/`--session-root` still
 /// falls through to the default-deny arm below.
 pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
+    if has_untracked_cpp_inputs(inv.source, inv.include) {
+        return None;
+    }
     // Walk first, so an uncacheable invocation costs no hashing.
     let mut fields: Vec<&OsStr> = Vec::new();
     let mut stable_session_root: Option<&OsStr> = None;
@@ -635,9 +707,8 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
     Some(InvocationKey(hasher.finalize().to_hex().to_string()))
 }
 
-/// Fingerprint a stable `--inject-val` module's `.hi` iface by CONTENT — the
-/// same "unreadable is a distinct hashed value, not a skip" discipline
-/// [`collect_relative`] uses for an include file, so a missing/unreadable
+/// Fingerprint a stable `--inject-val` module's `.hi` iface by CONTENT. It uses
+/// the dependency manifest's tagged-content discipline, so a missing/unreadable
 /// iface still yields a stable (if uncacheable-in-practice) key rather than
 /// panicking.
 fn fingerprint_stable_val_iface(hi_path: &Path, hasher: &mut blake3::Hasher) {
@@ -693,61 +764,12 @@ fn fingerprint_binary_content(bin: &Path, hasher: &mut blake3::Hasher) {
 /// symlinks, so a directory symlink pointing back at an ancestor would
 /// otherwise recurse forever.
 fn fingerprint_dir_relative(root: &Path, hasher: &mut blake3::Hasher) {
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    collect_relative(root, root, &mut files, &mut visited);
-    files.sort();
+    let files = dependency_source_manifest(root);
 
     frame(hasher, &(files.len() as u64).to_le_bytes());
     for (rel, digest) in &files {
-        frame(hasher, rel.as_bytes());
+        frame(hasher, rel.as_os_str().as_encoded_bytes());
         frame(hasher, digest);
-    }
-}
-
-fn collect_relative(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, Vec<u8>)>,
-    visited: &mut std::collections::HashSet<PathBuf>,
-) {
-    if let Ok(canon) = fs::canonicalize(dir) {
-        if !visited.insert(canon) {
-            return;
-        }
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(std::result::Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_relative(root, &path, out, visited);
-            continue;
-        }
-        let Some(ext) = path.extension() else {
-            continue;
-        };
-        if ext != "hs" && ext != "hs-boot" {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
-        // A leading tag byte keeps "unreadable" a distinct value from any
-        // content digest instead of aliasing onto one. `fs::read` follows
-        // symlinks and hashes what GHC will actually compile.
-        let digest = match fs::read(&path) {
-            Ok(bytes) => {
-                let mut d = vec![1u8];
-                d.extend_from_slice(blake3::hash(&bytes).as_bytes());
-                d
-            }
-            Err(_) => vec![0u8],
-        };
-        out.push((rel, digest));
     }
 }
 
@@ -1004,6 +1026,78 @@ mod tests {
         assert_ne!(
             k1, k2,
             "Cache key should change when dependency file changes"
+        );
+    }
+
+    /// Both cache generations consume the same dependency manifest. In
+    /// particular, an imported literate module must invalidate both the eval
+    /// key and the relocatable invocation key when its content changes.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn imported_literate_module_changes_both_cache_keys() {
+        let temp = TempDir::new().unwrap();
+        let bin = fake_bin(temp.path(), b"#!/bin/sh\nexit 0\n");
+        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin);
+        let include = temp.path().join("include");
+        fs::create_dir_all(&include).unwrap();
+        let literate = include.join("Lit.lhs");
+        fs::write(&literate, "> module Lit where\n> value = 1\n").unwrap();
+
+        let source = "module Expr where\nimport Lit\nresult = value\n";
+        let input = temp.path().join("Expr.hs");
+        let output = temp.path().join("out");
+        fs::write(&input, source).unwrap();
+        let includes = [include.as_path()];
+        let include_owned = [include.clone()];
+        let argv = turn_argv(&input, &output, "result", &includes);
+
+        let eval_before = cache_key(source, "result", &includes);
+        let invocation_before = invocation_key(&Invocation {
+            source,
+            argv: &argv,
+            input_path: &input,
+            include: &include_owned,
+            bin: &bin,
+            stable_val: None,
+        })
+        .unwrap();
+
+        fs::write(&literate, "> module Lit where\n> value = 2\n").unwrap();
+
+        assert_ne!(eval_before, cache_key(source, "result", &includes));
+        assert_ne!(
+            invocation_before,
+            invocation_key(&Invocation {
+                source,
+                argv: &argv,
+                input_path: &input,
+                include: &include_owned,
+                bin: &bin,
+                stable_val: None,
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn dependency_manifest_covers_every_supported_haskell_source_form() {
+        let temp = TempDir::new().unwrap();
+        for name in ["A.hs", "B.hs-boot", "C.lhs", "D.lhs-boot"] {
+            fs::write(temp.path().join(name), name).unwrap();
+        }
+        fs::write(temp.path().join("ignored.h"), "header").unwrap();
+
+        let names: Vec<_> = dependency_source_manifest(temp.path())
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(
+            names,
+            ["A.hs", "B.hs-boot", "C.lhs", "D.lhs-boot"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1402,6 +1496,77 @@ mod tests {
             input_path: &input,
             include: &[],
             bin: &tmp.path().join("no-such-extract"),
+            stable_val: None,
+        })
+        .is_none());
+    }
+
+    /// `LANGUAGE CPP` is accepted by GHC, but `#include` may name a file
+    /// outside every import root. Such a source is explicitly cold rather
+    /// than pretending the directory manifest covers that side input.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn cpp_include_invocation_is_uncacheable() {
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        let include = tmp.path().join("include");
+        fs::create_dir_all(&include).unwrap();
+        fs::write(
+            include.join("CppDep.hs"),
+            "{-# LANGUAGE CPP #-}\n#include \"value.h\"\nmodule CppDep where\nvalue = VALUE\n",
+        )
+        .unwrap();
+        fs::write(include.join("value.h"), "#define VALUE 1\n").unwrap();
+        let source = "module Expr where\nimport CppDep\nresult = value\n";
+        fs::write(&input, source).unwrap();
+        let include_owned = [include.clone()];
+        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
+
+        assert!(has_untracked_cpp_inputs(source, &include_owned));
+        assert!(eval_cache_key(source, "result", &include_owned, None).is_none());
+        assert!(invocation_key(&Invocation {
+            source,
+            argv: &argv,
+            input_path: &input,
+            include: &include_owned,
+            bin: &bin,
+            stable_val: None,
+        })
+        .is_none());
+        assert!(!source_has_untracked_cpp_inputs(
+            "module Expr where\nresult = 1 # 2\n"
+        ));
+    }
+
+    /// A dependency manifest entry that cannot be read is conservatively
+    /// uncacheable in both generations; neither may mint a key from the
+    /// unreadable sentinel while overlooking possible CPP side inputs.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn unreadable_dependency_source_is_uncacheable() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
+        let input = tmp.path().join("Expr.hs");
+        let include = tmp.path().join("include");
+        fs::create_dir_all(&include).unwrap();
+        symlink("missing-target", include.join("Broken.hs")).unwrap();
+        let source = "module Expr where\nresult = 1\n";
+        fs::write(&input, source).unwrap();
+        let include_owned = [include.clone()];
+        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
+
+        assert!(eval_cache_key(source, "result", &include_owned, None).is_none());
+        assert!(invocation_key(&Invocation {
+            source,
+            argv: &argv,
+            input_path: &input,
+            include: &include_owned,
+            bin: &bin,
             stable_val: None,
         })
         .is_none());

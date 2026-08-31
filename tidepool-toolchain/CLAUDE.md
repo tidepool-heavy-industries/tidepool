@@ -42,6 +42,14 @@ path-independent (module identity comes from the path relative to the search
 root, since Cast/Tick/Type erasure strips source spans before Core reaches
 Rust — see root CLAUDE.md's Key Decisions Reference).
 
+Both layers consume one dependency-source manifest covering `.hs`,
+`.hs-boot`, `.lhs`, and `.lhs-boot`. The eval layer additionally frames each
+include root's absolute path; the invocation layer frames only root-relative
+module paths so identical relocated trees share a key. CPP directives make
+either layer explicitly uncacheable: `#include` can name files outside every
+GHC import root, so an import-directory walk cannot honestly enumerate those
+side inputs.
+
 The key builder deliberately lives here and not in `tidepool-extract-cmd`
 (the crate that actually builds/spawns `ExtractCmd`): that crate is a
 zero-dependency std-only leaf so `tidepool-macro` can depend on it without
