@@ -16,7 +16,7 @@ Options:
   --sol            use gpt-5.6-sol (default)
   --terra          use gpt-5.6-terra for clearly bounded mechanical work
   --model MODEL    use an explicit Codex model
-  --effort LEVEL   reasoning_effort value (default: medium)
+  --effort LEVEL   model reasoning effort (defaults: Sol low, Terra medium)
   --attach          attach after creating the window when outside tmux
   --dry-run         validate and print the pane plan without changing tmux
   -h, --help        show this help
@@ -44,7 +44,8 @@ repo_root=$(cd -- "$script_dir/.." && pwd -P)
 session=""
 window="codex-$(date +%Y%m%d-%H%M%S)"
 model="gpt-5.6-sol"
-effort="medium"
+effort="low"
+effort_explicit=false
 attach=false
 dry_run=false
 declare -a requested=()
@@ -68,15 +69,22 @@ while (($#)); do
       ;;
     --sol)
       model="gpt-5.6-sol"
+      if ! $effort_explicit; then
+        effort="low"
+      fi
       shift
       ;;
     --terra)
       model="gpt-5.6-terra"
+      if ! $effort_explicit; then
+        effort="medium"
+      fi
       shift
       ;;
     --effort)
       (($# >= 2)) || die "--effort requires a value"
       effort=$2
+      effort_explicit=true
       shift 2
       ;;
     --attach)
@@ -131,8 +139,8 @@ for item in "${requested[@]}"; do
   worktrees+=("$worktree")
 done
 
-pane_command=$(printf 'exec codex -m %q -c %q %q' \
-  "$model" "reasoning_effort=$effort" "read prompt.md.tmp and begin work")
+pane_command=$(printf 'exec codex --strict-config -m %q -c %q %q' \
+  "$model" "model_reasoning_effort=$effort" "read prompt.md.tmp and begin work")
 
 if $dry_run; then
   printf 'session: %s\n' "${session:-<current-or-tidepool-codex>}"
