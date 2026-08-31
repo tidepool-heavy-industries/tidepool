@@ -86,7 +86,7 @@ where
     Workbench: AgentWorkbench,
 {
     admitted.queue_developer(format!(
-        "Current typed Haskell goal: produce `{}`. The authoritative input is mounted in the resident workbench; complete the goal through its typed completion action.",
+        "Current typed Haskell goal: produce `{}`. The authoritative input is mounted as `goalInput` in the resident workbench; complete the goal through its typed completion action.",
         goal.expected_type
     ));
     admitted.queue_user(goal.task);
@@ -452,7 +452,7 @@ mod tests {
             vec![
                 Message {
                     role: Role::Developer,
-                    content: "Current typed Haskell goal: produce `Answer`. The authoritative input is mounted in the resident workbench; complete the goal through its typed completion action.".into(),
+                    content: "Current typed Haskell goal: produce `Answer`. The authoritative input is mounted as `goalInput` in the resident workbench; complete the goal through its typed completion action.".into(),
                     reasoning_items: Vec::new(),
                 },
                 Message {

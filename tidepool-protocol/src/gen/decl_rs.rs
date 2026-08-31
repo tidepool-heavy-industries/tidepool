@@ -17,13 +17,21 @@ pub fn path(e: &Effect) -> String {
 /// The `mod`-index for the generated decl modules.
 #[must_use]
 pub fn module_index(effects: &[Effect]) -> GeneratedFile {
+    let mut contents = index_body(
+        "Generated effect declarations",
+        &effects.iter().map(module_name).collect::<Vec<_>>(),
+        true,
+    );
+    contents.push_str("\n/// Every schema-owned Haskell effect declaration.\n");
+    contents.push_str("pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {\n");
+    contents.push_str("    vec![\n");
+    for effect in effects {
+        contents.push_str(&format!("        {}(),\n", effect.decl_fn));
+    }
+    contents.push_str("    ]\n}\n");
     GeneratedFile {
         path: "tidepool-mcp/src/generated/mod.rs".to_string(),
-        contents: index_body(
-            "Generated effect declarations",
-            &effects.iter().map(module_name).collect::<Vec<_>>(),
-            true,
-        ),
+        contents,
     }
 }
 

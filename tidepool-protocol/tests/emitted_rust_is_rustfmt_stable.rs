@@ -160,10 +160,10 @@ fn every_runtime_decode_file_is_a_rustfmt_fixed_point() {
 fn every_actor_decode_file_is_a_rustfmt_fixed_point() {
     let files = tidepool_protocol::actor_generated_files();
 
-    assert_eq!(
-        files.len(),
-        2,
-        "expected the Actor decode file plus its mod index"
+    assert!(
+        files.len() >= 2,
+        "expected actor-owned decode files plus their mod index, got {}",
+        files.len()
     );
     for f in files {
         assert_eq!(

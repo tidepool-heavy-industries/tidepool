@@ -51,6 +51,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.EffectSchema (SiteType(..), YieldSite(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 
@@ -434,12 +435,12 @@ data TurnOut
       { toBinders       :: [Text]
       , toVariant       :: Int
       , toBoundBinders  :: [BoundBinder]
-      , toAsks          :: [(Word64, Text, [Text])]
+      , toAsks          :: [YieldSite]
       , toWrappedSource :: Text
       }
   | TExpr
       { toVariant       :: Int
-      , toAsks          :: [(Word64, Text, [Text])]
+      , toAsks          :: [YieldSite]
       , toWrappedSource :: Text
       }
   deriving (Eq, Show)
@@ -454,14 +455,18 @@ renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
     ++ ",\"tier\":" ++ jsonString tier
     ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
 
--- | One runLLMTurn/runLLMTurnFork @{site, type, modules}@ triple as JSON —
--- the @asks.json@ sidecar shape. @modules@ (added alongside @site@/@type@,
--- never optional — an extract that doesn't emit it is stale, and the Rust
--- reader fails loud on the missing key rather than silently falling back to
--- no modules) is the defining-module set 'Tidepool.Translate.modulesOfType'
--- resolved for @type@'s mentioned tycons.
-renderAskJson :: (Word64, Text, [Text]) -> String
-renderAskJson (site, ty, modules) =
+-- | One typed suspension site as JSON. The historical @asks.json@ filename
+-- now carries the general answer-plus-live-input contract; ordinary ask/fork
+-- sites simply have an empty @inputs@ list.
+renderAskJson :: YieldSite -> String
+renderAskJson (YieldSite site answer inputs) =
   "{\"site\":" ++ show site
-    ++ ",\"type\":" ++ jsonString (T.unpack ty)
-    ++ ",\"modules\":[" ++ intercalate "," (map (jsonString . T.unpack) modules) ++ "]}"
+    ++ ",\"type\":" ++ jsonString (T.unpack (stType answer))
+    ++ ",\"modules\":" ++ renderModules (stModules answer)
+    ++ ",\"inputs\":[" ++ intercalate "," (map renderSiteType inputs) ++ "]}"
+  where
+    renderSiteType (SiteType ty modules) =
+      "{\"type\":" ++ jsonString (T.unpack ty)
+        ++ ",\"modules\":" ++ renderModules modules ++ "}"
+    renderModules modules =
+      "[" ++ intercalate "," (map (jsonString . T.unpack) modules) ++ "]"

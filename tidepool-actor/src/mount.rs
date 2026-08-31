@@ -55,6 +55,18 @@ pub struct ActorCompileView {
 }
 
 impl ActorCompileView {
+    /// Extend this exact actor view with modules GHC named while describing a
+    /// typed suspension. These are compiler-derived type dependencies, not an
+    /// authored escape hatch around [`ActorSourceImports`]. Returning another
+    /// immutable view keeps turn compilation and persisted declaration source
+    /// on the same import set.
+    pub(crate) fn with_type_modules(mut self, modules: &[String]) -> Self {
+        for module in modules {
+            self.external.extend_text(module);
+        }
+        self
+    }
+
     /// Exact external, declaration, and live-value imports for a turn template.
     #[must_use]
     pub fn turn_imports(&self) -> String {

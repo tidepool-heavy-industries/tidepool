@@ -177,7 +177,8 @@ async fn fenced_haskell_returns_a_live_typed_closure_without_holding_checkout() 
     preamble.push_str("type AgentEffects = '[Actor]\n");
     let source = ActorWorkbenchSource::new(preamble, include);
     let expected = "Int -> Eff AgentEffects Int";
-    let mut workbench = ResidentActorWorkbench::new(Arc::clone(&machines), source, expected);
+    let mut workbench =
+        ResidentActorWorkbench::new(Arc::clone(&machines), source, expected, Vec::new());
     let provider = WorkbenchProvider {
         machines: Arc::clone(&machines),
         session: session_id,

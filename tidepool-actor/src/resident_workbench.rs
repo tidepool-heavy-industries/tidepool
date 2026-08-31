@@ -15,8 +15,8 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution, OutputSink,
-    ParsedBlock, ResidentError, ResidentOutcome, ResidentSession, RootCustody, SessionRunContext,
-    TurnRequest, TurnResult,
+    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
+    SessionRunContext, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -56,6 +56,7 @@ pub struct ResidentActorWorkbench<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
     expected_type: String,
+    type_modules: Arc<[String]>,
 }
 
 impl<H, O> ResidentActorWorkbench<H, O> {
@@ -64,11 +65,13 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         machines: Arc<ActorMachineRegistry<H, O>>,
         source: ActorWorkbenchSource,
         expected_type: impl Into<String>,
+        type_modules: Vec<String>,
     ) -> Self {
         Self {
             machines,
             source,
             expected_type: expected_type.into(),
+            type_modules: type_modules.into(),
         }
     }
 }
@@ -89,22 +92,29 @@ pub enum ResidentActorWorkbenchError {
     Join(tokio::task::JoinError),
     #[error("typed completion suspended without a live payload")]
     MissingCompletionPayload,
+    #[error("could not mount the typed deliberation input: {0}")]
+    InputMount(String),
 }
 
-impl<H, O> AgentWorkbench for ResidentActorWorkbench<H, O>
+impl<H, O> ResidentActorWorkbench<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    type Completion = RootCustody;
-    type Error = ResidentActorWorkbenchError;
-
-    async fn execute(
-        &mut self,
-        admitted: &AdmittedAgentSession,
-        block: ParsedBlock,
-    ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, Self::Error> {
-        let context = admitted.session_context();
+    async fn with_machine<ResultValue>(
+        &self,
+        context: crate::ActorSessionContext,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &crate::ActorSessionContext,
+                &ActorWorkbenchSource,
+            ) -> Result<ResultValue, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<ResultValue, ResidentActorWorkbenchError>
+    where
+        ResultValue: Send + 'static,
+    {
         let checkout = self
             .machines
             .checkout_wait(
@@ -116,11 +126,9 @@ where
             .map_err(ResidentActorWorkbenchError::Checkout)?;
         let (mut session, receipt) = checkout.into_parts();
         let source = self.source.clone();
-        let expected_type = self.expected_type.clone();
 
         let task = tokio::task::spawn_blocking(move || {
-            let outcome =
-                execute_checked_out(&mut session, &context, &source, &expected_type, block);
+            let outcome = operation(&mut session, &context, &source);
             let holes = session
                 .parked_holes()
                 .into_iter()
@@ -141,6 +149,195 @@ where
             }
         }
     }
+
+    /// Mount the authoritative input for the current deliberation under the
+    /// one stable workbench name `goalInput`.
+    ///
+    /// GHC compiles the binding identity and thin interface, but its
+    /// `undefined` expression is deliberately never run. The resident mount
+    /// transfers the already-existing live value directly into that binding.
+    pub async fn mount_goal_input(
+        &self,
+        admitted: &AdmittedAgentSession,
+        input_type: impl Into<String>,
+        input: RootCustody,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let input_type = input_type.into();
+        let type_modules = Arc::clone(&self.type_modules);
+        self.with_machine(
+            admitted.session_context(),
+            move |session, context, source| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let block = ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: format!("goalInput <- pure (undefined :: ({input_type}))"),
+                };
+                let compiled = match compile_block(
+                    session,
+                    context,
+                    source,
+                    "AgentEffects",
+                    &type_modules,
+                    &block,
+                )? {
+                    CompiledBlock::Ready(compiled) => compiled,
+                    CompiledBlock::Rejected(diagnostic) => {
+                        return Err(ResidentActorWorkbenchError::InputMount(diagnostic));
+                    }
+                };
+                let ReadyBlock {
+                    result, generation, ..
+                } = *compiled;
+                let TurnResult::Bind {
+                    bound,
+                    compiled: expression,
+                    ..
+                } = result
+                else {
+                    return Err(ResidentActorWorkbenchError::InputMount(
+                        "the internal goal-input source was not classified as a binding".into(),
+                    ));
+                };
+                let [binder] = bound.as_slice() else {
+                    return Err(ResidentActorWorkbenchError::InputMount(format!(
+                        "the internal goal-input binding produced {} binders",
+                        bound.len()
+                    )));
+                };
+                session
+                    .mount_compiled_binding_in(
+                        context.placement.lexical_scope,
+                        binder,
+                        generation,
+                        &expression.table,
+                        input,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn resume_deliberation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        answer: RootCustody,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.with_machine(context, move |session, context, _source| {
+            session
+                .set_actor_execution(
+                    context.run_context(),
+                    context.effect_policy,
+                    context.live_payload,
+                )
+                .map_err(ResidentActorWorkbenchError::Resident)?;
+            session
+                .resume_handle(hole, answer)
+                .map_err(ResidentActorWorkbenchError::Resident)
+        })
+        .await
+    }
+}
+
+impl<H, O> AgentWorkbench for ResidentActorWorkbench<H, O>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    type Completion = RootCustody;
+    type Error = ResidentActorWorkbenchError;
+
+    async fn execute(
+        &mut self,
+        admitted: &AdmittedAgentSession,
+        block: ParsedBlock,
+    ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, Self::Error> {
+        let expected_type = self.expected_type.clone();
+        let type_modules = Arc::clone(&self.type_modules);
+        self.with_machine(
+            admitted.session_context(),
+            move |session, context, source| {
+                execute_checked_out(
+                    session,
+                    context,
+                    source,
+                    &expected_type,
+                    &type_modules,
+                    block,
+                )
+            },
+        )
+        .await
+    }
+}
+
+struct ReadyBlock {
+    result: TurnResult,
+    generation: tidepool_repr::Generation,
+    declaration_source: String,
+}
+
+enum CompiledBlock {
+    Ready(Box<ReadyBlock>),
+    Rejected(String),
+}
+
+fn compile_block<H, O>(
+    session: &ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    effect_stack: &str,
+    type_modules: &[String],
+    block: &ParsedBlock,
+) -> Result<CompiledBlock, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let session_view = session
+        .compile_view_in(context.placement.lexical_scope)
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
+            ))
+        })?;
+    let compile_view = context
+        .compile_view(session_view)?
+        .with_type_modules(type_modules);
+    let templates =
+        resident_workbench_templates(&source.preamble, effect_stack, &compile_view.turn_imports());
+    let include = compile_view.include_paths(&source.base_include);
+    let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
+    let injected = compile_view.injected_module_names();
+    let request = TurnRequest {
+        turn_text: &block.source,
+        templates: &templates,
+        include: &include_refs,
+        session_root: compile_view.session_root(),
+        inject_modules: &injected,
+        gen: compile_view.next_value_generation().0,
+        verdict: None,
+        target: None,
+    };
+    match run_turn(request) {
+        Ok(result) => Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
+            result,
+            generation: compile_view.next_value_generation(),
+            declaration_source: compile_view.declaration_source(&block.source),
+        }))),
+        Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
+            Ok(CompiledBlock::Rejected(classify_compile(&error).message))
+        }
+        Err(error) => Err(ResidentActorWorkbenchError::Compile(error)),
+    }
 }
 
 fn execute_checked_out<H, O>(
@@ -148,6 +345,7 @@ fn execute_checked_out<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     expected_type: &str,
+    type_modules: &[String],
     block: ParsedBlock,
 ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
 where
@@ -167,7 +365,7 @@ where
             context.live_payload,
         )
         .map_err(ResidentActorWorkbenchError::Resident)?;
-    let outcome = execute_fragment(session, context, source, expected_type, block);
+    let outcome = execute_fragment(session, context, source, expected_type, type_modules, block);
     session.close_realm(fragment_realm);
     session
         .set_actor_execution(actor_context, context.effect_policy, context.live_payload)
@@ -180,53 +378,38 @@ fn execute_fragment<H, O>(
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
     expected_type: &str,
+    type_modules: &[String],
     block: ParsedBlock,
 ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let session_view = session
-        .compile_view_in(context.placement.lexical_scope)
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::Resident(ResidentError::Session(
-                tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
-            ))
-        })?;
-    let compile_view = context.compile_view(session_view)?;
     let effect_stack = format!("(Complete ({expected_type}) ': AgentEffects)");
-    let templates = resident_workbench_templates(
-        &source.preamble,
+    let compiled = match compile_block(
+        session,
+        context,
+        source,
         &effect_stack,
-        &compile_view.turn_imports(),
-    );
-    let include = compile_view.include_paths(&source.base_include);
-    let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
-    let injected = compile_view.injected_module_names();
-    let request = TurnRequest {
-        turn_text: &block.source,
-        templates: &templates,
-        include: &include_refs,
-        session_root: compile_view.session_root(),
-        inject_modules: &injected,
-        gen: compile_view.next_value_generation().0,
-        verdict: None,
-        target: None,
-    };
-    let compiled = match run_turn(request) {
-        Ok(compiled) => compiled,
-        Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
+        type_modules,
+        &block,
+    )? {
+        CompiledBlock::Ready(compiled) => compiled,
+        CompiledBlock::Rejected(diagnostic) => {
             return Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
-                classify_compile(&error).message,
-            )))
+                diagnostic,
+            )));
         }
-        Err(error) => return Err(ResidentActorWorkbenchError::Compile(error)),
     };
-
-    match compiled {
+    let ReadyBlock {
+        result,
+        generation,
+        declaration_source,
+    } = *compiled;
+    match result {
         TurnResult::Decl { binders, .. } => {
-            let declaration = compile_view.declaration_source(&block.source);
-            match session.define_scoped_in(context.placement.lexical_scope, &[&declaration]) {
+            match session.define_scoped_in(context.placement.lexical_scope, &[&declaration_source])
+            {
                 Ok(generation) => Ok(BlockExecution::Committed(format!(
                     "defined {} at generation {}",
                     if binders.is_empty() {
@@ -255,7 +438,6 @@ where
                         .into(),
                 )));
             }
-            let generation = compile_view.next_value_generation();
             let outcome = session.run_bind(
                 "actor_workbench_bind",
                 &compiled.expr,

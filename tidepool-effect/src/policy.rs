@@ -7,15 +7,23 @@ pub enum LivePayloadPolicy {
     /// Suspended requests must cross as ordinary data.
     #[default]
     None,
-    /// Retain this zero-based request-constructor field when its bridged value
-    /// contains a closure sentinel.
-    RequestField(usize),
+    /// Retain this field only when ordinary bridging found a closure. This is
+    /// the compatibility path for consumers that use the live root solely as
+    /// a fallback for an otherwise unbridgeable value.
+    ClosureField(usize),
+    /// Always retain this field as the authoritative in-heap value, including
+    /// first-order data that also has a bridged diagnostic projection.
+    ValueField(usize),
 }
 
 impl LivePayloadPolicy {
     /// Current Haskell effect-request convention: site/metadata in field 0 and
     /// the value crossing the runtime boundary in field 1.
-    pub const HASKELL_EFFECT_VALUE: Self = Self::RequestField(1);
+    pub const HASKELL_EFFECT_VALUE: Self = Self::ValueField(1);
+
+    /// Historical closure-only crossing used by consumers that reconstruct
+    /// ordinary data from the bridge.
+    pub const HASKELL_EFFECT_CLOSURE: Self = Self::ClosureField(1);
 }
 
 /// How one run treats effect requests relative to its installed handlers.

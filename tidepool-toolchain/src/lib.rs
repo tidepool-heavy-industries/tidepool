@@ -26,7 +26,8 @@ pub mod toolchain;
 
 pub use artifacts::{
     compile_targets, compile_targets_with_session_inject, compile_targets_with_stable_inject,
-    AskSite, AsksSidecar, CompiledArtifacts, SessionInject, StableValInject, TargetArtifact,
+    CompiledArtifacts, SessionInject, SiteType, StableValInject, TargetArtifact, YieldSite,
+    YieldSites,
 };
 pub use failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
 

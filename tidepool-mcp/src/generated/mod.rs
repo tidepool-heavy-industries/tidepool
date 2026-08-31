@@ -2,6 +2,7 @@
 
 pub mod actor;
 pub mod ask_user;
+pub mod deliberate;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
@@ -14,6 +15,7 @@ pub mod worktree;
 
 pub use actor::*;
 pub use ask_user::*;
+pub use deliberate::*;
 pub use exec::*;
 pub use finalize::*;
 pub use fork::*;
@@ -23,3 +25,21 @@ pub use read_state::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
 pub use worktree::*;
+
+/// Every schema-owned Haskell effect declaration.
+pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
+    vec![
+        exec_decl(),
+        journal_decl(),
+        worktree_decl(),
+        event_decl(),
+        deliberate_decl(),
+        askuser_decl(),
+        readstate_decl(),
+        runllmturn_decl(),
+        fork_decl(),
+        finalize_decl(),
+        green_decl(),
+        actor_decl(),
+    ]
+}

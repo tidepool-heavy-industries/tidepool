@@ -77,7 +77,7 @@ import Tidepool.Metadata (DCMeta(..))
 import Tidepool.PrimOps
   ( floatMathToDouble, mapPrimOp, primOpArity, splitMultiReturnPrimOp
   , splitTripleReturnPrimOp, splitUnaryMultiReturnPrimOp, splitWord2DivPrimOp )
-import Tidepool.EffectSchema (VerbSpec(..), sitedVerbs)
+import Tidepool.EffectSchema (SiteType(..), VerbSpec(..), YieldSite(..), sitedVerbs)
 import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
   ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType
@@ -122,11 +122,10 @@ data TransState = TransState
   -- declarative verb table.
   , tsSitedIds :: !(Map.Map String Word64)
   , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
-  -- Accumulated {site, type, modules} for the asks.json sidecar — 'modules'
-  -- is 'modulesOfType's defining-module set for the site's answer type, the
-  -- extract-side resolution that replaces the harness's own import-scraping
-  -- guess (tidepool-harness's `HarnessSource::answerer_imports`).
-  , tsRunLLMTurnSites :: !(Seq (Word64, Text, [Text]))
+  -- GHC-derived metadata for typed suspension sites. Besides the answer type,
+  -- a site may name live inputs an interpreter must mount into a later
+  -- workbench without trusting authored type strings.
+  , tsYieldSites :: !(Seq YieldSite)
   , tsCurrentBinder :: !(Maybe Text)   -- enclosing top-level binder name, for error messages
   }
 
@@ -199,8 +198,8 @@ freshSiteId = do
 -- | The identity slot for one poisoned unresolved external, assigned on first
 -- reference and reused for every later reference to the same original id.
 -- Slots are per-'lowerModule'-run and monotonic from 1 (0 is reserved for
--- "no identity recorded"), the same shape 'freshSiteId' uses for runLLMTurn
--- call sites.
+  -- "no identity recorded"), the same shape 'freshSiteId' uses for typed
+  -- suspension sites.
 poisonSlotFor :: Word64 -> TransM Word64
 poisonSlotFor vid = do
   slots <- gets tsPoisonSlots
@@ -211,12 +210,10 @@ poisonSlotFor vid = do
       modify' $ \s -> s { tsPoisonSlots = Map.insert vid slot (tsPoisonSlots s) }
       return slot
 
--- | Record one runLLMTurn/runLLMTurnFork site for the asks.json sidecar.
--- @modules@ is 'modulesOfType's defining-module set for the site's answer
--- type.
-recordRunLLMTurnSite :: Word64 -> Text -> [Text] -> TransM ()
-recordRunLLMTurnSite siteId typeStr modules = modify' $ \s ->
-  s { tsRunLLMTurnSites = tsRunLLMTurnSites s |> (siteId, typeStr, modules) }
+-- | Record one typed suspension site for both compiler artifact encodings.
+recordYieldSite :: YieldSite -> TransM ()
+recordYieldSite site = modify' $ \s ->
+  s { tsYieldSites = tsYieldSites s |> site }
 
 -- | Emit the UTF-8 decode + recurse step for ONE codepoint starting at
 -- address @aId@, given the already-read lead byte @byte0@ (a Char#-typed
@@ -423,7 +420,7 @@ emptyTransState = TransState
   , tsPoisonSlots = Map.empty
   , tsSitedIds = Map.empty
   , tsSiteCounter = 0
-  , tsRunLLMTurnSites = Seq.empty
+  , tsYieldSites = Seq.empty
   , tsCurrentBinder = Nothing
   }
 
@@ -452,7 +449,7 @@ data LoweredModule = LoweredModule
   { lmNodes :: Seq FlatNode
   , lmUsedDCs :: Map.Map (Word64, Text) DataCon
   , lmReachBinds :: [CoreBind]
-  , lmRunLLMTurnSites :: Seq (Word64, Text, [Text])
+  , lmYieldSites :: Seq YieldSite
   , lmPoisonSlots :: Map.Map Word64 Word64
   }
 
@@ -493,7 +490,7 @@ lowerModule allBinds targetName unresolvedIds =
       { lmNodes = tsNodes finalState
       , lmUsedDCs = tsUsedDCs finalState
       , lmReachBinds = neededBinds
-      , lmRunLLMTurnSites = tsRunLLMTurnSites finalState
+      , lmYieldSites = tsYieldSites finalState
       , lmPoisonSlots = tsPoisonSlots finalState
       }
   where
@@ -651,8 +648,8 @@ data ClosedModule = ClosedModule
     -- ^ The reachable binds actually compiled — the meta walks run over this.
   , cmVarNames   :: [(Word64, Text)]
     -- ^ varId → human name for runtime unresolved-error naming.
-  , cmRunLLMTurnSites :: [(Word64, Text, [Text])]
-    -- ^ Ask sites and the defining modules needed to resolve their types.
+  , cmYieldSites :: [YieldSite]
+    -- ^ Typed suspension sites and the modules needed to resolve their types.
   , cmPoisoned   :: [(Word64, Text)]
     -- ^ Sentinel identity slot → qualified name, for every unresolved external
     -- the emitted program replaced with a @0x45@ kind-4 poison node. Shipped
@@ -668,7 +665,7 @@ translateModuleClosed hscEnv allBinds targetName = do
         { lmNodes = nodes
         , lmUsedDCs = usedDCs
         , lmReachBinds = reachBinds
-        , lmRunLLMTurnSites = runLLMTurnSites
+        , lmYieldSites = yieldSites
         , lmPoisonSlots = poisonSlots
         } = lowerModule dedupedBinds targetName unresolvedIds
   -- TIDEPOOL_DUMP_CLOSED=<needle>: dump resolved bindings whose binder
@@ -828,7 +825,7 @@ translateModuleClosed hscEnv allBinds targetName = do
     , cmUnresolved = trulyUnresolved
     , cmReachBinds = reachBinds
     , cmVarNames   = varNames
-    , cmRunLLMTurnSites = Data.Foldable.toList runLLMTurnSites
+    , cmYieldSites = Data.Foldable.toList yieldSites
     , cmPoisoned   = poisonedTable
     }
   where
@@ -1846,12 +1843,13 @@ translate expr =
           -- The answer type is always the FIRST type argument; 'vsTypeArgs'
           -- says how many the shape requires (any beyond the first are
           -- discarded — see the rows for which verb discards what and why).
-          , Just (ty : _) <- leadingTypes (vsTypeArgs spec) typeArgs
+          , Just siteTys@(ty : _) <- leadingTypes (vsTypeArgs spec) typeArgs
           -- The trailing 'vsValueArity' args are the verb's own; anything
           -- before them is 0+ leading `Member <Eff> effs` dictionaries (see
           -- 'splitTrailingArgs').
           , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
         stableTy <- checkSiteType spec ty
+        stableInputs <- mapM (checkSiteInputType spec siteTys) (vsInputTypeArgs spec)
         sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
         case sitedIdM of
           -- The sibling's varId is resolved ONCE, by name, by a scan over
@@ -1882,10 +1880,14 @@ translate expr =
             let renderedTy = Tidepool.GhcPipeline.renderType stableTy
                 typeStr | vsListAnswer spec = "[" ++ renderedTy ++ "]"
                         | otherwise         = renderedTy
+                answerSiteType = SiteType
+                  (T.pack typeStr)
+                  (modulesOfType stableTy)
+                inputSiteTypes = map siteTypeOf stableInputs
             -- Modules are resolved from the per-child element type `ty`
             -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
             -- shim needs T's own defining module(s), not '[]''s.
-            recordRunLLMTurnSite siteId (T.pack typeStr) (modulesOfType stableTy)
+            recordYieldSite (YieldSite siteId answerSiteType inputSiteTypes)
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
             -- their original order, before the injected site-id literal —
@@ -2732,6 +2734,20 @@ checkSiteType :: VerbSpec -> Type -> TransM Type
 checkSiteType spec ty = do
   checkMonomorphicSite (vsName spec) ty
   pure (stabilizeEffectRows ty)
+
+checkSiteInputType :: VerbSpec -> [Type] -> Int -> TransM Type
+checkSiteInputType spec tys index =
+  case drop index tys of
+    ty : _ -> do
+      checkMonomorphicSite (vsName spec ++ " input") ty
+      pure (stabilizeEffectRows ty)
+    [] -> error $ "sited verb " ++ vsName spec
+      ++ " declares missing input type argument " ++ show index
+
+siteTypeOf :: Type -> SiteType
+siteTypeOf ty = SiteType
+  (T.pack (Tidepool.GhcPipeline.renderType ty))
+  (modulesOfType ty)
 
 -- | Suspension sites carry concrete type metadata, so their answer type must
 -- be monomorphic at extraction time.

@@ -213,7 +213,7 @@ fn pinned_finalize_needs_the_type_in_scope() {
 /// The driver side of SCOPE, on the CURRENT mechanism: extract itself
 /// resolves `Decision`'s defining module from the real type environment at
 /// the `finalize @Decision` call site and reports it in `asks.json`
-/// (`AsksSidecar::modules_of`) — `SelfHarnessDriver::answer_contract` pins
+/// (`YieldSites::modules_of`) — `SelfHarnessDriver::answer_contract` pins
 /// its imports from that lookup, not from a scan of `Harness.hs`'s own
 /// import lines (the retired `HarnessSource::answerer_imports`). Pinned
 /// to `HarnessTypes` here exactly like the retired scrape-based test was,

@@ -39,11 +39,12 @@ use tidepool_repr::{CoreExpr, DataConTable};
 use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, CompileError};
 
 // ---------------------------------------------------------------------------
-// The asks.json sidecar
+// Typed yield sites (`asks.json` on disk)
 // ---------------------------------------------------------------------------
 
-/// One `asks.json` entry: a yield-site id, its rendered answer type, and the
-/// defining modules a shim must import to resolve that type by name —
+/// One compiler sidecar entry: a typed suspension-site id, its rendered answer
+/// type, any live input types, and the defining modules needed to resolve each
+/// type by name —
 /// `Tidepool.Translate.modulesOfType`'s result for every tycon the type
 /// mentions (the type's own head plus every type argument's head). Extract
 /// has the type environment in hand at the call site, so it reports this
@@ -52,53 +53,83 @@ use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, Compi
 /// Asks`) rather than silently resolving with no modules, since a caller
 /// that built an `AnswerContract` from an empty list would compile a shim
 /// that cannot name the type at all.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AskSite {
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct YieldSite {
     pub site: u32,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub modules: Vec<String>,
+    pub inputs: Vec<SiteType>,
+}
+
+/// One GHC-rendered live input type attached to a suspension site.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SiteType {
     #[serde(rename = "type")]
     pub ty: String,
     pub modules: Vec<String>,
 }
 
-/// The `asks.json` sidecar as a site-id → (rendered-type, defining-modules)
-/// map. Empty when the source has no `runLLMTurn`/`runLLMTurnFork` sites
-/// (the extract always writes the file — loud absence beats a silent
-/// missing lookup).
+/// The typed-suspension sidecar indexed by site id. The artifact retains its
+/// historical `asks.json` filename for now, but its in-memory contract is no
+/// longer ask-specific.
 #[derive(Debug, Clone, Default)]
-pub struct AsksSidecar {
-    by_site: HashMap<u32, (String, Vec<String>)>,
+pub struct YieldSites {
+    by_site: HashMap<u32, YieldSite>,
 }
 
-impl AsksSidecar {
-    /// Build a sidecar from `(site, type)` pairs, with no module info — the
-    /// shape `tidepool_runtime::session::CompiledTurn::asks` carries,
-    /// decoded from `run_turn`'s `TurnOut` wire payload for a BIND/EXPR
-    /// verdict (that wire is a separate, unwidened format — see
-    /// `Tidepool.Translate`'s module doc on why `TurnOut.toAsks` stayed
-    /// `(Word64, Text)`). Test-only convenience elsewhere in this crate.
+impl YieldSites {
+    /// Test convenience for answer-only sites with no module information.
     pub fn from_pairs(pairs: Vec<(u32, String)>) -> Self {
-        AsksSidecar {
+        YieldSites {
             by_site: pairs
                 .into_iter()
-                .map(|(site, ty)| (site, (ty, Vec::new())))
+                .map(|(site, ty)| {
+                    (
+                        site,
+                        YieldSite {
+                            site,
+                            ty,
+                            modules: Vec::new(),
+                            inputs: Vec::new(),
+                        },
+                    )
+                })
                 .collect(),
         }
     }
 
-    /// Build a sidecar from `(site, type, modules)` triples — the full
-    /// `asks.json` shape, for tests that need module resolution.
+    /// Build an answer-only lookup from `(site, type, modules)` triples, for tests
+    /// that need output-type module resolution but no live inputs.
     pub fn from_entries(entries: Vec<(u32, String, Vec<String>)>) -> Self {
-        AsksSidecar {
+        YieldSites {
             by_site: entries
                 .into_iter()
-                .map(|(site, ty, modules)| (site, (ty, modules)))
+                .map(|(site, ty, modules)| {
+                    (
+                        site,
+                        YieldSite {
+                            site,
+                            ty,
+                            modules,
+                            inputs: Vec::new(),
+                        },
+                    )
+                })
                 .collect(),
+        }
+    }
+
+    /// Build a lookup from the compiler's complete typed-site records.
+    pub fn from_sites(sites: Vec<YieldSite>) -> Self {
+        Self {
+            by_site: sites.into_iter().map(|site| (site.site, site)).collect(),
         }
     }
 
     /// The rendered answer type for a yield-site id, if the site is known.
     pub fn type_of(&self, site: u32) -> Option<&str> {
-        self.by_site.get(&site).map(|(ty, _)| ty.as_str())
+        self.by_site.get(&site).map(|entry| entry.ty.as_str())
     }
 
     /// The defining modules a shim must import to resolve `site`'s answer
@@ -108,18 +139,24 @@ impl AsksSidecar {
     pub fn modules_of(&self, site: u32) -> &[String] {
         self.by_site
             .get(&site)
-            .map(|(_, modules)| modules.as_slice())
+            .map(|entry| entry.modules.as_slice())
             .unwrap_or(&[])
     }
 
-    /// Every recorded `(site, type, modules)` entry, in no particular order —
-    /// for a caller that needs to find a site by its resolved type/modules
-    /// rather than by a known id (e.g. a test compiling a single-site turn
-    /// without hardcoding extract's site-numbering scheme).
+    /// GHC-derived live input types attached to this suspension site.
+    pub fn inputs_of(&self, site: u32) -> &[SiteType] {
+        self.by_site
+            .get(&site)
+            .map(|entry| entry.inputs.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Every recorded answer `(site, type, modules)` entry, in no particular
+    /// order. Live-input metadata remains available through [`Self::inputs_of`].
     pub fn iter(&self) -> impl Iterator<Item = (u32, &str, &[String])> {
         self.by_site
             .iter()
-            .map(|(site, (ty, modules))| (*site, ty.as_str(), modules.as_slice()))
+            .map(|(site, entry)| (*site, entry.ty.as_str(), entry.modules.as_slice()))
     }
 
     /// Number of recorded sites.
@@ -182,7 +219,7 @@ pub struct SessionInject<'a> {
 /// `meta.cbor`).
 pub struct TargetArtifact {
     pub expr: CoreExpr,
-    pub asks: AsksSidecar,
+    pub asks: YieldSites,
 }
 
 /// The full output of one `tidepool-extract` invocation: a shared constructor
@@ -727,18 +764,13 @@ fn read_asks_bytes(path: &Path) -> Result<Option<Vec<u8>>, CompileError> {
 /// Parse the `asks.json` sidecar's bytes (if the extract wrote one) into a
 /// sidecar. `None` (file absent) yields an empty sidecar; present-but-malformed
 /// bytes are a hard error (a real regression to surface).
-fn parse_asks(bytes: Option<&[u8]>) -> Result<AsksSidecar, CompileError> {
+fn parse_asks(bytes: Option<&[u8]>) -> Result<YieldSites, CompileError> {
     let Some(bytes) = bytes else {
-        return Ok(AsksSidecar::default());
+        return Ok(YieldSites::default());
     };
-    let sites: Vec<AskSite> =
+    let sites: Vec<YieldSite> =
         serde_json::from_slice(bytes).map_err(|e| CompileError::Asks(e.to_string()))?;
-    Ok(AsksSidecar {
-        by_site: sites
-            .into_iter()
-            .map(|s| (s.site, (s.ty, s.modules)))
-            .collect(),
-    })
+    Ok(YieldSites::from_sites(sites))
 }
 
 // ---------------------------------------------------------------------------

@@ -71,6 +71,11 @@ This is the canonical status inventory for the plan.
   resident adapter checks the machine out only for a Haskell segment, compiles
   against the actor's exact source view, and returns a GHC-checked live value
   through the private `Complete result` completion effect.
+- Public `deliberate` is a nominal suspension with no authored type strings or
+  runtime `Typeable` convention. The extractor records each `YieldSite`'s
+  output and live-input types plus their defining modules directly from GHC;
+  the resident adapter mounts the exact rooted input and imports those same
+  compiler-derived modules for every workbench fragment.
 - Typed deliberation has a real GHC/JIT vertical: a rejected wrong-typed
   completion preserves prior declarations and bindings, the corrective round
   completes, the never-run suffix stays unexecuted, and a closure-valued result

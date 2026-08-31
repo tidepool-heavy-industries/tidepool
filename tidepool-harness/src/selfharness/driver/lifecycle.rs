@@ -1323,7 +1323,7 @@ impl SelfHarnessDriver {
                                     // The closure payload is
                                     // DELIVERED by handle — same heap, no
                                     // bridge, no sentinel.
-                                    FinalAnswer::Handle(h) => s.resume_handle(hole.cont_id(), h),
+                                    FinalAnswer::Handle(h) => s.resume_handle(hole, h),
                                 })
                                 .map_err(|e| DriverError::Session(e.to_string()))?
                                 .map_err(|e| {

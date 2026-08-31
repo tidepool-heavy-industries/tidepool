@@ -817,12 +817,14 @@ where
         discarded
     }
 
-    /// Resume the turn parked on `cont_id` by DELIVERING a machine-side
+    /// Resume the turn represented by `hole` by DELIVERING a machine-side
     /// rooted value — the handle's payload feeds the continuation verbatim,
     /// no materialization, closures included. The authored loop receives
     /// closure-valued state transitions this way. Same
     /// validate-before-consume and ground-truth reconciliation as
-    /// [`Self::resume`].
+    /// [`Self::resume`]. The typed hole carries the same binding-completion
+    /// obligation as the ordinary value path; handle delivery cannot silently
+    /// turn a suspended bind into a plain fragment.
     ///
     /// Takes the [`RootCustody`] token by value — this IS the consuming half
     /// of the custody crossing (see that type's doc): the delivery itself
@@ -833,17 +835,20 @@ where
     /// the moment its custody is spent.
     pub fn resume_handle(
         &mut self,
-        cont_id: &str,
+        hole: ResidentHole,
         custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
+        let seed = hole.seed();
+        let (cont_id, bind) = match hole {
+            ResidentHole::Plain(hole) => (hole.id, None),
+            ResidentHole::Binding(hole) => {
+                let bind = Some((hole.binder, hole.generation));
+                (hole.id, bind)
+            }
+        };
         let transfer = custody.into_transfer();
-        let result = self.reenter(
-            cont_id,
-            ResumeInput::Handle(transfer.handle),
-            HoleSeed::Plain,
-            None,
-        );
+        let result = self.reenter(&cont_id, ResumeInput::Handle(transfer.handle), seed, bind);
         if result.is_ok() {
             transfer.commit();
         }
@@ -956,6 +961,92 @@ where
                 scope,
             },
         )?;
+        Ok(())
+    }
+
+    /// Install a rooted live value under a binder GHC has already compiled,
+    /// without evaluating a throwaway placeholder of that type.
+    ///
+    /// `run_turn` writes the binder's thin `Val.G<gen>` interface and returns
+    /// its exact identity. This operation joins that type-plane identity to a
+    /// same-typed in-heap value supplied under affine custody. It is the mount
+    /// path for actor inputs and messages: the authoritative value already
+    /// exists, so running `undefined`, a guessed inhabitant, or a second copy
+    /// merely to create the binding would be both wasteful and semantically
+    /// wrong.
+    ///
+    /// Validation and table merge happen before custody is consumed. On
+    /// success ownership transfers from the handle registry to the scoped
+    /// value plane exactly once.
+    pub fn mount_compiled_binding_in(
+        &mut self,
+        scope: ScopeId,
+        binder: &BoundBinder,
+        gen: Generation,
+        table: &DataConTable,
+        custody: RootCustody,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        if !self.core.scope_tree().is_live(scope) {
+            self.discard_custody(custody);
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        let expected_module = SessionModule::val(gen).module_name();
+        if binder.module != expected_module {
+            self.discard_custody(custody);
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(format!(
+                    "compiled binder `{}` belongs to {}, expected {expected_module}",
+                    binder.name, binder.module
+                )),
+            ))));
+        }
+        self.core
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        let transfer = custody.into_transfer();
+        let handle = transfer.handle;
+        let handle_is_live = self
+            .core
+            .machine()
+            .is_some_and(|machine| machine.handle_slot(handle).is_some());
+        if !handle_is_live {
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(
+                    "compiled binding mount received an unknown or already-consumed handle".into(),
+                ),
+            ))));
+        }
+        self.core.retract_in(scope, &binder.name)?;
+        let Some(slot) = self
+            .core
+            .machine_mut()
+            .and_then(|machine| machine.take_handle_root(handle))
+        else {
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(
+                    "compiled binding mount lost a handle during exclusive session access".into(),
+                ),
+            ))));
+        };
+        transfer.commit();
+        let value = match binder.tier {
+            ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
+            ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+        };
+        self.core.bind_in(
+            scope,
+            BindingEntry {
+                name: BindingName(binder.name.clone()),
+                id: SessionVarId::from_extract(binder.var_id),
+                module: SessionModule::val(gen),
+                value,
+                type_display: Some(binder.type_display.clone()),
+                defining_expr: None,
+                scope,
+            },
+        )?;
+        self.core.set_val_gen(gen);
         Ok(())
     }
 

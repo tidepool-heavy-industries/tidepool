@@ -103,30 +103,21 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 /// executable handler row: callers that run effects still use their actual
 /// narrow handler stack.
 pub fn all_decls() -> Vec<EffectDecl> {
-    vec![
+    let mut declarations = vec![
         crate::console_decl(),
         crate::kv_decl(),
         crate::fs_decl(),
         crate::http_decl(),
-        crate::exec_decl(),
         crate::git_decl(),
         crate::time_decl(),
         crate::entropy_decl(),
         crate::meta_decl(),
         crate::ask_decl(),
-        crate::askuser_decl(),
-        crate::readstate_decl(),
-        crate::runllmturn_decl(),
-        crate::finalize_decl(),
-        crate::fork_decl(),
         crate::llm_decl(),
-        crate::worktree_decl(),
-        crate::event_decl(),
         crate::subagent_decl(),
-        crate::journal_decl(),
-        crate::green_decl(),
-        crate::actor_decl(),
-    ]
+    ];
+    declarations.extend(crate::generated::schema_decls());
+    declarations
 }
 
 /// Source of the STABLE `Tidepool.Effects.Core` module: every authored

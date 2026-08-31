@@ -8,6 +8,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 mod agent_session;
+mod deliberation;
 mod event;
 mod executor;
 mod generated;
@@ -21,6 +22,10 @@ mod wait;
 
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
+};
+pub use deliberation::{
+    DeliberationCaptureError, DeliberationRequest, DeliberationRequestError, ResidentDeliberation,
+    ResidentDeliberationError, ResidentDeliberationExecutor,
 };
 pub use event::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,

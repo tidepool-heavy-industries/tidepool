@@ -131,7 +131,7 @@ pub fn runtime_generated_files() -> Vec<GeneratedFile> {
 /// transitional harness classifier about actor lifecycle.
 #[must_use]
 pub fn actor_generated_files() -> Vec<GeneratedFile> {
-    let effects = vec![effects::actor::actor()];
+    let effects = vec![effects::actor::actor(), effects::deliberate::deliberate()];
     for e in &effects {
         if let Err(problems) = e.validate() {
             panic!("schema is invalid:\n  {}", problems.join("\n  "));

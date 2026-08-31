@@ -1,7 +1,29 @@
 module Tidepool.EffectSchema
   ( VerbSpec(..)
+  , SiteType(..)
+  , YieldSite(..)
   , sitedVerbs
   ) where
+
+import Data.Text (Text)
+import Data.Word (Word64)
+
+-- | One GHC-rendered, monomorphic type crossing a suspension boundary.
+data SiteType = SiteType
+  { stType :: Text
+  , stModules :: [Text]
+  }
+  deriving (Eq, Show)
+
+-- | Compile-time type metadata for one suspension call site. The answer is
+-- always present; @ysInputs@ contains only live inputs an interpreter must
+-- mount back into a typed workbench.
+data YieldSite = YieldSite
+  { ysSite :: Word64
+  , ysAnswer :: SiteType
+  , ysInputs :: [SiteType]
+  }
+  deriving (Eq, Show)
 
 -- | Declarative description of a surface verb rewritten to a site-aware
 -- sibling during Core lowering.
@@ -14,6 +36,7 @@ data VerbSpec = VerbSpec
   , vsValueArity :: Int
   , vsListAnswer :: Bool
   , vsMisShapeIsError :: Bool
+  , vsInputTypeArgs :: [Int]
   }
   deriving (Eq, Show)
 
@@ -23,21 +46,23 @@ data VerbSpec = VerbSpec
 sitedVerbs :: [VerbSpec]
 sitedVerbs =
   [ verb "runLLMTurn" "Tidepool.Effects.Core"
-      "runLLMTurnSited" "Tidepool.Effects.Core" 1 1 False False
+      "runLLMTurnSited" "Tidepool.Effects.Core" 1 1 False False []
   , verb "runLLMTurnFork" "Tidepool.Effects.Core"
-      "runLLMTurnForkSited" "Tidepool.Effects.Core" 1 1 False False
+      "runLLMTurnForkSited" "Tidepool.Effects.Core" 1 1 False False []
   , verb "runLLMTurnFanout" "Tidepool.Effects.Core"
-      "runLLMTurnFanoutSited" "Tidepool.Effects.Core" 1 1 True False
+      "runLLMTurnFanoutSited" "Tidepool.Effects.Core" 1 1 True False []
   , verb "finalize" "Tidepool.Effects.Core"
-      "finalizeSited" "Tidepool.Effects.Core" 2 1 False False
+      "finalizeSited" "Tidepool.Effects.Core" 2 1 False False []
   , verb "fork" "Tidepool.Fork"
-      "forkSited" "Tidepool.Effects.Core" 1 1 False False
+      "forkSited" "Tidepool.Effects.Core" 1 1 False False []
   , verb "forkAll" "Tidepool.Fork"
-      "forkAllSited" "Tidepool.Effects.Core" 1 1 True False
+      "forkAllSited" "Tidepool.Effects.Core" 1 1 True False []
   , verb "forkMap" "Tidepool.Fork"
-      "forkMapSited" "Tidepool.Fork" 2 2 True True
+      "forkMapSited" "Tidepool.Fork" 2 2 True True []
   , verb "forkCata" "Tidepool.Fork"
-      "forkCataSited" "Tidepool.Fork" 2 2 True True
+      "forkCataSited" "Tidepool.Fork" 2 2 True True []
+  , verb "deliberate" "Tidepool.Deliberation"
+      "deliberateSited" "Tidepool.Deliberation" 2 2 False True [1]
   ]
   where
     verb = VerbSpec

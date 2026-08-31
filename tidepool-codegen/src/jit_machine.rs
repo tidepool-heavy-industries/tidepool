@@ -1601,18 +1601,18 @@ impl JitEffectMachine {
                     live_payload,
                 } = park;
                 // A live request value crosses by reference only when the run
-                // ABI names its field and the tolerant bridge reported a
-                // closure there. The same field is then rooted below; there is
-                // no request-wide scan coupled to an unrelated field-1
-                // convention.
+                // policy names its exact field. ClosureField uses the bridge's
+                // sentinel as its gate; ValueField keeps the in-heap value
+                // authoritative even when a data projection also exists.
                 let live_payload_field = match live_payload {
                     LivePayloadPolicy::None => None,
-                    LivePayloadPolicy::RequestField(field)
+                    LivePayloadPolicy::ClosureField(field)
                         if request_field_carries_closure_sentinel(&request, field) =>
                     {
                         Some(field)
                     }
-                    LivePayloadPolicy::RequestField(_) => None,
+                    LivePayloadPolicy::ClosureField(_) => None,
+                    LivePayloadPolicy::ValueField(field) => Some(field),
                 };
                 let has_live_payload = live_payload_field.is_some();
                 // The root rides into `park_continuation` and lands on the

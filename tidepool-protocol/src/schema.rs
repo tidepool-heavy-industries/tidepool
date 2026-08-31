@@ -1564,6 +1564,8 @@ pub enum HandlingClass {
     Green,
     /// Routed to the Rust-owned actor registry and scheduler.
     Actor,
+    /// Runs one typed model/Haskell deliberation inside the current actor.
+    Deliberate,
 }
 
 /// Which driver-owned handler an [`HandlingClass::OuterDispatch`] verb reaches.

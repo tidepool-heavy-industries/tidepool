@@ -55,8 +55,8 @@ use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 
 use crate::effect_trace::{EffectRecord, EffectTrace, TracingDispatcher};
 use crate::engine::{
-    self, AsksSidecar, ClassifiedSuspension, EngineConfig, EngineError, SuspensionRouting,
-    TurnOutcome,
+    self, ClassifiedSuspension, EngineConfig, EngineError, SuspensionRouting, TurnOutcome,
+    YieldSites,
 };
 use crate::forcing::{NodeTree, TreeError};
 use crate::log::{Actor, AnswerOutcome, LogWriter};
@@ -297,7 +297,7 @@ struct PendingSuspension {
     /// Compile artifacts of the turn that suspended — needed to bridge an
     /// answer Value against the same constructor set.
     suspend_table: DataConTable,
-    suspend_asks: AsksSidecar,
+    suspend_asks: YieldSites,
 }
 
 /// A just-created node's staged opening context, held between node creation
@@ -900,7 +900,7 @@ impl Harness {
     /// compile this node's session runs — the seam a fork child's session
     /// uses to resolve its PARENT's decl-plane module by name:
     /// `AnswerContract`'s pin (built from
-    /// [`tidepool_runtime::AsksSidecar::modules_of`]) names the module, and
+    /// [`tidepool_runtime::YieldSites::modules_of`]) names the module, and
     /// this is what makes that name findable on disk. `SessionModule`'s
     /// dotted name (`Tidepool.Session.{Val|Lib}.G<g>`) carries no node
     /// identity, so the file layout under any node's own decl root matches
@@ -1238,8 +1238,10 @@ impl Harness {
 /// a durable log a caller is replaying should not gain a new required
 /// field), so this is a projection at the log-writing boundary, not a
 /// second copy of the asks data.
-fn asks_log_pairs(asks: &[(u32, String, Vec<String>)]) -> Vec<(u32, String)> {
-    asks.iter().map(|(s, t, _)| (*s, t.clone())).collect()
+fn asks_log_pairs(asks: &[tidepool_runtime::YieldSite]) -> Vec<(u32, String)> {
+    asks.iter()
+        .map(|site| (site.site, site.ty.clone()))
+        .collect()
 }
 
 /// The one place the node decl-plane path shape is constructed:
@@ -1781,7 +1783,7 @@ impl Harness {
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
                 self.log_turn_extracted(node, &asks_log_pairs(&compiled.asks), None)?;
-                let asks = AsksSidecar::from_entries(compiled.asks);
+                let asks = YieldSites::from_sites(compiled.asks);
                 let table = compiled.table;
                 let expr = compiled.expr;
 
@@ -2181,7 +2183,7 @@ impl Harness {
                 }
                 TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
                     self.log_turn_extracted(node, &asks_log_pairs(&compiled.asks), None)?;
-                    let asks = AsksSidecar::from_entries(compiled.asks);
+                    let asks = YieldSites::from_sites(compiled.asks);
                     let table = compiled.table;
                     let expr = compiled.expr;
                     let checkout = self.checkout_run_waiting(node).await?;
@@ -2290,7 +2292,7 @@ impl Harness {
         node: NodeId,
         outcome: Result<ResidentOutcome, ResidentError>,
         table: DataConTable,
-        asks: AsksSidecar,
+        asks: YieldSites,
         terminal: bool,
     ) -> Result<engine::TurnOutcome, HarnessError> {
         self.flush_effects(node)?;
@@ -2369,7 +2371,7 @@ impl Harness {
             &asks_log_pairs(&compiled.asks),
             Some((&binder.name, &binder.type_display)),
         )?;
-        let asks = AsksSidecar::from_entries(compiled.asks);
+        let asks = YieldSites::from_sites(compiled.asks);
         let table = compiled.table;
         let expr = compiled.expr;
 
@@ -2531,7 +2533,7 @@ impl Harness {
         HoleId,
         ClassifiedSuspension,
         DataConTable,
-        AsksSidecar,
+        YieldSites,
         Value,
     )> {
         let p = self.node_pending(node)?;
@@ -3758,7 +3760,7 @@ mod tests {
                     raw_request: Value::Con(tidepool_repr::DataConId(0), Vec::new()),
                     resident_hole: ResidentHole::plain(hole.0.clone()),
                     suspend_table: DataConTable::new(),
-                    suspend_asks: AsksSidecar::from_pairs(Vec::new()),
+                    suspend_asks: YieldSites::from_pairs(Vec::new()),
                 },
             )
             .expect("publish");

@@ -12,6 +12,7 @@ import qualified Data.Sequence as Seq
 import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
+import Tidepool.EffectSchema (SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 3.0.
 --
@@ -242,9 +243,18 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp) =
 -- fork/finalize servicing reads it back to pin a fork child's @Finalize@
 -- row) — the asks.json sidecar is a SEPARATE encoding of the identical data
 -- for the multi-target/whole-module compile path.
-encodeAsks :: [(Word64, Text, [Text])] -> Encoding
+encodeAsks :: [YieldSite] -> Encoding
 encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
 
-encodeAsk :: (Word64, Text, [Text]) -> Encoding
-encodeAsk (site, ty, modules) =
-  encodeListLen 3 <> encodeWord64 site <> encodeString ty <> encodeTextList modules
+encodeAsk :: YieldSite -> Encoding
+encodeAsk (YieldSite site (SiteType ty modules) inputs) =
+  encodeListLen 4
+  <> encodeWord64 site
+  <> encodeString ty
+  <> encodeTextList modules
+  <> encodeListLen (fromIntegral (length inputs))
+  <> foldMap encodeSiteType inputs
+
+encodeSiteType :: SiteType -> Encoding
+encodeSiteType (SiteType ty modules) =
+  encodeListLen 2 <> encodeString ty <> encodeTextList modules

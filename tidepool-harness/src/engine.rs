@@ -56,7 +56,7 @@ use tidepool_extract_cmd::ResolvedExtractBin;
 pub use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};
 use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_runtime::session::{assemble_bind_module, insert_preamble_imports, place_turn_stmt};
-pub use tidepool_runtime::AsksSidecar;
+pub use tidepool_runtime::YieldSites;
 use tidepool_runtime::{
     compile_targets, compile_targets_with_stable_inject, CompileError, CompiledArtifacts,
     StableValInject,
@@ -77,7 +77,7 @@ use crate::tree::FanBadge;
 pub struct CompiledTurn {
     pub expr: CoreExpr,
     pub table: DataConTable,
-    pub asks: AsksSidecar,
+    pub asks: YieldSites,
 }
 
 /// Compile `source` with entry binder `target`, searching `include` for
@@ -591,7 +591,7 @@ fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest,
 pub fn classify_hole(
     request: &Value,
     table: &DataConTable,
-    asks: &AsksSidecar,
+    asks: &YieldSites,
 ) -> Result<ClassifiedSuspension, ClassifyError> {
     use crate::generated::{
         ask_user, console, finalize, fork, read_state, run_l_l_m_turn as run_llm_turn,
@@ -736,7 +736,7 @@ fn decode_form_shape(
 /// must agree with the (validated) prompt count.
 fn classify_runllmturn_payload(
     payload: &Json,
-    asks: &AsksSidecar,
+    asks: &YieldSites,
 ) -> Result<SuspensionRouting, ClassifyError> {
     let site = require_site_field(payload, "RunLLMTurnWith", "typedSite")?;
     let ty = asks.type_of(site.get()).map(str::to_string);
@@ -3501,7 +3501,7 @@ mod tests {
 
     #[test]
     fn classify_runllmturn_payload_rejects_missing_site() {
-        let asks = AsksSidecar::from_pairs(vec![]);
+        let asks = YieldSites::from_pairs(vec![]);
         let payload = serde_json::json!({});
         let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
         assert!(
@@ -3518,7 +3518,7 @@ mod tests {
 
     #[test]
     fn classify_runllmturn_payload_rejects_non_numeric_site() {
-        let asks = AsksSidecar::from_pairs(vec![]);
+        let asks = YieldSites::from_pairs(vec![]);
         let payload = serde_json::json!({ "typedSite": "not-a-number" });
         let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
         assert!(
@@ -3536,7 +3536,7 @@ mod tests {
     /// `2^32` must not alias site `0` via an `as u32` truncation.
     #[test]
     fn classify_runllmturn_payload_rejects_out_of_range_site() {
-        let asks = AsksSidecar::from_pairs(vec![]);
+        let asks = YieldSites::from_pairs(vec![]);
         let huge = (u32::MAX as u64) + 1;
         let payload = serde_json::json!({ "typedSite": huge });
         let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
@@ -3555,7 +3555,7 @@ mod tests {
 
     #[test]
     fn classify_runllmturn_payload_rejects_fan_out_of_range() {
-        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let asks = YieldSites::from_pairs(vec![(0, "Text".to_string())]);
         let huge = (u32::MAX as u64) + 1;
         let payload = serde_json::json!({
             "typedSite": 0,
@@ -3579,7 +3579,7 @@ mod tests {
 
     #[test]
     fn classify_runllmturn_payload_rejects_declared_fan_prompt_mismatch() {
-        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let asks = YieldSites::from_pairs(vec![(0, "Text".to_string())]);
         let payload = serde_json::json!({
             "typedSite": 0,
             "fork": true,
@@ -3606,7 +3606,7 @@ mod tests {
     /// cardinality.
     #[test]
     fn classify_runllmturn_payload_rejects_non_text_prompt_element() {
-        let asks = AsksSidecar::from_pairs(vec![(0, "Text".to_string())]);
+        let asks = YieldSites::from_pairs(vec![(0, "Text".to_string())]);
         let payload = serde_json::json!({
             "typedSite": 0,
             "fork": true,
@@ -3630,7 +3630,7 @@ mod tests {
     /// that the added validation doesn't reject well-formed wire data.
     #[test]
     fn classify_runllmturn_payload_accepts_well_formed_fanout() {
-        let asks = AsksSidecar::from_pairs(vec![(3, "[Text]".to_string())]);
+        let asks = YieldSites::from_pairs(vec![(3, "[Text]".to_string())]);
         let payload = serde_json::json!({
             "typedSite": 3,
             "fork": true,
@@ -3655,7 +3655,7 @@ mod tests {
     /// same way — the validation is not fork-only.
     #[test]
     fn classify_runllmturn_payload_rejects_missing_site_on_plain_turn() {
-        let asks = AsksSidecar::from_pairs(vec![]);
+        let asks = YieldSites::from_pairs(vec![]);
         let payload = serde_json::json!({ "fork": false });
         assert!(classify_runllmturn_payload(&payload, &asks).is_err());
     }
@@ -3718,7 +3718,7 @@ mod tests {
     fn classify_hole_rejects_finalize_with_a_non_numeric_site() {
         let mut table = DataConTable::new();
         table.insert(dc(1, "FinalizeWith", 0, 2));
-        let asks = AsksSidecar::from_pairs(vec![]);
+        let asks = YieldSites::from_pairs(vec![]);
         let request = Value::Con(
             DataConId(1),
             vec![
@@ -3767,7 +3767,7 @@ mod tests {
             ],
         );
         let request = Value::Con(DataConId(1), vec![Value::Lit(Literal::LitWord(0)), list]);
-        let asks = AsksSidecar::from_pairs(vec![]);
+        let asks = YieldSites::from_pairs(vec![]);
         let err = classify_hole(&request, &table, &asks).unwrap_err();
         assert!(
             matches!(err, ClassifyError::Decode { ref constructor, .. } if constructor == "ForkAllWith"),

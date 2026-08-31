@@ -170,6 +170,14 @@ impl AdmittedAgentSession {
         self.lease.session_context()
     }
 
+    /// Return this admitted model/Haskell session to the exact authored
+    /// Haskell turn that opened it. The transition is atomic in the actor
+    /// registry: no mailbox or lifecycle turn can enter between typed
+    /// completion and continuation resumption.
+    pub(crate) fn return_to_haskell(self) -> Result<TurnLease, ActorRegistryError> {
+        self.lease.transition(ActorTurnKind::Haskell)
+    }
+
     pub(crate) fn queue_developer(&self, content: impl Into<String>) {
         self.session.queue_developer(content);
     }
@@ -531,7 +539,19 @@ mod tests {
             })
         ));
 
-        drop(admitted);
+        let haskell = admitted
+            .return_to_haskell()
+            .expect("return to authored continuation");
+        assert_eq!(haskell.kind(), ActorTurnKind::Haskell);
+        assert!(matches!(
+            registry.begin_turn(actor, ActorTurnKind::Mailbox),
+            Err(ActorRegistryError::Busy {
+                active: ActorTurnKind::Haskell,
+                ..
+            })
+        ));
+
+        drop(haskell);
         registry
             .begin_turn(actor, ActorTurnKind::Mailbox)
             .expect("transfer guard releases normally");

@@ -33,6 +33,7 @@ import GHC.Driver.Env (HscEnv)
 
 import Tidepool.Binders (renderAskJson)
 import Tidepool.CborEncode (encodeMetadata, encodeTree)
+import Tidepool.EffectSchema (YieldSite)
 import Tidepool.IR (FlatNode)
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Timing (emitPhase, timeSection)
@@ -122,7 +123,7 @@ data TargetWrite = TargetWrite
   , twReachBinds  :: [CoreBind]
   , twVarNames    :: [(Word64, Text)]
   , twHasIO       :: Bool
-  , twAskSites    :: [(Word64, Text, [Text])]
+  , twYieldSites  :: [YieldSite]
   , twPoisoned    :: [(Word64, Text)]
   }
 
@@ -144,14 +145,14 @@ mergePoisonedTables tables =
 writeClosedTargets
   :: Bool -> FilePath -> [CoreBind] -> Maybe Text -> [Text]
   -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
-  -> IO [(String, [(Word64, Text, [Text])])]   -- ^ outFileBase -> runLLMTurn sites
+  -> IO [(String, [YieldSite])]   -- ^ outFileBase -> typed suspension sites
 writeClosedTargets timing outDir binds mCapturedTy warnTexts targets = do
   let multi = length targets > 1
 
   -- Tree and metadata encoding share one timing phase.
   (writes, encodeMsTotal) <- foldM (\(acc, msAcc) (targetName, outFileBase, closed) -> do
       let ClosedModule { cmNodes = nodes, cmUsedDCs = usedDCs, cmReachBinds = reachBinds
-                        , cmVarNames = varNames, cmRunLLMTurnSites = runLLMTurnSites
+                        , cmVarNames = varNames, cmYieldSites = yieldSites
                         , cmPoisoned = poisoned
                         } = closed
       (cbor, ms) <- timeSection (evaluate (encodeTree nodes))
@@ -164,7 +165,7 @@ writeClosedTargets timing outDir binds mCapturedTy warnTexts targets = do
             , twReachBinds  = reachBinds
             , twVarNames    = varNames
             , twHasIO       = targetBindingHasIO binds targetName
-            , twAskSites    = runLLMTurnSites
+            , twYieldSites  = yieldSites
             , twPoisoned    = poisoned
             }
       return (acc ++ [w], msAcc + ms)
@@ -200,8 +201,8 @@ writeClosedTargets timing outDir binds mCapturedTy warnTexts targets = do
       hPutStrLn stderr $ "  Wrote: " ++ outFile ++ " (" ++ show (twNodeCount w) ++ " nodes, " ++ show (BS.length (twCbor w)) ++ " bytes)"
       when multi $ do
         let asksFile = outDir </> asksFileName (twOutFileBase w)
-        writeFile asksFile (renderAsksJson (twAskSites w))
-        hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twAskSites w)) ++ " sites)"
+        writeFile asksFile (renderAsksJson (twYieldSites w))
+        hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twYieldSites w)) ++ " sites)"
 
     let metaFile = outDir </> "meta.cbor"
     BS.writeFile metaFile metaCbor
@@ -210,11 +211,11 @@ writeClosedTargets timing outDir binds mCapturedTy warnTexts targets = do
     -- Always materialize the single-target sidecar, including an empty list.
     when (not multi) $ forM_ writes $ \w -> do
       let asksFile = outDir </> "asks.json"
-      writeFile asksFile (renderAsksJson (twAskSites w))
-      hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twAskSites w)) ++ " sites)"
+      writeFile asksFile (renderAsksJson (twYieldSites w))
+      hPutStrLn stderr $ "  Wrote: " ++ asksFile ++ " (" ++ show (length (twYieldSites w)) ++ " sites)"
   emitPhase timing "write" writeMs
 
-  return [ (twOutFileBase w, twAskSites w) | w <- writes ]
+  return [ (twOutFileBase w, twYieldSites w) | w <- writes ]
 
 -- | Enforce the artifact metadata contract before writing.
 --
@@ -252,7 +253,7 @@ assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
 -- | Translate and emit one target. The compiler binding name and output file
 -- base are separate because session scaffolds use a reserved binding while
 -- callers still consume @result.cbor@.
-writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> Maybe Text -> [Text] -> String -> String -> IO [(Word64, Text, [Text])]
+writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> Maybe Text -> [Text] -> String -> String -> IO [YieldSite]
 writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName outFileBase = do
   closed <- translateTargetClosed timing hscEnv binds targetName
   results <- writeClosedTargets timing outDir binds mCapturedTy warnTexts [(targetName, outFileBase, closed)]
@@ -272,6 +273,6 @@ runMultiTargetClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName
   return ()
 
 -- | Encode the ask sites associated with one emitted target.
-renderAsksJson :: [(Word64, Text, [Text])] -> String
+renderAsksJson :: [YieldSite] -> String
 renderAsksJson sites =
   "[" ++ intercalate "," (map renderAskJson sites) ++ "]"

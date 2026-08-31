@@ -172,7 +172,7 @@ pub fn typed_request_agent_decls_with_delegate() -> Vec<tidepool_mcp::EffectDecl
 impl SelfHarnessDriver {
     /// The [`AnswerContract`] for a hole of type `ty`: pin `finalize` to it
     /// and import `modules` — the defining modules `asks.json` reported for
-    /// `ty` ([`tidepool_runtime::AsksSidecar::modules_of`], resolved by
+    /// `ty` ([`tidepool_runtime::YieldSites::modules_of`], resolved by
     /// extract at the call site from the real type environment) — so the
     /// type resolves to the SAME defining module the outer loop resolved,
     /// meaning the finalized value's constructor ids match at the crossing.
