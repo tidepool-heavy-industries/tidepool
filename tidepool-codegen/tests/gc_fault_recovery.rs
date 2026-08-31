@@ -31,12 +31,12 @@
 //! (via `gc_trigger_call_count`) — a program that never triggers a
 //! collection would make the fault assertions pass vacuously.
 //!
-//! `nextest` runs every test in its own OS process, so the process-global
-//! state used here (`GC_TRIGGER_CALL_COUNT`, the `GC_FAULT_POINT` arm, the
-//! `set_gc_poison`/`set_heap_verify` overrides) never leaks between tests in
-//! this file — no mutex needed here, unlike `signal_safety.rs`'s
-//! `SIGNAL_LOCK` (which guards a genuinely process-shared `JMP_BUF` that
-//! matters even within one process).
+//! `nextest` isolates tests in separate processes, while ordinary `cargo
+//! test` runs this integration binary's tests in parallel. The `serial`
+//! guards below make both runners honor the process-global hook's actual
+//! ownership contract.
+
+use serial_test::serial;
 
 use tidepool_codegen::host_fns::{
     self, arm_gc_fault, gc_trigger_call_count, reset_test_counters, GcFaultPoint,
@@ -58,6 +58,23 @@ use gc_scaffold::{fixup_root, fresh_var, push_spine, reset_ctr, CONS, NIL};
 
 const NURSERY_SIZE: usize = 2 * 1024;
 const SPINE_LEN: i64 = 300;
+
+struct DiagnosticOverrides;
+
+impl DiagnosticOverrides {
+    fn enabled() -> Self {
+        host_fns::set_gc_poison(true);
+        host_fns::set_heap_verify(true);
+        Self
+    }
+}
+
+impl Drop for DiagnosticOverrides {
+    fn drop(&mut self) {
+        host_fns::clear_gc_poison_override();
+        host_fns::clear_heap_verify_override();
+    }
+}
 
 /// Tail-recursive sum fold over a cons-spine, expressed as a self-recursive
 /// `LetRec` lambda (JIT tail-call-optimizes it): same shape as
@@ -202,6 +219,7 @@ fn assert_fault_yields_clean_sigill(point: GcFaultPoint, expr: &CoreExpr) {
 }
 
 #[test]
+#[serial]
 fn during_copy_fault_surfaces_clean_signal_and_process_stays_usable() {
     let (expr, expected) = build_program();
     assert_program_forces_gc_and_is_correct(&expr, expected, "during_copy baseline");
@@ -221,6 +239,7 @@ fn during_copy_fault_surfaces_clean_signal_and_process_stays_usable() {
 }
 
 #[test]
+#[serial]
 fn after_copy_fault_surfaces_clean_signal_and_process_stays_usable() {
     let (expr, expected) = build_program();
     assert_program_forces_gc_and_is_correct(&expr, expected, "after_copy baseline");
@@ -243,9 +262,9 @@ fn after_copy_fault_surfaces_clean_signal_and_process_stays_usable() {
 /// with poison-writes and the post-GC verifier both active, proving neither
 /// knob perturbs the clean-recovery behavior.
 #[test]
+#[serial]
 fn during_copy_fault_is_clean_under_gc_poison_and_heap_verify() {
-    host_fns::set_gc_poison(true);
-    host_fns::set_heap_verify(true);
+    let _overrides = DiagnosticOverrides::enabled();
 
     let (expr, expected) = build_program();
     assert_program_forces_gc_and_is_correct(&expr, expected, "poison+verify baseline");

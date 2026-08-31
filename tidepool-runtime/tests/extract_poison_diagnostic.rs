@@ -15,16 +15,20 @@
 
 use std::process::Command;
 
+use tidepool_extract_cmd::{ExtractCmd, ResolvedExtractBin};
 use tidepool_testing::eval_harness::{prelude_path, require_extract};
 
-#[test]
-fn poisoned_external_is_named_on_stderr_at_extract_time() {
-    require_extract();
-    let extract = std::env::var("TIDEPOOL_EXTRACT").expect("require_extract checked this");
+struct PoisonFixture {
+    _root: tempfile::TempDir,
+    main: std::path::PathBuf,
+    deps: std::path::PathBuf,
+    out: std::path::PathBuf,
+}
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let deps = dir.path().join("deps");
-    let out = dir.path().join("out");
+fn poison_fixture() -> PoisonFixture {
+    let root = tempfile::tempdir().expect("tempdir");
+    let deps = root.path().join("deps");
+    let out = root.path().join("out");
     std::fs::create_dir_all(&deps).expect("mkdir deps");
     std::fs::create_dir_all(&out).expect("mkdir out");
 
@@ -38,9 +42,9 @@ fn poisoned_external_is_named_on_stderr_at_extract_time() {
          {-# NOINLINE helper #-}\n",
     )
     .expect("write Dep.hs");
-    let main_path = dir.path().join("Test.hs");
+    let main = root.path().join("Test.hs");
     std::fs::write(
-        &main_path,
+        &main,
         "{-# LANGUAGE NoImplicitPrelude #-}\n\
          module Test where\n\
          import Tidepool.Prelude\n\
@@ -50,16 +54,34 @@ fn poisoned_external_is_named_on_stderr_at_extract_time() {
     )
     .expect("write Test.hs");
 
+    PoisonFixture {
+        _root: root,
+        main,
+        deps,
+        out,
+    }
+}
+
+fn request_for(fixture: &PoisonFixture, extract: &str) -> ExtractCmd {
+    let mut request = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(extract));
+    request
+        .input(&fixture.main)
+        .output_dir(&fixture.out)
+        .target("main")
+        .include(prelude_path())
+        .include(&fixture.deps);
+    request
+}
+
+#[test]
+fn poisoned_external_is_named_on_stderr_at_extract_time() {
+    require_extract();
+    let extract = std::env::var("TIDEPOOL_EXTRACT").expect("require_extract checked this");
+
+    let fixture = poison_fixture();
+    let request = request_for(&fixture, &extract);
     let output = Command::new(&extract)
-        .arg(&main_path)
-        .arg("--output-dir")
-        .arg(&out)
-        .arg("--target")
-        .arg("main")
-        .arg("--include")
-        .arg(prelude_path())
-        .arg("--include")
-        .arg(&deps)
+        .args(request.worker_argv())
         .env("TIDEPOOL_TEST_FORCE_VALIDATION_ONLY", "Dep")
         .output()
         .expect("run tidepool-extract");
@@ -87,7 +109,7 @@ fn poisoned_external_is_named_on_stderr_at_extract_time() {
     // `0x45 << 56 | slot << 8 | 4`, and meta.cbor's `poisoned` table maps that
     // slot back to the qualified name. Neither half is a side channel — this
     // is the end-to-end proof of item 20(b)'s fix.
-    let expr_bytes = std::fs::read(out.join("main.cbor")).expect("read main.cbor");
+    let expr_bytes = std::fs::read(fixture.out.join("main.cbor")).expect("read main.cbor");
     let expr = tidepool_repr::serial::read_cbor(&expr_bytes).expect("decode main.cbor");
     let slots: Vec<u64> = expr
         .nodes
@@ -110,7 +132,7 @@ fn poisoned_external_is_named_on_stderr_at_extract_time() {
          slot 0 is the anonymous, pre-fix encoding"
     );
 
-    let meta_bytes = std::fs::read(out.join("meta.cbor")).expect("read meta.cbor");
+    let meta_bytes = std::fs::read(fixture.out.join("meta.cbor")).expect("read meta.cbor");
     let (_, warnings) =
         tidepool_repr::serial::read_metadata(&meta_bytes).expect("decode meta.cbor");
     for slot in &slots {
@@ -136,44 +158,10 @@ fn healthy_extraction_prints_no_poison_diagnostic() {
     require_extract();
     let extract = std::env::var("TIDEPOOL_EXTRACT").expect("require_extract checked this");
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let deps = dir.path().join("deps");
-    let out = dir.path().join("out");
-    std::fs::create_dir_all(&deps).expect("mkdir deps");
-    std::fs::create_dir_all(&out).expect("mkdir out");
-
-    std::fs::write(
-        deps.join("Dep.hs"),
-        "{-# LANGUAGE NoImplicitPrelude #-}\n\
-         module Dep where\n\
-         import Tidepool.Prelude\n\
-         helper :: Int -> Int\n\
-         helper n = n + 1\n\
-         {-# NOINLINE helper #-}\n",
-    )
-    .expect("write Dep.hs");
-    let main_path = dir.path().join("Test.hs");
-    std::fs::write(
-        &main_path,
-        "{-# LANGUAGE NoImplicitPrelude #-}\n\
-         module Test where\n\
-         import Tidepool.Prelude\n\
-         import qualified Dep\n\
-         main :: Int\n\
-         main = Dep.helper 41\n",
-    )
-    .expect("write Test.hs");
-
+    let fixture = poison_fixture();
+    let request = request_for(&fixture, &extract);
     let output = Command::new(&extract)
-        .arg(&main_path)
-        .arg("--output-dir")
-        .arg(&out)
-        .arg("--target")
-        .arg("main")
-        .arg("--include")
-        .arg(prelude_path())
-        .arg("--include")
-        .arg(&deps)
+        .args(request.worker_argv())
         .output()
         .expect("run tidepool-extract");
 

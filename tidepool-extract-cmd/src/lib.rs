@@ -572,6 +572,15 @@ impl ExtractCmd {
         self.request.encode()
     }
 
+    /// Exact argv consumed by the compiler worker: the version marker and
+    /// encoded typed request. Most callers should use [`Self::run`]; this is
+    /// for wrappers and tests that must add process-level instrumentation
+    /// such as fault-injection environment variables without reconstructing
+    /// the transport encoding.
+    pub fn worker_argv(&self) -> Vec<OsString> {
+        self.request.worker_argv()
+    }
+
     /// Spawn, wait, and classify — through this command's own [`Launcher`].
     ///
     /// If `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a working daemon, send the
