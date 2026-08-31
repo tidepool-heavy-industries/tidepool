@@ -55,12 +55,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     ("Deliberate", &["DeliberateWith"]),
     (
         "Actor",
-        &[
-            "ActorTerminalStatus",
-            "ActorPromoteWith",
-            "ActorStartWith",
-            "ActorWaitWith",
-        ],
+        &["ActorTerminalStatus", "ActorStartWith", "ActorWaitWith"],
     ),
     ("ActorLocal", &["ActorReadyWith"]),
 ];

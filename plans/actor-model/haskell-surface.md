@@ -145,7 +145,7 @@ runtime.
 
 An actor definition is the ordinary Haskell record a model authors. Public
 construction has one path: pass that definition to `startActor`. Exact-source
-capture, live-root transfer, facade compilation, and deployment receipts are
+capture, live-root transfer, and facade compilation are
 private steps inside that operation, not model-facing values or verbs.
 
 ```haskell

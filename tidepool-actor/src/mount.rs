@@ -31,7 +31,6 @@ pub struct ActorPlacement {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActorSourceImports {
     imports: SourceImports,
-    facade_receipts: Vec<String>,
 }
 
 impl ActorSourceImports {
@@ -42,16 +41,7 @@ impl ActorSourceImports {
         let facades: Vec<_> = facades.into_iter().collect();
         Self {
             imports: SourceImports::from_specs(facades.iter().map(|facade| facade.module_name())),
-            facade_receipts: facades
-                .iter()
-                .map(|facade| facade.identity().digest().to_string())
-                .collect(),
         }
-    }
-
-    #[must_use]
-    pub fn contains_receipt(&self, receipt: &str) -> bool {
-        self.facade_receipts.iter().any(|known| known == receipt)
     }
 }
 

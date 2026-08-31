@@ -13,7 +13,6 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum ActorReq {
-    ActorPromoteWith,
-    ActorStartWith(String, tidepool_eval::value::Value, String),
+    ActorStartWith(String, tidepool_eval::value::Value),
     ActorWaitWith((i64, i64)),
 }

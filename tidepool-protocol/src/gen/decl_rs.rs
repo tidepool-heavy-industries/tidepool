@@ -79,11 +79,17 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         } else {
             contents.push_str("    (\n");
             contents.push_str(&format!("        {},\n", rust_string_literal(effect.name)));
-            contents.push_str("        &[\n");
-            for name in hidden {
-                contents.push_str(&format!("            {},\n", rust_string_literal(name)));
+            let hidden: Vec<_> = hidden.into_iter().map(rust_string_literal).collect();
+            let compact_hidden = format!("&[{}]", hidden.join(", "));
+            if 8 + compact_hidden.len() <= 100 {
+                contents.push_str(&format!("        {compact_hidden},\n"));
+            } else {
+                contents.push_str("        &[\n");
+                for name in hidden {
+                    contents.push_str(&format!("            {name},\n"));
+                }
+                contents.push_str("        ],\n");
             }
-            contents.push_str("        ],\n");
             contents.push_str("    ),\n");
         }
     }

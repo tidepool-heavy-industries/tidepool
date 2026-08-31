@@ -15,9 +15,9 @@ use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution,
-    MaterializedFacade, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, SessionRunContext, TurnRequest, TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution, OutputSink,
+    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
+    SessionRunContext, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -137,8 +137,6 @@ pub enum ResidentActorWorkbenchError {
     Bridge(#[from] tidepool_bridge::BridgeError),
     #[error(transparent)]
     DeliberationCapture(#[from] crate::DeliberationCaptureError),
-    #[error(transparent)]
-    Promotion(#[from] crate::ActorPromotionError),
     #[error(transparent)]
     StartCapture(#[from] crate::ActorStartCaptureError),
 }
@@ -307,17 +305,18 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    /// Materialize the exact source facade requested by `startActor`'s private
-    /// sealing suspension and resume that exact continuation with its
-    /// content-addressed receipt.
-    pub async fn promote_definition(
+    /// Claim and seal the live child entry carried by one public `startActor`
+    /// suspension. The same checked-out operation derives its exact source
+    /// facade, mints an isolated lexical scope, and rehomes the entry into the
+    /// unpublished child's fresh resource realm.
+    pub async fn capture_start(
         &self,
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
-    ) -> Result<(ResidentOutcome, MaterializedFacade), ResidentActorWorkbenchError> {
+    ) -> Result<crate::ResidentActorStart, ResidentActorWorkbenchError> {
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "actor promotion completed without suspending".into(),
+                "actor start completed without suspending".into(),
             ));
         };
         self.access
@@ -329,44 +328,15 @@ where
                         context.live_payload,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                crate::promote_checked_out(session, hole, &request)
-                    .map_err(ResidentActorWorkbenchError::Promotion)
-            })
-            .await
-    }
-
-    /// Mint a fresh lexical scope with no parent-session ancestry. Exact
-    /// promoted facades are attached later by the actor descriptor.
-    pub async fn mint_isolated_scope(
-        &self,
-        context: crate::ActorSessionContext,
-    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                Ok(session.mint_isolated_scope())
-            })
-            .await
-    }
-
-    /// Claim the live child entry carried by one public `startActor`
-    /// suspension. The entry is immediately rehomed into the unpublished
-    /// child's resource realm.
-    pub async fn capture_start(
-        &self,
-        context: crate::ActorSessionContext,
-        outcome: ResidentOutcome,
-        child_realm: RealmId,
-    ) -> Result<crate::ResidentActorStart, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "actor start completed without suspending".into(),
-            ));
-        };
-        self.access
-            .with_machine(context, move |session, _, _| {
                 let table = session.data_con_table().clone();
-                crate::ResidentActorStart::capture(session, hole, &request, &table, child_realm)
-                    .map_err(ResidentActorWorkbenchError::StartCapture)
+                crate::ResidentActorStart::capture(
+                    session,
+                    hole,
+                    &request,
+                    &table,
+                    context.placement.session,
+                )
+                .map_err(ResidentActorWorkbenchError::StartCapture)
             })
             .await
     }

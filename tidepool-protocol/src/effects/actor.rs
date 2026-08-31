@@ -80,15 +80,6 @@ pub fn actor() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
-                ctor: "ActorPromoteWith",
-                method: "actor_promote_with",
-                args: vec![],
-                ret: HsType::Text,
-                errors: None,
-                handling: HandlingClass::Actor,
-                extract: None,
-            },
-            Verb {
                 ctor: "ActorStartWith",
                 method: "actor_start_with",
                 args: vec![
@@ -107,11 +98,6 @@ pub fn actor() -> Effect {
                             ),
                         ),
                         rust: RustBinding::CoreValue,
-                    },
-                    Arg {
-                        name: "promotion",
-                        ty: HsType::Text,
-                        rust: RustBinding::Derived,
                     },
                 ],
                 ret: address_type(),

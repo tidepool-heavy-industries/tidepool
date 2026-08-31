@@ -77,7 +77,6 @@ startActor
   -> startup
   -> Eff effs (ActorRef api exit)
 startActor (ActorDefinition label startupAction install) startup = do
-  receipt <- send ActorPromoteWith
   let cell = newExitCell startup
       entry _ = do
         initial <- startupAction startup
@@ -85,7 +84,7 @@ startActor (ActorDefinition label startupAction install) startup = do
         result <- install startup initial
         case fillExitCell cell result of
           () -> pure ()
-  (actorId, incarnation) <- send (ActorStartWith label entry receipt)
+  (actorId, incarnation) <- send (ActorStartWith label entry)
   pure (ActorRef actorId incarnation cell)
 
 -- | Start a supervised one-shot actor and wait for its exact terminal value.

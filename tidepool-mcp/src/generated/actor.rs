@@ -8,8 +8,7 @@ pub fn actor_decl() -> crate::EffectDecl {
         description: "Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; the constructors in this effect are runtime substrate, not a second public API.",
         prompt_card: Some("`Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits."),
         constructors: &[
-            "ActorPromoteWith :: Actor Text",
-            "ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Text -> Actor (Int, Int)",
+            "ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)",
             "ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus",
         ],
         type_defs: &[

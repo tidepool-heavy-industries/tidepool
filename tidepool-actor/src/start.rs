@@ -5,6 +5,8 @@
 //! starts it through `ResidentSession::run_rooted_entry`, the same entry
 //! primitive used by green threads.
 
+use std::collections::BTreeSet;
+
 use tidepool_bridge::{BridgeError, FromCore};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
@@ -12,7 +14,7 @@ use tidepool_eval::Value;
 use tidepool_model::{DynModelProvider, StreamSink};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{
-    OutputSink, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
+    MaterializedFacade, OutputSink, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
 };
 
 use crate::generated::actor::ActorReq;
@@ -22,16 +24,10 @@ use crate::{
     ResidentDeliberationExecutor, StartInitiator, TurnLease,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActorStartRequest {
-    pub label: String,
-    pub promotion: String,
-}
-
 /// One parked parent continuation paired with exclusive custody of its child
 /// entry. Compiler provenance travels with the rooted entry itself.
 pub struct ResidentActorStart {
-    request: ActorStartRequest,
+    descriptor: ActorDescriptor,
     parent_hole: ResidentHole,
     entry: RootCustody,
 }
@@ -44,6 +40,12 @@ pub enum ActorStartCaptureError {
     UnexpectedRequest,
     #[error("actor start suspended without its child entry live payload")]
     MissingEntry,
+    #[error(transparent)]
+    ExactExports(#[from] tidepool_runtime::session::ExactExportError),
+    #[error(transparent)]
+    Facade(#[from] tidepool_runtime::session::ExactFacadeError),
+    #[error("actor start has no live declaration plane")]
+    NoCompileView,
 }
 
 impl ResidentActorStart {
@@ -56,36 +58,73 @@ impl ResidentActorStart {
         parent_hole: ResidentHole,
         request: &Value,
         table: &DataConTable,
-        child_realm: RealmId,
+        session_id: tidepool_repr::SessionId,
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let ActorReq::ActorStartWith(label, _entry_projection, promotion) =
+        let ActorReq::ActorStartWith(label, _entry_projection) =
             ActorReq::from_value(request, table)?
         else {
             return Err(ActorStartCaptureError::UnexpectedRequest);
         };
+        let child_realm = RealmId::fresh();
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
             .ok_or(ActorStartCaptureError::MissingEntry)?;
+        let facade = materialize_entry_facade(session, &entry)?;
+        let lexical_scope = session.mint_isolated_scope();
+        let descriptor = ActorDescriptor::new(
+            label.clone(),
+            ["Actor", "ActorLocal", "Deliberate"],
+            crate::ActorPlacement {
+                session: session_id,
+                resource_scope: child_realm,
+                lexical_scope,
+            },
+        )
+        .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         Ok(Self {
-            request: ActorStartRequest { label, promotion },
+            descriptor,
             parent_hole,
             entry,
         })
     }
 
-    #[must_use]
-    pub fn request(&self) -> &ActorStartRequest {
-        &self.request
-    }
-
     /// Consume the capture into the exact parent obligation and child entry.
-    pub fn into_parts(self) -> (ResidentHole, RootCustody) {
-        (self.parent_hole, self.entry)
+    pub fn into_parts(self) -> (ActorDescriptor, ResidentHole, RootCustody) {
+        (self.descriptor, self.parent_hole, self.entry)
     }
+}
+
+fn materialize_entry_facade<H, O>(
+    session: &ResidentSession<H, O>,
+    entry: &RootCustody,
+) -> Result<MaterializedFacade, ActorStartCaptureError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let mut heads = BTreeSet::new();
+    for site in entry.provenance().sites() {
+        for head in site
+            .heads
+            .iter()
+            .chain(site.inputs.iter().flat_map(|input| input.heads.iter()))
+        {
+            if head.module.starts_with("Tidepool.Session.Lib.G") {
+                heads.insert(head.name.clone());
+            }
+        }
+    }
+    let scope = session.run_context().lexical_scope;
+    let names: Vec<_> = heads.iter().map(String::as_str).collect();
+    let surface = session.exact_exports_in(scope, &names)?;
+    let view = session
+        .compile_view_in(scope)
+        .ok_or(ActorStartCaptureError::NoCompileView)?;
+    Ok(surface.materialize(&view)?)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -96,10 +135,6 @@ pub enum ResidentActorStartError {
     Workbench(#[from] ResidentActorWorkbenchError),
     #[error(transparent)]
     Deliberation(#[from] ResidentDeliberationError),
-    #[error("actor start carried an unknown or stale promotion receipt")]
-    InvalidPromotion,
-    #[error("actor start label {request:?} does not match descriptor label {descriptor:?}")]
-    DescriptorLabel { request: String, descriptor: String },
 }
 
 /// Runtime-owned prompted startup. This is orchestration over the permanent
@@ -134,32 +169,19 @@ where
     pub async fn start(
         &self,
         parent_turn: TurnLease,
-        descriptor: ActorDescriptor,
         provider: &dyn DynModelProvider,
         start: ResidentActorStart,
         sink: Option<StreamSink>,
     ) -> Result<(TurnLease, crate::ActorRef, ResidentOutcome), ResidentActorStartError> {
         let owner = parent_turn.actor();
         let parent_context = parent_turn.session_context();
+        let (descriptor, parent_hole, entry) = start.into_parts();
         let child_realm = descriptor.placement().resource_scope;
-        if descriptor.label() != start.request().label {
-            return Err(ResidentActorStartError::DescriptorLabel {
-                request: start.request().label.clone(),
-                descriptor: descriptor.label().to_owned(),
-            });
-        }
-        if !descriptor
-            .source_imports()
-            .contains_receipt(&start.request().promotion)
-        {
-            return Err(ResidentActorStartError::InvalidPromotion);
-        }
         let starting =
             self.registry
                 .begin_start(Some(owner), descriptor, StartInitiator::Policy)?;
         let child_session = self.registry.startup_agent_session(&starting)?;
         let child_context = self.registry.session_context(starting.actor())?;
-        let (parent_hole, entry) = start.into_parts();
 
         let startup_result = async {
             let mut admitted = child_session.begin_startup_agent_session(&starting)?;

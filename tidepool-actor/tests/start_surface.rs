@@ -8,8 +8,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tidepool_actor::{
     ActorDescriptor, ActorLifecycle, ActorMachineRegistry, ActorPlacement, ActorRegistry,
-    ActorSourceImports, ActorTurnKind, ActorWorkbenchSource, ResidentActorRunner,
-    ResidentActorStarter, ResidentDeliberationExecutor, StartInitiator,
+    ActorTurnKind, ActorWorkbenchSource, ResidentActorRunner, ResidentActorStarter,
+    ResidentDeliberationExecutor, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -137,14 +137,14 @@ in do
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
-    let promotion = machine
+    let start_outcome = machine
         .run_with_sites(
             "start_parent",
             &compiled.expr,
             &compiled.table,
             &compiled.asks,
         )
-        .expect("run parent to promotion suspension");
+        .expect("run parent to start suspension");
 
     let machines = Arc::new(ActorMachineRegistry::new());
     assert!(machines.insert_idle(session_id, machine).is_none());
@@ -174,32 +174,10 @@ in do
     let workbench_source = ActorWorkbenchSource::new(preamble, include);
     let runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone());
 
-    let (start_outcome, facade) = runner
-        .promote_definition(parent_context.clone(), promotion)
-        .await
-        .expect("promote exact actor surface");
-    let child_scope = runner
-        .mint_isolated_scope(parent_context.clone())
-        .await
-        .expect("mint isolated child scope");
-    let child_realm = RealmId::fresh();
     let start = runner
-        .capture_start(parent_context, start_outcome, child_realm)
+        .capture_start(parent_context, start_outcome)
         .await
-        .expect("capture child entry");
-    assert_eq!(start.request().label, "worker");
-    assert_eq!(start.request().promotion, facade.identity().digest());
-
-    let child_descriptor = ActorDescriptor::new(
-        "worker",
-        ["Actor", "ActorLocal", "Deliberate"],
-        ActorPlacement {
-            session: session_id,
-            resource_scope: child_realm,
-            lexical_scope: child_scope,
-        },
-    )
-    .with_source_imports(ActorSourceImports::from_exact_facades([&facade]));
+        .expect("capture and seal child entry");
     let deliberations = ResidentDeliberationExecutor::new(Arc::clone(&machines), workbench_source);
     let starter = ResidentActorStarter::new(registry.clone(), runner, deliberations);
     let provider = ApprovesStartup {
@@ -207,11 +185,18 @@ in do
     };
 
     let (parent_turn, child, parent_outcome) = starter
-        .start(parent_turn, child_descriptor, &provider, start, None)
+        .start(parent_turn, &provider, start, None)
         .await
-        .expect("start promoted actor");
+        .expect("start sealed actor");
     assert_eq!(parent_turn.kind(), ActorTurnKind::Haskell);
     drop(parent_turn);
+    assert_eq!(
+        registry
+            .descriptor(child)
+            .expect("child descriptor")
+            .label(),
+        "worker"
+    );
     assert_eq!(provider.requests.lock().len(), 1);
     assert_eq!(registry.lifecycle(child), Ok(ActorLifecycle::Exited));
     match parent_outcome {

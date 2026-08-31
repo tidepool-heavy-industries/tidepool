@@ -93,8 +93,8 @@ This is the canonical status inventory for the plan.
   there is no second actor dispatcher or program-root registry.
 - The construction substrate exposes one public `ActorDefinition` ->
   `startActor` route. Its private sealing step materializes a content-addressed
-  exact facade from GHC provenance, and startup revalidates that receipt before
-  allocation. A real GHC/JIT/provider vertical covers sealing, isolated
+  exact facade directly from the rooted entry's GHC provenance while capturing
+  the sole start suspension. A real GHC/JIT/provider vertical covers sealing, isolated
   startup, one result-bearing session, realm-checked readiness, child completion,
   and parent resume.
 - Effect-schema metadata centrally curates authored constructors, supporting
@@ -331,8 +331,9 @@ second monad or altered stack—controls which `ActorLocal` operations are legal
 
 The landed vertical starts one checked-in definition through the public
 operation and derives an initial exact facade from compiler provenance. A
-private deployment value carries that content-addressed receipt into startup,
-which revalidates it before child allocation. Stage 5 completes the membrane with an
+single private capture owns the rooted entry, derives the facade, mints the
+isolated child scope, and assembles immutable launch metadata without routing a
+deployment token through authored Haskell. Stage 5 completes the membrane with an
 authored exact-export manifest and definition/facade coherence probes; it
 strengthens this same operation rather than adding another construction path
 or image registry.
@@ -355,8 +356,8 @@ add a program-root registry beside the resident continuation machinery.
 
 ### Startup sequence
 
-1. internally seal the definition, validate its opaque receipt, and authorize
-   the caller to instantiate it;
+1. capture the rooted definition entry, derive its exact facade from compiler
+   provenance, and authorize the caller to instantiate it;
 2. allocate an unpublished child identity, scope, resource realm, interpreter,
    conversation, exit cell, and ownership edge;
 3. deploy the authored exact program facade into a fresh lexical scope;
@@ -437,8 +438,8 @@ for proving application-message semantics.
 
 ## 8. Stage 5 — profiles, dynamic sealing, and caller-checked authority
 
-The private sealing suspension, content-addressed facade receipt, and startup
-revalidation already exist behind `startActor`. Complete that membrane so a
+The single private start capture already derives a content-addressed exact facade
+behind `startActor`. Complete that membrane so a
 model can start a newly defined actor without weakening the checked-in vertical.
 
 Land the two initial named profiles through this same path:
