@@ -187,6 +187,7 @@ impl SelfHarnessDriver {
         kind: engine::OuterEffectKind,
         request: &Value,
         table: &DataConTable,
+        terminal_async: &[i64],
     ) -> Result<Value, DriverError> {
         if kind == engine::OuterEffectKind::Console {
             if let Ok(tidepool_handlers::ConsoleReq::Print(text)) =
@@ -223,6 +224,23 @@ impl SelfHarnessDriver {
                         "set_event_handler",
                     )
                 })?;
+                // `waitEvent` is level-correct: the scheduler owns the sole
+                // green-thread state table, and supplies its terminal ids at
+                // subscription time. Do not create a second terminal-state
+                // registry in the event handler.
+                if let Ok(tidepool_handlers::RepoEventReq::RepoEventSubscribe(watches)) =
+                    <tidepool_handlers::RepoEventReq as tidepool_bridge::FromCore>::from_value(
+                        request, table,
+                    )
+                {
+                    let result = handler.repo_event_subscribe_with_terminal_async(
+                        watches,
+                        terminal_async.iter().copied(),
+                    );
+                    return tidepool_bridge::ToCore::to_value(&result, table).map_err(|e| {
+                        DriverError::Session(format!("RepoEvent subscribe encode: {e}"))
+                    });
+                }
                 Self::dispatch_outer_effect(handler, request, table)
             }
             engine::OuterEffectKind::Exec => {

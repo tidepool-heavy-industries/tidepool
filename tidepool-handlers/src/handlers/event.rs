@@ -176,6 +176,11 @@ impl Default for EventConfig {
 /// has already lost an observation.
 #[derive(Debug)]
 struct Subscription {
+    /// The driver lifecycle epoch that owns this registration. `None` is for
+    /// direct handler users (including the unit-only registry); a resident
+    /// driver always installs an explicit owner and closes it on every cycle
+    /// exit, including an error path that bypasses Haskell's unsubscribe.
+    owner: Option<u64>,
     watches: Vec<EvWatch>,
     queue: VecDeque<EvRepositoryEvent>,
     /// Observations this subscription lost to the bound. Nonzero means
@@ -246,6 +251,10 @@ impl SubscriptionRegistry {
     /// own, so THIS call is where "now" is read and the absolute deadline is
     /// fixed.
     pub fn subscribe(&mut self, watches: Vec<EvWatch>) -> EvSubscriptionId {
+        self.subscribe_owned(watches, None)
+    }
+
+    fn subscribe_owned(&mut self, watches: Vec<EvWatch>, owner: Option<u64>) -> EvSubscriptionId {
         let now = Instant::now();
         let pending_deadlines = watches
             .iter()
@@ -260,6 +269,7 @@ impl SubscriptionRegistry {
         self.subs.push((
             raw,
             Subscription {
+                owner,
                 watches,
                 queue: VecDeque::new(),
                 dropped: 0,
@@ -268,6 +278,74 @@ impl SubscriptionRegistry {
             },
         ));
         EvSubscriptionId { raw }
+    }
+
+    /// Queue a retained mailbox message for one newly-created subscription.
+    /// Retained entries have already been coalesced by `MailboxTable`, so this
+    /// only needs the ordinary bounded-delivery rule.
+    fn queue_retained_mailbox(
+        &mut self,
+        id: EvSubscriptionId,
+        mailbox: i64,
+        key: String,
+        payload: serde_json::Value,
+    ) {
+        let bound = self.bound;
+        let event_id = EvEventId {
+            raw: self.event_ids.next_raw() as i64,
+        };
+        let Some(sub) = self.lookup_mut(id.raw) else {
+            return;
+        };
+        if sub.poisoned() || sub.queue.len() >= bound {
+            sub.dropped += 1;
+            return;
+        }
+        let idx = sub.queue.len();
+        sub.queue.push_back(EvRepositoryEvent::ObservedMessage(
+            event_id, mailbox, payload,
+        ));
+        sub.mailbox_slots.insert((mailbox, key), idx);
+    }
+
+    /// A terminal async state is level-triggered at registration: queue it
+    /// for this subscription only, rather than pretending a past transition
+    /// can be broadcast again.
+    pub fn observe_terminal_async(&mut self, id: EvSubscriptionId, tid: i64) {
+        let bound = self.bound;
+        let event_id = EvEventId {
+            raw: self.event_ids.next_raw() as i64,
+        };
+        let Some(sub) = self.lookup_mut(id.raw) else {
+            return;
+        };
+        if !sub
+            .watches
+            .iter()
+            .any(|w| matches!(w, EvWatch::WatchAsync(i) if *i == tid))
+        {
+            return;
+        }
+        if sub.poisoned() || sub.queue.len() >= bound {
+            sub.dropped += 1;
+            return;
+        }
+        sub.queue
+            .push_back(EvRepositoryEvent::ObservedAsyncDone(event_id, tid));
+    }
+
+    pub fn close_owner(&mut self, owner: u64) {
+        self.subs.retain(|(_, sub)| sub.owner != Some(owner));
+    }
+
+    fn has_healthy_mailbox_receiver(&self, mailbox: i64) -> bool {
+        self.subs.iter().any(|(_, sub)| {
+            !sub.poisoned()
+                && sub
+                    .watches
+                    .iter()
+                    .any(|w| matches!(w, EvWatch::WatchMailbox(m) if *m == mailbox))
+        })
     }
 
     /// Queue exactly one `Tick` for every pending deadline that has passed
@@ -702,16 +780,26 @@ fn domain_kind_to_wire(k: &tidepool_worktree::HeadChangeKind) -> EvHeadChangeKin
 // Capability mailboxes
 // ============================================================================
 
-/// Mailbox identity: minted ids and which are still live. Independent of
-/// subscriptions — a mailbox can exist with zero watchers, same as a
-/// worktree can be reconciled with zero subscribers. Possession of the
-/// minted `Int` is the whole capability: this table is an implementation
-/// detail of the effect, never an address space the authored surface reasons
-/// about — no lookup-by-name, no enumeration, no addressing verb.
+/// Mailbox identity and its undelivered keyed messages. A mailbox is a
+/// capability source, not an alias for a currently-live subscription: sends
+/// made before a receiver registers remain here until one matching receiver
+/// consumes them. Possession of the minted `Int` is the whole capability;
+/// this is never an address space the authored surface reasons about.
 #[derive(Debug)]
 struct MailboxTable {
     ids: MonotonicIdIssuer,
     live: HashSet<i64>,
+    /// Global first-arrival order across mailboxes. A same-key replacement
+    /// updates the payload in place, retaining that first position.
+    pending: VecDeque<PendingMailboxMessage>,
+    pending_slots: HashMap<(i64, String), usize>,
+}
+
+#[derive(Debug)]
+struct PendingMailboxMessage {
+    mailbox: i64,
+    key: String,
+    payload: serde_json::Value,
 }
 
 impl MailboxTable {
@@ -719,6 +807,8 @@ impl MailboxTable {
         Self {
             ids: MonotonicIdIssuer::new("mailbox"),
             live: HashSet::new(),
+            pending: VecDeque::new(),
+            pending_slots: HashMap::new(),
         }
     }
 
@@ -736,7 +826,56 @@ impl MailboxTable {
     /// never minted or already dropped — the caller turns that into a typed
     /// `EventUnknownMailbox`.
     fn drop_mailbox(&mut self, id: i64) -> bool {
-        self.live.remove(&id)
+        if !self.live.remove(&id) {
+            return false;
+        }
+        self.pending.retain(|message| message.mailbox != id);
+        self.reindex_pending();
+        true
+    }
+
+    fn retain(&mut self, mailbox: i64, key: String, payload: serde_json::Value) {
+        let slot = (mailbox, key.clone());
+        if let Some(&idx) = self.pending_slots.get(&slot) {
+            self.pending[idx].payload = payload;
+            return;
+        }
+        let idx = self.pending.len();
+        self.pending.push_back(PendingMailboxMessage {
+            mailbox,
+            key,
+            payload,
+        });
+        self.pending_slots.insert(slot, idx);
+    }
+
+    /// Consume retained messages selected by this subscription. A mailbox is
+    /// single-consumer while idle; once a receiver is live, later sends use
+    /// Event's normal broadcast delivery to every live receiver.
+    fn take_matching(&mut self, watches: &[EvWatch]) -> Vec<PendingMailboxMessage> {
+        let mut taken = Vec::new();
+        let mut retained = VecDeque::new();
+        while let Some(message) = self.pending.pop_front() {
+            let matches = watches.iter().any(|watch| {
+                matches!(watch, EvWatch::WatchMailbox(mailbox) if *mailbox == message.mailbox)
+            });
+            if matches {
+                taken.push(message);
+            } else {
+                retained.push_back(message);
+            }
+        }
+        self.pending = retained;
+        self.reindex_pending();
+        taken
+    }
+
+    fn reindex_pending(&mut self) {
+        self.pending_slots.clear();
+        for (idx, message) in self.pending.iter().enumerate() {
+            self.pending_slots
+                .insert((message.mailbox, message.key.clone()), idx);
+        }
     }
 }
 
@@ -755,6 +894,7 @@ pub struct RepoEventHandler {
     poll_interval: Duration,
     last_pass: Option<Instant>,
     mailboxes: MailboxTable,
+    active_owner: Option<u64>,
 }
 
 impl RepoEventHandler {
@@ -790,6 +930,7 @@ impl RepoEventHandler {
             poll_interval: config.poll_interval,
             last_pass: None,
             mailboxes: MailboxTable::new(),
+            active_owner: None,
         }
     }
 
@@ -799,6 +940,21 @@ impl RepoEventHandler {
 
     pub fn registry_mut(&mut self) -> &mut SubscriptionRegistry {
         &mut self.registry
+    }
+
+    /// Start one driver-owned lifecycle epoch. The driver closes exactly this
+    /// owner on every cycle exit; authored happy-path unsubscribe remains an
+    /// early release, not the only cleanup mechanism.
+    pub fn begin_owner(&mut self, owner: u64) {
+        assert!(self.active_owner.is_none(), "event owner already active");
+        self.active_owner = Some(owner);
+    }
+
+    pub fn end_owner(&mut self, owner: u64) {
+        if self.active_owner == Some(owner) {
+            self.registry.close_owner(owner);
+            self.active_owner = None;
+        }
     }
 
     /// Run one reconciliation pass over every watched worktree and broadcast
@@ -843,7 +999,34 @@ impl RepoEventHandler {
         // the first DRAIN, after this subscription is live, so movement that
         // happened while nobody was subscribed reaches it instead of being
         // quietly absorbed by the act of registering. See the module docs.
-        Ok(self.registry.subscribe(watches))
+        let sub = self
+            .registry
+            .subscribe_owned(watches.clone(), self.active_owner);
+        for message in self.mailboxes.take_matching(&watches) {
+            self.registry.queue_retained_mailbox(
+                sub,
+                message.mailbox,
+                message.key,
+                message.payload,
+            );
+        }
+        Ok(sub)
+    }
+
+    /// Subscribe after querying the driver's existing green-thread state.
+    /// This is the level-triggered counterpart to transition broadcasting:
+    /// terminal ids are supplied by the scheduler's authoritative thread
+    /// table, never copied into this handler.
+    pub fn repo_event_subscribe_with_terminal_async(
+        &mut self,
+        watches: Vec<EvWatch>,
+        terminal_async: impl IntoIterator<Item = i64>,
+    ) -> Result<EvSubscriptionId, EventError> {
+        let sub = self.repo_event_subscribe(watches)?;
+        for tid in terminal_async {
+            self.registry.observe_terminal_async(sub, tid);
+        }
+        Ok(sub)
     }
 
     // `pub` (not `fn`, unlike this module's other tagged-verb methods):
@@ -884,8 +1067,12 @@ impl RepoEventHandler {
         if !self.mailboxes.is_live(mailbox) {
             return Err(EventError::EventUnknownMailbox(mailbox));
         }
-        self.registry
-            .publish_mailbox_message(mailbox, &key, payload.0);
+        if self.registry.has_healthy_mailbox_receiver(mailbox) {
+            self.registry
+                .publish_mailbox_message(mailbox, &key, payload.0);
+        } else {
+            self.mailboxes.retain(mailbox, key, payload.0);
+        }
         Ok(())
     }
 
@@ -1441,6 +1628,93 @@ mod tests {
             .unwrap();
         let batch = h.repo_event_drain(sub).unwrap();
         assert_eq!(mailbox_payloads(&batch), vec![serde_json::json!(3)]);
+    }
+
+    #[test]
+    fn retained_mailbox_burst_is_consumed_by_a_later_receiver() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(1)))
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(2)))
+            .unwrap();
+        h.mailbox_send(mid, "k".into(), payload(serde_json::json!(3)))
+            .unwrap();
+
+        let first = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&h.repo_event_drain(first).unwrap()),
+            vec![serde_json::json!(3)]
+        );
+
+        // A mailbox backlog is a one-receiver handoff, not a durable
+        // broadcast log. Once it is handed off, a later subscriber cannot
+        // replay it; later sends still broadcast to all live receivers.
+        let second = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        assert_eq!(h.repo_event_drain(second).unwrap(), vec![]);
+        h.mailbox_send(mid, "next".into(), payload(serde_json::json!(4)))
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&h.repo_event_drain(first).unwrap()),
+            vec![serde_json::json!(4)]
+        );
+        assert_eq!(
+            mailbox_payloads(&h.repo_event_drain(second).unwrap()),
+            vec![serde_json::json!(4)]
+        );
+    }
+
+    #[test]
+    fn retained_mailbox_keys_keep_first_arrival_order() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let mid = h.mailbox_new().unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a1")))
+            .unwrap();
+        h.mailbox_send(mid, "b".into(), payload(serde_json::json!("b1")))
+            .unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!("a2")))
+            .unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&h.repo_event_drain(sub).unwrap()),
+            vec![serde_json::json!("a2"), serde_json::json!("b1")]
+        );
+    }
+
+    #[test]
+    fn terminal_async_is_observed_when_subscription_starts_after_settlement() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        let sub = h
+            .repo_event_subscribe_with_terminal_async(vec![EvWatch::WatchAsync(7)], [7])
+            .unwrap();
+        assert!(matches!(
+            h.repo_event_drain(sub).unwrap().as_slice(),
+            [EvRepositoryEvent::ObservedAsyncDone(_, 7)]
+        ));
+    }
+
+    #[test]
+    fn closing_an_owner_removes_its_abandoned_subscriptions_only() {
+        let (mut h, _calls) = handler_with(vec![], Duration::ZERO);
+        h.begin_owner(10);
+        let abandoned = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(1)])
+            .unwrap();
+        h.end_owner(10);
+        assert_eq!(
+            h.repo_event_drain(abandoned),
+            Err(EventError::EventUnknownSubscription(abandoned.raw))
+        );
+        let unowned = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(1)])
+            .unwrap();
+        assert!(h.repo_event_drain(unowned).is_ok());
     }
 
     #[test]

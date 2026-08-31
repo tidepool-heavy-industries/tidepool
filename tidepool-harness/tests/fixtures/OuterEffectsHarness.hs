@@ -185,12 +185,12 @@ loop st = do
       closureTwo <- wait hClosure
       let closureReuse = closureOne False && not (closureTwo True)
 
-      -- `waitEvent`: a select over {thread completion,
-      -- deadline} that takes the completion branch (a generous deadline
-      -- against an already-fast thread), then reads the typed result with
-      -- one immediate `wait` — proving `waitEvent` composes into `nextEvent`
-      -- and carries the HANDLE, not the value.
+      -- `waitEvent` is level-triggered: settle the thread FIRST, then create
+      -- the Event subscription. The completion edge has already passed, so
+      -- this proves the select queries retained terminal state rather than
+      -- waiting forever for another transition.
       hWaitEvent <- async (pure (55 :: Int))
+      _ <- wait hWaitEvent
       weDeadline <- after 5000
       Observed _ weOutcome <-
         nextEvent (fmap Left (waitEvent hWaitEvent) <|> fmap Right weDeadline)

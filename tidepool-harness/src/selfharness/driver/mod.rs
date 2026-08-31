@@ -486,6 +486,10 @@ pub struct SelfHarnessDriver {
     /// never in `state_json` — so a restart resumes counting from the right
     /// number ([`Self::restore`]).
     iteration: u64,
+    /// Monotonic ownership epochs for cycle-scoped RepoEvent subscriptions.
+    /// Separate from the successful-iteration counter: failed cycles must
+    /// still receive a distinct owner and be cleaned up conclusively.
+    event_owner_epoch: u64,
     /// The operator-input seam: the driver blocks on this for `askUser`
     /// form presentation
     /// ([`Self::drive_agent_session_to_finalize`]) and the between-loops human
@@ -737,6 +741,7 @@ impl SelfHarnessDriver {
             checkpoint_generation: None,
             last_checkpoint: None,
             iteration: 0,
+            event_owner_epoch: 0,
             gate: Arc::new(StdinGate),
             ask_id_counter: AtomicU64::new(0),
             handlers: Mutex::new(OuterHandlers::default()),

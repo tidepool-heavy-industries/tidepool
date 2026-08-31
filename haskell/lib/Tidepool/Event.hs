@@ -84,6 +84,14 @@
 -- of the 'Int' is the only capability check, and both payloads stay BARE (like
 -- 'Tick'), so 'nextEvent' yields a single 'Observed', never a double wrap.
 --
+-- A mailbox retains its keyed, coalesced sends until the FIRST matching
+-- subscription consumes them, in first-arrival order (a same-key replacement
+-- keeps its original position). That retained backlog is a point-to-point
+-- handoff, not a replay log. Once receivers are live, later sends broadcast
+-- to every live matching Event subscription just like every other Event.
+-- This makes a child that sends before its parent calls 'received' observable
+-- without turning a capability mailbox into a durable broker.
+--
 -- == Where this module's definitions come from
 --
 -- `tidepool-protocol`'s closed schema represents FOUR names —

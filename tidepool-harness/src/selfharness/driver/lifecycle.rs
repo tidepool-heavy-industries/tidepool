@@ -733,6 +733,15 @@ impl SelfHarnessDriver {
         ));
 
         self.lifecycle = SelfHarnessState::RunningLoop;
+        // RepoEvent handlers live on the driver, while authored Event
+        // subscriptions belong to THIS loop cycle. Fence them with an owner
+        // the driver closes below on both success and every abnormal exit;
+        // Haskell's lexical unsubscribe is only the prompt happy-path release.
+        self.event_owner_epoch += 1;
+        let event_owner = self.event_owner_epoch;
+        if let Some(handler) = self.handlers.lock().event.as_mut() {
+            handler.begin_owner(event_owner);
+        }
         // The driver must not strand the lifecycle in `RunningLoop`/`Compacting`
         // on any exit from the loop body: a runaway-cap hard-fail, a failed
         // resume, or a compaction error all leave a mutable resident session
@@ -778,6 +787,9 @@ impl SelfHarnessDriver {
             })
         }
         .await;
+        if let Some(handler) = self.handlers.lock().event.as_mut() {
+            handler.end_owner(event_owner);
+        }
         match &result {
             Ok(_) => self.lifecycle = SelfHarnessState::Idle,
             Err(err) => {
@@ -1468,8 +1480,19 @@ impl SelfHarnessDriver {
                                     }
                                 }
                             } else {
-                                let value =
-                                    self.service_outer_effect(kind, &request, &compiled.table)?;
+                                let terminal_async: Vec<i64> = threads
+                                    .iter()
+                                    .filter_map(|(&tid, thread)| {
+                                        (!matches!(thread.state, GreenThreadState::Running))
+                                            .then_some(tid)
+                                    })
+                                    .collect();
+                                let value = self.service_outer_effect(
+                                    kind,
+                                    &request,
+                                    &compiled.table,
+                                    &terminal_async,
+                                )?;
                                 let sid = self.outer_sid()?;
                                 let next = self
                                     .agent

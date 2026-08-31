@@ -425,7 +425,7 @@ impl SelfHarnessDriver {
                                 "node {node:?} has no pending {kind:?} hole to service"
                             ))
                         })?;
-                    let value = self.service_outer_effect(kind, &request, &table)?;
+                    let value = self.service_outer_effect(kind, &request, &table, &[])?;
                     self.agent
                         .resume_with_value(node, &pending_suspension, value)
                         .await?;

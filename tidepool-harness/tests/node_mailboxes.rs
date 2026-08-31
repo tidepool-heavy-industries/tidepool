@@ -1,10 +1,5 @@
-//! `Tidepool.Node` capability mailboxes. Un-ignoring after the
-//! tenure-then-resume GC family fix (see
-//! `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc) surfaced
-//! a SEPARATE-LOOKING, previously unreachable bug (the
-//! burst scenario's coalesce times out) — see the test's own doc for why
-//! that is real but not yet proven independent. Still `#[ignore]`d, now for
-//! that new reason.
+//! `Tidepool.Node` capability mailboxes, including a burst that arrives
+//! before its receiver subscribes.
 //!
 //! # What was blocked, and what is not
 //!
@@ -12,7 +7,7 @@
 //! into the dogfood row, `waitEvent` composes into a `nextEvent` select
 //! (asserted in the `outer_effects` bundle), the mailbox verbs and their
 //! per-key coalescing are unit-tested in `tidepool-handlers`'
-//! `SubscriptionRegistry`, and the driver's non-blocking `RepoEventAwait`
+//! `MailboxTable`, and the driver's non-blocking `RepoEventAwait`
 //! servicing is exercised by that same bundle's deadline wait.
 //!
 //! What WAS blocked (now fixed) was END-TO-END `forkNode`: a node body whose
@@ -84,27 +79,9 @@ fn fixtures_dir() -> std::path::PathBuf {
 /// child that sends, a silent child that lets the deadline win, and a burst
 /// that must coalesce to its LAST payload.
 ///
-/// The tenure-then-resume GC bug this was chartered against IS fixed (see
-/// `tidepool-runtime/tests/tenure_resume_gc_repro.rs`'s module doc) — no
-/// more heap-tag-255 crash. Un-ignoring surfaced a SEPARATE-LOOKING,
-/// previously unreachable bug: scenario 3 (the same-key burst) times out —
-/// the select over `received nodeBurst <|> after 5000` takes the deadline
-/// branch (`nodeBurstPayload` reads back the fixture's own `-1` timeout
-/// sentinel, not the coalesced payload `3`) even though the fixture
-/// explicitly `folded`s and `wait`s the burst thread first specifically to
-/// make this deterministic, not a race. Scenarios 1 and 2 (plain message,
-/// silent deadline) both pass. Re-`#[ignore]`d pending its own
-/// investigation — the observed symptom differs from the tag-255 signature
-/// (a timeout / lost delivery, not a heap-tag fault), which is real evidence
-/// but not proof: this scenario still crosses the same suspension/resume
-/// boundaries a rooting defect could in principle manifest through as a
-/// silently-lost delivery rather than a crash. Not yet independently
-/// confirmed as a distinct root cause.
-#[ignore = "chartered gap (new): same-key burst coalesce times out after an explicit \
-            folded+wait sync (nodeBurstPayload reads back the -1 timeout sentinel, not \
-            3) — symptom differs from the tag-255 tenure-then-resume signature (timeout \
-            vs heap-tag fault; scenarios 1/2 there pass), but that is not yet independent \
-            confirmation of a distinct root cause — see this test's doc"]
+/// The burst deliberately sends before its parent subscribes. It proves that
+/// the capability mailbox retains the keyed latest value until `received`
+/// consumes it, instead of requiring a subscription to have already existed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_selects_over_message_and_deadline() {
     support::require_extract();
