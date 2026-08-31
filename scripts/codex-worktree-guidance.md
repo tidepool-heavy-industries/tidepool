@@ -23,10 +23,15 @@ changed target uncompiled.
 
 Before committing:
 
-1. List every changed file and map it to its owning build or test target.
-2. Compile every test target you changed, even when executing that target would
-   be too expensive. For Rust integration tests, use the narrow equivalent of
-   `cargo test -p PACKAGE --test TARGET --no-run` when execution is excluded.
+1. List every changed file and map it to its owning build or test target. If a
+   public type, serialized shape, generated contract, or shared command changes,
+   search the whole workspace for consumers and fixtures; the defining crate is
+   not the complete target map.
+2. Compile every changed or directly affected build/test target, even when
+   executing it would be too expensive. For Rust integration tests, use the
+   narrow equivalent of `cargo test -p PACKAGE --test TARGET --no-run` when
+   execution is excluded. Compile one named downstream target rather than
+   substituting an unrelated workspace-wide check.
 3. Run the smallest exact tests that exercise each changed behavior and each
    important failure/recovery branch. A unit test in a neighboring target does
    not prove that a modified integration target compiles.
