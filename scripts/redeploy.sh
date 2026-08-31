@@ -4,6 +4,7 @@ set -euo pipefail
 # Always operate from the repo root — every path below (git status haskell/,
 # cargo --path) assumes it.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source scripts/lib-extract.sh
 
 DRY=0
 NO_EXTRACT=0
@@ -72,7 +73,7 @@ if [ "$NO_EXTRACT" -eq 0 ]; then
       exit 1
     fi
     echo "  wrapper resolves to: $(readlink -f "$wrapper")"
-    if ! "$wrapper" 2>&1 | grep -q '^Usage:'; then
+    if ! extract_has_usage_banner "$wrapper"; then
       echo "error: upgraded tidepool-extract does not print the 'Usage:' banner — broken wrapper" >&2
       exit 1
     fi

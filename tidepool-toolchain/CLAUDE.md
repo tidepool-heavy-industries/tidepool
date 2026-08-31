@@ -63,7 +63,7 @@ because it needs Cranelift-adjacent dependencies
 `register_var_names`/`register_poisoned_externals`) that the invocation
 builder must stay free of.
 
-Session-scope compiles (`--session-bind`/`--inject-val`/`--session-root`,
+Session-scope compiles (`--inject-val`/`--session-root`,
 which read per-session mutable directories) are excluded from the invocation
 layer by construction — those flags are not on the allowlist, so such an
 invocation keys to `None` and always compiles cold — except for the one

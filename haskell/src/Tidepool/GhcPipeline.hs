@@ -397,11 +397,8 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
               -- them downstream (Translate.hs).
               mCapTy   = capturedUserType tcGblEnv
               -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
-              -- the one-shot eval wrapper (and a repl session's FIRST turn,
-              -- which has no prior bindings to inject and so still runs the
-              -- normal variant) can compile either; a later session turn's
-              -- wrapper compiles the scaffold-reserved @__result@ only. See
-              -- 'processSessionFile'.
+              -- the one-shot eval wrapper names @result@ while resident-turn
+              -- templates use the scaffold-reserved @__result@.
               mResTy   = foldr (<|>) Nothing
                            [ capturedBindingType occ tcGblEnv
                            | occ <- cpResultBinders plan ]
@@ -817,10 +814,9 @@ normalVariant path = PipelineVariant
       , cpSummaries = pure
           [ ms | ModuleNode _ ms <- flattenSCCs (topSortModuleGraph True modGraphRaw Nothing) ]
         -- 'runPipeline' (single-shot eval) always compiles a target named
-        -- @result@; a repl session's FIRST turn also lands on this variant
-        -- (no prior bindings to inject, so 'isSessionScopeActive' is still
-        -- False) and its wrapper compiles @__result@, the scaffold-reserved
-        -- name — see 'processSessionFile'. Try both, in that order.
+        -- @result@; a resident turn without prior bindings can also land on
+        -- this variant while its template names @__result@. Try both, in that
+        -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
       , cpAfterModule = \_ _ _ _ -> pure ()
       , cpTier = OptimizeCoreReachable
@@ -964,7 +960,7 @@ sessionVariant scope path = PipelineVariant
           -- Reached only once a session has a prior binding to inject
           -- ('isSessionScopeActive'); every such turn's wrapper compiles a
           -- target literally named @__result@ (scaffold-reserved, never
-          -- @result@ — see 'processSessionFile').
+          -- @result@).
         , cpResultBinders = [scaffoldTargetName]
           -- A deferred module (target ∪ transitive Val-importers, computed
           -- above) was deliberately excluded from the @load'@, so nothing has

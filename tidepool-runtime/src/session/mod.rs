@@ -67,10 +67,10 @@ pub use workbench::{
 };
 
 pub use turn::{
-    assemble_bind_module, assemble_expression_module, classify_block, compile_session_turn,
-    insert_preamble_imports, place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn,
-    ExpressionLift, SessionBind, SessionTurnResult, TemplateSelector, TurnClassification,
-    TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, assemble_expression_module, classify_block, insert_preamble_imports,
+    place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn, ExpressionLift,
+    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::collections::HashMap;
@@ -773,7 +773,7 @@ impl SessionLib {
         if !inject_modules.is_empty() {
             // `--inject-val` ifaces are looked up under `--session-root`
             // (`Tidepool.Session.ssRoot`) — required whenever we inject any,
-            // same as a stmt turn's `compile_session_turn` call.
+            // same as a statement's `run_turn` call.
             cmd.session_root(&self.root).inject_vals(inject_modules);
         }
 

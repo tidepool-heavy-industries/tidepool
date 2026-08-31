@@ -2136,7 +2136,7 @@ fn helpers_block(helpers: &str) -> String {
 
 /// Wrap a value-plane BIND turn (`x <- e`) as a session module whose `__result`
 /// runs the bind statement and yields the bound name — the shape
-/// `compile_session_turn` expects (target `__result`, `Eff <stack> _` so GHC
+/// the resident-turn compiler expects (target `__result`, `Eff <stack> _` so GHC
 /// infers the bound type from the block). Mirrors the repl's `wrap_bind_source`;
 /// the harness preamble/effect-stack differ, the `__result`/session-bind contract
 /// is identical — both are thin, policy-only callers of

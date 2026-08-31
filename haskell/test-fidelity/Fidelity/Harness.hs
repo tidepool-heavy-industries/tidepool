@@ -86,8 +86,8 @@ extractError tag modName src target needle =
 -- extracts and translates cleanly — the "survives a bind" half of a
 -- closure-tier check, without going through the JIT's own deep-force), and
 -- classify the captured 'PipelineResult.prResultType' via 'isClosureType' —
--- the same static classification 'GhcPipeline.mkBoundBinders' performs at
--- @--session-bind@ time. 'Left' carries the extraction error text; a module
+-- the same static classification 'SessionArtifacts.mkBoundBinders' performs
+-- for a resident bind turn. 'Left' carries the extraction error text; a module
 -- whose @result@ binder never typechecked (no captured type) is also a
 -- 'Left', with a distinct message.
 extractResultTier :: String -> String -> String -> IO (Either String Bool)

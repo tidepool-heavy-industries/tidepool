@@ -27,9 +27,9 @@ pub use tidepool_eval::value::Value;
 use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::{CoreExpr, DataConTable};
 
+pub(crate) use tidepool_toolchain::extract_spawn_error;
 pub use tidepool_toolchain::CompileError;
 pub use tidepool_toolchain::{artifacts, cache, diag, paths, timing, toolchain};
-pub(crate) use tidepool_toolchain::{extract_module_name, extract_spawn_error};
 
 pub mod failclass;
 /// Generated suspension-decode request types (`tidepool-protocol`'s

@@ -11,7 +11,7 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
 import Tidepool.Metadata (DCMeta(..))
-import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
+import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..))
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 3.0.
@@ -233,7 +233,9 @@ encodeBoundBinder (BoundBinder name varid modul tier tdisp) =
   <> encodeString (T.pack name)
   <> encodeWord64 varid
   <> encodeString (T.pack modul)
-  <> encodeString (T.pack tier)
+  <> encodeString (case tier of
+      Tier0Data -> "Tier0Data"
+      Tier1Closure -> "Tier1Closure")
   <> encodeString (T.pack tdisp)
 
 -- | @modules@ (the third element, added alongside @site@/@type@ — see

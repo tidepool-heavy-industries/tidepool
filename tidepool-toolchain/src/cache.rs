@@ -625,7 +625,7 @@ pub struct Invocation<'a> {
 /// `ExtractCmd` tomorrow and threaded into a calling site does not ride along
 /// unkeyed; it goes cold until someone classifies it. The failure direction is
 /// a miss, never a false hit. This is also how session-scope compiles
-/// (`--session-bind`/`--inject-val`/`--session-root`, which read per-session
+/// (`--inject-val`/`--session-root`, which read per-session
 /// MUTABLE directories nothing here fingerprints) are excluded: not by a
 /// comment, but because those flags are not on the list.
 ///
@@ -1472,7 +1472,6 @@ mod tests {
 
         assert!(key(&[]).is_some(), "the plain turn invocation is cacheable");
         for flags in [
-            &["--session-bind"][..],
             &["--session-root", "/tmp/sessions"][..],
             &["--inject-val", "Tidepool.Session.Val.G1"][..],
             &["--bind-gen", "2"][..],

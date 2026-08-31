@@ -26,7 +26,7 @@ module Tidepool.Binders
     -- * Turn-mode rich result (--turn)
   , TurnOut(..)
   , BoundBinder(..)
-  , renderBoundBinderJson
+  , ValueTier(..)
   , renderAskJson
   ) where
 
@@ -400,12 +400,17 @@ renderVerdictsJson sbs =
 
 -- | One bound-value record from a BIND turn: the mint'd 'stableVarId', the
 -- thin session iface module it was written under, its closure/data tier, and
--- its rendered type. Shared by the binder sidecar and the 'Bind' variant.
+-- its rendered type. Carried by the 'Bind' turn result.
+data ValueTier
+  = Tier0Data
+  | Tier1Closure
+  deriving (Eq, Show)
+
 data BoundBinder = BoundBinder
   { bbName        :: String
   , bbVarId       :: Word64
   , bbModule      :: String
-  , bbTier        :: String
+  , bbTier        :: ValueTier
   , bbTypeDisplay :: String
   } deriving (Eq, Show)
 
@@ -444,16 +449,6 @@ data TurnOut
       , toWrappedSource :: Text
       }
   deriving (Eq, Show)
-
--- | One 'BoundBinder' as JSON. @varId@ is a decimal string because JSON
--- numbers cannot represent every u64 exactly.
-renderBoundBinderJson :: BoundBinder -> String
-renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
-  "{\"name\":" ++ jsonString name
-    ++ ",\"varId\":" ++ jsonString (show varid)
-    ++ ",\"module\":" ++ jsonString modul
-    ++ ",\"tier\":" ++ jsonString tier
-    ++ ",\"typeDisplay\":" ++ jsonString tdisp ++ "}"
 
 -- | One typed suspension site as JSON. The historical @asks.json@ filename
 -- now carries the general answer-plus-live-input contract; ordinary ask/fork

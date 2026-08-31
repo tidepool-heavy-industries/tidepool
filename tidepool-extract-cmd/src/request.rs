@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v2";
-const MAGIC: &[u8; 8] = b"TPREQ002";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v3";
+const MAGIC: &[u8; 8] = b"TPREQ003";
 
 #[derive(Clone, Debug)]
 enum Field {
@@ -23,10 +23,7 @@ enum Field {
     BuildProductsDir(OsString),
     SessionRoot(OsString),
     InjectVal(OsString),
-    SessionBind,
-    BindName(OsString),
     BindGen(u64),
-    EmitBoundBinders(OsString),
     HarnessProfile,
 }
 
@@ -78,17 +75,12 @@ impl ExtractRequest {
                 }
                 Some("--session-root") => request.session_root(value(&mut args, "--session-root")?),
                 Some("--inject-val") => request.inject_val(value(&mut args, "--inject-val")?),
-                Some("--session-bind") => request.session_bind(),
-                Some("--bind-name") => request.bind_name(value(&mut args, "--bind-name")?),
                 Some("--bind-gen") => {
                     let raw = text_value(&mut args, "--bind-gen")?;
                     let generation = raw
                         .parse()
                         .map_err(|_| CliError::new("--bind-gen requires an unsigned integer"))?;
                     request.bind_gen(generation);
-                }
-                Some("--emit-bound-binders") => {
-                    request.emit_bound_binders(value(&mut args, "--emit-bound-binders")?)
                 }
                 Some("--harness-profile") => request.fields.push(Field::HarnessProfile),
                 Some(option) if option.starts_with('-') => {
@@ -134,12 +126,10 @@ impl ExtractRequest {
                 6 => Field::AllClosed,
                 7 => Field::TargetModuleOnly,
                 8 => Field::Include(decoder.os_string()?),
-                9 => Field::SessionBind,
-                10 => Field::BindName(decoder.os_string()?),
+                9 | 10 | 14 => return Err(ProtocolError::new(format!("retired field tag {tag}"))),
                 11 => Field::BindGen(decoder.u64()?),
                 12 => Field::SessionRoot(decoder.os_string()?),
                 13 => Field::InjectVal(decoder.os_string()?),
-                14 => Field::EmitBoundBinders(decoder.os_string()?),
                 16 => Field::Turn,
                 17 => Field::TurnTemplate {
                     kind: decoder.string()?,
@@ -167,7 +157,7 @@ impl ExtractRequest {
     pub fn decode_worker_argv(args: &[OsString]) -> Result<Self, ProtocolError> {
         if args.len() != 2 || args[0] != WORKER_REQUEST_FLAG {
             return Err(ProtocolError::new(
-                "worker argv must be exactly --worker-request-v2 PAYLOAD",
+                "worker argv must be exactly --worker-request-v3 PAYLOAD",
             ));
         }
         let payload = args[1]
@@ -270,21 +260,8 @@ impl ExtractRequest {
             .push(Field::InjectVal(value.as_ref().to_owned()));
     }
 
-    pub(crate) fn session_bind(&mut self) {
-        self.fields.push(Field::SessionBind);
-    }
-
-    pub(crate) fn bind_name(&mut self, value: impl AsRef<OsStr>) {
-        self.fields.push(Field::BindName(value.as_ref().to_owned()));
-    }
-
     pub(crate) fn bind_gen(&mut self, value: u64) {
         self.fields.push(Field::BindGen(value));
-    }
-
-    pub(crate) fn emit_bound_binders(&mut self, value: impl AsRef<OsStr>) {
-        self.fields
-            .push(Field::EmitBoundBinders(value.as_ref().to_owned()));
     }
 
     pub(crate) fn cli_argv(&self) -> Vec<OsString> {
@@ -315,12 +292,9 @@ impl ExtractRequest {
                 Field::BuildProductsDir(value) => flag(&mut flags, "--build-products-dir", value),
                 Field::SessionRoot(value) => flag(&mut flags, "--session-root", value),
                 Field::InjectVal(value) => flag(&mut flags, "--inject-val", value),
-                Field::SessionBind => flags.push("--session-bind".into()),
-                Field::BindName(value) => flag(&mut flags, "--bind-name", value),
                 Field::BindGen(value) => {
                     flag(&mut flags, "--bind-gen", OsStr::new(&value.to_string()))
                 }
-                Field::EmitBoundBinders(value) => flag(&mut flags, "--emit-bound-binders", value),
                 Field::HarnessProfile => flags.push("--harness-profile".into()),
             }
         }
@@ -483,13 +457,10 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::BuildProductsDir(value) => tagged_frame(out, 25, value),
         Field::SessionRoot(value) => tagged_frame(out, 12, value),
         Field::InjectVal(value) => tagged_frame(out, 13, value),
-        Field::SessionBind => out.push(9),
-        Field::BindName(value) => tagged_frame(out, 10, value),
         Field::BindGen(value) => {
             out.push(11);
             out.extend_from_slice(&value.to_le_bytes());
         }
-        Field::EmitBoundBinders(value) => tagged_frame(out, 14, value),
         Field::HarnessProfile => out.push(24),
     }
 }
@@ -625,13 +596,8 @@ mod tests {
             "/tmp/session".into(),
             "--inject-val".into(),
             "M".into(),
-            "--session-bind".into(),
-            "--bind-name".into(),
-            "x".into(),
             "--bind-gen".into(),
             "7".into(),
-            "--emit-bound-binders".into(),
-            "/tmp/binders.json".into(),
             "--harness-profile".into(),
         ];
         let request = ExtractRequest::from_cli(&args).unwrap();
@@ -656,6 +622,19 @@ mod tests {
             ExtractRequest::decode(&truncated).unwrap_err().to_string(),
             "truncated worker request"
         );
+    }
+
+    #[test]
+    fn typed_protocol_rejects_retired_session_bind_fields_explicitly() {
+        for tag in [9, 10, 14] {
+            let mut request = MAGIC.to_vec();
+            request.extend_from_slice(&1u32.to_le_bytes());
+            request.push(tag);
+            assert_eq!(
+                ExtractRequest::decode(&request).unwrap_err().to_string(),
+                format!("retired field tag {tag}")
+            );
+        }
     }
 
     #[test]

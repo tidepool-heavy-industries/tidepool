@@ -10,8 +10,7 @@
 //! production code, not chosen by the test.
 //!
 //! Setup: bind the SAME display name ("x") twice as two independent
-//! value-plane scopes, each a real `run_bind` turn compiled through the
-//! session-aware extract path (`--session-bind`), so each mints its own
+//! value-plane scopes, each a real resident bind turn, so each mints its own
 //! fresh, extract-sourced `SessionVarId` (never picked by the test). A third
 //! turn references "x" AFTER both binds — by construction (`current` is
 //! last-bind-wins) this resolves to scope B's binding — compiled and run
@@ -32,7 +31,8 @@ use tidepool_effect::Response;
 use tidepool_eval::value::Value;
 use tidepool_repr::SessionVarId;
 use tidepool_runtime::session::{
-    compile_session_turn, ResidentOutcome, ResidentSession, SessionBind,
+    run_turn, BoundBinder, CompiledTurn, ResidentOutcome, ResidentSession, TemplateSelector,
+    TurnClassification, TurnKind, TurnRequest, TurnResult, TurnTemplate,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness::{self, mock, EvalHarness};
@@ -113,14 +113,42 @@ fn mcp_module_with_imports(imports: &[String], body: &str) -> String {
     out
 }
 
-/// A session-aware BIND turn's wrapped source: run the statement, then yield
-/// the bound name — the same shape `tidepool-harness`'s
-/// `template_session_bind` produces, targeting the `__result` binder
-/// `compile_session_turn` expects.
-fn bind_source(literal: i64) -> String {
-    mock::mcp_module(&format!(
-        "__result :: M Int\n__result = do {{\n  x <- pure ({literal} :: Int)\n ; pure x\n}}\n"
-    ))
+fn compile_bind_turn(
+    literal: i64,
+    include: &[&Path],
+    session_root: &Path,
+    gen: u64,
+) -> (BoundBinder, CompiledTurn) {
+    let template = TurnTemplate {
+        kind: TemplateSelector::Bind,
+        source: mock::mcp_module(include_str!("realm_varid_pinning/bind_body.hs")),
+    };
+    let turn_text = format!("x <- pure ({literal} :: Int)");
+    let result = run_turn(TurnRequest {
+        turn_text: &turn_text,
+        templates: &[template],
+        include,
+        session_root,
+        inject_modules: &[],
+        gen,
+        verdict: Some(TurnClassification {
+            kind: TurnKind::Bind,
+            binders: vec!["x".to_string()],
+        }),
+        target: None,
+    })
+    .unwrap_or_else(|error| panic!("compile bind turn for {literal}: {error}"));
+    match result {
+        TurnResult::Bind {
+            mut bound,
+            compiled,
+            ..
+        } => {
+            assert_eq!(bound.len(), 1, "one-name bind must mint one binder");
+            (bound.remove(0), compiled)
+        }
+        _ => panic!("bind verdict returned a non-bind result"),
+    }
 }
 
 fn bootstrap(
@@ -150,24 +178,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
 
     // ---- scope A: bind x = 41, a real session-aware bind turn ----
     let gen_a = session.val_gen().next();
-    let names_a = vec!["x".to_string()];
-    let src_a = bind_source(41);
-    let compiled_a = compile_session_turn(
-        &src_a,
-        &base_include,
-        session_root.path(),
-        &[],
-        Some(SessionBind {
-            names: &names_a,
-            gen: gen_a.0,
-        }),
-    )
-    .expect("compile bind turn (scope A)");
-    let binder_a = compiled_a
-        .binders
-        .into_iter()
-        .next()
-        .expect("scope A bind emitted a binder");
+    let (binder_a, compiled_a) = compile_bind_turn(41, &base_include, session_root.path(), gen_a.0);
     match session
         .run_bind(
             "bind_a",
@@ -186,24 +197,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
     // name with scope A (both live in the SAME session `BindingTable`, as two
     // realms sharing one table would) ----
     let gen_b = session.val_gen().next();
-    let names_b = vec!["x".to_string()];
-    let src_b = bind_source(99);
-    let compiled_b = compile_session_turn(
-        &src_b,
-        &base_include,
-        session_root.path(),
-        &[],
-        Some(SessionBind {
-            names: &names_b,
-            gen: gen_b.0,
-        }),
-    )
-    .expect("compile bind turn (scope B)");
-    let binder_b = compiled_b
-        .binders
-        .into_iter()
-        .next()
-        .expect("scope B bind emitted a binder");
+    let (binder_b, compiled_b) = compile_bind_turn(99, &base_include, session_root.path(), gen_b.0);
     match session
         .run_bind(
             "bind_b",
@@ -237,15 +231,31 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
     let inject_modules = session.inject_val_modules();
     let mut include_read = base_include.clone();
     include_read.push(session_root.path());
-    let src_read = mcp_module_with_imports(&import_lines, "__result :: M Int\n__result = pure x\n");
-    let compiled_read = compile_session_turn(
-        &src_read,
-        &include_read,
-        session_root.path(),
-        &inject_modules,
-        None,
-    )
+    let read_template = TurnTemplate {
+        kind: TemplateSelector::Expr,
+        source: mcp_module_with_imports(
+            &import_lines,
+            include_str!("realm_varid_pinning/read_body.hs"),
+        ),
+    };
+    let read_result = run_turn(TurnRequest {
+        turn_text: "pure x",
+        templates: &[read_template],
+        include: &include_read,
+        session_root: session_root.path(),
+        inject_modules: &inject_modules,
+        gen: session.val_gen().next().0,
+        verdict: Some(TurnClassification {
+            kind: TurnKind::Expr,
+            binders: Vec::new(),
+        }),
+        target: None,
+    })
     .expect("compile read turn");
+    let compiled_read = match read_result {
+        TurnResult::Expr { compiled, .. } => compiled,
+        _ => panic!("expression verdict returned a non-expression result"),
+    };
 
     // Capture the SAME `ExternalEnv` `ResidentSession::run` would build
     // internally (`free_vars` then `seed_external_env`), via the narrow

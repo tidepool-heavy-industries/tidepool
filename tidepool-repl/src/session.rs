@@ -39,10 +39,10 @@ use tidepool_repr::{
 };
 use tidepool_runtime::session::{
     assemble_bind_module, classify_block, extract_ask_request, insert_preamble_imports,
-    place_turn_stmt, subtract_import_list_names, BoundBinder, GateDispatcher, ModuleEnv,
-    PersistentSession, SessionCompileView, SessionError, SessionLib, SessionTurnResult,
-    SourceImports, TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, ValueTier, WorkSequence,
+    place_turn_stmt, subtract_import_list_names, BoundBinder, CompiledTurn, GateDispatcher,
+    ModuleEnv, PersistentSession, SessionCompileView, SessionError, SessionLib, SourceImports,
+    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, WorkSequence,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, value_to_json, CompileError, FailureClass, Phase,
@@ -86,6 +86,14 @@ struct ReplCompileFailure {
     error: CompileError,
     source: String,
     user_lines: Option<(usize, usize)>,
+}
+
+/// REPL-local view of a compiled resident turn. Runtime owns the compiled
+/// artifact; this frontend additionally needs the names installed by bind
+/// turns.
+struct ReplCompiledTurn {
+    binders: Vec<BoundBinder>,
+    compiled: CompiledTurn,
 }
 
 /// One ITEM's outcome — the same shape as [`TurnStep`], named separately
@@ -1318,7 +1326,7 @@ impl Session {
             self.core.val_gen(),
         )
         .ok()
-        .and_then(|compiled| compiled.warnings.captured_type)
+        .and_then(|compiled| compiled.compiled.warnings.captured_type)
     }
 
     /// Build the `Defined` outcome for one decl head at generation `gen`,
@@ -1537,7 +1545,7 @@ impl Session {
         templates: Vec<TurnTemplate>,
         verdict: TurnClassification,
         gen: Generation,
-    ) -> Result<SessionTurnResult, ReplCompileFailure> {
+    ) -> Result<ReplCompiledTurn, ReplCompileFailure> {
         let include = self.turn_include();
         let inject = self.live_val_modules();
         let result = tidepool_runtime::session::run_turn(TurnRequest {
@@ -1578,13 +1586,7 @@ impl Session {
                 })
             }
         };
-        Ok(SessionTurnResult {
-            expr: compiled.expr,
-            table: compiled.table,
-            warnings: compiled.warnings,
-            binders,
-            asks: compiled.asks,
-        })
+        Ok(ReplCompiledTurn { binders, compiled })
     }
 
     /// BIND path (`x <- action` / `let x = e`): wrap into an `Eff`-typed
@@ -1634,7 +1636,7 @@ impl Session {
                 )))
             }
         };
-        if turn.warnings.has_io {
+        if turn.compiled.warnings.has_io {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::UserHaskell,
                 Phase::Compile,
@@ -1651,7 +1653,7 @@ impl Session {
                 )))
             }
         };
-        if let Err(e) = self.merge_table(&turn.table) {
+        if let Err(e) = self.merge_table(&turn.compiled.table) {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::Runtime,
                 Phase::Run,
@@ -1664,7 +1666,10 @@ impl Session {
         // needs), publishing the cancel handle. Later binds re-enter the live
         // machine.
         if !self.core.is_bootstrapped() {
-            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+            if let Err(e) = self
+                .core
+                .bootstrap_if_needed(&turn.compiled.expr, &turn.compiled.table)
+            {
                 return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
@@ -1676,11 +1681,11 @@ impl Session {
         // deep-forces + tenures it. (`run_fragment_and_bind` takes a `forced`
         // bool; the tier is the source of truth — derive the flag here, expand
         // the same tier back to a `BoundValue` via `bound_value`.)
-        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.compiled.expr);
         let env = self.core.seed_external_env(&referenced);
         let fid = match self
             .core
-            .add_fragment_session("repl_bind", &turn.expr, &env)
+            .add_fragment_session("repl_bind", &turn.compiled.expr, &env)
         {
             Ok(f) => f,
             Err(e) => {
@@ -1829,7 +1834,7 @@ impl Session {
                 )))
             }
         };
-        if turn.warnings.has_io {
+        if turn.compiled.warnings.has_io {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::UserHaskell,
                 Phase::Compile,
@@ -1847,7 +1852,7 @@ impl Session {
                 ),
             )));
         }
-        if let Err(e) = self.merge_table(&turn.table) {
+        if let Err(e) = self.merge_table(&turn.compiled.table) {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::Runtime,
                 Phase::Run,
@@ -1856,17 +1861,20 @@ impl Session {
         }
 
         if !self.core.is_bootstrapped() {
-            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+            if let Err(e) = self
+                .core
+                .bootstrap_if_needed(&turn.compiled.expr, &turn.compiled.table)
+            {
                 return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
 
-        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.compiled.expr);
         let env = self.core.seed_external_env(&referenced);
         let fid = match self
             .core
-            .add_fragment_session("repl_multi_bind", &turn.expr, &env)
+            .add_fragment_session("repl_multi_bind", &turn.compiled.expr, &env)
         {
             Ok(f) => f,
             Err(e) => {
@@ -1936,15 +1944,15 @@ impl Session {
     /// action, never a pure reference.
     fn run_reference_fragment<H: DispatchEffect<CapturedOutput>>(
         &mut self,
-        turn: tidepool_runtime::session::SessionTurnResult,
+        turn: ReplCompiledTurn,
         inner_type: Option<String>,
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> ItemStep {
-        if turn.warnings.has_io {
+        if turn.compiled.warnings.has_io {
             return ItemStep::Done(io_type_fail());
         }
-        if let Err(e) = self.merge_table(&turn.table) {
+        if let Err(e) = self.merge_table(&turn.compiled.table) {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::Runtime,
                 Phase::Run,
@@ -1953,14 +1961,20 @@ impl Session {
         }
         self.ensure_effect_machine();
         if !self.core.is_bootstrapped() {
-            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+            if let Err(e) = self
+                .core
+                .bootstrap_if_needed(&turn.compiled.expr, &turn.compiled.table)
+            {
                 return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
-        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.compiled.expr);
         let env = self.core.seed_external_env(&referenced);
-        let fid = match self.core.add_fragment_session("repl_ref", &turn.expr, &env) {
+        let fid = match self
+            .core
+            .add_fragment_session("repl_ref", &turn.compiled.expr, &env)
+        {
             Ok(f) => f,
             Err(e) => {
                 return ItemStep::Done(TurnOutcome::Error(run_fail(
@@ -2008,7 +2022,7 @@ impl Session {
         let eval_input = self.eval_input.clone();
         // TWO names, matching the `(it, toWire it)` tuple `result` now yields:
         // rides the same multi-binder `splitTupleType` path
-        // `run_multi_bind`/`wrap_multi_bind_source` use, so `emitBindArtifacts`
+        // `run_multi_bind`/`wrap_multi_bind_source` use, so turn compilation
         // splits `result`'s `(T, Value)` type into `it :: T` + `__it_render ::
         // Value` instead of wrongly taking the whole tuple as `it`'s type.
         // `__it_render`'s binder metadata is discarded below (only
@@ -2057,7 +2071,7 @@ impl Session {
             }
         };
 
-        if turn.warnings.has_io {
+        if turn.compiled.warnings.has_io {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::UserHaskell,
                 Phase::Compile,
@@ -2074,7 +2088,7 @@ impl Session {
                 )))
             }
         };
-        if let Err(e) = self.merge_table(&turn.table) {
+        if let Err(e) = self.merge_table(&turn.compiled.table) {
             return ItemStep::Done(TurnOutcome::Error(tag_failure(
                 FailureClass::Runtime,
                 Phase::Run,
@@ -2086,15 +2100,21 @@ impl Session {
         // table (an Eff module either way — both wraps end in
         // `pure (it, toWire it)`).
         if !self.core.is_bootstrapped() {
-            if let Err(e) = self.core.bootstrap_if_needed(&turn.expr, &turn.table) {
+            if let Err(e) = self
+                .core
+                .bootstrap_if_needed(&turn.compiled.expr, &turn.compiled.table)
+            {
                 return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
             }
             self.publish_cancel();
         }
 
-        let referenced = tidepool_repr::free_vars::free_vars(&turn.expr);
+        let referenced = tidepool_repr::free_vars::free_vars(&turn.compiled.expr);
         let env = self.core.seed_external_env(&referenced);
-        let fid = match self.core.add_fragment_session("repl_it", &turn.expr, &env) {
+        let fid = match self
+            .core
+            .add_fragment_session("repl_it", &turn.compiled.expr, &env)
+        {
             Ok(f) => f,
             Err(e) => {
                 return ItemStep::Done(TurnOutcome::Error(run_fail(
@@ -2569,7 +2589,7 @@ impl Session {
         // `Eff`-typed `__result :: Eff {effect_stack} _` binding (forcing the
         // same freer-simple constructor requirement this bootstrap exists
         // for), just via an extra `__probe`/`__t` monadic peel we don't need
-        // the result of — only `turn.table`/`turn.expr` are read below.
+        // the result of — only the compiled table and expression are read below.
         let template = wrap_probe_source(
             &preamble,
             &self.cfg.effect_stack,
@@ -2591,10 +2611,10 @@ impl Session {
         );
         if let Ok(compiled) = compiled {
             let turn = compiled;
-            let _ = self.merge_table(&turn.table);
+            let _ = self.merge_table(&turn.compiled.table);
             if self
                 .core
-                .bootstrap_if_needed(&turn.expr, &turn.table)
+                .bootstrap_if_needed(&turn.compiled.expr, &turn.compiled.table)
                 .is_ok()
             {
                 self.publish_cancel();

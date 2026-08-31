@@ -143,6 +143,64 @@ fn write_fixture(dir: &Path, name: &str, contents: &str) -> PathBuf {
     path
 }
 
+#[derive(Clone, Copy)]
+enum TurnShape {
+    Bind,
+    Expr,
+}
+
+impl TurnShape {
+    fn template_key(self) -> &'static str {
+        match self {
+            Self::Bind => "bind",
+            Self::Expr => "expr",
+        }
+    }
+
+    fn verdict(self) -> &'static str {
+        match self {
+            Self::Bind => "bind:x",
+            Self::Expr => "expr",
+        }
+    }
+}
+
+struct TurnFixture<'a> {
+    label: &'a str,
+    source: &'a str,
+    template: &'a str,
+    shape: TurnShape,
+    output_dir: PathBuf,
+    session_root: &'a Path,
+    inject: &'a [&'a str],
+    includes: &'a [&'a Path],
+}
+
+/// Build the low-level resident-turn request used by production. Keeping this
+/// test crate dependency-light means it inspects the emitted files directly
+/// rather than decoding runtime types.
+fn turn_cmd(bin: &Path, dir: &Path, fixture: TurnFixture<'_>) -> ExtractCmd {
+    let turn = write_fixture(dir, &format!("{}-turn.txt", fixture.label), fixture.source);
+    let template = write_fixture(
+        dir,
+        &format!("{}-template.hs", fixture.label),
+        fixture.template,
+    );
+    let turn_out = fixture.output_dir.join("turn.cbor");
+    let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
+    cmd.input(turn)
+        .turn()
+        .turn_template(fixture.shape.template_key(), &template)
+        .turn_out(turn_out)
+        .turn_verdict(fixture.shape.verdict())
+        .output_dir(&fixture.output_dir)
+        .session_root(fixture.session_root)
+        .bind_gen(1)
+        .inject_vals(fixture.inject.iter().copied())
+        .includes(fixture.includes.iter().copied());
+    cmd
+}
+
 fn contains_extension(dir: &Path, extension: &str) -> bool {
     fs::read_dir(dir).is_ok_and(|entries| {
         entries.filter_map(Result::ok).any(|entry| {
@@ -330,54 +388,50 @@ fn check_b_failing_program_same_diagnostics(bin: &Path, dir: &Path, lib: &Path, 
 /// prevents the design §2.2 leak (a request-spanning `GutsMemo` serving one
 /// session's guts to another's compile of the same name).
 fn check_c_isolation_across_session_roots(bin: &Path, dir: &Path, lib: &Path, socket: &Path) {
-    let session = |label: &str, bound_value: i64| -> (PathBuf, PathBuf) {
+    let session = |label: &str, bind_source: &str| -> PathBuf {
         let root = dir.join(format!("session-{label}-root"));
         fs::create_dir_all(&root).unwrap();
-        let bind_file = write_fixture(
+        let bind_cmd = turn_cmd(
+            bin,
             dir,
-            &format!("Bind{label}.hs"),
-            &format!(
-                "module Bind{label} where\nimport Tidepool.Prelude\n__result :: Int\n__result = {bound_value}\n"
-            ),
+            TurnFixture {
+                label: &format!("c-{label}-bind"),
+                source: bind_source,
+                template: include_str!("daemon_integration/resident_bind.hs"),
+                shape: TurnShape::Bind,
+                output_dir: dir.join(format!("out-c-{label}-bind")),
+                session_root: &root,
+                inject: &[],
+                includes: &[lib],
+            },
         );
-        let sidecar = dir.join(format!("bb-{label}.json"));
-        let mut bind_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-        bind_cmd
-            .input(&bind_file)
-            .output_dir(dir.join(format!("out-c-{label}-bind")))
-            .session_bind()
-            .bind_name("x")
-            .bind_gen(1)
-            .session_root(&root)
-            .emit_bound_binders(&sidecar)
-            .include(lib);
         let out = run_via_env_socket(&bind_cmd, socket);
         assert!(
             out.status.success(),
             "bind turn ({label}) should succeed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        (root, dir.join(format!("Ref{label}.hs")))
+        root
     };
 
-    let (root_a, ref_file_a) = session("A", 111);
-    let (root_b, ref_file_b) = session("B", 222);
+    let root_a = session("A", "x <- pure (111 :: Int)");
+    let root_b = session("B", "x <- pure True");
 
-    let reference = |ref_file: &Path, root: &Path, label: &str| -> Vec<u8> {
-        fs::write(
-            ref_file,
-            format!(
-                "module Ref{label} where\nimport Tidepool.Session.Val.G1 (x)\nimport Tidepool.Prelude\n__result :: Int\n__result = x + 1\n"
-            ),
-        )
-        .unwrap();
-        let mut ref_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-        ref_cmd
-            .input(ref_file)
-            .output_dir(dir.join(format!("out-c-{label}-ref")))
-            .session_root(root)
-            .inject_val("Tidepool.Session.Val.G1")
-            .include(lib);
+    let reference = |root: &Path, label: &str, source: &str| -> Vec<u8> {
+        let ref_cmd = turn_cmd(
+            bin,
+            dir,
+            TurnFixture {
+                label: &format!("c-{label}-ref"),
+                source,
+                template: include_str!("daemon_integration/session_ref.hs"),
+                shape: TurnShape::Expr,
+                output_dir: dir.join(format!("out-c-{label}-ref")),
+                session_root: root,
+                inject: &["Tidepool.Session.Val.G1"],
+                includes: &[lib],
+            },
+        );
         let out = run_via_env_socket(&ref_cmd, socket);
         assert!(
             out.status.success(),
@@ -387,15 +441,15 @@ fn check_c_isolation_across_session_roots(bin: &Path, dir: &Path, lib: &Path, so
         fs::read(dir.join(format!("out-c-{label}-ref/result.cbor"))).unwrap()
     };
 
-    let cbor_a = reference(&ref_file_a, &root_a, "A");
-    let cbor_b = reference(&ref_file_b, &root_b, "B");
+    let cbor_a = reference(&root_a, "A", "x + 1");
+    let cbor_b = reference(&root_b, "B", "if x then 222 else 0");
     // Interleave: re-run session A's reference AFTER session B ran, proving
     // B's activity never mutated the shared memo entries A's compile reads.
-    let cbor_a_again = reference(&ref_file_a, &root_a, "A");
+    let cbor_a_again = reference(&root_a, "A", "x + 1");
 
     assert_ne!(
         cbor_a, cbor_b,
-        "sessions A (x=111) and B (x=222) must produce DIFFERENT __result values (111+1 vs 222+1) despite both minting __result/Val.G1"
+        "sessions A (x :: Int) and B (x :: Bool) must compile different reference programs despite both minting ResidentBind/Val.G1"
     );
     assert_eq!(
         cbor_a, cbor_a_again,
@@ -621,21 +675,20 @@ fn check_g_shim_dependent_module_warm_second_request(
     let bind = |label: &str| -> PathBuf {
         let root = dir.join(format!("g-session-{label}"));
         fs::create_dir_all(&root).unwrap();
-        let bind_file = write_fixture(
+        let bind_cmd = turn_cmd(
+            bin,
             dir,
-            &format!("GBind{label}.hs"),
-            &format!("module GBind{label} where\nimport Tidepool.Prelude\n__result :: Int\n__result = 0\n"),
+            TurnFixture {
+                label: &format!("g-{label}-bind"),
+                source: "x <- pure (0 :: Int)",
+                template: include_str!("daemon_integration/resident_bind.hs"),
+                shape: TurnShape::Bind,
+                output_dir: dir.join(format!("out-g-{label}-bind")),
+                session_root: &root,
+                inject: &[],
+                includes: &[lib],
+            },
         );
-        let mut bind_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-        bind_cmd
-            .input(&bind_file)
-            .output_dir(dir.join(format!("out-g-{label}-bind")))
-            .session_bind()
-            .bind_name("x")
-            .bind_gen(1)
-            .session_root(&root)
-            .emit_bound_binders(dir.join(format!("g-bb-{label}.json")))
-            .include(lib);
         let out = run_via_env_socket(&bind_cmd, socket);
         assert!(
             out.status.success(),
@@ -647,30 +700,25 @@ fn check_g_shim_dependent_module_warm_second_request(
     let root_a = bind("A");
     let root_b = bind("B");
 
-    write_fixture(
-        dir,
-        "GPinA.hs",
-        "module GPinA where\nimport Tidepool.Session.Val.G1 (x)\nimport Tidepool.Prelude\nimport Tidepool.Shim\nimport Tidepool.Companion\n__result :: Int\n__result = x\n",
-    );
-    write_fixture(
-        dir,
-        "GPinB.hs",
-        "module GPinB where\nimport Tidepool.Session.Val.G1 (x)\nimport Tidepool.Prelude\nimport Tidepool.Shim\nimport Tidepool.Companion\nmine :: Pinned\nmine = companionVal\n__result :: Int\n__result = (if mine then 1 else 0) + x\n",
-    );
-
     // Request A: warms the shared memo's `Tidepool.Companion` entry against
     // dir A's own `Pinned` expansion (`= Int`) — just by IMPORTING it, same
     // as the real shim/orchestrate pair: downsweep compiles every imported
     // home module regardless of whether the target actually uses its
     // exports.
-    let mut a_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-    a_cmd
-        .input(dir.join("GPinA.hs"))
-        .output_dir(dir.join("out-g-a-ref"))
-        .session_root(&root_a)
-        .inject_val("Tidepool.Session.Val.G1")
-        .include(lib)
-        .include(&a_inc);
+    let a_cmd = turn_cmd(
+        bin,
+        dir,
+        TurnFixture {
+            label: "g-a-ref",
+            source: "x",
+            template: include_str!("daemon_integration/shim_ref_a.hs"),
+            shape: TurnShape::Expr,
+            output_dir: dir.join("out-g-a-ref"),
+            session_root: &root_a,
+            inject: &["Tidepool.Session.Val.G1"],
+            includes: &[lib, &a_inc],
+        },
+    );
     let a_out = run_via_env_socket(&a_cmd, socket);
     assert!(
         a_out.status.success(),
@@ -689,14 +737,20 @@ fn check_g_shim_dependent_module_warm_second_request(
     // daemon-vs-direct-spawn CBOR divergence rather than a compile error
     // here) are the actual oracle; a GHC-level "Couldn't match type" is
     // rejected too, when it does surface.
-    let mut b_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-    b_cmd
-        .input(dir.join("GPinB.hs"))
-        .output_dir(dir.join("out-g-b-daemon"))
-        .session_root(&root_b)
-        .inject_val("Tidepool.Session.Val.G1")
-        .include(lib)
-        .include(&b_inc);
+    let b_cmd = turn_cmd(
+        bin,
+        dir,
+        TurnFixture {
+            label: "g-b-ref",
+            source: "(if mine then 1 else 0) + x",
+            template: include_str!("daemon_integration/shim_ref_b.hs"),
+            shape: TurnShape::Expr,
+            output_dir: dir.join("out-g-b-daemon"),
+            session_root: &root_b,
+            inject: &["Tidepool.Session.Val.G1"],
+            includes: &[lib, &b_inc],
+        },
+    );
     let b_daemon_out = run_via_env_socket(&b_cmd, socket);
 
     let daemon_stderr = String::from_utf8_lossy(&b_daemon_out.stderr);
@@ -711,14 +765,20 @@ fn check_g_shim_dependent_module_warm_second_request(
 
     // Baseline: a direct spawn of the SAME request-B fixture never touches
     // the daemon's shared memo at all.
-    let mut b_direct_cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(bin));
-    b_direct_cmd
-        .input(dir.join("GPinB.hs"))
-        .output_dir(dir.join("out-g-b-direct"))
-        .session_root(&root_b)
-        .inject_val("Tidepool.Session.Val.G1")
-        .include(lib)
-        .include(&b_inc);
+    let b_direct_cmd = turn_cmd(
+        bin,
+        dir,
+        TurnFixture {
+            label: "g-b-ref",
+            source: "(if mine then 1 else 0) + x",
+            template: include_str!("daemon_integration/shim_ref_b.hs"),
+            shape: TurnShape::Expr,
+            output_dir: dir.join("out-g-b-direct"),
+            session_root: &root_b,
+            inject: &["Tidepool.Session.Val.G1"],
+            includes: &[lib, &b_inc],
+        },
+    );
     let b_direct_out = run_direct(&b_direct_cmd);
     assert!(
         b_direct_out.status.success(),
@@ -736,6 +796,11 @@ fn check_g_shim_dependent_module_warm_second_request(
         daemon_cbor, direct_cbor,
         "result.cbor must be byte-identical — request B's own Pinned/companionVal must be what \
          actually compiles, not a stale request-A Tidepool.Companion memo entry"
+    );
+    assert_eq!(
+        fs::read(dir.join("out-g-b-daemon/turn.cbor")).unwrap(),
+        fs::read(dir.join("out-g-b-direct/turn.cbor")).unwrap(),
+        "the resident-turn result must also be byte-identical across transports"
     );
 }
 

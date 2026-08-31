@@ -12,6 +12,18 @@
 # battery-shard.sh. Kept here, not duplicated per script, for the same reason as
 # resolve_tidepool_extract above.
 
+# A no-argument frontend invocation is a usage error and therefore exits
+# non-zero. Capture its complete output without letting `set -e` short-circuit
+# the caller, then validate the stable banner used as the frontend identity
+# probe.
+extract_has_usage_banner() {
+  local output
+  if output="$("$1" 2>&1)"; then
+    :
+  fi
+  grep -q '^Usage:' <<<"$output"
+}
+
 resolve_tidepool_extract() {
   # Captured BEFORE the build-if-unset branch below: the staleness check
   # after it only applies to a caller-SUPPLIED TIDEPOOL_EXTRACT — a binary
@@ -89,14 +101,11 @@ resolve_tidepool_extract() {
     fi
   fi
 
-  # Capture the whole no-args probe before searching it so an early-closing
-  # pipe cannot give the frontend EPIPE while it writes diagnostics JSON.
   if [ ! -x "$TIDEPOOL_EXTRACT" ]; then
     echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not executable" >&2
     exit 1
   fi
-  _usage_output="$("$TIDEPOOL_EXTRACT" 2>&1)"
-  if ! grep -q '^Usage:' <<<"$_usage_output"; then
+  if ! extract_has_usage_banner "$TIDEPOOL_EXTRACT"; then
     echo "error: TIDEPOOL_EXTRACT='$TIDEPOOL_EXTRACT' is not a runnable tidepool-extract (no 'Usage:' banner)" >&2
     exit 1
   fi

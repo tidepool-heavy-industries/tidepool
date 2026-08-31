@@ -535,29 +535,9 @@ impl ExtractCmd {
         self
     }
 
-    /// `--session-bind` — this turn binds a name, so write the thin session
-    /// iface and emit the bound-binder sidecar.
-    pub fn session_bind(&mut self) -> &mut Self {
-        self.request.session_bind();
-        self
-    }
-
-    /// `--bind-name <name>`. Repeatable; order preserved.
-    pub fn bind_name(&mut self, name: impl AsRef<OsStr>) -> &mut Self {
-        self.request.bind_name(name);
-        self
-    }
-
     /// `--bind-gen <n>` — the session generation this turn binds into.
     pub fn bind_gen(&mut self, gen: u64) -> &mut Self {
         self.request.bind_gen(gen);
-        self
-    }
-
-    /// `--emit-bound-binders <path>` — where the bound-binder JSON sidecar is
-    /// written.
-    pub fn emit_bound_binders(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
-        self.request.emit_bound_binders(path);
         self
     }
 
@@ -750,30 +730,6 @@ mod tests {
                 "2",
                 "--turn-verdict",
                 "bind:x,y",
-            ]
-        );
-    }
-
-    #[test]
-    fn session_bind_mode_spells_every_flag() {
-        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
-        cmd.session_bind()
-            .bind_gen(3)
-            .emit_bound_binders("/tmp/bb.json")
-            .bind_name("x")
-            .bind_name("y");
-        assert_eq!(
-            strs(&cmd.argv()),
-            vec![
-                "--session-bind",
-                "--bind-gen",
-                "3",
-                "--emit-bound-binders",
-                "/tmp/bb.json",
-                "--bind-name",
-                "x",
-                "--bind-name",
-                "y",
             ]
         );
     }

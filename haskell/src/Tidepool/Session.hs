@@ -332,7 +332,7 @@ injectSessionScope scope hsc =
 -- turn's session-lib import). A one-shot eval's wrapper compiles
 -- 'scaffoldOutputBase' instead; 'GhcPipeline.cpResultBinders' tries both, in
 -- that order, to capture the bound value's type regardless of which wrapper
--- ran (see 'GhcPipeline.processSessionFile' callers).
+-- ran (see the resident-turn compiler path).
 scaffoldTargetName :: String
 scaffoldTargetName = "__result"
 

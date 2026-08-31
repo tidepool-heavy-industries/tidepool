@@ -9,7 +9,7 @@ import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, throwIO, SomeException, fromException, toException)
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
-import Control.Monad (foldM, when, void)
+import Control.Monad (foldM, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 
@@ -41,7 +41,7 @@ import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, scaffoldOutputBase )
 import Tidepool.SessionArtifacts
-  ( emitBindArtifacts, mkBoundBinders, parseValModule )
+  ( mkBoundBinders, parseValModule )
 import Tidepool.Translate
   ( ClosedModule(..), UnresolvedVar(..), collectDataCons
   , collectTransitiveDCons, collectUsedDataCons, mergeMetaPreserving
@@ -115,14 +115,8 @@ dispatch compiler timing args =
         | requestClassify args                    -> runClassifyMode timing args
         -- A turn may also carry session fields, so it precedes session dispatch.
         | requestTurn args                        -> runTurnMode compiler args file
-        -- Multi-target compilation may carry a session scope and therefore
-        -- precedes the single-target session operation.
+        -- Multi-target compilation may also carry a stable-value scope.
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
-        -- Session mode: bind/reference turn with iface injection +
-        -- (for binds) thin-iface write + BoundBinder sidecar. Only the FIRST
-        -- file is processed (matching the two guards above) — one invocation,
-        -- one stdout report, per the module doc.
-        | isSessionMode args                  -> processSessionFile compiler args file
         -- Normal one-shot extraction.
         | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
 
@@ -168,10 +162,9 @@ reportDiags (Left e) = do
   pure (ExitFailure 1)
 reportDiags (Right ()) = putStrLn (renderDiagsJson ReportSuccess []) >> pure ExitSuccess
 
--- | A session-aware turn: any of the @--session-*@ flags are present. Reference
--- turns set @--session-root@ (+ @--inject-val@); bind turns add @--session-bind@.
-isSessionMode :: WorkerRequest -> Bool
-isSessionMode args = requestSessionBind args || isJust (requestSessionRoot args)
+-- | Whether a generic extraction needs stable session values in scope.
+hasSessionScope :: WorkerRequest -> Bool
+hasSessionScope args = not (null (requestInjectVals args)) || isJust (requestSessionRoot args)
 
 -- | Project the session portion of a worker request. Callers decide whether
 -- the resulting scope is active.
@@ -190,7 +183,7 @@ processFile compiler timing args path = do
   res <- try $ do
     -- Multi-target extraction can inject stable session values without
     -- becoming a session bind/reference operation.
-    let scope = if isSessionMode args then Just (scopeFromWorkerRequest args) else Nothing
+    let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
     result <- compiler scope path (requestIncludes args) (requestBuildProductsDir args)
     let binds = prBinds result
         tycons = prTyCons result
@@ -340,54 +333,9 @@ processFile compiler timing args path = do
 
   reportDiags res
 
--- | A session-eval turn (reference or bind). Compile through
--- 'runPipelineSession' with the live @Val.G<g>@ ifaces injected (so refs to
--- earlier bindings resolve), emit the JIT-able Core for @__result@, and — on a
--- bind turn — capture the bound value's type, write the thin session iface, and
--- emit the BoundBinder sidecar. Non-session extraction stays on 'processFile'.
-processSessionFile
-  :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
-processSessionFile compiler args path = do
-  -- The self-iterating harness's fused outer render/loop compile never
-  -- reaches this session-mode path even though it now DOES carry
-  -- --session-root/--inject-val for stable-value injection: 'dispatch' checks
-  -- `not (null (requestTargets args))` (which its multi-target --targets
-  -- result,__selfHarnessLoopEntry always is) BEFORE 'isSessionMode', so it
-  -- always lands on 'processFile' instead. This read is here purely so
-  -- 'writeWholeModuleClosed' (shared with 'processFile') behaves identically
-  -- regardless of caller.
-  timing <- readTimingEnabled
-  hPutStrLn stderr $ "Processing (session): " ++ path
-  let scope = scopeFromWorkerRequest args
-      -- The repl wrapper's own compile-target binding is scaffold-reserved
-      -- (@__result@, not @result@) so it can never collide with a user's own
-      -- chosen bind name promoted into a later turn's session-lib import —
-      -- see 'writeWholeModuleClosed''s doc for why the CBOR file it's
-      -- written to stays named @result.cbor@ regardless.
-      targetName = fromMaybe scaffoldTargetName (requestTarget args)
-  res <- try $ do
-    result <- compiler (Just scope) path (requestIncludes args) (requestBuildProductsDir args)
-    let binds  = prBinds result
-        hscEnv = prHscEnv result
-        mCapturedTy = fmap T.pack (prCapturedType result)
-        warnTexts = map T.pack (prWarnings result)
-    hPutStrLn stderr $ "  Top-level bindings: " ++ show (length binds)
-    if requestDumpCore args then hPutStrLn stderr (dumpCore binds) else return ()
-    let outDir = case requestOutDir args of
-          Just dir -> dir
-          Nothing  -> takeDirectory path </> takeBaseName path ++ "_cbor"
-    createDirectoryIfMissing True outDir
-    -- The JIT-able Core for the target (same emission as whole-module mode).
-    -- File base name is always "result" — every Rust session-turn caller
-    -- expects result.cbor regardless of the (scaffold-reserved) lookup name.
-    void $ writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName scaffoldOutputBase
-    -- BIND turn: capture the bound type, mint+write the thin iface, emit sidecar.
-    when (requestSessionBind args) (emitBindArtifacts args result)
-  reportDiags res
-
 -- | Turn mode (@--turn@): classify the raw
 -- turn text (or accept a caller-supplied @--turn-verdict@), splice the
--- matching template, compile through the EXISTING session-compile path
+-- matching template, compile through the resident session path
 -- ('runPipelineSession' \/ 'writeWholeModuleClosed'), and write the rich
 -- 'TurnOut' result as CBOR (@--turn-out@). A @decl@ verdict never compiles: its
 -- 'toDeclItems' come from a whole-module parse over the turn's OWN spliced
@@ -478,8 +426,8 @@ runTurnMode compiler args path = do
             mCapturedTy = fmap T.pack (prCapturedType result)
             warnTexts   = map T.pack (prWarnings result)
         -- The Core binding to look up. Scaffold-reserved by default, but a
-        -- caller whose template names its own target says so with --target
-        -- (the same knob 'processSessionFile' honours). The output file base
+        -- caller whose template names its own target says so with --target.
+        -- The output file base
         -- stays "result" regardless — every Rust caller reads result.cbor.
         let targetName = fromMaybe scaffoldTargetName (requestTarget args)
         asksSites <- writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName scaffoldOutputBase

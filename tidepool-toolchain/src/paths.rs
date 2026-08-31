@@ -136,7 +136,7 @@ pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
 /// `cmd`, on by default for EVERY `tidepool-extract` spawn in this crate —
 /// not just the ones built through `artifacts::compile_invocation`.
 /// `tidepool-runtime` has more than one spawn site (`session/turn.rs`'s
-/// `run_turn`/`classify_block`/`compile_session_turn` and `session/mod.rs`'s
+/// `run_turn`/`classify_block` and `session/mod.rs`'s
 /// `validate_candidate` build their own `ExtractCmd`s directly, bypassing
 /// `compile_invocation`'s memo — a session turn has on-disk side effects and
 /// mutable-session dependencies a content-addressed cache would get wrong,

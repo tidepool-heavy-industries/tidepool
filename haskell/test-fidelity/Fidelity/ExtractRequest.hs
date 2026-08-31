@@ -8,27 +8,36 @@ checks = pure
   [ check "typed request decodes fields and a binary generation" typedRequestDecodes
   , check "unknown request versions are rejected" wrongVersionRejected
   , check "unknown field tags are rejected" unknownTagRejected
+  , check "retired session-bind field tags are rejected explicitly" retiredTagsRejected
   , check "truncated fields are rejected" truncatedFieldRejected
   ]
 
 typedRequestDecodes :: Bool
-typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v2", payload] of
+typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v3", payload] of
   Right (Just request) -> requestFiles request == ["x"] && requestBindGen request == Just 42
   _ -> False
   where
-    payload = "5450524551303032020000000101000000780b2a00000000000000"
+    payload = "5450524551303033020000000101000000780b2a00000000000000"
 
 wrongVersionRejected :: Bool
 wrongVersionRejected = isLeft (workerRequestFromArgv
-  ["--worker-request-v2", "424144564552303100000000"])
+  ["--worker-request-v3", "424144564552303100000000"])
 
 unknownTagRejected :: Bool
 unknownTagRejected = isLeft (workerRequestFromArgv
-  ["--worker-request-v2", "545052455130303201000000ff"])
+  ["--worker-request-v3", "545052455130303301000000ff"])
+
+retiredTagsRejected :: Bool
+retiredTagsRejected = all retired [9, 10, 14]
+  where
+    retired tag = workerRequestFromArgv
+      ["--worker-request-v3", "545052455130303301000000" ++ byteHex tag]
+      == Left ("worker request: retired field tag " ++ show tag)
+    byteHex n = ["0123456789abcdef" !! (n `div` 16), "0123456789abcdef" !! (n `mod` 16)]
 
 truncatedFieldRejected :: Bool
 truncatedFieldRejected = isLeft (workerRequestFromArgv
-  ["--worker-request-v2", "545052455130303201000000010500000078"])
+  ["--worker-request-v3", "545052455130303301000000010500000078"])
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

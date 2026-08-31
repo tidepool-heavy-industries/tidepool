@@ -28,7 +28,7 @@ use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
 
-use crate::{extract_module_name, timing, CompileError, NominalHead, SiteType, YieldSite};
+use crate::{timing, CompileError, NominalHead, SiteType, YieldSite};
 
 use super::render::ExportItem;
 
@@ -89,43 +89,14 @@ pub struct TurnClassification {
     pub binders: Vec<String>,
 }
 
-/// The result of compiling one session-eval turn.
-pub struct SessionTurnResult {
-    /// JIT-able Core for the turn's `result` binding.
-    pub expr: CoreExpr,
-    /// This turn's DataCon metadata (the repl merges it into the session table).
-    pub table: DataConTable,
-    /// Compile warnings (e.g. `has_io`).
-    pub warnings: MetaWarnings,
-    /// The binder(s) this turn introduced — non-empty only on a BIND turn.
-    pub binders: Vec<BoundBinder>,
-    /// GHC-derived typed suspension sites. Answer types serve the legacy
-    /// fork/finalize paths; live input types additionally define actor
-    /// workbench mounts.
-    pub asks: Vec<YieldSite>,
-}
-
-/// Arguments for the bind half of a turn (omit for an EXPR turn).
-#[derive(Clone, Debug)]
-pub struct SessionBind<'a> {
-    /// The bound names (GHC-sourced). One name for a single-binder turn; N
-    /// names for a flat-tuple multi-binder turn.
-    pub names: &'a [String],
-    /// The generation of the `Val.G<g>` module to mint (shared by all N names).
-    pub gen: u64,
-}
-
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
 /// a `Bind` verdict maps to one of two distinct template shapes depending on
 /// whether it actually binds a name (`binders.is_empty()`) — a discarding
-/// bind (`_ <- e`) can't flow through [`SessionBind`] (the extract rejects an
-/// empty `--bind-name` list), so it needs its own wrapper. [`TurnKind`] stays
-/// a plain 3-value mirror of the extract's wire-contract `kind` string
-/// ([`Decl`]/[`Bind`]/[`Expr`](TurnKind)); this is the separate, Rust-only
-/// selection key template lookup is keyed on. `Decl` also selects a template
-/// — the extract's decl path requires `--turn-template decl=<file>` and
-/// errors without one — but a `Decl` verdict still never compiles through it;
-/// the template is only the parse wrapper's pragma block.
+/// bind (`_ <- e`) has no value to install, so it needs its own wrapper.
+/// [`TurnKind`] stays a plain 3-value mirror of the extract's wire-contract
+/// `kind` string ([`Decl`]/[`Bind`]/[`Expr`](TurnKind)); this is the separate,
+/// Rust-only selection key used for template lookup. `Decl` also selects its
+/// parse wrapper but never compiles through it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemplateSelector {
     /// A top-level declaration — selects the parse wrapper (never compiles).
@@ -562,9 +533,8 @@ fn map_notfound(e: SpawnError) -> CompileError {
 /// pass `"classify"` (matching [`timing::CLASSIFY_STAGE_PREFIX`]) for the
 /// parse-only [`classify_block`] spawn, `"extract"` (matching
 /// [`timing::EXTRACT_STAGE_PREFIX`]) for a full-pipeline spawn like
-/// [`run_turn`]'s or `compile_session_turn`'s. Two DIFFERENT subprocess
-/// spawns must never share a prefix — a collector summing by stage name
-/// would silently merge their costs into one row.
+/// [`run_turn`]'s. Different subprocess spawns must never share a prefix: a
+/// collector summing by stage name would silently merge their costs.
 fn forward_extract_timing(stderr: &str, prefix: &str) {
     let stage_name = |phase: &str| match prefix {
         "extract" => timing::extract_stage_name(phase),
@@ -591,8 +561,7 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// `--turn-verdict` when `req.verdict` is supplied (skipping the extract's
 /// internal re-parse). Decodes the `TurnOut` CBOR sidecar into the matching
 /// [`TurnResult`] variant; for `Bind`/`Expr` also reads `result.cbor` /
-/// `meta.cbor` off the same output dir, exactly as [`compile_session_turn`]
-/// does for its own compile.
+/// `meta.cbor` from that same output directory into [`CompiledTurn`].
 ///
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
@@ -729,11 +698,8 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
     }
 }
 
-/// Read `result.cbor`/`meta.cbor` off `output_dir` and register warning var
-/// names — the same post-compile bookkeeping [`compile_session_turn`]
-/// performs, shared here because [`run_turn`]'s `Bind`/`Expr` arms need it
-/// too. `asks` comes from the already-decoded wire variant, not a sidecar
-/// read.
+/// Read one compiled artifact and register its warning metadata. `asks` comes
+/// from the already-decoded turn result, not a parallel sidecar.
 fn read_compiled_turn(
     output_dir: &Path,
     asks: Vec<YieldSite>,
@@ -1173,181 +1139,6 @@ fn parse_one_verdict(v: &serde_json::Value) -> Result<TurnClassification, Compil
     Ok(TurnClassification { kind, binders })
 }
 
-/// Compile one session-eval turn through the session-aware extract path.
-///
-/// `wrapped_source` is the full wrapped module (target binder `result`).
-/// `inject_modules` are the live `Tidepool.Session.Val.G<g'>` module names to
-/// inject so the turn can reference earlier bindings. `session_root` is where
-/// the `Val` ifaces are written/read. `bind` carries the new binder's name+gen
-/// on a BIND turn (and triggers the thin-iface write + sidecar emission).
-pub fn compile_session_turn(
-    wrapped_source: &str,
-    include: &[&Path],
-    session_root: &Path,
-    inject_modules: &[String],
-    bind: Option<SessionBind<'_>>,
-) -> Result<SessionTurnResult, CompileError> {
-    let temp = TempDir::new()?;
-    let filename = extract_module_name(wrapped_source)
-        .map_or_else(|| "Input.hs".to_string(), |m| format!("{m}.hs"));
-    let input = temp.path().join(&filename);
-    std::fs::write(&input, wrapped_source)?;
-    let bb_path = temp.path().join("bound_binders.json");
-
-    let mut cmd = extract_cmd()?;
-    cmd.input(&input)
-        .output_dir(temp.path())
-        // Scaffold-reserved binding name (never a plain user-choosable
-        // identifier like "result") — Main.hs's session path always compiles
-        // this exact target but still writes the output as result.cbor
-        // below, so this rename needs no change to the read-back path.
-        .target("__result")
-        .session_root(session_root)
-        .inject_vals(inject_modules)
-        .includes(include);
-    let is_bind = bind.is_some();
-    if let Some(ref b) = bind {
-        cmd.session_bind()
-            .bind_gen(b.gen)
-            .emit_bound_binders(&bb_path);
-        for name in b.names {
-            cmd.bind_name(name);
-        }
-    }
-
-    let run = cmd.run().map_err(map_notfound)?;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_EXTRACT_SPAWN,
-        run.elapsed,
-        0,
-    );
-    let output = &run.output;
-    let stderr = run.stderr_lossy();
-    if !stderr.is_empty() {
-        eprintln!("[tidepool-extract stderr]\n{stderr}");
-    }
-    // A failed compile is still a real answerer round — attribute its extract
-    // phases the same as a successful one, before the early return below.
-    // "extract", not "classify": this is a full-pipeline spawn, the same lane
-    // `compile.rs::compile_turn` instruments.
-    forward_extract_timing(&stderr, "extract");
-    crate::diag::decode_extract_result(run.success(), &output.stdout, &output.stderr)?;
-
-    let expr_path = temp.path().join("result.cbor");
-    let meta_path = temp.path().join("meta.cbor");
-    if !expr_path.exists() {
-        return Err(CompileError::MissingOutput(expr_path));
-    }
-    if !meta_path.exists() {
-        return Err(CompileError::MissingOutput(meta_path));
-    }
-    let cbor_read_start = std::time::Instant::now();
-    let expr_bytes = std::fs::read(&expr_path)?;
-    let meta_bytes = std::fs::read(&meta_path)?;
-    let cbor_read_bytes = (expr_bytes.len() + meta_bytes.len()) as u64;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_CBOR_READ,
-        cbor_read_start.elapsed(),
-        cbor_read_bytes,
-    );
-
-    let deserialize_start = std::time::Instant::now();
-    let expr = read_cbor(&expr_bytes)?;
-    let (table, warnings) = read_metadata(&meta_bytes)?;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_CBOR_DESERIALIZE,
-        deserialize_start.elapsed(),
-        0,
-    );
-    // Runtime unresolved-error naming — see lib.rs twin sites.
-    tidepool_codegen::host_fns::register_var_names(&warnings.var_names);
-    tidepool_codegen::host_fns::register_poisoned_externals(&warnings.poisoned);
-
-    let binders = if is_bind {
-        let json = std::fs::read_to_string(&bb_path).map_err(|e| {
-            CompileError::ExtractFailed(format!("bind turn emitted no bound-binder sidecar: {e}"))
-        })?;
-        parse_bound_binders(&json)?
-    } else {
-        Vec::new()
-    };
-
-    let asks_start = std::time::Instant::now();
-    let asks = read_asks_sidecar(&temp.path().join("asks.json"))?;
-    timing::record_stage(
-        timing::NO_NODE,
-        timing::NO_ROUND,
-        timing::STAGE_ASKS_PARSE,
-        asks_start.elapsed(),
-        0,
-    );
-
-    Ok(SessionTurnResult {
-        expr,
-        table,
-        warnings,
-        binders,
-        asks,
-    })
-}
-
-/// Read the `asks.json` typed-yield sidecar the extract writes into the
-/// output-dir. Every entry carries `site`, answer `type`/`modules`, and an
-/// `inputs` array of live input type/module records.
-/// The extractor writes `[]` for no sites. Missing or malformed metadata is a
-/// hard compiler-artifact error; there is no legacy fail-open interpretation.
-fn read_asks_sidecar(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
-    tidepool_toolchain::read_yield_sites(path)
-}
-
-fn parse_bound_binders(json: &str) -> Result<Vec<BoundBinder>, CompileError> {
-    let v: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| CompileError::ExtractFailed(format!("invalid bound-binder JSON: {e}")))?;
-    let arr = v
-        .get("binders")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| CompileError::ExtractFailed("bound-binder JSON missing `binders`".into()))?;
-    arr.iter().map(parse_one_binder).collect()
-}
-
-fn parse_one_binder(v: &serde_json::Value) -> Result<BoundBinder, CompileError> {
-    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
-    let name = s("name")
-        .ok_or_else(|| CompileError::ExtractFailed("binder missing `name`".into()))?
-        .to_string();
-    // varId is a DECIMAL STRING (JSON f64 would truncate a 64-bit id).
-    let var_id = s("varId")
-        .ok_or_else(|| CompileError::ExtractFailed("binder missing `varId`".into()))?
-        .parse::<u64>()
-        .map_err(|e| CompileError::ExtractFailed(format!("binder varId not a u64: {e}")))?;
-    let module = s("module")
-        .ok_or_else(|| CompileError::ExtractFailed("binder missing `module`".into()))?
-        .to_string();
-    let tier = match s("tier") {
-        Some("Tier1Closure") => ValueTier::Tier1Closure,
-        Some("Tier0Data") | None => ValueTier::Tier0Data,
-        Some(other) => {
-            return Err(CompileError::ExtractFailed(format!(
-                "unknown binder tier {other:?}"
-            )))
-        }
-    };
-    let type_display = s("typeDisplay").unwrap_or("").to_string();
-    Ok(BoundBinder {
-        name,
-        var_id,
-        module,
-        tier,
-        type_display,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1395,7 +1186,7 @@ mod tests {
     /// An extractor whose non-zero-exit stdout does not parse as the
     /// diagnostics report is a stale/skewed build: `MalformedDiagnostics`
     /// (→ VersionSkew), never `ExtractFailed` (→ UserHaskell) — same contract
-    /// as `compile_session_turn` and `lib.rs::compile_haskell`. Env mutation is
+    /// as `run_turn` and `lib.rs::compile_haskell`. Env mutation is
     /// safe: nextest runs each test in its own process.
     #[test]
     fn classify_block_unparseable_report_is_malformed_diagnostics() {
@@ -1610,27 +1401,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_bound_binder_with_string_varid() {
-        let raw = (0xFEu64 << 56) | 0x123456;
-        let json = format!(
-            r#"{{"binders":[{{"name":"x","varId":"{raw}","module":"Tidepool.Session.Val.G3","tier":"Tier0Data","typeDisplay":"Int"}}]}}"#
-        );
-        let bs = parse_bound_binders(&json).unwrap();
-        assert_eq!(bs.len(), 1);
-        assert_eq!(bs[0].name, "x");
-        assert_eq!(bs[0].var_id, raw);
-        assert_eq!(bs[0].tier, ValueTier::Tier0Data);
-        assert_eq!(bs[0].module, "Tidepool.Session.Val.G3");
-    }
-
-    #[test]
-    fn parses_tier1_closure() {
-        let json = r#"{"binders":[{"name":"f","varId":"42","module":"Tidepool.Session.Val.G1","tier":"Tier1Closure","typeDisplay":"Int -> Int"}]}"#;
-        let bs = parse_bound_binders(json).unwrap();
-        assert_eq!(bs[0].tier, ValueTier::Tier1Closure);
-    }
-
-    #[test]
     fn render_template_byte_exact_turn_and_multi_binder_join() {
         let source = "module M where\nresult = do { {{TURN}}\n ; pure ({{BINDERS}}) }\n";
         let turn = "x <- pure {1, 2}\nlet y = {\"k\":1}";
@@ -1821,7 +1591,7 @@ mod tests {
         );
         let call = calls.lines().next().unwrap_or_default();
         assert!(
-            call.starts_with("--worker-request-v2 5450524551303032"),
+            call.starts_with("--worker-request-v3 5450524551303033"),
             "spawn did not use the versioned typed worker protocol:\n{call}"
         );
     }

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source scripts/lib-extract.sh
 repo_root="$PWD"
 status=0
 plausible_mtime_floor=946684800
@@ -45,8 +46,7 @@ elif [ ! -x "$frontend" ]; then
 else
   note "path:   $frontend"
   note "source: $frontend_source"
-  usage_output="$("$frontend" 2>&1)"
-  if grep -q '^Usage:' <<<"$usage_output"; then
+  if extract_has_usage_banner "$frontend"; then
     note "usage probe: ok"
   else
     fail "frontend did not print its Usage banner"

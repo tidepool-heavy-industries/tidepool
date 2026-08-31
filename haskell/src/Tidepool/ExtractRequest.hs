@@ -24,12 +24,9 @@ data RequestField
   | AllClosed
   | TargetModuleOnly
   | Include FilePath
-  | SessionBind
-  | BindName String
   | BindGen Word64
   | SessionRoot FilePath
   | InjectVal String
-  | EmitBoundBinders FilePath
   | Turn
   | TurnTemplate String FilePath
   | TurnOut FilePath
@@ -51,12 +48,9 @@ data WorkerRequest = WorkerRequest
   , requestTargetModuleOnly :: Bool
   , requestIncludes :: [FilePath]
   , requestFiles :: [FilePath]
-  , requestSessionBind :: Bool
-  , requestBindNames :: [String]
   , requestBindGen :: Maybe Word64
   , requestSessionRoot :: Maybe FilePath
   , requestInjectVals :: [String]
-  , requestEmitBoundBinders :: Maybe FilePath
   , requestTurn :: Bool
   , requestTurnTemplates :: [(String, FilePath)]
   , requestTurnOut :: Maybe FilePath
@@ -78,12 +72,9 @@ emptyWorkerRequest = WorkerRequest
   , requestTargetModuleOnly = False
   , requestIncludes = []
   , requestFiles = []
-  , requestSessionBind = False
-  , requestBindNames = []
   , requestBindGen = Nothing
   , requestSessionRoot = Nothing
   , requestInjectVals = []
-  , requestEmitBoundBinders = Nothing
   , requestTurn = False
   , requestTurnTemplates = []
   , requestTurnOut = Nothing
@@ -106,12 +97,9 @@ requestFromFields = foldl apply emptyWorkerRequest
       AllClosed -> request { requestAllClosed = True }
       TargetModuleOnly -> request { requestTargetModuleOnly = True }
       Include path -> request { requestIncludes = requestIncludes request ++ [path] }
-      SessionBind -> request { requestSessionBind = True }
-      BindName name -> request { requestBindNames = requestBindNames request ++ [name] }
       BindGen generation -> request { requestBindGen = Just generation }
       SessionRoot path -> request { requestSessionRoot = Just path }
       InjectVal name -> request { requestInjectVals = requestInjectVals request ++ [name] }
-      EmitBoundBinders path -> request { requestEmitBoundBinders = Just path }
       Turn -> request { requestTurn = True }
       TurnTemplate kind path -> request
         { requestTurnTemplates = requestTurnTemplates request ++ [(kind, path)] }
@@ -123,7 +111,7 @@ requestFromFields = foldl apply emptyWorkerRequest
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v2"
+workerRequestFlag = "--worker-request-v3"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -142,7 +130,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ002"
+  if magic /= "TPREQ003"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -152,7 +140,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ002" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ003" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -164,12 +152,9 @@ encodeField field = case field of
   AllClosed -> BS.singleton 6
   TargetModuleOnly -> BS.singleton 7
   Include value -> taggedText 8 value
-  SessionBind -> BS.singleton 9
-  BindName value -> taggedText 10 value
   BindGen value -> BS.singleton 11 <> putU64 value
   SessionRoot value -> taggedText 12 value
   InjectVal value -> taggedText 13 value
-  EmitBoundBinders value -> taggedText 14 value
   Turn -> BS.singleton 16
   TurnTemplate kind path -> BS.singleton 17 <> textFrame kind <> textFrame path
   TurnOut value -> taggedText 18 value
@@ -216,12 +201,12 @@ pField bytes = do
     6  -> Right (AllClosed, rest)
     7  -> Right (TargetModuleOnly, rest)
     8  -> mapParser Include pText rest
-    9  -> Right (SessionBind, rest)
-    10 -> mapParser BindName pText rest
+    9  -> retired tag
+    10 -> retired tag
     11 -> mapParser BindGen pWord64 rest
     12 -> mapParser SessionRoot pText rest
     13 -> mapParser InjectVal pText rest
-    14 -> mapParser EmitBoundBinders pText rest
+    14 -> retired tag
     16 -> Right (Turn, rest)
     17 -> do
       (kind, rest') <- pText rest
@@ -234,6 +219,8 @@ pField bytes = do
     24 -> Right (HarnessProfile, rest)
     25 -> mapParser BuildProductsDir pText rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)
+  where
+    retired tag = Left ("worker request: retired field tag " ++ show tag)
 
 mapParser :: (a -> b) -> Parser a -> Parser b
 mapParser f parser bytes = do
