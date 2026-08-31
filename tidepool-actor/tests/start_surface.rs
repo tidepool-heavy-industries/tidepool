@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tidepool_actor::{
-    ActorDescriptor, ActorLifecycle, ActorMachineRegistry, ActorPlacement, ActorRegistry,
-    ActorTurnKind, ActorWorkbenchSource, OutboundSettlement, ResidentActorMailbox,
-    ResidentActorRunner, ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor,
-    ResidentWaitPoll, StartInitiator,
+    ActorDescriptor, ActorExitKind, ActorLifecycle, ActorMachineRegistry, ActorPlacement,
+    ActorRegistry, ActorTerminal, ActorTurnKind, ActorWorkbenchSource, OutboundSettlement,
+    ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRunner, ResidentActorStarter,
+    ResidentCallPoll, ResidentCompletionExecutor, ResidentWaitPoll, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -359,4 +359,29 @@ in do
         }
         ResidentOutcome::Suspended { .. } => panic!("parent should complete after typed job exit"),
     }
+
+    assert_eq!(
+        machines.peek(session_id, |machine| machine.parked_holes().len()),
+        Some(1),
+        "the live server owns the sole remaining parked continuation"
+    );
+    let lifecycle = ResidentActorLifecycle::new(
+        registry.clone(),
+        ResidentActorRunner::new(Arc::clone(&machines), workbench_source),
+    );
+    lifecycle
+        .force_terminate(
+            parent,
+            ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "parent completed".into(),
+            },
+        )
+        .await
+        .expect("force cleanup completed parent subtree");
+    assert_eq!(
+        machines.peek(session_id, |machine| machine.parked_holes().len()),
+        Some(0),
+        "subtree cleanup closes the server's resident realm"
+    );
 }

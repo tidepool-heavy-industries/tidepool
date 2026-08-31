@@ -75,12 +75,18 @@ pub enum ResidentWaitPoll {
 pub struct ResidentActorMailbox<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
+    lifecycle: crate::ResidentActorLifecycle<H, O>,
 }
 
 impl<H, O> ResidentActorMailbox<H, O> {
     #[must_use]
     pub fn new(registry: ActorRegistry, runner: ResidentActorRunner<H, O>) -> Self {
-        Self { registry, runner }
+        let lifecycle = crate::ResidentActorLifecycle::new(registry.clone(), runner.clone());
+        Self {
+            registry,
+            runner,
+            lifecycle,
+        }
     }
 }
 
@@ -90,17 +96,16 @@ where
     O: OutputSink + Sync + 'static,
 {
     async fn fail_actor(&self, actor: ActorRef, summary: String) {
-        if let Ok(context) = self.registry.session_context(actor) {
-            let realm = context.placement.resource_scope;
-            let _ = self.runner.close_realm(context, realm).await;
-        }
-        let _ = self.registry.finish(
-            actor,
-            ActorTerminal {
-                kind: ActorExitKind::Failed,
-                summary,
-            },
-        );
+        let _ = self
+            .lifecycle
+            .force_terminate(
+                actor,
+                ActorTerminal {
+                    kind: ActorExitKind::Failed,
+                    summary,
+                },
+            )
+            .await;
     }
 
     /// Submit one already-suspended public `call` or `cast`. Cast resumes the
@@ -124,6 +129,15 @@ where
                     continuation,
                     request,
                 } => {
+                    let target_realm = self
+                        .registry
+                        .session_context(target)?
+                        .placement
+                        .resource_scope;
+                    let request = self
+                        .runner
+                        .rehome_mailbox_value(context.clone(), request, target_realm)
+                        .await?;
                     self.registry.cast(caller, target, request)?;
                     let outcome = self.runner.resume_unit(context, continuation).await?;
                     Ok(OutboundSettlement::Continued { turn, outcome })
@@ -133,6 +147,15 @@ where
                     continuation,
                     request,
                 } => {
+                    let target_realm = self
+                        .registry
+                        .session_context(target)?
+                        .placement
+                        .resource_scope;
+                    let request = self
+                        .runner
+                        .rehome_mailbox_value(context.clone(), request, target_realm)
+                        .await?;
                     let ticket = self.registry.call(caller, target, request)?;
                     drop(turn);
                     Ok(OutboundSettlement::Pending(ResidentCall {
@@ -295,8 +318,18 @@ where
             .await?;
         let reply_continuation = reply.continuation;
         let reply = match &mut delivery {
-            MailboxDelivery::Call(_) => {
-                Some(MailboxValue::new(context.placement.session, reply.value))
+            MailboxDelivery::Call(call) => {
+                let caller_realm = self
+                    .registry
+                    .session_context(call.caller())?
+                    .placement
+                    .resource_scope;
+                let value = MailboxValue::new(context.placement.session, reply.value);
+                Some(
+                    self.runner
+                        .rehome_mailbox_value(context.clone(), value, caller_realm)
+                        .await?,
+                )
             }
             MailboxDelivery::Cast(_) => {
                 drop(reply.value);
@@ -341,13 +374,17 @@ where
             suspended => {
                 let receiver = self
                     .runner
-                    .capture_receiver(context, suspended, actor_realm)
+                    .capture_receiver(context.clone(), suspended, actor_realm)
                     .await?;
                 InstalledActorState::Receiving(receiver)
             }
         };
+        let completed = matches!(next, InstalledActorState::Completed(_));
         self.registry
             .settle_resident_delivery(actor, &mut delivery, reply, next)?;
+        if completed {
+            self.runner.close_realm(context, actor_realm).await?;
+        }
         Ok(())
     }
 }

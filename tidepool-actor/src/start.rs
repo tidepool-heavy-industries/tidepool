@@ -22,7 +22,7 @@ use crate::resident_workbench::ResidentActorStartupStep;
 use crate::{
     ActorDescriptor, ActorExitKind, ActorRegistry, ActorRegistryError, ActorTerminal,
     ResidentActorRunner, ResidentActorWorkbenchError, ResidentCompletionError,
-    ResidentCompletionExecutor, StartInitiator, TurnLease,
+    ResidentCompletionExecutor, ResidentLifecycleError, StartInitiator, TurnLease,
 };
 
 /// One parked parent continuation paired with exclusive custody of its child
@@ -136,6 +136,8 @@ pub enum ResidentActorStartError {
     Workbench(#[from] ResidentActorWorkbenchError),
     #[error(transparent)]
     Completion(#[from] ResidentCompletionError),
+    #[error(transparent)]
+    Lifecycle(#[from] ResidentLifecycleError),
 }
 
 /// Runtime-owned prompted startup. This is orchestration over the permanent
@@ -145,6 +147,7 @@ pub struct ResidentActorStarter<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
     completions: ResidentCompletionExecutor<H, O>,
+    lifecycle: crate::ResidentActorLifecycle<H, O>,
 }
 
 impl<H, O> ResidentActorStarter<H, O> {
@@ -154,10 +157,12 @@ impl<H, O> ResidentActorStarter<H, O> {
         runner: ResidentActorRunner<H, O>,
         completions: ResidentCompletionExecutor<H, O>,
     ) -> Self {
+        let lifecycle = crate::ResidentActorLifecycle::new(registry.clone(), runner.clone());
         Self {
             registry,
             runner,
             completions,
+            lifecycle,
         }
     }
 }
@@ -167,6 +172,20 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    async fn abort_starting(
+        &self,
+        starting: crate::StartingActor,
+        context: crate::ActorSessionContext,
+        terminal: ActorTerminal,
+    ) -> Result<(), ResidentActorStartError> {
+        let realm = context.placement.resource_scope;
+        let abort = self.registry.abort_start(starting, terminal);
+        let cleanup = self.runner.close_realm(context, realm).await;
+        abort?;
+        cleanup?;
+        Ok(())
+    }
+
     pub async fn start(
         &self,
         parent_turn: TurnLease,
@@ -218,13 +237,15 @@ where
         let readiness = match startup_result {
             Ok(readiness) => readiness,
             Err(error) => {
-                self.registry.abort_start(
+                self.abort_starting(
                     starting,
+                    child_context,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
                     },
-                )?;
+                )
+                .await?;
                 return Err(error);
             }
         };
@@ -236,13 +257,15 @@ where
         {
             Ok(child) => child,
             Err(error) => {
-                self.registry.abort_start(
+                self.abort_starting(
                     starting,
+                    child_context,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
                     },
-                )?;
+                )
+                .await?;
                 return Err(error.into());
             }
         };
@@ -250,38 +273,76 @@ where
         if !completed {
             let receiver = match self
                 .runner
-                .capture_receiver(child_context, child, child_realm)
+                .capture_receiver(child_context.clone(), child, child_realm)
                 .await
             {
                 Ok(receiver) => receiver,
                 Err(error) => {
-                    self.registry.abort_start(
+                    self.abort_starting(
                         starting,
+                        child_context,
                         ActorTerminal {
                             kind: ActorExitKind::Failed,
                             summary: error.to_string(),
                         },
-                    )?;
+                    )
+                    .await?;
                     return Err(error.into());
                 }
             };
-            self.registry
-                .install_starting_receiver(&starting, receiver)?;
+            if let Err(error) = self.registry.install_starting_receiver(&starting, receiver) {
+                self.abort_starting(
+                    starting,
+                    child_context,
+                    ActorTerminal {
+                        kind: ActorExitKind::Failed,
+                        summary: error.to_string(),
+                    },
+                )
+                .await?;
+                return Err(error.into());
+            }
         }
-        let actor = self.registry.publish_ready(starting)?;
+        let actor = match self.registry.publish_ready(starting) {
+            Ok(actor) => actor,
+            Err(error) => {
+                let _ = self.runner.close_realm(child_context, child_realm).await;
+                return Err(error.into());
+            }
+        };
         if completed {
-            self.registry.finish(
-                actor,
-                ActorTerminal {
-                    kind: ActorExitKind::Completed,
-                    summary: "completed".into(),
-                },
-            )?;
+            self.lifecycle
+                .force_terminate(
+                    actor,
+                    ActorTerminal {
+                        kind: ActorExitKind::Completed,
+                        summary: "completed".into(),
+                    },
+                )
+                .await?;
         }
-        let parent = self
+        let parent = match self
             .runner
             .resume_starting_parent(parent_context, parent_hole, actor)
-            .await?;
+            .await
+        {
+            Ok(parent) => parent,
+            Err(error) => {
+                let _ = self
+                    .lifecycle
+                    .force_terminate(
+                        actor,
+                        ActorTerminal {
+                            kind: ActorExitKind::Failed,
+                            summary: format!(
+                                "starter could not publish the child reference: {error}"
+                            ),
+                        },
+                    )
+                    .await;
+                return Err(error.into());
+            }
+        };
         Ok((parent_turn, actor, parent))
     }
 }

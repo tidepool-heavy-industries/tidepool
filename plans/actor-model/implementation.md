@@ -117,6 +117,17 @@ This is the canonical status inventory for the plan.
   and notification channel per session. This is the actor runnable-segment
   queue and the existing harness checkout path at once; the former global
   notification could wake the wrong session and has been removed.
+- One resident lifecycle component owns Rust-forced subtree termination: it
+  publishes terminal state first to stop admission and settle obligations,
+  then closes every captured actor realm, attempting the whole subtree even if
+  one cleanup fails. Resident continuation failures and failed/unpublishable
+  startup use this path; the cooperative typed shutdown hook remains unlanded.
+- Resident mailbox custody now follows the canonical ownership protocol:
+  accepted requests are rehomed to the target realm, replies are rehomed to
+  the caller realm before atomic publication, and a completed callee can close
+  its realm immediately without invalidating either value. Immediate and
+  mailbox-driven completion both reap execution resources while the shared
+  Haskell exit cell remains reachable through `ActorRef`.
 - Effect-schema metadata centrally curates authored constructors, supporting
   types, and helpers. The generated public shim and model-facing descriptions
   consume the same allowlists; internal Core retains the full nominal
@@ -137,7 +148,7 @@ This is the canonical status inventory for the plan.
   than authority;
 - full sealing validation for explicit model-visible value exports and
   shadow-drift/type-coherence probes beyond the landed nominal-head facade;
-- lifecycle advisories and typed shutdown execution;
+- lifecycle advisories and cooperative typed shutdown execution;
 - the remaining mailbox cancellation/failure race matrix;
 - model-authored dynamic definitions and internally sealed child deployments;
 - immutable live-binding snapshots or structural context fork;
@@ -446,14 +457,14 @@ The Rust registry already provides:
 - synchronous wait-edge tracking and `A -> B -> A` cycle rejection;
 - owner termination recursively stopping its subtree.
 
-Still add closing-phase shutdown execution, followed by Rust-owned forced
-cleanup.
+Still add closing-phase cooperative shutdown execution before the landed
+Rust-owned forced-cleanup fallback.
 
 The resident call/cast/receive/serve vertical, atomic reply-plus-next-state
 settlement, exact waits, and per-session FIFO machine admission are landed.
-The remaining work in this stage is shutdown and adversarial
-lifecycle/cancellation coverage—not another scheduler, mailbox execution, or
-exit-value retention mechanism.
+The remaining work in this stage is the typed shutdown hook and adversarial
+lifecycle/cancellation coverage—not another scheduler, mailbox execution,
+forced-cleanup, or exit-value retention mechanism.
 
 Remaining acceptance covers call/cancel/reply races, queued-root teardown, stale
 incarnations, call cycles, subtree termination, quiet normal completion, and

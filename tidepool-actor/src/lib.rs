@@ -16,6 +16,7 @@ mod identity;
 mod mailbox;
 mod mount;
 mod registry;
+mod resident_lifecycle;
 mod resident_mailbox;
 mod resident_workbench;
 mod start;
@@ -49,6 +50,7 @@ pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
     ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,
 };
+pub use resident_lifecycle::{ResidentActorLifecycle, ResidentLifecycleError};
 pub use resident_mailbox::{
     OutboundSettlement, ResidentActorMailbox, ResidentCall, ResidentCallPoll, ResidentMailboxError,
     ResidentWait, ResidentWaitPoll,

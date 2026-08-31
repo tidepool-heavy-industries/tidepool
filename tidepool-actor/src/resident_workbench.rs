@@ -81,6 +81,17 @@ pub struct ResidentActorRunner<H, O> {
     access: ResidentMachineAccess<H, O>,
 }
 
+impl<H, O> Clone for ResidentActorRunner<H, O> {
+    fn clone(&self) -> Self {
+        Self {
+            access: ResidentMachineAccess::new(
+                Arc::clone(&self.access.machines),
+                self.access.source.clone(),
+            ),
+        }
+    }
+}
+
 /// A private readiness continuation validated while its actor is still
 /// unpublished. Construction proves both the nominal request and owning
 /// resource realm; consuming it is the only way the runner enters the
@@ -712,6 +723,24 @@ where
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn rehome_mailbox_value(
+        &self,
+        context: crate::ActorSessionContext,
+        value: crate::MailboxValue,
+        owner: RealmId,
+    ) -> Result<crate::MailboxValue, ResidentActorWorkbenchError> {
+        let session_id = value.session();
+        let custody = value.into_custody();
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let custody = session
+                    .rehome_custody(custody, owner)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                Ok(crate::MailboxValue::new(session_id, custody))
             })
             .await
     }

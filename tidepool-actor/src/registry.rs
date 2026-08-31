@@ -1064,6 +1064,11 @@ impl CallDelivery {
         self.call
     }
 
+    #[must_use]
+    pub(crate) fn caller(&self) -> ActorRef {
+        self.caller
+    }
+
     #[must_use = "the request root must be mounted or deliberately dropped"]
     pub fn take_value(&mut self) -> Option<MailboxValue> {
         self.value.take()
