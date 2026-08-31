@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tidepool_bridge::ToCore;
+use tidepool_bridge::{FromCore, ToCore};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
@@ -21,6 +21,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
+use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound};
 use crate::{
     ActorCompileViewError, ActorRegistryError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench,
 };
@@ -443,6 +444,248 @@ where
                 session
                     .resume(readiness.hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn capture_receiver(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        actor_realm: RealmId,
+    ) -> Result<InstalledReceiver, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "completed actor has no mailbox receiver".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _) =
+                    crate::generated::actor_local::ActorLocalReq::from_value(
+                        &request,
+                        session.data_con_table(),
+                    )?;
+                let site = u64::try_from(site).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor receive carried invalid site id {site}"
+                    ))
+                })?;
+                if session.parked_realm(&hole) != Some(actor_realm) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor receive escaped its owning realm {actor_realm:?}"
+                    )));
+                }
+                let handler = session
+                    .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "actor receive suspended without its handler".into(),
+                        )
+                    })?;
+                Ok(InstalledReceiver {
+                    site,
+                    continuation: hole,
+                    handler,
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn run_mailbox_handler(
+        &self,
+        context: crate::ActorSessionContext,
+        handler: RootCustody,
+        request: RootCustody,
+        handler_realm: RealmId,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                session
+                    .run_rooted_application(
+                        "actor_mailbox_handler",
+                        handler,
+                        request,
+                        handler_realm,
+                        None,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn capture_outbound(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+    ) -> Result<ResidentOutbound, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor outbound operation completed without suspending".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let decoded = crate::generated::actor::ActorReq::from_value(
+                    &request,
+                    session.data_con_table(),
+                )?;
+                let (target, call) = match decoded {
+                    crate::generated::actor::ActorReq::ActorCallWith(target, _) => (target, true),
+                    crate::generated::actor::ActorReq::ActorCastWith(target, _) => (target, false),
+                    _ => {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "expected actor call or cast suspension".into(),
+                        ));
+                    }
+                };
+                let (id, incarnation) = target;
+                let id = u64::try_from(id).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor request carried invalid actor id {id}"
+                    ))
+                })?;
+                let incarnation = u64::try_from(incarnation).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor request carried invalid incarnation {incarnation}"
+                    ))
+                })?;
+                let target = crate::ActorRef {
+                    id: crate::ActorId(id),
+                    incarnation: crate::Incarnation(incarnation),
+                };
+                let custody = session
+                    .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "actor call or cast suspended without its request".into(),
+                        )
+                    })?;
+                let request = crate::MailboxValue::new(context.placement.session, custody);
+                Ok(if call {
+                    ResidentOutbound::Call {
+                        target,
+                        continuation: hole,
+                        request,
+                    }
+                } else {
+                    ResidentOutbound::Cast {
+                        target,
+                        continuation: hole,
+                        request,
+                    }
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn capture_kernel_value(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        expected_constructor: &'static str,
+        expected_site: u64,
+        handler_realm: RealmId,
+        actor_realm: RealmId,
+    ) -> Result<KernelValue, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "mailbox handler completed before `{expected_constructor}`"
+            )));
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                if session.parked_realm(&hole) != Some(handler_realm) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "`{expected_constructor}` escaped mailbox handler realm {handler_realm:?}"
+                    )));
+                }
+                let decoded = crate::generated::actor_kernel::ActorKernelReq::from_value(
+                    &request,
+                    session.data_con_table(),
+                )?;
+                let (constructor, site) = match decoded {
+                    crate::generated::actor_kernel::ActorKernelReq::ActorReplyWith(site, _) => {
+                        ("ActorReplyWith", site)
+                    }
+                    crate::generated::actor_kernel::ActorKernelReq::ActorContinueWith(site, _) => {
+                        ("ActorContinueWith", site)
+                    }
+                    crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith => {
+                        ("ActorReadyWith", -1)
+                    }
+                };
+                let site = u64::try_from(site).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "`{constructor}` carried invalid site id {site}"
+                    ))
+                })?;
+                if constructor != expected_constructor || site != expected_site {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "expected `{expected_constructor}` at site {expected_site}, got `{constructor}` at site {site}"
+                    )));
+                }
+                let value = session
+                    .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "`{constructor}` suspended without its live value"
+                        ))
+                    })?;
+                Ok(KernelValue {
+                    continuation: hole,
+                    value,
+                })
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_unit(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = ().to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_live(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        value: RootCustody,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .resume_handle(hole, value)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn close_realm(
+        &self,
+        context: crate::ActorSessionContext,
+        realm: RealmId,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let _ = session.close_realm(realm);
+                Ok(())
             })
             .await
     }

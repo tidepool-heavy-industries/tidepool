@@ -101,9 +101,14 @@ This is the canonical status inventory for the plan.
   isolated startup with zero or multiple sequential result-bearing sessions,
   realm-checked readiness, child completion, and parent resume.
 - The model-facing `call`, `cast`, rank-2 `receive`, and `serve` vocabulary is
-  now typed and extractor-backed. `receive` installs an opaque rooted handler
-  and uses one private `ActorKernel` effect for named reply/continue settlement;
-  the Rust mailbox interpreter that consumes those requests remains Stage 4.
+  now typed, extractor-backed, and exercised through the real resident machine.
+  `receive` installs an opaque rooted handler and uses one private `ActorKernel`
+  effect for named reply/continue settlement. The Rust mailbox interpreter
+  moves live requests through that handler, truthfully settles call/cast, and
+  atomically publishes a call reply with the callee's next installed receive.
+  Recursive `serve` assigns its typed site at the concrete outer call and
+  reuses it internally, rather than making the generic library body pretend to
+  contain a monomorphic suspension.
 - Effect-schema metadata centrally curates authored constructors, supporting
   types, and helpers. The generated public shim and model-facing descriptions
   consume the same allowlists; internal Core retains the full nominal
@@ -125,6 +130,8 @@ This is the canonical status inventory for the plan.
 - full sealing validation for explicit model-visible value exports and
   shadow-drift/type-coherence probes beyond the landed nominal-head facade;
 - lifecycle advisories and typed shutdown execution;
+- FIFO runnable-segment scheduling above shared-machine checkout, plus the
+  remaining mailbox cancellation/failure race matrix;
 - model-authored dynamic definitions and internally sealed child deployments;
 - immutable live-binding snapshots or structural context fork;
 - the DevSwarm actor entry and deletion of the old selfharness path.
@@ -406,10 +413,10 @@ The `ReadWrite`/`ReadOnly` row proof belongs with named profiles in Stage 5.
 Stage 3 must leave no reflected ABI or registry that profile selection would
 have to route around.
 
-The Stage 3 vertical installs a one-shot continuation that immediately returns
-`exit` after initialization. It proves construction, installation, readiness,
-and retained exit without pretending the mailbox-consumption surface from
-Stage 4 already exists.
+The first Stage 3 vertical installed a one-shot continuation that immediately
+returned `exit` after initialization. Stage 4 now extends that exact root and
+continuation path with installed receives; it did not introduce a second
+program registry or actor dispatcher.
 
 ## 7. Stage 4 — actor operations and supervision
 
@@ -434,6 +441,11 @@ Finish the Rust lifecycle behavior:
 - synchronous wait-edge tracking and `A -> B -> A` cycle rejection;
 - owner termination recursively stopping its subtree;
 - closing-phase shutdown execution, followed by Rust-owned forced cleanup.
+
+The resident call/cast/receive/serve vertical and atomic reply-plus-next-state
+settlement are landed. The remaining work in this stage is scheduling,
+shutdown, exit-value completion of mailbox-driven actors, and adversarial
+lifecycle/cancellation coverage—not another mailbox execution mechanism.
 
 Acceptance covers call/cancel/reply races, queued-root teardown, stale
 incarnations, call cycles, subtree termination, quiet normal completion, and

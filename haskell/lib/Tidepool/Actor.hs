@@ -157,11 +157,30 @@ receiveSited site handler = send (ActorReceiveWith site kernelHandler)
 -- | Serve requests forever with explicit Haskell state. Actors that may exit
 -- in response to a message use 'receive' directly and return normally.
 serve
-  :: Member (ActorLocal protocol) effs
+  :: forall state protocol effs exit
+   . Member (ActorLocal protocol) effs
   => state
   -> (forall result. state -> protocol result -> Eff effs (result, state))
   -> Eff effs exit
-serve state step = receive (step state) >>= \next -> serve next step
+{-# OPAQUE serve #-}
+serve state step = serveSited @state unreachableSiteId state step
+  where
+    unreachableSiteId = error
+      "serve: unreachable — extract must assign its receive site at the fully applied call"
+
+-- A recursive server owns one stable receive site. The extractor rewrites the
+-- public, fully-applied `serve` call where `state` is concrete; recursion then
+-- reuses that site instead of trying to extract this polymorphic library body.
+{-# OPAQUE serveSited #-}
+serveSited
+  :: forall state protocol effs exit
+   . Member (ActorLocal protocol) effs
+  => Int
+  -> state
+  -> (forall result. state -> protocol result -> Eff effs (result, state))
+  -> Eff effs exit
+serveSited site state step =
+  receiveSited @state site (step state) >>= \next -> serveSited site next step
 
 -- | Observe this exact actor incarnation's retained terminal result.
 --

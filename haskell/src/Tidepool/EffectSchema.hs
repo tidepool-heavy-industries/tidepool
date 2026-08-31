@@ -70,6 +70,8 @@ sitedVerbs =
       "deliberateSited" "Tidepool.Deliberation" 2 2 False True [1]
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" 1 1 False True []
+  , verb "serve" "Tidepool.Actor"
+      "serveSited" "Tidepool.Actor" 1 2 False True []
   ]
   where
     verb = VerbSpec

@@ -8,8 +8,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tidepool_actor::{
     ActorDescriptor, ActorLifecycle, ActorMachineRegistry, ActorPlacement, ActorRegistry,
-    ActorTurnKind, ActorWorkbenchSource, ResidentActorRunner, ResidentActorStarter,
-    ResidentCompletionExecutor, StartInitiator,
+    ActorTurnKind, ActorWorkbenchSource, OutboundSettlement, ResidentActorMailbox,
+    ResidentActorRunner, ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor,
+    StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -125,7 +126,7 @@ let idleDefinition :: ActorDefinition Int Maybe Int
         "server"
         (\seed -> pure seed)
         (\_seed initial ->
-          (receive (\(delta, result) -> pure (result, initial + delta))
+          (serve initial (\state (delta, result) -> pure (result, state + delta))
             :: Eff '[Deliberate, ActorLocal ((,) Int)] Int))
 
     client :: ActorRef ((,) Int) Int -> Eff '[Actor] Int
@@ -136,8 +137,9 @@ let idleDefinition :: ActorDefinition Int Maybe Int
 in do
     _ <- startActor idleDefinition 10
     _ <- startActor workerDefinition 41
-    _ <- startActor serverDefinition 0
-    pure (7 :: Int)
+    server <- startActor serverDefinition 0
+    cast server (1, ())
+    call server (2, 41)
 "#;
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: source,
@@ -257,7 +259,7 @@ in do
         Ok(ActorLifecycle::Exited)
     );
 
-    let capture_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source);
+    let capture_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone());
     let server_start = capture_runner
         .capture_start(parent_turn.session_context(), parent_outcome)
         .await
@@ -266,7 +268,6 @@ in do
         .start(parent_turn, &provider, server_start, None)
         .await
         .expect("start mailbox server");
-    drop(parent_turn);
     assert_eq!(
         registry
             .descriptor(server)
@@ -276,10 +277,40 @@ in do
     );
     assert_eq!(registry.lifecycle(server), Ok(ActorLifecycle::Ready));
     assert_eq!(provider.requests.lock().len(), 2);
+
+    let mailbox_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone());
+    let mailbox = ResidentActorMailbox::new(registry.clone(), mailbox_runner);
+    let (parent_turn, parent_outcome) = match mailbox
+        .submit_outbound(parent_turn, parent_outcome)
+        .await
+        .expect("submit cast")
+    {
+        OutboundSettlement::Continued { turn, outcome } => (turn, outcome),
+        OutboundSettlement::Pending(_) => panic!("cast must continue after acceptance"),
+    };
+    assert!(mailbox.dispatch_one(server).await.expect("dispatch cast"));
+    let pending = match mailbox
+        .submit_outbound(parent_turn, parent_outcome)
+        .await
+        .expect("submit call")
+    {
+        OutboundSettlement::Pending(call) => call,
+        OutboundSettlement::Continued { .. } => panic!("call must park for its reply"),
+    };
+    assert!(mailbox.dispatch_one(server).await.expect("dispatch call"));
+    let (parent_turn, parent_outcome) = match mailbox
+        .poll_call(pending)
+        .await
+        .expect("resume replied call")
+    {
+        ResidentCallPoll::Continued { turn, outcome } => (turn, outcome),
+        ResidentCallPoll::Pending(_) => panic!("dispatched call must be settled"),
+    };
+    drop(parent_turn);
     match parent_outcome {
         ResidentOutcome::Completed { result, .. } => {
-            assert_eq!(result.to_json(), serde_json::json!(7));
+            assert_eq!(result.to_json(), serde_json::json!(41));
         }
-        ResidentOutcome::Suspended { .. } => panic!("parent should complete after start"),
+        ResidentOutcome::Suspended { .. } => panic!("parent should complete after call reply"),
     }
 }

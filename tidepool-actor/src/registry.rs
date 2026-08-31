@@ -6,6 +6,7 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::MonotonicIdIssuer;
 
 use crate::agent_session::AgentSessionState;
+use crate::mailbox::{InstalledActorState, InstalledReceiver};
 use crate::{
     ActorAgentSession, ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorPlacement,
     ActorRef, ActorSessionContext, ActorSourceImports, CallDisposition, CallFailure, CallId,
@@ -138,6 +139,10 @@ pub enum ActorRegistryError {
     AlreadyReady(ActorRef),
     #[error("actor {0:?} has exited")]
     Exited(ActorRef),
+    #[error("actor {0:?} already has an installed mailbox receiver")]
+    ReceiverAlreadyInstalled(ActorRef),
+    #[error("actor {0:?} has no installed mailbox receiver")]
+    ReceiverMissing(ActorRef),
     #[error("actor {actor:?} already has an active {active:?} turn")]
     Busy {
         actor: ActorRef,
@@ -203,6 +208,7 @@ struct ActorEntry {
     lifecycle: ActorLifecycle,
     active_turn: Option<ActorTurnKind>,
     mailbox: VecDeque<QueuedMessage>,
+    receiver: Option<InstalledReceiver>,
     parked: Option<ParkedObligation>,
     terminal: Option<ActorTerminal>,
     agent_session: Option<Arc<Mutex<AgentSessionState>>>,
@@ -332,6 +338,7 @@ impl ActorRegistry {
                 lifecycle: ActorLifecycle::Initializing,
                 active_turn: None,
                 mailbox: VecDeque::new(),
+                receiver: None,
                 parked: None,
                 terminal: None,
                 agent_session: None,
@@ -399,6 +406,100 @@ impl ActorRegistry {
     ) -> Result<ActorAgentSession, ActorRegistryError> {
         self.validate_starting(starting)?;
         ActorAgentSession::attach(self.clone(), starting.actor)
+    }
+
+    /// Install the first receiver before readiness publication. The private
+    /// startup capability proves this is the exact unpublished incarnation.
+    pub(crate) fn install_starting_receiver(
+        &self,
+        starting: &StartingActor,
+        receiver: InstalledReceiver,
+    ) -> Result<(), ActorRegistryError> {
+        self.validate_starting(starting)?;
+        let mut state = self.inner.state.lock();
+        let actor = entry_mut(&mut state, starting.actor)?;
+        if actor.lifecycle != ActorLifecycle::Initializing {
+            return Err(match actor.lifecycle {
+                ActorLifecycle::Ready => ActorRegistryError::AlreadyReady(starting.actor),
+                ActorLifecycle::Exited => ActorRegistryError::Exited(starting.actor),
+                ActorLifecycle::Initializing => unreachable!(),
+            });
+        }
+        if actor.receiver.is_some() {
+            return Err(ActorRegistryError::ReceiverAlreadyInstalled(starting.actor));
+        }
+        actor.receiver = Some(receiver);
+        Ok(())
+    }
+
+    pub(crate) fn take_receiver(
+        &self,
+        actor: ActorRef,
+    ) -> Result<InstalledReceiver, ActorRegistryError> {
+        entry_mut(&mut self.inner.state.lock(), actor)?
+            .receiver
+            .take()
+            .ok_or(ActorRegistryError::ReceiverMissing(actor))
+    }
+
+    /// Atomically publish a call reply (when present) and commit the callee's
+    /// next stable state. The delivery retains its mailbox turn lease across
+    /// the transition; this method is the sole resident-handler settlement
+    /// boundary.
+    pub(crate) fn settle_resident_delivery(
+        &self,
+        actor: ActorRef,
+        delivery: &mut MailboxDelivery,
+        reply: Option<MailboxValue>,
+        next: InstalledActorState,
+    ) -> Result<(), MailboxFailure> {
+        let mut state = self.inner.state.lock();
+        require_ready(&state, actor)?;
+        let actor_entry = entry(&state, actor)?;
+        if actor_entry.active_turn != Some(ActorTurnKind::Mailbox) {
+            return Err(ActorRegistryError::TurnTransitionMismatch {
+                actor,
+                expected: ActorTurnKind::Mailbox,
+                active: actor_entry.active_turn,
+            }
+            .into());
+        }
+        if actor_entry.receiver.is_some() {
+            return Err(ActorRegistryError::ReceiverAlreadyInstalled(actor).into());
+        }
+
+        match (&mut *delivery, reply) {
+            (MailboxDelivery::Call(call), Some(value)) if call.target == actor => {
+                reply_call_in(&mut state, call.call, value)?;
+                call.settled = true;
+            }
+            (MailboxDelivery::Cast(cast), None) if cast._lease.actor() == actor => {}
+            (MailboxDelivery::Call(_), None) => {
+                return Err(MailboxFailure::SettlementShape(
+                    "a call handler did not produce a reply",
+                ));
+            }
+            (MailboxDelivery::Cast(_), Some(_)) => {
+                return Err(MailboxFailure::SettlementShape(
+                    "a cast handler produced a reply",
+                ));
+            }
+            _ => {
+                return Err(MailboxFailure::SettlementShape(
+                    "delivery belongs to another actor",
+                ));
+            }
+        }
+
+        match next {
+            InstalledActorState::Receiving(receiver) => {
+                entry_mut(&mut state, actor)?.receiver = Some(receiver);
+            }
+            InstalledActorState::Completed(terminal) => {
+                exit_subtree(&mut state, actor, terminal)?;
+            }
+        }
+        Ok(())
     }
 
     /// Terminate an actor whose startup failed before reference publication.
@@ -912,42 +1013,7 @@ impl ActorRegistry {
 
     fn reply_call(&self, call: CallId, value: MailboxValue) -> Result<(), MailboxFailure> {
         let mut state = self.inner.state.lock();
-        let Some(call_entry) = state.calls.get(&call) else {
-            return Err(MailboxFailure::UnknownCall(call));
-        };
-        if !matches!(call_entry.state, CallState::Delivered) {
-            return Err(MailboxFailure::UnknownCall(call));
-        }
-        let target = call_entry.target;
-        let caller = call_entry.caller;
-        require_ready(&state, target)?;
-        let target_session = entry(&state, target)?.descriptor.placement.session;
-        if value.session() != target_session {
-            return Err(MailboxFailure::MachineBoundary {
-                actor: target,
-                actor_session: target_session,
-                value: value.session(),
-            });
-        }
-        state
-            .calls
-            .get_mut(&call)
-            .ok_or(MailboxFailure::UnknownCall(call))?
-            .state = CallState::Replied(value);
-        record(
-            &mut state,
-            target,
-            EventCausality {
-                owner: Some(caller),
-                operation: Some(format!("call:{}", call.0)),
-                ..EventCausality::default()
-            },
-            ActorEvent::CallSettled {
-                call,
-                disposition: CallDisposition::Replied,
-            },
-        )?;
-        Ok(())
+        reply_call_in(&mut state, call, value)
     }
 
     fn abandon_call(&self, call: CallId, target: ActorRef) {
@@ -1441,6 +1507,49 @@ fn settle_call_failure(
         },
         ActorEvent::CallSettled { call, disposition },
     );
+}
+
+fn reply_call_in(
+    state: &mut RegistryState,
+    call: CallId,
+    value: MailboxValue,
+) -> Result<(), MailboxFailure> {
+    let Some(call_entry) = state.calls.get(&call) else {
+        return Err(MailboxFailure::UnknownCall(call));
+    };
+    if !matches!(call_entry.state, CallState::Delivered) {
+        return Err(MailboxFailure::UnknownCall(call));
+    }
+    let target = call_entry.target;
+    let caller = call_entry.caller;
+    require_ready(state, target)?;
+    let target_session = entry(state, target)?.descriptor.placement.session;
+    if value.session() != target_session {
+        return Err(MailboxFailure::MachineBoundary {
+            actor: target,
+            actor_session: target_session,
+            value: value.session(),
+        });
+    }
+    state
+        .calls
+        .get_mut(&call)
+        .ok_or(MailboxFailure::UnknownCall(call))?
+        .state = CallState::Replied(value);
+    record(
+        state,
+        target,
+        EventCausality {
+            owner: Some(caller),
+            operation: Some(format!("call:{}", call.0)),
+            ..EventCausality::default()
+        },
+        ActorEvent::CallSettled {
+            call,
+            disposition: CallDisposition::Replied,
+        },
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

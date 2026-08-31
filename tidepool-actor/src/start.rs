@@ -229,12 +229,15 @@ where
             }
         };
 
-        let actor = self.registry.publish_ready(starting)?;
-        let child = match self.runner.resume_readiness(child_context, readiness).await {
+        let child = match self
+            .runner
+            .resume_readiness(child_context.clone(), readiness)
+            .await
+        {
             Ok(child) => child,
             Err(error) => {
-                self.registry.finish(
-                    actor,
+                self.registry.abort_start(
+                    starting,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
@@ -243,7 +246,30 @@ where
                 return Err(error.into());
             }
         };
-        if matches!(child, ResidentOutcome::Completed { .. }) {
+        let completed = matches!(child, ResidentOutcome::Completed { .. });
+        if !completed {
+            let receiver = match self
+                .runner
+                .capture_receiver(child_context, child, child_realm)
+                .await
+            {
+                Ok(receiver) => receiver,
+                Err(error) => {
+                    self.registry.abort_start(
+                        starting,
+                        ActorTerminal {
+                            kind: ActorExitKind::Failed,
+                            summary: error.to_string(),
+                        },
+                    )?;
+                    return Err(error.into());
+                }
+            };
+            self.registry
+                .install_starting_receiver(&starting, receiver)?;
+        }
+        let actor = self.registry.publish_ready(starting)?;
+        if completed {
             self.registry.finish(
                 actor,
                 ActorTerminal {

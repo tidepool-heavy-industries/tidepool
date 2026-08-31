@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use tidepool_repr::SessionId;
-use tidepool_runtime::session::RootCustody;
+use tidepool_runtime::session::{ResidentHole, RootCustody};
 
 use crate::{ActorRef, ActorRegistryError};
 
@@ -22,6 +22,44 @@ pub struct WaitId(pub u64);
 pub enum ParkedObligation {
     Call(CallId),
     Wait(WaitId),
+}
+
+/// The installed one-message receiver for an exact actor incarnation.
+///
+/// The parked authored continuation consumes `next`; the rooted rank-N
+/// handler consumes the next protocol request. Both have move-only Rust
+/// custody and therefore live in the one actor registry, not in a parallel
+/// program table; this imposes no linearity discipline on authored Haskell.
+pub(crate) struct InstalledReceiver {
+    pub(crate) site: u64,
+    pub(crate) continuation: ResidentHole,
+    pub(crate) handler: RootCustody,
+}
+
+/// The stable actor state committed at the end of one mailbox turn.
+/// Reply publication and this transition share one registry linearization
+/// point, so a caller never observes a result before the callee advances.
+pub(crate) enum InstalledActorState {
+    Receiving(InstalledReceiver),
+    Completed(crate::ActorTerminal),
+}
+
+pub(crate) struct KernelValue {
+    pub(crate) continuation: ResidentHole,
+    pub(crate) value: RootCustody,
+}
+
+pub(crate) enum ResidentOutbound {
+    Call {
+        target: ActorRef,
+        continuation: ResidentHole,
+        request: MailboxValue,
+    },
+    Cast {
+        target: ActorRef,
+        continuation: ResidentHole,
+        request: MailboxValue,
+    },
 }
 
 /// One live Haskell value under exclusive machine-root custody.
@@ -124,6 +162,8 @@ pub enum MailboxFailure {
     },
     #[error("call {0:?} is unknown or already consumed")]
     UnknownCall(CallId),
+    #[error("resident mailbox settlement had invalid shape: {0}")]
+    SettlementShape(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
