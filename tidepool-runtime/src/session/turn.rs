@@ -28,7 +28,7 @@ use tidepool_extract_cmd::{ExtractCmd, SpawnError};
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
 
-use crate::{extract_module_name, timing, CompileError, SiteType, YieldSite};
+use crate::{extract_module_name, timing, CompileError, NominalHead, SiteType, YieldSite};
 
 use super::render::ExportItem;
 
@@ -880,29 +880,47 @@ fn decode_bound_binders(v: &CborValue) -> Result<Vec<BoundBinder>, CompileError>
 }
 
 fn decode_ask(v: &CborValue) -> Result<YieldSite, CompileError> {
-    let arr = cbor_expect_array_len(v, 4, "typed suspension site")?;
+    let arr = cbor_expect_array_len(v, 7, "typed suspension site")?;
     let site = cbor_as_u64(&arr[0], "Ask site")?;
-    let site = u32::try_from(site).map_err(|_| {
-        CompileError::ExtractFailed("TurnOut CBOR: Ask site too large for u32".into())
-    })?;
-    let answer_type = cbor_expect_text(&arr[1], "Ask answer type")?.to_string();
-    let modules = decode_string_array(&arr[2], "Ask modules")?;
-    let inputs = cbor_expect_array(&arr[3], "site input types")?
+    let origin = cbor_expect_text(&arr[1], "Ask origin")?.to_string();
+    let ordinal = cbor_as_u64(&arr[2], "Ask ordinal")?;
+    let answer_type = cbor_expect_text(&arr[3], "Ask answer type")?.to_string();
+    let modules = decode_string_array(&arr[4], "Ask modules")?;
+    let heads = decode_nominal_heads(&arr[5], "Ask nominal heads")?;
+    let inputs = cbor_expect_array(&arr[6], "site input types")?
         .iter()
         .map(|input| {
-            let input = cbor_expect_array_len(input, 2, "site input type")?;
+            let input = cbor_expect_array_len(input, 3, "site input type")?;
             Ok(SiteType {
                 ty: cbor_expect_text(&input[0], "site input type name")?.to_string(),
                 modules: decode_string_array(&input[1], "site input type modules")?,
+                heads: decode_nominal_heads(&input[2], "site input nominal heads")?,
             })
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
     Ok(YieldSite {
         site,
+        origin,
+        ordinal,
         ty: answer_type,
         modules,
+        heads,
         inputs,
     })
+}
+
+fn decode_nominal_heads(value: &CborValue, what: &str) -> Result<Vec<NominalHead>, CompileError> {
+    cbor_expect_array(value, what)?
+        .iter()
+        .map(|head| {
+            let head = cbor_expect_array_len(head, 3, "nominal type head")?;
+            Ok(NominalHead {
+                unit: cbor_expect_text(&head[0], "nominal type unit")?.to_string(),
+                module: cbor_expect_text(&head[1], "nominal type module")?.to_string(),
+                name: cbor_expect_text(&head[2], "nominal type name")?.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn decode_asks(v: &CborValue) -> Result<Vec<YieldSite>, CompileError> {
@@ -1250,20 +1268,10 @@ pub fn compile_session_turn(
 /// Read the `asks.json` typed-yield sidecar the extract writes into the
 /// output-dir. Every entry carries `site`, answer `type`/`modules`, and an
 /// `inputs` array of live input type/module records.
-/// A missing file yields an empty list (a turn with no yield sites, or an
-/// older extract); a present but malformed file is a hard error (a real
-/// sidecar-shape regression). `modules` is REQUIRED, not defaulted — an
-/// extract old enough not to emit it fails this parse loudly rather than
-/// silently reporting no modules (mirrors `tidepool_runtime::artifacts::
-/// YieldSite`, the `--targets` path's twin of this same sidecar shape).
+/// The extractor writes `[]` for no sites. Missing or malformed metadata is a
+/// hard compiler-artifact error; there is no legacy fail-open interpretation.
 fn read_asks_sidecar(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(CompileError::Io(e)),
-    };
-    serde_json::from_slice(&bytes)
-        .map_err(|e| CompileError::ExtractFailed(format!("invalid asks.json sidecar: {e}")))
+    tidepool_toolchain::read_yield_sites(path)
 }
 
 fn parse_bound_binders(json: &str) -> Result<Vec<BoundBinder>, CompileError> {
@@ -1365,6 +1373,7 @@ mod tests {
         std::fs::write(&fake, "#!/bin/sh\necho not-a-diag-report\nexit 1\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _worker = TestEnvGuard::unset("TIDEPOOL_EXTRACT_WORKER");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
         let err = classify_block(&["x <- pure 1"]).unwrap_err();
         assert!(
@@ -1787,7 +1796,10 @@ mod tests {
                 ])]),
                 CborValue::Array(vec![CborValue::Array(vec![
                     CborValue::Integer(7.into()),
+                    CborValue::Text("M.result".into()),
+                    CborValue::Integer(0.into()),
                     CborValue::Text("Text".into()),
+                    CborValue::Array(vec![]),
                     CborValue::Array(vec![]),
                     CborValue::Array(vec![]),
                 ])]),
@@ -1812,8 +1824,11 @@ mod tests {
                     asks,
                     vec![YieldSite {
                         site: 7,
+                        origin: "M.result".into(),
+                        ordinal: 0,
                         ty: "Text".into(),
                         modules: Vec::new(),
+                        heads: Vec::new(),
                         inputs: Vec::new(),
                     }]
                 );

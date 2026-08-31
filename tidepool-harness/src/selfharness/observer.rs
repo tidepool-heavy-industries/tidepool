@@ -66,7 +66,7 @@ pub enum Event {
     /// `loop` suspended on a `runLLMTurn @A` hole; the driver is about to
     /// service it (`prompt` is the hole's human-facing ask text).
     RunLLMTurnHole {
-        site: u32,
+        site: u64,
         ty: Option<String>,
         prompt: String,
     },
@@ -86,7 +86,7 @@ pub enum Event {
     /// exactly these three fields, grouped by `site`.
     AnswererRound {
         node: NodeId,
-        site: u32,
+        site: u64,
         round: u32,
         error: Option<String>,
     },

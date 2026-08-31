@@ -52,7 +52,7 @@ This is the canonical status inventory for the plan.
 - `tidepool-actor` owns exact-incarnation identity, lifecycle state, the
   ownership tree, turn admission, live-value mailboxes, call/cast settlement,
   repeatable waits, and neutral actor events.
-- Successful typed exits use the shared Haskell cell carried by `AgentRef`;
+- Successful typed exits use the shared Haskell cell carried by `ActorRef`;
   Rust retains terminal metadata rather than another payload root.
 - Actor placement binds one session, lexical scope, resource scope, execution
   principal, effect-run policy, and exact source-import membrane.
@@ -67,28 +67,40 @@ This is the canonical status inventory for the plan.
   ordered/prefix-preserving block cursor, and canonical declaration, bind, and
   pure/effectful expression templates. REPL, harness, and actor frontends use
   those mechanics rather than carrying their own parser or cursor.
-- `tidepool-actor` owns one multi-round typed-deliberation executor. Its
+- `tidepool-actor` owns one multi-round agent-session executor. Its
   resident adapter checks the machine out only for a Haskell segment, compiles
   against the actor's exact source view, and returns a GHC-checked live value
   through the private `Complete result` completion effect.
 - Public `deliberate` is a nominal suspension with no authored type strings or
-  runtime `Typeable` convention. The extractor records each `YieldSite`'s
-  output and live-input types plus their defining modules directly from GHC;
-  the resident adapter mounts the exact rooted input and imports those same
-  compiler-derived modules for every workbench fragment.
-- Typed deliberation has a real GHC/JIT vertical: a rejected wrong-typed
+  runtime `Typeable` convention. The extractor gives each site a stable
+  binder-qualified identity and records its output and live-input types,
+  defining modules, and structured nominal type heads directly from GHC.
+  Missing sidecars and colliding site identities fail closed.
+- Compiler provenance follows parked continuations, resident bindings, live
+  custody transfers, and rooted actor entries. Resuming with a live value
+  unions provenance and rejects contradictory metadata; actor adapters derive
+  startup and `deliberate`-site contracts from the rooted program rather than from
+  caller-supplied side tables.
+- Result-bearing sessions have a real GHC/JIT vertical: a rejected wrong-typed
   completion preserves prior declarations and bindings, the corrective round
   completes, the never-run suffix stays unexecuted, and a closure-valued result
   remains callable after the fragment resource realm closes.
-- The first typed-startup substrate is landed: an existential `ActorSpec`
-  captures one concrete initialization action and installed behavior; public
-  `startActor` lowers it to one rooted child entry; and the Rust capture seam
-  retains that entry, the parked parent, and GHC-owned yield metadata without
-  reflecting the child row. An end-to-end test drives typed deliberation,
-  private realm-checked readiness, child completion, and parent publication.
-- This substrate deliberately stops before lifecycle orchestration. The
-  current `actorSpec` constructor is the checked vertical's construction seam,
-  not the final model-authored program-image membrane described in Stage 5.
+- One resident actor runner now owns internal sealing, isolated-scope allocation,
+  rooted-entry startup, typed-session capture, readiness resumption, and
+  exact parent resumption over the existing machine checkout mechanism. The
+  private readiness request validates its child realm before the
+  registry may publish. The registry owns publication and terminal settlement;
+  there is no second actor dispatcher or program-root registry.
+- The construction substrate exposes one public `ActorDefinition` ->
+  `startActor` route. Its private sealing step materializes a content-addressed
+  exact facade from GHC provenance, and startup revalidates that receipt before
+  allocation. A real GHC/JIT/provider vertical covers sealing, isolated
+  startup, one result-bearing session, realm-checked readiness, child completion,
+  and parent resume.
+- Effect-schema metadata centrally curates authored constructors, supporting
+  types, and helpers. The generated public shim and model-facing descriptions
+  consume the same allowlists; internal Core retains the full nominal
+  substrate vocabulary.
 - Rust effect routing is nominal; no positional handler-prefix contract or
   reflected Haskell row ABI remains.
 
@@ -96,15 +108,19 @@ This is the canonical status inventory for the plan.
 
 - convergence of the remaining presentation-heavy REPL/harness execution
   epilogues where they still duplicate neutral compile/commit behavior;
-- explicit heterogeneous child-interpreter policy selection and
+- named `ReadWrite`/`ReadOnly` child profiles, spawn-edge attenuation, and
   capability-specific launch grants;
-- registry-owned startup orchestration, readiness publication, and terminal
-  settlement behind the now-landed Haskell/capture substrate;
-- public `ActorDefinition` and `promoteActor`, including the exact
-  model-visible export membrane; replacement of the provisional `actorSpec`
-  constructor happens at that boundary rather than creating a second route;
+- an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
+  require it, but current profiles, facades, and nominal handlers must leave it
+  additive without changing the actor API, program images, profile semantics,
+  or Rust dispatch. Constructor curation remains interaction hygiene rather
+  than authority;
+- full sealing validation for explicit model-visible value exports and
+  shadow-drift/type-coherence probes beyond the landed nominal-head facade;
 - lifecycle advisories and typed shutdown execution;
-- model-authored program promotion and dynamic child specifications;
+- initialization with zero or more `deliberate` calls; the landed vertical
+  currently proves exactly one;
+- model-authored dynamic definitions and internally sealed child deployments;
 - immutable live-binding snapshots or structural context fork;
 - the DevSwarm actor entry and deletion of the old selfharness path.
 
@@ -120,22 +136,25 @@ These choices remove branches from the first implementation:
   optimization derived from that transcript.
 - A program image contains code/value deployment identity and explicit source
   exports. It does not own placement, authority, or an interpreter.
-- `ActorDefinition` existentially packages its concrete Haskell row, while
-  `ActorSpec` hides that row behind stable startup/protocol/exit indexes. Rust
-  sees nominal requests, not a reflected row or runtime-profile token.
-- V0 fresh children inherit the owner's composition-owned interpreter policy.
-  Explicit heterogeneous policy selection is deferred until a concrete
-  capability needs it; authorization remains interpreter/principal-level.
-- Models author `ActorDefinition`; one `promoteActor` membrane produces opaque
-  deployable `ActorSpec` values. `ActorSpec` has one prompted startup path.
-  Startup deliberation may use the child runtime; installation is pure. V0 has
-  no alternate startup mode or lifecycle-specific mini-DSL.
-- One indexed `ActorLocal api exit` effect ties the authored continuation's
-  protocol and exit type to the eventual `AgentRef`; its `receive` algebra
+- V0 specializes `Member`-polymorphic authored behavior into one concrete row
+  per incarnation and runs that stack directly. The private sealed deployment
+  hides the row behind stable startup/protocol/exit indexes. Rust authorizes
+  nominal requests without a reflected row ABI. Trusted Haskell lowering is
+  optional after V0, but the public and runtime boundaries must be ready for it
+  without redesign.
+- V0 has named `ReadWrite` and `ReadOnly` profiles. `ReadWrite` may spawn either;
+  `ReadOnly` may spawn only `ReadOnly`. The profile fixes the model-facing row
+  and interpreter policy, while grants and opaque handles authorize resources.
+- Models author `ActorDefinition` and pass it directly to `startActor`, which
+  performs exact sealing internally. Initialization may call the child model
+  runtime; installation is pure. V0 has no alternate startup mode or
+  lifecycle-specific mini-DSL.
+- One indexed `ActorLocal protocol exit` effect ties the authored continuation's
+  protocol and exit type to the eventual `ActorRef`; its `receive` algebra
   exposes no callback registry, public reply token, or parallel mailbox API.
   There is no public `ActorProgram` wrapper around the `Eff` value.
 - Per-instance resource authority uses opaque, capability-specific launch-grant
-  recipes attached immutably to a specification. V0 has no generic public
+  recipes attached immutably to a definition. V0 has no generic public
   delegation/revocation API and never scans a startup value for capabilities.
 - Same-machine calls carry live values. Rust never invents a result or
   substitutes a same-typed actor; an exact-call failure abandons the current
@@ -200,19 +219,24 @@ Acceptance:
 - the superseded high-level block drivers and generic actor sequence helper are
   deleted in the same change that moves their callers.
 
-## 5. Stage 2 — typed deliberation on an existing actor
+## 5. Stage 2 — one result-bearing agent session
 
-Complete one typed deliberation before adding actor construction.
+Complete one result-bearing agent session before adding actor construction.
 
 The actor-owned executor has one provider/Haskell loop and an internal sealed
 obligation interface. V0 needs two obligation shapes:
 
-- **typed completion**, used by ordinary deliberation and later by startup;
+- **typed completion**, used by sessions opened through `deliberate`;
 - **advisory acknowledgment**, added in Stage 6.
 
 This is an internal Rust distinction, not a universal model-facing option
 record. Both shapes use the same conversation, provider call path, fenced
 parser, workbench, actor admission, and event stream.
+
+`Deliberate` remains the Haskell effect and `deliberate` the operation that
+opens a result-bearing session. Rust modules, state machines, and events should
+name the generic `AgentSession` and its current completion or acknowledgment
+expectation; do not reintroduce a `Deliberation` or `Goal` runtime object.
 
 Refine the current actor `TurnLease` into the one phase-aware admission guard
 if necessary. A `deliberate` suspension transfers the already-held authored-
@@ -224,8 +248,12 @@ serialization mechanism, not a nested lease protocol.
 Deliver typed completion first:
 
 - mount the goal input as a live Haskell binding;
-- expose one completion action whose argument GHC checks against the expected
-  type;
+- add exactly one scoped `Complete output` effect to a workbench with a typed
+  caller; advisory workbenches have none;
+- retain any outer return expectations privately so authored Haskell can see
+  and settle only the innermost one;
+- expose `complete`, with no public obligation id or token, and have GHC check
+  its argument against the expected type;
 - supply the actor-owned `:goal` view through the workbench extension hook;
 - append Haskell-authored task context as a User message;
 - send the full canonical conversation to the provider;
@@ -233,13 +261,15 @@ Deliver typed completion first:
 - return compilation/execution receipts as conversation context;
 - continue after declarations or a wrong-typed completion without losing
   committed work;
+- refuse synchronous same-actor `deliberate` re-entry while allowing the model
+  to define and return closures containing future `deliberate` calls;
 - settle exactly once when the correct live value is produced.
 
 Acceptance:
 
 - one agent-session admission remains held across provider waits, transport
   retry, fenced execution, and corrective rounds;
-- deliberation entered from an active Haskell turn transfers that exact
+- a session opened from an active Haskell turn transfers that exact
   admission and resumes the same continuation without nested `begin_turn`;
 - machine checkout is absent during provider waits and reacquired only for
   Haskell run segments;
@@ -256,48 +286,56 @@ Acceptance:
 
 Deletion gate: the legacy `drive_model_turn`/answerer loop may remain only
 until its production caller runs through this executor; it is then deleted,
-not kept as a second deliberation route.
+not kept as a second agent-session route.
 
-## 6. Stage 3 — one real `startActor`
+## 6. Stage 3 — one real `startActor` (vertical landed; hardening remains)
 
-Implement fresh startup for an authored specification before supporting
-model-authored program promotion.
+The first real sealing/startup vertical is landed. It deliberately uses the
+same public `ActorDefinition` -> `startActor` route intended for model-authored
+definitions; there is no privileged static-spec constructor or public sealing verb.
+This stage remains open until the lifecycle and race acceptance below are
+complete.
 
 ### Interpreter policy
 
-Do not introduce a reflected effect-row ABI or an `ActorRuntime capEffs`
-profile token. The compiled actor entry fixes its Haskell row; ordinary
-existential packaging hides that row inside the specification. Rust dispatch
-remains nominal and checks lifecycle phase, principal, and grants at use time.
+Do not introduce a reflected effect-row ABI. The named profile is sealed launch
+metadata, not a Haskell authority token passed to handlers. The compiled actor
+entry fixes its Haskell row; ordinary existential packaging hides that row
+inside the private deployment. V0 runs that row directly. Rust remains nominal
+and checks lifecycle phase, principal, realm, incarnation, and grants at use
+time. A later trusted Haskell intent-to-kernel split may strengthen the static
+boundary without changing the actor API or Rust dispatch.
 
-The first vertical inherits the owner's composition-owned interpreter policy
-and source vocabulary. This is deliberately one mechanism, not a temporary
-positional dispatcher. The later first capability that genuinely needs a
-different child policy must extend the existing capability registry and actor
-interpreter; it must not create a parallel runtime-profile registry.
+The landed vertical uses the existing `ReadWrite`-equivalent row and source
+vocabulary. Completing the named-profile path adds no positional dispatcher or
+reflected row registry: profile selection specializes the definition, Rust
+validates attenuation, and the existing actor interpreter handles the resulting
+nominal requests.
 
-### Haskell specification
+### Haskell definition
 
 Use the single definition shape in
-[haskell-surface.md](haskell-surface.md#3-actor-specifications-are-haskell-values):
+[haskell-surface.md](haskell-surface.md#3-actor-definitions-are-haskell-values):
 
-- one concrete `startup -> Eff actorEffs initial` initialization action whose
-  authored call site supplies GHC's typed-deliberation metadata;
-- one pure `startup -> initial -> Eff actorEffs exit` behavior selector;
+- one `Member`-polymorphic initialization action, specialized to the child's
+  concrete row, whose authored call site supplies GHC's
+  `deliberate`-site metadata;
+- one behavior selector specialized to that same row;
 - one explicit list of model-visible top-level export heads;
-- one shutdown handler running under
-  the same existentially packaged `actorEffs` row with closing-phase
+- one shutdown handler specialized to the same row with closing-phase
   interpreter restrictions.
 
 Startup, the installed program, fenced workbench fragments, and shutdown all
 compile against the same fixed row. The interpreter's lifecycle phase—not a
 second monad or altered stack—controls which `ActorLocal` operations are legal.
 
-For this stage, the composition root constructs one checked-in definition with
-an authored exact export manifest and seals it in the permanent opaque
-`ActorSpec` representation. Stage 5 adds the public `promoteActor` operation
-that validates model-authored definitions into that same representation; it
-does not introduce a second static-spec path or a second image registry.
+The landed vertical starts one checked-in definition through the public
+operation and derives an initial exact facade from compiler provenance. A
+private deployment value carries that content-addressed receipt into startup,
+which revalidates it before child allocation. Stage 5 completes the membrane with an
+authored exact-export manifest and definition/facade coherence probes; it
+strengthens this same operation rather than adding another construction path
+or image registry.
 
 The process composition root is the sole bootstrap exception: it creates the
 initial root actor and installs its interpreter policy directly. Child
@@ -306,26 +344,32 @@ lifecycle and `startActor` path that model-authored Haskell will use.
 
 The Haskell library hides exactly one row-erasure membrane when it hands the
 existential child entry to Rust. The entry travels as the existing rooted live
-payload; Rust never decodes the row or dispatches by a union position. A real
-private `ActorLocal` readiness request marks the end of pure installation. The
-interpreter accepts that request only from the installed-program resource
-realm, so fenced model code cannot forge readiness by naming a raw constructor.
+payload; Rust never decodes the row or dispatches by a union position. A
+private readiness request, absent from `ActorLocal` and every model-facing
+profile, marks the end of pure installation. The interpreter accepts that
+request only from the installed-program resource realm and startup phase, so
+fenced model code cannot forge readiness merely by importing a constructor
+name.
 The parked readiness continuation itself retains the installed program; do not
 add a program-root registry beside the resident continuation machinery.
 
 ### Startup sequence
 
-1. authorize the caller to instantiate the specification;
+1. internally seal the definition, validate its opaque receipt, and authorize
+   the caller to instantiate it;
 2. allocate an unpublished child identity, scope, resource realm, interpreter,
    conversation, exit cell, and ownership edge;
 3. deploy the authored exact program facade into a fresh lexical scope;
-4. mount the typed startup value;
-5. run one User-role typed-completion session through the Stage 2 executor;
-6. run pure installation until the private readiness request parks the
-   installed program;
+4. run the rooted child entry, whose authored initialization action carries the
+   typed startup value;
+5. service each sequential User-role result-bearing session through the Stage 2
+   executor until initialization returns (the landed proof currently covers
+   one);
+6. validate, while still unpublished, that installation parked the private
+   readiness request in the child's own resource realm;
 7. publish readiness, settle the parent's start continuation with the exact
-   `AgentRef`, and schedule the installed program through ordinary actor-turn
-   admission.
+   `ActorRef`, and schedule the validated installed continuation through
+   ordinary actor-turn admission.
 
 Capability-specific launch-grant recipes are intentionally not part of this
 vertical. When the first concrete resource needs them, redemption belongs at
@@ -339,12 +383,12 @@ its retained result.
 
 Acceptance:
 
-- one checked-in specification starts through the same opaque representation
-  and lifecycle path reserved for later model-authored promotion;
+- one checked-in definition starts through the sole public construction
+  operation and the same private sealing/lifecycle path reserved for model-authored use;
 - startup carries its existential child entry as a rooted value without
   positional dispatch metadata or Rust row reflection;
-- unauthorized specification use fails before allocation or model inference;
-- copying a specification does not transfer caller authorization;
+- unauthorized definition start fails before allocation or model inference;
+- copying a definition does not transfer caller authorization;
 - the child's model sees only the runtime facade and authored program exports,
   never ambient parent bindings or transcript;
 - startup cannot nest another model session during pure installation;
@@ -352,13 +396,14 @@ Acceptance:
   tested;
 - successful closure-valued exit survives child execution-resource reaping.
 
-The heterogeneous-row proof belongs with the first actual heterogeneous
-interpreter policy in Stage 5. Stage 3 must leave no reflected ABI or registry
-that such a policy would have to route around.
+The `ReadWrite`/`ReadOnly` row proof belongs with named profiles in Stage 5.
+Stage 3 must leave no reflected ABI or registry that profile selection would
+have to route around.
 
-The Stage 3 vertical uses a one-shot `program (pure exit)` after startup. It
-proves construction, installation, readiness, and retained exit without
-pretending the mailbox-consumption surface from Stage 4 already exists.
+The Stage 3 vertical installs a one-shot continuation that immediately returns
+`exit` after initialization. It proves construction, installation, readiness,
+and retained exit without pretending the mailbox-consumption surface from
+Stage 4 already exists.
 
 ## 7. Stage 4 — actor operations and supervision
 
@@ -370,7 +415,7 @@ Expose the small Haskell actor vocabulary:
 - no `tryStart`/`tryCall`/`tryCast`/`tryWait` mirror family.
 
 `receive` is the sole public mailbox-consumption primitive. Its
-`ActorLocal api exit` constraint connects the actor program's protocol and exit
+`ActorLocal protocol exit` constraint connects the actor program's protocol and exit
 type to the request. Its rank-2 handler returns the exact protocol result plus
 the program's next state, while the runtime-private reply obligation cannot
 escape into model-authored Haskell. `serve` and state-machine loops are library
@@ -390,21 +435,36 @@ shutdown that cannot obtain Haskell execution before the watchdog. The first
 real request/reply child vertical lands here; advisory inference is not a gate
 for proving application-message semantics.
 
-## 8. Stage 5 — dynamic programs and caller-checked authority
+## 8. Stage 5 — profiles, dynamic sealing, and caller-checked authority
 
-Let a model promote a newly defined actor definition only after authored
-startup works.
+The private sealing suspension, content-addressed facade receipt, and startup
+revalidation already exist behind `startActor`. Complete that membrane so a
+model can start a newly defined actor without weakening the checked-in vertical.
 
-The existing promotion component must expose one `promoteActor` operation to
-the workbench and produce one program image composed from:
+Land the two initial named profiles through this same path:
+
+- `ReadWrite` actors may start `ReadWrite` or `ReadOnly` children;
+- `ReadOnly` actors may start only `ReadOnly` children;
+- GHC checks each definition against the selected profile row;
+- Rust validates the spawn edge before allocation;
+- profile identity remains launch metadata, separate from program images and
+  per-resource grants;
+- `ReadOnly` excludes ambient write effects but may call an explicitly supplied
+  writer actor.
+
+Acceptance proves every permitted edge, rejects `ReadOnly -> ReadWrite` before
+allocation, rejects a write-using definition specialized to `ReadOnly`, and
+shows that copying a profile choice or definition transfers no resource grant.
+
+The existing sealing component must extend its program image to cover:
 
 - the rooted definition value;
 - exact dependency-closed session-module identities;
 - the definition's explicit model-visible top-level heads, resolved through
   GHC metadata against the definition's exact compile view;
-- source and deliberation provenance.
+- source and agent-session provenance.
 
-Promotion and installed-root state supply the actor-owned `:program` snapshot;
+Sealing and installed-root state supply the actor-owned `:program` snapshot;
 the resident workbench neither owns nor reconstructs that state.
 
 It must reuse the code arena, source-facade mechanism, root ledger, and resource
@@ -412,23 +472,24 @@ realms. It must not replay source to manufacture nominally new types, inherit a
 live parent scope, or introduce a program-image registry.
 
 Prove the membrane with one model-authored GADT child: the parent defines the
-protocol and definition, names a minimal child-visible head set, promotes it,
-fresh-spawns the child, calls it with the same nominal protocol type, and
+protocol and definition, names a minimal child-visible head set, starts it,
+calls the child with the same nominal protocol type, and
 receives a closure-valued result. A regression case redefines one selected head
-between definition and promotion and must fail rather than pairing the
-definition with a same-spelled later type. Keep one promotion operation; do not
-split image, export, and installation into separately stateful APIs.
+between definition and start and must fail rather than pairing the definition
+with a same-spelled later type. Keep sealing inside the one start operation; do
+not split image, export, and installation into separately stateful public APIs.
 
-Promotion must compile the real child entry facade plus typed startup/program
-adapters before returning. That proof must cover the existential startup-result
-type as well as the public startup, protocol, and exit types; a string-level
+Sealing must compile the real child entry facade plus typed startup/installed-
+continuation adapters before allocating the child. That proof must cover the
+existential startup-result type as well as the public startup, protocol, and
+exit types; a string-level
 head match is not sufficient evidence of nominal compatibility.
 
 Complete caller-checked capability behavior in the same stage:
 
 - moving a closure never transfers its creator's principal;
 - opaque operations consult the receiver's grants at use time;
-- actor specification launch and capability use obey the same caller-check
+- actor-definition launch and capability use obey the same caller-check
   model;
 - backend and worktree identifiers remain resource identities, not competing
   actor principals.
@@ -446,11 +507,11 @@ Acceptance covers advisory deduplication, exact-key acknowledgment, several
 events coalesced without identity loss, events arriving during inference, and
 an owner parked on unrelated work. An unavailable provider closes the advisory
 without killing its owner, while the same terminal provider failure during
-typed deliberation terminates the actor.
+a result-bearing session terminates the actor.
 
 ## 10. Stage 7 — structural context fork
 
-Fork only after fresh spawn, typed startup, dynamic promotion, and authority
+Fork only after fresh spawn, typed startup, dynamic sealing, and authority
 have real tests.
 
 One atomic fork point contains:
@@ -535,10 +596,11 @@ The plan is complete when:
 
 - a real DevSwarm owner runs as a Haskell actor with a resident model and
   workbench;
-- it can define, promote, fresh-spawn, call, supervise, and fork typed child
+- it can define, internally seal, fresh-spawn, call, supervise, and fork typed child
   actors;
 - actors exchange function-bearing values under caller-checked authority;
-- heterogeneous actor rows share one machine through nominal request routing;
+- `ReadWrite` and `ReadOnly` actors share one machine through nominal request
+  routing, and spawn edges never amplify profiles;
 - startup publishes only ready exact references and exits remain repeatable;
 - advisories inform the model without inventing a Haskell lifecycle inbox or
   re-entering the authored continuation;

@@ -10,6 +10,7 @@ const WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
 const USAGE: &str = "Usage: tidepool-extract [OPTIONS] <file.hs> ...";
 
 pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
+    crate::process::current_process_dies_with_parent().map_err(FrontendError::Io)?;
     if args.is_empty() {
         eprintln!("{USAGE}");
         println!("{{\"version\":1,\"diagnostics\":[]}}");
@@ -29,10 +30,10 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
             request.worker_argv()
         }
     };
-    let status = Command::new(worker_bin()?)
-        .args(worker_args)
-        .status()
-        .map_err(FrontendError::Io)?;
+    let mut command = Command::new(worker_bin()?);
+    command.args(worker_args);
+    crate::process::child_dies_with_parent(&mut command);
+    let status = command.status().map_err(FrontendError::Io)?;
     Ok(exit_code(status))
 }
 

@@ -29,21 +29,28 @@ pub struct HoleId(pub String);
 /// always one `asks.json` genuinely indexes; a raw `u32`/`u64` past this
 /// point is structurally unrepresentable as a site id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SiteId(u32);
+pub struct SiteId(u64);
 
 impl SiteId {
-    pub fn get(self) -> u32 {
+    pub fn get(self) -> u64 {
         self.0
     }
 }
 
 impl std::convert::TryFrom<u64> for SiteId {
-    type Error = std::num::TryFromIntError;
+    type Error = SiteIdOutOfRange;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
-        u32::try_from(value).map(SiteId)
+        if value <= i64::MAX as u64 {
+            Ok(SiteId(value))
+        } else {
+            Err(SiteIdOutOfRange)
+        }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiteIdOutOfRange;
 
 /// Node lifecycle. Who a suspended hole is routed to (model child vs
 /// operator) is a property of the hole, not the node — the observatory's

@@ -33,7 +33,7 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{
-    first_sentence, helper_sig, input_binding_source, library_vocab, template_haskell_show_default,
+    first_sentence, input_binding_source, library_vocab, template_haskell_show_default,
     CapturedOutput, EffectDecl, EffectRoster,
 };
 use tidepool_repr::{
@@ -3520,15 +3520,17 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
             .find(|d| d.type_name.eq_ignore_ascii_case(name))
         {
             Some(d) => {
-                let verbs: Vec<String> = d.helpers.iter().filter_map(|h| helper_sig(h)).collect();
+                let verbs = tidepool_mcp::authored_helper_signatures(d);
+                let constructors = tidepool_mcp::authored_constructors(d);
+                let types = tidepool_mcp::authored_type_definitions(d);
                 serde_json::json!({
                     "effect": d.type_name,
                     "description": d.description,
                     "verbs": verbs,
-                    "constructors": d.constructors,
+                    "constructors": constructors,
                     // Real field names, straight from the type_def — the doc
                     // prose above can drift, this can't (#346).
-                    "types": d.type_defs,
+                    "types": types,
                 })
             }
             None => {

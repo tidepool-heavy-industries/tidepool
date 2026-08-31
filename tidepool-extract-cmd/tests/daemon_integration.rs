@@ -1,7 +1,7 @@
 //! GHC-heavy integration test for the resident compile daemon. One binary and
 //! daemon boot are shared across checks (a)-(d)
-//! run against one daemon; (e) needs its own (it deliberately kills itself
-//! after 2 requests).
+//! run against one daemon; (e) needs its own (it deliberately rotates after
+//! accepting concurrent requests).
 //!
 //! Needs a resolvable `tidepool-extract` binary (`$TIDEPOOL_EXTRACT` or
 //! `PATH`) and a GHC on `PATH` that can load it (see haskell/CLAUDE.md).
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
+use tidepool_extract_cmd::{resolve_bin, ExtractCmd, Launcher, ResolvedExtractBin};
 
 /// The stdlib root every fixture's `--include` points at — this crate's own
 /// workspace-relative path, not the general-purpose 5-tier locator
@@ -170,7 +170,7 @@ fn run_via_env_socket(cmd: &ExtractCmd, socket: &Path) -> std::process::Output {
     let result = cmd.run();
     std::env::remove_var(k);
     result
-        .expect("daemon-routed run() should not itself error (it falls back to Direct)")
+        .expect("daemon-routed run() should complete (or safely fall back before submission)")
         .output
 }
 
@@ -739,9 +739,8 @@ fn check_g_shim_dependent_module_warm_second_request(
     );
 }
 
-/// (e) `--rotate-after 2` → the daemon exits after 2 requests, and the
-/// client's NEXT call falls back to a real spawn cleanly (not a hang, not an
-/// error surfaced to the caller).
+/// (e) rotation unpublishes the socket, drains already-connected clients, and
+/// lets the next known-unsubmitted call fall back to a real spawn.
 fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
     let dir = unique_scratch_dir("rotate");
     let socket = unique_socket_path("rotate");
@@ -751,17 +750,29 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
         "module Expr where\nimport Tidepool.Prelude\nresult :: Int\nresult = 5\n",
     );
 
-    let Some(daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "2"]) else {
+    let Some(daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1"]) else {
         let _ = fs::remove_dir_all(&dir);
         return;
     };
 
-    for i in 0..2 {
-        let out = run_via_env_socket(
-            &cmd_for(bin, &dir, &format!("out-e-{i}"), "Expr.hs", lib),
-            &socket,
-        );
-        assert!(out.status.success(), "rotation request {i} should succeed");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+    let mut requests = Vec::new();
+    for i in 0..4 {
+        let command = cmd_for(bin, &dir, &format!("out-e-{i}"), "Expr.hs", lib);
+        let socket = socket.clone();
+        let barrier = barrier.clone();
+        requests.push(std::thread::spawn(move || {
+            barrier.wait();
+            command.run_with(&Launcher::Daemon(socket))
+        }));
+    }
+    barrier.wait();
+    for (i, request) in requests.into_iter().enumerate() {
+        let run = request
+            .join()
+            .unwrap_or_else(|_| panic!("rotation request {i} panicked"))
+            .unwrap_or_else(|error| panic!("rotation request {i} failed: {error}"));
+        assert!(run.success(), "rotation request {i} should succeed");
     }
 
     // The daemon should exit on its own shortly after serving request 2 —
@@ -776,7 +787,7 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
         }
         assert!(
             start.elapsed() < Duration::from_secs(15),
-            "daemon did not exit after --rotate-after 2 within 15s"
+            "daemon did not exit after draining rotation clients within 15s"
         );
         std::thread::sleep(Duration::from_millis(100));
     }

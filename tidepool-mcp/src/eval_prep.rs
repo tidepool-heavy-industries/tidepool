@@ -297,7 +297,23 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
             "module Tidepool.Effects (module Tidepool.Effects.Core, M{extra_exports}) where\n"
         ));
     }
-    out.push_str("import Tidepool.Effects.Core\n");
+    out.push_str("import Tidepool.Effects.Core");
+    let hidden: Vec<_> = row_effects
+        .iter()
+        .flat_map(|effect| {
+            crate::generated::AUTHORED_HIDDEN_BY_EFFECT
+                .iter()
+                .find(|(owner, _)| *owner == effect.type_name)
+                .into_iter()
+                .flat_map(|(_, names)| names.iter().copied())
+        })
+        .collect();
+    if !hidden.is_empty() {
+        out.push_str(" hiding (");
+        out.push_str(&hidden.join(", "));
+        out.push(')');
+    }
+    out.push('\n');
     // `Eff` for `type M`'s own RHS and `pure` for `__shimProbe`'s body: Core IMPORTS
     // all of these (from freer-simple and `Tidepool.Prelude` respectively)
     // but, having no explicit export list re-exporting them, does not itself
@@ -1421,6 +1437,26 @@ mod tests {
         // proof of that half.
         let shim = effects_shim_module_source(&[crate::askuser_decl()], &crate::RowArgs::default());
         assert!(shim.contains("type M = Eff '[AskUser]"), "{shim}");
+    }
+
+    #[test]
+    fn authored_shim_hides_only_curated_names_in_its_roster() {
+        let decls = vec![crate::actor_decl(), crate::askuser_decl()];
+        let core = effects_core_module_source_for(&decls);
+        let shim = effects_shim_module_source(&decls, &crate::RowArgs::default());
+
+        assert!(core.contains("ActorStartWith ::"), "{core}");
+        assert!(core.contains("ActorWaitWith ::"), "{core}");
+        assert!(
+            shim.contains(
+                "hiding (ActorTerminalStatus, ActorPromoteWith, ActorStartWith, ActorWaitWith)"
+            ),
+            "{shim}"
+        );
+        assert!(!shim.contains("DeliberateWith"), "{shim}");
+        assert!(!shim.contains("AskUserWith"), "{shim}");
+        assert!(crate::authored_name_is_hidden("Actor", "ActorStartWith"));
+        assert!(!crate::authored_name_is_hidden("AskUser", "AskUserWith"));
     }
 
     /// Dedup by `type_name`: the same effect listed twice in the vocabulary

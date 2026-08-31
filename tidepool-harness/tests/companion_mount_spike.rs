@@ -142,7 +142,6 @@ fn build_shared_session(cfg: &EngineConfig, decl_root: &std::path::Path) -> Sess
     .with_validation_include(cfg.include.clone());
     Session::unbootstrapped(
         stack,
-        cfg.effect_names.clone(),
         tidepool_mcp::CapturedOutput::new(),
         cfg.include.clone(),
         tidepool_runtime::DEFAULT_NURSERY_SIZE,

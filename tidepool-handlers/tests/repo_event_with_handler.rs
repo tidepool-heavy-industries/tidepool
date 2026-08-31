@@ -75,7 +75,7 @@ use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
 use tidepool_eval::value::Value;
 use tidepool_handlers::{
-    ConsoleHandler, EventConfig, EventError, ObservationSource, RepoEventHandler,
+    ConsoleHandler, EventConfig, EventError, ObservationSource, RepoEventHandler, WorktreeReq,
 };
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
 use tidepool_repr::DataConTable;
@@ -115,11 +115,11 @@ impl DescribeEffect for UnwiredWorktreeRow {
 }
 
 impl EffectHandler<CapturedOutput> for UnwiredWorktreeRow {
-    type Request = Value;
+    type Request = WorktreeReq;
 
     fn handle(
         &mut self,
-        _req: Value,
+        _req: WorktreeReq,
         _cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
         panic!(

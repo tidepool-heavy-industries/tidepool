@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 mod daemon;
 pub mod exec_check;
 pub mod frontend;
+mod process;
 mod request;
 use exec_check::is_readable_executable_file;
 pub use request::{ExtractRequest, ProtocolError};
@@ -584,18 +585,26 @@ impl ExtractCmd {
     /// Spawn, wait, and classify — through this command's own [`Launcher`].
     ///
     /// If `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a working daemon, send the
-    /// current directory and worker request over it. Any unavailable-daemon error falls
-    /// back to the configured launcher for this request. The spawn counter
-    /// increments once for either route.
+    /// current directory and worker request over it. A failed connect falls
+    /// back to the configured launcher; failures after submission are
+    /// returned because replay could duplicate the compile. The spawn counter
+    /// increments once for either successful route.
     pub fn run(&self) -> Result<ExtractRun, SpawnError> {
         if let Some(socket) = std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET") {
             let socket_path = PathBuf::from(socket);
-            if let Ok(run) = self.run_via_daemon(&socket_path) {
-                return Ok(run);
+            match self.run_via_daemon(&socket_path) {
+                Ok(run) => return Ok(run),
+                Err(error) if error.permits_direct_fallback() => {}
+                Err(error) => {
+                    return Err(SpawnError {
+                        bin: socket_path.into_os_string(),
+                        source: std::io::Error::other(error.to_string()),
+                    });
+                }
             }
-            // Any daemon-unavailable signal (unset is handled by the `if
-            // let` above never firing; every other case lands here) falls
-            // through to Direct — never surfaced as this call's own error.
+            // Connect failure proves the request was never submitted, so one
+            // direct attempt is safe. Post-connect failures return above:
+            // the daemon may still be compiling that logical request.
         }
         self.run_with(&self.launcher)
     }
@@ -619,6 +628,7 @@ impl ExtractCmd {
 
         let mut cmd = launcher.command();
         cmd.args(self.request.worker_argv());
+        process::child_dies_with_parent(&mut cmd);
 
         let start = Instant::now();
         let output = cmd.output().map_err(|source| SpawnError {
@@ -1025,6 +1035,56 @@ mod tests {
         // daemon attempt plus a real spawn.
         assert_eq!(extract_spawn_count(), 1);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn submitted_daemon_request_is_not_replayed_directly() {
+        let _state = PROCESS_STATE.lock().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tidepool-extract-cmd-no-replay-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("direct-ran");
+        let fake_bin = dir.join("fake-extract");
+        std::fs::write(
+            &fake_bin,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sock_path = scratch_socket_path("submitted-close");
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            drain_request(&mut connection);
+            // Losing the connection here leaves settlement indeterminate: the
+            // daemon accepted the whole request but returned no response.
+        });
+
+        std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", &sock_path);
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&fake_bin));
+        cmd.input("Expr.hs");
+        let error = cmd.run().unwrap_err();
+        std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        server.join().unwrap();
+
+        assert!(
+            error.to_string().contains("daemon crashed mid-request"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !marker.exists(),
+            "an accepted daemon request must never be replayed directly"
+        );
+
+        std::fs::remove_file(&sock_path).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 }

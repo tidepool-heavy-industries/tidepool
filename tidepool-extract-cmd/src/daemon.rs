@@ -14,9 +14,9 @@
 //!
 //! EOF (a short read) at any point is the daemon-crashed-mid-request signal
 //! both sides rely on — this module turns it into [`DaemonError::Crashed`].
-//! Every [`DaemonError`] variant means the same thing to the caller: this ONE
-//! request was not served by the daemon, fall back to a direct spawn — never
-//! a hang, never a silent retry against the same daemon.
+//! Only connect failure permits direct fallback: after connection, the daemon
+//! may have accepted or even completed the logical request, so retrying it on
+//! another transport would duplicate compiler work.
 
 use std::ffi::OsString;
 use std::fs;
@@ -37,13 +37,17 @@ use crate::ExtractRequest;
 /// a COLD resident-session compile can legitimately take several seconds
 /// so this is sized well above a cold compile, not
 /// tuned to the warm case.
-const IO_TIMEOUT: Duration = Duration::from_secs(60);
+// The resident GHC worker is deliberately single-threaded. Four heavy clients
+// may therefore wait for three complete cold compiles before their own reply;
+// this bounds a genuinely wedged daemon without mistaking ordinary queueing
+// for failure and creating a herd of duplicate direct workers.
+const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
 
-/// The daemon did not serve this request. Every variant carries the SAME
-/// meaning to the caller (fall back to Direct) — the distinction exists only
-/// for error messages, never for different fallback behavior.
+/// Failure while attempting one daemon request. The point of failure carries
+/// settlement information: [`DaemonError::Connect`] is known-unsubmitted;
+/// all later failures are indeterminate and must not be retried elsewhere.
 #[derive(Debug)]
 pub(crate) enum DaemonError {
     /// The socket does not exist, or nothing is listening — the ordinary,
@@ -57,6 +61,15 @@ pub(crate) enum DaemonError {
     /// unambiguous: a clean response is always a complete, self-describing
     /// byte sequence, so any short read here can only mean the peer is gone.
     Crashed,
+}
+
+impl DaemonError {
+    /// Only a failed connect proves that no request reached the daemon.
+    /// Anything after connection may have been accepted or completed even if
+    /// its response was lost, so retrying directly would duplicate work.
+    pub(crate) fn permits_direct_fallback(&self) -> bool {
+        matches!(self, Self::Connect(_))
+    }
 }
 
 impl std::fmt::Display for DaemonError {
@@ -172,11 +185,7 @@ pub(crate) fn serve(
     if let Some(parent) = config.socket.parent() {
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
     }
-    match fs::remove_file(&config.socket) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(FrontendError::Io(error)),
-    }
+    remove_socket(&config.socket)?;
     let listener =
         std::os::unix::net::UnixListener::bind(&config.socket).map_err(FrontendError::Io)?;
     let boot_stamp = config
@@ -190,8 +199,13 @@ pub(crate) fn serve(
 
     let result = (|| {
         let mut served = 0;
+        let mut draining = false;
         loop {
-            let (mut connection, _) = listener.accept().map_err(FrontendError::Io)?;
+            let (mut connection, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if draining && error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(FrontendError::Io(error)),
+            };
             if connection
                 .set_read_timeout(Some(Duration::from_secs(30)))
                 .is_err()
@@ -216,11 +230,18 @@ pub(crate) fn serve(
                 }
                 _ => false,
             };
-            if served >= rotate_after
-                || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
-                || stamp_changed
+            if !draining
+                && (served >= rotate_after
+                    || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
+                    || stamp_changed)
             {
-                break;
+                // Stop publication before draining. New clients now fail to
+                // connect and may safely use Direct; clients already queued
+                // on this listener remain accepted below and receive their
+                // one authoritative response before worker shutdown.
+                remove_socket(&config.socket)?;
+                listener.set_nonblocking(true).map_err(FrontendError::Io)?;
+                draining = true;
             }
         }
         Ok(0)
@@ -230,6 +251,14 @@ pub(crate) fn serve(
     let _ = fs::remove_file(&config.socket);
     worker.shutdown();
     result
+}
+
+fn remove_socket(path: &Path) -> Result<(), FrontendError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(FrontendError::Io(error)),
+    }
 }
 
 fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
@@ -321,13 +350,14 @@ struct Worker {
 
 impl Worker {
     fn spawn(bin: &Path) -> Result<Self, FrontendError> {
-        let mut child = Command::new(bin)
+        let mut command = Command::new(bin);
+        command
             .arg("--worker-loop-v1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(FrontendError::Io)?;
+            .stderr(Stdio::inherit());
+        crate::process::child_dies_with_parent(&mut command);
+        let mut child = command.spawn().map_err(FrontendError::Io)?;
         let stdin = child
             .stdin
             .take()

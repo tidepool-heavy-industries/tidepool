@@ -3533,11 +3533,12 @@ mod tests {
         );
     }
 
-    /// `2^32` must not alias site `0` via an `as u32` truncation.
+    /// A site literal must fit the positive Haskell `Int` range used by the
+    /// generated request constructor.
     #[test]
     fn classify_runllmturn_payload_rejects_out_of_range_site() {
         let asks = YieldSites::from_pairs(vec![]);
-        let huge = (u32::MAX as u64) + 1;
+        let huge = (i64::MAX as u64) + 1;
         let payload = serde_json::json!({ "typedSite": huge });
         let err = classify_runllmturn_payload(&payload, &asks).unwrap_err();
         assert!(
@@ -3686,25 +3687,15 @@ mod tests {
     }
 
     #[test]
-    fn require_arg_site_rejects_out_of_range_value() {
+    fn require_arg_site_accepts_the_widened_64_bit_range() {
         let huge = i64::from(u32::MAX) + 1;
-        let err = require_arg_site(huge, "ForkWith", "site").unwrap_err();
-        assert!(
-            matches!(
-                err,
-                ClassifyError::OutOfRange {
-                    constructor: "ForkWith",
-                    field: "site",
-                    value
-                } if value == huge as u64
-            ),
-            "{err:?}"
-        );
+        let site = require_arg_site(huge, "ForkWith", "site").expect("site fits a u64 SiteId");
+        assert_eq!(site.get(), huge as u64);
     }
 
     #[test]
     fn require_arg_site_accepts_a_valid_value() {
-        let site = require_arg_site(42, "ForkAllWith", "site").expect("42 fits a u32 SiteId");
+        let site = require_arg_site(42, "ForkAllWith", "site").expect("42 fits a u64 SiteId");
         assert_eq!(site.get(), 42);
     }
 

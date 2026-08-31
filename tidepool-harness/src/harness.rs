@@ -929,7 +929,6 @@ impl Harness {
         include.extend(extra_include);
         let session = ResidentSession::unbootstrapped(
             stack,
-            self.cfg.effect_names.clone(),
             CapturedOutput::new(),
             include,
             DEFAULT_NURSERY_SIZE,
@@ -1238,7 +1237,7 @@ impl Harness {
 /// a durable log a caller is replaying should not gain a new required
 /// field), so this is a projection at the log-writing boundary, not a
 /// second copy of the asks data.
-fn asks_log_pairs(asks: &[tidepool_runtime::YieldSite]) -> Vec<(u32, String)> {
+fn asks_log_pairs(asks: &[tidepool_runtime::YieldSite]) -> Vec<(u64, String)> {
     asks.iter()
         .map(|site| (site.site, site.ty.clone()))
         .collect()
@@ -1783,7 +1782,9 @@ impl Harness {
             // effect/value, no binding materializes on the value plane.
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
                 self.log_turn_extracted(node, &asks_log_pairs(&compiled.asks), None)?;
-                let asks = YieldSites::from_sites(compiled.asks);
+                let sites = compiled.asks;
+                let asks = YieldSites::from_sites(sites.clone())
+                    .map_err(|error| HarnessError::Compile(error.to_string()))?;
                 let table = compiled.table;
                 let expr = compiled.expr;
 
@@ -1793,7 +1794,7 @@ impl Harness {
                 let run_table = table.clone();
                 let run_outcome = self
                     .run_checked_out(node, checkout, move |mut session| {
-                        let out = session.run("turn", &expr, &run_table);
+                        let out = session.run_with_sites("turn", &expr, &run_table, &sites);
                         (session, out)
                     })
                     .await?;
@@ -2183,14 +2184,16 @@ impl Harness {
                 }
                 TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => {
                     self.log_turn_extracted(node, &asks_log_pairs(&compiled.asks), None)?;
-                    let asks = YieldSites::from_sites(compiled.asks);
+                    let sites = compiled.asks;
+                    let asks = YieldSites::from_sites(sites.clone())
+                        .map_err(|error| HarnessError::Compile(error.to_string()))?;
                     let table = compiled.table;
                     let expr = compiled.expr;
                     let checkout = self.checkout_run_waiting(node).await?;
                     let run_table = table.clone();
                     let run_outcome = self
                         .run_checked_out(node, checkout, move |mut session| {
-                            let out = session.run("turn", &expr, &run_table);
+                            let out = session.run_with_sites("turn", &expr, &run_table, &sites);
                             (session, out)
                         })
                         .await?;
@@ -2371,7 +2374,9 @@ impl Harness {
             &asks_log_pairs(&compiled.asks),
             Some((&binder.name, &binder.type_display)),
         )?;
-        let asks = YieldSites::from_sites(compiled.asks);
+        let sites = compiled.asks;
+        let asks = YieldSites::from_sites(sites.clone())
+            .map_err(|error| HarnessError::Compile(error.to_string()))?;
         let table = compiled.table;
         let expr = compiled.expr;
 
@@ -2380,7 +2385,14 @@ impl Harness {
         let run_table = table.clone();
         let outcome = self
             .run_checked_out(node, checkout, move |mut session| {
-                let out = session.run_bind("bind", &expr, &run_table, &binder_for_run, gen);
+                let out = session.run_bind_with_sites(
+                    "bind",
+                    &expr,
+                    &run_table,
+                    &binder_for_run,
+                    gen,
+                    &sites,
+                );
                 (session, out)
             })
             .await?;
@@ -3169,7 +3181,7 @@ impl Harness {
     fn log_turn_extracted(
         &self,
         node: NodeId,
-        asks: &[(u32, String)],
+        asks: &[(u64, String)],
         bound: Option<(&str, &str)>,
     ) -> Result<(), HarnessError> {
         if asks.is_empty() && bound.is_none() {
@@ -3256,7 +3268,7 @@ impl Harness {
     /// fork/fanout child's `finalize` pins its imports from, replacing the
     /// harness-import-scraping guess. Empty when `node` has no live convo
     /// or `site` has no sidecar entry.
-    pub(crate) fn asks_modules(&self, node: NodeId, site: u32) -> Vec<String> {
+    pub(crate) fn asks_modules(&self, node: NodeId, site: u64) -> Vec<String> {
         self.node_pending(node)
             .map(|p| p.suspend_asks.modules_of(site).to_vec())
             .unwrap_or_default()
@@ -4119,7 +4131,6 @@ mod tests {
         let (stack, _trace) = harness.build_stack();
         ResidentSession::unbootstrapped(
             stack,
-            vec![],
             CapturedOutput::new(),
             vec![],
             DEFAULT_NURSERY_SIZE,

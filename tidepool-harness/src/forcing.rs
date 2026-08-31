@@ -287,7 +287,7 @@ impl<M> NodeTree<M> {
     pub fn turn_extracted(
         &self,
         node: NodeId,
-        asks: Vec<(u32, String)>,
+        asks: Vec<(u64, String)>,
         bound: Option<(String, String)>,
     ) -> Result<(), TreeError> {
         let mut inner = self.inner.lock();

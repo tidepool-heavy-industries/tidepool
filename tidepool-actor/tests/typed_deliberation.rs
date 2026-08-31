@@ -112,7 +112,7 @@ impl ModelProvider for WorkbenchProvider {
             } else {
                 concat!(
                     "```haskell\n",
-                    "complete ((\\n -> pure (offset + twice (+ 1) n)) :: Int -> Eff AgentEffects Int)\n",
+                    "complete ((\\n -> pure (offset + twice (+ 1) n)) :: Int -> Eff ActorEffects Int)\n",
                     "```\n",
                     "```haskell\n",
                     "error \"completion must stop the suffix\"\n",
@@ -144,7 +144,6 @@ async fn fenced_haskell_returns_a_live_typed_closure_without_holding_checkout() 
         .with_validation_include(include.clone());
     let machine: Machine = ResidentSession::unbootstrapped(
         NoHandlers,
-        vec!["Actor".into()],
         TestSink,
         include.clone(),
         DEFAULT_NURSERY_SIZE,
@@ -174,9 +173,9 @@ async fn fenced_haskell_returns_a_live_typed_closure_without_holding_checkout() 
     let mut admitted = agent.begin_agent_session().expect("admit agent session");
 
     let mut preamble = tidepool_mcp::build_preamble(&[tidepool_mcp::actor_decl()], false);
-    preamble.push_str("type AgentEffects = '[Actor]\n");
+    preamble.push_str("type ActorEffects = '[Actor]\n");
     let source = ActorWorkbenchSource::new(preamble, include);
-    let expected = "Int -> Eff AgentEffects Int";
+    let expected = "Int -> Eff ActorEffects Int";
     let mut workbench =
         ResidentActorWorkbench::new(Arc::clone(&machines), source, expected, Vec::new());
     let provider = WorkbenchProvider {

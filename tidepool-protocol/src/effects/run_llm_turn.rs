@@ -80,6 +80,7 @@ pub fn run_llm_turn() -> Effect {
         // variant identifier, unrelated to this string, and keeps its own
         // casing.
         name: "RunLLMTurn",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "RunLLMTurnHandler",
         handler_module: "run_llm_turn",
         req_enum: "RunLLMTurnReq",

@@ -42,6 +42,7 @@ fn thread_id_arg() -> Arg {
 pub fn green() -> Effect {
     Effect {
         name: "Green",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "GreenDecodeHandler",
         handler_module: "green",
         req_enum: "GreenReq",

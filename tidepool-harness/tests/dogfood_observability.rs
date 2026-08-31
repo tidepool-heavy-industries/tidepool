@@ -242,13 +242,13 @@ async fn narration_and_transcript_fold_both_hold_for_one_retry_cycle() {
     assert_eq!(
         by_site.len(),
         1,
-        "exactly one hole (site 0, the loop's single runLLMTurn) was serviced, got: {by_site:?}"
+        "exactly one hole (the loop's single runLLMTurn) was serviced, got: {by_site:?}"
     );
-    let rounds = &by_site[&0];
+    let (&site, rounds) = by_site.iter().next().expect("the one typed site");
     assert_eq!(
         rounds.len(),
         2,
-        "site 0 must show both the failing and the corrected round, got: {rounds:?}"
+        "site {site} must show both the failing and corrected round, got: {rounds:?}"
     );
     assert_eq!(
         rounds[0],
@@ -269,9 +269,9 @@ async fn narration_and_transcript_fold_both_hold_for_one_retry_cycle() {
 
     let retries = retries_per_hole(&by_site);
     assert_eq!(
-        retries.get(&0),
+        retries.get(&site),
         Some(&1),
-        "site 0 consumed exactly one corrective-retry round, got: {retries:?}"
+        "site {site} consumed exactly one corrective-retry round, got: {retries:?}"
     );
 }
 

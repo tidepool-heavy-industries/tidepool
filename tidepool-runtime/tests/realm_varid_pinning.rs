@@ -127,12 +127,10 @@ fn bootstrap(
     harness: &EvalHarness,
 ) -> ResidentSession<AsSink<impl DispatchEffect<()> + Send>, TestSink> {
     let (expr, table) = compile_turn(harness, "result :: M Int\nresult = pure (0 :: Int)");
-    let effect_names = mock::EFFECT_NAMES.iter().map(|s| s.to_string()).collect();
     ResidentSession::bootstrap(
         &expr,
         table,
         AsSink(mock::min_stack()),
-        effect_names,
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,

@@ -14,6 +14,7 @@ const TYPE_PARAMS: &[TypeParam] = &[TypeParam::unary("api"), TypeParam::value("e
 pub fn actor_local() -> Effect {
     Effect {
         name: "ActorLocal",
+        authored_surface: crate::schema::AuthoredSurface::OPAQUE,
         handler: "ActorLocalDecodeHandler",
         handler_module: "actor_local",
         req_enum: "ActorLocalReq",

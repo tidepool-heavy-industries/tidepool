@@ -51,7 +51,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import Tidepool.ExtractUtil (getLibdir)
-import Tidepool.EffectSchema (SiteType(..), YieldSite(..))
+import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 import Tidepool.Json (jsonString)
 import Tidepool.Timing (timeSection, emitPhase)
 
@@ -459,14 +459,24 @@ renderBoundBinderJson (BoundBinder name varid modul tier tdisp) =
 -- now carries the general answer-plus-live-input contract; ordinary ask/fork
 -- sites simply have an empty @inputs@ list.
 renderAskJson :: YieldSite -> String
-renderAskJson (YieldSite site answer inputs) =
+renderAskJson (YieldSite site origin ordinal answer inputs) =
   "{\"site\":" ++ show site
+    ++ ",\"origin\":" ++ jsonString (T.unpack origin)
+    ++ ",\"ordinal\":" ++ show ordinal
     ++ ",\"type\":" ++ jsonString (T.unpack (stType answer))
     ++ ",\"modules\":" ++ renderModules (stModules answer)
+    ++ ",\"heads\":" ++ renderHeads (stHeads answer)
     ++ ",\"inputs\":[" ++ intercalate "," (map renderSiteType inputs) ++ "]}"
   where
-    renderSiteType (SiteType ty modules) =
+    renderSiteType (SiteType ty modules heads) =
       "{\"type\":" ++ jsonString (T.unpack ty)
-        ++ ",\"modules\":" ++ renderModules modules ++ "}"
+        ++ ",\"modules\":" ++ renderModules modules
+        ++ ",\"heads\":" ++ renderHeads heads ++ "}"
     renderModules modules =
       "[" ++ intercalate "," (map (jsonString . T.unpack) modules) ++ "]"
+    renderHeads heads =
+      "[" ++ intercalate "," (map renderHead heads) ++ "]"
+    renderHead (NominalHead unit modul name) =
+      "{\"unit\":" ++ jsonString (T.unpack unit)
+        ++ ",\"module\":" ++ jsonString (T.unpack modul)
+        ++ ",\"name\":" ++ jsonString (T.unpack name) ++ "}"

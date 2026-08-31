@@ -112,13 +112,10 @@ fn multi_target_fails_on_any_bad_target() {
 /// **per-target asks stay distinct.** `targetA`'s `runLLMTurn @Int` site and
 /// `targetB`'s `runLLMTurn @Text` site must NOT collapse into one shared
 /// sidecar: each target's own `CompiledTurn::asks` records only its own site,
-/// at its own type, end-to-end through `engine::compile_turns`. Both targets'
-/// site counters independently start at 0 (a fresh `TransState` per
-/// `translateModuleClosed` call, `Translate.hs`), so this also proves the two
-/// targets' `asks.json` sidecars are read from genuinely SEPARATE files/maps
-/// — a shared-map bug would have target B's site 0 silently overwrite (or be
-/// overwritten by) target A's, and this test would see one type instead of
-/// two.
+/// at its own type and stable binder-qualified identity, end-to-end through
+/// `engine::compile_turns`. This also proves the two targets' `asks.json`
+/// sidecars are read from genuinely separate files/maps: a shared-map bug
+/// would collapse or overwrite one record.
 #[test]
 fn multi_target_asks_stay_distinct() {
     tidepool_testing::eval_harness::require_extract();
@@ -154,12 +151,21 @@ fn multi_target_asks_stay_distinct() {
         "targetB should record its one runLLMTurn site"
     );
 
-    let ty_a = asks_a
-        .type_of(0)
-        .expect("targetA's site 0 should be recorded");
-    let ty_b = asks_b
-        .type_of(0)
-        .expect("targetB's site 0 should be recorded");
+    let sites_a = asks_a.sites();
+    let sites_b = asks_b.sites();
+    let [site_a] = sites_a.as_slice() else {
+        panic!("targetA should expose one complete typed-site record");
+    };
+    let [site_b] = sites_b.as_slice() else {
+        panic!("targetB should expose one complete typed-site record");
+    };
+    let ty_a = &site_a.ty;
+    let ty_b = &site_b.ty;
+
+    assert_ne!(
+        site_a.site, site_b.site,
+        "binder-qualified site identities must remain distinct across targets"
+    );
 
     assert!(
         ty_a.contains("Int"),

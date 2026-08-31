@@ -22,9 +22,10 @@ and toolchain validation belong to `tidepool-toolchain`.
 
 `ExtractCmd::run()` uses the resident daemon when
 `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` is set and falls back to a direct worker
-spawn when the daemon is unavailable. A logical request is attempted at most
-once through each transport: daemon failure may trigger one direct attempt,
-but never a daemon retry.
+spawn only when connection failure proves the request was never submitted.
+After connection, a lost or late response is indeterminate: the daemon may
+still be compiling, so the error is returned instead of duplicating the
+request through a direct worker.
 
 `run_with(&Launcher::Daemon(path))` is different by design: the caller chose a
 specific transport, so daemon failure is returned rather than hidden behind a
@@ -33,6 +34,10 @@ fallback.
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
 counter.
+
+Every process edge in the extractor chain uses the crate's parent-death
+contract. Killing a caller, frontend, or daemon must reap its frontend or GHC
+worker descendants; process-tree ownership is not delegated to test scripts.
 
 ## Wire boundary
 

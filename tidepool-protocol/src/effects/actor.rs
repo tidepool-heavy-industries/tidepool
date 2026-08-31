@@ -5,7 +5,7 @@
 //! existentially row-typed child entry as its field-1 live payload. A wait
 //! carries an exact Rust routing identity and returns terminal metadata. The
 //! successful exit value never crosses either request: it remains in the
-//! managed Haskell cell carried by the corresponding `AgentRef`.
+//! managed Haskell cell carried by the corresponding `ActorRef`.
 //!
 //! There is no `tidepool-handlers` handler.  The request is decoded and
 //! serviced by `tidepool-actor`, whose registry owns exact-incarnation wait
@@ -26,6 +26,7 @@ fn address_type() -> HsType {
 pub fn actor() -> Effect {
     Effect {
         name: "Actor",
+        authored_surface: crate::schema::AuthoredSurface::OPAQUE,
         handler: "ActorDecodeHandler",
         handler_module: "actor",
         req_enum: "ActorReq",
@@ -79,6 +80,15 @@ pub fn actor() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
+                ctor: "ActorPromoteWith",
+                method: "actor_promote_with",
+                args: vec![],
+                ret: HsType::Text,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
                 ctor: "ActorStartWith",
                 method: "actor_start_with",
                 args: vec![
@@ -97,6 +107,11 @@ pub fn actor() -> Effect {
                             ),
                         ),
                         rust: RustBinding::CoreValue,
+                    },
+                    Arg {
+                        name: "promotion",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
                     },
                 ],
                 ret: address_type(),
@@ -118,7 +133,7 @@ pub fn actor() -> Effect {
                 extract: None,
             },
         ],
-        // The public wrapper needs the managed cell carried by `AgentRef`, so
+        // The public wrapper needs the managed cell carried by `ActorRef`, so
         // it is authored in Tidepool.Actor rather than emitted as a second,
         // raw helper here.
         helpers: Vec::new(),

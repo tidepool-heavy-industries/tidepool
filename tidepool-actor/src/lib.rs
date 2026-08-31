@@ -15,6 +15,7 @@ mod generated;
 mod identity;
 mod mailbox;
 mod mount;
+mod promotion;
 mod registry;
 mod resident_workbench;
 mod start;
@@ -44,13 +45,18 @@ pub use mount::{
     mount_actor_turn, ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget,
     ActorSessionContext, ActorSourceImports, MountActorTurnError,
 };
+pub use promotion::{promote_checked_out, ActorPromotionError};
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
     ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,
 };
 pub use resident_workbench::{
-    ActorMachineRegistry, ActorWorkbenchSource, ResidentActorWorkbench, ResidentActorWorkbenchError,
+    ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
+    ResidentActorWorkbenchError,
 };
-pub use start::{ActorStartCaptureError, ActorStartRequest, ResidentActorStart};
+pub use start::{
+    ActorStartCaptureError, ActorStartRequest, ResidentActorStart, ResidentActorStartError,
+    ResidentActorStarter,
+};
 pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
 pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};

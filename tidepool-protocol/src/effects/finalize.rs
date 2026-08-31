@@ -33,6 +33,7 @@ const TYPE_PARAMS: &[TypeParam] = &[TypeParam::value("v")];
 pub fn finalize() -> Effect {
     Effect {
         name: "Finalize",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "FinalizeHandler",
         handler_module: "finalize",
         req_enum: "FinalizeReq",

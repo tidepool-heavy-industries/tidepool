@@ -50,15 +50,10 @@ fn ready_actor_runs_haskell_under_its_exact_principal() {
         .compile(&source, "result")
         .expect("compile actor turn");
 
-    let effect_names = mock::EFFECT_NAMES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
     let mut session = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
         AsSink(mock::min_stack()),
-        effect_names,
         TestSink,
         Vec::new(),
         DEFAULT_NURSERY_SIZE,
@@ -124,7 +119,6 @@ fn actor_mount_installs_its_request_policy_and_effect_metadata() {
         &compiled.expr,
         compiled.table.clone(),
         AsSink(mock::min_stack()),
-        effect_names.clone(),
         TestSink,
         Vec::new(),
         DEFAULT_NURSERY_SIZE,

@@ -46,3 +46,21 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_local_decl(),
     ]
 }
+
+/// Effects with an explicitly curated authored vocabulary.
+pub(crate) const CURATED_EFFECTS: &[&str] = &["Deliberate", "Actor", "ActorLocal"];
+
+/// Hidden names grouped by their owning effect.
+pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
+    ("Deliberate", &["DeliberateWith"]),
+    (
+        "Actor",
+        &[
+            "ActorTerminalStatus",
+            "ActorPromoteWith",
+            "ActorStartWith",
+            "ActorWaitWith",
+        ],
+    ),
+    ("ActorLocal", &["ActorReadyWith"]),
+];

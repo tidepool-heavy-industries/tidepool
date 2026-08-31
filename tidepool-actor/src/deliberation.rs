@@ -39,9 +39,9 @@ pub enum DeliberationRequestError {
     #[error("deliberation request carried invalid site id {0}")]
     InvalidSite(i64),
     #[error("deliberation site {0} is absent from its GHC metadata")]
-    MissingSite(u32),
+    MissingSite(u64),
     #[error("deliberation site {site} describes {actual} live input types, expected one")]
-    InputArity { site: u32, actual: usize },
+    InputArity { site: u64, actual: usize },
 }
 
 impl DeliberationRequest {
@@ -52,7 +52,7 @@ impl DeliberationRequest {
     ) -> Result<Self, DeliberationRequestError> {
         let DeliberateReq::DeliberateWith(site, _input, task) =
             DeliberateReq::from_value(request, table)?;
-        let site = u32::try_from(site).map_err(|_| DeliberationRequestError::InvalidSite(site))?;
+        let site = u64::try_from(site).map_err(|_| DeliberationRequestError::InvalidSite(site))?;
         let metadata = sites
             .iter()
             .find(|metadata| metadata.site == site)
@@ -100,14 +100,14 @@ impl ResidentDeliberation {
         hole: ResidentHole,
         request: &Value,
         table: &DataConTable,
-        sites: &[YieldSite],
         actor_realm: tidepool_codegen::suspension::RealmId,
     ) -> Result<Self, DeliberationCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let decoded = DeliberationRequest::decode(request, table, sites)?;
+        let sites = session.parked_program_provenance(&hole).unwrap_or_default();
+        let decoded = DeliberationRequest::decode(request, table, &sites.sites())?;
         let input = session
             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
             .ok_or(DeliberationCaptureError::MissingInput)?;
@@ -179,12 +179,26 @@ where
         deliberation: ResidentDeliberation,
         sink: Option<StreamSink>,
     ) -> Result<(TurnLease, ResidentOutcome), ResidentDeliberationError> {
+        let mut admitted = agent.enter_from_haskell_turn(haskell_turn)?;
+        let outcome = self
+            .resolve_admitted(&mut admitted, provider, deliberation, sink)
+            .await?;
+        let haskell_turn = admitted.return_to_haskell()?;
+        Ok((haskell_turn, outcome))
+    }
+
+    pub(crate) async fn resolve_admitted(
+        &self,
+        admitted: &mut crate::AdmittedAgentSession,
+        provider: &dyn DynModelProvider,
+        deliberation: ResidentDeliberation,
+        sink: Option<StreamSink>,
+    ) -> Result<ResidentOutcome, ResidentDeliberationError> {
         let ResidentDeliberation {
             request,
             hole,
             input,
         } = deliberation;
-        let mut admitted = agent.enter_from_haskell_turn(haskell_turn)?;
         let mut type_modules = request.input_modules.clone();
         for module in &request.output_modules {
             if !type_modules.contains(module) {
@@ -198,10 +212,10 @@ where
             type_modules,
         );
         workbench
-            .mount_goal_input(&admitted, request.input_type, input)
+            .mount_goal_input(admitted, request.input_type, input)
             .await?;
         let answer = run_typed_deliberation(
-            &mut admitted,
+            admitted,
             provider,
             &mut workbench,
             TypedGoal::new(request.task, request.output_type),
@@ -209,10 +223,9 @@ where
             sink,
         )
         .await?;
-        let haskell_turn = admitted.return_to_haskell()?;
         let outcome = workbench
-            .resume_deliberation(haskell_turn.session_context(), hole, answer)
+            .resume_deliberation(admitted.session_context(), hole, answer)
             .await?;
-        Ok((haskell_turn, outcome))
+        Ok(outcome)
     }
 }

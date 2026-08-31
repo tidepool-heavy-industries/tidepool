@@ -11,7 +11,7 @@ use crate::{
 /// A Haskell `awaitExit` parked against the registry's exact target incarnation.
 ///
 /// The value is deliberately just a Rust wait ticket. The successful typed
-/// exit remains in the managed Haskell cell carried by `AgentRef`; settling
+/// exit remains in the managed Haskell cell carried by `ActorRef`; settling
 /// this ticket supplies only the terminal metadata that sequences the cell
 /// read in the resumed continuation.
 pub struct ActorWait {

@@ -32,6 +32,7 @@ fn proc() -> HsType {
 pub fn exec() -> Effect {
     Effect {
         name: "Exec",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "ExecHandler",
         handler_module: "exec",
         req_enum: "ExecReq",

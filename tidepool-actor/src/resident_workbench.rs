@@ -9,14 +9,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tidepool_bridge::ToCore;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution, OutputSink,
-    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
-    SessionRunContext, TurnRequest, TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution,
+    MaterializedFacade, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, SessionRunContext, TurnRequest, TurnResult,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -27,7 +28,7 @@ use crate::{
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
 /// Trusted source environment supplied by actor deployment. The canonical
-/// `AgentEffects` alias itself lives in the imported Haskell facade; Rust does
+/// `ActorEffects` alias itself lives in the imported Haskell facade; Rust does
 /// not reflect or authorize its row entries.
 #[derive(Clone)]
 pub struct ActorWorkbenchSource {
@@ -51,12 +52,49 @@ impl ActorWorkbenchSource {
 /// inside each running segment.
 pub type ActorMachineRegistry<H, O> = SessionRegistry<ResidentSession<H, O>, String>;
 
-/// Concrete resident workbench for one typed agent-session obligation.
-pub struct ResidentActorWorkbench<H, O> {
+/// Shared checkout boundary for every actor machine entry path. Fenced
+/// fragments and installed actor programs differ above this layer, but use
+/// exactly the same admission and settlement mechanism.
+struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
+}
+
+impl<H, O> ResidentMachineAccess<H, O> {
+    fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
+        Self { machines, source }
+    }
+}
+
+/// Concrete resident workbench for one typed agent-session obligation.
+pub struct ResidentActorWorkbench<H, O> {
+    access: ResidentMachineAccess<H, O>,
     expected_type: String,
     type_modules: Arc<[String]>,
+}
+
+/// The one machine-entry component for installed actor program segments.
+/// It shares checkout/context installation with the fenced workbench; startup
+/// and later mailbox scheduling therefore cannot grow a second dispatcher.
+pub struct ResidentActorRunner<H, O> {
+    access: ResidentMachineAccess<H, O>,
+}
+
+/// A private readiness continuation validated while its actor is still
+/// unpublished. Construction proves both the nominal request and owning
+/// resource realm; consuming it is the only way the runner enters the
+/// installed program.
+pub(crate) struct ResidentActorReadiness {
+    hole: ResidentHole,
+}
+
+impl<H, O> ResidentActorRunner<H, O> {
+    #[must_use]
+    pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
+        Self {
+            access: ResidentMachineAccess::new(machines, source),
+        }
+    }
 }
 
 impl<H, O> ResidentActorWorkbench<H, O> {
@@ -68,8 +106,7 @@ impl<H, O> ResidentActorWorkbench<H, O> {
         type_modules: Vec<String>,
     ) -> Self {
         Self {
-            machines,
-            source,
+            access: ResidentMachineAccess::new(machines, source),
             expected_type: expected_type.into(),
             type_modules: type_modules.into(),
         }
@@ -94,9 +131,19 @@ pub enum ResidentActorWorkbenchError {
     MissingCompletionPayload,
     #[error("could not mount the typed deliberation input: {0}")]
     InputMount(String),
+    #[error("actor protocol violation: {0}")]
+    ActorProtocol(String),
+    #[error("could not bridge an actor protocol value: {0}")]
+    Bridge(#[from] tidepool_bridge::BridgeError),
+    #[error(transparent)]
+    DeliberationCapture(#[from] crate::DeliberationCaptureError),
+    #[error(transparent)]
+    Promotion(#[from] crate::ActorPromotionError),
+    #[error(transparent)]
+    StartCapture(#[from] crate::ActorStartCaptureError),
 }
 
-impl<H, O> ResidentActorWorkbench<H, O>
+impl<H, O> ResidentMachineAccess<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -149,7 +196,13 @@ where
             }
         }
     }
+}
 
+impl<H, O> ResidentActorWorkbench<H, O>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     /// Mount the authoritative input for the current deliberation under the
     /// one stable workbench name `goalInput`.
     ///
@@ -164,65 +217,66 @@ where
     ) -> Result<(), ResidentActorWorkbenchError> {
         let input_type = input_type.into();
         let type_modules = Arc::clone(&self.type_modules);
-        self.with_machine(
-            admitted.session_context(),
-            move |session, context, source| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
-                let block = ParsedBlock {
-                    ordinal: 1,
-                    total: 1,
-                    source: format!("goalInput <- pure (undefined :: ({input_type}))"),
-                };
-                let compiled = match compile_block(
-                    session,
-                    context,
-                    source,
-                    "AgentEffects",
-                    &type_modules,
-                    &block,
-                )? {
-                    CompiledBlock::Ready(compiled) => compiled,
-                    CompiledBlock::Rejected(diagnostic) => {
-                        return Err(ResidentActorWorkbenchError::InputMount(diagnostic));
-                    }
-                };
-                let ReadyBlock {
-                    result, generation, ..
-                } = *compiled;
-                let TurnResult::Bind {
-                    bound,
-                    compiled: expression,
-                    ..
-                } = result
-                else {
-                    return Err(ResidentActorWorkbenchError::InputMount(
-                        "the internal goal-input source was not classified as a binding".into(),
-                    ));
-                };
-                let [binder] = bound.as_slice() else {
-                    return Err(ResidentActorWorkbenchError::InputMount(format!(
-                        "the internal goal-input binding produced {} binders",
-                        bound.len()
-                    )));
-                };
-                session
-                    .mount_compiled_binding_in(
-                        context.placement.lexical_scope,
-                        binder,
-                        generation,
-                        &expression.table,
-                        input,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            },
-        )
-        .await
+        self.access
+            .with_machine(
+                admitted.session_context(),
+                move |session, context, source| {
+                    session
+                        .set_actor_execution(
+                            context.run_context(),
+                            context.effect_policy,
+                            context.live_payload,
+                        )
+                        .map_err(ResidentActorWorkbenchError::Resident)?;
+                    let block = ParsedBlock {
+                        ordinal: 1,
+                        total: 1,
+                        source: format!("goalInput <- pure (undefined :: ({input_type}))"),
+                    };
+                    let compiled = match compile_block(
+                        session,
+                        context,
+                        source,
+                        "ActorEffects",
+                        &type_modules,
+                        &block,
+                    )? {
+                        CompiledBlock::Ready(compiled) => compiled,
+                        CompiledBlock::Rejected(diagnostic) => {
+                            return Err(ResidentActorWorkbenchError::InputMount(diagnostic));
+                        }
+                    };
+                    let ReadyBlock {
+                        result, generation, ..
+                    } = *compiled;
+                    let TurnResult::Bind {
+                        bound,
+                        compiled: expression,
+                        ..
+                    } = result
+                    else {
+                        return Err(ResidentActorWorkbenchError::InputMount(
+                            "the internal goal-input source was not classified as a binding".into(),
+                        ));
+                    };
+                    let [binder] = bound.as_slice() else {
+                        return Err(ResidentActorWorkbenchError::InputMount(format!(
+                            "the internal goal-input binding produced {} binders",
+                            bound.len()
+                        )));
+                    };
+                    session
+                        .mount_compiled_binding_in(
+                            context.placement.lexical_scope,
+                            binder,
+                            generation,
+                            &expression.table,
+                            input,
+                        )
+                        .map_err(ResidentActorWorkbenchError::Resident)
+                },
+            )
+            .await
     }
 
     pub(crate) async fn resume_deliberation(
@@ -231,19 +285,190 @@ where
         hole: ResidentHole,
         answer: RootCustody,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.with_machine(context, move |session, context, _source| {
-            session
-                .set_actor_execution(
-                    context.run_context(),
-                    context.effect_policy,
-                    context.live_payload,
-                )
-                .map_err(ResidentActorWorkbenchError::Resident)?;
-            session
-                .resume_handle(hole, answer)
-                .map_err(ResidentActorWorkbenchError::Resident)
-        })
-        .await
+        self.access
+            .with_machine(context, move |session, context, _source| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                session
+                    .resume_handle(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+}
+
+impl<H, O> ResidentActorRunner<H, O>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    /// Materialize the exact source facade requested by `startActor`'s private
+    /// sealing suspension and resume that exact continuation with its
+    /// content-addressed receipt.
+    pub async fn promote_definition(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+    ) -> Result<(ResidentOutcome, MaterializedFacade), ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor promotion completed without suspending".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                crate::promote_checked_out(session, hole, &request)
+                    .map_err(ResidentActorWorkbenchError::Promotion)
+            })
+            .await
+    }
+
+    /// Mint a fresh lexical scope with no parent-session ancestry. Exact
+    /// promoted facades are attached later by the actor descriptor.
+    pub async fn mint_isolated_scope(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                Ok(session.mint_isolated_scope())
+            })
+            .await
+    }
+
+    /// Claim the live child entry carried by one public `startActor`
+    /// suspension. The entry is immediately rehomed into the unpublished
+    /// child's resource realm.
+    pub async fn capture_start(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        child_realm: RealmId,
+    ) -> Result<crate::ResidentActorStart, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor start completed without suspending".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table().clone();
+                crate::ResidentActorStart::capture(session, hole, &request, &table, child_realm)
+                    .map_err(ResidentActorWorkbenchError::StartCapture)
+            })
+            .await
+    }
+
+    pub async fn run_rooted_entry(
+        &self,
+        context: crate::ActorSessionContext,
+        entry: RootCustody,
+        realm: RealmId,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                session
+                    .run_rooted_entry("actor_program", entry, 0, realm, None)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub async fn capture_deliberation(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        actor_realm: RealmId,
+    ) -> Result<crate::ResidentDeliberation, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor startup completed before its required deliberation".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table().clone();
+                crate::ResidentDeliberation::capture(session, hole, &request, &table, actor_realm)
+                    .map_err(ResidentActorWorkbenchError::DeliberationCapture)
+            })
+            .await
+    }
+
+    pub(crate) async fn capture_readiness(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+        actor_realm: RealmId,
+    ) -> Result<ResidentActorReadiness, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor startup completed without reaching readiness".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let constructor = request_constructor(&request, session.data_con_table());
+                if constructor.rsplit('.').next() != Some("ActorReadyWith")
+                    || session.parked_realm(&hole) != Some(actor_realm)
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor startup expected private readiness in {actor_realm:?}, got {constructor}"
+                    )));
+                }
+                Ok(ResidentActorReadiness { hole })
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_readiness(
+        &self,
+        context: crate::ActorSessionContext,
+        readiness: ResidentActorReadiness,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = ().to_value(session.data_con_table())?;
+                session
+                    .resume(readiness.hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub async fn resume_starting_parent(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        actor: crate::ActorRef,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = (actor.id.0 as i64, actor.incarnation.0 as i64)
+                    .to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
     }
 }
 
@@ -262,20 +487,21 @@ where
     ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, Self::Error> {
         let expected_type = self.expected_type.clone();
         let type_modules = Arc::clone(&self.type_modules);
-        self.with_machine(
-            admitted.session_context(),
-            move |session, context, source| {
-                execute_checked_out(
-                    session,
-                    context,
-                    source,
-                    &expected_type,
-                    &type_modules,
-                    block,
-                )
-            },
-        )
-        .await
+        self.access
+            .with_machine(
+                admitted.session_context(),
+                move |session, context, source| {
+                    execute_checked_out(
+                        session,
+                        context,
+                        source,
+                        &expected_type,
+                        &type_modules,
+                        block,
+                    )
+                },
+            )
+            .await
     }
 }
 
@@ -385,7 +611,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let effect_stack = format!("(Complete ({expected_type}) ': AgentEffects)");
+    let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
     let compiled = match compile_block(
         session,
         context,
@@ -438,12 +664,13 @@ where
                         .into(),
                 )));
             }
-            let outcome = session.run_bind(
+            let outcome = session.run_bind_with_sites(
                 "actor_workbench_bind",
                 &compiled.expr,
                 &compiled.table,
                 &bound[0],
                 generation,
+                &compiled.asks,
             );
             settle_run(
                 session,
@@ -454,7 +681,12 @@ where
             )
         }
         TurnResult::Expr { compiled, .. } => {
-            let outcome = session.run("actor_workbench_expr", &compiled.expr, &compiled.table);
+            let outcome = session.run_with_sites(
+                "actor_workbench_expr",
+                &compiled.expr,
+                &compiled.table,
+                &compiled.asks,
+            );
             settle_run(session, context, &compiled.table, outcome, None)
         }
     }

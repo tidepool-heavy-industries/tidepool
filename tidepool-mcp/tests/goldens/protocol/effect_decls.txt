@@ -2173,14 +2173,18 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 `Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits.
 -- end prompt_card.0 --
 
--- constructors (2 items) --
--- constructors[0] (71 bytes) --
-ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)
+-- constructors (3 items) --
+-- constructors[0] (30 bytes) --
+ActorPromoteWith :: Actor Text
 -- end constructors[0] --
 
--- constructors[1] (56 bytes) --
-ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
+-- constructors[1] (79 bytes) --
+ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Text -> Actor (Int, Int)
 -- end constructors[1] --
+
+-- constructors[2] (56 bytes) --
+ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
+-- end constructors[2] --
 
 -- end constructors --
 

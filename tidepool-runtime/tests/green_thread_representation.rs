@@ -207,7 +207,6 @@ impl DispatchEffect<TestSink> for NoDispatch {
 fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
     ResidentSession::unbootstrapped(
         NoDispatch,
-        Vec::new(),
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,

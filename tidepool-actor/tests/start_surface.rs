@@ -1,18 +1,27 @@
-//! Haskell construction proof for actor startup, stopping at the Rust
-//! orchestration boundary. A public `ActorSpec` becomes one live rooted child
-//! entry; that entry performs typed startup deliberation, reaches the private
-//! readiness effect, and then completes its installed program.
+//! Public `startActor` proof through the shared resident runner. Its internal
+//! sealing step derives an exact source facade from compiler provenance;
+//! startup then runs one typed model/Haskell deliberation, publishes readiness,
+//! and resumes the parent with the exact actor incarnation.
 
-use tidepool_actor::ResidentActorStart;
-use tidepool_bridge::ToCore;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use tidepool_actor::{
+    ActorDescriptor, ActorLifecycle, ActorMachineRegistry, ActorPlacement, ActorRegistry,
+    ActorSourceImports, ActorTurnKind, ActorWorkbenchSource, ResidentActorRunner,
+    ResidentActorStarter, ResidentDeliberationExecutor, StartInitiator,
+};
+use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_eval::Value;
+use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage};
+use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
-    resident_workbench_templates, run_turn, OutputSink, ResidentOutcome, ResidentSession,
-    TurnRequest, TurnResult,
+    resident_workbench_templates, run_turn, ModuleEnv, OutputSink, ResidentOutcome,
+    ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
@@ -43,10 +52,31 @@ impl DispatchEffect<TestSink> for NoHandlers {
     }
 }
 
-#[test]
-fn public_spec_crosses_as_one_rooted_entry_and_reaches_readiness() {
+struct ApprovesStartup {
+    requests: Mutex<Vec<TurnRequest>>,
+}
+
+impl ModelProvider for ApprovesStartup {
+    async fn complete(
+        &self,
+        request: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        self.requests.lock().push(request);
+        Ok(TurnResponse {
+            text: "```haskell\ncomplete True\n```".into(),
+            usage: Usage::default(),
+            reasoning: None,
+            reasoning_items: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn public_start_uses_one_exact_resident_path() {
     eval_harness::require_extract();
 
+    let session_id = SessionId(93);
     let decls = [
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_local_decl(),
@@ -56,27 +86,25 @@ fn public_spec_crosses_as_one_rooted_entry_and_reaches_readiness() {
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let mut preamble = tidepool_mcp::build_preamble(&decls, false);
-    preamble.push_str("type AgentEffects = '[Actor]\n");
-    let templates = resident_workbench_templates(&preamble, "AgentEffects", "");
+    preamble.push_str("type ActorEffects = '[Actor]\n");
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().expect("session root");
     let source = r#"
-let workerSpec :: ActorSpec Int Maybe Int
-    workerSpec =
-      actorSpec
+let workerDefinition :: ActorDefinition Int Maybe Int
+    workerDefinition =
+      ActorDefinition
         "worker"
         (\seed ->
-          deliberate
-            (deliberation @Int @Bool "Approve the supplied seed.")
-            seed)
+          deliberate "Approve the supplied seed." seed)
         (\seed approved ->
           (pure (if approved then seed + 1 else seed - 1)
             :: Eff '[Deliberate, ActorLocal Maybe Int] Int))
 in do
-    _ <- startActor workerSpec 41
+    _ <- startActor workerDefinition 41
     pure (7 :: Int)
 "#;
-    let compiled = match run_turn(TurnRequest {
+    let compiled = match run_turn(HaskellTurnRequest {
         turn_text: source,
         templates: &templates,
         include: &include_refs,
@@ -86,99 +114,107 @@ in do
         verdict: None,
         target: None,
     })
-    .expect("compile public actor start")
+    .expect("compile public actor program")
     {
         TurnResult::Expr { compiled, .. } => compiled,
-        other => panic!("actor start should compile as an expression, got {other:?}"),
+        other => panic!("actor program should compile as an expression, got {other:?}"),
     };
 
-    let mut session = ResidentSession::bootstrap(
+    let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
+        .expect("open declaration plane")
+        .with_validation_include(include.clone());
+    let mut machine = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
         NoHandlers,
-        vec!["Actor".into(), "ActorLocal".into(), "Deliberate".into()],
         TestSink,
-        include,
+        include.clone(),
         DEFAULT_NURSERY_SIZE,
-        None,
+        Some(lib),
     )
     .expect("bootstrap resident machine");
-    session.set_effect_execution(
+    machine.set_effect_execution(
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
-
-    let child_realm = RealmId::fresh();
-    let parent = session
-        .run("start_parent", &compiled.expr, &compiled.table)
-        .expect("run parent to start suspension");
-    let start = match parent {
-        ResidentOutcome::Suspended { hole, request, .. } => ResidentActorStart::capture(
-            &mut session,
-            hole,
-            &request,
+    let promotion = machine
+        .run_with_sites(
+            "start_parent",
+            &compiled.expr,
             &compiled.table,
-            compiled.asks.clone(),
-            child_realm,
+            &compiled.asks,
         )
-        .expect("capture rooted actor entry"),
-        ResidentOutcome::Completed { .. } => panic!("startActor must suspend"),
-    };
+        .expect("run parent to promotion suspension");
+
+    let machines = Arc::new(ActorMachineRegistry::new());
+    assert!(machines.insert_idle(session_id, machine).is_none());
+    let registry = ActorRegistry::new();
+    let parent_start = registry
+        .begin_start(
+            None,
+            ActorDescriptor::new(
+                "parent",
+                ["Actor"],
+                ActorPlacement {
+                    session: session_id,
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: ScopeId::ROOT,
+                },
+            ),
+            StartInitiator::Runtime,
+        )
+        .expect("begin parent");
+    let parent = registry
+        .publish_ready(parent_start)
+        .expect("publish parent");
+    let parent_turn = registry
+        .begin_turn(parent, ActorTurnKind::Haskell)
+        .expect("admit parent Haskell turn");
+    let parent_context = parent_turn.session_context();
+    let workbench_source = ActorWorkbenchSource::new(preamble, include);
+    let runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone());
+
+    let (start_outcome, facade) = runner
+        .promote_definition(parent_context.clone(), promotion)
+        .await
+        .expect("promote exact actor surface");
+    let child_scope = runner
+        .mint_isolated_scope(parent_context.clone())
+        .await
+        .expect("mint isolated child scope");
+    let child_realm = RealmId::fresh();
+    let start = runner
+        .capture_start(parent_context, start_outcome, child_realm)
+        .await
+        .expect("capture child entry");
     assert_eq!(start.request().label, "worker");
-    let (parent_hole, entry, _sites) = start.into_parts();
+    assert_eq!(start.request().promotion, facade.identity().digest());
 
-    let startup = session
-        .run_rooted_entry("actor_entry", entry, 0, child_realm, Some(&compiled.table))
-        .expect("run child entry");
-    let (startup_hole, startup_request) = match startup {
-        ResidentOutcome::Suspended { hole, request, .. } => (hole, request),
-        ResidentOutcome::Completed { .. } => panic!("prompted startup must deliberate"),
-    };
-    assert_eq!(
-        tidepool_effect::dispatch::request_constructor(&startup_request, &compiled.table)
-            .rsplit('.')
-            .next(),
-        Some("DeliberateWith")
-    );
-
-    let ready = session
-        .resume(
-            startup_hole,
-            true.to_value(&compiled.table).expect("box startup answer"),
-        )
-        .expect("resume startup deliberation");
-    let ready_hole = match ready {
-        ResidentOutcome::Suspended { hole, request, .. } => {
-            assert_eq!(
-                tidepool_effect::dispatch::request_constructor(&request, &compiled.table)
-                    .rsplit('.')
-                    .next(),
-                Some("ActorReadyWith")
-            );
-            assert_eq!(session.parked_realm(&hole), Some(child_realm));
-            assert!(session.live_payload_handle(hole.cont_id()).is_none());
-            hole
-        }
-        ResidentOutcome::Completed { .. } => panic!("entry must park at readiness"),
+    let child_descriptor = ActorDescriptor::new(
+        "worker",
+        ["Actor", "ActorLocal", "Deliberate"],
+        ActorPlacement {
+            session: session_id,
+            resource_scope: child_realm,
+            lexical_scope: child_scope,
+        },
+    )
+    .with_source_imports(ActorSourceImports::from_exact_facades([&facade]));
+    let deliberations = ResidentDeliberationExecutor::new(Arc::clone(&machines), workbench_source);
+    let starter = ResidentActorStarter::new(registry.clone(), runner, deliberations);
+    let provider = ApprovesStartup {
+        requests: Mutex::new(Vec::new()),
     };
 
-    let child_done = session
-        .resume(
-            ready_hole,
-            ().to_value(&compiled.table).expect("box readiness unit"),
-        )
-        .expect("run installed one-shot program");
-    assert!(matches!(child_done, ResidentOutcome::Completed { .. }));
-
-    let parent_done = session
-        .resume(
-            parent_hole,
-            (1_i64, 1_i64)
-                .to_value(&compiled.table)
-                .expect("box actor identity"),
-        )
-        .expect("publish exact actor identity to parent");
-    match parent_done {
+    let (parent_turn, child, parent_outcome) = starter
+        .start(parent_turn, child_descriptor, &provider, start, None)
+        .await
+        .expect("start promoted actor");
+    assert_eq!(parent_turn.kind(), ActorTurnKind::Haskell);
+    drop(parent_turn);
+    assert_eq!(provider.requests.lock().len(), 1);
+    assert_eq!(registry.lifecycle(child), Ok(ActorLifecycle::Exited));
+    match parent_outcome {
         ResidentOutcome::Completed { result, .. } => {
             assert_eq!(result.to_json(), serde_json::json!(7));
         }

@@ -97,7 +97,7 @@ pub enum ActorEvent {
         input: Option<Value>,
     },
     HaskellCompiled {
-        asks: Vec<(u32, String)>,
+        asks: Vec<(u64, String)>,
         bound: Option<(String, String)>,
     },
     EffectSettled {
@@ -108,7 +108,7 @@ pub enum ActorEvent {
     },
     Suspended {
         suspension: String,
-        site: Option<u32>,
+        site: Option<u64>,
         answer_type: Option<String>,
         prompt: String,
         fork: bool,

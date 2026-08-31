@@ -226,7 +226,6 @@ impl SelfHarnessDriver {
             Box::new(tidepool_handlers::build_base_stack(&handler_cfg));
         let mut session = crate::harness::Session::unbootstrapped(
             stack,
-            cfg.effect_names.clone(),
             tidepool_mcp::CapturedOutput::new(),
             cfg.include.clone(),
             tidepool_runtime::DEFAULT_NURSERY_SIZE,
@@ -588,12 +587,13 @@ impl SelfHarnessDriver {
         let outcome = self
             .agent
             .with_session(sid, |s| {
-                s.run_bind(
+                s.run_bind_with_sites(
                     "harness_ctx",
                     &turn.expr,
                     &turn.table,
                     binder,
                     tidepool_repr::Generation(0),
+                    &turn.asks,
                 )
             })
             .map_err(|e| DriverError::Session(e.to_string()))?

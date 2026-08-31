@@ -29,16 +29,29 @@ pub struct ActorPlacement {
 /// string across the fresh-scope boundary. Standard Tidepool imports remain
 /// part of the shared turn template rather than this actor-local membrane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ActorSourceImports(SourceImports);
+pub struct ActorSourceImports {
+    imports: SourceImports,
+    facade_receipts: Vec<String>,
+}
 
 impl ActorSourceImports {
     #[must_use]
     pub fn from_exact_facades<'a>(
         facades: impl IntoIterator<Item = &'a MaterializedFacade>,
     ) -> Self {
-        Self(SourceImports::from_specs(
-            facades.into_iter().map(MaterializedFacade::module_name),
-        ))
+        let facades: Vec<_> = facades.into_iter().collect();
+        Self {
+            imports: SourceImports::from_specs(facades.iter().map(|facade| facade.module_name())),
+            facade_receipts: facades
+                .iter()
+                .map(|facade| facade.identity().digest().to_string())
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn contains_receipt(&self, receipt: &str) -> bool {
+        self.facade_receipts.iter().any(|known| known == receipt)
     }
 }
 
@@ -155,7 +168,7 @@ impl ActorSessionContext {
         }
         Ok(ActorCompileView {
             session,
-            external: self.source_imports.0.clone(),
+            external: self.source_imports.imports.clone(),
         })
     }
 }

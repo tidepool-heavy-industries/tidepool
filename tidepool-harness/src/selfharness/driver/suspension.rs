@@ -37,7 +37,7 @@ impl SelfHarnessDriver {
     /// against the per-loop [`LOOP_INFERENCE_CALL_CAP`] total.
     pub async fn service_typed_request_suspension(
         &mut self,
-        site: u32,
+        site: u64,
         ty: Option<&str>,
         modules: &[String],
         prompt: &str,

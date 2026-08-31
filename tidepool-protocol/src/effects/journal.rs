@@ -21,6 +21,7 @@ use crate::schema::{
 pub fn journal() -> Effect {
     Effect {
         name: "Journal",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "JournalHandler",
         handler_module: "journal",
         req_enum: "JournalReq",

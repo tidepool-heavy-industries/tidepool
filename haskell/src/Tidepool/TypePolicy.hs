@@ -2,12 +2,15 @@ module Tidepool.TypePolicy
   ( isGhcCompilerName
   , isGhcCompilerTyCon
   , modulesOfType
+  , nominalHeadsOfType
+  , NominalHead(..)
   , stabilizeEffectRows
   ) where
 
 import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.List as List
+import Data.Maybe (mapMaybe, maybeToList)
 import qualified Data.Text as T
 import GHC.Core.TyCo.FVs (tyConsOfType)
 import GHC.Core.TyCo.Rep (Type(..))
@@ -19,6 +22,13 @@ import GHC.Types.Name.Occurrence (occNameString)
 import qualified GHC.Types.Unique.Set as USet
 import GHC.Unit.Module (moduleName, moduleNameString)
 import GHC.Unit.Types (moduleUnitId, unitIdString)
+
+data NominalHead = NominalHead
+  { nhUnit :: Text
+  , nhModule :: Text
+  , nhName :: Text
+  }
+  deriving (Eq, Ord, Show)
 
 -- | Whether a name belongs to the @ghc@ compiler package rather than a
 -- runtime package such as @ghc-prim@ or @ghc-internal@. Compiler API values
@@ -40,17 +50,21 @@ isGhcCompilerTyCon = isGhcCompilerName . tyConName
 -- preserves the module of a user-written type synonym while still discovering
 -- the modules of types nested beneath it. Results are stable and deduplicated.
 modulesOfType :: Type -> [Text]
-modulesOfType ty =
-  List.sort . List.nub $ headModule ty ++
-    [ T.pack (moduleNameString (moduleName m))
-    | tc <- USet.nonDetEltsUniqSet (tyConsOfType ty)
-    , Just m <- [nameModule_maybe (tyConName tc)]
-    ]
+modulesOfType = List.nub . map nhModule . nominalHeadsOfType
+
+nominalHeadsOfType :: Type -> [NominalHead]
+nominalHeadsOfType ty = List.sort . List.nub $ headTyCon ty ++
+  mapMaybe nominal (USet.nonDetEltsUniqSet (tyConsOfType ty))
   where
-    headModule (TyConApp tc _)
-      | Just m <- nameModule_maybe (tyConName tc) =
-          [T.pack (moduleNameString (moduleName m))]
-    headModule _ = []
+    headTyCon (TyConApp tc _) = maybeToList (nominal tc)
+    headTyCon _ = []
+    nominal tc = do
+      m <- nameModule_maybe (tyConName tc)
+      pure NominalHead
+        { nhUnit = T.pack (unitIdString (moduleUnitId m))
+        , nhModule = T.pack (moduleNameString (moduleName m))
+        , nhName = T.pack (occNameString (nameOccName (tyConName tc)))
+        }
 
 -- | Replace effect-row aliases with their exact underlying @Eff '[...]@ type.
 --

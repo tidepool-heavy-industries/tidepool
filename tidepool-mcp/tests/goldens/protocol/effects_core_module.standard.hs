@@ -241,7 +241,8 @@ data Green a where
 
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 data Actor a where
-  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)
+  ActorPromoteWith :: Actor Text
+  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Text -> Actor (Int, Int)
   ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
 
 data ActorLocal (api :: Type -> Type) exit a where

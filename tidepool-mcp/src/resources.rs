@@ -455,25 +455,31 @@ fn edits_md() -> String {
 
 fn effect_md(e: &EffectDecl) -> String {
     let mut s = format!("# Effect: {}\n\n{}\n", e.type_name, e.description);
-    if !e.constructors.is_empty() {
+    if crate::has_curated_authored_surface(e.type_name) {
+        s.push_str("\nThis effect has a curated authored surface. Use its public Tidepool library module; omitted names are runtime substrate.\n");
+    }
+    let constructors = crate::authored_constructors(e);
+    if !constructors.is_empty() {
         s.push_str("\n## Constructors (invoke via `send`)\n```haskell\n");
-        for c in e.constructors {
+        for c in constructors {
             s.push_str(c);
             s.push('\n');
         }
         s.push_str("```\n");
     }
-    if !e.type_defs.is_empty() {
+    let type_defs = crate::authored_type_definitions(e);
+    if !type_defs.is_empty() {
         s.push_str("\n## Types & supporting definitions\n```haskell\n");
-        for t in e.type_defs {
+        for t in type_defs {
             s.push_str(t);
             s.push('\n');
         }
         s.push_str("```\n");
     }
-    if !e.helpers.is_empty() {
+    let helpers = crate::authored_helpers(e);
+    if !helpers.is_empty() {
         s.push_str("\n## Helpers (prefer over raw `send`)\n```haskell\n");
-        for h in e.helpers {
+        for h in helpers {
             s.push_str(h);
             s.push('\n');
         }
@@ -491,7 +497,7 @@ fn vocab_md(ctx: &ResourceCtx) -> String {
          library verbs come from `.tidepool/lib`.\n\n## Effect verbs\n",
     );
     for eff in ctx.effects {
-        let sigs = crate::extract_sigs(&eff.helpers.join("\n"));
+        let sigs = crate::authored_helper_signatures(eff);
         if sigs.is_empty() {
             continue;
         }

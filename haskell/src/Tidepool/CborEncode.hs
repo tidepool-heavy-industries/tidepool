@@ -12,7 +12,7 @@ import qualified Data.Sequence as Seq
 import Tidepool.IR (FlatNode(..), LitEnc(..), FlatAlt(..), FlatAltCon(..))
 import Tidepool.Metadata (DCMeta(..))
 import Tidepool.Binders (TurnOut(..), BoundBinder(..), ExportItem(..))
-import Tidepool.EffectSchema (SiteType(..), YieldSite(..))
+import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
 -- | 8-byte version header: magic 'TPLR' + version 3.0.
 --
@@ -247,14 +247,23 @@ encodeAsks :: [YieldSite] -> Encoding
 encodeAsks xs = encodeListLen (fromIntegral (length xs)) <> foldMap encodeAsk xs
 
 encodeAsk :: YieldSite -> Encoding
-encodeAsk (YieldSite site (SiteType ty modules) inputs) =
-  encodeListLen 4
+encodeAsk (YieldSite site origin ordinal (SiteType ty modules heads) inputs) =
+  encodeListLen 7
   <> encodeWord64 site
+  <> encodeString origin
+  <> encodeWord64 ordinal
   <> encodeString ty
   <> encodeTextList modules
+  <> encodeHeads heads
   <> encodeListLen (fromIntegral (length inputs))
   <> foldMap encodeSiteType inputs
 
 encodeSiteType :: SiteType -> Encoding
-encodeSiteType (SiteType ty modules) =
-  encodeListLen 2 <> encodeString ty <> encodeTextList modules
+encodeSiteType (SiteType ty modules heads) =
+  encodeListLen 3 <> encodeString ty <> encodeTextList modules <> encodeHeads heads
+
+encodeHeads :: [NominalHead] -> Encoding
+encodeHeads heads = encodeListLen (fromIntegral (length heads)) <> foldMap encodeHead heads
+  where
+    encodeHead (NominalHead unit modul name) =
+      encodeListLen 3 <> encodeString unit <> encodeString modul <> encodeString name

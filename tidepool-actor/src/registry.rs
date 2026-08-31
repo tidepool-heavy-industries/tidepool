@@ -98,6 +98,13 @@ impl std::fmt::Debug for StartingActor {
     }
 }
 
+impl StartingActor {
+    #[must_use]
+    pub(crate) fn actor(&self) -> ActorRef {
+        self.actor
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorLifecycle {
     Initializing,

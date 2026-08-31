@@ -9,10 +9,10 @@ and next delivery stage are in
 Tidepool should be an actor runtime whose actors are typed Haskell programs
 with a resident model context and a resident GHCi-style environment.
 
-Rust owns execution mechanics. Haskell owns behavior. The model works inside
-typed deliberation requests opened by the Haskell program, where it can define
-new types and functions, return live values, replace behavior, and construct
-new actor specifications.
+Rust owns execution mechanics. Haskell owns behavior. The Haskell program may
+open a result-bearing agent session with `deliberate`; within an agent session,
+the model can define new types and functions, return live values, replace
+behavior, and construct new actor definitions.
 
 The Haskell API optimizes for use by an LLM in a resident GHCi-style
 environment, not for comprehensive exposure of runtime machinery. A small,
@@ -29,7 +29,7 @@ The useful slogan is:
 surface is deliberately fenced Haskell in ordinary assistant responses: each
 fenced block is compiled into the actor's persistent Haskell environment, and
 may produce typed values—often closures or actor
-specifications—which the fixed program can test, install, invoke, send, or
+definitions—which the fixed program can test, install, invoke, send, or
 retain for rollback.
 
 ## Accepted direction
@@ -38,6 +38,10 @@ retain for rollback.
   Haskell environment, one serial control flow, and one effect stack fixed for
   that incarnation under Rust-owned authority. Effect algebras remain an
   extensible Haskell design vocabulary, not a global ABI enum.
+- Initial effect profiles are named `ReadWrite` and `ReadOnly`. A `ReadWrite`
+  actor may start either profile; a `ReadOnly` actor may start only `ReadOnly`.
+  Profiles limit expressible intent, while grants and opaque handles authorize
+  concrete resources.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
   carry live typed values; JSON is only a durable or external boundary.
 - Fresh spawn deploys an explicit program into a fresh context. Structural
@@ -46,12 +50,14 @@ retain for rollback.
 - `startActor` publishes only a ready exact-incarnation reference. Exact calls
   never invent results or substitute actors; failure-prone jobs use
   `startActor`/`awaitExit` supervision and explicit Haskell control flow.
-- An actor specification existentially packages its concrete Haskell row.
-  GHC checks that row; Rust authorizes nominal requests under the actor's
-  principal and grants without reflecting a second row ABI.
+- A private sealed deployment hides an actor definition's concrete Haskell
+  row. V0 runs one stack per actor and Rust authorizes nominal requests under
+  the actor's principal and grants. Authored libraries remain
+  `Member`-polymorphic; a later Haskell intent-to-kernel split must not require
+  a reflected row ABI in Rust.
 - One actor-turn admission spans a complete agent session, while shorter
-  machine checkouts serialize only its Haskell run segments. Startup,
-  deliberation, and advisory share the same provider/fenced-Haskell executor.
+  machine checkouts serialize only its Haskell run segments. Result-bearing
+  and advisory sessions share the same provider/fenced-Haskell executor.
 - One neutral actor event stream records runtime truth. Views, durable logs,
   Developer advisories, and UI are projections; none is a second registry.
 - Moving a value does not move authority. Unexpected child failure informs but
@@ -73,10 +79,6 @@ restating it unless an acceptance test needs the detail.
    consequences and the model-facing Haskell experience.
 4. [Implementation plan](implementation.md) owns current status, delivery
    order, acceptance criteria, and retirement work.
-5. [LLM interaction-surface steering](interaction-surface-steering.md) is a
-   temporary refinement delta for the implementation currently in flight. Its
-   settled decisions are folded into the canonical documents as the surface
-   lands, then the steering file is deleted.
 
 ## Vocabulary
 
@@ -87,11 +89,11 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | actor | One actor identity, mailbox, Haskell program, persistent Haskell environment, and accumulating model context |
 | actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
-| actor specification | An opaque deployable `ActorSpec` produced by promoting a definition across the program-image membrane |
-| deliberation | A typed request from the Haskell program to its resident model context |
-| agent session | The possibly multi-round interaction that answers one deliberation |
+| sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |
+| agent session | One serialized, possibly multi-round execution of the resident model and fenced-Haskell workbench; it may carry a typed `Complete output` expectation or an advisory acknowledgment |
+| effect profile | A named model-facing effect row and matching interpreter policy; initially `ReadWrite` or `ReadOnly` |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
-| program image | The exact declarations, interface metadata, and live roots captured inside a promoted actor specification |
+| program image | The exact declarations, interface metadata, and live roots captured while `startActor` seals a definition |
 | program snapshot | An immutable point in an actor's Haskell environment, suitable for structural sharing |
 | execution principal | The runtime identity under whose authority Haskell is currently executing |
 | capability | An opaque live value whose operations are authorized by Rust at use time |
@@ -121,8 +123,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 - Transferring runtime-issued continuation references through a fork.
 - Detaching, reparenting, or adopting a live actor. These are desirable later
   extensions, but the initial ownership tree always terminates with its owner.
-- Automatically promoting every scratch declaration into permanent program
-  state.
+- Treating every scratch declaration as permanent actor-program state.
 - Solving executable-code reclamation before real actor workloads establish
   the useful pressure. The design must expose growth and allow bounded
   rotation, but policy should follow measurement.

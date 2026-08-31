@@ -35,6 +35,7 @@ fn site_arg() -> Arg {
 pub fn fork() -> Effect {
     Effect {
         name: "Fork",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "ForkHandler",
         handler_module: "fork",
         req_enum: "ForkReq",

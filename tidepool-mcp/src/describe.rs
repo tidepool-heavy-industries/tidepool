@@ -17,6 +17,77 @@
 use crate::effect_decls::EffectDecl;
 use crate::effect_defs::substrate_marker;
 
+#[must_use]
+pub fn has_curated_authored_surface(type_name: &str) -> bool {
+    crate::generated::CURATED_EFFECTS.contains(&type_name)
+}
+
+#[must_use]
+pub fn authored_name_is_hidden(effect: &str, name: &str) -> bool {
+    crate::generated::AUTHORED_HIDDEN_BY_EFFECT
+        .iter()
+        .find(|(owner, _)| *owner == effect)
+        .is_some_and(|(_, hidden)| hidden.contains(&name))
+}
+
+fn constructor_name(constructor: &str) -> Option<&str> {
+    constructor.split_once("::").map(|(name, _)| name.trim())
+}
+
+fn type_definition_name(definition: &str) -> Option<&str> {
+    definition.split_whitespace().nth(1)
+}
+
+/// The canonical model-visible constructor slice for one effect.
+#[must_use]
+pub fn authored_constructors<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
+    decl.constructors
+        .iter()
+        .copied()
+        .filter(|constructor| {
+            constructor_name(constructor)
+                .is_none_or(|name| !authored_name_is_hidden(decl.type_name, name))
+        })
+        .collect()
+}
+
+/// The canonical model-visible supporting-type slice for one effect.
+#[must_use]
+pub fn authored_type_definitions<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
+    decl.type_defs
+        .iter()
+        .copied()
+        .filter(|definition| {
+            type_definition_name(definition)
+                .is_none_or(|name| !authored_name_is_hidden(decl.type_name, name))
+        })
+        .collect()
+}
+
+/// The canonical model-visible helper-source slice for one effect.
+#[must_use]
+pub fn authored_helpers<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
+    decl.helpers
+        .iter()
+        .copied()
+        .filter(|helper| {
+            helper_name(helper)
+                .as_deref()
+                .is_none_or(|name| !authored_name_is_hidden(decl.type_name, name))
+        })
+        .collect()
+}
+
+/// Signatures derived from [`authored_helpers`], for compact model-facing
+/// indexes such as `:browse` and the vocabulary resource.
+#[must_use]
+pub fn authored_helper_signatures(decl: &EffectDecl) -> Vec<String> {
+    authored_helpers(decl)
+        .into_iter()
+        .filter_map(helper_sig)
+        .collect()
+}
+
 /// The one-line summary of an effect's (often multi-sentence) `description`: the
 /// leading sentence, or the whole (trimmed) string when there is no sentence
 /// break. This is what `:browse` (bare) and the derived index show — the full
@@ -102,9 +173,8 @@ fn helper_is_substrate(helper: &str) -> bool {
 ///       verbs: say
 /// ```
 pub fn describe_effect(decl: &EffectDecl) -> String {
-    let verbs: Vec<String> = decl
-        .helpers
-        .iter()
+    let verbs: Vec<String> = authored_helpers(decl)
+        .into_iter()
         .filter(|h| !helper_is_substrate(h))
         .filter_map(|h| helper_name(h))
         .collect();
@@ -166,6 +236,19 @@ mod tests {
             helper_name("grepGlob :: Text -> FilePath -> M [Hit]\ngrepGlob = undefined").as_deref(),
             Some("grepGlob")
         );
+    }
+
+    #[test]
+    fn authored_effect_view_applies_one_curation_policy_to_every_name_class() {
+        let actor = crate::actor_decl();
+        assert!(authored_constructors(&actor).is_empty());
+        assert!(authored_type_definitions(&actor).is_empty());
+        assert!(authored_helpers(&actor).is_empty());
+
+        let console = crate::console_decl();
+        assert_eq!(authored_constructors(&console), console.constructors);
+        assert_eq!(authored_type_definitions(&console), console.type_defs);
+        assert_eq!(authored_helpers(&console), console.helpers);
     }
 
     /// Snapshot-guard: the derived index names every effect and lists at least

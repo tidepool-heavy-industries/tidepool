@@ -146,6 +146,7 @@ fn identity(
 pub fn event() -> Effect {
     Effect {
         name: "RepoEvent",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "RepoEventHandler",
         handler_module: "event",
         req_enum: "RepoEventReq",

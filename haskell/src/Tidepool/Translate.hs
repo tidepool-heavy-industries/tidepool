@@ -51,10 +51,11 @@ import GHC.Types.Unique.Set as USet (nonDetEltsUniqSet)
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet, mkUniqSet)
 import GHC.Types.Basic (JoinPointHood(..))
 import GHC.Utils.Outputable (showPprUnsafe, renderWithContext, defaultSDocContext, ppr)
+import GHC.Utils.Fingerprint (Fingerprint(..), fingerprintString)
 import GHC.Float (castDoubleToWord64, castFloatToWord32)
 import Data.Char (ord)
 import Data.List (isPrefixOf, isInfixOf)
-import Data.Bits ((.&.), (.|.), shiftL, shiftR)
+import Data.Bits ((.&.), (.|.), shiftL, shiftR, xor)
 import Data.Word
 import Data.Text (Text)
 import qualified Data.Set as Set
@@ -80,7 +81,7 @@ import Tidepool.PrimOps
 import Tidepool.EffectSchema (SiteType(..), VerbSpec(..), YieldSite(..), sitedVerbs)
 import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
-  ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType
+  ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType, nominalHeadsOfType
   , stabilizeEffectRows )
 import qualified System.Environment
 import qualified Data.List
@@ -121,7 +122,7 @@ data TransState = TransState
   -- A map keyed by the schema's surface name keeps lookup aligned with the
   -- declarative verb table.
   , tsSitedIds :: !(Map.Map String Word64)
-  , tsSiteCounter :: !Word64           -- fresh site-id counter, one per detected call site
+  , tsSiteCounters :: !(Map.Map Text Word64) -- binder-local typed-site ordinals
   -- GHC-derived metadata for typed suspension sites. Besides the answer type,
   -- a site may name live inputs an interpreter must mount into a later
   -- workbench without trusting authored type strings.
@@ -185,21 +186,30 @@ recordDC dc
   | otherwise = modify' $ \s ->
       s { tsUsedDCs = Map.insert (varId (dataConWorkId dc), qualifiedName (dataConName dc)) dc (tsUsedDCs s) }
 
--- | Fresh site id for a typed suspension call site:
--- a plain per-'lowerModule'-run counter, distinct from 'freshSynthVarId'
--- (this counter's values travel as literal 'Int' payload data, not VarIds).
-freshSiteId :: TransM Word64
-freshSiteId = do
+-- | Allocate the binder-local ordinal component of a typed suspension site.
+freshSiteOrdinal :: TransM (Text, Word64)
+freshSiteOrdinal = do
   s <- get
-  let c = tsSiteCounter s
-  put s { tsSiteCounter = c + 1 }
-  return c
+  let origin = Data.Maybe.fromMaybe "<top-level>" (tsCurrentBinder s)
+      ordinal = Map.findWithDefault 0 origin (tsSiteCounters s)
+  put s { tsSiteCounters = Map.insert origin (ordinal + 1) (tsSiteCounters s) }
+  return (origin, ordinal)
+
+-- | Stable positive identity for one typed suspension boundary. The actual
+-- GHC-derived answer/input contract participates in the hash: two independent
+-- @Expr.__user@ snippets may share a binder spelling and ordinal, but a type
+-- change is a different boundary. Unrelated declarations remain irrelevant.
+siteIdFor :: VerbSpec -> Text -> Word64 -> SiteType -> [SiteType] -> Word64
+siteIdFor spec origin ordinal answer inputs =
+  let Fingerprint high low = fingerprintString
+        (T.unpack origin ++ "#" ++ show ordinal ++ "#" ++ vsName spec
+          ++ "#" ++ show answer ++ "#" ++ show inputs)
+  in max 1 ((high `xor` low) .&. 0x7FFFFFFFFFFFFFFF)
 
 -- | The identity slot for one poisoned unresolved external, assigned on first
 -- reference and reused for every later reference to the same original id.
 -- Slots are per-'lowerModule'-run and monotonic from 1 (0 is reserved for
-  -- "no identity recorded"), the same shape 'freshSiteId' uses for typed
-  -- suspension sites.
+  -- "no identity recorded").
 poisonSlotFor :: Word64 -> TransM Word64
 poisonSlotFor vid = do
   slots <- gets tsPoisonSlots
@@ -419,7 +429,7 @@ emptyTransState = TransState
   , tsUnresolvedIds = Set.empty
   , tsPoisonSlots = Map.empty
   , tsSitedIds = Map.empty
-  , tsSiteCounter = 0
+  , tsSiteCounters = Map.empty
   , tsYieldSites = Seq.empty
   , tsCurrentBinder = Nothing
   }
@@ -609,7 +619,7 @@ lowerModule allBinds targetName unresolvedIds =
     wrapAllBinds (NonRec b rhs : rest) target
       | isErasedBinder b = wrapAllBinds rest target  -- skip erased (type/coercion) bindings
       | otherwise = do
-          modify' $ \s -> s { tsCurrentBinder = Just (T.pack (occNameString (nameOccName (idName b)))) }
+          modify' $ \s -> s { tsCurrentBinder = Just (binderQualName b) }
           rhsIdx <- translate rhs
           bodyIdx <- wrapAllBinds rest target
           emitNode (NLetNonRec (varId b) rhsIdx bodyIdx)
@@ -629,7 +639,7 @@ lowerModule allBinds targetName unresolvedIds =
                   foldM (\inner p -> emitNode $ NLam (varId p) inner)
                         joinBodyIdx (reverse params)
                 Nothing -> do
-                  modify' $ \s -> s { tsCurrentBinder = Just (T.pack (occNameString (nameOccName (idName b)))) }
+                  modify' $ \s -> s { tsCurrentBinder = Just (binderQualName b) }
                   translate rhs
             return (varId b, rhs')
           bodyIdx <- wrapAllBinds rest target
@@ -1869,7 +1879,7 @@ translate expr =
             mapM_ translate valueArgs
             emitFfiPoison
           Just sitedVarId -> do
-            siteId <- freshSiteId
+            (siteOrigin, siteOrdinal) <- freshSiteOrdinal
             -- A fanout-shaped verb's answer type is `[T]` (N children each
             -- answering T), but `ty` here is the per-child element type `T`
             -- applied at the call site (`@T`) — record the LIST type in the
@@ -1883,11 +1893,13 @@ translate expr =
                 answerSiteType = SiteType
                   (T.pack typeStr)
                   (modulesOfType stableTy)
+                  (nominalHeadsOfType stableTy)
                 inputSiteTypes = map siteTypeOf stableInputs
+                siteId = siteIdFor spec siteOrigin siteOrdinal answerSiteType inputSiteTypes
             -- Modules are resolved from the per-child element type `ty`
             -- itself (never the `[]`-wrapped 'typeStr') — a fanout site's
             -- shim needs T's own defining module(s), not '[]''s.
-            recordYieldSite (YieldSite siteId answerSiteType inputSiteTypes)
+            recordYieldSite (YieldSite siteId siteOrigin siteOrdinal answerSiteType inputSiteTypes)
             sitedRef <- emitNode $ NVar sitedVarId
             -- Re-apply any `Member <Eff> effs` dictionaries verbatim, in
             -- their original order, before the injected site-id literal —
@@ -2748,6 +2760,7 @@ siteTypeOf :: Type -> SiteType
 siteTypeOf ty = SiteType
   (T.pack (Tidepool.GhcPipeline.renderType ty))
   (modulesOfType ty)
+  (nominalHeadsOfType ty)
 
 -- | Suspension sites carry concrete type metadata, so their answer type must
 -- be monomorphic at extraction time.

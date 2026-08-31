@@ -29,6 +29,65 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         contents.push_str(&format!("        {}(),\n", effect.decl_fn));
     }
     contents.push_str("    ]\n}\n");
+    contents.push_str("\n/// Effects with an explicitly curated authored vocabulary.\n");
+    let curated: Vec<_> = effects
+        .iter()
+        .filter(|effect| !matches!(effect.authored_surface, crate::schema::AuthoredSurface::All))
+        .map(|effect| rust_string_literal(effect.name))
+        .collect();
+    let compact_curated = format!(
+        "pub(crate) const CURATED_EFFECTS: &[&str] = &[{}];\n",
+        curated.join(", ")
+    );
+    if compact_curated.len() <= 100 {
+        contents.push_str(&compact_curated);
+    } else {
+        contents.push_str("pub(crate) const CURATED_EFFECTS: &[&str] = &[\n");
+        for name in curated {
+            contents.push_str(&format!("    {name},\n"));
+        }
+        contents.push_str("];\n");
+    }
+    contents.push_str("\n/// Hidden names grouped by their owning effect.\n");
+    contents.push_str("pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[\n");
+    for effect in effects
+        .iter()
+        .filter(|effect| !matches!(effect.authored_surface, crate::schema::AuthoredSurface::All))
+    {
+        let mut hidden = Vec::new();
+        for type_def in &effect.type_defs {
+            if !effect.authored_surface.includes_type_def(type_def.name) {
+                hidden.push(type_def.name);
+            }
+        }
+        for verb in &effect.verbs {
+            if !effect.authored_surface.includes_verb(verb.ctor) {
+                hidden.push(verb.ctor);
+            }
+        }
+        for helper in &effect.helpers {
+            if !effect.authored_surface.includes_helper(helper.name) {
+                hidden.push(helper.name);
+            }
+        }
+        if hidden.len() == 1 {
+            contents.push_str(&format!(
+                "    ({}, &[{}]),\n",
+                rust_string_literal(effect.name),
+                rust_string_literal(hidden[0])
+            ));
+        } else {
+            contents.push_str("    (\n");
+            contents.push_str(&format!("        {},\n", rust_string_literal(effect.name)));
+            contents.push_str("        &[\n");
+            for name in hidden {
+                contents.push_str(&format!("            {},\n", rust_string_literal(name)));
+            }
+            contents.push_str("        ],\n");
+            contents.push_str("    ),\n");
+        }
+    }
+    contents.push_str("];\n");
     GeneratedFile {
         path: "tidepool-mcp/src/generated/mod.rs".to_string(),
         contents,

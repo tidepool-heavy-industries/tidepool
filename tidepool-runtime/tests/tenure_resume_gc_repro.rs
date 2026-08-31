@@ -399,7 +399,6 @@ impl DispatchEffect<TestSink> for NoDispatch {
 fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
     ResidentSession::unbootstrapped(
         NoDispatch,
-        Vec::new(),
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,
@@ -645,7 +644,6 @@ impl DispatchEffect<TestSink> for HandledThenSuspend {
 fn handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
     ResidentSession::unbootstrapped(
         HandledThenSuspend,
-        Vec::new(),
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,
@@ -1569,7 +1567,6 @@ fn event_shaped_capture_survives_tenure_and_resume() {
 fn tiny_handled_session() -> ResidentSession<HandledThenSuspend, TestSink> {
     ResidentSession::unbootstrapped(
         HandledThenSuspend,
-        Vec::new(),
         TestSink::default(),
         Vec::new(),
         // Deliberately tiny: forces REAL, in-flight `gc_trigger`s during
@@ -1686,7 +1683,6 @@ impl DispatchEffect<TestSink> for HandledEitherThenSuspend {
 fn handled_either_session() -> ResidentSession<HandledEitherThenSuspend, TestSink> {
     ResidentSession::unbootstrapped(
         HandledEitherThenSuspend,
-        Vec::new(),
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,

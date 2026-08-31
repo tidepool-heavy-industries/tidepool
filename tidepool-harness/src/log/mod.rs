@@ -89,7 +89,7 @@ pub enum Event {
     /// `None` when the turn has neither (most turns).
     TurnExtracted {
         node: NodeId,
-        asks: Vec<(u32, String)>,
+        asks: Vec<(u64, String)>,
         bound: Option<(String, String)>,
     },
     Effect {

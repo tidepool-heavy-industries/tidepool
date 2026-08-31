@@ -22,9 +22,9 @@
 //! this suite deliberately does not exercise it (see the segment-20 SPEC's L7
 //! anti-pattern).
 
-use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
+use tidepool_effect::dispatch::{request_constructor, DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
-use tidepool_effect::Response;
+use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_eval::value::Value;
 use tidepool_repr::Literal;
 use tidepool_runtime::session::{ResidentError, ResidentOutcome, ResidentSession};
@@ -71,6 +71,13 @@ impl<H: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<H> {
         request: &Value,
         cx: &EffectContext<'_, TestSink>,
     ) -> Result<Option<Response>, EffectError> {
+        // These tests exercise the resident suspension boundary, not the
+        // mock harness's canned Ask response. Routing is nominal now: leave
+        // Ask unhandled and let HandleOrSuspend park it. Every other request
+        // still goes through the ordinary mock stack.
+        if request_constructor(request, cx.table()).rsplit('.').next() == Some("Ask") {
+            return Ok(None);
+        }
         let unit_cx = EffectContext::with_user(cx.table(), &());
         self.0.dispatch(request, &unit_cx)
     }
@@ -89,26 +96,27 @@ fn compile_turn(
     (compiled.expr, compiled.table)
 }
 
-/// Bootstrap a resident session whose machine seeds its ConTags from `boot_body`
-/// (the first turn's table carries the full 10-effect stack). Handlers are the
-/// mock stack (its `MockKv` HashMap is the resident cross-turn accumulator).
+/// Bootstrap a resident session whose machine seeds its constructors from
+/// `boot_body`. Handlers are the mock stack (its `MockKv` HashMap is the
+/// resident cross-turn accumulator), except that nominal `Ask` is deliberately
+/// left for the suspension boundary.
 fn bootstrap(
     harness: &EvalHarness,
     boot_body: &str,
 ) -> ResidentSession<AsSink<impl DispatchEffect<()> + Send>, TestSink> {
     let (expr, table) = compile_turn(harness, boot_body);
-    let effect_names = mock::EFFECT_NAMES.iter().map(|s| s.to_string()).collect();
-    ResidentSession::bootstrap(
+    let mut session = ResidentSession::bootstrap(
         &expr,
         table,
         AsSink(mock::min_stack()),
-        effect_names,
         TestSink::default(),
         Vec::new(),
         DEFAULT_NURSERY_SIZE,
         None,
     )
-    .expect("bootstrap the resident machine")
+    .expect("bootstrap the resident machine");
+    session.set_effect_execution(EffectRunPolicy::HandleOrSuspend, LivePayloadPolicy::None);
+    session
 }
 
 fn setup() -> EvalHarness {
@@ -260,18 +268,17 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     // Small nursery so a child's allocation forces a real collection with the
     // parent's continuation stowed and GC-rooted.
     let (expr, table) = compile_turn(&harness, "result :: M Int\nresult = pure (0 :: Int)");
-    let effect_names = mock::EFFECT_NAMES.iter().map(|s| s.to_string()).collect();
     let mut session = ResidentSession::bootstrap(
         &expr,
         table,
         AsSink(mock::min_stack()),
-        effect_names,
         TestSink::default(),
         Vec::new(),
         1 << 16,
         None,
     )
     .expect("bootstrap");
+    session.set_effect_execution(EffectRunPolicy::HandleOrSuspend, LivePayloadPolicy::None);
 
     // Turn 1: write a KV key, then suspend at `ask`.
     let (t1_expr, t1_table) = compile_turn(

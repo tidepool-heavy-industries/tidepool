@@ -74,8 +74,7 @@ use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::EffectRunPolicy;
 use tidepool_effect::Response;
-use tidepool_eval::value::Value as JitValue;
-use tidepool_handlers::{ConsoleHandler, SubagentHandler};
+use tidepool_handlers::{ConsoleHandler, SubagentHandler, WorktreeReq};
 use tidepool_mcp::{CapturedOutput, DescribeEffect, EffectDecl};
 use tidepool_repr::{CoreExpr, DataConTable};
 use tidepool_worktree::testing::TestRepo;
@@ -102,11 +101,11 @@ impl DescribeEffect for UnwiredWorktreeRow {
 }
 
 impl EffectHandler<CapturedOutput> for UnwiredWorktreeRow {
-    type Request = JitValue;
+    type Request = WorktreeReq;
 
     fn handle(
         &mut self,
-        _req: JitValue,
+        _req: WorktreeReq,
         _cx: &EffectContext<'_, CapturedOutput>,
     ) -> Result<Response, EffectError> {
         panic!(

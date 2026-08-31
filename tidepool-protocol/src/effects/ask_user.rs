@@ -32,6 +32,7 @@ use crate::schema::{
 pub fn ask_user() -> Effect {
     Effect {
         name: "AskUser",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "AskUserHandler",
         handler_module: "ask_user",
         req_enum: "AskUserReq",

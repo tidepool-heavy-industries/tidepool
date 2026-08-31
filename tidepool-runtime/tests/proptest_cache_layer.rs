@@ -198,14 +198,15 @@ impl Harness {
         keys
     }
 
-    /// Paths (cbor, meta, ok) for the single cache entry; panics if not exactly one.
-    fn entry_paths(&self) -> (PathBuf, PathBuf, PathBuf) {
+    /// Paths (cbor, meta, asks, ok) for the single cache entry; panics if not exactly one.
+    fn entry_paths(&self) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         let keys = self.entry_keys();
         assert_eq!(keys.len(), 1, "expected exactly one cache entry");
         let d = self.cache_dir();
         (
             d.join(format!("{}.cbor", keys[0])),
             d.join(format!("{}.meta.cbor", keys[0])),
+            d.join(format!("{}.asks.json", keys[0])),
             d.join(format!("{}.ok", keys[0])),
         )
     }
@@ -244,6 +245,7 @@ fn fake_extract_worker() {
         fs::copy(&expr, output_dir.join(format!("{target}.cbor"))).unwrap();
     }
     fs::copy(meta, output_dir.join("meta.cbor")).unwrap();
+    fs::write(output_dir.join("asks.json"), b"[]").unwrap();
 }
 
 fn decode_hex(hex: &str) -> Vec<u8> {
@@ -687,7 +689,7 @@ fn apply_corruption(path: &Path, c: Corruption) {
     }
 }
 
-/// (4): corruption matrix — {cbor, meta, ok} x {delete, truncate, flips,
+/// (4): corruption matrix — {cbor, meta, asks, ok} x {delete, truncate, flips,
 /// garbage}. Invariant asserted: the consumer NEVER panics, and either the
 /// corruption is detected (counted recompile = MISS fallthrough) or the
 /// served payload is identical to the original. Structural flips (header,
@@ -708,14 +710,14 @@ fn corruption_matrix_no_panic_no_silent_divergence() {
         Corruption::FlipByteAt(usize::MAX), // last byte
         Corruption::WriteGarbage,
     ];
-    for file_idx in 0..3usize {
+    for file_idx in 0..4usize {
         for &op in &ops {
             let h = Harness::new();
             let src = unique_src("corrupt");
             let original = h.compile(&src, "t", &[]).unwrap();
             assert_eq!(h.runs(), 1);
-            let (cbor, meta, ok) = h.entry_paths();
-            let target = [&cbor, &meta, &ok][file_idx];
+            let (cbor, meta, asks, ok) = h.entry_paths();
+            let target = [&cbor, &meta, &asks, &ok][file_idx];
             apply_corruption(target, op);
 
             // Must not panic; must not serve divergent data silently.
@@ -739,44 +741,49 @@ fn corruption_matrix_no_panic_no_silent_divergence() {
 }
 
 /// (4): explicit partial-write / interrupted-store states. cache_store's
-/// sequence is: remove .ok -> persist .cbor -> persist .meta.cbor -> write
-/// .ok. A crash at any point leaves no sentinel, so every prefix state must
-/// be a MISS. Conversely a sentinel with missing payload files must also be
-/// a MISS (read failure), never a panic.
+/// sequence is: remove .ok -> persist .cbor -> persist .meta.cbor -> persist
+/// .asks.json -> write .ok. A crash at any point leaves no sentinel, so every
+/// prefix state must be a MISS. Conversely a sentinel with missing payload
+/// files must also be a MISS (read failure), never a panic.
 #[test]
 #[serial]
 fn partial_write_states_are_misses() {
-    // States: (keep_cbor, keep_meta, keep_ok)
+    // States: (keep_cbor, keep_meta, keep_asks, keep_ok)
     let states = [
-        (true, false, false), // crashed after persisting expr
-        (true, true, false),  // crashed before writing sentinel
-        (false, false, true), // payloads lost, sentinel intact
-        (false, true, true),  // expr lost, sentinel intact
-        (true, false, true),  // meta lost, sentinel intact
+        (true, false, false, false), // crashed after persisting expr
+        (true, true, false, false),  // crashed after persisting metadata
+        (true, true, true, false),   // crashed before writing sentinel
+        (false, false, false, true), // payloads lost, sentinel intact
+        (false, true, true, true),   // expr lost, sentinel intact
+        (true, false, true, true),   // meta lost, sentinel intact
+        (true, true, false, true),   // asks lost, sentinel intact
     ];
-    for &(keep_cbor, keep_meta, keep_ok) in &states {
+    for &(keep_cbor, keep_meta, keep_asks, keep_ok) in &states {
         let h = Harness::new();
         let src = unique_src("partial");
         let original = h.compile(&src, "t", &[]).unwrap();
         assert_eq!(h.runs(), 1);
-        let (cbor, meta, ok) = h.entry_paths();
+        let (cbor, meta, asks, ok) = h.entry_paths();
         if !keep_cbor {
             fs::remove_file(&cbor).unwrap();
         }
         if !keep_meta {
             fs::remove_file(&meta).unwrap();
         }
+        if !keep_asks {
+            fs::remove_file(&asks).unwrap();
+        }
         if !keep_ok {
             fs::remove_file(&ok).unwrap();
         }
 
         let res = h.compile(&src, "t", &[]).unwrap_or_else(|e| {
-            panic!("partial state ({keep_cbor},{keep_meta},{keep_ok}) errored: {e}")
+            panic!("partial state ({keep_cbor},{keep_meta},{keep_asks},{keep_ok}) errored: {e}")
         });
         assert_eq!(
             h.runs(),
             2,
-            "partial state ({keep_cbor},{keep_meta},{keep_ok}) must be a MISS"
+            "partial state ({keep_cbor},{keep_meta},{keep_asks},{keep_ok}) must be a MISS"
         );
         assert_eq!(
             res.expr, original.expr,
@@ -785,7 +792,7 @@ fn partial_write_states_are_misses() {
     }
 }
 
-/// FIXED (F6): the sentinel now carries blake3(expr) || blake3(meta), so
+/// FIXED (F6): the sentinel carries hashes of expr, metadata, and asks, so
 /// garbage .ok content fails the checksum recompute and falls through to a
 /// MISS/recompile — it no longer validates the entry.
 #[test]
@@ -795,7 +802,7 @@ fn garbage_sentinel_forces_recompile() {
     let src = unique_src("sentinel");
     let original = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(h.runs(), 1);
-    let (_, _, ok) = h.entry_paths();
+    let (_, _, _, ok) = h.entry_paths();
     fs::write(&ok, b"garbage-not-a-checksum").unwrap();
     let res = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(
@@ -816,7 +823,7 @@ fn garbage_sentinel_forces_recompile() {
 /// FIXED (F6): the .ok sentinel used to guard COMPLETENESS only, so a single
 /// bit-flip in a value byte of the cached .cbor that still decoded as a VALID
 /// CoreExpr — for a different program — was served as a cache hit with no
-/// recompile. The sentinel now also carries blake3(expr) || blake3(meta)
+/// recompile. The sentinel now also carries hashes of expr, metadata, and asks
 /// (see `cache_store`/`cache_load`), so a surviving flip fails the checksum
 /// and falls through to a MISS/recompile instead. This is now the ACTIVE
 /// regression test (the old buggy-behavior pin has been deleted, per this
@@ -828,7 +835,7 @@ fn corrupted_payload_should_be_rejected_or_recompiled() {
     let src = unique_src("bitflip-fix");
     let original = h.compile(&src, "t", &[]).unwrap();
     assert_eq!(h.runs(), 1);
-    let (cbor, _, _) = h.entry_paths();
+    let (cbor, _, _, _) = h.entry_paths();
     let bytes = fs::read(&cbor).unwrap();
 
     // Find a flip that the consumer decoder still accepts as valid CBOR but

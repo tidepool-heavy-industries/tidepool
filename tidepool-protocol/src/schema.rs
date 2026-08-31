@@ -41,6 +41,10 @@ pub const SUBSTRATE_MARKER: &str = "-- @substrate-helper@";
 pub struct Effect {
     /// Haskell GADT type name, and the Rust-side prefix: `"Exec"`.
     pub name: &'static str,
+    /// The constructor, support-type, and helper vocabulary re-exported to
+    /// authored Haskell. The effect type head itself always remains visible
+    /// for `Member` constraints.
+    pub authored_surface: AuthoredSurface,
     /// The hand-written handler struct in `tidepool-handlers`: `"ExecHandler"`.
     pub handler: &'static str,
     /// The snake_case module `handler` lives in under
@@ -119,6 +123,42 @@ pub struct Effect {
     /// contribute its DECL text (`decl_rs`) once its helpers are fully
     /// schema-representable, entirely independent of this flag.
     pub dispatched: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoredSurface {
+    All,
+    Only {
+        verbs: &'static [&'static str],
+        type_defs: &'static [&'static str],
+        helpers: &'static [&'static str],
+    },
+}
+
+impl AuthoredSurface {
+    pub const OPAQUE: Self = Self::Only {
+        verbs: &[],
+        type_defs: &[],
+        helpers: &[],
+    };
+
+    #[must_use]
+    pub fn includes_verb(self, name: &str) -> bool {
+        matches!(self, Self::All)
+            || matches!(self, Self::Only { verbs, .. } if verbs.contains(&name))
+    }
+
+    #[must_use]
+    pub fn includes_type_def(self, name: &str) -> bool {
+        matches!(self, Self::All)
+            || matches!(self, Self::Only { type_defs, .. } if type_defs.contains(&name))
+    }
+
+    #[must_use]
+    pub fn includes_helper(self, name: &str) -> bool {
+        matches!(self, Self::All)
+            || matches!(self, Self::Only { helpers, .. } if helpers.contains(&name))
+    }
 }
 
 /// How an effect's row admits a type bound at the invocation site — #20

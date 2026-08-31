@@ -19,6 +19,7 @@ use crate::schema::{Effect, HandlingClass, Helper, HelperBody, Polymorphism, Ver
 pub fn read_state() -> Effect {
     Effect {
         name: "ReadState",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "ReadStateHandler",
         handler_module: "read_state",
         req_enum: "ReadStateReq",

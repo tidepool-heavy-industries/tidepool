@@ -1,5 +1,6 @@
 module Tidepool.EffectSchema
   ( VerbSpec(..)
+  , NominalHead(..)
   , SiteType(..)
   , YieldSite(..)
   , sitedVerbs
@@ -7,11 +8,13 @@ module Tidepool.EffectSchema
 
 import Data.Text (Text)
 import Data.Word (Word64)
+import Tidepool.TypePolicy (NominalHead(..))
 
 -- | One GHC-rendered, monomorphic type crossing a suspension boundary.
 data SiteType = SiteType
   { stType :: Text
   , stModules :: [Text]
+  , stHeads :: [NominalHead]
   }
   deriving (Eq, Show)
 
@@ -20,6 +23,8 @@ data SiteType = SiteType
 -- mount back into a typed workbench.
 data YieldSite = YieldSite
   { ysSite :: Word64
+  , ysOrigin :: Text
+  , ysOrdinal :: Word64
   , ysAnswer :: SiteType
   , ysInputs :: [SiteType]
   }

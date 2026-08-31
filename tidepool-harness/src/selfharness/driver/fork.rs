@@ -413,7 +413,7 @@ impl SelfHarnessDriver {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn service_outer_fanout(
         &mut self,
-        site: u32,
+        site: u64,
         ty: Option<&str>,
         modules: &[String],
         fan: Option<FanBadge>,
@@ -540,7 +540,7 @@ impl SelfHarnessDriver {
     pub(crate) async fn drive_fanout_child(
         &self,
         sid: tidepool_repr::SessionId,
-        site: u32,
+        site: u64,
         idx: usize,
         prompt: &str,
         element_ty: Option<&str>,
@@ -587,7 +587,7 @@ impl SelfHarnessDriver {
     pub(crate) async fn finalize_fanout_child(
         &self,
         node: NodeId,
-        site: u32,
+        site: u64,
         idx: usize,
         prompt: &str,
         element_ty: Option<&str>,
@@ -695,7 +695,7 @@ impl SelfHarnessDriver {
         &self,
         node: NodeId,
         ty: Option<&str>,
-        site: u32,
+        site: u64,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,
         policy: AgentSessionExitPolicy,
@@ -1541,7 +1541,7 @@ impl SelfHarnessDriver {
         title: &str,
         brief: &str,
         ty: Option<&str>,
-        site: u32,
+        site: u64,
         table: &DataConTable,
         fork_depth: u32,
         fork_subtree: &std::sync::atomic::AtomicU32,

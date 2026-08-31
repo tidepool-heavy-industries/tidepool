@@ -51,6 +51,7 @@ use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb}
 pub fn ask() -> Effect {
     Effect {
         name: "Ask",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "AskHandler",
         handler_module: "ask",
         req_enum: "AskReq",

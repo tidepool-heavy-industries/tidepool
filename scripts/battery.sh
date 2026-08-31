@@ -40,10 +40,10 @@
 # always torn down (by its exact recorded pid, escalating to SIGKILL after a
 # 10s grace period if it doesn't exit on TERM) on script exit, including
 # SIGINT/SIGTERM — see lib-extract.sh's
-# start_battery_daemon/teardown_battery_daemon. A daemon crash or
-# unavailability mid-run needs no handling here: ExtractCmd::run() already
-# falls back to a direct spawn per request in that case
-# (tidepool-extract-cmd/CLAUDE.md).
+# start_battery_daemon/teardown_battery_daemon. Failure to connect needs no
+# handling here: ExtractCmd::run() safely falls back before submission. A
+# failure after submission is surfaced rather than replayed and duplicating
+# an in-flight GHC compile (tidepool-extract-cmd/CLAUDE.md).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 

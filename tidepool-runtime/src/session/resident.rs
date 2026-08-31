@@ -52,6 +52,7 @@
 //! boundary: parked completions are projected in-thread to `Send` data, a
 //! bind's tenured root riding out as a [`ValueHandle`].
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -73,7 +74,54 @@ use tidepool_repr::{
 
 use crate::render::EvalResult;
 use crate::timing;
-use crate::{JitError, RuntimeError, EVAL_STACK_SIZE};
+use crate::{JitError, RuntimeError, YieldSite, YieldSiteCollision, EVAL_STACK_SIZE};
+
+/// Immutable compiler provenance that travels with live Haskell programs.
+/// Sites are globally stable, while the map makes accidental hash collisions
+/// loud before a continuation can be resumed against the wrong type.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProgramProvenance {
+    sites: BTreeMap<u64, YieldSite>,
+}
+
+pub type ProgramProvenanceError = YieldSiteCollision;
+
+impl ProgramProvenance {
+    pub fn from_sites(sites: &[YieldSite]) -> Result<Self, ProgramProvenanceError> {
+        let mut provenance = Self::default();
+        provenance.extend(sites)?;
+        Ok(provenance)
+    }
+
+    fn extend(&mut self, sites: &[YieldSite]) -> Result<(), ProgramProvenanceError> {
+        for site in sites {
+            if let Some(previous) = self.sites.get(&site.site) {
+                if previous != site {
+                    return Err(YieldSiteCollision {
+                        site: site.site,
+                        first: previous.clone(),
+                        second: site.clone(),
+                    });
+                }
+            } else {
+                self.sites.insert(site.site, site.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &Self) -> Result<(), ProgramProvenanceError> {
+        for site in other.sites.values() {
+            self.extend(std::slice::from_ref(site))?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn sites(&self) -> Vec<YieldSite> {
+        self.sites.values().cloned().collect()
+    }
+}
 
 use tidepool_codegen::scope::ScopeId;
 use tidepool_repr::PrincipalId;
@@ -141,27 +189,41 @@ impl Default for SessionRunContext {
 pub struct RootCustody {
     handle: Option<ValueHandle>,
     cleanup: Arc<CustodyCleanup>,
+    provenance: Arc<ProgramProvenance>,
 }
 
 // Custody must remain exclusive.
 static_assertions::assert_not_impl_any!(RootCustody: Clone, Copy);
 
-/// Copyable reference to a live value whose root remains owned by a runtime
+/// Cloneable reference to a live value whose root remains owned by a runtime
 /// resource scope.
 ///
 /// This may be delivered repeatedly, but cannot be adopted, discarded, or
 /// passed to raw machine APIs. Those ownership transitions require
 /// [`RootCustody`] and a [`ResidentSession`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RootedValueRef(ValueHandle);
+#[derive(Debug, Clone)]
+pub struct RootedValueRef {
+    handle: ValueHandle,
+    provenance: Arc<ProgramProvenance>,
+}
 
 impl RootCustody {
     /// Wrap a handle minted by the resident session.
-    fn new(handle: ValueHandle, cleanup: Arc<CustodyCleanup>) -> Self {
+    fn new(
+        handle: ValueHandle,
+        cleanup: Arc<CustodyCleanup>,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Self {
         RootCustody {
             handle: Some(handle),
             cleanup,
+            provenance,
         }
+    }
+
+    #[must_use]
+    pub fn provenance(&self) -> &ProgramProvenance {
+        &self.provenance
     }
 
     fn into_transfer(mut self) -> CustodyTransfer {
@@ -171,6 +233,7 @@ impl RootCustody {
         CustodyTransfer {
             handle,
             cleanup: Arc::clone(&self.cleanup),
+            provenance: Arc::clone(&self.provenance),
             committed: false,
         }
     }
@@ -180,7 +243,10 @@ impl RootCustody {
     #[must_use]
     pub fn into_rooted_ref(self) -> RootedValueRef {
         let transfer = self.into_transfer();
-        let rooted = RootedValueRef(transfer.handle);
+        let rooted = RootedValueRef {
+            handle: transfer.handle,
+            provenance: Arc::clone(&transfer.provenance),
+        };
         transfer.commit();
         rooted
     }
@@ -212,6 +278,7 @@ impl CustodyCleanup {
 struct CustodyTransfer {
     handle: ValueHandle,
     cleanup: Arc<CustodyCleanup>,
+    provenance: Arc<ProgramProvenance>,
     committed: bool,
 }
 
@@ -222,7 +289,11 @@ impl CustodyTransfer {
 
     fn into_custody(mut self) -> RootCustody {
         self.committed = true;
-        RootCustody::new(self.handle, Arc::clone(&self.cleanup))
+        RootCustody::new(
+            self.handle,
+            Arc::clone(&self.cleanup),
+            Arc::clone(&self.provenance),
+        )
     }
 }
 
@@ -411,6 +482,8 @@ pub enum ResidentError {
     /// `merge_table`).
     #[error("session DataConTable collision: {0}")]
     TableCollision(String),
+    #[error(transparent)]
+    ProgramProvenance(#[from] ProgramProvenanceError),
     /// A decl-plane operation failed while materializing a value bind — the
     /// cross-plane shadow retract (a value bind evicting a same-name decl head).
     #[error(transparent)]
@@ -433,10 +506,6 @@ pub struct ResidentSession<H, O> {
     core: PersistentSession,
     /// The effect handler stack, borrowed by each turn's eval thread.
     handlers: H,
-    /// Effect names by tag (registry-entry metadata; exposed via
-    /// [`ResidentSession::effect_names`] for the harness's effect-roster
-    /// rendering — the resident surface does not re-classify run errors here).
-    effect_names: Vec<String>,
     /// The console-output buffer turns write into.
     captured: O,
     /// GHC include search paths for fragment compiles (unused today — fragments
@@ -451,6 +520,8 @@ pub struct ResidentSession<H, O> {
     /// registry is the ground truth; these are the string identities callers
     /// resume/abort against (atomic validate-before-consume). Top = last.
     parked: Vec<(String, ContinuationId)>,
+    parked_provenance: HashMap<ContinuationId, Arc<ProgramProvenance>>,
+    binding_provenance: HashMap<u64, Arc<ProgramProvenance>>,
     /// The resource and lexical scopes for the next session entry. Callers
     /// sharing a machine replace this atomically at checkout boundaries.
     run_context: SessionRunContext,
@@ -485,7 +556,7 @@ where
     /// against the SAME machine [`Self::unbootstrapped`] would also have
     /// booted from their first `run`.
     // The arg list mirrors the engine's `StartTurn` field carrier (source,
-    // handlers, effect_names, captured, include, nursery) — bundling
+    // handlers, captured, include, nursery) — bundling
     // them into a struct would just move the arity, not remove it.
     ///
     /// `lib` is the decl plane: pass `Some` to accumulate declarations across
@@ -496,7 +567,6 @@ where
         expr: &CoreExpr,
         table: DataConTable,
         handlers: H,
-        effect_names: Vec<String>,
         captured: O,
         include: Vec<PathBuf>,
         nursery_size: usize,
@@ -508,11 +578,12 @@ where
         Ok(ResidentSession {
             core,
             handlers,
-            effect_names,
             captured,
             include,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
+            parked_provenance: HashMap::new(),
+            binding_provenance: HashMap::new(),
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
         })
@@ -529,7 +600,6 @@ where
     #[allow(clippy::too_many_arguments)]
     pub fn unbootstrapped(
         handlers: H,
-        effect_names: Vec<String>,
         captured: O,
         include: Vec<PathBuf>,
         nursery_size: usize,
@@ -539,11 +609,12 @@ where
         ResidentSession {
             core,
             handlers,
-            effect_names,
             captured,
             include,
             cont_id_issuer: MonotonicIdIssuer::new("scont"),
             parked: Vec::new(),
+            parked_provenance: HashMap::new(),
+            binding_provenance: HashMap::new(),
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
         }
@@ -665,6 +736,15 @@ where
         self.core.machine()?.parked_realm(id)
     }
 
+    #[must_use]
+    pub fn parked_program_provenance(&self, hole: &ResidentHole) -> Option<Arc<ProgramProvenance>> {
+        let (_, id) = self
+            .parked
+            .iter()
+            .find(|(name, _)| name == hole.cont_id())?;
+        self.parked_provenance.get(id).cloned()
+    }
+
     /// Whether the session has no parked frames (ready and quiescent).
     pub fn is_idle(&self) -> bool {
         self.parked.is_empty()
@@ -744,6 +824,8 @@ where
         let counts = machine.close_realm(realm);
         let survivors = machine.parked_ids();
         self.parked.retain(|(_, id)| survivors.contains(id));
+        self.parked_provenance
+            .retain(|id, _| survivors.contains(id));
         counts
     }
 
@@ -757,10 +839,11 @@ where
     pub fn live_payload_handle(&mut self, hole: &str) -> Option<RootCustody> {
         self.settle_dropped_custody();
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
+        let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
         self.core
             .machine_mut()?
             .handle_from_live_payload(id)
-            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup)))
+            .map(|handle| RootCustody::new(handle, Arc::clone(&self.custody_cleanup), provenance))
     }
 
     /// [`Self::live_payload_handle`]'s sibling for a result that must outlive
@@ -779,11 +862,13 @@ where
     ) -> Option<RootCustody> {
         self.settle_dropped_custody();
         let &(_, id) = self.parked.iter().find(|(h, _)| h == hole)?;
+        let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
         let machine = self.core.machine_mut()?;
         let slot = machine.take_parked_live_payload_root(id)?;
         Some(RootCustody::new(
             machine.mint_handle_from_root(slot, realm),
             Arc::clone(&self.custody_cleanup),
+            provenance,
         ))
     }
 
@@ -860,7 +945,14 @@ where
             }
         };
         let transfer = custody.into_transfer();
-        let result = self.reenter(&cont_id, ResumeInput::Handle(transfer.handle), seed, bind);
+        let provenance = Arc::clone(&transfer.provenance);
+        let result = self.reenter(
+            &cont_id,
+            ResumeInput::Handle(transfer.handle),
+            seed,
+            bind,
+            Some(&provenance),
+        );
         if result.is_ok() {
             transfer.commit();
         }
@@ -944,6 +1036,7 @@ where
             }
         };
         let transfer = custody.into_transfer();
+        let provenance = Arc::clone(&transfer.provenance);
         let handle = transfer.handle;
         let slot = self
             .core
@@ -973,6 +1066,7 @@ where
                 scope,
             },
         )?;
+        self.binding_provenance.insert(id.raw(), provenance);
         Ok(())
     }
 
@@ -1017,6 +1111,7 @@ where
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
         let transfer = custody.into_transfer();
+        let provenance = Arc::clone(&transfer.provenance);
         let handle = transfer.handle;
         let handle_is_live = self
             .core
@@ -1059,6 +1154,7 @@ where
             },
         )?;
         self.core.set_val_gen(gen);
+        self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
     }
 
@@ -1085,9 +1181,10 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         self.reenter(
             cont_id,
-            ResumeInput::Handle(handle.0),
+            ResumeInput::Handle(handle.handle),
             HoleSeed::Plain,
             None,
+            Some(&handle.provenance),
         )
     }
 
@@ -1099,10 +1196,9 @@ where
         self.core.is_bootstrapped()
     }
 
-    /// Effect names by union tag (the roster the harness renders alongside an
-    /// unhandled-effect error).
-    pub fn effect_names(&self) -> &[String] {
-        &self.effect_names
+    #[must_use]
+    pub fn data_con_table(&self) -> &DataConTable {
+        self.core.session_table()
     }
 
     /// Read-only heap/GC snapshot of this session's live machine (observatory
@@ -1247,6 +1343,20 @@ where
         self.core.seed_external_env(&referenced)
     }
 
+    fn provenance_for(
+        &self,
+        expr: &CoreExpr,
+        sites: &[YieldSite],
+    ) -> Result<Arc<ProgramProvenance>, ResidentError> {
+        let mut provenance = ProgramProvenance::from_sites(sites)?;
+        for var in tidepool_repr::free_vars::free_vars(expr) {
+            if let Some(parent) = self.binding_provenance.get(&var.0) {
+                provenance.merge(parent)?;
+            }
+        }
+        Ok(Arc::new(provenance))
+    }
+
     fn next_cont_id(&self) -> String {
         self.cont_id_issuer.next_id()
     }
@@ -1263,6 +1373,17 @@ where
         expr: &CoreExpr,
         table: &DataConTable,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_with_sites(name_hint, expr, table, &[])
+    }
+
+    pub fn run_with_sites(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        sites: &[YieldSite],
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let provenance = self.provenance_for(expr, sites)?;
         // No reject-while-suspended: on the parked path, a new turn over
         // parked frames is ordinary (the machine is never slot-suspended).
         // Merge this turn's table into the accumulated session table (later turns
@@ -1314,7 +1435,7 @@ where
             run_exec_started.elapsed(),
             0,
         );
-        Ok(self.classify_parked(outcome, None, HoleSeed::Plain))
+        Ok(self.classify_parked(outcome, None, HoleSeed::Plain, provenance))
     }
 
     /// Run a value-plane BIND turn (`x <- e`): seed the env from prior bindings,
@@ -1333,6 +1454,19 @@ where
         binder: &BoundBinder,
         gen: Generation,
     ) -> Result<ResidentOutcome, ResidentError> {
+        self.run_bind_with_sites(name_hint, expr, table, binder, gen, &[])
+    }
+
+    pub fn run_bind_with_sites(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        binder: &BoundBinder,
+        gen: Generation,
+        sites: &[YieldSite],
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let provenance = self.provenance_for(expr, sites)?;
         self.core
             .merge_table(table)
             .map_err(ResidentError::TableCollision)?;
@@ -1395,9 +1529,10 @@ where
             binder: binder.clone(),
             generation: gen,
         };
-        let resident_outcome = self.classify_parked(outcome, None, seed);
+        let resident_outcome = self.classify_parked(outcome, None, seed, Arc::clone(&provenance));
         if completed {
             self.materialize_binder(binder, gen, bound)?;
+            self.binding_provenance.insert(binder.var_id, provenance);
         }
         Ok(resident_outcome)
     }
@@ -1642,6 +1777,7 @@ where
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
+        let provenance = Arc::clone(&entry.provenance);
         // Entry consumes custody: the computation that runs it is the handle's
         // new owner, with no second consumer.
         let transfer = entry.into_transfer();
@@ -1711,7 +1847,7 @@ where
                 .map(|o| project_parked(machine, o, owning_realm))
         })?;
         transfer.commit();
-        Ok(self.classify_parked(outcome, None, HoleSeed::Plain))
+        Ok(self.classify_parked(outcome, None, HoleSeed::Plain, provenance))
     }
 
     /// Resume the suspended turn `hole` answered with `answer`, driving the
@@ -1736,10 +1872,12 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole.seed();
         match hole {
-            ResidentHole::Plain(h) => self.reenter(&h.id, ResumeInput::Answer(answer), seed, None),
+            ResidentHole::Plain(h) => {
+                self.reenter(&h.id, ResumeInput::Answer(answer), seed, None, None)
+            }
             ResidentHole::Binding(h) => {
                 let bind = Some((h.binder, h.generation));
-                self.reenter(&h.id, ResumeInput::Answer(answer), seed, bind)
+                self.reenter(&h.id, ResumeInput::Answer(answer), seed, bind, None)
             }
         }
     }
@@ -1755,7 +1893,13 @@ where
         cont_id: &str,
         reason: String,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(cont_id, ResumeInput::Abort(reason), HoleSeed::Plain, None)
+        self.reenter(
+            cont_id,
+            ResumeInput::Abort(reason),
+            HoleSeed::Plain,
+            None,
+            None,
+        )
     }
 
     fn reenter(
@@ -1764,6 +1908,7 @@ where
         input: ResumeInput,
         seed: HoleSeed,
         bind: Option<(BoundBinder, Generation)>,
+        additional_provenance: Option<&ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
         // set (any-order resume — the machine imposes no order and neither do
@@ -1774,6 +1919,15 @@ where
                 pending: self.parked.iter().map(|(h, _)| h.clone()).collect(),
             });
         };
+        let mut provenance = self
+            .parked_provenance
+            .get(&frame_id)
+            .map(|value| (**value).clone())
+            .unwrap_or_default();
+        if let Some(additional) = additional_provenance {
+            provenance.merge(additional)?;
+        }
+        let provenance = Arc::new(provenance);
         // The machine is authoritative on whether the frame was actually
         // consumed: `resume_continuation` NF-forces a data-kinded answer BEFORE
         // removing the frame (A5), and on a retryable rejection leaves it
@@ -1805,6 +1959,7 @@ where
                     .map(|m| m.parked_ids().contains(&frame_id))
                     .unwrap_or(false);
                 if !still_parked {
+                    self.parked_provenance.remove(&frame_id);
                     self.parked.retain(|(h, _)| h != cont_id);
                 }
                 return Err(e);
@@ -1818,9 +1973,11 @@ where
             ParkedRun::Suspended { .. } => None,
         };
         let completed = matches!(outcome, ParkedRun::Completed { .. });
-        let resident_outcome = self.classify_parked(outcome, Some(cont_id), seed);
+        let resident_outcome =
+            self.classify_parked(outcome, Some(cont_id), seed, Arc::clone(&provenance));
         if let (Some((binder, gen)), true) = (bind, completed) {
             self.materialize_binder(&binder, gen, bound)?;
+            self.binding_provenance.insert(binder.var_id, provenance);
         }
         Ok(resident_outcome)
     }
@@ -1992,10 +2149,14 @@ where
         outcome: ParkedRun,
         resumed: Option<&str>,
         seed: HoleSeed,
+        provenance: Arc<ProgramProvenance>,
     ) -> ResidentOutcome {
         match outcome {
             ParkedRun::Completed { value, .. } => {
                 if let Some(hole) = resumed {
+                    if let Some((_, id)) = self.parked.iter().find(|(h, _)| h == hole) {
+                        self.parked_provenance.remove(id);
+                    }
                     self.parked.retain(|(h, _)| h != hole);
                 }
                 let output = self.captured.drain();
@@ -2009,10 +2170,14 @@ where
                 // frame was consumed; a fresh frame parked under a FRESH id —
                 // ids are never reused) and the new one replaces it.
                 if let Some(hole) = resumed {
+                    if let Some((_, old_id)) = self.parked.iter().find(|(h, _)| h == hole) {
+                        self.parked_provenance.remove(old_id);
+                    }
                     self.parked.retain(|(h, _)| h != hole);
                 }
                 let cont_id = self.next_cont_id();
                 self.parked.push((cont_id.clone(), id));
+                self.parked_provenance.insert(id, provenance);
                 let output = self.captured.snapshot();
                 ResidentOutcome::Suspended {
                     output,
@@ -2162,13 +2327,42 @@ mod tests {
             &expr,
             table,
             frunk::HNil,
-            Vec::new(),
             NullSink,
             Vec::new(),
             crate::DEFAULT_NURSERY_SIZE,
             None,
         )
         .expect("a trivial Lit expression over an empty table compiles")
+    }
+
+    fn typed_site(site: u64, ty: &str) -> YieldSite {
+        YieldSite {
+            site,
+            origin: "M.program".into(),
+            ordinal: 0,
+            ty: ty.into(),
+            modules: Vec::new(),
+            heads: Vec::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn program_provenance_unions_identical_sites_and_rejects_collisions() {
+        let mut provenance =
+            ProgramProvenance::from_sites(&[typed_site(11, "Int")]).expect("first site");
+        let same = ProgramProvenance::from_sites(&[typed_site(11, "Int")]).expect("same site");
+        provenance.merge(&same).expect("identical metadata merges");
+        assert_eq!(provenance.sites(), vec![typed_site(11, "Int")]);
+
+        let conflicting =
+            ProgramProvenance::from_sites(&[typed_site(11, "Bool")]).expect("other site set");
+        let error = provenance
+            .merge(&conflicting)
+            .expect_err("same id with different metadata must fail");
+        assert_eq!(error.site, 11);
+        assert_eq!(error.first.ty, "Int");
+        assert_eq!(error.second.ty, "Bool");
     }
 
     /// A deterministic thread-spawn failure must return a typed error and
@@ -2259,7 +2453,11 @@ mod tests {
         // An arbitrary handle id: the liveness check must short-circuit
         // before this is ever resolved against the machine's handle
         // registry, so it need not be a real, live-minted handle.
-        let custody = RootCustody::new(ValueHandle(0), Arc::clone(&session.custody_cleanup));
+        let custody = RootCustody::new(
+            ValueHandle(0),
+            Arc::clone(&session.custody_cleanup),
+            Arc::new(ProgramProvenance::default()),
+        );
         let result = session.mount_handle_in(scope, "escapee", custody);
 
         assert!(
@@ -2284,7 +2482,11 @@ mod tests {
 
         // Arbitrary, need not be live-minted — resolution fails before the
         // handle registry is ever consulted.
-        let custody = RootCustody::new(ValueHandle(0), Arc::clone(&session.custody_cleanup));
+        let custody = RootCustody::new(
+            ValueHandle(0),
+            Arc::clone(&session.custody_cleanup),
+            Arc::new(ProgramProvenance::default()),
+        );
         let result = session.mount_handle_in(scope, "nope", custody);
 
         assert!(
@@ -2305,7 +2507,11 @@ mod tests {
     #[test]
     fn dropped_custody_is_queued_and_settled_without_panicking() {
         let mut session = bootstrap_trivial_session();
-        let custody = RootCustody::new(ValueHandle(u64::MAX), Arc::clone(&session.custody_cleanup));
+        let custody = RootCustody::new(
+            ValueHandle(u64::MAX),
+            Arc::clone(&session.custody_cleanup),
+            Arc::new(ProgramProvenance::default()),
+        );
 
         drop(custody);
 

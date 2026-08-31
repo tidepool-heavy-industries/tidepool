@@ -507,7 +507,6 @@ mod resident_delegation {
             &value_fragment(0),
             table_with_c1(),
             NoDispatch,
-            Vec::new(),
             Sink,
             Vec::new(),
             1 << 16,

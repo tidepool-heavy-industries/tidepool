@@ -1,6 +1,6 @@
 //! Real GHC -> Core -> resident JIT proof for typed actor exit retention.
 //!
-//! A Haskell `AgentRef` publishes a closure into its managed cell, parks on
+//! A Haskell `ActorRef` publishes a closure into its managed cell, parks on
 //! Rust's exact-incarnation wait registry, then observes that same closure on
 //! two independent waits after the target has exited.
 
@@ -88,19 +88,23 @@ import Prelude
 import Tidepool.Actor
 import Tidepool.Actor.Internal
 import Tidepool.Effects
+import Tidepool.Internal.ExitCell
 
-ref :: AgentRef Maybe (Bool -> Bool)
-ref = newAgentRef {actor_id} {incarnation} ("pending" :: String)
+refCell :: ExitCell String (Bool -> Bool)
+refCell = newExitCell "pending"
 
-failedRef :: AgentRef Maybe Int
-failedRef = newAgentRef {failed_actor_id} {failed_incarnation} ("failed pending" :: String)
+ref :: ActorRef Maybe (Bool -> Bool)
+ref = ActorRef {actor_id} {incarnation} refCell
 
-cancelledRef :: AgentRef Maybe Int
-cancelledRef = newAgentRef {cancelled_actor_id} {cancelled_incarnation} ("cancelled pending" :: String)
+failedRef :: ActorRef Maybe Int
+failedRef = ActorRef {failed_actor_id} {failed_incarnation} (newExitCell ("failed pending" :: String))
+
+cancelledRef :: ActorRef Maybe Int
+cancelledRef = ActorRef {cancelled_actor_id} {cancelled_incarnation} (newExitCell ("cancelled pending" :: String))
 
 result :: M Bool
 result =
-  case completeAgentRef ref not of
+  case fillExitCell refCell not of
     () -> do
       first <- awaitExit ref
       second <- awaitExit ref
@@ -129,13 +133,13 @@ result =
         .compile(&source, "result")
         .expect("compile typed actor wait");
 
-    // Actor is interposed at tag zero. The concrete handler stack is never
-    // entered; it merely supplies the resident session's generic dispatcher.
+    // The mock stack has no Actor handler. Mounting the actor selects
+    // HandleOrSuspend, so the nominal wait request reaches the actor adapter
+    // without assigning any meaning to its freer-simple row position.
     let mut session = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
         AsSink(mock::min_stack()),
-        vec!["Actor".into()],
         TestSink,
         Vec::new(),
         DEFAULT_NURSERY_SIZE,

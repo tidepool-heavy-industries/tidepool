@@ -25,8 +25,8 @@ leaves they eventually invoke can check their caller.
 | Class | Examples | Mobility | Restart |
 |---|---|---|---|
 | ordinary Haskell value | sums, products, maps, pure closures | Same machine by live root | No, unless explicitly encoded |
-| actor program value | `ActorDefinition startup api exit`, opaque `ActorSpec startup api exit`, authored `Eff` continuation, function-bearing record | Same machine; promotion captures an exact deployment image | No initially |
-| opaque runtime value | `AgentRef api exit`, worktree handle, command runner | Copyable where its registry permits; use is caller-checked | Recover only through its owner |
+| actor program value | `ActorDefinition startup protocol exit`, private sealed deployment, authored `Eff` continuation, function-bearing record | Same machine; `startActor` captures an exact deployment image internally | No initially |
+| opaque runtime value | `ActorRef protocol exit`, worktree handle, command runner | Copyable where its registry permits; use is caller-checked | Recover only through its owner |
 | durable value | JSON stored through get/put | Anywhere the backend exposes it | Yes |
 | external wire value | provider or MCP payload | Encoded at the boundary | According to that protocol |
 
@@ -75,10 +75,25 @@ owning module's public operations. Registry entries record:
 
 Actor interpreters use the same principal and grant records. The Haskell row
 does not serve as a capability token, and Rust carries no reflected copy of
-it. V0 fresh spawn inherits the owner's composition-owned interpreter policy;
-a later explicit child-policy selector must be justified by a concrete
-capability and must reuse this registry rather than create a runtime-profile
-registry.
+it. A named effect profile selects a concrete model-facing row and matching
+interpreter policy; it authorizes classes of expressible intent, not concrete
+resources. Principals, grants, and opaque handles authorize those resources at
+use time.
+
+The initial spawn lattice is monotonic:
+
+```text
+ReadWrite -> ReadWrite | ReadOnly
+ReadOnly  -> ReadOnly
+```
+
+Rust validates the edge, while GHC checks the definition against the selected
+child row. Profile identity is launch metadata and remains separate from the
+program image and launch grants. Definitions and profile names convey no
+authority by themselves. `ReadOnly` means no ambient write effects; it may
+still create `ReadOnly` children and call an explicitly supplied writer
+`ActorRef`. Preventing that would be an information-flow policy, not capability
+attenuation, and is outside this contract.
 
 The common authorization behavior should be registered callers rather than a
 blanket prohibition on copying the surrounding value. A failed operation
@@ -136,15 +151,15 @@ capability leaves, and static interpreter policy cannot name per-instance
 resources such as one worktree.
 
 The initial membrane is an opaque launch-grant recipe attached immutably to an
-actor specification:
+actor definition:
 
 ```haskell
 data LaunchGrant
 
 withLaunchGrant
   :: LaunchGrant
-  -> ActorSpec startup api exit
-  -> ActorSpec startup api exit
+  -> ActorDefinition startup protocol exit
+  -> ActorDefinition startup protocol exit
 ```
 
 Capability-owning modules create these recipes through their own small
@@ -157,7 +172,7 @@ At `startActor`, Rust checks the current principal and the resource's
 registered policy under the child interpreter. It then redeems every
 recipe atomically for the newly allocated child before startup. Any refusal
 rolls back the unpublished child and all grants already derived for it.
-Copying a recipe or decorated specification transfers no authority: every
+Copying a recipe or decorated definition transfers no authority: every
 redemption is checked again, and the resource owner decides whether a recipe
 is reusable, rebinds a fresh resource, or has expired.
 
@@ -196,7 +211,7 @@ as part of the actor protocol.
 ### Successful exit values
 
 Successful actor exits do not use the mailbox root ledger. The opaque
-`AgentRef api exit` carries a shared, managed Haskell single-assignment cell.
+`ActorRef protocol exit` carries a shared, managed Haskell single-assignment cell.
 The actor entry wrapper fills it before reporting completion to Rust, so every
 copy of the reference reaches the same typed value through the ordinary
 Haskell heap. Rust stores the terminal lifecycle fact but never a

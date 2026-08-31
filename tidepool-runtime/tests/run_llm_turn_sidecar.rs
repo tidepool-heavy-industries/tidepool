@@ -389,6 +389,42 @@ fn runllmturn_accepts_monomorphic_data_site() {
     );
 }
 
+#[test]
+fn typed_site_identity_is_stable_and_records_nominal_heads() {
+    let decls = tidepool_mcp::standard_decls();
+    let first = runllmturn_source(
+        "runLLMTurn @Verdict \"ok\"",
+        "data Verdict = Approve | Reject deriving (Show)",
+    );
+    let with_unrelated_declaration = runllmturn_source(
+        "runLLMTurn @Verdict \"ok\"",
+        "unrelated :: Int\nunrelated = 42\ndata Verdict = Approve | Reject deriving (Show)",
+    );
+    let different_contract = runllmturn_source("runLLMTurn @Bool \"ok\"", "");
+    let first_asks = compile_and_read_asks(&first, "result", &decls);
+    let second_asks = compile_and_read_asks(&with_unrelated_declaration, "result", &decls);
+    let different_asks = compile_and_read_asks(&different_contract, "result", &decls);
+    let first_site = &first_asks[0];
+    let second_site = &second_asks[0];
+
+    assert_eq!(first_site["site"], second_site["site"]);
+    assert_ne!(first_site["site"], different_asks[0]["site"]);
+    assert_eq!(first_site["origin"], second_site["origin"]);
+    assert_eq!(first_site["ordinal"], serde_json::json!(0));
+    assert_eq!(second_site["ordinal"], serde_json::json!(0));
+    assert!(
+        first_site["origin"]
+            .as_str()
+            .is_some_and(|origin| origin.ends_with(".__user")),
+        "{first_site}"
+    );
+    assert!(first_site["heads"]
+        .as_array()
+        .expect("answer heads are an array")
+        .iter()
+        .any(|head| head["module"] == "Expr" && head["name"] == "Verdict"));
+}
+
 /// Compile `hole` (an expression using `runLLMTurn`, `>>= const (pure ())`'d
 /// away so its polymorphic/never-forced result never needs a concrete
 /// instantiation beyond the explicit `@T`) via the REAL eval pipeline,

@@ -55,11 +55,21 @@ use crate::{cache, diag, extract_module_name, extract_spawn_error, timing, Compi
 /// that cannot name the type at all.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct YieldSite {
-    pub site: u32,
+    pub site: u64,
+    pub origin: String,
+    pub ordinal: u64,
     #[serde(rename = "type")]
     pub ty: String,
     pub modules: Vec<String>,
+    pub heads: Vec<NominalHead>,
     pub inputs: Vec<SiteType>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NominalHead {
+    pub unit: String,
+    pub module: String,
+    pub name: String,
 }
 
 /// One GHC-rendered live input type attached to a suspension site.
@@ -68,6 +78,7 @@ pub struct SiteType {
     #[serde(rename = "type")]
     pub ty: String,
     pub modules: Vec<String>,
+    pub heads: Vec<NominalHead>,
 }
 
 /// The typed-suspension sidecar indexed by site id. The artifact retains its
@@ -75,12 +86,20 @@ pub struct SiteType {
 /// longer ask-specific.
 #[derive(Debug, Clone, Default)]
 pub struct YieldSites {
-    by_site: HashMap<u32, YieldSite>,
+    by_site: HashMap<u64, YieldSite>,
+}
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[error("typed-site collision at {site}: {first:?} != {second:?}")]
+pub struct YieldSiteCollision {
+    pub site: u64,
+    pub first: YieldSite,
+    pub second: YieldSite,
 }
 
 impl YieldSites {
     /// Test convenience for answer-only sites with no module information.
-    pub fn from_pairs(pairs: Vec<(u32, String)>) -> Self {
+    pub fn from_pairs(pairs: Vec<(u64, String)>) -> Self {
         YieldSites {
             by_site: pairs
                 .into_iter()
@@ -89,8 +108,11 @@ impl YieldSites {
                         site,
                         YieldSite {
                             site,
+                            origin: "<test>".into(),
+                            ordinal: site,
                             ty,
                             modules: Vec::new(),
+                            heads: Vec::new(),
                             inputs: Vec::new(),
                         },
                     )
@@ -101,7 +123,7 @@ impl YieldSites {
 
     /// Build an answer-only lookup from `(site, type, modules)` triples, for tests
     /// that need output-type module resolution but no live inputs.
-    pub fn from_entries(entries: Vec<(u32, String, Vec<String>)>) -> Self {
+    pub fn from_entries(entries: Vec<(u64, String, Vec<String>)>) -> Self {
         YieldSites {
             by_site: entries
                 .into_iter()
@@ -110,8 +132,11 @@ impl YieldSites {
                         site,
                         YieldSite {
                             site,
+                            origin: "<test>".into(),
+                            ordinal: site,
                             ty,
                             modules,
+                            heads: Vec::new(),
                             inputs: Vec::new(),
                         },
                     )
@@ -121,14 +146,27 @@ impl YieldSites {
     }
 
     /// Build a lookup from the compiler's complete typed-site records.
-    pub fn from_sites(sites: Vec<YieldSite>) -> Self {
-        Self {
-            by_site: sites.into_iter().map(|site| (site.site, site)).collect(),
+    pub fn from_sites(sites: Vec<YieldSite>) -> Result<Self, YieldSiteCollision> {
+        let mut by_site: HashMap<u64, YieldSite> = HashMap::new();
+        for site in sites {
+            match by_site.get(&site.site) {
+                Some(previous) if previous != &site => {
+                    return Err(YieldSiteCollision {
+                        site: site.site,
+                        first: previous.clone(),
+                        second: site,
+                    });
+                }
+                _ => {
+                    by_site.insert(site.site, site);
+                }
+            }
         }
+        Ok(Self { by_site })
     }
 
     /// The rendered answer type for a yield-site id, if the site is known.
-    pub fn type_of(&self, site: u32) -> Option<&str> {
+    pub fn type_of(&self, site: u64) -> Option<&str> {
         self.by_site.get(&site).map(|entry| entry.ty.as_str())
     }
 
@@ -136,7 +174,7 @@ impl YieldSites {
     /// type by name — empty when the site is unknown or the extract that
     /// produced this sidecar recorded no modules (e.g. a `Prelude`-only
     /// type).
-    pub fn modules_of(&self, site: u32) -> &[String] {
+    pub fn modules_of(&self, site: u64) -> &[String] {
         self.by_site
             .get(&site)
             .map(|entry| entry.modules.as_slice())
@@ -144,7 +182,7 @@ impl YieldSites {
     }
 
     /// GHC-derived live input types attached to this suspension site.
-    pub fn inputs_of(&self, site: u32) -> &[SiteType] {
+    pub fn inputs_of(&self, site: u64) -> &[SiteType] {
         self.by_site
             .get(&site)
             .map(|entry| entry.inputs.as_slice())
@@ -153,10 +191,20 @@ impl YieldSites {
 
     /// Every recorded answer `(site, type, modules)` entry, in no particular
     /// order. Live-input metadata remains available through [`Self::inputs_of`].
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &str, &[String])> {
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &str, &[String])> {
         self.by_site
             .iter()
             .map(|(site, entry)| (*site, entry.ty.as_str(), entry.modules.as_slice()))
+    }
+
+    /// Complete compiler records in stable site-id order. Use this when a
+    /// compiled program crosses into a provenance-owning runtime API; compact
+    /// lookup consumers should continue to use [`Self::iter`].
+    #[must_use]
+    pub fn sites(&self) -> Vec<YieldSite> {
+        let mut sites: Vec<_> = self.by_site.values().cloned().collect();
+        sites.sort_by_key(|site| site.site);
+        sites
     }
 
     /// Number of recorded sites.
@@ -339,14 +387,14 @@ pub fn compile_invocation(
     let eval_key = if let CacheStrategy::Eval { salt } = &inv.cache {
         let include_refs: Vec<&Path> = inv.include.iter().map(PathBuf::as_path).collect();
         let key = cache::cache_key_salted(inv.source, inv.targets[0], &include_refs, *salt);
-        if let Some((expr_bytes, meta_bytes)) = cache::cache_load(&key) {
+        if let Some((expr_bytes, meta_bytes, asks_bytes)) = cache::cache_load(&key) {
             // Attempt to deserialize cached data. If this fails, treat it as
             // a cache miss and fall through to recompilation instead of
             // propagating the error.
             let raw = vec![RawTargetOutput {
                 target: inv.targets[0].to_string(),
                 expr_bytes,
-                asks_bytes: None,
+                asks_bytes,
             }];
             if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
                 return Ok(artifacts);
@@ -507,7 +555,7 @@ pub fn compile_invocation(
     // memo costs a recompile, it never fails a compile.
     let artifacts = assemble(&meta_bytes, &raw, &mut on_stage)?;
     if let Some(key) = &eval_key {
-        cache::cache_store(key, &raw[0].expr_bytes, &meta_bytes);
+        cache::cache_store(key, &raw[0].expr_bytes, &meta_bytes, &raw[0].asks_bytes);
     }
     if let Some(key) = &inv_key {
         store_memo(key, &name_refs, &meta_bytes, &raw);
@@ -608,7 +656,7 @@ pub fn compile_targets_with_session_inject(
 pub(crate) struct RawTargetOutput {
     pub(crate) target: String,
     pub(crate) expr_bytes: Vec<u8>,
-    asks_bytes: Option<Vec<u8>>,
+    asks_bytes: Vec<u8>,
 }
 
 /// Spawn `cmd` (already fully configured — input, output-dir, target(s),
@@ -737,7 +785,7 @@ pub(crate) fn assemble(
     let asks_start = Instant::now();
     let mut targets = BTreeMap::new();
     for (r, expr) in raw.iter().zip(exprs.into_iter()) {
-        let asks = parse_asks(r.asks_bytes.as_deref())?;
+        let asks = parse_asks(&r.asks_bytes)?;
         targets.insert(r.target.clone(), TargetArtifact { expr, asks });
     }
     on_stage(timing::STAGE_ASKS_PARSE, asks_start.elapsed(), 0);
@@ -749,28 +797,75 @@ pub(crate) fn assemble(
     })
 }
 
-/// Read the `asks.json` sidecar's raw bytes. A missing file yields `None`
-/// (older extract without the pass, or a target that made no
-/// `runLLMTurn`/`runLLMTurnFork` calls) rather than an error; any other read
-/// failure is a hard error.
-fn read_asks_bytes(path: &Path) -> Result<Option<Vec<u8>>, CompileError> {
+/// Read the required typed-yield sidecar. The extractor writes `[]` for a
+/// program with no sites; absence therefore means an incomplete or stale
+/// compiler artifact, never "no effects".
+fn read_asks_bytes(path: &Path) -> Result<Vec<u8>, CompileError> {
     match std::fs::read(path) {
-        Ok(b) => Ok(Some(b)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(CompileError::MissingOutput(path.to_path_buf()))
+        }
         Err(e) => Err(CompileError::Io(e)),
     }
 }
 
-/// Parse the `asks.json` sidecar's bytes (if the extract wrote one) into a
-/// sidecar. `None` (file absent) yields an empty sidecar; present-but-malformed
-/// bytes are a hard error (a real regression to surface).
-fn parse_asks(bytes: Option<&[u8]>) -> Result<YieldSites, CompileError> {
-    let Some(bytes) = bytes else {
-        return Ok(YieldSites::default());
-    };
+fn parse_asks(bytes: &[u8]) -> Result<YieldSites, CompileError> {
     let sites: Vec<YieldSite> =
         serde_json::from_slice(bytes).map_err(|e| CompileError::Asks(e.to_string()))?;
-    Ok(YieldSites::from_sites(sites))
+    YieldSites::from_sites(sites).map_err(|error| CompileError::Asks(error.to_string()))
+}
+
+/// Read the compiler's required typed-yield sidecar for session-turn callers.
+/// This is the sole path-level reader; multi-target compilation uses the same
+/// byte parser after its cache layer has captured the artifact set.
+pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
+    let bytes = read_asks_bytes(path)?;
+    serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))
+}
+
+#[cfg(test)]
+mod typed_site_tests {
+    use super::*;
+
+    fn site(id: u64, ty: &str) -> YieldSite {
+        YieldSite {
+            site: id,
+            origin: "M.program".into(),
+            ordinal: 0,
+            ty: ty.into(),
+            modules: Vec::new(),
+            heads: Vec::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn missing_sidecar_is_not_an_empty_site_set() {
+        let root = tempfile::tempdir().expect("temporary artifact root");
+        let path = root.path().join("asks.json");
+        assert!(matches!(
+            read_yield_sites(&path),
+            Err(CompileError::MissingOutput(missing)) if missing == path
+        ));
+    }
+
+    #[test]
+    fn empty_sidecar_is_the_only_empty_site_set() {
+        let root = tempfile::tempdir().expect("temporary artifact root");
+        let path = root.path().join("asks.json");
+        std::fs::write(&path, b"[]").expect("write empty sidecar");
+        assert_eq!(read_yield_sites(&path).expect("read empty sidecar"), vec![]);
+    }
+
+    #[test]
+    fn conflicting_site_id_is_a_structured_error() {
+        let collision = YieldSites::from_sites(vec![site(7, "Int"), site(7, "Bool")])
+            .expect_err("conflicting metadata must fail");
+        assert_eq!(collision.site, 7);
+        assert_eq!(collision.first.ty, "Int");
+        assert_eq!(collision.second.ty, "Bool");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -804,7 +899,7 @@ fn total_bytes(meta_bytes: &[u8], raw: &[RawTargetOutput]) -> u64 {
     let total = meta_bytes.len()
         + raw
             .iter()
-            .map(|r| r.expr_bytes.len() + r.asks_bytes.as_ref().map_or(0, Vec::len))
+            .map(|r| r.expr_bytes.len() + r.asks_bytes.len())
             .sum::<usize>();
     total as u64
 }
@@ -819,15 +914,13 @@ fn load_memo(
 ) -> Option<(Vec<u8>, Vec<RawTargetOutput>)> {
     let loaded = cache::artifacts_load(key, names)?;
     let mut it = loaded.into_iter();
-    // `meta.cbor` and every `<target>.cbor` are required (the spawn path errors
-    // with `MissingOutput` without them); the asks sidecar is legitimately
-    // absent for an extract predating that pass, and `None` must survive as
-    // `None` so `parse_asks` yields an empty sidecar rather than parsing `[]`.
+    // Every artifact is required. An extractor represents a target with no
+    // typed suspension sites by writing an `[]` sidecar.
     let meta_bytes = it.next()??;
     let mut raw = Vec::with_capacity(targets.len());
     for target in targets {
         let expr_bytes = it.next()??;
-        let asks_bytes = it.next()?;
+        let asks_bytes = it.next()??;
         raw.push(RawTargetOutput {
             target: (*target).to_string(),
             expr_bytes,
@@ -855,7 +948,7 @@ fn store_memo(
             return;
         };
         artifacts.push((expr_name, Some(r.expr_bytes.as_slice())));
-        artifacts.push((asks_name, r.asks_bytes.as_deref()));
+        artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
     }
     cache::artifacts_store(key, &artifacts);
 }

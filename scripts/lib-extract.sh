@@ -162,10 +162,10 @@ finalize_battery_artifacts() {
 # `-S` alone only proves the path is a socket special file, which survives a
 # crashed daemon — so also try a real connect via python3 (already used
 # elsewhere in scripts/, e.g. bench-turn.sh) when it's on PATH; without
-# python3, fall back to the `-S` check alone. Either way this is advisory:
-# ExtractCmd::run() falls back to a direct spawn per request on any
-# daemon-unavailable signal (tidepool-extract-cmd/CLAUDE.md), so a false
-# "alive" verdict here costs a slower run, never correctness.
+# python3, fall back to the `-S` check alone. Either way this is advisory: a
+# stale socket that refuses connection safely falls back to a direct spawn;
+# once connected, ExtractCmd never replays an indeterminate request
+# (tidepool-extract-cmd/CLAUDE.md).
 _battery_daemon_socket_alive() {
   local sock="$1"
   [ -S "$sock" ] || return 1
@@ -229,12 +229,11 @@ _battery_daemon_stamp_path() {
 # already-running daemon is always correct regardless of whether this
 # particular invocation's own env re-states the opt-in.
 #
-# The daemon crashing or being unreachable mid-run needs no handling here:
-# ExtractCmd::run() (the ONE tidepool-extract invocation builder,
-# tidepool-extract-cmd/CLAUDE.md) already falls back to a direct spawn per
-# request on any daemon-unavailable signal — connect failure, timeout, or a
-# crash mid-request. This function only ever makes TIDEPOOL_EXTRACT_DAEMON_SOCKET
-# available; it never becomes a requirement for the run to proceed.
+# An unreachable daemon needs no handling here: ExtractCmd::run() (the ONE
+# tidepool-extract invocation builder, tidepool-extract-cmd/CLAUDE.md) falls
+# back after a known-unsubmitted connect failure. Timeout or crash after
+# submission is surfaced rather than replayed. This function only makes
+# TIDEPOOL_EXTRACT_DAEMON_SOCKET available; it does not own request policy.
 start_battery_daemon() {
   BATTERY_DAEMON_PID=""
   BATTERY_DAEMON_SOCKET_DIR=""

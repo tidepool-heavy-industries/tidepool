@@ -90,14 +90,14 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let mut preamble = tidepool_mcp::build_preamble(&[tidepool_mcp::deliberate_decl()], false);
-    preamble.push_str("type AgentEffects = '[Deliberate]\n");
+    preamble.push_str("type ActorEffects = '[Deliberate]\n");
     let source = r#"do
-  answer <- deliberate (deliberation @(Tree Int) @Bool "Check whether the supplied integer is forty-one.") (Node 41 [])
+  answer <- deliberate "Check whether the supplied integer is forty-one." (Node 41 [])
   pure (if answer then 84 else 0)
 "#;
     let root = tempfile::tempdir().expect("session root");
     let compile_preamble = insert_preamble_imports(&preamble, "Data.Tree");
-    let templates = resident_workbench_templates(&compile_preamble, "AgentEffects", "");
+    let templates = resident_workbench_templates(&compile_preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: source,
@@ -122,7 +122,6 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
         &compiled.expr,
         compiled.table.clone(),
         NoHandlers,
-        vec!["Deliberate".into()],
         TestSink,
         include.clone(),
         DEFAULT_NURSERY_SIZE,
@@ -171,7 +170,12 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
         )
         .expect("install actor execution context");
     let initial = machine
-        .run("resident_deliberate", &compiled.expr, &compiled.table)
+        .run_with_sites(
+            "resident_deliberate",
+            &compiled.expr,
+            &compiled.table,
+            &compiled.asks,
+        )
         .expect("run to deliberate suspension");
     let pending = match initial {
         ResidentOutcome::Suspended { hole, request, .. } => ResidentDeliberation::capture(
@@ -179,7 +183,6 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
             hole,
             &request,
             &compiled.table,
-            &compiled.asks,
             actor_realm,
         )
         .expect("capture typed deliberation"),

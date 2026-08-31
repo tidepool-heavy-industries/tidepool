@@ -34,6 +34,7 @@ fn value_arg(name: &'static str) -> Arg {
 pub fn subagent() -> Effect {
     Effect {
         name: "Subagent",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "SubagentDecodeHandler",
         handler_module: "subagent",
         req_enum: "SubagentReq",

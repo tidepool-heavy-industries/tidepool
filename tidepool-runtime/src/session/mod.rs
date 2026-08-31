@@ -48,8 +48,8 @@ pub use facade::{
 pub use supervisor::{GraceOutcome, TurnSupervisor};
 
 pub use resident::{
-    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, RootedValueRef,
-    SessionRunContext,
+    ProgramProvenance, ProgramProvenanceError, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, RootedValueRef, SessionRunContext,
 };
 
 pub use view::{SessionCompileView, SourceImports};

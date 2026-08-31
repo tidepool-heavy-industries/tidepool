@@ -14,6 +14,7 @@ use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb}
 pub fn deliberate() -> Effect {
     Effect {
         name: "Deliberate",
+        authored_surface: crate::schema::AuthoredSurface::OPAQUE,
         handler: "DeliberateHandler",
         handler_module: "deliberate",
         req_enum: "DeliberateReq",

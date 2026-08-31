@@ -18,6 +18,7 @@ use crate::schema::{Arg, Effect, HandlingClass, OuterEffect, Polymorphism, RustB
 pub fn console() -> Effect {
     Effect {
         name: "Console",
+        authored_surface: crate::schema::AuthoredSurface::All,
         handler: "ConsoleDecodeHandler",
         handler_module: "console",
         req_enum: "ConsoleReq",
