@@ -434,6 +434,11 @@ pub enum ResidentOutcome {
 /// Why a resident-session operation was refused or failed.
 #[derive(thiserror::Error, Debug)]
 pub enum ResidentError {
+    /// A rooted value minted by another resident session was presented to
+    /// this machine. Handle ids are session-local and must never be resolved
+    /// by numeric coincidence.
+    #[error("root custody belongs to a different resident session")]
+    ForeignCustody,
     /// A `run_child`/`apply_finalized` was attempted with no parked frame — a
     /// child run reads a suspended parent's world by construction.
     #[error("session has no parked continuation; a child run requires a suspended parent")]
@@ -1777,6 +1782,9 @@ where
         run_table: Option<&DataConTable>,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
+        if !Arc::ptr_eq(&entry.cleanup, &self.custody_cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
         let provenance = Arc::clone(&entry.provenance);
         // Entry consumes custody: the computation that runs it is the handle's
         // new owner, with no second consumer.
@@ -1812,42 +1820,135 @@ where
         let mut env = ExternalEnv::new();
         env.insert(ROOTED_ENTRY_VAR, slot.addr());
 
+        let outcome = self.run_rooted_fragment(name_hint, &expr, &env, realm, run_table)?;
+        transfer.commit();
+        Ok(self.classify_parked(outcome, None, HoleSeed::Plain, provenance))
+    }
+
+    /// Apply one rooted Haskell function to one rooted Haskell argument and
+    /// run the resulting `Eff` computation as a suspension-capable top-level
+    /// turn. Both values remain opaque: no bridge, serialization, constructor
+    /// inspection, or type-directed Rust code sits on this path.
+    ///
+    /// This is the value-to-code counterpart of [`Self::run_rooted_entry`]. It
+    /// exists for boundaries such as actor mailboxes where both the handler
+    /// and its protocol-indexed request are live Haskell values. Custody is
+    /// transferred into the running computation only after both handles have
+    /// been validated against this exact resident session. A rejected call
+    /// still drops the by-value custody arguments normally.
+    pub fn run_rooted_application(
+        &mut self,
+        name_hint: &str,
+        function: RootCustody,
+        argument: RootCustody,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+    ) -> Result<ResidentOutcome, ResidentError> {
+        self.settle_dropped_custody();
+        if !Arc::ptr_eq(&function.cleanup, &self.custody_cleanup)
+            || !Arc::ptr_eq(&argument.cleanup, &self.custody_cleanup)
+        {
+            return Err(ResidentError::ForeignCustody);
+        }
+
+        let Some(function_handle) = function.handle else {
+            unreachable!("live custody always contains its handle");
+        };
+        let Some(argument_handle) = argument.handle else {
+            unreachable!("live custody always contains its handle");
+        };
+        let (function_addr, argument_addr) = {
+            let machine = self.core.machine_mut().ok_or_else(|| {
+                ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                    "run_rooted_application: resident machine is not live".into(),
+                ))))
+            })?;
+            let function_addr = machine
+                .handle_slot(function_handle)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                        format!(
+                        "run_rooted_application: function handle {function_handle:?} is not live"
+                    ),
+                    ))))
+                })?
+                .addr();
+            let argument_addr = machine
+                .handle_slot(argument_handle)
+                .ok_or_else(|| {
+                    ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                        format!(
+                        "run_rooted_application: argument handle {argument_handle:?} is not live"
+                    ),
+                    ))))
+                })?
+                .addr();
+            (function_addr, argument_addr)
+        };
+
+        let mut provenance = (*function.provenance).clone();
+        provenance.merge(&argument.provenance)?;
+        let function = function.into_transfer();
+        let argument = argument.into_transfer();
+
+        const ROOTED_FUNCTION_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0003);
+        const ROOTED_ARGUMENT_VAR: tidepool_repr::VarId = tidepool_repr::VarId(0xF4_0000_0004);
+        let mut builder = tidepool_repr::TreeBuilder::new();
+        let function_node = builder.push(tidepool_repr::CoreFrame::Var(ROOTED_FUNCTION_VAR));
+        let argument_node = builder.push(tidepool_repr::CoreFrame::Var(ROOTED_ARGUMENT_VAR));
+        let _application = builder.push(tidepool_repr::CoreFrame::App {
+            fun: function_node,
+            arg: argument_node,
+        });
+        let expression = builder.build();
+
+        let mut environment = ExternalEnv::new();
+        environment.insert(ROOTED_FUNCTION_VAR, function_addr);
+        environment.insert(ROOTED_ARGUMENT_VAR, argument_addr);
+
+        let outcome =
+            self.run_rooted_fragment(name_hint, &expression, &environment, realm, run_table)?;
+        function.commit();
+        argument.commit();
+        Ok(self.classify_parked(outcome, None, HoleSeed::Plain, Arc::new(provenance)))
+    }
+
+    fn run_rooted_fragment(
+        &mut self,
+        name_hint: &str,
+        expression: &CoreExpr,
+        environment: &ExternalEnv,
+        realm: RealmId,
+        run_table: Option<&DataConTable>,
+    ) -> Result<ParkedRun, ResidentError> {
         let table = run_table
             .cloned()
             .unwrap_or_else(|| self.core.session_table().clone());
         self.core
             .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
-        // A rooted entry requires a live machine by construction (the handle came off a
-        // parked frame on it), so this is a no-op — kept for symmetry with
-        // `run`/`run_bind`.
         self.core
-            .bootstrap_if_needed(&expr, &table)
+            .bootstrap_if_needed(expression, &table)
             .map_err(ResidentError::Bootstrap)?;
-        // TOP-LEVEL, not `add_child_fragment_session`: this entry is a peer run,
-        // not a value-shaped nested child of a parked continuation.
-        let func_id = self
+        // Rooted runs are peers, not value-shaped children of an arbitrary
+        // parked continuation.
+        let function = self
             .core
-            .add_fragment_session(name_hint, &expr, &env)
+            .add_fragment_session(name_hint, expression, environment)
             .map_err(ResidentError::AddFunction)?;
-
         let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
-        // Handle ownership on completion is the SESSION's realm, deliberately:
-        // a result must outlive the thread realm that produced it, since
-        // cancelling or retiring a thread closes that realm while a waiter may
-        // still be holding the value.
+        // Completed live results belong to the actor/session realm, not the
+        // shorter-lived turn realm that happened to produce them.
         let owning_realm = self.run_context.resource_scope;
-        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+        self.on_eval_thread(move |machine, table, handlers, captured| {
             let run =
-                SuspensionRun::fragment(func_id, table, effect_policy, realm, ParkKind::Plain)
+                SuspensionRun::fragment(function, table, effect_policy, realm, ParkKind::Plain)
                     .with_live_payload(live_payload);
             machine
                 .run_until_suspension(run, handlers, captured)
-                .map(|o| project_parked(machine, o, owning_realm))
-        })?;
-        transfer.commit();
-        Ok(self.classify_parked(outcome, None, HoleSeed::Plain, provenance))
+                .map(|outcome| project_parked(machine, outcome, owning_realm))
+        })
     }
 
     /// Resume the suspended turn `hole` answered with `answer`, driving the

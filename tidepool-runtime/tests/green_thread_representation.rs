@@ -161,6 +161,69 @@ fn build_wrap_suspend(wrap_tag: u64, dummy: i64, body_tag: u64) -> CoreExpr {
     b.build()
 }
 
+enum RootedOperand {
+    IdentityEff,
+    ThreadResult(i64),
+}
+
+/// Suspend with either an opaque `\x -> Val x` handler or an opaque protocol
+/// value in the live-payload field. The pair exercises the same rooted
+/// function/rooted argument boundary used by actor mailbox delivery.
+fn build_operand_suspend(wrap_tag: u64, operand: RootedOperand) -> CoreExpr {
+    let mut builder = TreeBuilder::new();
+    let operand = match operand {
+        RootedOperand::IdentityEff => {
+            const ARG: VarId = VarId(21);
+            let argument = builder.push(CoreFrame::Var(ARG));
+            let value = builder.push(CoreFrame::Con {
+                tag: VAL_ID,
+                fields: vec![argument],
+            });
+            builder.push(CoreFrame::Lam {
+                binder: ARG,
+                body: value,
+            })
+        }
+        RootedOperand::ThreadResult(value) => {
+            let value = builder.push(CoreFrame::Lit(Literal::LitInt(value)));
+            builder.push(CoreFrame::Con {
+                tag: RESULT_ID,
+                fields: vec![value],
+            })
+        }
+    };
+
+    let dummy = builder.push(CoreFrame::Lit(Literal::LitInt(0)));
+    let request = builder.push(CoreFrame::Con {
+        tag: WRAP_ID,
+        fields: vec![dummy, operand],
+    });
+    let tag = builder.push(CoreFrame::Lit(Literal::LitWord(wrap_tag)));
+    let union = builder.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![tag, request],
+    });
+    const CONTINUATION: VarId = VarId(22);
+    let answer = builder.push(CoreFrame::Var(CONTINUATION));
+    let completed = builder.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![answer],
+    });
+    let continuation = builder.push(CoreFrame::Lam {
+        binder: CONTINUATION,
+        body: completed,
+    });
+    let queue = builder.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![continuation],
+    });
+    builder.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![union, queue],
+    });
+    builder.build()
+}
+
 fn expect_int(v: &Value) -> i64 {
     match v {
         Value::Lit(Literal::LitInt(n)) => *n,
@@ -212,6 +275,66 @@ fn fresh_session() -> ResidentSession<NoDispatch, TestSink> {
         DEFAULT_NURSERY_SIZE,
         None,
     )
+}
+
+fn capture_operand(
+    session: &mut ResidentSession<NoDispatch, TestSink>,
+    table: &DataConTable,
+    label: &str,
+    tag: u64,
+    operand: RootedOperand,
+) -> tidepool_runtime::session::RootCustody {
+    let outcome = session
+        .run(label, &build_operand_suspend(tag, operand), table)
+        .unwrap_or_else(|error| panic!("{label}: operand suspension failed: {error}"));
+    let hole = match outcome {
+        ResidentOutcome::Suspended { hole, .. } => hole,
+        other => panic!("{label}: operand must suspend, got {other:?}"),
+    };
+    let custody = session
+        .live_payload_handle(hole.cont_id())
+        .unwrap_or_else(|| panic!("{label}: operand suspension has no live payload"));
+    let completed = session
+        .resume(hole, Value::Lit(Literal::LitInt(0)))
+        .unwrap_or_else(|error| panic!("{label}: operand wrapper resume failed: {error}"));
+    assert!(matches!(completed, ResidentOutcome::Completed { .. }));
+    custody
+}
+
+#[test]
+fn rooted_application_passes_an_opaque_live_value_to_opaque_live_code() {
+    let table = table();
+    let mut session = fresh_session();
+    let function = capture_operand(
+        &mut session,
+        &table,
+        "rooted_function",
+        90,
+        RootedOperand::IdentityEff,
+    );
+    let argument = capture_operand(
+        &mut session,
+        &table,
+        "rooted_argument",
+        91,
+        RootedOperand::ThreadResult(41),
+    );
+
+    let outcome = session
+        .run_rooted_application(
+            "rooted_application",
+            function,
+            argument,
+            RealmId(12),
+            Some(&table),
+        )
+        .expect("rooted application");
+    match outcome {
+        ResidentOutcome::Completed { result, .. } => {
+            assert_eq!(expect_thread_result(&result.into_value()), 41);
+        }
+        other => panic!("identity handler must complete, got {other:?}"),
+    }
 }
 
 /// Fork one green thread: run the scratch wrapper suspension, take its
