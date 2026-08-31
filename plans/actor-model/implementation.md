@@ -109,6 +109,10 @@ This is the canonical status inventory for the plan.
   Recursive `serve` assigns its typed site at the concrete outer call and
   reuses it internally, rather than making the generic library body pretend to
   contain a monomorphic suspension.
+- Resident `awaitExit` now parks through the existing exact wait registry and
+  resumes with terminal metadata only. A real mailbox-driven child fills its
+  shared Haskell `ExitCell`, replies, exits, and is then observed with the same
+  typed value; no Rust exit-value store or second root registry exists.
 - Effect-schema metadata centrally curates authored constructors, supporting
   types, and helpers. The generated public shim and model-facing descriptions
   consume the same allowlists; internal Core retains the full nominal
@@ -444,8 +448,8 @@ Finish the Rust lifecycle behavior:
 
 The resident call/cast/receive/serve vertical and atomic reply-plus-next-state
 settlement are landed. The remaining work in this stage is scheduling,
-shutdown, exit-value completion of mailbox-driven actors, and adversarial
-lifecycle/cancellation coverage—not another mailbox execution mechanism.
+shutdown, and adversarial lifecycle/cancellation coverage—not another mailbox
+execution or exit-value retention mechanism.
 
 Acceptance covers call/cancel/reply races, queued-root teardown, stale
 incarnations, call cycles, subtree termination, quiet normal completion, and

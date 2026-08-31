@@ -10,7 +10,7 @@ use tidepool_actor::{
     ActorDescriptor, ActorLifecycle, ActorMachineRegistry, ActorPlacement, ActorRegistry,
     ActorTurnKind, ActorWorkbenchSource, OutboundSettlement, ResidentActorMailbox,
     ResidentActorRunner, ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor,
-    StartInitiator,
+    ResidentWaitPoll, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -129,17 +129,27 @@ let idleDefinition :: ActorDefinition Int Maybe Int
           (serve initial (\state (delta, result) -> pure (result, state + delta))
             :: Eff '[Deliberate, ActorLocal ((,) Int)] Int))
 
-    client :: ActorRef ((,) Int) Int -> Eff '[Actor] Int
-    client ref = do
-      result <- call ref (1, 41)
-      cast ref (0, ())
-      pure result
+    jobDefinition :: ActorDefinition Int ((,) Int) Int
+    jobDefinition =
+      ActorDefinition
+        "job"
+        (\seed -> pure seed)
+        (\_seed initial ->
+          (receive (\(delta, result) -> pure (result, initial + delta))
+            :: Eff '[Deliberate, ActorLocal ((,) Int)] Int))
+
 in do
     _ <- startActor idleDefinition 10
     _ <- startActor workerDefinition 41
     server <- startActor serverDefinition 0
     cast server (1, ())
-    call server (2, 41)
+    serverAnswer <- call server (2, 41)
+    job <- startActor jobDefinition 10
+    jobAnswer <- call job (5, 42)
+    jobExit <- awaitExit job
+    case jobExit of
+      Completed value -> pure (serverAnswer, jobAnswer, value)
+      _ -> pure (-1, -1, -1)
 "#;
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: source,
@@ -306,11 +316,47 @@ in do
         ResidentCallPoll::Continued { turn, outcome } => (turn, outcome),
         ResidentCallPoll::Pending(_) => panic!("dispatched call must be settled"),
     };
+
+    let job_start = capture_runner
+        .capture_start(parent_turn.session_context(), parent_outcome)
+        .await
+        .expect("capture one-shot job entry");
+    let (parent_turn, job, parent_outcome) = starter
+        .start(parent_turn, &provider, job_start, None)
+        .await
+        .expect("start one-shot mailbox job");
+    let pending = match mailbox
+        .submit_outbound(parent_turn, parent_outcome)
+        .await
+        .expect("submit job call")
+    {
+        OutboundSettlement::Pending(call) => call,
+        OutboundSettlement::Continued { .. } => panic!("job call must park for its reply"),
+    };
+    assert!(mailbox.dispatch_one(job).await.expect("dispatch job call"));
+    assert_eq!(registry.lifecycle(job), Ok(ActorLifecycle::Exited));
+    let (parent_turn, parent_outcome) =
+        match mailbox.poll_call(pending).await.expect("resume job reply") {
+            ResidentCallPoll::Continued { turn, outcome } => (turn, outcome),
+            ResidentCallPoll::Pending(_) => panic!("job call must be settled"),
+        };
+    let wait = mailbox
+        .submit_wait(parent_turn, parent_outcome)
+        .await
+        .expect("submit typed job wait");
+    let (parent_turn, parent_outcome) = match mailbox
+        .poll_wait(wait)
+        .await
+        .expect("resume typed job exit")
+    {
+        ResidentWaitPoll::Continued { turn, outcome } => (turn, outcome),
+        ResidentWaitPoll::Pending(_) => panic!("completed job wait must settle immediately"),
+    };
     drop(parent_turn);
     match parent_outcome {
         ResidentOutcome::Completed { result, .. } => {
-            assert_eq!(result.to_json(), serde_json::json!(41));
+            assert_eq!(result.to_json(), serde_json::json!([41, 42, 15]));
         }
-        ResidentOutcome::Suspended { .. } => panic!("parent should complete after call reply"),
+        ResidentOutcome::Suspended { .. } => panic!("parent should complete after typed job exit"),
     }
 }

@@ -39,6 +39,14 @@ impl ActorWait {
         request: &Value,
         table: &DataConTable,
     ) -> Result<Self, ActorWaitError> {
+        let target = Self::decode_target(request, table)?;
+        Self::register_target(registry, waiter, target)
+    }
+
+    pub(crate) fn decode_target(
+        request: &Value,
+        table: &DataConTable,
+    ) -> Result<ActorRef, ActorWaitError> {
         let ActorReq::ActorWaitWith((actor_id, incarnation)) =
             ActorReq::from_value(request, table)?
         else {
@@ -52,10 +60,17 @@ impl ActorWait {
                 incarnation,
             });
         };
-        let target = ActorRef {
+        Ok(ActorRef {
             id: ActorId(actor_id_u64),
             incarnation: Incarnation(incarnation_u64),
-        };
+        })
+    }
+
+    pub(crate) fn register_target(
+        registry: &ActorRegistry,
+        waiter: ActorRef,
+        target: ActorRef,
+    ) -> Result<Self, ActorWaitError> {
         Ok(Self {
             ticket: registry.register_wait(waiter, target)?,
         })

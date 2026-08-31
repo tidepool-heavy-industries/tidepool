@@ -62,6 +62,11 @@ pub(crate) enum ResidentOutbound {
     },
 }
 
+pub(crate) struct ResidentWaitRequest {
+    pub(crate) target: ActorRef,
+    pub(crate) continuation: ResidentHole,
+}
+
 /// One live Haskell value under exclusive machine-root custody.
 ///
 /// The session tag lets the actor kernel reject a cross-machine delivery

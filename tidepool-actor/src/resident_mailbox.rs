@@ -1,8 +1,9 @@
-//! Resident execution of one accepted actor mailbox message.
+//! Resident execution of typed actor messaging and exact lifecycle waits.
 //!
 //! Routing and linear reply ownership remain in [`crate::ActorRegistry`].
-//! This adapter only moves opaque rooted Haskell values through the installed
-//! rank-N handler and its private `ActorKernel` settlement protocol.
+//! This adapter moves opaque rooted Haskell values through the installed
+//! rank-N handler and parks/resumes exact wait obligations. It owns neither a
+//! second mailbox nor a second exit-value store.
 
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
@@ -23,6 +24,8 @@ pub enum ResidentMailboxError {
     Mailbox(#[from] MailboxFailure),
     #[error(transparent)]
     Workbench(#[from] ResidentActorWorkbenchError),
+    #[error(transparent)]
+    Wait(#[from] crate::ActorWaitError),
     #[error("mailbox {0} had no request value")]
     MissingRequest(&'static str),
     #[error("mailbox handler continued after its private settlement protocol")]
@@ -48,6 +51,21 @@ pub struct ResidentCall {
 
 pub enum ResidentCallPoll {
     Pending(ResidentCall),
+    Continued {
+        turn: TurnLease,
+        outcome: ResidentOutcome,
+    },
+}
+
+pub struct ResidentWait {
+    waiter: ActorRef,
+    context: crate::ActorSessionContext,
+    continuation: tidepool_runtime::session::ResidentHole,
+    wait: crate::ActorWait,
+}
+
+pub enum ResidentWaitPoll {
+    Pending(ResidentWait),
     Continued {
         turn: TurnLease,
         outcome: ResidentOutcome,
@@ -161,6 +179,66 @@ where
                 Ok(ResidentCallPoll::Continued { turn, outcome })
             }
         }
+    }
+
+    /// Park one exact-incarnation `awaitExit` after releasing the current
+    /// Haskell turn. The retained result remains in the Haskell `ActorRef`;
+    /// this ticket carries only lifecycle observation and the continuation.
+    pub async fn submit_wait(
+        &self,
+        turn: TurnLease,
+        outcome: ResidentOutcome,
+    ) -> Result<ResidentWait, ResidentMailboxError> {
+        let waiter = turn.actor();
+        let context = turn.session_context();
+        let result: Result<ResidentWait, ResidentMailboxError> = async {
+            let request = self.runner.capture_wait(context.clone(), outcome).await?;
+            drop(turn);
+            let wait = crate::ActorWait::register_target(&self.registry, waiter, request.target)?;
+            Ok(ResidentWait {
+                waiter,
+                context,
+                continuation: request.continuation,
+                wait,
+            })
+        }
+        .await;
+        if let Err(error) = &result {
+            self.fail_actor(waiter, error.to_string()).await;
+        }
+        result
+    }
+
+    /// Poll a retained exact wait. Target completion is an ordinary typed
+    /// result: reacquire the waiter turn and resume with terminal metadata so
+    /// Haskell can read the shared exit cell.
+    pub async fn poll_wait(
+        &self,
+        mut pending: ResidentWait,
+    ) -> Result<ResidentWaitPoll, ResidentMailboxError> {
+        let terminal = match pending.wait.poll() {
+            Ok(None) => return Ok(ResidentWaitPoll::Pending(pending)),
+            Ok(Some(terminal)) => terminal,
+            Err(error) => {
+                self.fail_actor(pending.waiter, error.to_string()).await;
+                return Err(error.into());
+            }
+        };
+        let result: Result<ResidentWaitPoll, ResidentMailboxError> = async {
+            let turn = self
+                .registry
+                .begin_turn(pending.waiter, crate::ActorTurnKind::Haskell)?;
+            let outcome = self
+                .runner
+                .resume_terminal(pending.context, pending.continuation, terminal)
+                .await?;
+            Ok(ResidentWaitPoll::Continued { turn, outcome })
+        }
+        .await;
+        if let Err(error) = &result {
+            self.fail_actor(pending.waiter, error.to_string()).await;
+        }
+        result
     }
 
     /// Handle at most one accepted message. `false` means the mailbox was

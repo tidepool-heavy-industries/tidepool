@@ -21,7 +21,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
-use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound};
+use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
 use crate::{
     ActorCompileViewError, ActorRegistryError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench,
 };
@@ -148,6 +148,8 @@ pub enum ResidentActorWorkbenchError {
     CompletionCapture(#[from] crate::CompletionCaptureError),
     #[error(transparent)]
     StartCapture(#[from] crate::ActorStartCaptureError),
+    #[error(transparent)]
+    WaitCapture(#[from] crate::ActorWaitError),
 }
 
 impl<H, O> ResidentMachineAccess<H, O>
@@ -586,6 +588,27 @@ where
             .await
     }
 
+    pub(crate) async fn capture_wait(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+    ) -> Result<ResidentWaitRequest, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "actor wait completed without suspending".into(),
+            ));
+        };
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let target = crate::ActorWait::decode_target(&request, session.data_con_table())?;
+                Ok(ResidentWaitRequest {
+                    target,
+                    continuation: hole,
+                })
+            })
+            .await
+    }
+
     pub(crate) async fn capture_kernel_value(
         &self,
         context: crate::ActorSessionContext,
@@ -672,6 +695,22 @@ where
             .with_machine(context, move |session, _, _| {
                 session
                     .resume_handle(hole, value)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_terminal(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        terminal: crate::ActorTerminal,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = crate::actor_terminal_value(&terminal, session.data_con_table())?;
+                session
+                    .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await

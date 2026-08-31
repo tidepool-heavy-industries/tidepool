@@ -51,6 +51,7 @@ pub use registry::{
 };
 pub use resident_mailbox::{
     OutboundSettlement, ResidentActorMailbox, ResidentCall, ResidentCallPoll, ResidentMailboxError,
+    ResidentWait, ResidentWaitPoll,
 };
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
