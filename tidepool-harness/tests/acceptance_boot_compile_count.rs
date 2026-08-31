@@ -1,53 +1,8 @@
-//! A live-shaped receipt: not "it should have dropped" but a test that drives the self-iterating
-//! harness from launch to the FIRST model call and asserts how many
-//! `tidepool-extract` compiles were paid before that call, against a single
-//! named constant a later dev flips when the fix lands. Own binary, own
-//! process — [`tidepool_harness::engine::extract_spawn_count`] is
-//! PROCESS-GLOBAL (nextest already gives one process per test binary, so
-//! this test's count is never polluted by another test's compiles).
-//!
-//! # Traced call chain (the ONE extract-spawn site the self-harness launch
-//! path reaches before the first model call — see this crate's `engine.rs`
-//! module doc and the counter's doc comment in `tidepool-extract-cmd` for the
-//! full site survey)
-//!
-//! The counter sees EVERY `tidepool-extract` spawn in the process, not just
-//! this crate's: it lives in `tidepool_extract_cmd`, which owns the one
-//! builder every site goes through.
-//! The constant below is unaffected, because the other sites are not on the
-//! pre-model path: the ONE pre-model compile below funnels through
-//! [`tidepool_harness::engine::compile_turns`]
-//! (a thin wrapper over `tidepool_runtime::artifacts::compile_targets`, at
-//! its single `cmd.run()` call) — the harness's turn-compile path is
-//! deliberately independent of
-//! `tidepool_runtime::compile_haskell`/`cache.rs` (the MCP eval path, never
-//! reached from the self-harness driver) and of
-//! `tidepool_runtime::session::turn.rs`'s `run_turn`/`classify_block`/
-//! `compile_session_turn` (reached only via `Harness::run_block`, i.e. only
-//! AFTER a model turn produces a Haskell block to run — never before the
-//! first model call). Boot is lazy: `Harness::new` and
-//! `SelfHarnessDriver::bootstrap` no longer pay trivial ConTags-seeding
-//! compiles, and render+loop emission is fused into one extract invocation:
-//!
-//! 1. `SelfHarnessDriver::run_one_loop_iteration` →
-//!    `SelfHarnessDriver::compile_loop_entry` (driver.rs) — ONE
-//!    `tidepool-extract` spawn (`engine::compile_turns`, two `--targets`
-//!    over one shared merged `meta.cbor`) compiling the pre-loop
-//!    `render(state, lastCompaction)` and this cycle's
-//!    `loop __selfHarnessState` TOGETHER, as distinct top-level entries of
-//!    ONE module. Only once this compile succeeds and the loop suspends on
-//!    its first `runLLMTurn` hole does the driver ever call a model —
-//!    `service_typed_request_suspension` → `drive_agent_session_to_finalize` →
-//!    `Harness::drive_turn` → `engine::drive_model_turn` (the first live
-//!    [`ModelProvider::complete`] call, which [`SnapshotOnFirstCall`] below
-//!    intercepts).
-//!
-//! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
-//! `nix develop` (see `haskell/CLAUDE.md`). Pays 1 real GHC extract compile
-//! — sized to fit comfortably inside this environment's ~380s shard budget
-//! as its own binary: `export XDG_CACHE_HOME="$PWD/.cache" &&
-//! scripts/battery-shard.sh tidepool-harness -E
-//! 'binary(acceptance_boot_compile_count)'`.
+//! Pins the number of extractor invocations a self-harness pays before its
+//! first model call. The process-global counter observes both pre-model paths:
+//! `refresh_harness_ctx` installs the live context through `run_turn`, then
+//! `compile_loop_entry` compiles the fused render/loop artifact. Boot itself
+//! remains lazy. Run inside the repository's Nix/GHC environment.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,7 +24,7 @@ use tidepool_harness::{
 /// A clean-cache self-harness launch pays exactly **2** `tidepool-extract`
 /// compiles before the first model call:
 ///
-/// 1. `SelfHarnessDriver::refresh_harness_ctx`'s small `--session-bind` spawn
+/// 1. `SelfHarnessDriver::refresh_harness_ctx`'s small resident bind turn
 ///    (compiling a tiny `(Text, Text)` tuple literal, `Data.Text`-only) that
 ///    injects the stable val — deliberately never memo-cacheable (fresh
 ///    literal content each time), paid every cycle.
@@ -79,9 +34,7 @@ use tidepool_harness::{
 ///
 /// That second compile is BYTE-IDENTICAL turn to turn once the stable-val
 /// injection precedes it, so every cycle after the first is a memo HIT for it
-/// (dominant, ~6-minute spawn) — see `tests/state_injection_memo_hit.rs`,
-/// which pins that win directly. The one small extra spawn on cycle 1 is the
-/// accepted cost.
+/// — see `tests/state_injection_memo_hit.rs`, which pins that behavior.
 ///
 /// Harness turn compiles are memoized, so "clean cache" is enforced by the
 /// test (`support::isolate_compile_memo`) rather than assumed of the ambient

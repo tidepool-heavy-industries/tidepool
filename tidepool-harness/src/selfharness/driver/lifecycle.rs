@@ -538,11 +538,9 @@ impl SelfHarnessDriver {
     /// turn-invariant harness-context injection (the type/iface
     /// half is [`Self::compile_loop_entry`]'s `--inject-val`).
     ///
-    /// Compiles a tiny standalone module
-    /// ([`state_cross::harness_ctx_source`]) through
-    /// [`tidepool_runtime::session::turn::compile_session_turn`]'s
-    /// `--session-bind` path — its own small, deliberately non-cacheable
-    /// spawn (fresh literal content every cycle; see that function's doc) —
+    /// Compiles a tiny bind statement through the shared resident-turn path —
+    /// its own small, deliberately non-cacheable spawn (fresh literal content
+    /// every cycle) —
     /// then runs it, tenures the result, and registers it against the OUTER
     /// session via [`tidepool_runtime::session::resident::ResidentSession::run_bind`]:
     /// the SAME `Tidepool.Session.Val.G<g>` value-plane mechanism the
@@ -561,27 +559,49 @@ impl SelfHarnessDriver {
         let state_json = prior_state.map_or_else(|| "null".to_string(), Json::to_string);
         let operator_json = serde_json::to_string(&self.pending_operator_input)
             .unwrap_or_else(|_| "null".to_string());
-        let src = state_cross::harness_ctx_source(&state_json, &operator_json);
+        let statement = state_cross::harness_ctx_statement(&state_json, &operator_json);
+        let template = state_cross::harness_ctx_template();
 
         let session_root = Self::harness_ctx_session_root();
         std::fs::create_dir_all(&session_root)
             .map_err(|e| DriverError::Session(format!("harness-ctx session root: {e}")))?;
 
-        let binding_name = state_cross::HARNESS_CTX_BINDING.to_string();
-        let turn = tidepool_runtime::session::turn::compile_session_turn(
-            &src,
-            &[],
-            &session_root,
-            &[],
-            Some(tidepool_runtime::session::turn::SessionBind {
-                names: std::slice::from_ref(&binding_name),
-                gen: 0,
-            }),
-        )
-        .map_err(|e| DriverError::Session(format!("harness-ctx bind compile failed: {e:?}")))?;
-        let binder = turn.binders.first().ok_or_else(|| {
-            DriverError::Session("harness-ctx bind: extract returned no binders".into())
+        let turn = tidepool_runtime::session::run_turn(tidepool_runtime::session::TurnRequest {
+            turn_text: &statement,
+            templates: std::slice::from_ref(&template),
+            include: &[],
+            session_root: &session_root,
+            inject_modules: &[],
+            gen: 0,
+            verdict: None,
+            target: None,
+        })
+        .map_err(|failure| {
+            DriverError::Session(format!(
+                "harness-ctx bind compile failed: {:?}",
+                failure.error
+            ))
         })?;
+        let (compiled, binder) = match turn {
+            tidepool_runtime::session::TurnResult::Bind {
+                compiled, bound, ..
+            } => {
+                let binder = bound
+                    .into_iter()
+                    .find(|binder| binder.name == state_cross::HARNESS_CTX_BINDING)
+                    .ok_or_else(|| {
+                        DriverError::Session(
+                            "harness-ctx bind: compiled result omitted __harnessCtx".into(),
+                        )
+                    })?;
+                (compiled, binder)
+            }
+            other => {
+                return Err(DriverError::Session(format!(
+                    "harness-ctx bind produced {other:?}, expected Bind"
+                )))
+            }
+        };
 
         let sid = self.outer_sid()?;
         let outcome = self
@@ -589,11 +609,11 @@ impl SelfHarnessDriver {
             .with_session(sid, |s| {
                 s.run_bind_with_sites(
                     "harness_ctx",
-                    &turn.expr,
-                    &turn.table,
-                    binder,
+                    &compiled.expr,
+                    &compiled.table,
+                    &binder,
                     tidepool_repr::Generation(0),
-                    &turn.asks,
+                    &compiled.asks,
                 )
             })
             .map_err(|e| DriverError::Session(e.to_string()))?

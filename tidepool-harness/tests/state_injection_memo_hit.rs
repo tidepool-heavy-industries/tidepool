@@ -193,7 +193,7 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     assert!(
         cycle1.is_err(),
         "the scripted provider always fails, so the cycle must error — this \
-         test only needs the fused compile to have run, never the loop to finish"
+         test only needs the fused compile to have run, never the loop to finish: {cycle1:?}"
     );
 
     let before_cycle2 = engine::extract_spawn_count();
@@ -201,7 +201,7 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     let spawns_cycle2 = engine::extract_spawn_count() - before_cycle2;
     assert!(
         cycle2.is_err(),
-        "cycle 2 also never gets past the always-failing provider"
+        "cycle 2 also never gets past the always-failing provider: {cycle2:?}"
     );
 
     // --- Proof 1: the fused outer module's rendered TEXT is turn-invariant.
@@ -209,7 +209,8 @@ async fn second_cycle_outer_compile_is_a_memo_hit_with_fresh_state() {
     assert_eq!(
         sources.len(),
         2,
-        "each cycle must emit exactly one render+loop OuterCompile event, got {sources:?}"
+        "each cycle must emit exactly one render+loop OuterCompile event, got {sources:?}; \
+         cycle1={cycle1:?}; cycle2={cycle2:?}"
     );
     assert_eq!(
         sources[0], sources[1],

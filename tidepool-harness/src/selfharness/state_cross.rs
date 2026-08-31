@@ -42,6 +42,7 @@
 use serde_json::Value as Json;
 use tidepool_eval::value::Value;
 use tidepool_repr::DataConTable;
+use tidepool_runtime::session::{assemble_bind_module, TemplateSelector, TurnTemplate};
 
 /// The qualifier every harness-source reference (`render`, `loop`, `State`,
 /// `initialState`) is imported under — see this module's doc for why
@@ -154,14 +155,9 @@ pub fn harness_ctx_module() -> tidepool_repr::SessionModule {
 /// fused outer module's TEXT turn-invariant.
 pub const HARNESS_CTX_BINDING: &str = "__harnessCtx";
 
-/// The standalone module [`SelfHarnessDriver::refresh_harness_ctx`]
-/// (`driver.rs`) compiles through
-/// `tidepool_runtime::session::turn::compile_session_turn`'s `--session-bind`
-/// path every cycle, to (re-)bind [`HARNESS_CTX_BINDING`] at
-/// [`harness_ctx_module`]. `state_json`/`operator_msg_json` are both raw JSON
-/// text (the `State`'s JSON, and a JSON-encoded `Maybe Text` for the operator
-/// message — `serde_json::to_string(&Option<String>)` already produces
-/// exactly that shape: `"null"`/`"\"...\""`).
+/// Build the resident-turn statement that (re-)binds [`HARNESS_CTX_BINDING`]
+/// at [`harness_ctx_module`]. `state_json` and `operator_msg_json` are raw JSON
+/// text; the latter is already a JSON-encoded `Maybe Text`.
 ///
 /// Deliberately its OWN tiny compile, and deliberately never itself
 /// memo-cacheable (`tidepool_runtime::cache::invocation_key` treats fresh
@@ -170,22 +166,35 @@ pub const HARNESS_CTX_BINDING: &str = "__harnessCtx";
 /// outer module it unblocks from the memo.
 ///
 /// [`SelfHarnessDriver::refresh_harness_ctx`]: crate::selfharness::driver::SelfHarnessDriver::refresh_harness_ctx
-pub fn harness_ctx_source(state_json: &str, operator_msg_json: &str) -> String {
-    // `__result :: Eff '[] (Text, Text)`, not a bare `(Text, Text)`: a
-    // session-bind turn's scaffold target is always run through the
-    // suspendable-binding JIT calling convention (freer-simple's `Val`/`E`
-    // union), which a plain non-`Eff` value does not satisfy — mirrors the
-    // real bind wrapper's shape (`tidepool-repl`'s `wrap_bind_source`/
-    // `single_bind_template`: `__result :: Eff <stack> _; __result = do {
-    // <stmt> ; pure {{BINDERS}} }`), specialized to the empty row since this
-    // scratch module has no effects of its own to declare.
+pub fn harness_ctx_statement(state_json: &str, operator_msg_json: &str) -> String {
     format!(
-        "{{-# LANGUAGE OverloadedStrings, DataKinds #-}}\nmodule TidepoolHarnessCtx \
-         where\nimport Data.Text (Text)\nimport Control.Monad.Freer (Eff)\n__result :: Eff \
-         '[] (Text, Text)\n__result = pure ({}, {})\n",
+        "let {binding} = ({} :: Text, {} :: Text)",
         haskell_string_literal(state_json),
         haskell_string_literal(operator_msg_json),
+        binding = HARNESS_CTX_BINDING,
     )
+}
+
+/// The one wrapper used to compile [`harness_ctx_statement`] through the
+/// shared resident-turn path. The empty effect row is deliberate: refreshing
+/// context is a pure value bind, not an authored capability surface.
+pub fn harness_ctx_template() -> TurnTemplate {
+    let preamble = "{-# LANGUAGE OverloadedStrings, DataKinds, PartialTypeSignatures #-}\n\
+                    module TidepoolHarnessCtx where\n\
+                    import Data.Text (Text)\n\
+                    import Control.Monad.Freer (Eff)\n";
+    TurnTemplate {
+        kind: TemplateSelector::Bind,
+        source: assemble_bind_module(
+            preamble,
+            "",
+            "__result",
+            "'[]",
+            "{{TURN_STMT}}",
+            "{{BINDERS}}",
+            false,
+        ),
+    }
 }
 
 /// Fixed helper text for the fused outer compile's `__selfHarnessState`
@@ -197,7 +206,7 @@ pub fn harness_ctx_source(state_json: &str, operator_msg_json: &str) -> String {
 /// `"null"` (the fresh-boot sentinel [`state_in`]'s `None` arm special-cased
 /// in RUST) is now special-cased HERE, in Haskell, since the value crossing
 /// the injection plane is always a plain `Text`, never absent — a fresh boot
-/// still injects the literal string `"null"` (`harness_ctx_source`'s
+/// still injects the literal string `"null"` (`harness_ctx_statement`'s
 /// caller), and this helper recognizes it the same way `state_in`'s `None`
 /// arm used to. Every other value is decoded via the author's `FromJSON
 /// State` instance, with the SAME `STATE_DECODE_SENTINEL`-prefixed error on
@@ -219,7 +228,7 @@ pub fn state_in_via_ctx() -> String {
 /// JSON-encoded `Maybe Text` (never a bare literal), decoded via the same
 /// `Aeson.eitherDecode` machinery every other injected value uses; a decode
 /// failure here (which cannot happen from a caller going through
-/// [`harness_ctx_source`], since `serde_json` always emits a value `Maybe
+/// [`harness_ctx_statement`], since `serde_json` always emits a value `Maybe
 /// Text`'s `FromJSON` accepts) falls back to `Nothing` rather than erroring —
 /// the operator message is advisory, not a contract the author's own types
 /// pin the way `State` does.
@@ -356,11 +365,20 @@ mod tests {
     }
 
     #[test]
-    fn harness_ctx_source_embeds_both_literals_as_a_tuple() {
-        let src = harness_ctx_source("{\"loopCount\":3}", "null");
-        assert!(src.contains("module TidepoolHarnessCtx where"));
-        assert!(src.contains("__result :: Eff '[] (Text, Text)"));
-        assert!(src.contains("__result = pure (\"{\\\"loopCount\\\":3}\", \"null\")"));
+    fn harness_ctx_turn_embeds_both_literals_in_the_shared_bind_wrapper() {
+        let statement = harness_ctx_statement("{\"loopCount\":3}", "null");
+        assert_eq!(
+            statement,
+            "let __harnessCtx = (\"{\\\"loopCount\\\":3}\" :: Text, \"null\" :: Text)"
+        );
+        let source = tidepool_runtime::session::render_template(
+            &harness_ctx_template().source,
+            &statement,
+            &[HARNESS_CTX_BINDING.to_string()],
+        );
+        assert!(source.contains("module TidepoolHarnessCtx where"));
+        assert!(source.contains("__result :: Eff '[] _"));
+        assert!(source.contains("pure __harnessCtx"));
     }
 
     /// [`state_in_via_ctx`]/[`operator_msg_in_via_ctx`] take NO arguments and
