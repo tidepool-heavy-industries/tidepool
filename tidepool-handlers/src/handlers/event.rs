@@ -338,6 +338,16 @@ impl SubscriptionRegistry {
         self.subs.retain(|(_, sub)| sub.owner != Some(owner));
     }
 
+    /// A mailbox may have overflowed before any subscription existed. Its
+    /// first claimant inherits that named loss, just as if its own bounded
+    /// queue had overflowed while live; retained messages are not presented
+    /// as a deceptively complete prefix.
+    fn poison_from_retained_mailbox(&mut self, id: EvSubscriptionId, dropped: i64) {
+        if let Some(sub) = self.lookup_mut(id.raw) {
+            sub.dropped += dropped;
+        }
+    }
+
     fn has_healthy_mailbox_receiver(&self, mailbox: i64) -> bool {
         self.subs.iter().any(|(_, sub)| {
             !sub.poisoned()
@@ -789,10 +799,15 @@ fn domain_kind_to_wire(k: &tidepool_worktree::HeadChangeKind) -> EvHeadChangeKin
 struct MailboxTable {
     ids: MonotonicIdIssuer,
     live: HashSet<i64>,
+    bound: usize,
     /// Global first-arrival order across mailboxes. A same-key replacement
     /// updates the payload in place, retaining that first position.
     pending: VecDeque<PendingMailboxMessage>,
     pending_slots: HashMap<(i64, String), usize>,
+    /// Unique-key sends rejected after a mailbox's retained backlog reached
+    /// `bound`. Kept until a receiver claims (and is poisoned by) that
+    /// mailbox, or the capability is dropped.
+    overflowed: HashMap<i64, i64>,
 }
 
 #[derive(Debug)]
@@ -802,13 +817,20 @@ struct PendingMailboxMessage {
     payload: serde_json::Value,
 }
 
+struct MailboxClaim {
+    messages: Vec<PendingMailboxMessage>,
+    dropped: i64,
+}
+
 impl MailboxTable {
-    fn new() -> Self {
+    fn new(bound: usize) -> Self {
         Self {
             ids: MonotonicIdIssuer::new("mailbox"),
             live: HashSet::new(),
+            bound,
             pending: VecDeque::new(),
             pending_slots: HashMap::new(),
+            overflowed: HashMap::new(),
         }
     }
 
@@ -830,6 +852,7 @@ impl MailboxTable {
             return false;
         }
         self.pending.retain(|message| message.mailbox != id);
+        self.overflowed.remove(&id);
         self.reindex_pending();
         true
     }
@@ -838,6 +861,15 @@ impl MailboxTable {
         let slot = (mailbox, key.clone());
         if let Some(&idx) = self.pending_slots.get(&slot) {
             self.pending[idx].payload = payload;
+            return;
+        }
+        let retained_for_mailbox = self
+            .pending
+            .iter()
+            .filter(|message| message.mailbox == mailbox)
+            .count();
+        if retained_for_mailbox >= self.bound {
+            *self.overflowed.entry(mailbox).or_default() += 1;
             return;
         }
         let idx = self.pending.len();
@@ -852,14 +884,18 @@ impl MailboxTable {
     /// Consume retained messages selected by this subscription. A mailbox is
     /// single-consumer while idle; once a receiver is live, later sends use
     /// Event's normal broadcast delivery to every live receiver.
-    fn take_matching(&mut self, watches: &[EvWatch]) -> Vec<PendingMailboxMessage> {
+    fn take_matching(&mut self, watches: &[EvWatch]) -> MailboxClaim {
+        let claimed_mailboxes: HashSet<i64> = watches
+            .iter()
+            .filter_map(|watch| match watch {
+                EvWatch::WatchMailbox(mailbox) => Some(*mailbox),
+                _ => None,
+            })
+            .collect();
         let mut taken = Vec::new();
         let mut retained = VecDeque::new();
         while let Some(message) = self.pending.pop_front() {
-            let matches = watches.iter().any(|watch| {
-                matches!(watch, EvWatch::WatchMailbox(mailbox) if *mailbox == message.mailbox)
-            });
-            if matches {
+            if claimed_mailboxes.contains(&message.mailbox) {
                 taken.push(message);
             } else {
                 retained.push_back(message);
@@ -867,7 +903,14 @@ impl MailboxTable {
         }
         self.pending = retained;
         self.reindex_pending();
-        taken
+        let dropped = claimed_mailboxes
+            .into_iter()
+            .filter_map(|mailbox| self.overflowed.remove(&mailbox))
+            .sum();
+        MailboxClaim {
+            messages: taken,
+            dropped,
+        }
     }
 
     fn reindex_pending(&mut self) {
@@ -929,7 +972,7 @@ impl RepoEventHandler {
             source,
             poll_interval: config.poll_interval,
             last_pass: None,
-            mailboxes: MailboxTable::new(),
+            mailboxes: MailboxTable::new(config.queue_bound),
             active_owner: None,
         }
     }
@@ -1002,13 +1045,19 @@ impl RepoEventHandler {
         let sub = self
             .registry
             .subscribe_owned(watches.clone(), self.active_owner);
-        for message in self.mailboxes.take_matching(&watches) {
-            self.registry.queue_retained_mailbox(
-                sub,
-                message.mailbox,
-                message.key,
-                message.payload,
-            );
+        let claim = self.mailboxes.take_matching(&watches);
+        if claim.dropped > 0 {
+            self.registry
+                .poison_from_retained_mailbox(sub, claim.dropped);
+        } else {
+            for message in claim.messages {
+                self.registry.queue_retained_mailbox(
+                    sub,
+                    message.mailbox,
+                    message.key,
+                    message.payload,
+                );
+            }
         }
         Ok(sub)
     }
@@ -1383,6 +1432,19 @@ mod tests {
         (h, calls)
     }
 
+    fn handler_with_mailbox_bound(bound: usize) -> RepoEventHandler {
+        RepoEventHandler::with_source(
+            Box::new(ScriptedSource {
+                passes: vec![],
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            EventConfig {
+                queue_bound: bound,
+                poll_interval: Duration::ZERO,
+            },
+        )
+    }
+
     #[test]
     fn registration_reads_nothing_and_consumes_no_backlog() {
         // Pass 0 carries a commit that happened while nobody was subscribed.
@@ -1684,6 +1746,60 @@ mod tests {
         assert_eq!(
             mailbox_payloads(&h.repo_event_drain(sub).unwrap()),
             vec![serde_json::json!("a2"), serde_json::json!("b1")]
+        );
+    }
+
+    #[test]
+    fn unique_retained_messages_over_the_bound_poison_the_first_claimant() {
+        let mut h = handler_with_mailbox_bound(2);
+        let mid = h.mailbox_new().unwrap();
+        for key in ["a", "b", "c"] {
+            h.mailbox_send(mid, key.into(), payload(serde_json::json!(key)))
+                .unwrap();
+        }
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        assert_eq!(
+            h.repo_event_drain(sub),
+            Err(EventError::EventQueueOverflow(sub.raw, 1)),
+            "the third unique retained key is named loss, never silently omitted"
+        );
+    }
+
+    #[test]
+    fn retained_same_key_coalesces_within_the_mailbox_bound() {
+        let mut h = handler_with_mailbox_bound(2);
+        let mid = h.mailbox_new().unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!(1)))
+            .unwrap();
+        h.mailbox_send(mid, "b".into(), payload(serde_json::json!(2)))
+            .unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!(3)))
+            .unwrap();
+        let sub = h
+            .repo_event_subscribe(vec![EvWatch::WatchMailbox(mid)])
+            .unwrap();
+        assert_eq!(
+            mailbox_payloads(&h.repo_event_drain(sub).unwrap()),
+            vec![serde_json::json!(3), serde_json::json!(2)]
+        );
+    }
+
+    #[test]
+    fn dropping_a_mailbox_releases_its_retained_backlog_and_overflow_accounting() {
+        let mut h = handler_with_mailbox_bound(1);
+        let mid = h.mailbox_new().unwrap();
+        h.mailbox_send(mid, "a".into(), payload(serde_json::json!(1)))
+            .unwrap();
+        h.mailbox_send(mid, "b".into(), payload(serde_json::json!(2)))
+            .unwrap();
+        h.mailbox_drop(mid).unwrap();
+        assert!(h.mailboxes.pending.is_empty());
+        assert!(!h.mailboxes.overflowed.contains_key(&mid));
+        assert_eq!(
+            h.mailbox_send(mid, "c".into(), payload(serde_json::json!(3))),
+            Err(EventError::EventUnknownMailbox(mid))
         );
     }
 

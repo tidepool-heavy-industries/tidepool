@@ -91,6 +91,9 @@
 -- to every live matching Event subscription just like every other Event.
 -- This makes a child that sends before its parent calls 'received' observable
 -- without turning a capability mailbox into a durable broker.
+-- Retention has the same configured bound as an Event subscription: excess
+-- distinct keys poison the first claimant with 'EventQueueOverflow', rather
+-- than becoming an unbounded mailbox or disappearing silently.
 --
 -- == Where this module's definitions come from
 --
