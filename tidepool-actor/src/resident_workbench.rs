@@ -12,6 +12,7 @@ use std::time::Duration;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
+use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
@@ -118,6 +119,38 @@ pub(crate) enum ResidentActorStartupStep {
     InstallShutdown(ResidentActorShutdown),
     Deliberate(crate::ResidentCompletion),
     Ready(ResidentActorReadiness),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResidentRequestKind {
+    InstallShutdown,
+    Deliberate,
+    Ready,
+    Complete,
+    Other(String),
+}
+
+impl ResidentRequestKind {
+    fn classify(request: &Value, table: &DataConTable) -> Self {
+        let constructor = request_constructor(request, table);
+        match constructor.rsplit('.').next() {
+            Some("ActorInstallShutdownWith") => Self::InstallShutdown,
+            Some("DeliberateWith") => Self::Deliberate,
+            Some("ActorReadyWith") => Self::Ready,
+            Some("CompleteWith") => Self::Complete,
+            _ => Self::Other(constructor),
+        }
+    }
+
+    fn constructor(&self) -> &str {
+        match self {
+            Self::InstallShutdown => "ActorInstallShutdownWith",
+            Self::Deliberate => "DeliberateWith",
+            Self::Ready => "ActorReadyWith",
+            Self::Complete => "CompleteWith",
+            Self::Other(constructor) => constructor,
+        }
+    }
 }
 
 impl<H, O> ResidentActorRunner<H, O> {
@@ -430,9 +463,9 @@ where
         };
         self.access
             .with_machine(context, move |session, _, _| {
-                let constructor = request_constructor(&request, session.data_con_table());
-                match constructor.rsplit('.').next() {
-                    Some("ActorInstallShutdownWith")
+                let kind = ResidentRequestKind::classify(&request, session.data_con_table());
+                match kind {
+                    ResidentRequestKind::InstallShutdown
                         if session.parked_realm(&hole) == Some(actor_realm) =>
                     {
                         let hook = session
@@ -449,7 +482,7 @@ where
                             },
                         ))
                     }
-                    Some("DeliberateWith") => {
+                    ResidentRequestKind::Deliberate => {
                         let table = session.data_con_table().clone();
                         let completion = crate::ResidentCompletion::capture(
                             session,
@@ -460,15 +493,16 @@ where
                         )?;
                         Ok(ResidentActorStartupStep::Deliberate(completion))
                     }
-                    Some("ActorReadyWith")
+                    ResidentRequestKind::Ready
                         if session.parked_realm(&hole) == Some(actor_realm) =>
                     {
                         Ok(ResidentActorStartupStep::Ready(ResidentActorReadiness {
                             hole,
                         }))
                     }
-                    _ => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "actor initialization suspended on unsupported `{constructor}` in {actor_realm:?}"
+                    unsupported => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor initialization suspended on unsupported `{}` in {actor_realm:?}",
+                        unsupported.constructor()
                     ))),
                 }
             })
@@ -502,9 +536,11 @@ where
                 {
                     ResidentOutcome::Completed { .. } => Ok(()),
                     ResidentOutcome::Suspended { request, .. } => {
-                        let constructor = request_constructor(&request, session.data_con_table());
+                        let kind =
+                            ResidentRequestKind::classify(&request, session.data_con_table());
                         Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "shutdown suspended on disallowed `{constructor}`"
+                            "shutdown suspended on disallowed `{}`",
+                            kind.constructor()
                         )))
                     }
                 }
@@ -1105,8 +1141,8 @@ where
             hole,
             request,
         } => {
-            let constructor = request_constructor(&request, table);
-            if constructor.rsplit('.').next() == Some("CompleteWith") {
+            let kind = ResidentRequestKind::classify(&request, table);
+            if kind == ResidentRequestKind::Complete {
                 let completion = session
                     .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
                     .ok_or(ResidentActorWorkbenchError::MissingCompletionPayload)?;
@@ -1120,7 +1156,8 @@ where
                 format!("\n\nOutput before suspension:\n{}", output.join("\n"))
             };
             Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(format!(
-                "fragment suspended on `{constructor}`, which the current actor interpreter could not settle{output}"
+                "fragment suspended on `{}`, which the current actor interpreter could not settle{output}",
+                kind.constructor()
             ))))
         }
     }

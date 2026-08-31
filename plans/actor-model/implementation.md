@@ -154,6 +154,12 @@ This is the canonical status inventory for the plan.
   attenuate, while `ReadOnly` may only preserve `ReadOnly`. The neutral actor
   timeline retains profile and descriptive effect-stack metadata for
   observability without using either for runtime authorization.
+- The resident fenced-Haskell path now proves model-authored construction: a
+  parent session declares fresh startup and GADT protocol types, returns a live
+  `Eff` program that constructs and starts the full `ActorDefinition`, calls it,
+  awaits it, and applies its closure-valued retained exit. The fixed outer
+  program sees only the computation's old result type. No source replay or
+  actor-specific value registry participates.
 
 ### Not landed
 
@@ -169,7 +175,7 @@ This is the canonical status inventory for the plan.
   shadow-drift/type-coherence probes beyond the landed nominal-head facade;
 - lifecycle advisories;
 - the remaining mailbox cancellation/failure race matrix;
-- model-authored dynamic definitions and internally sealed child deployments;
+- the shadow-drift sealing adversary;
 - immutable live-binding snapshots or structural context fork;
 - the DevSwarm actor entry and deletion of the old selfharness path.
 
@@ -519,8 +525,10 @@ adds a compile-failure fixture for a write-using `ReadOnly` definition.
 
 The single private start capture now combines compiler-inferred dependencies
 with `visibleToChild`, resolves that exact facade before allocation, and routes
-the rooted entry through the normal isolated child lifecycle. Complete the
-membrane with a genuinely model-authored definition; do not add a second image
+the rooted entry through the normal isolated child lifecycle. A real resident
+model session now defines a fresh GADT protocol, constructs and starts its
+definition, calls it, and retrieves a closure-valued exit inside one live
+returned computation. Keep this one membrane; do not add a second image
 registry or public sealing operation.
 
 The sealing proof must cover:
@@ -538,13 +546,13 @@ It must reuse the code arena, source-facade mechanism, root ledger, and resource
 realms. It must not replay source to manufacture nominally new types, inherit a
 live parent scope, or introduce a program-image registry.
 
-Prove the membrane with one model-authored GADT child: the parent defines the
-protocol and definition, names a minimal child-visible head set, starts it,
-calls the child with the same nominal protocol type, and
-receives a closure-valued result. A regression case redefines one selected head
-between definition and start and must fail rather than pairing the definition
-with a same-spelled later type. Keep sealing inside the one start operation; do
-not split image, export, and installation into separately stateful public APIs.
+The landed membrane proof uses one model-authored GADT child: the model defines
+the protocol and definition, names a minimal child-visible head set, starts it,
+calls the child with the same nominal protocol type, and receives a
+closure-valued result. Remaining acceptance redefines one selected head between
+definition and start and must fail rather than pairing the definition with a
+same-spelled later type. Keep sealing inside the one start operation; do not
+split image, export, and installation into separately stateful public APIs.
 
 Sealing must compile the real child entry facade plus typed startup/installed-
 continuation adapters before allocating the child. That proof must cover the

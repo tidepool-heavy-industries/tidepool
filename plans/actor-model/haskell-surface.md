@@ -219,6 +219,29 @@ initialization-artifact, protocol, and successful-exit types need not resemble
 one another. A non-prompted constructor remains absent until a real actor needs
 one.
 
+The outer session that asks a model to author a definition likewise fixes the
+whole result type at its `deliberate` site:
+
+```haskell
+definition <-
+  (deliberate "Define the reviewer actor." goalInput
+    :: Eff ActorEffects (ActorDefinition ReviewSeed Reviewer ReviewExit))
+```
+
+Inside the fenced response, define new nominal types as declarations, then
+construct the full record as the live completion value. Give any effectful
+field helper a local monomorphic signature before placing it behind the GADT's
+existential row. This is ordinary Haskell type staging: neither task text nor
+Rust metadata guesses types that the authored call site left ambiguous.
+
+If the response invents the protocol type itself, the fixed caller cannot name
+that type retroactively. Return a value behind an interface the caller already
+knows—commonly an `Eff ActorEffects result` computation that constructs,
+starts, calls, and awaits the actor internally, or an existential package with
+its eliminators. This is the useful fusion of fixed harness and self-written
+program: dynamic Haskell owns the new types while the outer state machine keeps
+an old, precise transition type.
+
 An owner can have children with unrelated exit types because exit observation
 is tied to each `ActorRef protocol exit`. `awaitExit` returns that child's exact exit
 type. Unexpected lifecycle events do not enter a heterogeneous Haskell system
