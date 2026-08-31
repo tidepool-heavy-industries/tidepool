@@ -42,18 +42,6 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
     );
 }
 
-/// Extracts the `"bindings"` array (as raw JSON text) from a `:bindings`
-/// response — used to assert "nothing was registered" without also comparing
-/// `generation`/`valGeneration` counters, which a `:t` probe legitimately
-/// bumps (it consumes a throwaway generation to avoid an iface collision with
-/// the NEXT real bind).
-fn bindings_only(s: &str) -> serde_json::Value {
-    serde_json::from_str::<serde_json::Value>(s)
-        .ok()
-        .and_then(|v| v.get("bindings").cloned())
-        .unwrap_or(serde_json::Value::Null)
-}
-
 /// `:t` on an M-returning expression must report the authored spelling and
 /// mutate nothing. Persistence normalizes `M` internally, but type display is
 /// deliberately the original readable type.
@@ -88,9 +76,8 @@ async fn t_on_m_returning_helper_reports_authored_type() {
         .expect_ok(":bindings after :t")
         .to_string();
     assert_eq!(
-        bindings_only(&before),
-        bindings_only(&after),
-        ":t must mutate nothing — the probe bind is never registered: before={before} after={after}"
+        before, after,
+        ":t must not mutate bindings or either logical generation: before={before} after={after}"
     );
 }
 
@@ -166,9 +153,8 @@ async fn t_on_either_returning_effect_verb_reports_type() {
         .expect_ok(":bindings after :t")
         .to_string();
     assert_eq!(
-        bindings_only(&before),
-        bindings_only(&after),
-        ":t must mutate nothing — the probe bind is never registered: before={before} after={after}"
+        before, after,
+        ":t must not mutate bindings or either logical generation: before={before} after={after}"
     );
 }
 

@@ -250,6 +250,45 @@ pub struct TurnRequest<'a> {
     pub target: Option<&'a str>,
 }
 
+/// Failure from the shared resident-turn boundary.
+///
+/// `attempted_source` is present when the extractor reached a rendered
+/// template and failed while compiling it. Frontends that remap GHC spans use
+/// this exact source; other callers can discard it without reconstructing the
+/// worker's template choice.
+#[derive(Debug)]
+pub struct TurnFailure {
+    pub error: CompileError,
+    pub attempted_source: Option<String>,
+}
+
+impl std::fmt::Display for TurnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for TurnFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl From<CompileError> for TurnFailure {
+    fn from(error: CompileError) -> Self {
+        Self {
+            error,
+            attempted_source: None,
+        }
+    }
+}
+
+impl From<std::io::Error> for TurnFailure {
+    fn from(error: std::io::Error) -> Self {
+        CompileError::from(error).into()
+    }
+}
+
 /// What a compiled (BIND or EXPR) turn yields. Grouped separately from
 /// [`TurnResult`] so the `Decl` variant, which compiles nothing, carries none
 /// of it.
@@ -557,7 +596,7 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 ///
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
-pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
+pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders }) => {
             #[allow(
@@ -567,7 +606,7 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
             let selector = TemplateSelector::for_verdict(*kind, binders)
                 .expect("TemplateSelector::for_verdict is total over TurnKind");
             if select_template(req.templates, selector).is_none() {
-                return Err(missing_template_error(selector));
+                return Err(missing_template_error(selector).into());
             }
             let mut arg = turn_kind_wire_name(*kind).to_string();
             if !binders.is_empty() {
@@ -634,15 +673,18 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, CompileError> {
         timing::log_module_timings(&module_timings);
     }
     if !run.success() {
-        return Err(
-            match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
-                Ok(report) => CompileError::Diagnostics(report.diagnostics),
-                Err(msg) => CompileError::MalformedDiagnostics(msg),
-            },
-        );
+        let attempted_source = std::fs::read_to_string(temp.path().join("turn-attempt.hs")).ok();
+        let error = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
+            Ok(report) => CompileError::Diagnostics(report.diagnostics),
+            Err(msg) => CompileError::MalformedDiagnostics(msg),
+        };
+        return Err(TurnFailure {
+            error,
+            attempted_source,
+        });
     }
 
-    decode_turn_output_dir(temp.path())
+    decode_turn_output_dir(temp.path()).map_err(Into::into)
 }
 
 /// Decode one item's full output directory into a [`TurnResult`]: the
@@ -1721,7 +1763,7 @@ mod tests {
         };
         let err = run_turn(req).unwrap_err();
         assert!(
-            matches!(err, CompileError::ExtractFailed(_)),
+            matches!(err.error, CompileError::ExtractFailed(_)),
             "expected a clean ExtractFailed, got {err:?}"
         );
     }
@@ -1776,6 +1818,44 @@ mod tests {
         assert!(
             call.starts_with("--worker-request-v2 5450524551303032"),
             "spawn did not use the versioned typed worker protocol:\n{call}"
+        );
+    }
+
+    /// Ordered templates are a typechecking fallback, not a blanket recovery
+    /// loop. A missing external preprocessor raises an infrastructure
+    /// exception rather than a GHC `SourceError`; the worker must surface it
+    /// immediately instead of silently compiling the valid second template.
+    #[test]
+    fn run_turn_does_not_retry_template_after_infrastructure_exception() {
+        tidepool_testing::eval_harness::require_extract();
+        let session_root = TempDir::new().unwrap();
+        let templates = vec![
+            TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: "{-# OPTIONS_GHC -F -pgmF /definitely/missing/tidepool-turn-preprocessor #-}\nmodule Expr where\n__result = {{TURN}}\n".to_string(),
+            },
+            TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: "module Expr where\n__result = {{TURN}}\n".to_string(),
+            },
+        ];
+        let err = run_turn(TurnRequest {
+            turn_text: "1 :: Int",
+            templates: &templates,
+            include: &[],
+            session_root: session_root.path(),
+            inject_modules: &[],
+            gen: 0,
+            verdict: Some(TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+            }),
+            target: None,
+        })
+        .expect_err("an infrastructure exception must not select the valid fallback template");
+        assert!(
+            matches!(err.error, CompileError::Diagnostics(_)),
+            "worker infrastructure failure should retain its diagnostic envelope: {err:?}"
         );
     }
 
@@ -2253,7 +2333,7 @@ mod tests {
                     // behavior), not silently succeed or panic.
                     let err = run_turn(req).unwrap_err();
                     assert!(
-                        matches!(err, CompileError::Diagnostics(_)),
+                        matches!(err.error, CompileError::Diagnostics(_)),
                         "{}: expected a real GHC diagnostic, got {err:?}",
                         case.name
                     );

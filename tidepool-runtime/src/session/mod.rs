@@ -69,8 +69,8 @@ pub use workbench::{
 pub use turn::{
     assemble_bind_module, assemble_expression_module, classify_block, compile_session_turn,
     insert_preamble_imports, place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn,
-    ExpressionLift, SessionBind, SessionTurnResult, TemplateSelector, TurnClassification, TurnKind,
-    TurnRequest, TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    ExpressionLift, SessionBind, SessionTurnResult, TemplateSelector, TurnClassification,
+    TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::collections::HashMap;
@@ -586,7 +586,7 @@ impl SessionLib {
             }),
             target: None,
         })
-        .map_err(SessionError::Compile)?;
+        .map_err(|failure| SessionError::Compile(failure.error))?;
         let items = match turn_result {
             TurnResult::Decl { items, .. } => items,
             other => {

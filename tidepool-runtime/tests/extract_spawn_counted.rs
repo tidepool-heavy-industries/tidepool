@@ -96,7 +96,7 @@ fn a_failed_spawn_is_not_counted() {
     };
     let err = run_turn(req).unwrap_err();
     assert!(
-        matches!(err, tidepool_runtime::CompileError::Io(_)),
+        matches!(err.error, tidepool_runtime::CompileError::Io(_)),
         "a spawn failure is an environment problem, got {err:?}"
     );
 

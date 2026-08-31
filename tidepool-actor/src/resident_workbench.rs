@@ -969,10 +969,10 @@ where
             generation: compile_view.next_value_generation(),
             declaration_source: compile_view.declaration_source(&block.source),
         }))),
-        Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
-            Ok(CompiledBlock::Rejected(classify_compile(&error).message))
-        }
-        Err(error) => Err(ResidentActorWorkbenchError::Compile(error)),
+        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => Ok(
+            CompiledBlock::Rejected(classify_compile(&failure.error).message),
+        ),
+        Err(failure) => Err(ResidentActorWorkbenchError::Compile(failure.error)),
     }
 }
 

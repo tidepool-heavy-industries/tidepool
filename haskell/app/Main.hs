@@ -6,7 +6,7 @@ import System.Directory (createDirectoryIfMissing, setCurrentDirectory)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
-import Control.Exception (evaluate, try, SomeException, fromException, toException)
+import Control.Exception (evaluate, try, throwIO, SomeException, fromException, toException)
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
 import Control.Monad (foldM, when, void)
@@ -437,6 +437,10 @@ runTurnMode compiler args path = do
           createDirectoryIfMissing True outDir
           let modulePath = outDir </> modName ++ ".hs"
           writeFile modulePath spliced
+          -- Overwritten before every ordered compile attempt. The Rust turn
+          -- boundary reads this only on failure so frontend diagnostics use
+          -- the exact module GHC last saw, never an unspliced template guess.
+          writeFile (outDir </> "turn-attempt.hs") spliced
           return (spliced, modName, modulePath)
     turnOut <- case sbKind sb of
       KDecl -> do
@@ -456,12 +460,18 @@ runTurnMode compiler args path = do
         -- 'templateSelectorForVerdict' mirrors Rust's
         -- 'TemplateSelector::for_verdict' exactly.
         let selector = templateSelectorForVerdict kind (sbBinders sb)
-        tmplFile <- case lookup (templateSelectorWireName selector) templates of
-          Just f  -> return f
-          Nothing -> error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
-        (spliced, _modName, modulePath) <- spliceInto tmplFile
         let scope = scopeFromWorkerRequest args
-        result <- compiler (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args)
+            matching = [f | (name, f) <- templates, name == templateSelectorWireName selector]
+            compileVariants _ [] = error ("--turn: no --turn-template for kind " ++ templateSelectorWireName selector)
+            compileVariants index (tmplFile:rest) = do
+              (spliced, _modName, modulePath) <- spliceInto tmplFile
+              attempted <- try (compiler (Just scope) modulePath (requestIncludes args) (requestBuildProductsDir args))
+              case attempted of
+                Right result -> return (index, spliced, result)
+                Left err@(_ :: SomeException) -> case (fromException err :: Maybe SourceError, rest) of
+                  (Just _, _ : _) -> compileVariants (index + 1) rest
+                  _               -> throwIO err
+        (variant, spliced, result) <- compileVariants (0 :: Int) matching
         let binds       = prBinds result
             hscEnv      = prHscEnv result
             mCapturedTy = fmap T.pack (prCapturedType result)
@@ -478,9 +488,9 @@ runTurnMode compiler args path = do
             g    <- requireArg "--bind-gen"     (requestBindGen args)
             root <- requireArg "--session-root" (requestSessionRoot args)
             bbs  <- mkBoundBinders (sbBinders sb) g root result
-            return (TBind (map T.pack (sbBinders sb)) 0 bbs asksSites wrapped)
-          SBindDiscard -> return (TBind [] 0 [] asksSites wrapped)
-          SExpr -> return (TExpr 0 asksSites wrapped)
+            return (TBind (map T.pack (sbBinders sb)) variant bbs asksSites wrapped)
+          SBindDiscard -> return (TBind [] variant [] asksSites wrapped)
+          SExpr -> return (TExpr variant asksSites wrapped)
           SDecl -> error ("--turn: unexpected verdict kind: " ++ templateSelectorWireName selector)
     outFile <- requireArg "--turn-out" (requestTurnOut args)
     let cbor = encodeTurnOut turnOut

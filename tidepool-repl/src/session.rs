@@ -38,10 +38,11 @@ use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
 };
 use tidepool_runtime::session::{
-    assemble_bind_module, classify_block, compile_session_turn, extract_ask_request,
-    insert_preamble_imports, place_turn_stmt, subtract_import_list_names, BoundBinder,
-    GateDispatcher, ModuleEnv, PersistentSession, SessionBind, SessionCompileView, SessionError,
-    SessionLib, SourceImports, TurnClassification, TurnKind, ValueTier, WorkSequence,
+    assemble_bind_module, classify_block, extract_ask_request, insert_preamble_imports,
+    place_turn_stmt, subtract_import_list_names, BoundBinder, GateDispatcher, ModuleEnv,
+    PersistentSession, SessionCompileView, SessionError, SessionLib, SessionTurnResult,
+    SourceImports, TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest,
+    TurnResult, TurnTemplate, ValueTier, WorkSequence,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, value_to_json, CompileError, FailureClass, Phase,
@@ -79,6 +80,12 @@ pub struct AskRequest {
 pub enum TurnStep {
     Completed(TurnOutcome),
     Suspended(AskRequest),
+}
+
+struct ReplCompileFailure {
+    error: CompileError,
+    source: String,
+    user_lines: Option<(usize, usize)>,
 }
 
 /// One ITEM's outcome — the same shape as [`TurnStep`], named separately
@@ -193,6 +200,10 @@ pub struct Session {
     /// alongside effectful (materialized) binds. Latest-wins per name; a
     /// cross-plane rebind removes the name from the other plane.
     pure_binds: std::collections::BTreeMap<String, PureBind>,
+    /// Disposable interface identity. Kept in the high half of the generation
+    /// space so read-only probes never consume or collide with committed value
+    /// generations.
+    scratch_gen: u64,
 }
 
 /// A pure bind that lives in the decl plane (GHCi-environment model): its value
@@ -468,6 +479,7 @@ impl Session {
             cancel_slot: None,
             last_stubs: Vec::new(),
             pure_binds: std::collections::BTreeMap::new(),
+            scratch_gen: 1_u64 << 63,
         })
     }
 
@@ -1291,13 +1303,22 @@ impl Session {
     fn probe_pure_type(&mut self, name: &str) -> Option<String> {
         let preamble = to_nmr_pragmas(&self.patched_preamble());
         let imports = self.session_imports();
-        let inject = self.live_val_modules();
         let eval_input = self.eval_input.clone();
-        let src = wrap_pure_ref_source(&preamble, &imports, name, eval_input.as_ref());
-        let include = self.turn_include();
-        compile_session_turn(&src, &include, self.session_root(), &inject, None)
-            .ok()
-            .and_then(|turn| turn.warnings.captured_type)
+        let template = wrap_pure_ref_source(&preamble, &imports, "{{TURN}}", eval_input.as_ref());
+        self.compile_repl_turn(
+            name,
+            vec![TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: template,
+            }],
+            TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+            },
+            self.core.val_gen(),
+        )
+        .ok()
+        .and_then(|compiled| compiled.warnings.captured_type)
     }
 
     /// Build the `Defined` outcome for one decl head at generation `gen`,
@@ -1459,8 +1480,7 @@ impl Session {
             // render the response from that SAME single evaluation. See
             // `run_bare_expr`.
             let imports = self.turn_imports(expr_text);
-            let inject = self.live_val_modules();
-            self.run_bare_expr(expr_text, &imports, &inject, handlers, captured)
+            self.run_bare_expr(expr_text, &imports, handlers, captured)
         }
     }
 
@@ -1507,6 +1527,66 @@ impl Session {
         }
     }
 
+    /// Compile one raw REPL item through the shared resident turn boundary.
+    /// Frontend policy is limited to the ordered wrapper templates; GHC owns
+    /// classification and variant selection, and there is exactly one extract
+    /// spawn for the item.
+    fn compile_repl_turn(
+        &self,
+        turn_text: &str,
+        templates: Vec<TurnTemplate>,
+        verdict: TurnClassification,
+        gen: Generation,
+    ) -> Result<SessionTurnResult, ReplCompileFailure> {
+        let include = self.turn_include();
+        let inject = self.live_val_modules();
+        let result = tidepool_runtime::session::run_turn(TurnRequest {
+            turn_text,
+            templates: &templates,
+            include: &include,
+            session_root: self.session_root(),
+            inject_modules: &inject,
+            gen: gen.0,
+            verdict: Some(verdict),
+            target: None,
+        })
+        .map_err(|failure| {
+            let TurnFailure {
+                error,
+                attempted_source,
+            } = failure;
+            let source = attempted_source.unwrap_or_default();
+            let user_lines = user_code_line_range(&source, turn_text);
+            ReplCompileFailure {
+                error,
+                source,
+                user_lines,
+            }
+        })?;
+        let (binders, compiled) = match result {
+            TurnResult::Bind {
+                bound, compiled, ..
+            } => (bound, compiled),
+            TurnResult::Expr { compiled, .. } => (Vec::new(), compiled),
+            TurnResult::Decl { .. } => {
+                return Err(ReplCompileFailure {
+                    error: CompileError::ExtractFailed(
+                        "REPL compile adapter received a declaration outcome".to_string(),
+                    ),
+                    source: String::new(),
+                    user_lines: None,
+                })
+            }
+        };
+        Ok(SessionTurnResult {
+            expr: compiled.expr,
+            table: compiled.table,
+            warnings: compiled.warnings,
+            binders,
+            asks: compiled.asks,
+        })
+    }
+
     /// BIND path (`x <- action` / `let x = e`): wrap into an `Eff`-typed
     /// `__result = do { <stmt>; pure x }`, compile through the session extract
     /// (earlier bindings injected so `action` may reference them), then
@@ -1523,35 +1603,35 @@ impl Session {
     ) -> ItemStep {
         let preamble = self.patched_preamble();
         let g = self.core.val_gen().next();
-        let inject = self.live_val_modules();
         let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
-        let wrapped = wrap_bind_source(
+        let template_source = wrap_bind_source(
             &preamble,
             &self.cfg.effect_stack,
             &imports,
-            turn_text,
-            &name,
+            "{{TURN_STMT}}",
+            "{{BINDERS}}",
             eval_input.as_ref(),
         );
-
-        let include = self.turn_include();
-
-        let single = vec![name.clone()];
-        let user_lines = user_code_line_range(&wrapped, turn_text);
-        let turn = match compile_session_turn(
-            &wrapped,
-            &include,
-            self.session_root(),
-            &inject,
-            Some(SessionBind {
-                names: &single,
-                gen: g.0,
-            }),
+        let turn = match self.compile_repl_turn(
+            turn_text,
+            vec![TurnTemplate {
+                kind: TemplateSelector::Bind,
+                source: template_source.clone(),
+            }],
+            TurnClassification {
+                kind: TurnKind::Bind,
+                binders: vec![name.clone()],
+            },
+            g,
         ) {
-            Ok(t) => t,
+            Ok(turn) => turn,
             Err(e) => {
-                return ItemStep::Done(TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)))
+                return ItemStep::Done(TurnOutcome::Error(compile_fail(
+                    &e.error,
+                    &e.source,
+                    e.user_lines,
+                )))
             }
         };
         if turn.warnings.has_io {
@@ -1657,9 +1737,9 @@ impl Session {
     /// DISCARD-BIND path (`_ <- e`, `(_, _) <- e`): wraps the whole statement
     /// into an `Eff`-typed `__result = do { <stmt>; pure () }` — the same
     /// `{{TURN_STMT}}` placement `run_bind` uses, but yielding `()` and
-    /// splicing no binder — and compiles it with no [`SessionBind`] (a
-    /// discarding bind mints no session value, so it must not flow through
-    /// `SessionBind`: the extract rejects an empty `--bind-name` list). Runs
+    /// splicing no binder — and selects the shared discard-bind template (a
+    /// discarding bind mints no session value, so the extract receives an
+    /// empty GHC-derived binder list). Runs
     /// through [`Self::run_reference_fragment`] exactly like a session
     /// reference, reporting `()` as the value — the statement's own effects
     /// fire exactly once, and nothing is bound.
@@ -1670,28 +1750,36 @@ impl Session {
         captured: &CapturedOutput,
     ) -> ItemStep {
         let preamble = self.patched_preamble();
-        let inject = self.live_val_modules();
         let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
-        let wrapped = wrap_bind_discard_source(
+        let template_source = wrap_bind_discard_source(
             &preamble,
             &self.cfg.effect_stack,
             &imports,
-            turn_text,
+            "{{TURN_STMT}}",
             eval_input.as_ref(),
         );
-
-        let include = self.turn_include();
-        let user_lines = user_code_line_range(&wrapped, turn_text);
-        let turn =
-            match compile_session_turn(&wrapped, &include, self.session_root(), &inject, None) {
-                Ok(t) => t,
-                Err(e) => {
-                    return ItemStep::Done(TurnOutcome::Error(compile_fail(
-                        &e, &wrapped, user_lines,
-                    )))
-                }
-            };
+        let turn = match self.compile_repl_turn(
+            turn_text,
+            vec![TurnTemplate {
+                kind: TemplateSelector::BindDiscard,
+                source: template_source.clone(),
+            }],
+            TurnClassification {
+                kind: TurnKind::Bind,
+                binders: Vec::new(),
+            },
+            self.core.val_gen(),
+        ) {
+            Ok(turn) => turn,
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(compile_fail(
+                    &e.error,
+                    &e.source,
+                    e.user_lines,
+                )))
+            }
+        };
         self.run_reference_fragment(turn, Some("()".to_string()), handlers, captured)
     }
 
@@ -1710,34 +1798,35 @@ impl Session {
     ) -> ItemStep {
         let preamble = self.patched_preamble();
         let g = self.core.val_gen().next();
-        let inject = self.live_val_modules();
         let imports = self.turn_imports(turn_text);
         let eval_input = self.eval_input.clone();
-        let wrapped = wrap_multi_bind_source(
+        let template_source = wrap_multi_bind_source(
             &preamble,
             &self.cfg.effect_stack,
             &imports,
-            turn_text,
-            &names,
+            "{{TURN_STMT}}",
+            &["{{BINDERS}}".to_string()],
             eval_input.as_ref(),
         );
-
-        let include = self.turn_include();
-
-        let user_lines = user_code_line_range(&wrapped, turn_text);
-        let turn = match compile_session_turn(
-            &wrapped,
-            &include,
-            self.session_root(),
-            &inject,
-            Some(SessionBind {
-                names: &names,
-                gen: g.0,
-            }),
+        let turn = match self.compile_repl_turn(
+            turn_text,
+            vec![TurnTemplate {
+                kind: TemplateSelector::Bind,
+                source: template_source.clone(),
+            }],
+            TurnClassification {
+                kind: TurnKind::Bind,
+                binders: names.clone(),
+            },
+            g,
         ) {
-            Ok(t) => t,
+            Ok(turn) => turn,
             Err(e) => {
-                return ItemStep::Done(TurnOutcome::Error(compile_fail(&e, &wrapped, user_lines)))
+                return ItemStep::Done(TurnOutcome::Error(compile_fail(
+                    &e.error,
+                    &e.source,
+                    e.user_lines,
+                )))
             }
         };
         if turn.warnings.has_io {
@@ -1911,7 +2000,6 @@ impl Session {
         &mut self,
         expr_text: &str,
         imports: &str,
-        inject: &[String],
         handlers: &mut H,
         captured: &CapturedOutput,
     ) -> ItemStep {
@@ -1927,56 +2015,45 @@ impl Session {
         // `turn.binders[0]`, i.e. `it`, is used).
         let it_names = vec!["it".to_string(), "__it_render".to_string()];
 
-        let monadic_src = wrap_bare_it_monadic(
+        let monadic_template = wrap_bare_it_monadic(
             &preamble,
             &self.cfg.effect_stack,
             imports,
-            expr_text,
+            "{{TURN}}",
             eval_input.as_ref(),
         );
-        let monadic_result = {
-            let include = self.turn_include();
-            compile_session_turn(
-                &monadic_src,
-                &include,
-                self.session_root(),
-                inject,
-                Some(SessionBind {
-                    names: &it_names,
-                    gen: g.0,
-                }),
-            )
-        };
-
-        let turn = match monadic_result {
-            Ok(t) => t,
-            Err(_monadic_err) => {
-                let pure_src = wrap_bare_it_pure(
-                    &preamble,
-                    &self.cfg.effect_stack,
-                    imports,
-                    expr_text,
-                    eval_input.as_ref(),
-                );
-                let include = self.turn_include();
-                let user_lines = user_code_line_range(&pure_src, expr_text);
-                match compile_session_turn(
-                    &pure_src,
-                    &include,
-                    self.session_root(),
-                    inject,
-                    Some(SessionBind {
-                        names: &it_names,
-                        gen: g.0,
-                    }),
-                ) {
-                    Ok(t) => t,
-                    Err(pure_err) => {
-                        return ItemStep::Done(TurnOutcome::Error(compile_fail(
-                            &pure_err, &pure_src, user_lines,
-                        )))
-                    }
-                }
+        let pure_template = wrap_bare_it_pure(
+            &preamble,
+            &self.cfg.effect_stack,
+            imports,
+            "{{TURN}}",
+            eval_input.as_ref(),
+        );
+        let turn = match self.compile_repl_turn(
+            expr_text,
+            vec![
+                TurnTemplate {
+                    kind: TemplateSelector::Bind,
+                    source: monadic_template,
+                },
+                TurnTemplate {
+                    kind: TemplateSelector::Bind,
+                    source: pure_template.clone(),
+                },
+            ],
+            TurnClassification {
+                kind: TurnKind::Bind,
+                binders: it_names,
+            },
+            g,
+        ) {
+            Ok(turn) => turn,
+            Err(e) => {
+                return ItemStep::Done(TurnOutcome::Error(compile_fail(
+                    &e.error,
+                    &e.source,
+                    e.user_lines,
+                )))
             }
         };
 
@@ -2151,44 +2228,37 @@ impl Session {
                     }));
                 }
                 let preamble = self.patched_preamble();
-                // Consume a throwaway generation to prevent an iface collision
-                // with the next real bind (compile_session_turn writes a Val.G<g>.hi
-                // even for the discard path). We do NOT add to self.core.bindings().
-                let throwaway_gen = self.core.val_gen().next();
-                self.core.set_val_gen(throwaway_gen);
-                let inject = self.live_val_modules();
+                let probe_gen = Generation(self.scratch_gen);
+                self.scratch_gen = self.scratch_gen.saturating_add(1);
                 let imports = self.turn_imports(expr);
                 let eval_input = self.eval_input.clone();
                 let turn_text = format!("let __t = {expr}");
-                let wrapped = wrap_bind_source(
+                let template_source = wrap_bind_source(
                     &preamble,
                     &self.cfg.effect_stack,
                     &imports,
-                    &turn_text,
-                    "__t",
+                    "{{TURN_STMT}}",
+                    "{{BINDERS}}",
                     eval_input.as_ref(),
                 );
-                let include = self.turn_include();
-                let names: Vec<String> = vec!["__t".to_string()];
-                let user_lines = user_code_line_range(&wrapped, &turn_text);
-                let turn = match compile_session_turn(
-                    &wrapped,
-                    &include,
-                    self.session_root(),
-                    &inject,
-                    Some(SessionBind {
-                        names: &names,
-                        gen: throwaway_gen.0,
-                        // `:t` reads the inferred type from an ordinary
-                        // throwaway bind, then discards it from session scope.
-                    }),
+                let turn = match self.compile_repl_turn(
+                    &turn_text,
+                    vec![TurnTemplate {
+                        kind: TemplateSelector::Bind,
+                        source: template_source.clone(),
+                    }],
+                    TurnClassification {
+                        kind: TurnKind::Bind,
+                        binders: vec!["__t".to_string()],
+                    },
+                    probe_gen,
                 ) {
-                    Ok(t) => t,
+                    Ok(turn) => turn,
                     Err(e) => {
                         return TurnOutcome::Meta(serde_json::json!({
                             "error": format!(
                                 "compile error: {}",
-                                render_compile_fail_body(&e, &wrapped, user_lines)
+                                render_compile_fail_body(&e.error, &e.source, e.user_lines)
                             )
                         }))
                     }
@@ -2491,29 +2561,36 @@ impl Session {
         }
         let preamble = self.patched_preamble();
         let imports = self.session_imports();
-        let inject = self.live_val_modules();
         let eval_input = self.eval_input.clone();
         // `template_haskell_show_default` (the non-session `eval`-tool
         // template, target `result`) is the WRONG shape here — it's compiled
-        // via `compile_session_turn`, whose extractor invocation always
-        // targets the scaffold-reserved `__result` (see `turn.rs`). Reuse
+        // through the shared turn boundary. Reuse
         // `wrap_probe_source` instead: it already compiles to a properly
         // `Eff`-typed `__result :: Eff {effect_stack} _` binding (forcing the
         // same freer-simple constructor requirement this bootstrap exists
         // for), just via an extra `__probe`/`__t` monadic peel we don't need
         // the result of — only `turn.table`/`turn.expr` are read below.
-        let src = wrap_probe_source(
+        let template = wrap_probe_source(
             &preamble,
             &self.cfg.effect_stack,
             &imports,
-            "pure ()",
+            "{{TURN}}",
             eval_input.as_ref(),
         );
-        let compiled = {
-            let include = self.turn_include();
-            compile_session_turn(&src, &include, self.session_root(), &inject, None)
-        };
-        if let Ok(turn) = compiled {
+        let compiled = self.compile_repl_turn(
+            "pure ()",
+            vec![TurnTemplate {
+                kind: TemplateSelector::Expr,
+                source: template,
+            }],
+            TurnClassification {
+                kind: TurnKind::Expr,
+                binders: Vec::new(),
+            },
+            self.core.val_gen(),
+        );
+        if let Ok(compiled) = compiled {
+            let turn = compiled;
             let _ = self.merge_table(&turn.table);
             if self
                 .core
