@@ -99,8 +99,8 @@ impl ProgramProvenance {
                 if previous != site {
                     return Err(YieldSiteCollision {
                         site: site.site,
-                        first: previous.clone(),
-                        second: site.clone(),
+                        first: Box::new(previous.clone()),
+                        second: Box::new(site.clone()),
                     });
                 }
             } else {

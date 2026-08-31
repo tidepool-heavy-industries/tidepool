@@ -131,6 +131,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::zombie_processes,
+        reason = "the helper must exit without waiting to test parent-death cleanup"
+    )]
     fn parent_death_helper() {
         if std::env::var_os(HELPER_ENV).is_none() {
             return;

@@ -93,8 +93,8 @@ pub struct YieldSites {
 #[error("typed-site collision at {site}: {first:?} != {second:?}")]
 pub struct YieldSiteCollision {
     pub site: u64,
-    pub first: YieldSite,
-    pub second: YieldSite,
+    pub first: Box<YieldSite>,
+    pub second: Box<YieldSite>,
 }
 
 impl YieldSites {
@@ -153,8 +153,8 @@ impl YieldSites {
                 Some(previous) if previous != &site => {
                     return Err(YieldSiteCollision {
                         site: site.site,
-                        first: previous.clone(),
-                        second: site,
+                        first: Box::new(previous.clone()),
+                        second: Box::new(site),
                     });
                 }
                 _ => {
@@ -819,50 +819,6 @@ pub fn read_yield_sites(path: &Path) -> Result<Vec<YieldSite>, CompileError> {
     serde_json::from_slice(&bytes).map_err(|e| CompileError::Asks(e.to_string()))
 }
 
-#[cfg(test)]
-mod typed_site_tests {
-    use super::*;
-
-    fn site(id: u64, ty: &str) -> YieldSite {
-        YieldSite {
-            site: id,
-            origin: "M.program".into(),
-            ordinal: 0,
-            ty: ty.into(),
-            modules: Vec::new(),
-            heads: Vec::new(),
-            inputs: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn missing_sidecar_is_not_an_empty_site_set() {
-        let root = tempfile::tempdir().expect("temporary artifact root");
-        let path = root.path().join("asks.json");
-        assert!(matches!(
-            read_yield_sites(&path),
-            Err(CompileError::MissingOutput(missing)) if missing == path
-        ));
-    }
-
-    #[test]
-    fn empty_sidecar_is_the_only_empty_site_set() {
-        let root = tempfile::tempdir().expect("temporary artifact root");
-        let path = root.path().join("asks.json");
-        std::fs::write(&path, b"[]").expect("write empty sidecar");
-        assert_eq!(read_yield_sites(&path).expect("read empty sidecar"), vec![]);
-    }
-
-    #[test]
-    fn conflicting_site_id_is_a_structured_error() {
-        let collision = YieldSites::from_sites(vec![site(7, "Int"), site(7, "Bool")])
-            .expect_err("conflicting metadata must fail");
-        assert_eq!(collision.site, 7);
-        assert_eq!(collision.first.ty, "Int");
-        assert_eq!(collision.second.ty, "Bool");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Invocation-keyed memo glue (compile_targets only — see the module doc)
 // ---------------------------------------------------------------------------
@@ -946,4 +902,48 @@ fn store_memo(
         artifacts.push((asks_name, Some(r.asks_bytes.as_slice())));
     }
     cache::artifacts_store(key, &artifacts);
+}
+
+#[cfg(test)]
+mod typed_site_tests {
+    use super::*;
+
+    fn site(id: u64, ty: &str) -> YieldSite {
+        YieldSite {
+            site: id,
+            origin: "M.program".into(),
+            ordinal: 0,
+            ty: ty.into(),
+            modules: Vec::new(),
+            heads: Vec::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn missing_sidecar_is_not_an_empty_site_set() {
+        let root = tempfile::tempdir().expect("temporary artifact root");
+        let path = root.path().join("asks.json");
+        assert!(matches!(
+            read_yield_sites(&path),
+            Err(CompileError::MissingOutput(missing)) if missing == path
+        ));
+    }
+
+    #[test]
+    fn empty_sidecar_is_the_only_empty_site_set() {
+        let root = tempfile::tempdir().expect("temporary artifact root");
+        let path = root.path().join("asks.json");
+        std::fs::write(&path, b"[]").expect("write empty sidecar");
+        assert_eq!(read_yield_sites(&path).expect("read empty sidecar"), vec![]);
+    }
+
+    #[test]
+    fn conflicting_site_id_is_a_structured_error() {
+        let collision = YieldSites::from_sites(vec![site(7, "Int"), site(7, "Bool")])
+            .expect_err("conflicting metadata must fail");
+        assert_eq!(collision.site, 7);
+        assert_eq!(collision.first.ty, "Int");
+        assert_eq!(collision.second.ty, "Bool");
+    }
 }
