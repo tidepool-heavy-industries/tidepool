@@ -158,27 +158,28 @@ where
         &self,
         mut pending: ResidentCall,
     ) -> Result<ResidentCallPoll, ResidentMailboxError> {
-        match pending.ticket.poll()? {
-            CallStatus::Pending => Ok(ResidentCallPoll::Pending(pending)),
-            CallStatus::Failed(failure) => {
-                self.fail_actor(
-                    pending.caller,
-                    format!("synchronous actor call failed: {failure:?}"),
-                )
-                .await;
-                Err(ResidentMailboxError::CallFailed(failure))
-            }
-            CallStatus::Reply(reply) => {
-                let turn = self
-                    .registry
-                    .begin_turn(pending.caller, crate::ActorTurnKind::Haskell)?;
-                let outcome = self
-                    .runner
-                    .resume_live(pending.context, pending.continuation, reply.into_custody())
-                    .await?;
-                Ok(ResidentCallPoll::Continued { turn, outcome })
+        let caller = pending.caller;
+        let result: Result<ResidentCallPoll, ResidentMailboxError> = async {
+            match pending.ticket.poll()? {
+                CallStatus::Pending => Ok(ResidentCallPoll::Pending(pending)),
+                CallStatus::Failed(failure) => Err(ResidentMailboxError::CallFailed(failure)),
+                CallStatus::Reply(reply) => {
+                    let turn = self
+                        .registry
+                        .begin_turn(caller, crate::ActorTurnKind::Haskell)?;
+                    let outcome = self
+                        .runner
+                        .resume_live(pending.context, pending.continuation, reply.into_custody())
+                        .await?;
+                    Ok(ResidentCallPoll::Continued { turn, outcome })
+                }
             }
         }
+        .await;
+        if let Err(error) = &result {
+            self.fail_actor(caller, error.to_string()).await;
+        }
+        result
     }
 
     /// Park one exact-incarnation `awaitExit` after releasing the current
