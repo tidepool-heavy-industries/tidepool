@@ -15,6 +15,7 @@ mod generated;
 mod identity;
 mod mailbox;
 mod mount;
+mod profile;
 mod registry;
 mod resident_lifecycle;
 mod resident_mailbox;
@@ -46,6 +47,7 @@ pub use mount::{
     mount_actor_turn, ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget,
     ActorSessionContext, ActorSourceImports, MountActorTurnError,
 };
+pub use profile::ActorEffectProfile;
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
     ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,

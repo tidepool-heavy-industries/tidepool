@@ -8,17 +8,18 @@ use tidepool_repr::MonotonicIdIssuer;
 use crate::agent_session::AgentSessionState;
 use crate::mailbox::{InstalledActorState, InstalledReceiver};
 use crate::{
-    ActorAgentSession, ActorEvent, ActorEventRecord, ActorExitKind, ActorId, ActorPlacement,
-    ActorRef, ActorSessionContext, ActorSourceImports, CallDisposition, CallFailure, CallId,
-    CallStatus, CallTicket, EventCausality, ExitObservation, MailboxFailure, MailboxMessageKind,
-    MailboxValue, MessageId, ParkedObligation, StartInitiator, WaitDisposition, WaitError, WaitId,
-    WaitTicket,
+    ActorAgentSession, ActorEffectProfile, ActorEvent, ActorEventRecord, ActorExitKind, ActorId,
+    ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports, CallDisposition,
+    CallFailure, CallId, CallStatus, CallTicket, EventCausality, ExitObservation, MailboxFailure,
+    MailboxMessageKind, MailboxValue, MessageId, ParkedObligation, StartInitiator, WaitDisposition,
+    WaitError, WaitId, WaitTicket,
 };
 
 /// Immutable attributes selected before an actor begins initialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
     label: String,
+    profile: ActorEffectProfile,
     effect_names: Vec<String>,
     effect_policy: EffectRunPolicy,
     live_payload: LivePayloadPolicy,
@@ -38,6 +39,7 @@ impl ActorDescriptor {
     ) -> Self {
         Self {
             label: label.into(),
+            profile: ActorEffectProfile::ReadWrite,
             effect_names: effect_names.into_iter().map(Into::into).collect(),
             effect_policy: EffectRunPolicy::SuspendAll,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
@@ -49,6 +51,18 @@ impl ActorDescriptor {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    #[must_use]
+    pub fn profile(&self) -> ActorEffectProfile {
+        self.profile
+    }
+
+    /// Select the immutable named effect profile before actor allocation.
+    #[must_use]
+    pub fn with_profile(mut self, profile: ActorEffectProfile) -> Self {
+        self.profile = profile;
+        self
     }
 
     #[must_use]
@@ -139,6 +153,14 @@ pub enum ActorRegistryError {
     AlreadyReady(ActorRef),
     #[error("actor {0:?} has exited")]
     Exited(ActorRef),
+    #[error(
+        "actor {owner:?} with profile {owner_profile:?} cannot start child profile {child_profile:?}"
+    )]
+    ProfileEscalation {
+        owner: ActorRef,
+        owner_profile: ActorEffectProfile,
+        child_profile: ActorEffectProfile,
+    },
     #[error("actor {0:?} already has an installed mailbox receiver")]
     ReceiverAlreadyInstalled(ActorRef),
     #[error("actor {0:?} has no installed mailbox receiver")]
@@ -310,7 +332,6 @@ impl ActorRegistry {
         descriptor: ActorDescriptor,
         initiator: StartInitiator,
     ) -> Result<StartingActor, ActorRegistryError> {
-        let reference = ActorRef::first(ActorId(self.inner.ids.next_raw()));
         let mut state = self.inner.state.lock();
         if let Some(owner) = owner {
             let owner_entry = entry(&state, owner)?;
@@ -321,11 +342,25 @@ impl ActorRegistry {
                 ActorLifecycle::Exited => return Err(ActorRegistryError::Exited(owner)),
                 ActorLifecycle::Ready => {}
             }
+            if !owner_entry
+                .descriptor
+                .profile
+                .permits_child(descriptor.profile)
+            {
+                return Err(ActorRegistryError::ProfileEscalation {
+                    owner,
+                    owner_profile: owner_entry.descriptor.profile,
+                    child_profile: descriptor.profile,
+                });
+            }
         }
+
+        let reference = ActorRef::first(ActorId(self.inner.ids.next_raw()));
 
         let created = ActorEvent::Created {
             owner,
             label: descriptor.label.clone(),
+            profile: descriptor.profile,
             effect_stack: descriptor.effect_names.clone(),
         };
         state.actors.insert(
@@ -1630,6 +1665,78 @@ mod tests {
             registry.events().last().map(|record| &record.event),
             Some(ActorEvent::Ready)
         ));
+    }
+
+    #[test]
+    fn named_profiles_attenuate_before_child_identity_allocation() {
+        let registry = ActorRegistry::new();
+        let read_only_start = registry
+            .begin_start(
+                None,
+                descriptor("reader").with_profile(ActorEffectProfile::ReadOnly),
+                StartInitiator::Runtime,
+            )
+            .expect("start read-only root");
+        let reader = registry
+            .publish_ready(read_only_start)
+            .expect("publish reader");
+
+        assert!(matches!(
+            registry.begin_start(
+                Some(reader),
+                descriptor("forbidden writer").with_profile(ActorEffectProfile::ReadWrite),
+                StartInitiator::Policy,
+            ),
+            Err(ActorRegistryError::ProfileEscalation {
+                owner,
+                owner_profile: ActorEffectProfile::ReadOnly,
+                child_profile: ActorEffectProfile::ReadWrite,
+            }) if owner == reader
+        ));
+
+        let read_only_child = registry
+            .begin_start(
+                Some(reader),
+                descriptor("reader child").with_profile(ActorEffectProfile::ReadOnly),
+                StartInitiator::Policy,
+            )
+            .expect("read-only may attenuate to read-only");
+        assert_eq!(
+            read_only_child.actor().id.0,
+            reader.id.0 + 1,
+            "a rejected escalation must not consume an actor identity"
+        );
+        let read_only_child = registry
+            .publish_ready(read_only_child)
+            .expect("publish reader child");
+        assert_eq!(
+            registry
+                .descriptor(read_only_child)
+                .expect("child descriptor")
+                .profile(),
+            ActorEffectProfile::ReadOnly
+        );
+
+        let writer_start = registry
+            .begin_start(
+                None,
+                descriptor("writer").with_profile(ActorEffectProfile::ReadWrite),
+                StartInitiator::Runtime,
+            )
+            .expect("start writer root");
+        let writer = registry
+            .publish_ready(writer_start)
+            .expect("publish writer");
+        for profile in [ActorEffectProfile::ReadWrite, ActorEffectProfile::ReadOnly] {
+            let child = registry
+                .begin_start(
+                    Some(writer),
+                    descriptor("permitted writer child").with_profile(profile),
+                    StartInitiator::Policy,
+                )
+                .expect("read-write may preserve or attenuate");
+            registry.publish_ready(child).expect("publish writer child");
+        }
     }
 
     #[test]

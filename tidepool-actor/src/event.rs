@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ActorRef, CallId, MessageId, WaitId};
+use crate::{ActorEffectProfile, ActorRef, CallId, MessageId, WaitId};
 
 /// Durable ordering envelope shared by native actor events and compatibility
 /// adapters. `stream_sequence` orders one journal; `actor_sequence` orders the
@@ -48,6 +48,8 @@ pub enum ActorEvent {
     Created {
         owner: Option<ActorRef>,
         label: String,
+        #[serde(default)]
+        profile: ActorEffectProfile,
         effect_stack: Vec<String>,
     },
     Started {

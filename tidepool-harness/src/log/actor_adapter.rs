@@ -90,6 +90,7 @@ fn adapt_event(event: &Event) -> (EventCausality, ActorEvent) {
             ActorEvent::Created {
                 owner,
                 label: teaser.clone(),
+                profile: tidepool_actor::ActorEffectProfile::ReadWrite,
                 effect_stack: effect_row.clone(),
             }
         }

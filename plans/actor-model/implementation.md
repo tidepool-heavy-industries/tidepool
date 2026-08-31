@@ -134,13 +134,18 @@ This is the canonical status inventory for the plan.
   substrate vocabulary.
 - Rust effect routing is nominal; no positional handler-prefix contract or
   reflected Haskell row ABI remains.
+- Actor descriptors and creation events carry immutable `ReadWrite` or
+  `ReadOnly` profile identity. The registry enforces the initial attenuation
+  lattice before allocating a child identity: `ReadWrite` may preserve or
+  attenuate, while `ReadOnly` may only preserve `ReadOnly`.
 
 ### Not landed
 
 - convergence of the remaining presentation-heavy REPL/harness execution
   epilogues where they still duplicate neutral compile/commit behavior;
-- named `ReadWrite`/`ReadOnly` child profiles, spawn-edge attenuation, and
-  capability-specific launch grants;
+- the Haskell spelling that selects `ReadWrite` or `ReadOnly`, specialization
+  of definitions to the selected concrete row, and capability-specific launch
+  grants;
 - an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
   require it, but current profiles, facades, and nominal handlers must leave it
   additive without changing the actor API, program images, profile semantics,
@@ -474,24 +479,33 @@ for proving application-message semantics.
 
 ## 8. Stage 5 — profiles, dynamic sealing, and caller-checked authority
 
+The Rust half of the initial profile contract is landed. `ActorDescriptor`
+records immutable `ReadWrite` or `ReadOnly` identity, creation events preserve
+it, and `ActorRegistry` rejects `ReadOnly -> ReadWrite` before consuming an
+actor identity. Profile identity remains neutral metadata: it neither reflects
+a Haskell row nor grants access to a resource.
+
 The single private start capture already derives a content-addressed exact facade
 behind `startActor`. Complete that membrane so a
 model can start a newly defined actor without weakening the checked-in vertical.
 
-Land the two initial named profiles through this same path:
+Complete the Haskell half of the two initial named profiles through this same
+path:
 
 - `ReadWrite` actors may start `ReadWrite` or `ReadOnly` children;
 - `ReadOnly` actors may start only `ReadOnly` children;
 - GHC checks each definition against the selected profile row;
-- Rust validates the spawn edge before allocation;
+- Rust validates the spawn edge before allocation (landed);
 - profile identity remains launch metadata, separate from program images and
   per-resource grants;
 - `ReadOnly` excludes ambient write effects but may call an explicitly supplied
   writer actor.
 
-Acceptance proves every permitted edge, rejects `ReadOnly -> ReadWrite` before
-allocation, rejects a write-using definition specialized to `ReadOnly`, and
-shows that copying a profile choice or definition transfers no resource grant.
+The registry tests already prove every permitted metadata edge and reject
+`ReadOnly -> ReadWrite` before allocation without consuming an identity. The
+remaining acceptance rejects a write-using definition specialized to
+`ReadOnly` and shows that copying a profile choice or definition transfers no
+resource grant.
 
 The existing sealing component must extend its program image to cover:
 
