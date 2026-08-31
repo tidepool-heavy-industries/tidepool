@@ -26,9 +26,9 @@ use crate::{
 
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
-/// Trusted source environment supplied by an actor runtime profile. The
-/// canonical `AgentEffects` alias itself lives in the imported Haskell facade;
-/// Rust does not reflect or authorize its row entries.
+/// Trusted source environment supplied by actor deployment. The canonical
+/// `AgentEffects` alias itself lives in the imported Haskell facade; Rust does
+/// not reflect or authorize its row entries.
 #[derive(Clone)]
 pub struct ActorWorkbenchSource {
     preamble: Arc<str>,

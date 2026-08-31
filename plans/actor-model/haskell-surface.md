@@ -81,20 +81,12 @@ interpreter instance under the child's principal. Different actor rows may
 share one machine because union position has no Rust dispatch meaning.
 
 Naming an effect in `AgentEffects` is not authority and cannot manufacture a
-Rust handler. Trusted composition supplies abstract, type-indexed runtime
-tokens:
-
-```haskell
-data ActorRuntime capEffs
-```
-
-An `ActorRuntime capEffs` names a Rust interpreter factory and exact source
-facade for the capability row. Its constructor is abstract. The actor kernel
-composes `ActorLocal api exit` with that row exactly once when it promotes the
-definition. Rust sees an opaque runtime handle, not either row; GHC alone checks
-the resulting `ActorEffects api exit capEffs`. Using the token through
-`startActor` also checks the current principal, so copying it does not grant
-launch authority.
+Rust handler. The actor's compiled entry fixes the Haskell row; the Rust actor
+interpreter independently decides which nominal requests that principal and
+its grants may perform. V0 fresh children inherit the composition-owned
+interpreter policy of their owner. Explicit selection of a different child
+policy waits for the first concrete capability protocol that needs it; it will
+not be encoded as a reflected effect-row token.
 
 The stack determines which operation classes Haskell can express. Opaque
 handles and principal-scoped grants still authorize particular resources at
@@ -109,29 +101,25 @@ dynamic construction systems:
 
 ```haskell
 data AgentRef api exit
-data ActorProgram capEffs api exit
+data ActorProgram actorEffs api exit
 data ActorSpec startup api exit
 data LaunchGrant
 data ActorLocal api exit a
 
-type ActorEffects api exit capEffs =
-  ActorLocal api exit ': capEffs
-
 data ActorDefinition startup api exit where
   ActorDefinition
-    :: { runtime
-           :: ActorRuntime capEffs
-       , startupSession
+    :: Members '[Deliberate, ActorLocal api exit] actorEffs
+    => { startupSession
            :: Deliberation startup initial
        , install
            :: startup
            -> initial
-           -> ActorProgram capEffs api exit
+           -> ActorProgram actorEffs api exit
        , modelExports
            :: [Text]
        , onShutdown
            :: ShutdownReason
-           -> Eff (ActorEffects api exit capEffs) ()
+           -> Eff actorEffs ()
        }
     -> ActorDefinition startup api exit
 
@@ -162,14 +150,13 @@ awaitExit
   -> Eff effs (ActorExit exit)
 ```
 
-Ordinary Haskell existential packaging hides `initial` and `capEffs`; it does
-not imply a reflected Rust row ABI. The runtime token is an unforgeable launch
-profile, not embedded authority: the caller is authorized when the token is
-used. `promoteActor` is the sole program-image boundary. It captures the rooted
-definition, exact declaration identities, and explicit model-visible export
-facade; models never assemble an image record themselves. Project-authored
-actors are promoted at boot through the same mechanism using their checked-in
-export manifest.
+Ordinary Haskell existential packaging hides `initial` and `actorEffs` behind
+the stable `ActorSpec startup api exit` surface. That is ordinary module/GADT
+encapsulation, not a reflected Rust row ABI. `promoteActor` is the sole
+program-image boundary. It captures the rooted definition, exact declaration
+identities, and explicit model-visible export facade; models never assemble an
+image record themselves. Project-authored actors are promoted at boot through
+the same mechanism using their checked-in export manifest.
 
 `modelExports` is a list of top-level head names, not arbitrary Haskell export
 syntax. Promotion resolves it through GHC's export metadata against the exact
@@ -188,7 +175,7 @@ transfers no authority.
 `startActor` mounts `startup` as a live value, runs the specification's sole
 typed startup agent session, and passes the resulting `initial` to the pure
 `install` function. The startup session may evaluate fenced Haskell using the
-child's complete `ActorEffects` row. The lifecycle-phase interpreter refuses
+child's fixed row. The lifecycle-phase interpreter refuses
 `receive` and `forkActors` before program readiness; this is policy on the
 same row, not a startup monad. Installation itself cannot deliberate or perform
 external work because it is pure. The call returns only after the resulting
@@ -204,7 +191,7 @@ inbox; Rust instead schedules a Developer-triggered advisory turn in the
 owner's model context at the next quiescent provider boundary.
 
 Validating and installing the returned
-`ActorProgram capEffs api exit` is the readiness linearization point. The
+`ActorProgram actorEffs api exit` is the readiness linearization point. The
 model produces a typed initialization artifact, not the actor's entire control
 flow. Authored Haskell decides how that artifact configures the fixed program.
 Rust invokes the specification's shutdown hook at a safe boundary for
@@ -235,8 +222,8 @@ model-facing shape is conceptually:
 
 ```haskell
 program
-  :: Eff (ActorEffects api exit capEffs) exit
-  -> ActorProgram capEffs api exit
+  :: Eff actorEffs exit
+  -> ActorProgram actorEffs api exit
 
 receive
   :: Member (ActorLocal api exit) effs
@@ -257,6 +244,13 @@ Its raw effect constructors are kernel-private; the ordinary Haskell functions
 are the public algebra. This is module encapsulation, not a magic runtime ABI.
 Every request is interpreted under the current actor principal, so there is no
 mailbox handle to forge, pass, or rewrite during fork.
+
+The kernel module also uses one private `ActorLocal` readiness operation while
+bootstrapping an `ActorProgram`. Its parked continuation is the installed
+program root. The interpreter accepts it only from the program's resource
+realm, never from a fenced model fragment. This keeps readiness in the same
+ordinary effect algebra without exposing a public lifecycle token or adding a
+Rust-side program registry.
 
 `receive` suspends without polling, accepts one call or cast, runs the handler
 under the actor's principal, settles the indexed result, and returns only the

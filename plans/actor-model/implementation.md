@@ -87,8 +87,8 @@ This is the canonical status inventory for the plan.
 
 - convergence of the remaining presentation-heavy REPL/harness execution
   epilogues where they still duplicate neutral compile/commit behavior;
-- `ActorRuntime capEffs`, actor-local interpreter factories, and caller-checked
-  launch policy;
+- explicit heterogeneous child-interpreter policy selection and
+  capability-specific launch grants;
 - public `ActorDefinition`, `ActorSpec`, `ActorProgram`, or `startActor`;
 - lifecycle advisories and typed shutdown execution;
 - model-authored program promotion and dynamic child specifications;
@@ -107,10 +107,12 @@ These choices remove branches from the first implementation:
   optimization derived from that transcript.
 - A program image contains code/value deployment identity and explicit source
   exports. It does not own placement, authority, or an interpreter.
-- `ActorRuntime capEffs` is an abstract Haskell token backed by a trusted Rust
-  capability-interpreter factory and launch policy. GHC sees the composed
-  `ActorLocal api exit ': capEffs` row; Rust sees only nominal requests and the
-  opaque registered handle.
+- `ActorDefinition` existentially packages its concrete Haskell row, while
+  `ActorSpec` hides that row behind stable startup/protocol/exit indexes. Rust
+  sees nominal requests, not a reflected row or runtime-profile token.
+- V0 fresh children inherit the owner's composition-owned interpreter policy.
+  Explicit heterogeneous policy selection is deferred until a concrete
+  capability needs it; authorization remains interpreter/principal-level.
 - Models author `ActorDefinition`; one `promoteActor` membrane produces opaque
   deployable `ActorSpec` values. `ActorSpec` has one prompted startup path.
   Startup deliberation may use the child runtime; installation is pure. V0 has
@@ -248,63 +250,73 @@ not kept as a second deliberation route.
 Implement fresh startup for an authored specification before supporting
 model-authored program promotion.
 
-### Runtime profile
+### Interpreter policy
 
-Add one capability-registry-backed `ActorRuntime capEffs` token. Its abstract
-constructor associates:
+Do not introduce a reflected effect-row ABI or an `ActorRuntime capEffs`
+profile token. The compiled actor entry fixes its Haskell row; ordinary
+existential packaging hides that row inside the specification. Rust dispatch
+remains nominal and checks lifecycle phase, principal, and grants at use time.
 
-- a Rust capability-interpreter factory;
-- the exact Haskell facade exporting the corresponding capability row and
-  model-visible vocabulary;
-- allowed lifecycle phases for each operation family;
-- caller authorization and grant derivation.
-
-The capability registry is the sole owner of this opaque handle. Do not add an
-actor-runtime-profile registry beside it. Promotion composes the kernel-owned
-`ActorLocal api exit` effect with `capEffs`; the complete row is then fixed for
-the incarnation. The type parameters are checked only by GHC. Rust dispatch
-remains nominal and checks the handle, principal, and grants at use time. The
-registry also supplies the actor-owned capability introspection view; the
-workbench only renders the returned neutral snapshot.
+The first vertical inherits the owner's composition-owned interpreter policy
+and source vocabulary. This is deliberately one mechanism, not a temporary
+positional dispatcher. The later first capability that genuinely needs a
+different child policy must extend the existing capability registry and actor
+interpreter; it must not create a parallel runtime-profile registry.
 
 ### Haskell specification
 
 Use the single definition shape in
 [haskell-surface.md](haskell-surface.md#3-actor-specifications-are-haskell-values):
 
-- one `ActorRuntime capEffs`;
 - one `Deliberation startup initial`;
-- one pure `startup -> initial -> ActorProgram capEffs api exit`;
+- one pure `startup -> initial -> ActorProgram actorEffs api exit`;
 - one explicit list of model-visible top-level export heads;
 - one shutdown handler running under
-  `ActorEffects api exit capEffs` with closing-phase interpreter restrictions.
+  the same existentially packaged `actorEffs` row with closing-phase
+  interpreter restrictions.
 
 Startup, the installed program, fenced workbench fragments, and shutdown all
-compile against the same composed row. The interpreter's lifecycle phase—not a
+compile against the same fixed row. The interpreter's lifecycle phase—not a
 second monad or altered stack—controls which `ActorLocal` operations are legal.
 
-For this stage, the composition root promotes one checked-in definition using
-the permanent promotion component and an authored exact export manifest. The
-public workbench path for model-created definitions waits for Stage 5, but it
-must produce the same opaque `ActorSpec`, not a second static constructor.
+For this stage, the composition root constructs one checked-in definition with
+an authored exact export manifest and seals it in the permanent opaque
+`ActorSpec` representation. Stage 5 adds the public `promoteActor` operation
+that validates model-authored definitions into that same representation; it
+does not introduce a second static-spec path or a second image registry.
 
 The process composition root is the sole bootstrap exception: it creates the
-initial root actor and trusted runtime tokens directly. Child construction,
-including the first test child, goes through the same registry lifecycle and
-`startActor` path that model-authored Haskell will use.
+initial root actor and installs its interpreter policy directly. Child
+construction, including the first test child, goes through the same registry
+lifecycle and `startActor` path that model-authored Haskell will use.
+
+The Haskell library hides exactly one row-erasure membrane when it hands the
+existential child entry to Rust. The entry travels as the existing rooted live
+payload; Rust never decodes the row or dispatches by a union position. A real
+private `ActorLocal` readiness request marks the end of pure installation. The
+interpreter accepts that request only from the installed-program resource
+realm, so fenced model code cannot forge readiness by naming a raw constructor.
+The parked readiness continuation itself retains the installed program; do not
+add a program-root registry beside the resident continuation machinery.
 
 ### Startup sequence
 
-1. authorize the caller's use of the runtime token;
+1. authorize the caller to instantiate the specification;
 2. allocate an unpublished child identity, scope, resource realm, interpreter,
    conversation, exit cell, and ownership edge;
-3. validate and atomically redeem any opaque launch-grant recipes for that
-   exact child;
-4. deploy an authored exact program facade into a fresh lexical scope;
-5. mount the typed startup value;
-6. run one User-role typed-completion session through the Stage 2 executor;
-7. run pure installation and validate the resulting actor program;
-8. publish readiness and return `AgentRef api exit`.
+3. deploy the authored exact program facade into a fresh lexical scope;
+4. mount the typed startup value;
+5. run one User-role typed-completion session through the Stage 2 executor;
+6. run pure installation until the private readiness request parks the
+   installed program;
+7. publish readiness, settle the parent's start continuation with the exact
+   `AgentRef`, and schedule the installed program through ordinary actor-turn
+   admission.
+
+Capability-specific launch-grant recipes are intentionally not part of this
+vertical. When the first concrete resource needs them, redemption belongs at
+the authorization/allocation boundary above without changing the actor entry,
+readiness, or publication mechanism.
 
 Failure before readiness publishes no reference and recursively cleans the
 unpublished subtree. Death after readiness but before caller resumption may
@@ -313,16 +325,22 @@ its retained result.
 
 Acceptance:
 
-- two runtime tokens with different Haskell rows and Rust handlers start actors
-  on one machine without positional dispatch metadata;
-- unauthorized token use fails before allocation or model inference;
-- copying a token or specification does not transfer caller authorization;
+- one checked-in specification starts through the same opaque representation
+  and lifecycle path reserved for later model-authored promotion;
+- startup carries its existential child entry as a rooted value without
+  positional dispatch metadata or Rust row reflection;
+- unauthorized specification use fails before allocation or model inference;
+- copying a specification does not transfer caller authorization;
 - the child's model sees only the runtime facade and authored program exports,
   never ambient parent bindings or transcript;
 - startup cannot nest another model session during pure installation;
 - readiness, cancellation, exit, and publication races are exhaustively
   tested;
 - successful closure-valued exit survives child execution-resource reaping.
+
+The heterogeneous-row proof belongs with the first actual heterogeneous
+interpreter policy in Stage 5. Stage 3 must leave no reflected ABI or registry
+that such a policy would have to route around.
 
 The Stage 3 vertical uses a one-shot `program (pure exit)` after startup. It
 proves construction, installation, readiness, and retained exit without
@@ -396,7 +414,8 @@ Complete caller-checked capability behavior in the same stage:
 
 - moving a closure never transfers its creator's principal;
 - opaque operations consult the receiver's grants at use time;
-- actor runtime tokens obey the same caller-check model;
+- actor specification launch and capability use obey the same caller-check
+  model;
 - backend and worktree identifiers remain resource identities, not competing
   actor principals.
 
@@ -505,7 +524,7 @@ The plan is complete when:
 - it can define, promote, fresh-spawn, call, supervise, and fork typed child
   actors;
 - actors exchange function-bearing values under caller-checked authority;
-- heterogeneous actor rows share one machine through nominal interpreters;
+- heterogeneous actor rows share one machine through nominal request routing;
 - startup publishes only ready exact references and exits remain repeatable;
 - advisories inform the model without inventing a Haskell lifecycle inbox or
   re-entering the authored continuation;

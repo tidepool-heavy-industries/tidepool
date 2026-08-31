@@ -25,8 +25,8 @@ leaves they eventually invoke can check their caller.
 | Class | Examples | Mobility | Restart |
 |---|---|---|---|
 | ordinary Haskell value | sums, products, maps, pure closures | Same machine by live root | No, unless explicitly encoded |
-| actor program value | `ActorProgram capEffs api exit`, `ActorDefinition startup api exit`, opaque `ActorSpec startup api exit`, function-bearing record | Same machine; promotion captures an exact deployment image | No initially |
-| opaque runtime value | `AgentRef api exit`, `ActorRuntime capEffs`, worktree handle, command runner | Copyable where its registry permits; use is caller-checked | Recover only through its owner |
+| actor program value | `ActorProgram actorEffs api exit`, `ActorDefinition startup api exit`, opaque `ActorSpec startup api exit`, function-bearing record | Same machine; promotion captures an exact deployment image | No initially |
+| opaque runtime value | `AgentRef api exit`, worktree handle, command runner | Copyable where its registry permits; use is caller-checked | Recover only through its owner |
 | durable value | JSON stored through get/put | Anywhere the backend exposes it | Yes |
 | external wire value | provider or MCP payload | Encoded at the boundary | According to that protocol |
 
@@ -73,12 +73,12 @@ owning module's public operations. Registry entries record:
 - cleanup owned by Rust;
 - optional failure provenance.
 
-`ActorRuntime capEffs` uses this same registry. Its Haskell type index ties a
-program to a trusted runtime profile, while the registry entry supplies the
-interpreter factory and launch policy. Copying the token is harmless: using it
-to start an actor still checks the current principal. There is no separate
-runtime-profile registry and no Rust reflection of `capEffs` or the composed
-actor row.
+Actor interpreters use the same principal and grant records. The Haskell row
+does not serve as a capability token, and Rust carries no reflected copy of
+it. V0 fresh spawn inherits the owner's composition-owned interpreter policy;
+a later explicit child-policy selector must be justified by a concrete
+capability and must reuse this registry rather than create a runtime-profile
+registry.
 
 The common authorization behavior should be registered callers rather than a
 blanket prohibition on copying the surrounding value. A failed operation
@@ -132,7 +132,7 @@ continuation.
 
 Fresh spawn needs one explicit way to authorize a child for a particular
 resource. The runtime must not recursively inspect the startup value for
-capability leaves, and a static runtime profile cannot name per-instance
+capability leaves, and static interpreter policy cannot name per-instance
 resources such as one worktree.
 
 The initial membrane is an opaque launch-grant recipe attached immutably to an
@@ -153,8 +153,8 @@ its registered child policy for one handle. The model does not choose an
 arbitrary `Share`/`Rebind` enum, forge a registry identifier, or edit a generic
 grant record.
 
-At `startActor`, Rust checks the current principal, the resource's registered
-policy, and compatibility with the child interpreter. It then redeems every
+At `startActor`, Rust checks the current principal and the resource's
+registered policy under the child interpreter. It then redeems every
 recipe atomically for the newly allocated child before startup. Any refusal
 rolls back the unpublished child and all grants already derived for it.
 Copying a recipe or decorated specification transfers no authority: every

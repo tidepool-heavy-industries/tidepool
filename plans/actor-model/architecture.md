@@ -49,8 +49,7 @@ inventory, not a required Rust struct layout.
 | actor program continuation | The currently running or parked installed `Eff` computation |
 | program snapshot | Current persistent declarations, bindings, and installed behavior roots |
 | model context | Canonical conversation, compaction state, backend connection state, and usage |
-| runtime profile | Trusted interpreter factory, allowed request families, lifecycle restrictions, and source facade for one Haskell effect row |
-| actor interpreter | Rust handlers and grants enforcing that profile for this actor |
+| actor interpreter | Rust nominal handlers, grants, and lifecycle restrictions for this actor |
 | execution principal | Identity installed while this actor's Haskell runs |
 | capability grants | Owned, launch-derived, inherited, revoked, and fork-policy metadata |
 | runtime resource scope | Parked frames, handles, cancellation state, and live roots |
@@ -402,26 +401,25 @@ batch-construction API.
 `startActor` is the ordinary prompted constructor. Its typed startup value is
 distinct from the actor's mailbox protocol. It accepts an opaque promoted
 `ActorSpec`; models author an `ActorDefinition` and cross the program-image
-membrane once with `promoteActor`. The underlying definition pairs its Haskell
-program with an abstract `ActorRuntime capEffs` token. That token is created
-only by trusted runtime composition and names an interpreter factory, its exact
-Haskell capability-row facade, and the caller policy for using it. Promotion
-composes the kernel-owned `ActorLocal api exit` algebra with that capability
-row. Rust treats the token as an opaque handle and never reflects or compares
-either row.
+membrane once with `promoteActor`. The definition existentially packages its
+concrete Haskell effect row, including `ActorLocal api exit`. This is ordinary
+Haskell type hiding: GHC checks it and Rust never reflects or compares it.
+V0 fresh children inherit the owner's composition-owned nominal interpreter
+policy. Selecting a different child policy is deferred until a real
+capability protocol establishes the required shape.
 
 Startup runs one User-role `Deliberation startup initial` in the new child's
-workbench under that runtime profile. The model may use the child's permitted
+workbench under that actor interpreter. The model may use the child's permitted
 effects while producing `initial`; the `ActorLocal` handler is present in the
-fixed row but refuses `receive` and `forkActors` before readiness. A pure authored
-function combines
-`startup` and `initial` into `ActorProgram capEffs api exit`. Pure
+fixed row but refuses `receive` and `forkActors` before readiness. A pure
+authored function combines `startup` and `initial` into
+`ActorProgram actorEffs api exit`. Pure
 installation removes the need for separate `prepare`/`StartupM` mechanisms and
 makes nested startup inference impossible by construction.
 
-An `ActorProgram capEffs api exit` installs one
-`Eff (ActorEffects api exit capEffs) exit` continuation, not a callback
-registry or Rust-owned handler table. `ActorLocal` is a normal indexed Haskell
+An `ActorProgram actorEffs api exit` installs one `Eff actorEffs exit`
+continuation, not a callback registry or Rust-owned handler table. `ActorLocal`
+is a normal indexed Haskell
 effect whose public algebra includes `receive`. `forkActors` deliberately
 composes it with the outward `Actor` capability: the former supplies the
 current protocol and exit indexes, while the latter authorizes actor creation.
@@ -437,20 +435,24 @@ the library/runtime boundary: authored Haskell never receives a linear token
 it can duplicate, lose, or settle twice. `serve` is an ordinary recursive
 library loop over `receive`, not another actor mode.
 
-The token is not ambient authority. `startActor` checks the current principal
-against its registered launch policy, derives the new incarnation's grants,
-and refuses use by an unauthorized caller. Copying an `ActorSpec` or runtime
-token therefore does not grant the right to instantiate it.
+An `ActorSpec` is not ambient authority. `startActor` checks the current
+principal, derives the new incarnation's grants, and refuses use by an
+unauthorized caller. Copying a specification therefore does not grant the
+right to instantiate it.
 
 Per-resource authority is explicit launch metadata, not a recursive scan of
 the startup value. An `ActorSpec` may be immutably decorated with opaque grant
 recipes created by the resource-owning capability module. After allocating the
 unpublished child identity, Rust validates and redeems those recipes atomically
-under the caller's principal and the child interpreter. Program image, runtime
-profile, and launch grants remain three separate responsibilities even when
-one Haskell specification value carries them to `startActor`.
+under the caller's principal and the child interpreter. Program image,
+interpreter policy, and launch grants remain separate responsibilities even
+when one Haskell specification value carries them to `startActor`.
 
-The validated installed `ActorProgram` is the OTP-style readiness point; no
+The installed program parks on a kernel-private `ActorLocal` readiness request.
+That suspension is the OTP-style readiness point: its continuation already
+retains the installed computation, so readiness needs neither a callback table
+nor a second program-root registry. The interpreter accepts the request only
+from the installed-program resource realm, not a fenced workbench fragment. No
 `AgentRef` escapes before it. Rust mechanically retries only initialization
 conditions the interpreter owns. Any remaining failure or pre-readiness
 cancellation cleans up the incomplete actor and terminates the caller whose
@@ -572,12 +574,11 @@ has:
   provenance.
 
 Actor launch metadata pairs that image with placement, ownership, derived
-grants, and the capability interpreter named by `ActorRuntime capEffs`; the
-kernel adds the nominal `ActorLocal api exit` interpreter. Keeping
-the runtime profile outside the image matters: the image answers “what Haskell
-program and names are being deployed,” while the runtime token and caller check
-answer “which handlers exist and who may instantiate them.” Fork may reuse
-both from a source incarnation, but they remain separate responsibilities.
+grants, and nominal interpreter policy. Keeping interpreter policy outside the
+image matters: the image answers “what Haskell program and names are being
+deployed,” while principal/grant checks answer “which operations are allowed
+and who may instantiate it.” Fork may reuse both from a source incarnation,
+but they remain separate responsibilities.
 
 The resident code arena owns executable code, the value-handle ledger owns
 roots while they are in transit, and the actor's resource realm owns deployed

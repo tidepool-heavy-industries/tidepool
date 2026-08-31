@@ -46,9 +46,9 @@ retain for rollback.
 - `startActor` publishes only a ready exact-incarnation reference. Exact calls
   never invent results or substitute actors; failure-prone jobs use
   `startActor`/`awaitExit` supervision and explicit Haskell control flow.
-- An abstract `ActorRuntime capEffs` token selects a trusted capability
-  interpreter; the kernel composes it with `ActorLocal api exit` without
-  reflecting either row into Rust or carrying ambient launch authority.
+- An actor specification existentially packages its concrete Haskell row.
+  GHC checks that row; Rust authorizes nominal requests under the actor's
+  principal and grants without reflecting a second row ABI.
 - One actor-turn admission spans a complete agent session, while shorter
   machine checkouts serialize only its Haskell run segments. Startup,
   deliberation, and advisory share the same provider/fenced-Haskell executor.
@@ -91,8 +91,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | program snapshot | An immutable point in an actor's Haskell environment, suitable for structural sharing |
 | execution principal | The runtime identity under whose authority Haskell is currently executing |
 | capability | An opaque live value whose operations are authorized by Rust at use time |
-| runtime profile | An abstract `ActorRuntime capEffs` token naming a trusted capability interpreter, source facade, lifecycle restrictions, and launch policy |
-| actor interpreter | One actor-local Rust handler instance created from a runtime profile and enforcing nominal requests under the actor principal |
+| actor interpreter | Rust-owned nominal handlers and lifecycle policy enforcing requests under one actor principal |
 | advisory turn | A Developer-triggered model session for an abnormal runtime fact with no parked Haskell result obligation |
 
 ## Relationship to existing work
