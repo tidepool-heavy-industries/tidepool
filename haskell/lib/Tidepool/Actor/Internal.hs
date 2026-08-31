@@ -11,24 +11,56 @@
 -- another runtime root and a closure-valued exit survives actor teardown.
 module Tidepool.Actor.Internal
   ( ActorRef (..)
+  , EffectProfile (..)
+  , ReadOnlyEffects
+  , ReadWriteEffects
+  , ShutdownReason (..)
   , ActorDefinition (..)
   ) where
 
-import Control.Monad.Freer (Eff, Members)
+import Control.Monad.Freer (Eff)
 import Data.Kind (Type)
 import Data.Text (Text)
 import Prelude
 
-import Tidepool.Effects.Core (ActorLocal, Deliberate)
+import Tidepool.Effects.Core (Actor, ActorLocal, Deliberate, FsRead, FsWrite)
 import Tidepool.Internal.ExitCell (ExitCell)
 
 data ActorRef (protocol :: Type -> Type) exit where
   ActorRef :: Int -> Int -> ExitCell pending exit -> ActorRef protocol exit
 
+-- | Named, statically known actor capability profiles. The witness fixes the
+-- child row; Rust independently validates that the spawn edge attenuates the
+-- parent's profile.
+data EffectProfile (protocol :: Type -> Type) effs where
+  ReadOnly :: EffectProfile protocol (ReadOnlyEffects protocol)
+  ReadWrite :: EffectProfile protocol (ReadWriteEffects protocol)
+
+type ReadOnlyEffects protocol =
+  '[ ActorLocal protocol
+   , Actor
+   , Deliberate
+   , FsRead
+   ]
+
+type ReadWriteEffects protocol = FsWrite ': ReadOnlyEffects protocol
+
+-- | Typed reason supplied to an actor's cooperative shutdown hook. Detailed
+-- diagnostics remain runtime metadata; cleanup policy branches on lifecycle
+-- class rather than parsing prose.
+data ShutdownReason
+  = ShutdownCompleted
+  | ShutdownFailed
+  | ShutdownCancelled
+  deriving (Show, Eq)
+
 data ActorDefinition startup (protocol :: Type -> Type) exit where
   ActorDefinition
-    :: Members '[Deliberate, ActorLocal api] actorEffs
-    => Text
-    -> (startup -> Eff actorEffs initial)
-    -> (startup -> initial -> Eff actorEffs exit)
-    -> ActorDefinition startup api exit
+    :: { label :: Text
+       , effectProfile :: EffectProfile protocol actorEffs
+       , initialization :: startup -> Eff actorEffs initial
+       , behavior :: startup -> initial -> Eff actorEffs exit
+       , visibleToChild :: [Text]
+       , onShutdown :: ShutdownReason -> Eff actorEffs ()
+       }
+    -> ActorDefinition startup protocol exit

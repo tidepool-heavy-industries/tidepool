@@ -47,6 +47,8 @@ pub enum ActorStartCaptureError {
     Facade(#[from] tidepool_runtime::session::ExactFacadeError),
     #[error("actor start has no live declaration plane")]
     NoCompileView,
+    #[error("actor start carried unknown effect profile {0}")]
+    UnknownProfile(i64),
 }
 
 impl ResidentActorStart {
@@ -65,7 +67,7 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let ActorReq::ActorStartWith(label, _entry_projection) =
+        let ActorReq::ActorStartWith(label, _entry_projection, profile, explicit_exports) =
             ActorReq::from_value(request, table)?
         else {
             return Err(ActorStartCaptureError::UnexpectedRequest);
@@ -74,17 +76,23 @@ impl ResidentActorStart {
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
             .ok_or(ActorStartCaptureError::MissingEntry)?;
-        let facade = materialize_entry_facade(session, &entry)?;
+        let profile = match profile {
+            0 => crate::ActorEffectProfile::ReadWrite,
+            1 => crate::ActorEffectProfile::ReadOnly,
+            other => return Err(ActorStartCaptureError::UnknownProfile(other)),
+        };
+        let facade = materialize_entry_facade(session, &entry, &explicit_exports)?;
         let lexical_scope = session.mint_isolated_scope();
         let descriptor = ActorDescriptor::new(
             label.clone(),
-            ["ActorKernel", "Actor", "ActorLocal", "Deliberate"],
+            profile.effect_names().iter().copied(),
             crate::ActorPlacement {
                 session: session_id,
                 resource_scope: child_realm,
                 lexical_scope,
             },
         )
+        .with_profile(profile)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         Ok(Self {
             descriptor,
@@ -102,13 +110,28 @@ impl ResidentActorStart {
 fn materialize_entry_facade<H, O>(
     session: &ResidentSession<H, O>,
     entry: &RootCustody,
+    explicit_exports: &[String],
 ) -> Result<MaterializedFacade, ActorStartCaptureError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let mut heads = BTreeSet::new();
-    for site in entry.provenance().sites() {
+    let heads = facade_heads(entry.provenance(), explicit_exports);
+    let scope = session.run_context().lexical_scope;
+    let names: Vec<_> = heads.iter().map(String::as_str).collect();
+    let surface = session.exact_exports_in(scope, &names)?;
+    let view = session
+        .compile_view_in(scope)
+        .ok_or(ActorStartCaptureError::NoCompileView)?;
+    Ok(surface.materialize(&view)?)
+}
+
+fn facade_heads(
+    provenance: &tidepool_runtime::session::ProgramProvenance,
+    explicit_exports: &[String],
+) -> BTreeSet<String> {
+    let mut heads: BTreeSet<_> = explicit_exports.iter().cloned().collect();
+    for site in provenance.sites() {
         for head in site
             .heads
             .iter()
@@ -119,13 +142,21 @@ where
             }
         }
     }
-    let scope = session.run_context().lexical_scope;
-    let names: Vec<_> = heads.iter().map(String::as_str).collect();
-    let surface = session.exact_exports_in(scope, &names)?;
-    let view = session
-        .compile_view_in(scope)
-        .ok_or(ActorStartCaptureError::NoCompileView)?;
-    Ok(surface.materialize(&view)?)
+    heads
+}
+
+#[cfg(test)]
+mod tests {
+    use super::facade_heads;
+
+    #[test]
+    fn explicit_facade_heads_are_deduplicated_and_sorted() {
+        let heads = facade_heads(
+            &tidepool_runtime::session::ProgramProvenance::default(),
+            &["Policy".into(), "helper".into(), "Policy".into()],
+        );
+        assert_eq!(heads.into_iter().collect::<Vec<_>>(), ["Policy", "helper"]);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,14 +206,9 @@ where
     async fn abort_starting(
         &self,
         starting: crate::StartingActor,
-        context: crate::ActorSessionContext,
         terminal: ActorTerminal,
     ) -> Result<(), ResidentActorStartError> {
-        let realm = context.placement.resource_scope;
-        let abort = self.registry.abort_start(starting, terminal);
-        let cleanup = self.runner.close_realm(context, realm).await;
-        abort?;
-        cleanup?;
+        self.lifecycle.abort_starting(starting, terminal).await?;
         Ok(())
     }
 
@@ -215,6 +241,14 @@ where
                     .capture_startup_step(child_context.clone(), outcome, child_realm)
                     .await?
                 {
+                    ResidentActorStartupStep::InstallShutdown(shutdown) => {
+                        let (continuation, hook) = shutdown.into_parts();
+                        self.registry.install_starting_shutdown(&starting, hook)?;
+                        outcome = self
+                            .runner
+                            .resume_unit(child_context.clone(), continuation)
+                            .await?;
+                    }
                     ResidentActorStartupStep::Deliberate(completion) => {
                         let admitted = match admitted.as_mut() {
                             Some(admitted) => admitted,
@@ -239,7 +273,6 @@ where
             Err(error) => {
                 self.abort_starting(
                     starting,
-                    child_context,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
@@ -259,7 +292,6 @@ where
             Err(error) => {
                 self.abort_starting(
                     starting,
-                    child_context,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
@@ -280,7 +312,6 @@ where
                 Err(error) => {
                     self.abort_starting(
                         starting,
-                        child_context,
                         ActorTerminal {
                             kind: ActorExitKind::Failed,
                             summary: error.to_string(),
@@ -293,7 +324,6 @@ where
             if let Err(error) = self.registry.install_starting_receiver(&starting, receiver) {
                 self.abort_starting(
                     starting,
-                    child_context,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
@@ -311,7 +341,8 @@ where
             }
         };
         if completed {
-            self.lifecycle
+            let cleanup = self
+                .lifecycle
                 .force_terminate(
                     actor,
                     ActorTerminal {
@@ -319,7 +350,11 @@ where
                         summary: "completed".into(),
                     },
                 )
-                .await?;
+                .await;
+            match cleanup {
+                Ok(()) | Err(ResidentLifecycleError::Shutdown { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         let parent = match self
             .runner

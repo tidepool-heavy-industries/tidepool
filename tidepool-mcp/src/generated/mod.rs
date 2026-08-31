@@ -68,7 +68,12 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     ),
     (
         "ActorKernel",
-        &["ActorReadyWith", "ActorReplyWith", "ActorContinueWith"],
+        &[
+            "ActorInstallShutdownWith",
+            "ActorReadyWith",
+            "ActorReplyWith",
+            "ActorContinueWith",
+        ],
     ),
     ("ActorLocal", &["ActorReceiveWith"]),
 ];

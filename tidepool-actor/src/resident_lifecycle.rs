@@ -1,9 +1,8 @@
 //! Rust-owned terminal cleanup for resident actor subtrees.
 //!
-//! Cooperative typed shutdown will run before this boundary. This component
-//! is the authoritative fallback: publish terminal lifecycle first so no new
-//! work can enter, then close every captured machine realm even if one cleanup
-//! attempt fails.
+//! This component publishes terminal lifecycle first so no new work can enter,
+//! runs each captured cooperative shutdown hook, then authoritatively closes
+//! every machine realm even if a hook or earlier cleanup attempt fails.
 
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::OutputSink;
@@ -19,6 +18,12 @@ pub enum ResidentLifecycleError {
     Registry(#[from] ActorRegistryError),
     #[error("failed to close resident resources for actor {actor:?}: {source}")]
     Cleanup {
+        actor: ActorRef,
+        #[source]
+        source: ResidentActorWorkbenchError,
+    },
+    #[error("cooperative shutdown failed for actor {actor:?}: {source}")]
+    Shutdown {
         actor: ActorRef,
         #[source]
         source: ResidentActorWorkbenchError,
@@ -51,22 +56,66 @@ where
         terminal: ActorTerminal,
     ) -> Result<(), ResidentLifecycleError> {
         let actors = self.registry.finish_for_cleanup(actor, terminal)?;
+        self.cleanup(actors).await
+    }
 
-        let mut first_error = None;
-        for (current, context) in actors.into_iter().rev() {
-            let realm = context.placement.resource_scope;
-            if let Err(source) = self.runner.close_realm(context, realm).await {
-                if first_error.is_none() {
-                    first_error = Some(ResidentLifecycleError::Cleanup {
-                        actor: current,
+    pub(crate) async fn abort_starting(
+        &self,
+        starting: crate::StartingActor,
+        terminal: ActorTerminal,
+    ) -> Result<(), ResidentLifecycleError> {
+        let cleanup = self.registry.abort_start_for_cleanup(starting, terminal)?;
+        self.cleanup(vec![cleanup]).await
+    }
+
+    pub(crate) async fn cleanup_terminal(
+        &self,
+        cleanup: crate::registry::ActorCleanup,
+    ) -> Result<(), ResidentLifecycleError> {
+        self.cleanup(vec![cleanup]).await
+    }
+
+    async fn cleanup(
+        &self,
+        actors: Vec<crate::registry::ActorCleanup>,
+    ) -> Result<(), ResidentLifecycleError> {
+        let mut first_shutdown_error = None;
+        let mut first_cleanup_error = None;
+        for cleanup in actors.into_iter().rev() {
+            let realm = cleanup.context.placement.resource_scope;
+            if let Some(shutdown) = cleanup.shutdown {
+                if let Err(source) = self
+                    .runner
+                    .run_shutdown(
+                        cleanup.context.clone(),
+                        shutdown,
+                        realm,
+                        cleanup.terminal.kind,
+                    )
+                    .await
+                {
+                    let _ = self
+                        .registry
+                        .record_shutdown_hook_failed(cleanup.actor, source.to_string());
+                    if first_shutdown_error.is_none() {
+                        first_shutdown_error = Some(ResidentLifecycleError::Shutdown {
+                            actor: cleanup.actor,
+                            source,
+                        });
+                    }
+                }
+            }
+            if let Err(source) = self.runner.close_realm(cleanup.context, realm).await {
+                if first_cleanup_error.is_none() {
+                    first_cleanup_error = Some(ResidentLifecycleError::Cleanup {
+                        actor: cleanup.actor,
                         source,
                     });
                 }
             }
         }
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        first_cleanup_error
+            .or(first_shutdown_error)
+            .map_or(Ok(()), Err)
     }
 }

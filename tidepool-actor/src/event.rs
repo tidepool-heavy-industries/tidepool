@@ -62,6 +62,9 @@ pub enum ActorEvent {
         #[serde(default)]
         owner_observing: bool,
     },
+    ShutdownHookFailed {
+        summary: String,
+    },
     ModelMessage {
         turn: u64,
         role: ActorRole,

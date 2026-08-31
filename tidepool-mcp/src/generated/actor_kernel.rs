@@ -8,6 +8,7 @@ pub fn actor_kernel_decl() -> crate::EffectDecl {
         description: "Kernel-private actor control boundary. Trusted Tidepool.Actor wrappers use it for readiness and hidden mailbox settlement; authored code has no operation here.",
         prompt_card: None,
         constructors: &[
+            "ActorInstallShutdownWith :: Int -> (Int -> Eff childEffs ()) -> ActorKernel ()",
             "ActorReadyWith :: ActorKernel ()",
             "ActorReplyWith :: Int -> result -> ActorKernel ()",
             "ActorContinueWith :: Int -> next -> ActorKernel ()",

@@ -20,6 +20,10 @@
 module Tidepool.Actor
   ( ActorRef
   , ActorDefinition (..)
+  , EffectProfile (..)
+  , ReadOnlyEffects
+  , ReadWriteEffects
+  , ShutdownReason (..)
   , startActor
   , runActor
   , call
@@ -39,6 +43,10 @@ import Prelude
 import Tidepool.Actor.Internal
   ( ActorDefinition (..)
   , ActorRef (..)
+  , EffectProfile (..)
+  , ReadOnlyEffects
+  , ReadWriteEffects
+  , ShutdownReason (..)
   )
 import Tidepool.Effects.Core
   ( Actor (..)
@@ -82,16 +90,35 @@ startActor
   => ActorDefinition startup api exit
   -> startup
   -> Eff effs (ActorRef api exit)
-startActor (ActorDefinition label startupAction install) startup = do
+startActor ActorDefinition
+  { label = actorLabel
+  , effectProfile = profile
+  , initialization = startupAction
+  , behavior = install
+  , visibleToChild = exports
+  , onShutdown = shutdownAction
+  } startup = do
   let cell = newExitCell startup
+      shutdownEntry reasonCode =
+        raiseKernel (shutdownAction (decodeShutdownReason reasonCode))
       entry _ = do
+        send (ActorInstallShutdownWith 0 shutdownEntry)
         initial <- raiseKernel (startupAction startup)
         send ActorReadyWith
         result <- raiseKernel (install startup initial)
         case fillExitCell cell result of
           () -> pure ()
-  (actorId, incarnation) <- send (ActorStartWith label entry)
+  (actorId, incarnation) <- send (ActorStartWith actorLabel entry (profileCode profile) exports)
   pure (ActorRef actorId incarnation cell)
+
+profileCode :: EffectProfile protocol effs -> Int
+profileCode ReadWrite = 0
+profileCode ReadOnly = 1
+
+decodeShutdownReason :: Int -> ShutdownReason
+decodeShutdownReason 0 = ShutdownCompleted
+decodeShutdownReason 1 = ShutdownFailed
+decodeShutdownReason _ = ShutdownCancelled
 
 raiseKernel :: Eff effs a -> Eff (ActorKernel ': effs) a
 raiseKernel = raise

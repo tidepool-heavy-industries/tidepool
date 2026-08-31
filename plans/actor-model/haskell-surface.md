@@ -43,8 +43,8 @@ Private readiness requests, reply obligations, deployment roots, Rust actor
 identities, program-image records, and provider machinery are not additional
 model-facing nouns.
 
-The exact names in this document are sketches. The contracts and separation of
-concerns are the decisions.
+Unless a fence is explicitly marked as pseudocode, the public names and types
+below describe the landed Haskell surface.
 
 ## 2. Actor-local effect stacks
 
@@ -54,20 +54,18 @@ principal, grants, realm, incarnation, and lifecycle phase. Generated imports
 and exports keep raw lifecycle, site, completion-settlement, and bridge
 vocabulary out of routine model use, but do not grant or revoke authority:
 
-For an application protocol `ActorProtocol :: Type -> Type`, an entry module
-may expose aliases like:
+The public library exposes these profile rows:
 
 ```haskell
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol
    , Actor
    , Deliberate
-   , RepoRead
-   , Review
+   , FsRead
    ]
 
 type ReadWriteEffects protocol =
-  RepoWrite ': ReadOnlyEffects protocol
+  FsWrite ': ReadOnlyEffects protocol
 
 type ActorEffects = ReadWriteEffects ActorProtocol
 type ActorM = Eff ActorEffects
@@ -78,7 +76,7 @@ functions do not mention it:
 
 ```haskell
 route
-  :: Members '[Actor, RepoRead] effs
+  :: Members '[Actor, FsRead] effs
   => WorkItem
   -> Eff effs Decision
 ```
@@ -150,8 +148,26 @@ private steps inside that operation, not model-facing values or verbs.
 
 ```haskell
 data ActorRef protocol exit
-data LaunchGrant
-data ActorDefinition startup protocol exit
+
+data EffectProfile protocol effs where
+  ReadOnly  :: EffectProfile protocol (ReadOnlyEffects protocol)
+  ReadWrite :: EffectProfile protocol (ReadWriteEffects protocol)
+
+data ShutdownReason
+  = ShutdownCompleted
+  | ShutdownFailed
+  | ShutdownCancelled
+
+data ActorDefinition startup protocol exit where
+  ActorDefinition
+    :: { label          :: Text
+       , effectProfile  :: EffectProfile protocol actorEffs
+       , initialization :: startup -> Eff actorEffs initial
+       , behavior       :: startup -> initial -> Eff actorEffs exit
+       , visibleToChild :: [Text]
+       , onShutdown     :: ShutdownReason -> Eff actorEffs ()
+       }
+    -> ActorDefinition startup protocol exit
 
 data ActorExit exit
   = Completed exit
@@ -164,31 +180,10 @@ startActor
   -> startup
   -> Eff effs (ActorRef protocol exit)
 
-withLaunchGrant
-  :: LaunchGrant
-  -> ActorDefinition startup protocol exit
-  -> ActorDefinition startup protocol exit
-
 awaitExit
   :: Member Actor effs
   => ActorRef protocol exit
   -> Eff effs (ActorExit exit)
-```
-
-The target definition is a full record. Its concrete syntax may change while
-the actor surface lands, but its authored choices are fixed. The following is
-explicit pseudocode: `initial` and `actorEffs` are existentially hidden, and
-`actorEffs` is the row selected by `effectProfile`.
-
-```haskell
-ActorDefinition
-  { label          :: Text
-  , effectProfile  :: EffectProfile actorEffs
-  , initialization :: startup -> Eff actorEffs initial
-  , behavior       :: startup -> initial -> Eff actorEffs exit
-  , visibleToChild :: [Text]
-  , onShutdown     :: ShutdownReason -> Eff actorEffs ()
-  }
 ```
 
 V0 runs the selected concrete row directly; reusable helpers remain
@@ -197,16 +192,9 @@ existentially hide `initial` and the concrete row, but Rust—not the existentia
 or an import—authorizes the resulting nominal requests. The profile is a named
 compile/deploy choice, not a reflected row ABI or authority token.
 
-The exact Haskell spelling of profile selection remains open until the Stage 5
-row-specialization vertical. It must remain part of full `ActorDefinition`
-construction, not become a second start operation, mutable options bag, or
-runtime row descriptor.
-
-The currently landed vertical carries only `label`, `initialization`, and
-`behavior`. It proves sealing, startup, readiness, and typed exit retention,
-but is not the final public record. Add `visibleToChild` and `onShutdown` only
-with their real exact-facade and closing-phase semantics; do not add ignored
-fields or a smart constructor with guessed defaults.
+Profile selection is part of the one full `ActorDefinition`; it is not a
+second start operation, mutable options bag, or runtime row descriptor. The
+GADT existentially hides both the initialization artifact and selected row.
 
 `visibleToChild` names additional top-level heads, not arbitrary Haskell
 export syntax. Internal sealing resolves them through GHC-derived metadata
@@ -215,11 +203,11 @@ head carries its constructor export shape; selecting a value carries that
 exact declaration identity. Missing, shadow-drifted, or type-incoherent
 selections fail start before child allocation.
 
-`withLaunchGrant` decorates the definition without changing its program image.
-Capability-owning modules create opaque recipes for their own resources;
-there is no public generic grant record or policy enum. `startActor` validates
-and redeems every recipe for the new child under the caller's principal.
-Copying a definition or recipe transfers no authority.
+Capability-specific launch grants remain planned, not public API. When added,
+capability-owning modules create opaque recipes for their own resources;
+there is no generic grant record or policy enum. Attaching a recipe must not
+change the definition's program image, and copying a definition or recipe must
+not itself transfer authority.
 
 `startActor` runs the definition's concrete `initialization` action. Any
 `deliberate` calls remain at authored monomorphic sites, so GHC records their
@@ -244,9 +232,11 @@ flow. Authored Haskell decides how that artifact configures the fixed program.
 Rust invokes the definition's shutdown hook at a safe boundary for
 cooperative shutdown without depending on it for hard cleanup. The hook runs
 under the actor's normal row and principal, but the interpreter is in its
-closing phase and refuses `Deliberate`, actor startup, and any other operation
-not permitted during shutdown. Rust remains the final owner of cleanup if
-Haskell cannot run.
+closing phase: installed handlers may finish ordinary bounded cleanup, while
+an unhandled suspension such as `Deliberate` or actor startup fails the hook.
+Rust closes the actor realm regardless, so cooperative Haskell cleanup is
+best-effort rather than a prerequisite for hard cleanup. Hook failure is a
+neutral actor event; it does not rewrite the actor's retained terminal result.
 
 Publication and liveness are separate facts. A child may terminate after
 signaling ready but before the caller resumes. The returned reference still

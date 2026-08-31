@@ -2203,8 +2203,8 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 -- end prompt_card.0 --
 
 -- constructors (4 items) --
--- constructors[0] (71 bytes) --
-ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)
+-- constructors[0] (88 bytes) --
+ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> Actor (Int, Int)
 -- end constructors[0] --
 
 -- constructors[1] (56 bytes) --
@@ -2260,18 +2260,22 @@ Kernel-private actor control boundary. Trusted Tidepool.Actor wrappers use it fo
 
 -- prompt_card: None --
 
--- constructors (3 items) --
--- constructors[0] (32 bytes) --
-ActorReadyWith :: ActorKernel ()
+-- constructors (4 items) --
+-- constructors[0] (78 bytes) --
+ActorInstallShutdownWith :: Int -> (Int -> Eff childEffs ()) -> ActorKernel ()
 -- end constructors[0] --
 
--- constructors[1] (49 bytes) --
-ActorReplyWith :: Int -> result -> ActorKernel ()
+-- constructors[1] (32 bytes) --
+ActorReadyWith :: ActorKernel ()
 -- end constructors[1] --
 
--- constructors[2] (50 bytes) --
-ActorContinueWith :: Int -> next -> ActorKernel ()
+-- constructors[2] (49 bytes) --
+ActorReplyWith :: Int -> result -> ActorKernel ()
 -- end constructors[2] --
+
+-- constructors[3] (50 bytes) --
+ActorContinueWith :: Int -> next -> ActorKernel ()
+-- end constructors[3] --
 
 -- end constructors --
 

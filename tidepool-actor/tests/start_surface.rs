@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tidepool_actor::{
-    ActorDescriptor, ActorExitKind, ActorLifecycle, ActorMachineRegistry, ActorPlacement,
-    ActorRegistry, ActorTerminal, ActorTurnKind, ActorWorkbenchSource, OutboundSettlement,
-    ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRunner, ResidentActorStarter,
-    ResidentCallPoll, ResidentCompletionExecutor, ResidentWaitPoll, StartInitiator,
+    ActorDescriptor, ActorEvent, ActorExitKind, ActorLifecycle, ActorMachineRegistry,
+    ActorPlacement, ActorRegistry, ActorTerminal, ActorTurnKind, ActorWorkbenchSource,
+    OutboundSettlement, ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRunner,
+    ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor, ResidentWaitPoll,
+    StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -103,40 +104,60 @@ async fn public_start_uses_one_exact_resident_path() {
 let idleDefinition :: ActorDefinition Int Maybe Int
     idleDefinition =
       ActorDefinition
-        "idle-worker"
-        (\seed -> pure seed)
-        (\_seed initial ->
-          (pure initial :: Eff '[Deliberate, ActorLocal Maybe] Int))
+        { label = "idle-worker"
+        , effectProfile = ReadWrite
+        , initialization = \seed -> pure seed
+        , behavior = \_seed initial ->
+            (pure initial :: Eff (ReadWriteEffects Maybe) Int)
+        , visibleToChild = []
+        , onShutdown = \reason -> case reason of
+            ShutdownCompleted -> deliberate "completed shutdown must not deliberate" ()
+            _ -> pure ()
+        }
 
     workerDefinition :: ActorDefinition Int Maybe Int
     workerDefinition =
       ActorDefinition
-        "worker"
-        (\seed -> do
-          approved <- deliberate "Approve the supplied seed." seed
-          adjustment <- deliberate "Choose the adjustment." seed
-          pure (approved, adjustment))
-        (\seed (approved, adjustment) ->
-          (pure (if approved then seed + adjustment else seed - adjustment)
-            :: Eff '[Deliberate, ActorLocal Maybe] Int))
+        { label = "worker"
+        , effectProfile = ReadOnly
+        , initialization = \seed -> do
+            approved <- deliberate "Approve the supplied seed." seed
+            adjustment <- deliberate "Choose the adjustment." seed
+            pure (approved, adjustment)
+        , behavior = \seed (approved, adjustment) ->
+            (pure (if approved then seed + adjustment else seed - adjustment)
+              :: Eff (ReadOnlyEffects Maybe) Int)
+        , visibleToChild = []
+        , onShutdown = const (pure ())
+        }
 
     serverDefinition :: ActorDefinition Int ((,) Int) Int
     serverDefinition =
       ActorDefinition
-        "server"
-        (\seed -> pure seed)
-        (\_seed initial ->
-          (serve initial (\state (delta, result) -> pure (result, state + delta))
-            :: Eff '[Deliberate, ActorLocal ((,) Int)] Int))
+        { label = "server"
+        , effectProfile = ReadOnly
+        , initialization = \seed -> pure seed
+        , behavior = \_seed initial ->
+            (serve initial (\state (delta, result) -> pure (result, state + delta))
+              :: Eff (ReadOnlyEffects ((,) Int)) Int)
+        , visibleToChild = []
+        , onShutdown = \reason -> case reason of
+            ShutdownCancelled -> deliberate "shutdown must not deliberate" ()
+            _ -> pure ()
+        }
 
     jobDefinition :: ActorDefinition Int ((,) Int) Int
     jobDefinition =
       ActorDefinition
-        "job"
-        (\seed -> pure seed)
-        (\_seed initial ->
-          (receive (\(delta, result) -> pure (result, initial + delta))
-            :: Eff '[Deliberate, ActorLocal ((,) Int)] Int))
+        { label = "job"
+        , effectProfile = ReadOnly
+        , initialization = \seed -> pure seed
+        , behavior = \_seed initial ->
+            (receive (\(delta, result) -> pure (result, initial + delta))
+              :: Eff (ReadOnlyEffects ((,) Int)) Int)
+        , visibleToChild = []
+        , onShutdown = const (pure ())
+        }
 
 in do
     _ <- startActor idleDefinition 10
@@ -243,6 +264,27 @@ in do
             .expect("child descriptor")
             .label(),
         "idle-worker"
+    );
+    assert_eq!(
+        registry
+            .descriptor(idle_child)
+            .expect("child descriptor")
+            .profile(),
+        tidepool_actor::ActorEffectProfile::ReadWrite
+    );
+    assert_eq!(
+        registry
+            .descriptor(idle_child)
+            .expect("child descriptor")
+            .effect_names(),
+        [
+            "ActorKernel",
+            "FsWrite",
+            "ActorLocal",
+            "Actor",
+            "Deliberate",
+            "FsRead"
+        ]
     );
     assert_eq!(provider.requests.lock().len(), 0);
     assert_eq!(registry.lifecycle(idle_child), Ok(ActorLifecycle::Exited));
@@ -369,7 +411,7 @@ in do
         registry.clone(),
         ResidentActorRunner::new(Arc::clone(&machines), workbench_source),
     );
-    lifecycle
+    let shutdown_error = lifecycle
         .force_terminate(
             parent,
             ActorTerminal {
@@ -378,10 +420,25 @@ in do
             },
         )
         .await
-        .expect("force cleanup completed parent subtree");
+        .expect_err("disallowed shutdown deliberation must be reported");
+    assert!(
+        shutdown_error
+            .to_string()
+            .contains("shutdown suspended on disallowed `Tidepool.Effects.Core.DeliberateWith`"),
+        "unexpected shutdown error: {shutdown_error}"
+    );
     assert_eq!(
         machines.peek(session_id, |machine| machine.parked_holes().len()),
         Some(0),
         "subtree cleanup closes the server's resident realm"
+    );
+    assert_eq!(
+        registry
+            .events()
+            .into_iter()
+            .filter(|record| matches!(record.event, ActorEvent::ShutdownHookFailed { .. }))
+            .count(),
+        2,
+        "both forbidden shutdown sessions remain visible in the neutral event stream"
     );
 }

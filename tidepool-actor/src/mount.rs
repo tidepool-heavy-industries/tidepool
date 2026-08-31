@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(target.installed, Some(context.run_context()));
         assert_eq!(target.effect_policy, Some(context.effect_policy));
         assert_eq!(target.live_payload, Some(context.live_payload));
-        assert_eq!(context.effect_policy, EffectRunPolicy::SuspendAll);
+        assert_eq!(context.effect_policy, EffectRunPolicy::HandleOrSuspend);
         assert_eq!(
             context.live_payload,
             tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE

@@ -150,7 +150,8 @@ impl ActorTimelines {
             | ActorEvent::MailboxDequeued { .. }
             | ActorEvent::CallSettled { .. }
             | ActorEvent::WaitRegistered { .. }
-            | ActorEvent::WaitSettled { .. } => {}
+            | ActorEvent::WaitSettled { .. }
+            | ActorEvent::ShutdownHookFailed { .. } => {}
             ActorEvent::Ready => timeline.lifecycle = TimelineLifecycle::Ready,
             ActorEvent::Exited { kind, summary, .. } => {
                 timeline.lifecycle = TimelineLifecycle::Exited;
@@ -178,6 +179,7 @@ fn event_name(event: &ActorEvent) -> &'static str {
         ActorEvent::Started { .. } => "started",
         ActorEvent::Ready => "ready",
         ActorEvent::Exited { .. } => "exited",
+        ActorEvent::ShutdownHookFailed { .. } => "shutdown_hook_failed",
         ActorEvent::ModelMessage { .. } => "model_message",
         ActorEvent::MailboxAccepted { .. } => "mailbox_accepted",
         ActorEvent::MailboxDequeued { .. } => "mailbox_dequeued",

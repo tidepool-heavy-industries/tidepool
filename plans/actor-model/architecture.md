@@ -713,11 +713,12 @@ already observed, advises its owner. Detachment, reparenting, and adoption are
 plausible later extensions but are absent from the initial API. Restart or an
 effect-stack change creates a new actor incarnation and a new `ActorRef`.
 
-Termination first queues a typed shutdown event for cooperative Haskell
-cleanup. Rust remains responsible for eventual forced termination and all
-external-resource cleanup. The initial watchdog is twelve hours, configurable
-per deployment. It is deliberately a leak backstop rather than an interactive
-timeout; measurement may justify changing the default later.
+Termination first publishes the immutable terminal transition, then invokes
+the actor's typed shutdown handler for cooperative Haskell cleanup. Hook
+failure is recorded as a neutral actor event and never rewrites that terminal
+result. Rust remains responsible for eventual forced termination and all
+external-resource cleanup. The planned watchdog is twelve hours, configurable
+per deployment; it is a leak backstop rather than an interactive timeout.
 
 The shutdown hook retains the actor's ordinary Haskell row, but the interpreter
 enters a closing phase that refuses `deliberate`, actor creation, and other

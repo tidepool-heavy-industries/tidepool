@@ -20,4 +20,21 @@ impl ActorEffectProfile {
             (Self::ReadWrite, _) | (Self::ReadOnly, Self::ReadOnly)
         )
     }
+
+    /// Nominal effect names in the exact Haskell row selected by this profile,
+    /// including the kernel-private outer entry row.
+    #[must_use]
+    pub const fn effect_names(self) -> &'static [&'static str] {
+        match self {
+            Self::ReadWrite => &[
+                "ActorKernel",
+                "FsWrite",
+                "ActorLocal",
+                "Actor",
+                "Deliberate",
+                "FsRead",
+            ],
+            Self::ReadOnly => &["ActorKernel", "ActorLocal", "Actor", "Deliberate", "FsRead"],
+        }
+    }
 }

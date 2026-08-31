@@ -99,6 +99,16 @@ pub fn actor() -> Effect {
                         ),
                         rust: RustBinding::CoreValue,
                     },
+                    Arg {
+                        name: "profile",
+                        ty: HsType::Int,
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "exports",
+                        ty: HsType::List(Box::new(HsType::Text)),
+                        rust: RustBinding::Derived,
+                    },
                 ],
                 ret: address_type(),
                 errors: None,

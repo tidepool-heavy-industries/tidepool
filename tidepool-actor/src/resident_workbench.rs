@@ -100,10 +100,22 @@ pub(crate) struct ResidentActorReadiness {
     hole: ResidentHole,
 }
 
-/// The only two suspensions the trusted V0 initialization driver settles.
+pub(crate) struct ResidentActorShutdown {
+    continuation: ResidentHole,
+    hook: RootCustody,
+}
+
+impl ResidentActorShutdown {
+    pub(crate) fn into_parts(self) -> (ResidentHole, RootCustody) {
+        (self.continuation, self.hook)
+    }
+}
+
+/// The only suspensions the trusted V0 initialization driver settles.
 /// Other nominal effects will join this classifier when their actor-local
 /// interpreters land; they must never be mistaken for readiness.
 pub(crate) enum ResidentActorStartupStep {
+    InstallShutdown(ResidentActorShutdown),
     Deliberate(crate::ResidentCompletion),
     Ready(ResidentActorReadiness),
 }
@@ -420,6 +432,23 @@ where
             .with_machine(context, move |session, _, _| {
                 let constructor = request_constructor(&request, session.data_con_table());
                 match constructor.rsplit('.').next() {
+                    Some("ActorInstallShutdownWith")
+                        if session.parked_realm(&hole) == Some(actor_realm) =>
+                    {
+                        let hook = session
+                            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "shutdown registration carried no live hook".into(),
+                                )
+                            })?;
+                        Ok(ResidentActorStartupStep::InstallShutdown(
+                            ResidentActorShutdown {
+                                continuation: hole,
+                                hook,
+                            },
+                        ))
+                    }
                     Some("DeliberateWith") => {
                         let table = session.data_con_table().clone();
                         let completion = crate::ResidentCompletion::capture(
@@ -441,6 +470,43 @@ where
                     _ => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                         "actor initialization suspended on unsupported `{constructor}` in {actor_realm:?}"
                     ))),
+                }
+            })
+            .await
+    }
+
+    pub(crate) async fn run_shutdown(
+        &self,
+        context: crate::ActorSessionContext,
+        hook: RootCustody,
+        realm: RealmId,
+        reason: crate::ActorExitKind,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let argument = match reason {
+            crate::ActorExitKind::Completed => 0,
+            crate::ActorExitKind::Failed => 1,
+            crate::ActorExitKind::Cancelled => 2,
+        };
+        self.access
+            .with_machine(context, move |session, context, _| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                match session
+                    .run_rooted_entry("actor_shutdown", hook, argument, realm, None)
+                    .map_err(ResidentActorWorkbenchError::Resident)?
+                {
+                    ResidentOutcome::Completed { .. } => Ok(()),
+                    ResidentOutcome::Suspended { request, .. } => {
+                        let constructor = request_constructor(&request, session.data_con_table());
+                        Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "shutdown suspended on disallowed `{constructor}`"
+                        )))
+                    }
                 }
             })
             .await
@@ -646,6 +712,10 @@ where
                     session.data_con_table(),
                 )?;
                 let (constructor, site) = match decoded {
+                    crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
+                        site,
+                        _,
+                    ) => ("ActorInstallShutdownWith", site),
                     crate::generated::actor_kernel::ActorKernelReq::ActorReplyWith(site, _) => {
                         ("ActorReplyWith", site)
                     }

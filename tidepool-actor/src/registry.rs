@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 use parking_lot::Mutex;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::MonotonicIdIssuer;
+use tidepool_runtime::session::RootCustody;
 
 use crate::agent_session::AgentSessionState;
 use crate::mailbox::{InstalledActorState, InstalledReceiver};
@@ -41,7 +42,7 @@ impl ActorDescriptor {
             label: label.into(),
             profile: ActorEffectProfile::ReadWrite,
             effect_names: effect_names.into_iter().map(Into::into).collect(),
-            effect_policy: EffectRunPolicy::SuspendAll,
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
             source_imports: ActorSourceImports::default(),
@@ -153,6 +154,8 @@ pub enum ActorRegistryError {
     AlreadyReady(ActorRef),
     #[error("actor {0:?} has exited")]
     Exited(ActorRef),
+    #[error("actor {0:?} has not exited")]
+    NotExited(ActorRef),
     #[error(
         "actor {owner:?} with profile {owner_profile:?} cannot start child profile {child_profile:?}"
     )]
@@ -163,6 +166,8 @@ pub enum ActorRegistryError {
     },
     #[error("actor {0:?} already has an installed mailbox receiver")]
     ReceiverAlreadyInstalled(ActorRef),
+    #[error("actor {0:?} already has an installed shutdown hook")]
+    ShutdownAlreadyInstalled(ActorRef),
     #[error("actor {0:?} has no installed mailbox receiver")]
     ReceiverMissing(ActorRef),
     #[error("actor {actor:?} already has an active {active:?} turn")]
@@ -231,10 +236,18 @@ struct ActorEntry {
     active_turn: Option<ActorTurnKind>,
     mailbox: VecDeque<QueuedMessage>,
     receiver: Option<InstalledReceiver>,
+    shutdown: Option<RootCustody>,
     parked: Option<ParkedObligation>,
     terminal: Option<ActorTerminal>,
     agent_session: Option<Arc<Mutex<AgentSessionState>>>,
     next_event_sequence: u64,
+}
+
+pub(crate) struct ActorCleanup {
+    pub(crate) actor: ActorRef,
+    pub(crate) context: ActorSessionContext,
+    pub(crate) terminal: ActorTerminal,
+    pub(crate) shutdown: Option<RootCustody>,
 }
 
 struct QueuedMessage {
@@ -374,6 +387,7 @@ impl ActorRegistry {
                 active_turn: None,
                 mailbox: VecDeque::new(),
                 receiver: None,
+                shutdown: None,
                 parked: None,
                 terminal: None,
                 agent_session: None,
@@ -467,6 +481,29 @@ impl ActorRegistry {
         Ok(())
     }
 
+    /// Install the cooperative shutdown hook before readiness publication.
+    pub(crate) fn install_starting_shutdown(
+        &self,
+        starting: &StartingActor,
+        shutdown: RootCustody,
+    ) -> Result<(), ActorRegistryError> {
+        self.validate_starting(starting)?;
+        let mut state = self.inner.state.lock();
+        let actor = entry_mut(&mut state, starting.actor)?;
+        if actor.lifecycle != ActorLifecycle::Initializing {
+            return Err(match actor.lifecycle {
+                ActorLifecycle::Ready => ActorRegistryError::AlreadyReady(starting.actor),
+                ActorLifecycle::Exited => ActorRegistryError::Exited(starting.actor),
+                ActorLifecycle::Initializing => unreachable!(),
+            });
+        }
+        if actor.shutdown.is_some() {
+            return Err(ActorRegistryError::ShutdownAlreadyInstalled(starting.actor));
+        }
+        actor.shutdown = Some(shutdown);
+        Ok(())
+    }
+
     pub(crate) fn take_receiver(
         &self,
         actor: ActorRef,
@@ -487,7 +524,7 @@ impl ActorRegistry {
         delivery: &mut MailboxDelivery,
         reply: Option<MailboxValue>,
         next: InstalledActorState,
-    ) -> Result<(), MailboxFailure> {
+    ) -> Result<Option<ActorCleanup>, MailboxFailure> {
         let mut state = self.inner.state.lock();
         require_ready(&state, actor)?;
         let actor_entry = entry(&state, actor)?;
@@ -538,12 +575,13 @@ impl ActorRegistry {
         match next {
             InstalledActorState::Receiving(receiver) => {
                 entry_mut(&mut state, actor)?.receiver = Some(receiver);
+                Ok(None)
             }
             InstalledActorState::Completed(terminal) => {
                 exit_subtree(&mut state, actor, terminal)?;
+                Ok(Some(cleanup_for(&mut state, actor)?))
             }
         }
-        Ok(())
     }
 
     /// Terminate an actor whose startup failed before reference publication.
@@ -551,20 +589,31 @@ impl ActorRegistry {
     /// handle is returned to the starter.
     pub fn abort_start(
         &self,
-        mut starting: StartingActor,
+        starting: StartingActor,
         terminal: ActorTerminal,
     ) -> Result<(), ActorRegistryError> {
+        self.abort_start_for_cleanup(starting, terminal).map(drop)
+    }
+
+    pub(crate) fn abort_start_for_cleanup(
+        &self,
+        mut starting: StartingActor,
+        terminal: ActorTerminal,
+    ) -> Result<ActorCleanup, ActorRegistryError> {
         self.validate_starting(&starting)?;
         let mut state = self.inner.state.lock();
-        let result = match entry(&state, starting.actor)?.lifecycle {
-            ActorLifecycle::Initializing => exit_subtree(&mut state, starting.actor, terminal),
-            ActorLifecycle::Ready => Err(ActorRegistryError::AlreadyReady(starting.actor)),
-            ActorLifecycle::Exited => Err(ActorRegistryError::Exited(starting.actor)),
-        };
-        if result.is_ok() {
-            starting.armed = false;
+        let actor = starting.actor;
+        match entry(&state, actor)?.lifecycle {
+            ActorLifecycle::Initializing => exit_subtree(&mut state, actor, terminal)?,
+            ActorLifecycle::Ready => {
+                return Err(ActorRegistryError::AlreadyReady(starting.actor));
+            }
+            ActorLifecycle::Exited => {
+                return Err(ActorRegistryError::Exited(starting.actor));
+            }
         }
-        result
+        starting.armed = false;
+        cleanup_for(&mut state, actor)
     }
 
     /// Admit one serialized actor turn. Dropping the lease restores admission
@@ -1009,12 +1058,15 @@ impl ActorRegistry {
         &self,
         actor: ActorRef,
         terminal: ActorTerminal,
-    ) -> Result<Vec<(ActorRef, ActorSessionContext)>, ActorRegistryError> {
+    ) -> Result<Vec<ActorCleanup>, ActorRegistryError> {
         let mut state = self.inner.state.lock();
         entry(&state, actor)?;
-        let cleanup = owned_subtree_contexts(&state, actor)?;
+        let actors = owned_subtree_refs(&state, actor)?;
         exit_subtree(&mut state, actor, terminal)?;
-        Ok(cleanup)
+        actors
+            .into_iter()
+            .map(|actor| cleanup_for(&mut state, actor))
+            .collect()
     }
 
     pub fn lifecycle(&self, actor: ActorRef) -> Result<ActorLifecycle, ActorRegistryError> {
@@ -1035,6 +1087,23 @@ impl ActorRegistry {
 
     pub fn events(&self) -> Vec<ActorEventRecord> {
         self.inner.state.lock().events.clone()
+    }
+
+    pub(crate) fn record_shutdown_hook_failed(
+        &self,
+        actor: ActorRef,
+        summary: String,
+    ) -> Result<(), ActorRegistryError> {
+        let mut state = self.inner.state.lock();
+        if entry(&state, actor)?.lifecycle != ActorLifecycle::Exited {
+            return Err(ActorRegistryError::NotExited(actor));
+        }
+        record(
+            &mut state,
+            actor,
+            EventCausality::default(),
+            ActorEvent::ShutdownHookFailed { summary },
+        )
     }
 
     pub(crate) fn record_event(
@@ -1340,18 +1409,34 @@ fn clear_parked(state: &mut RegistryState, actor: ActorRef, obligation: ParkedOb
     }
 }
 
-fn owned_subtree_contexts(
+fn owned_subtree_refs(
     state: &RegistryState,
     root: ActorRef,
-) -> Result<Vec<(ActorRef, ActorSessionContext)>, ActorRegistryError> {
+) -> Result<Vec<ActorRef>, ActorRegistryError> {
     let mut pending = vec![root];
-    let mut contexts = Vec::new();
+    let mut actors = Vec::new();
     while let Some(actor) = pending.pop() {
         let actor_entry = entry(state, actor)?;
         pending.extend(actor_entry.children.iter().copied());
-        contexts.push((actor, session_context_for(actor, actor_entry)));
+        actors.push(actor);
     }
-    Ok(contexts)
+    Ok(actors)
+}
+
+fn cleanup_for(
+    state: &mut RegistryState,
+    actor: ActorRef,
+) -> Result<ActorCleanup, ActorRegistryError> {
+    let actor_entry = entry_mut(state, actor)?;
+    Ok(ActorCleanup {
+        actor,
+        context: session_context_for(actor, actor_entry),
+        terminal: actor_entry
+            .terminal
+            .clone()
+            .ok_or(ActorRegistryError::Exited(actor))?,
+        shutdown: actor_entry.shutdown.take(),
+    })
 }
 
 fn session_context_for(actor: ActorRef, entry: &ActorEntry) -> ActorSessionContext {
@@ -1863,9 +1948,9 @@ mod tests {
         assert_eq!(
             cleanup
                 .iter()
-                .map(|(actor, context)| {
-                    assert_eq!(*actor, context.actor);
-                    *actor
+                .map(|cleanup| {
+                    assert_eq!(cleanup.actor, cleanup.context.actor);
+                    cleanup.actor
                 })
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([root, child, sibling]),

@@ -243,12 +243,13 @@ data Green a where
 
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 data Actor a where
-  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)
+  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> Actor (Int, Int)
   ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
   ActorCallWith :: (Int, Int) -> protocol result -> Actor result
   ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
 
 data ActorKernel a where
+  ActorInstallShutdownWith :: Int -> (Int -> Eff childEffs ()) -> ActorKernel ()
   ActorReadyWith :: ActorKernel ()
   ActorReplyWith :: Int -> result -> ActorKernel ()
   ActorContinueWith :: Int -> next -> ActorKernel ()

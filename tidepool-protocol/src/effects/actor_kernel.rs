@@ -32,6 +32,32 @@ pub fn actor_kernel() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
+                ctor: "ActorInstallShutdownWith",
+                method: "actor_install_shutdown_with",
+                args: vec![
+                    crate::schema::Arg {
+                        name: "site",
+                        ty: HsType::Int,
+                        rust: crate::schema::RustBinding::Derived,
+                    },
+                    crate::schema::Arg {
+                        name: "shutdown",
+                        ty: HsType::func(
+                            HsType::Int,
+                            HsType::app(
+                                HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
+                                HsType::Unit,
+                            ),
+                        ),
+                        rust: crate::schema::RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
                 ctor: "ActorReadyWith",
                 method: "actor_ready_with",
                 args: Vec::new(),

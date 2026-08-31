@@ -129,8 +129,13 @@ This is the canonical status inventory for the plan.
   critical section, then closes every captured actor realm, attempting the
   whole subtree even if one cleanup fails. A concurrently admitted child can
   therefore never be cancelled without its realm entering cleanup. Resident
-  continuation failures and failed/unpublishable startup use this path; the
-  cooperative typed shutdown hook remains unlanded.
+  continuation failures and failed/unpublishable startup use this path.
+- The full Haskell `ActorDefinition` GADT selects `ReadWrite` or `ReadOnly`,
+  carries exact child-visible exports, and installs one typed cooperative
+  shutdown hook before readiness. The lifecycle owner runs hooks child-first
+  for every captured terminal path and still closes every realm if a hook
+  fails or suspends on a disallowed operation. Hook failures enter the neutral
+  actor event stream and do not replace the retained terminal result.
 - Resident mailbox custody now follows the canonical ownership protocol:
   accepted requests are rehomed to the target realm, replies are rehomed to
   the caller realm before atomic publication, and a completed callee can close
@@ -154,9 +159,7 @@ This is the canonical status inventory for the plan.
 
 - convergence of the remaining presentation-heavy REPL/harness execution
   epilogues where they still duplicate neutral compile/commit behavior;
-- the Haskell spelling that selects `ReadWrite` or `ReadOnly`, specialization
-  of definitions to the selected concrete row, and capability-specific launch
-  grants;
+- capability-specific launch grants;
 - an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
   require it, but current profiles, facades, and nominal handlers must leave it
   additive without changing the actor API, program images, profile semantics,
@@ -164,7 +167,7 @@ This is the canonical status inventory for the plan.
   than authority;
 - full sealing validation for explicit model-visible value exports and
   shadow-drift/type-coherence probes beyond the landed nominal-head facade;
-- lifecycle advisories and cooperative typed shutdown execution;
+- lifecycle advisories;
 - the remaining mailbox cancellation/failure race matrix;
 - model-authored dynamic definitions and internally sealed child deployments;
 - immutable live-binding snapshots or structural context fork;
@@ -473,14 +476,11 @@ The Rust registry already provides:
 - synchronous wait-edge tracking and `A -> B -> A` cycle rejection;
 - owner termination recursively stopping its subtree.
 
-Still add closing-phase cooperative shutdown execution before the landed
-Rust-owned forced-cleanup fallback.
-
 The resident call/cast/receive/serve vertical, atomic reply-plus-next-state
-settlement, exact waits, and per-session FIFO machine admission are landed.
-The remaining work in this stage is the typed shutdown hook and adversarial
-lifecycle/cancellation coverage—not another scheduler, mailbox execution,
-forced-cleanup, or exit-value retention mechanism.
+settlement, exact waits, typed shutdown, and per-session FIFO machine admission
+are landed. The remaining work in this stage is adversarial lifecycle and
+cancellation coverage—not another scheduler, mailbox execution,
+forced-cleanup, shutdown, or exit-value retention mechanism.
 
 The call/cancel/reply linearization cases are now pinned: caller cancellation
 after handler admission does not fail the callee, target exit before reply
@@ -492,37 +492,38 @@ execution before the watchdog. The first real request/reply child vertical is
 landed; advisory inference is not a gate for proving application-message
 semantics.
 
-## 8. Stage 5 — profiles, dynamic sealing, and caller-checked authority
+## 8. Stage 5 — dynamic sealing and caller-checked authority
 
-The Rust half of the initial profile contract is landed. `ActorDescriptor`
-records immutable `ReadWrite` or `ReadOnly` identity, creation events preserve
-it, and `ActorRegistry` rejects `ReadOnly -> ReadWrite` before consuming an
-actor identity. Profile identity remains neutral metadata: it neither reflects
-a Haskell row nor grants access to a resource.
+The initial named-profile path is landed end to end. `ActorDefinition` selects
+one statically known Haskell row, while `ActorDescriptor` records the matching
+immutable `ReadWrite` or `ReadOnly` identity. Creation events preserve it and
+`ActorRegistry` rejects `ReadOnly -> ReadWrite` before consuming an actor
+identity. Profile identity remains neutral metadata: it neither reflects an
+arbitrary Haskell row nor grants access to a resource.
 
-The single private start capture already derives a content-addressed exact facade
-behind `startActor`. Complete that membrane so a
-model can start a newly defined actor without weakening the checked-in vertical.
-
-Complete the Haskell half of the two initial named profiles through this same
-path:
+The profile contract is:
 
 - `ReadWrite` actors may start `ReadWrite` or `ReadOnly` children;
 - `ReadOnly` actors may start only `ReadOnly` children;
 - GHC checks each definition against the selected profile row;
-- Rust validates the spawn edge before allocation (landed);
+- Rust validates the spawn edge before allocation;
 - profile identity remains launch metadata, separate from program images and
   per-resource grants;
 - `ReadOnly` excludes ambient write effects but may call an explicitly supplied
   writer actor.
 
-The registry tests already prove every permitted metadata edge and reject
-`ReadOnly -> ReadWrite` before allocation without consuming an identity. The
-remaining acceptance rejects a write-using definition specialized to
-`ReadOnly` and shows that copying a profile choice or definition transfers no
-resource grant.
+Registry tests prove every permitted metadata edge and reject `ReadOnly ->
+ReadWrite` without consuming an identity. The Haskell start vertical compiles
+and runs definitions specialized to both rows. Remaining profile acceptance
+adds a compile-failure fixture for a write-using `ReadOnly` definition.
 
-The existing sealing component must extend its program image to cover:
+The single private start capture now combines compiler-inferred dependencies
+with `visibleToChild`, resolves that exact facade before allocation, and routes
+the rooted entry through the normal isolated child lifecycle. Complete the
+membrane with a genuinely model-authored definition; do not add a second image
+registry or public sealing operation.
+
+The sealing proof must cover:
 
 - the rooted definition value;
 - exact dependency-closed session-module identities;

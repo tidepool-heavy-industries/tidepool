@@ -25,6 +25,8 @@ pub enum ResidentMailboxError {
     #[error(transparent)]
     Workbench(#[from] ResidentActorWorkbenchError),
     #[error(transparent)]
+    Lifecycle(#[from] crate::ResidentLifecycleError),
+    #[error(transparent)]
     Wait(#[from] crate::ActorWaitError),
     #[error("mailbox {0} had no request value")]
     MissingRequest(&'static str),
@@ -382,11 +384,11 @@ where
                 InstalledActorState::Receiving(receiver)
             }
         };
-        let completed = matches!(next, InstalledActorState::Completed(_));
-        self.registry
+        let cleanup = self
+            .registry
             .settle_resident_delivery(actor, &mut delivery, reply, next)?;
-        if completed {
-            self.runner.close_realm(context, actor_realm).await?;
+        if let Some(cleanup) = cleanup {
+            self.lifecycle.cleanup_terminal(cleanup).await?;
         }
         Ok(())
     }
