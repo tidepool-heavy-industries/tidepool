@@ -14,7 +14,9 @@
 //! rather than sitting as declared-but-never-exercised code.
 
 use tidepool_protocol::effects::finalize::finalize;
-use tidepool_protocol::schema::Polymorphism;
+use tidepool_protocol::schema::{Polymorphism, TypeParam};
+
+const GHOST_PARAMS: &[TypeParam] = &[TypeParam::value("v"), TypeParam::value("ghost")];
 
 /// `ArgBound`'s positive case: `Finalize`'s real, declared shape (`v` a real
 /// GADT parameter, appearing as `FinalizeWith`'s `value` argument type).
@@ -45,7 +47,7 @@ fn arg_bound_rejects_a_tyvar_not_in_type_params() {
 #[test]
 fn arg_bound_rejects_a_tyvar_absent_from_every_verb_argument() {
     let mut eff = finalize();
-    eff.type_params = &["v", "ghost"];
+    eff.type_params = GHOST_PARAMS;
     eff.default_row_args = &["Void", "Void"];
     // "ghost" now satisfies the type_params check but appears in no verb's
     // argument list, so it must fail the "argument-bound, not result-bound"

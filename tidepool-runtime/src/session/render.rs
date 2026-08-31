@@ -308,7 +308,7 @@ impl ModuleEnv {
             // missing here, the same drift class as the earlier
             // `OverloadedRecordDot`/`DuplicateRecordFields` gap.
             pragmas: "{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, DataKinds, TypeOperators, \
-                      FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, \
+                      FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, \
                       PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, \
                       LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, \
                       ViewPatterns, BangPatterns, TypeApplications, BlockArguments, \

@@ -1612,7 +1612,10 @@ impl JitEffectMachine {
                         Some(field)
                     }
                     LivePayloadPolicy::ClosureField(_) => None,
-                    LivePayloadPolicy::ValueField(field) => Some(field),
+                    LivePayloadPolicy::ValueField(field) if request_has_field(&request, field) => {
+                        Some(field)
+                    }
+                    LivePayloadPolicy::ValueField(_) => None,
                 };
                 let has_live_payload = live_payload_field.is_some();
                 // The root rides into `park_continuation` and lands on the
@@ -2785,6 +2788,14 @@ fn request_field_carries_closure_sentinel(
             .is_some_and(heap_bridge::contains_closure_sentinel),
         _ => false,
     }
+}
+
+/// Whether a bridged request actually has the policy-selected field.
+/// Payload-free requests are ordinary in a mixed nominal effect row; they do
+/// not need fake padding merely because another constructor carries a live
+/// value at that position.
+fn request_has_field(request: &tidepool_eval::value::Value, field: usize) -> bool {
+    matches!(request, tidepool_eval::value::Value::Con(_, fields) if field < fields.len())
 }
 
 /// Drive the freer-simple effect step loop to `Yield::Done`: step the machine,

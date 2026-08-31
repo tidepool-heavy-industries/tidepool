@@ -178,6 +178,7 @@ pub(crate) fn effects_core_module_source_for(vocab_effects: &[EffectDecl]) -> St
     // `effects`: it's a zero-cost base import, and gating it would need a
     // vocabulary check this function doesn't otherwise make per-effect.
     out.push_str("import Data.Void (Void)\n");
+    out.push_str("import Data.Kind (Type)\n");
     out.push_str("import qualified Tidepool.Data.Text as T\n");
     out.push_str("import qualified Data.Map.Strict as Map\n");
     out.push_str("import qualified Tidepool.Aeson.KeyMap as KM\n");
@@ -308,20 +309,14 @@ pub fn effects_shim_module_source(row_effects: &[EffectDecl], row: &crate::RowAr
         out.push_str("import Control.Monad.Freer hiding (run)\n");
         out.push_str("import Tidepool.Prelude hiding (error)\n");
     }
-    // `Data.Void`'s `Void` rides the SAME re-export hazard as the pair above,
-    // but only when `Finalize` is actually in the vocabulary: Core imports it
-    // (for `Finalize`'s uninhabited default row arg) but cannot re-export it
-    // either, and `type M`'s own RHS below is exactly where an unpinned
-    // `Finalize` row spells `Finalize Void` — without this import that
-    // reference is "Not in scope: type constructor 'Void'", which cascades
-    // into every downstream module reporting confusing fallout ("does not
-    // export", "which is not loaded") via extract's own non-topological
-    // diagnostic-recovery pass (see `validate_finalize_row`'s doc for that
-    // same recovery-pass hazard, there for a PINNED row). Gated on
-    // `Finalize`'s presence (unlike the pair above, needed by any row-
-    // dependent effect generally) so a vocabulary without `Finalize` never
-    // carries an unused import.
-    if row_effects.iter().any(|e| e.type_name == "Finalize") {
+    // `Data.Void`'s `Void` rides the SAME re-export hazard as the pair above.
+    // Import it whenever an effect's default application actually names it;
+    // keying this to one historical consumer (`Finalize`) would make adding a
+    // second parameterized effect silently generate an ill-scoped row.
+    if row_effects
+        .iter()
+        .any(|effect| effect.default_row_args.contains(&"Void"))
+    {
         out.push_str("import Data.Void (Void)\n");
     }
     // Author modules defining the types this row is applied to (e.g. the

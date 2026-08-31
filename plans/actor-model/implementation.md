@@ -80,6 +80,15 @@ This is the canonical status inventory for the plan.
   completion preserves prior declarations and bindings, the corrective round
   completes, the never-run suffix stays unexecuted, and a closure-valued result
   remains callable after the fragment resource realm closes.
+- The first typed-startup substrate is landed: an existential `ActorSpec`
+  captures one concrete initialization action and installed behavior; public
+  `startActor` lowers it to one rooted child entry; and the Rust capture seam
+  retains that entry, the parked parent, and GHC-owned yield metadata without
+  reflecting the child row. An end-to-end test drives typed deliberation,
+  private realm-checked readiness, child completion, and parent publication.
+- This substrate deliberately stops before lifecycle orchestration. The
+  current `actorSpec` constructor is the checked vertical's construction seam,
+  not the final model-authored program-image membrane described in Stage 5.
 - Rust effect routing is nominal; no positional handler-prefix contract or
   reflected Haskell row ABI remains.
 
@@ -89,7 +98,11 @@ This is the canonical status inventory for the plan.
   epilogues where they still duplicate neutral compile/commit behavior;
 - explicit heterogeneous child-interpreter policy selection and
   capability-specific launch grants;
-- public `ActorDefinition`, `ActorSpec`, `ActorProgram`, or `startActor`;
+- registry-owned startup orchestration, readiness publication, and terminal
+  settlement behind the now-landed Haskell/capture substrate;
+- public `ActorDefinition` and `promoteActor`, including the exact
+  model-visible export membrane; replacement of the provisional `actorSpec`
+  constructor happens at that boundary rather than creating a second route;
 - lifecycle advisories and typed shutdown execution;
 - model-authored program promotion and dynamic child specifications;
 - immutable live-binding snapshots or structural context fork;
@@ -117,10 +130,10 @@ These choices remove branches from the first implementation:
   deployable `ActorSpec` values. `ActorSpec` has one prompted startup path.
   Startup deliberation may use the child runtime; installation is pure. V0 has
   no alternate startup mode or lifecycle-specific mini-DSL.
-- `ActorProgram` wraps one authored `Eff` continuation. One indexed
-  `ActorLocal api exit` effect ties its protocol and exit type to the eventual
-  `AgentRef`; its `receive` algebra exposes no callback registry, public reply
-  token, or parallel mailbox API.
+- One indexed `ActorLocal api exit` effect ties the authored continuation's
+  protocol and exit type to the eventual `AgentRef`; its `receive` algebra
+  exposes no callback registry, public reply token, or parallel mailbox API.
+  There is no public `ActorProgram` wrapper around the `Eff` value.
 - Per-instance resource authority uses opaque, capability-specific launch-grant
   recipes attached immutably to a specification. V0 has no generic public
   delegation/revocation API and never scans a startup value for capabilities.
@@ -268,8 +281,9 @@ interpreter; it must not create a parallel runtime-profile registry.
 Use the single definition shape in
 [haskell-surface.md](haskell-surface.md#3-actor-specifications-are-haskell-values):
 
-- one `Deliberation startup initial`;
-- one pure `startup -> initial -> ActorProgram actorEffs api exit`;
+- one concrete `startup -> Eff actorEffs initial` initialization action whose
+  authored call site supplies GHC's typed-deliberation metadata;
+- one pure `startup -> initial -> Eff actorEffs exit` behavior selector;
 - one explicit list of model-visible top-level export heads;
 - one shutdown handler running under
   the same existentially packaged `actorEffs` row with closing-phase

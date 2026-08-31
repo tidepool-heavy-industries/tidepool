@@ -57,9 +57,13 @@ fn assert_decl_matches_schema(decl: &tidepool_mcp::EffectDecl, eff: &tidepool_pr
         "extra_imports"
     );
     assert_eq!(helpers.to_vec(), eff.helper_texts(), "helpers");
+    let rendered_type_params: Vec<_> = eff.type_params.iter().map(|param| param.render()).collect();
     assert_eq!(
-        type_params.to_vec(),
-        eff.type_params.to_vec(),
+        type_params
+            .iter()
+            .map(|param| (*param).to_owned())
+            .collect::<Vec<_>>(),
+        rendered_type_params,
         "type_params"
     );
     assert_eq!(
@@ -222,6 +226,27 @@ fn actor_decl_matches_the_schema_exactly() {
     );
 }
 
+/// Deliberation is runtime suspension substrate generated directly from the
+/// schema. Keep its compiled declaration pinned independently of file output.
+#[test]
+fn deliberate_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::deliberate_decl(),
+        &tidepool_protocol::effects::deliberate::deliberate(),
+    );
+}
+
+/// ActorLocal is indexed by a unary protocol constructor and an exit type;
+/// this assertion therefore also proves that kinded parameters survive the
+/// schema-to-MCP projection.
+#[test]
+fn actor_local_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::actor_local_decl(),
+        &tidepool_protocol::effects::actor_local::actor_local(),
+    );
+}
+
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -238,6 +263,7 @@ fn every_schema_effect_is_reachable() {
             "Journal",
             "Worktree",
             "RepoEvent",
+            "Deliberate",
             "AskUser",
             "ReadState",
             "RunLLMTurn",
@@ -245,6 +271,7 @@ fn every_schema_effect_is_reachable() {
             "Finalize",
             "Green",
             "Actor",
+            "ActorLocal",
         ],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );

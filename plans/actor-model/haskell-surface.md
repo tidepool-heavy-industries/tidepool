@@ -101,7 +101,6 @@ dynamic construction systems:
 
 ```haskell
 data AgentRef api exit
-data ActorProgram actorEffs api exit
 data ActorSpec startup api exit
 data LaunchGrant
 data ActorLocal api exit a
@@ -109,12 +108,12 @@ data ActorLocal api exit a
 data ActorDefinition startup api exit where
   ActorDefinition
     :: Members '[Deliberate, ActorLocal api exit] actorEffs
-    => { startupSession
-           :: Deliberation startup initial
-       , install
+    => { initialization
+           :: startup -> Eff actorEffs initial
+       , behavior
            :: startup
            -> initial
-           -> ActorProgram actorEffs api exit
+           -> Eff actorEffs exit
        , modelExports
            :: [Text]
        , onShutdown
@@ -172,14 +171,15 @@ resources; there is no public generic grant record or policy enum.
 caller's principal before startup. Copying the resulting specification still
 transfers no authority.
 
-`startActor` mounts `startup` as a live value, runs the specification's sole
-typed startup agent session, and passes the resulting `initial` to the pure
-`install` function. The startup session may evaluate fenced Haskell using the
-child's fixed row. The lifecycle-phase interpreter refuses
+`startActor` runs the specification's concrete `initialization` action. That
+action contains the authored `deliberate` call so GHC records its exact input
+and output types before `ActorSpec` existentially hides the row. The startup
+interpreter accepts exactly that one deliberation and then requires readiness;
+it refuses
 `receive` and `forkActors` before program readiness; this is policy on the
-same row, not a startup monad. Installation itself cannot deliberate or perform
-external work because it is pure. The call returns only after the resulting
-`ActorProgram` is validated, installed, and accepting application messages.
+same row, not a startup monad. The pure `behavior startup initial` application
+selects the already-authored computation. The call returns only after that
+computation is installed and accepting application messages.
 The startup, initialization-artifact, and successful-exit types need not
 resemble the mailbox protocol. A non-prompted constructor remains absent until
 a real actor needs one.
@@ -190,8 +190,8 @@ type. Unexpected lifecycle events do not enter a heterogeneous Haskell system
 inbox; Rust instead schedules a Developer-triggered advisory turn in the
 owner's model context at the next quiescent provider boundary.
 
-Validating and installing the returned
-`ActorProgram actorEffs api exit` is the readiness linearization point. The
+Installing the returned `Eff actorEffs exit` computation is the readiness
+linearization point. The
 model produces a typed initialization artifact, not the actor's entire control
 flow. Authored Haskell decides how that artifact configures the fixed program.
 Rust invokes the specification's shutdown hook at a safe boundary for
@@ -217,14 +217,9 @@ immutable terminal metadata needed to distinguish completion, failure, and
 cancellation. A stale or invalid reference and cancellation of the waiter make
 that `awaitExit` fragment unsatisfiable; target termination returns normally.
 
-`ActorProgram` is a typed wrapper around one ordinary `Eff` computation. The
-model-facing shape is conceptually:
+The model-facing shape is the ordinary `Eff` computation directly:
 
 ```haskell
-program
-  :: Eff actorEffs exit
-  -> ActorProgram actorEffs api exit
-
 receive
   :: Member (ActorLocal api exit) effs
   => (forall result. api result -> Eff effs (result, next))
@@ -246,10 +241,11 @@ Every request is interpreted under the current actor principal, so there is no
 mailbox handle to forge, pass, or rewrite during fork.
 
 The kernel module also uses one private `ActorLocal` readiness operation while
-bootstrapping an `ActorProgram`. Its parked continuation is the installed
-program root. The interpreter accepts it only from the program's resource
-realm, never from a fenced model fragment. This keeps readiness in the same
-ordinary effect algebra without exposing a public lifecycle token or adding a
+bootstrapping the authored computation. Its parked continuation is the
+installed program root. The interpreter accepts it only from the program's
+resource realm, never from a fenced model fragment. This keeps readiness in
+the same ordinary effect algebra without exposing a public lifecycle token or
+adding a
 Rust-side program registry.
 
 `receive` suspends without polling, accepts one call or cast, runs the handler

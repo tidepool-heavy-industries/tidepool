@@ -22,8 +22,11 @@
 
 use crate::hs::HsType;
 use crate::schema::{
-    Arg, Effect, HandlingClass, Helper, HelperBody, Polymorphism, RustBinding, SitedCtorArg, Verb,
+    Arg, Effect, HandlingClass, Helper, HelperBody, Polymorphism, RustBinding, SitedCtorArg,
+    TypeParam, Verb,
 };
+
+const TYPE_PARAMS: &[TypeParam] = &[TypeParam::value("v")];
 
 /// The `Finalize` suspension, decode-only.
 #[must_use]
@@ -52,7 +55,7 @@ pub fn finalize() -> Effect {
         // `Data.Void`, imported into the generated Core module — not a
         // bespoke `data` decl here) is the default for a turn not answering a
         // typed hole: uninhabited, so such a turn simply cannot finalize.
-        type_params: &["v"],
+        type_params: TYPE_PARAMS,
         default_row_args: &["Void"],
         helpers_row_polymorphic: true,
         extra_imports: &[],

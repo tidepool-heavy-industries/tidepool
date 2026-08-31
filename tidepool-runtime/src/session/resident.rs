@@ -653,6 +653,18 @@ where
         self.parked.iter().map(|(h, _)| h.as_str()).collect()
     }
 
+    /// Runtime resource scope owning one parked continuation. Lifecycle
+    /// interpreters use this to distinguish installed-program suspensions from
+    /// disposable workbench fragments without trusting request payload data.
+    #[must_use]
+    pub fn parked_realm(&self, hole: &ResidentHole) -> Option<RealmId> {
+        let &(_, id) = self
+            .parked
+            .iter()
+            .find(|(name, _)| name == hole.cont_id())?;
+        self.core.machine()?.parked_realm(id)
+    }
+
     /// Whether the session has no parked frames (ready and quiescent).
     pub fn is_idle(&self) -> bool {
         self.parked.is_empty()

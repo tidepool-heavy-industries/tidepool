@@ -26,6 +26,8 @@ pub enum ActorWaitError {
     Decode(#[from] BridgeError),
     #[error(transparent)]
     Wait(#[from] WaitError),
+    #[error("actor wait decoder received a non-wait request")]
+    UnexpectedRequest,
 }
 
 impl ActorWait {
@@ -37,7 +39,11 @@ impl ActorWait {
         request: &Value,
         table: &DataConTable,
     ) -> Result<Self, ActorWaitError> {
-        let ActorReq::ActorWaitWith(actor_id, incarnation) = ActorReq::from_value(request, table)?;
+        let ActorReq::ActorWaitWith((actor_id, incarnation)) =
+            ActorReq::from_value(request, table)?
+        else {
+            return Err(ActorWaitError::UnexpectedRequest);
+        };
         let (Ok(actor_id_u64), Ok(incarnation_u64)) =
             (u64::try_from(actor_id), u64::try_from(incarnation))
         else {

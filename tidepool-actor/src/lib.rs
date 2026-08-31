@@ -17,6 +17,7 @@ mod mailbox;
 mod mount;
 mod registry;
 mod resident_workbench;
+mod start;
 mod timeline;
 mod wait;
 
@@ -50,5 +51,6 @@ pub use registry::{
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorWorkbench, ResidentActorWorkbenchError,
 };
+pub use start::{ActorStartCaptureError, ActorStartRequest, ResidentActorStart};
 pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
 pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};

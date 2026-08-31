@@ -408,19 +408,19 @@ V0 fresh children inherit the owner's composition-owned nominal interpreter
 policy. Selecting a different child policy is deferred until a real
 capability protocol establishes the required shape.
 
-Startup runs one User-role `Deliberation startup initial` in the new child's
-workbench under that actor interpreter. The model may use the child's permitted
-effects while producing `initial`; the `ActorLocal` handler is present in the
-fixed row but refuses `receive` and `forkActors` before readiness. A pure
-authored function combines `startup` and `initial` into
-`ActorProgram actorEffs api exit`. Pure
-installation removes the need for separate `prepare`/`StartupM` mechanisms and
-makes nested startup inference impossible by construction.
+Startup runs one concrete `startup -> Eff actorEffs initial` action in the new
+child's workbench under that actor interpreter. Keeping the `deliberate` call
+at this authored, monomorphic site lets GHC record its exact types before the
+definition hides `actorEffs`. The startup interpreter accepts exactly one such
+deliberation and then requires readiness; it refuses `receive` and
+`forkActors` before readiness. A pure authored function combines `startup` and
+`initial` into the installed `Eff actorEffs exit` continuation. This removes
+the need for separate `prepare`/`StartupM` mechanisms and for a public
+`ActorProgram` wrapper.
 
-An `ActorProgram actorEffs api exit` installs one `Eff actorEffs exit`
-continuation, not a callback registry or Rust-owned handler table. `ActorLocal`
-is a normal indexed Haskell
-effect whose public algebra includes `receive`. `forkActors` deliberately
+The installed continuation is not a callback registry or Rust-owned handler
+table. `ActorLocal` is a normal indexed Haskell effect whose public algebra
+includes `receive`. `forkActors` deliberately
 composes it with the outward `Actor` capability: the former supplies the
 current protocol and exit indexes, while the latter authorizes actor creation.
 Raw constructors stay inside the kernel module. GHC uses the indexes to tie the
@@ -448,10 +448,11 @@ under the caller's principal and the child interpreter. Program image,
 interpreter policy, and launch grants remain separate responsibilities even
 when one Haskell specification value carries them to `startActor`.
 
-The installed program parks on a kernel-private `ActorLocal` readiness request.
-That suspension is the OTP-style readiness point: its continuation already
-retains the installed computation, so readiness needs neither a callback table
-nor a second program-root registry. The interpreter accepts the request only
+The installed computation parks on a kernel-private `ActorLocal` readiness
+request. That suspension is the OTP-style readiness point: its continuation
+already retains the installed computation, so readiness needs neither a
+callback table nor a second program-root registry. The interpreter accepts the
+request only
 from the installed-program resource realm, not a fenced workbench fragment. No
 `AgentRef` escapes before it. Rust mechanically retries only initialization
 conditions the interpreter owns. Any remaining failure or pre-readiness

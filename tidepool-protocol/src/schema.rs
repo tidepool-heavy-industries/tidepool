@@ -65,7 +65,8 @@ pub struct Effect {
     /// The compact per-turn card, or `None` to fall back to `description`.
     pub prompt_card: Option<&'static [&'static str]>,
     /// Type parameters the GADT head carries before its result parameter.
-    pub type_params: &'static [&'static str],
+    /// Kinds are structured here rather than smuggled into rendered names.
+    pub type_params: &'static [TypeParam],
     /// Row arguments a compile that supplies none falls back to.
     pub default_row_args: &'static [&'static str],
     /// Do this effect's helpers typecheck against any row carrying `Member`?
@@ -166,6 +167,47 @@ pub enum Polymorphism {
     },
 }
 
+/// The small kind language needed by effect parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeParamKind {
+    /// An ordinary lifted value type.
+    Type,
+    /// A unary type constructor, such as an indexed actor protocol.
+    Unary,
+}
+
+/// One named parameter of an effect GADT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypeParam {
+    pub name: &'static str,
+    pub kind: TypeParamKind,
+}
+
+impl TypeParam {
+    pub const fn value(name: &'static str) -> Self {
+        Self {
+            name,
+            kind: TypeParamKind::Type,
+        }
+    }
+
+    pub const fn unary(name: &'static str) -> Self {
+        Self {
+            name,
+            kind: TypeParamKind::Unary,
+        }
+    }
+
+    /// Render this parameter in a Haskell data head.
+    #[must_use]
+    pub fn render(self) -> String {
+        match self.kind {
+            TypeParamKind::Type => self.name.to_string(),
+            TypeParamKind::Unary => format!("({} :: Type -> Type)", self.name),
+        }
+    }
+}
+
 impl Effect {
     /// The `description` field as one string.
     #[must_use]
@@ -191,7 +233,7 @@ impl Effect {
         let mut out = String::from(self.name);
         for p in self.type_params {
             out.push(' ');
-            out.push_str(p);
+            out.push_str(p.name);
         }
         out
     }
@@ -377,7 +419,7 @@ impl Effect {
         match self.polymorphism {
             Polymorphism::None => {}
             Polymorphism::ArgBound { tyvar } => {
-                if !self.type_params.contains(&tyvar) {
+                if !self.type_params.iter().any(|param| param.name == tyvar) {
                     errs.push(format!(
                         "{}: ArgBound tyvar `{tyvar}` must appear in type_params (it is a real, \
                          applied GADT parameter)",
@@ -397,7 +439,7 @@ impl Effect {
                 }
             }
             Polymorphism::ResultBound { tyvar } => {
-                if self.type_params.contains(&tyvar) {
+                if self.type_params.iter().any(|param| param.name == tyvar) {
                     errs.push(format!(
                         "{}: ResultBound tyvar `{tyvar}` must NOT appear in type_params (it is a \
                          phantom, never an applied GADT parameter)",

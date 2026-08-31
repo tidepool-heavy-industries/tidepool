@@ -73,6 +73,10 @@ restating it unless an acceptance test needs the detail.
    consequences and the model-facing Haskell experience.
 4. [Implementation plan](implementation.md) owns current status, delivery
    order, acceptance criteria, and retirement work.
+5. [LLM interaction-surface steering](interaction-surface-steering.md) is a
+   temporary refinement delta for the implementation currently in flight. Its
+   settled decisions are folded into the canonical documents as the surface
+   lands, then the steering file is deleted.
 
 ## Vocabulary
 
@@ -81,7 +85,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | Term | Meaning |
 |---|---|
 | actor | One actor identity, mailbox, Haskell program, persistent Haskell environment, and accumulating model context |
-| actor program | One installed `ActorProgram`: an authored `Eff` continuation with fixed row, protocol, and exit types |
+| actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
 | actor specification | An opaque deployable `ActorSpec` produced by promoting a definition across the program-image membrane |
 | deliberation | A typed request from the Haskell program to its resident model context |

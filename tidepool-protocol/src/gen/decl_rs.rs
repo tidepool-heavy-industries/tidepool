@@ -103,7 +103,12 @@ fn body(e: &Effect) -> String {
         "        helpers: {},\n",
         slice_literal(&e.helper_texts(), "        ")
     ));
-    let tps: Vec<String> = e.type_params.iter().map(|s| (*s).to_string()).collect();
+    let tps: Vec<String> = e
+        .type_params
+        .iter()
+        .copied()
+        .map(crate::schema::TypeParam::render)
+        .collect();
     out.push_str(&format!(
         "        type_params: {},\n",
         slice_literal(&tps, "        ")

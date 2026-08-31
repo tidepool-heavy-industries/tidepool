@@ -25,7 +25,7 @@ leaves they eventually invoke can check their caller.
 | Class | Examples | Mobility | Restart |
 |---|---|---|---|
 | ordinary Haskell value | sums, products, maps, pure closures | Same machine by live root | No, unless explicitly encoded |
-| actor program value | `ActorProgram actorEffs api exit`, `ActorDefinition startup api exit`, opaque `ActorSpec startup api exit`, function-bearing record | Same machine; promotion captures an exact deployment image | No initially |
+| actor program value | `ActorDefinition startup api exit`, opaque `ActorSpec startup api exit`, authored `Eff` continuation, function-bearing record | Same machine; promotion captures an exact deployment image | No initially |
 | opaque runtime value | `AgentRef api exit`, worktree handle, command runner | Copyable where its registry permits; use is caller-checked | Recover only through its owner |
 | durable value | JSON stored through get/put | Anywhere the backend exposes it | Yes |
 | external wire value | provider or MCP payload | Encoded at the boundary | According to that protocol |

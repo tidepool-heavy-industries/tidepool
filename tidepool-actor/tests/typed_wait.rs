@@ -89,13 +89,13 @@ import Tidepool.Actor
 import Tidepool.Actor.Internal
 import Tidepool.Effects
 
-ref :: AgentRef () (Bool -> Bool)
+ref :: AgentRef Maybe (Bool -> Bool)
 ref = newAgentRef {actor_id} {incarnation} ("pending" :: String)
 
-failedRef :: AgentRef () Int
+failedRef :: AgentRef Maybe Int
 failedRef = newAgentRef {failed_actor_id} {failed_incarnation} ("failed pending" :: String)
 
-cancelledRef :: AgentRef () Int
+cancelledRef :: AgentRef Maybe Int
 cancelledRef = newAgentRef {cancelled_actor_id} {cancelled_incarnation} ("cancelled pending" :: String)
 
 result :: M Bool

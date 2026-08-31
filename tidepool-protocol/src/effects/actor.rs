@@ -1,10 +1,11 @@
 //! The actor-runtime suspension boundary.
 //!
 //! The public Haskell API lives in `Tidepool.Actor`; this schema owns only the
-//! one internal request needed by its first vertical slice.  A wait carries an
-//! exact Rust routing identity and returns terminal metadata.  The successful
-//! exit value never crosses this request: it remains in the managed Haskell
-//! cell carried by the corresponding `AgentRef`.
+//! outward requests needed by the first actor vertical. A start carries one
+//! existentially row-typed child entry as its field-1 live payload. A wait
+//! carries an exact Rust routing identity and returns terminal metadata. The
+//! successful exit value never crosses either request: it remains in the
+//! managed Haskell cell carried by the corresponding `AgentRef`.
 //!
 //! There is no `tidepool-handlers` handler.  The request is decoded and
 //! serviced by `tidepool-actor`, whose registry owns exact-incarnation wait
@@ -16,7 +17,11 @@ use crate::schema::{
     TypeShape, Verb, WireDerive, WireDerives,
 };
 
-/// The actor effect's internal wait request.
+fn address_type() -> HsType {
+    HsType::Tuple(vec![HsType::Int, HsType::Int])
+}
+
+/// The actor effect's internal start and wait requests.
 #[must_use]
 pub fn actor() -> Effect {
     Effect {
@@ -72,26 +77,47 @@ pub fn actor() -> Effect {
         }],
         foreign_types: &[],
         errors: None,
-        verbs: vec![Verb {
-            ctor: "ActorWaitWith",
-            method: "actor_wait_with",
-            args: vec![
-                Arg {
-                    name: "actorId",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
-                },
-                Arg {
-                    name: "incarnation",
-                    ty: HsType::Int,
-                    rust: RustBinding::Derived,
-                },
-            ],
-            ret: HsType::Named("ActorTerminalStatus"),
-            errors: None,
-            handling: HandlingClass::Actor,
-            extract: None,
-        }],
+        verbs: vec![
+            Verb {
+                ctor: "ActorStartWith",
+                method: "actor_start_with",
+                args: vec![
+                    Arg {
+                        name: "label",
+                        ty: HsType::Text,
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
+                        name: "entry",
+                        ty: HsType::func(
+                            HsType::Int,
+                            HsType::app(
+                                HsType::app(HsType::Named("Eff"), HsType::Var("childEffs")),
+                                HsType::Unit,
+                            ),
+                        ),
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: address_type(),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorWaitWith",
+                method: "actor_wait_with",
+                args: vec![Arg {
+                    name: "actor",
+                    ty: address_type(),
+                    rust: RustBinding::Path("(i64, i64)"),
+                }],
+                ret: HsType::Named("ActorTerminalStatus"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+        ],
         // The public wrapper needs the managed cell carried by `AgentRef`, so
         // it is authored in Tidepool.Actor rather than emitted as a second,
         // raw helper here.
