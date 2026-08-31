@@ -4,8 +4,7 @@
 //! current actor's protocol and successful-exit type. Its raw constructors are
 //! kernel substrate; `Tidepool.Actor` exposes the authored operations.
 
-use crate::schema::{Effect, HandlingClass, Polymorphism, TypeParam, Verb};
-use crate::HsType;
+use crate::schema::{Effect, Polymorphism, TypeParam};
 
 const TYPE_PARAMS: &[TypeParam] = &[TypeParam::unary("api"), TypeParam::value("exit")];
 
@@ -32,15 +31,7 @@ pub fn actor_local() -> Effect {
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,
-        verbs: vec![Verb {
-            ctor: "ActorReadyWith",
-            method: "actor_ready_with",
-            args: Vec::new(),
-            ret: HsType::Unit,
-            errors: None,
-            handling: HandlingClass::Actor,
-            extract: None,
-        }],
+        verbs: Vec::new(),
         helpers: Vec::new(),
         polymorphism: Polymorphism::None,
         dispatched: false,

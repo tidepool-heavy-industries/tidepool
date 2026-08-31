@@ -79,6 +79,7 @@ async fn public_start_uses_one_exact_resident_path() {
     let session_id = SessionId(93);
     let decls = [
         tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_bootstrap_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::deliberate_decl(),
     ];

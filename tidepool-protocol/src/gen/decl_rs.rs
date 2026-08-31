@@ -35,12 +35,14 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         .filter(|effect| !matches!(effect.authored_surface, crate::schema::AuthoredSurface::All))
         .map(|effect| rust_string_literal(effect.name))
         .collect();
-    let compact_curated = format!(
-        "pub(crate) const CURATED_EFFECTS: &[&str] = &[{}];\n",
-        curated.join(", ")
-    );
+    let compact_values = format!("&[{}]", curated.join(", "));
+    let compact_curated =
+        format!("pub(crate) const CURATED_EFFECTS: &[&str] = {compact_values};\n");
     if compact_curated.len() <= 100 {
         contents.push_str(&compact_curated);
+    } else if 4 + compact_values.len() <= 100 {
+        contents.push_str("pub(crate) const CURATED_EFFECTS: &[&str] =\n");
+        contents.push_str(&format!("    {compact_values};\n"));
     } else {
         contents.push_str("pub(crate) const CURATED_EFFECTS: &[&str] = &[\n");
         for name in curated {
@@ -70,11 +72,13 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
                 hidden.push(helper.name);
             }
         }
-        if hidden.len() == 1 {
+        if hidden.len() <= 1 {
             contents.push_str(&format!(
                 "    ({}, &[{}]),\n",
                 rust_string_literal(effect.name),
-                rust_string_literal(hidden[0])
+                hidden
+                    .first()
+                    .map_or_else(String::new, |name| rust_string_literal(name))
             ));
         } else {
             contents.push_str("    (\n");

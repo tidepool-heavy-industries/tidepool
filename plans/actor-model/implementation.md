@@ -88,7 +88,9 @@ This is the canonical status inventory for the plan.
 - One resident actor runner now owns internal sealing, isolated-scope allocation,
   rooted-entry startup, typed-session capture, readiness resumption, and
   exact parent resumption over the existing machine checkout mechanism. The
-  private readiness request validates its child realm before the
+  trusted entry wrapper raises the authored row under the kernel-private
+  `ActorBootstrap` effect; `ActorLocal` and model-facing profiles contain no
+  readiness operation. The readiness request validates its child realm before the
   registry may publish. The registry owns publication and terminal settlement;
   there is no second actor dispatcher or program-root registry.
 - The construction substrate exposes one public `ActorDefinition` ->

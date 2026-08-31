@@ -27,7 +27,7 @@ module Tidepool.Actor
   , awaitExit
   ) where
 
-import Control.Monad.Freer (Eff, Member, send)
+import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
 import Prelude
 
@@ -37,7 +37,7 @@ import Tidepool.Actor.Internal
   )
 import Tidepool.Effects.Core
   ( Actor (..)
-  , ActorLocal (..)
+  , ActorBootstrap (..)
   , ActorTerminalStatus (..)
   )
 import Tidepool.Internal.ExitCell
@@ -79,13 +79,16 @@ startActor
 startActor (ActorDefinition label startupAction install) startup = do
   let cell = newExitCell startup
       entry _ = do
-        initial <- startupAction startup
-        send (ActorReadyWith @api @exit)
-        result <- install startup initial
+        initial <- raiseBootstrap (startupAction startup)
+        send ActorReadyWith
+        result <- raiseBootstrap (install startup initial)
         case fillExitCell cell result of
           () -> pure ()
   (actorId, incarnation) <- send (ActorStartWith label entry)
   pure (ActorRef actorId incarnation cell)
+
+raiseBootstrap :: Eff effs a -> Eff (ActorBootstrap ': effs) a
+raiseBootstrap = raise
 
 -- | Start a supervised one-shot actor and wait for its exact terminal value.
 runActor

@@ -7,6 +7,7 @@
 //! smallest first, with no flag day.
 
 pub mod actor;
+pub mod actor_bootstrap;
 pub mod actor_local;
 pub mod ask;
 pub mod ask_user;
@@ -53,6 +54,7 @@ pub fn all() -> Vec<Effect> {
         finalize::finalize(),
         green::green(),
         actor::actor(),
+        actor_bootstrap::actor_bootstrap(),
         actor_local::actor_local(),
     ]
 }
