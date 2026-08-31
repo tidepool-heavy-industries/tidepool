@@ -1058,7 +1058,7 @@ where
             ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
             ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
         };
-        self.core.bind_in(
+        self.core.bind_replacing_decl_in(
             scope,
             BindingEntry {
                 name: BindingName(name.to_string()),
@@ -2131,8 +2131,7 @@ where
         // OWN scope — a child binding `helper` retracts the child's decl head,
         // never the parent's, because nothing in this tree ever walks downward.
         // Root-scope bindings use this same scoped path.
-        self.core.retract_in(scope, &binder.name)?;
-        self.core.bind_in(
+        self.core.bind_replacing_decl_in(
             scope,
             BindingEntry {
                 name: BindingName(binder.name.clone()),

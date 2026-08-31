@@ -585,21 +585,18 @@ impl Session {
     /// decl-plane binding of the same name in the same step — a name lives in
     /// AT MOST one plane, enforced HERE and in [`Self::bind_pure`] so a bind
     /// site can't smear a name across both by forgetting the paired removal.
-    fn bind_materialized(&mut self, entry: BindingEntry) {
-        // Retract from the decl plane too, so `SessionLib` stops exporting a
-        // now-stale decl. No-op when the name was never a decl head. Best-effort:
-        // a rare module-write failure leaves the binding materialized correctly.
-        let _ = self.core.retract(&entry.name.0);
-        self.pure_binds.remove(&entry.name.0);
-        self.core.bind(entry);
+    fn bind_materialized(&mut self, entry: BindingEntry) -> Result<(), SessionError> {
+        // Durable retraction is the commit point. Do not touch the
+        // frontend-only pure-bind view until the shared core confirms it.
+        let receipt = self.core.bind_replacing_decl(entry)?;
+        self.pure_binds.remove(&receipt.name);
+        Ok(())
     }
 
-    /// Register `pb` on the decl (pure) plane under `name`, EVICTING any
-    /// materialized value-plane binding of the same name from the current view.
-    /// The dual of [`Self::bind_materialized`] — the single site that upholds
-    /// the one-name-one-plane invariant for pure binds.
+    /// Register REPL-only metadata for a pure declaration after
+    /// [`Self::define_scoped`] has atomically made that declaration its name's
+    /// sole visible plane.
     fn bind_pure(&mut self, name: &str, pb: PureBind) {
-        self.core.bindings_mut().remove_current(name);
         self.pure_binds.insert(name.to_string(), pb);
     }
 
@@ -892,9 +889,13 @@ impl Session {
             };
             let mut stop = false;
             match batched {
-                Some(gen) => {
+                Some(receipt) => {
                     for (k, text) in texts.iter().enumerate() {
-                        let outcome = self.defined_outcome(text, decl_head(text).to_string(), gen);
+                        let outcome = self.defined_outcome(
+                            text,
+                            decl_head(text).to_string(),
+                            receipt.generation,
+                        );
                         if cursor.absorb(ItemRun {
                             index: start + k,
                             kind: ItemKind::Decl,
@@ -1244,8 +1245,16 @@ impl Session {
     /// at the prompt sees earlier bindings. EVERY decl-plane route goes through
     /// here (`run_def`, the whole-block decl batch, `try_pure_bind_as_decl`);
     /// an unscoped `SessionLib::define*` call from the repl is a bug.
-    fn define_scoped(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
-        self.core.define_scoped(decl_texts)
+    fn define_scoped(
+        &mut self,
+        decl_texts: &[&str],
+    ) -> Result<tidepool_runtime::session::DeclarationPlaneCommit, SessionError> {
+        let heads: Vec<&str> = decl_texts.iter().map(|text| decl_head(text)).collect();
+        let receipt = self.core.define_replacing_values(decl_texts, &heads)?;
+        for name in &receipt.names {
+            self.pure_binds.remove(name);
+        }
+        Ok(receipt)
     }
 
     /// Declaration handler: append the declaration to the Lane-A log + regenerate
@@ -1253,7 +1262,7 @@ impl Session {
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
         let head = decl_head(decl_text).to_string();
         match self.define_scoped(&[decl_text]) {
-            Ok(gen) => self.defined_outcome(decl_text, head, gen),
+            Ok(receipt) => self.defined_outcome(decl_text, head, receipt.generation),
             Err(e) => TurnOutcome::Error(session_fail(&e, "declaration failed")),
         }
     }
@@ -1277,7 +1286,7 @@ impl Session {
     fn try_pure_bind_as_decl(&mut self, expr_text: &str, name: &str) -> Option<TurnOutcome> {
         let decl = pure_bind_to_decl(expr_text, name)?;
         match self.define_scoped(&[decl.as_str()]) {
-            Ok(gen) => {
+            Ok(receipt) => {
                 let type_display = self.probe_pure_type(name).unwrap_or_default();
                 // Register in the environment (decl plane) so :bindings/stale/etc.
                 // see it; `bind_pure` evicts any materialized binding of `name`
@@ -1287,7 +1296,7 @@ impl Session {
                     PureBind {
                         type_display: type_display.clone(),
                         defining_expr: expr_text.to_string(),
-                        gen,
+                        gen: receipt.generation,
                     },
                 );
                 Some(TurnOutcome::Bound {
@@ -1794,7 +1803,7 @@ impl Session {
         let value = bound_value(tail.tier, slot);
         // `bind_materialized` records the value binding AND evicts any pure decl
         // of the same name (cross-plane shadow, one-plane invariant).
-        self.bind_materialized(BindingEntry {
+        if let Err(e) = self.bind_materialized(BindingEntry {
             name: BindingName(tail.name.clone()),
             id: SessionVarId::from_extract(tail.var_id),
             module: SessionModule::val(tail.g),
@@ -1803,7 +1812,9 @@ impl Session {
             defining_expr: Some(tail.defining_expr),
             // The repl is a flat session: every bind is a ROOT-frame bind.
             scope: ScopeId::ROOT,
-        });
+        }) {
+            return TurnOutcome::Error(session_fail(&e, "bind failed"));
+        }
         TurnOutcome::Bound {
             name: tail.name,
             type_display: tail.type_display,
@@ -1969,7 +1980,7 @@ impl Session {
         let mut components: Vec<BoundComponent> = Vec::new();
         for (binder, slot) in tail.binders.iter().zip(slots.into_iter()) {
             let value = bound_value(binder.tier, slot);
-            self.bind_materialized(BindingEntry {
+            if let Err(e) = self.bind_materialized(BindingEntry {
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
                 module: SessionModule::val(tail.g),
@@ -1978,7 +1989,9 @@ impl Session {
                 // The whole multi-bind turn defines each component (`(a,b) <- e`).
                 defining_expr: Some(tail.defining_expr.clone()),
                 scope: ScopeId::ROOT,
-            });
+            }) {
+                return TurnOutcome::Error(session_fail(&e, "multi-bind failed"));
+            }
             components.push(BoundComponent {
                 name: binder.name.clone(),
                 type_display: binder.type_display.clone(),
@@ -2211,7 +2224,7 @@ impl Session {
     ) -> TurnOutcome {
         self.core.set_val_gen(tail.g);
         let it_value = bound_value(tail.tier, it_slot);
-        self.bind_materialized(BindingEntry {
+        if let Err(e) = self.bind_materialized(BindingEntry {
             name: BindingName("it".to_string()),
             id: SessionVarId::from_extract(tail.var_id),
             module: SessionModule::val(tail.g),
@@ -2219,7 +2232,9 @@ impl Session {
             type_display: Some(tail.type_display.clone()),
             defining_expr: Some(tail.defining_expr),
             scope: ScopeId::ROOT,
-        });
+        }) {
+            return TurnOutcome::Error(session_fail(&e, "expression bind failed"));
+        }
 
         let rendered = value_to_json(&rendered_value, self.core.session_table(), 0);
         self.value_outcome_bound_it(rendered, Some(tail.type_display))
@@ -3979,6 +3994,73 @@ mod reset_tests {
         assert!(
             session.pure_binds.contains_key("marker"),
             "a failed reopen must not clear pure_binds — the old decl log must stay usable"
+        );
+    }
+
+    /// Failure injection for the decl → materialized transition.  Retraction
+    /// writes a new Lib generation, so block that write after a real decl has
+    /// committed and prove the REPL neither installs the value nor discards its
+    /// pure-bind metadata while still reporting the error.
+    #[test]
+    fn failed_retraction_does_not_commit_materialized_bind() {
+        use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
+        use tidepool_codegen::old_space::RootSlot;
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_repr::{BindingName, SessionModule, SessionVarId};
+
+        tidepool_testing::eval_harness::require_extract();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::open(minimal_config(dir.path().to_path_buf()), no_handlers())
+            .expect("session opens");
+        assert!(matches!(
+            session.run_def("x = 1 :: Int"),
+            TurnOutcome::Defined { .. }
+        ));
+        session.pure_binds.insert(
+            "x".to_string(),
+            PureBind {
+                type_display: "Int".to_string(),
+                defining_expr: "1".to_string(),
+                gen: Generation(1),
+            },
+        );
+
+        // `Lib.G1.hs` is already durable. Replacing its parent with a file
+        // makes the G2 retraction write fail without changing that committed
+        // declaration generation.
+        let tidepool_dir = dir.path().join("Tidepool");
+        std::fs::remove_dir_all(&tidepool_dir).expect("remove generated module tree");
+        std::fs::write(&tidepool_dir, b"retraction write blocker").expect("write blocker");
+
+        let mut root: *mut u8 = std::ptr::null_mut();
+        // SAFETY: this test only verifies table bookkeeping after the fallible
+        // retraction; the slot is never dereferenced or executed.
+        let slot = unsafe { RootSlot::new(&mut root as *mut *mut u8) };
+        let result = session.bind_materialized(BindingEntry {
+            name: BindingName("x".to_string()),
+            id: SessionVarId::from_extract((0xFE << 56) | 99),
+            module: SessionModule::val(Generation(99)),
+            value: BoundValue::Tier0Forced(slot),
+            type_display: Some("Int".to_string()),
+            defining_expr: Some("pure 2".to_string()),
+            scope: ScopeId::ROOT,
+        });
+
+        assert!(
+            result.is_err(),
+            "failed durable retraction must fail the bind"
+        );
+        assert!(
+            session.core.resolve_in(ScopeId::ROOT, "x").is_none(),
+            "failed retraction must not install a materialized x"
+        );
+        assert!(
+            session.pure_binds.contains_key("x"),
+            "failed retraction must retain frontend pure-bind metadata"
+        );
+        assert!(
+            session.core.lib().decl_value_names().contains(&"x"),
+            "failed retraction must retain the last committed declaration"
         );
     }
 

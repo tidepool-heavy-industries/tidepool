@@ -115,6 +115,23 @@ pub struct PersistentSession {
     nursery_size: usize,
 }
 
+/// The committed fact from moving one name to the materialized value plane.
+/// Callers use this rather than inferring success from a partly-mutated view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValuePlaneCommit {
+    pub name: String,
+    pub module: SessionModule,
+}
+
+/// The committed fact from adding declarations and evicting their same-scope
+/// value-plane names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclarationPlaneCommit {
+    pub generation: Generation,
+    pub module: SessionModule,
+    pub names: Vec<String>,
+}
+
 impl PersistentSession {
     /// Build an idle session core. `lib` is the decl plane (`Some` for the repl
     /// and the accumulating harness; `None` for a value-plane-only session). The
@@ -1153,6 +1170,91 @@ impl PersistentSession {
         }
         self.bindings.bind_in(scope, entry);
         Ok(())
+    }
+
+    /// Atomically move `entry.name` from this scope's declaration plane to its
+    /// materialized value plane.  Durable retraction is the commit point: if
+    /// it fails, the binding table is untouched and the caller must report the
+    /// failure rather than a successful bind.
+    pub fn bind_replacing_decl_in(
+        &mut self,
+        scope: ScopeId,
+        entry: BindingEntry,
+    ) -> Result<ValuePlaneCommit, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        self.retract_in(scope, &entry.name.0)?;
+        let receipt = ValuePlaneCommit {
+            name: entry.name.0.clone(),
+            module: entry.module,
+        };
+        self.bindings.bind_in(scope, entry);
+        Ok(receipt)
+    }
+
+    /// Root-scope [`Self::bind_replacing_decl_in`].
+    pub fn bind_replacing_decl(
+        &mut self,
+        entry: BindingEntry,
+    ) -> Result<ValuePlaneCommit, SessionError> {
+        self.bind_replacing_decl_in(ScopeId::ROOT, entry)
+    }
+
+    /// Commit declarations, then remove any same-scope materialized names they
+    /// replace.  Definition is fallible and happens first, so a failed module
+    /// write/validation leaves the old value view intact.  Once it succeeds,
+    /// frame removal is in-memory and infallible; the receipt is the single
+    /// committed source of truth for frontend metadata updates.
+    pub fn define_replacing_values_in(
+        &mut self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+        names: &[&str],
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        let mut names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        names.sort();
+        names.dedup();
+        // The candidate declaration owns these names, so it must not import
+        // their old Val modules unqualified while GHC validates it.  Keep them
+        // injected: already-compiled fragments may still need their ifaces,
+        // but they are not visible providers in this new source turn.
+        let mut import_modules: Vec<String> = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(name, _)| !names.iter().any(|replaced| replaced == &name.0))
+            .map(|(_, entry)| entry.module.module_name())
+            .collect();
+        import_modules.sort();
+        import_modules.dedup();
+        let inject_modules = self.live_val_modules();
+        #[allow(clippy::expect_used, reason = "decl plane present")]
+        let generation = self
+            .lib
+            .as_mut()
+            .expect("decl plane present")
+            .define_batch_with_vals_in(scope, decl_texts, &import_modules, &inject_modules)?;
+        for name in &names {
+            self.bindings.remove_current_in(scope, name);
+        }
+        Ok(DeclarationPlaneCommit {
+            generation,
+            module: SessionModule::lib(generation),
+            names,
+        })
+    }
+
+    /// Root-scope [`Self::define_replacing_values_in`].
+    pub fn define_replacing_values(
+        &mut self,
+        decl_texts: &[&str],
+        names: &[&str],
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.define_replacing_values_in(ScopeId::ROOT, decl_texts, names)
     }
 
     /// Resolve `name` as seen FROM `scope`: local frame first, then each

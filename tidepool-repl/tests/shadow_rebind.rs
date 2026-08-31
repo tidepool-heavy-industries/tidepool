@@ -292,6 +292,32 @@ async fn migrated_name_read_from_later_let() {
     assert!(bare.contains('1'), "bare length x: expected 1, got: {bare}");
 }
 
+/// A declaration that replaces a materialized name commits through the shared
+/// name-plane transition.  The later reference must see its Lib provider only;
+/// retaining the old Val provider would make the import ambiguous (or leave
+/// the old heap value visible to the JIT path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declaration_replaces_materialized_name() {
+    require_extract();
+    let repl = Repl::new();
+
+    repl.eval("x <- pure (1 :: Int)")
+        .await
+        .expect_ok("seed x on the declaration plane");
+    repl.eval("x <- pure (x + 1)")
+        .await
+        .expect_ok("migrate x to the materialized plane");
+
+    repl.def("x = 40 :: Int")
+        .await
+        .expect_ok("declaration replaces materialized x");
+    let out = repl.eval_ok("x + 2").await;
+    assert!(
+        out.contains("42"),
+        "the declaration must be x's sole visible provider, got: {out}"
+    );
+}
+
 /// CASE 7 — accumulator, then a `let` fold. The pattern the repl exists for:
 /// build a list across turns with self-referential rebinds, then a `let` that
 /// folds it must see every element (not a stale empty decl).

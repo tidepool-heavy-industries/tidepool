@@ -33,7 +33,9 @@ pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAG
 
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
-pub use persistent::{MachineLease, PersistentSession, ScopeRetirement};
+pub use persistent::{
+    DeclarationPlaneCommit, MachineLease, PersistentSession, ScopeRetirement, ValuePlaneCommit,
+};
 
 pub use registry::{
     Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, SingleSlot, Slot, SlotKind,

@@ -203,7 +203,14 @@ impl BindingTable {
     /// a materialized value binding (cross-plane shadow, GHCi-environment
     /// model). No-op if `name` isn't current.
     pub fn remove_current(&mut self, name: &str) {
-        if let Some(frame) = self.current.get_mut(&ScopeId::ROOT) {
+        self.remove_current_in(ScopeId::ROOT, name);
+    }
+
+    /// Scoped [`Self::remove_current`]: remove `name` from this scope's frame
+    /// only.  A declaration committed in a child scope must not make an
+    /// ancestor's materialized binding disappear from the ancestor's view.
+    pub fn remove_current_in(&mut self, scope: ScopeId, name: &str) {
+        if let Some(frame) = self.current.get_mut(&scope) {
             frame.remove(&BindingName(name.to_string()));
         }
     }
