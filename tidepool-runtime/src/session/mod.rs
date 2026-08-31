@@ -34,7 +34,8 @@ pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAG
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
-    DeclarationPlaneCommit, MachineLease, PersistentSession, ScopeRetirement, ValuePlaneCommit,
+    DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
+    ScopeRetirement, ValuePlaneCommit,
 };
 
 pub use registry::{
@@ -713,13 +714,28 @@ impl SessionLib {
     /// retracted in a child scope never touches the parent's (or a sibling's)
     /// tip or heads.
     pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
+        self.retract_many_in(scope, &[name.to_string()])
+    }
+
+    /// Retract all current declaration heads in `names` with ONE durable
+    /// generation.  This is the declaration-side commit used by an atomic
+    /// materialization set: either the rendered re-export shell removes every
+    /// requested current head, or the log/tip stay exactly as they were.
+    pub fn retract_many_in(
+        &mut self,
+        scope: ScopeId,
+        names: &[String],
+    ) -> Result<(), SessionError> {
         let tip = self.scope_tip(scope);
-        if !self
-            .log
-            .current_heads_at(tip)
+        let heads = self.log.current_heads_at(tip);
+        let mut retracts: Vec<String> = names
             .iter()
-            .any(|(h, _)| h == name)
-        {
+            .filter(|name| heads.iter().any(|(head, _)| head == *name))
+            .cloned()
+            .collect();
+        retracts.sort();
+        retracts.dedup();
+        if retracts.is_empty() {
             return Ok(());
         }
         let tip_before = self.tips.get(&scope).copied();
@@ -728,7 +744,7 @@ impl SessionLib {
             DeclTurn {
                 sources: Vec::new(),
                 items: Vec::new(),
-                retracts: vec![name.to_string()],
+                retracts,
                 parent: None, // set inside push_turn_in from scope's tip
             },
         );

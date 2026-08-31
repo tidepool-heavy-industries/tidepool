@@ -123,6 +123,12 @@ pub struct ValuePlaneCommit {
     pub module: SessionModule,
 }
 
+/// The committed facts from materializing one complete binding set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializationSetCommit {
+    pub bindings: Vec<ValuePlaneCommit>,
+}
+
 /// The committed fact from adding declarations and evicting their same-scope
 /// value-plane names.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1110,6 +1116,19 @@ impl PersistentSession {
         }
     }
 
+    /// Retract a set of declaration heads through one durable declaration
+    /// generation. Used by set materialization so a later name cannot fail
+    /// after an earlier name has already entered the value plane.
+    fn retract_many_in(&mut self, scope: ScopeId, names: &[String]) -> Result<(), SessionError> {
+        if !self.scopes.is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
+        match self.lib.as_mut() {
+            Some(lib) => lib.retract_many_in(scope, names),
+            None => Ok(()),
+        }
+    }
+
     // -- scopes --------------------------------------------------------------
 
     /// Mint a fresh child scope of `parent`. `None` if `parent` is not live
@@ -1181,16 +1200,13 @@ impl PersistentSession {
         scope: ScopeId,
         entry: BindingEntry,
     ) -> Result<ValuePlaneCommit, SessionError> {
-        if !self.scopes.is_live(scope) {
-            return Err(SessionError::DeadScope(scope));
-        }
-        self.retract_in(scope, &entry.name.0)?;
-        let receipt = ValuePlaneCommit {
-            name: entry.name.0.clone(),
-            module: entry.module,
-        };
-        self.bindings.bind_in(scope, entry);
-        Ok(receipt)
+        let receipt = self.bind_replacing_decls_in(scope, vec![entry])?;
+        #[allow(clippy::expect_used, reason = "one entry yields one receipt")]
+        Ok(receipt
+            .bindings
+            .into_iter()
+            .next()
+            .expect("one materialization receipt"))
     }
 
     /// Root-scope [`Self::bind_replacing_decl_in`].
@@ -1199,6 +1215,69 @@ impl PersistentSession {
         entry: BindingEntry,
     ) -> Result<ValuePlaneCommit, SessionError> {
         self.bind_replacing_decl_in(ScopeId::ROOT, entry)
+    }
+
+    /// Atomically materialize a whole binding set.  The declaration-plane
+    /// retraction is one durable generation for every affected name; only after
+    /// it succeeds are entries installed in the value table.  On any failure,
+    /// every produced root is retired before the error returns, so none becomes
+    /// an unowned persistent GC root.
+    pub fn bind_replacing_decls_in(
+        &mut self,
+        scope: ScopeId,
+        entries: Vec<BindingEntry>,
+    ) -> Result<MaterializationSetCommit, SessionError> {
+        if !self.scopes.is_live(scope) {
+            self.discard_unbound_entries(entries);
+            return Err(SessionError::DeadScope(scope));
+        }
+        let names: Vec<String> = entries.iter().map(|entry| entry.name.0.clone()).collect();
+        if let Err(error) = self.retract_many_in(scope, &names) {
+            self.discard_unbound_entries(entries);
+            return Err(error);
+        }
+        let bindings = entries
+            .into_iter()
+            .map(|entry| {
+                let receipt = ValuePlaneCommit {
+                    name: entry.name.0.clone(),
+                    module: entry.module,
+                };
+                self.bindings.bind_in(scope, entry);
+                receipt
+            })
+            .collect();
+        Ok(MaterializationSetCommit { bindings })
+    }
+
+    /// Root-scope [`Self::bind_replacing_decls_in`].
+    pub fn bind_replacing_decls(
+        &mut self,
+        entries: Vec<BindingEntry>,
+    ) -> Result<MaterializationSetCommit, SessionError> {
+        self.bind_replacing_decls_in(ScopeId::ROOT, entries)
+    }
+
+    /// Dispose roots that were produced by a completed materialization but
+    /// could not enter the value plane. They are registered persistent roots,
+    /// not ordinary Rust-owned allocations, so dropping `RootSlot` alone would
+    /// leak them until session teardown.
+    fn discard_unbound_entries(&mut self, entries: Vec<BindingEntry>) {
+        let Some(machine) = self.machine.as_mut() else {
+            // Unit-level bookkeeping fixtures can carry synthetic slots before
+            // a machine exists; there is no root ledger to release there.
+            return;
+        };
+        let count = entries.len();
+        let roots_before = machine.persistent_roots_count();
+        for entry in entries {
+            machine.retire_scope_root(entry.value.root());
+        }
+        debug_assert_eq!(
+            roots_before - machine.persistent_roots_count(),
+            count,
+            "every failed materialization entry must release exactly one persistent root"
+        );
     }
 
     /// Commit declarations, then remove any same-scope materialized names they

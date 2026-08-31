@@ -1978,9 +1978,10 @@ impl Session {
     fn finish_multi_bind(&mut self, tail: MultiBindTail, slots: Vec<RootSlot>) -> TurnOutcome {
         self.core.set_val_gen(tail.g);
         let mut components: Vec<BoundComponent> = Vec::new();
+        let mut entries = Vec::with_capacity(tail.binders.len());
         for (binder, slot) in tail.binders.iter().zip(slots.into_iter()) {
             let value = bound_value(binder.tier, slot);
-            if let Err(e) = self.bind_materialized(BindingEntry {
+            entries.push(BindingEntry {
                 name: BindingName(binder.name.clone()),
                 id: SessionVarId::from_extract(binder.var_id),
                 module: SessionModule::val(tail.g),
@@ -1989,13 +1990,18 @@ impl Session {
                 // The whole multi-bind turn defines each component (`(a,b) <- e`).
                 defining_expr: Some(tail.defining_expr.clone()),
                 scope: ScopeId::ROOT,
-            }) {
-                return TurnOutcome::Error(session_fail(&e, "multi-bind failed"));
-            }
+            });
             components.push(BoundComponent {
                 name: binder.name.clone(),
                 type_display: binder.type_display.clone(),
             });
+        }
+        let receipt = match self.core.bind_replacing_decls(entries) {
+            Ok(receipt) => receipt,
+            Err(e) => return TurnOutcome::Error(session_fail(&e, "multi-bind failed")),
+        };
+        for binding in receipt.bindings {
+            self.pure_binds.remove(&binding.name);
         }
         TurnOutcome::MultiBound { components }
     }
@@ -4002,7 +4008,7 @@ mod reset_tests {
     /// committed and prove the REPL neither installs the value nor discards its
     /// pure-bind metadata while still reporting the error.
     #[test]
-    fn failed_retraction_does_not_commit_materialized_bind() {
+    fn failed_later_retraction_does_not_commit_any_materialized_component() {
         use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
         use tidepool_codegen::old_space::RootSlot;
         use tidepool_codegen::scope::ScopeId;
@@ -4013,11 +4019,19 @@ mod reset_tests {
         let mut session = Session::open(minimal_config(dir.path().to_path_buf()), no_handlers())
             .expect("session opens");
         assert!(matches!(
-            session.run_def("x = 1 :: Int"),
+            session.run_def("y = 1 :: Int"),
             TurnOutcome::Defined { .. }
         ));
         session.pure_binds.insert(
             "x".to_string(),
+            PureBind {
+                type_display: "Int".to_string(),
+                defining_expr: "1".to_string(),
+                gen: Generation(1),
+            },
+        );
+        session.pure_binds.insert(
+            "y".to_string(),
             PureBind {
                 type_display: "Int".to_string(),
                 defining_expr: "1".to_string(),
@@ -4032,34 +4046,54 @@ mod reset_tests {
         std::fs::remove_dir_all(&tidepool_dir).expect("remove generated module tree");
         std::fs::write(&tidepool_dir, b"retraction write blocker").expect("write blocker");
 
-        let mut root: *mut u8 = std::ptr::null_mut();
+        let mut first_root: *mut u8 = std::ptr::null_mut();
+        let mut later_root: *mut u8 = std::ptr::null_mut();
         // SAFETY: this test only verifies table bookkeeping after the fallible
         // retraction; the slot is never dereferenced or executed.
-        let slot = unsafe { RootSlot::new(&mut root as *mut *mut u8) };
-        let result = session.bind_materialized(BindingEntry {
-            name: BindingName("x".to_string()),
-            id: SessionVarId::from_extract((0xFE << 56) | 99),
-            module: SessionModule::val(Generation(99)),
-            value: BoundValue::Tier0Forced(slot),
-            type_display: Some("Int".to_string()),
-            defining_expr: Some("pure 2".to_string()),
-            scope: ScopeId::ROOT,
-        });
+        let first_slot = unsafe { RootSlot::new(&mut first_root as *mut *mut u8) };
+        let later_slot = unsafe { RootSlot::new(&mut later_root as *mut *mut u8) };
+        let result = session.core.bind_replacing_decls(vec![
+            BindingEntry {
+                // This first component has no declaration to retract. The old
+                // per-entry loop committed it before failing on `y` below.
+                name: BindingName("x".to_string()),
+                id: SessionVarId::from_extract((0xFE << 56) | 99),
+                module: SessionModule::val(Generation(99)),
+                value: BoundValue::Tier0Forced(first_slot),
+                type_display: Some("Int".to_string()),
+                defining_expr: Some("pure 2".to_string()),
+                scope: ScopeId::ROOT,
+            },
+            BindingEntry {
+                name: BindingName("y".to_string()),
+                id: SessionVarId::from_extract((0xFE << 56) | 100),
+                module: SessionModule::val(Generation(99)),
+                value: BoundValue::Tier0Forced(later_slot),
+                type_display: Some("Int".to_string()),
+                defining_expr: Some("pure 3".to_string()),
+                scope: ScopeId::ROOT,
+            },
+        ]);
 
         assert!(
             result.is_err(),
             "failed durable retraction must fail the bind"
         );
         assert!(
-            session.core.resolve_in(ScopeId::ROOT, "x").is_none(),
-            "failed retraction must not install a materialized x"
+            session.core.resolve_in(ScopeId::ROOT, "x").is_none()
+                && session.core.resolve_in(ScopeId::ROOT, "y").is_none(),
+            "failed later retraction must not install any materialized component"
         );
         assert!(
             session.pure_binds.contains_key("x"),
             "failed retraction must retain frontend pure-bind metadata"
         );
         assert!(
-            session.core.lib().decl_value_names().contains(&"x"),
+            session.pure_binds.contains_key("y"),
+            "failed retraction must retain later-component pure-bind metadata"
+        );
+        assert!(
+            session.core.lib().decl_value_names().contains(&"y"),
             "failed retraction must retain the last committed declaration"
         );
     }
