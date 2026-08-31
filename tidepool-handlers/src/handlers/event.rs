@@ -41,14 +41,12 @@
 //!
 //! **It is emphatically NOT a licence to lose movement that happened while no
 //! subscription existed.** Between two resident loop iterations there is a gap with
-//! agents still running and nobody subscribed. Those commits are not journalled
-//! yet, so the new loop iteration's first pass reports them as genuinely NEW
-//! observations and the freshly registered subscription receives them — which
-//! is why [`RepoEventHandler::repo_event_subscribe`] does NOT poll: it is a
-//! cheap registry insert, and it deliberately leaves the first pass of the
-//! loop iteration to the first drain, AFTER the subscription is live. Registering and
-//! then quietly consuming the backlog on the registrant's behalf would drop
-//! commits in the direction nobody notices.
+//! agents still running and nobody subscribed. Source registration recovers a
+//! previously observed worktree's baseline from its journal, so the next drain
+//! reports movement from that gap. A genuinely never-before-observed worktree
+//! is different: subscription registration fixes its fresh HEAD as the cutoff,
+//! without emitting or replaying history. Any movement after that cutoff is a
+//! delta for the live subscription, even when another source is in cooldown.
 //!
 //! Both rules hold at once, and for one reason: the durable baseline is the
 //! JOURNAL (the observer's business — see [`MonitorObservations`]), and the
@@ -145,7 +143,8 @@ pub struct EventConfig {
     /// turns a slow handler into unbounded memory growth, and the failure
     /// arrives as an OOM instead of a named error.
     pub queue_bound: usize,
-    /// Minimum wall-clock gap between drain-triggered reconciliation passes.
+    /// Minimum wall-clock gap between successful reconciliation passes for one
+    /// source. Failed sources remain retryable on the next dependent operation.
     /// V1 is polling; hooks, when they arrive, are only a wake-up that causes a
     /// read. Raising it delays a report; it never loses one, because a pass is
     /// a delta against the observer's durable baseline rather than a window.
@@ -541,6 +540,34 @@ impl SubscriptionRegistry {
         out
     }
 
+    /// The worktree sources one live subscription depends on, deduplicated in
+    /// authored watch order. Used to route a source-local failure without
+    /// failing unrelated subscribers.
+    fn subscription_worktrees(
+        &self,
+        id: EvSubscriptionId,
+    ) -> Result<Vec<WtWorktreeId>, EventError> {
+        let sub = self
+            .subs
+            .iter()
+            .find(|(raw, _)| *raw == id.raw)
+            .map(|(_, sub)| sub)
+            .ok_or(EventError::EventUnknownSubscription(id.raw))?;
+        let mut out = Vec::new();
+        for watch in &sub.watches {
+            let source = match watch {
+                EvWatch::WatchCommit(id) | EvWatch::WatchHead(id) => id,
+                EvWatch::WatchDeadline(_) | EvWatch::WatchAsync(_) | EvWatch::WatchMailbox(_) => {
+                    continue
+                }
+            };
+            if !out.contains(source) {
+                out.push(source.clone());
+            }
+        }
+        Ok(out)
+    }
+
     fn lookup_mut(&mut self, raw: i64) -> Option<&mut Subscription> {
         self.subs
             .iter_mut()
@@ -553,7 +580,7 @@ impl SubscriptionRegistry {
 // Where observations come from
 // ============================================================================
 
-/// One reconciliation pass over the named worktrees.
+/// Registration and reconciliation for one named worktree source.
 ///
 /// Injectable because the git reasoning belongs to
 /// [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor), not here:
@@ -575,8 +602,17 @@ impl SubscriptionRegistry {
 /// entry. A "start from now" source is therefore legitimate ONLY in a
 /// single-loop-iteration test; it must never be the production implementation.
 pub trait ObservationSource: Send {
-    fn observe(&mut self, worktrees: &[WtWorktreeId])
-        -> Result<Vec<EvRepositoryEvent>, EventError>;
+    /// Establish this source's "start from now" cutoff before a subscription
+    /// becomes live. Production resolves the durable worktree path and primes
+    /// the monitor here; focused policy seams may keep the default no-op when
+    /// they already carry an explicit baseline.
+    fn register(&mut self, _worktree: &WtWorktreeId) -> Result<(), EventError> {
+        Ok(())
+    }
+
+    /// Reconcile exactly one source. Keeping the result source-scoped is what
+    /// lets a caller retain A's journalled facts when an independent B fails.
+    fn observe(&mut self, worktree: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError>;
 }
 
 /// The production source: [`WorktreeMonitor`](tidepool_worktree::WorktreeMonitor)
@@ -616,10 +652,9 @@ impl MonitorObservations {
         }
     }
 
-    /// Same as [`Self::new`], but `observe` may also resolve an id it has no
-    /// baseline for by looking it up in `registry` — see the module-level
-    /// note on [`ObservationSource for MonitorObservations`](struct.MonitorObservations.html)'s
-    /// `observe` impl for the lazy-registration mechanism this enables.
+    /// Same as [`Self::new`], but subscription-time source registration may
+    /// resolve an id's path through the durable `registry` before fixing its
+    /// cutoff.
     pub fn with_registry(
         monitor: tidepool_worktree::WorktreeMonitor,
         registry: tidepool_worktree::WorktreeRegistry,
@@ -649,54 +684,45 @@ impl MonitorObservations {
 }
 
 impl ObservationSource for MonitorObservations {
-    fn observe(
-        &mut self,
-        worktrees: &[WtWorktreeId],
-    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
-        let mut out = Vec::new();
-        for wire_id in worktrees {
-            let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
-            // A worktree the durable registry records but this process never
-            // called `register` for (a `Worktree` create in a PRIOR loop
-            // iteration, or by another process) has no baseline yet. Resolve
-            // it lazily from the registry — the id->path authority — and
-            // register it now, so the first sight at observe time reports
-            // nothing retroactively (matching `register`'s own "first pass
-            // belongs to the first drain" contract) rather than failing the
-            // whole turn. An id the registry also does not know falls through
-            // unchanged to `reconcile`'s typed `WorktreeNotRegistered`.
-            if !self.monitor.is_registered(&domain_id) {
-                if let Some(registry) = &self.registry {
-                    if let Some(receipt) = registry
-                        .get(&domain_id)
-                        .map_err(worktree_error_to_event_error)?
-                    {
-                        self.monitor
-                            .register(domain_id.clone(), receipt.cwd)
-                            .map_err(worktree_error_to_event_error)?;
-                    }
-                }
-            }
-            // An unregistered id is now a TYPED failure from the monitor
-            // itself, mapped like every other monitor error — the ids reaching
-            // here come from author-supplied `Watch` values, so this is a case
-            // authors can hit and must be able to case on.
-            let facts = self
-                .monitor
-                .reconcile(&domain_id)
-                .map_err(worktree_error_to_event_error)?;
-            // The id on each observation is the one the monitor minted for this
-            // pass and JOURNALLED under, so co-emitted views of one change still
-            // share an id AND that id correlates with the journal row.
-            out.extend(facts.iter().map(|o| {
-                domain_event_to_wire(
-                    EvEventId {
-                        raw: o.event_id.0 as i64,
-                    },
-                    &o.value,
-                )
-            }));
+    fn register(&mut self, wire_id: &WtWorktreeId) -> Result<(), EventError> {
+        let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
+        if self.monitor.is_registered(&domain_id) {
+            return Ok(());
         }
+        if let Some(registry) = &self.registry {
+            if let Some(receipt) = registry
+                .get(&domain_id)
+                .map_err(worktree_error_to_event_error)?
+            {
+                return self
+                    .monitor
+                    .register(domain_id, receipt.cwd)
+                    .map_err(worktree_error_to_event_error);
+            }
+        }
+        Err(worktree_error_to_event_error(
+            tidepool_worktree::WorktreeError::WorktreeNotRegistered(domain_id),
+        ))
+    }
+
+    fn observe(&mut self, wire_id: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        let mut out = Vec::new();
+        let domain_id = tidepool_worktree::WorktreeId::from_raw(wire_id.raw.clone());
+        let facts = self
+            .monitor
+            .reconcile(&domain_id)
+            .map_err(worktree_error_to_event_error)?;
+        // The id on each observation is the one the monitor minted for this
+        // pass and JOURNALLED under, so co-emitted views of one change still
+        // share an id AND that id correlates with the journal row.
+        out.extend(facts.iter().map(|o| {
+            domain_event_to_wire(
+                EvEventId {
+                    raw: o.event_id.0 as i64,
+                },
+                &o.value,
+            )
+        }));
         Ok(out)
     }
 }
@@ -935,9 +961,44 @@ pub struct RepoEventHandler {
     registry: SubscriptionRegistry,
     source: Box<dyn ObservationSource>,
     poll_interval: Duration,
-    last_pass: Option<Instant>,
+    sources: Vec<SourceState>,
     mailboxes: MailboxTable,
     active_owner: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+enum SourceFailure {
+    Lost(String),
+    Failed(String),
+}
+
+impl SourceFailure {
+    fn from_event_error(error: EventError) -> Self {
+        match error {
+            EventError::EventSourceLost(source) => Self::Lost(source),
+            EventError::EventSourceFailed(detail) => Self::Failed(detail),
+            other => Self::Failed(format!("observation source returned {other:?}")),
+        }
+    }
+
+    fn to_event_error(&self) -> EventError {
+        match self {
+            Self::Lost(source) => EventError::EventSourceLost(source.clone()),
+            Self::Failed(detail) => EventError::EventSourceFailed(detail.clone()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SourceState {
+    worktree: WtWorktreeId,
+    registered: bool,
+    /// Cooldown starts only after a successful observation. A failure remains
+    /// reportable to dependent subscriptions and, once reported, is retried on
+    /// their next operation regardless of `poll_interval`.
+    last_successful_pass: Option<Instant>,
+    failure: Option<SourceFailure>,
+    failure_reported: bool,
 }
 
 impl RepoEventHandler {
@@ -971,7 +1032,7 @@ impl RepoEventHandler {
             registry: SubscriptionRegistry::new(config.queue_bound),
             source,
             poll_interval: config.poll_interval,
-            last_pass: None,
+            sources: Vec::new(),
             mailboxes: MailboxTable::new(config.queue_bound),
             active_owner: None,
         }
@@ -1000,33 +1061,99 @@ impl RepoEventHandler {
         }
     }
 
-    /// Run one reconciliation pass over every watched worktree and broadcast
-    /// what it found, at most once per [`EventConfig::poll_interval`].
+    /// Run one independent reconciliation pass for every due source watched by
+    /// the draining subscription and broadcast each success immediately.
+    /// Cadence and typed failure state are per source, so one subscription's
+    /// operation neither polls, cools down, nor fails an unrelated source.
     ///
     /// The rate limit exists to stop a body's effect storm from becoming a
     /// git-read storm — `withHandler` sends one drain before EVERY effect its
     /// body performs. It never loses anything: a pass reports movement relative
     /// to the observer's durable baseline, so a skipped pass is a delayed
     /// report, not a dropped one.
-    fn reconcile(&mut self) -> Result<(), EventError> {
+    fn reconcile(&mut self, subscription: EvSubscriptionId) -> Result<(), EventError> {
         // Deadlines cost no I/O, so they are checked on EVERY pass —
         // unconditionally, ahead of the git-read rate limit below, and even
         // when nothing is watched for commits/heads at all.
         self.registry.fire_due_deadlines(Instant::now());
-        if let Some(last) = self.last_pass {
-            if last.elapsed() < self.poll_interval {
-                return Ok(());
-            }
-        }
-        let watched = self.registry.watched_worktrees();
+        // Git I/O is scoped to the subscription whose drain/await caused this
+        // pass. In particular, an A-only operation must not register, observe,
+        // or retry an unrelated B merely because B is watched elsewhere.
+        let watched = self.registry.subscription_worktrees(subscription)?;
         if watched.is_empty() {
             return Ok(());
         }
-        self.last_pass = Some(Instant::now());
-        for event in self.source.observe(&watched)? {
-            self.registry.publish(&event);
+        for worktree in watched {
+            let Some(index) = self
+                .sources
+                .iter()
+                .position(|state| state.worktree == worktree)
+            else {
+                // Subscription registration establishes every source before
+                // inserting the subscription, so this is an internal invariant.
+                continue;
+            };
+            if self.sources[index].failure.is_some() {
+                if !self.sources[index].failure_reported {
+                    continue;
+                }
+            } else if self.sources[index]
+                .last_successful_pass
+                .is_some_and(|last| last.elapsed() < self.poll_interval)
+            {
+                continue;
+            }
+            if !self.sources[index].registered {
+                match self.source.register(&worktree) {
+                    Ok(()) => {
+                        self.sources[index].registered = true;
+                        self.sources[index].failure = None;
+                        self.sources[index].failure_reported = false;
+                    }
+                    Err(error) => {
+                        self.sources[index].failure = Some(SourceFailure::from_event_error(error));
+                        self.sources[index].failure_reported = false;
+                        continue;
+                    }
+                }
+            }
+            match self.source.observe(&worktree) {
+                Ok(events) => {
+                    self.sources[index].failure = None;
+                    self.sources[index].failure_reported = false;
+                    self.sources[index].last_successful_pass = Some(Instant::now());
+                    for event in events {
+                        self.registry.publish(&event);
+                    }
+                }
+                Err(error) => {
+                    self.sources[index].failure = Some(SourceFailure::from_event_error(error));
+                    self.sources[index].failure_reported = false;
+                }
+            }
         }
         Ok(())
+    }
+
+    fn failure_for(
+        &mut self,
+        subscription: EvSubscriptionId,
+    ) -> Result<Option<EventError>, EventError> {
+        let worktrees = self.registry.subscription_worktrees(subscription)?;
+        for worktree in worktrees {
+            if let Some(state) = self
+                .sources
+                .iter_mut()
+                .find(|state| state.worktree == worktree)
+            {
+                if let Some(failure) = state.failure.as_ref() {
+                    let error = failure.to_event_error();
+                    state.failure_reported = true;
+                    return Ok(Some(error));
+                }
+            }
+        }
+        Ok(None)
     }
 
     // Errors-tagged verbs: total in `EventError`, no `cx` — the generated
@@ -1037,11 +1164,35 @@ impl RepoEventHandler {
         &mut self,
         watches: Vec<EvWatch>,
     ) -> Result<EvSubscriptionId, EventError> {
-        // A cheap registry insert, and deliberately nothing else. It reads no
-        // git and it consumes no backlog: the first pass of a loop iteration belongs to
-        // the first DRAIN, after this subscription is live, so movement that
-        // happened while nobody was subscribed reaches it instead of being
-        // quietly absorbed by the act of registering. See the module docs.
+        // Establish every never-before-seen source cutoff BEFORE making the
+        // subscription live. This reads only the baseline; it neither
+        // reconciles nor publishes journal rows, so historical rows never
+        // replay while movement after this point remains observable.
+        let mut worktrees = Vec::new();
+        for watch in &watches {
+            let worktree = match watch {
+                EvWatch::WatchCommit(id) | EvWatch::WatchHead(id) => id,
+                EvWatch::WatchDeadline(_) | EvWatch::WatchAsync(_) | EvWatch::WatchMailbox(_) => {
+                    continue
+                }
+            };
+            if !worktrees.contains(worktree) {
+                worktrees.push(worktree.clone());
+            }
+        }
+        for worktree in worktrees {
+            if self.sources.iter().any(|state| state.worktree == worktree) {
+                continue;
+            }
+            let registration = self.source.register(&worktree);
+            self.sources.push(SourceState {
+                worktree,
+                registered: registration.is_ok(),
+                last_successful_pass: None,
+                failure: registration.err().map(SourceFailure::from_event_error),
+                failure_reported: false,
+            });
+        }
         let sub = self
             .registry
             .subscribe_owned(watches.clone(), self.active_owner);
@@ -1092,7 +1243,10 @@ impl RepoEventHandler {
         // A drain is where polling happens: `withHandler`'s interposition sends
         // one before every effect its body performs, so this is the natural —
         // and rate-limited — heartbeat.
-        self.reconcile()?;
+        self.reconcile(subscription)?;
+        if let Some(error) = self.failure_for(subscription)? {
+            return Err(error);
+        }
         self.registry.drain(subscription)
     }
 
@@ -1161,7 +1315,10 @@ impl RepoEventHandler {
             Some(Instant::now() + Duration::from_millis(timeout_ms as u64))
         };
         loop {
-            self.reconcile()?;
+            self.reconcile(subscription)?;
+            if let Some(error) = self.failure_for(subscription)? {
+                return Err(error);
+            }
             let batch = self.registry.drain(subscription)?;
             if !batch.is_empty() {
                 return Ok(batch);
@@ -1401,7 +1558,7 @@ mod tests {
     impl ObservationSource for ScriptedSource {
         fn observe(
             &mut self,
-            _worktrees: &[WtWorktreeId],
+            _worktree: &WtWorktreeId,
         ) -> Result<Vec<EvRepositoryEvent>, EventError> {
             let n = self
                 .calls
@@ -1446,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_reads_nothing_and_consumes_no_backlog() {
+    fn registration_does_not_reconcile_or_consume_backlog() {
         // Pass 0 carries a commit that happened while nobody was subscribed.
         // If registering polled, that pass would run with no subscriber and the
         // commit would be gone; because it does not, the first DRAIN runs it
@@ -1458,7 +1615,7 @@ mod tests {
         assert_eq!(
             passes_run(&calls),
             0,
-            "registration is a registry insert; it must not poll"
+            "registration establishes cutoffs but must not reconcile"
         );
         assert_eq!(
             oids(&h.repo_event_drain(sub).unwrap()),
@@ -1546,6 +1703,217 @@ mod tests {
             Err(EventError::EventUnknownSubscription(sub.raw))
         );
         assert_eq!(passes_run(&calls), before);
+    }
+
+    struct IndependentSource {
+        emitted_a: bool,
+        b_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ObservationSource for IndependentSource {
+        fn observe(
+            &mut self,
+            worktree: &WtWorktreeId,
+        ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+            match worktree.raw.as_str() {
+                "a" if !self.emitted_a => {
+                    self.emitted_a = true;
+                    Ok(vec![commit_event(1, "a", "a1")])
+                }
+                "a" => Ok(Vec::new()),
+                "b" => {
+                    self.b_calls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(EventError::EventSourceLost("b".into()))
+                }
+                other => panic!("unexpected source {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_success_is_delivered_when_b_fails_and_only_b_subscribers_fail() {
+        let b_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut h = RepoEventHandler::with_source(
+            Box::new(IndependentSource {
+                emitted_a: false,
+                b_calls: b_calls.clone(),
+            }),
+            EventConfig {
+                queue_bound: 8,
+                poll_interval: Duration::ZERO,
+            },
+        );
+        let a = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
+            .unwrap();
+        let b = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("b"))])
+            .unwrap();
+
+        assert_eq!(oids(&h.repo_event_drain(a).unwrap()), vec!["a1"]);
+        assert_eq!(
+            h.repo_event_drain(b),
+            Err(EventError::EventSourceLost("b".into()))
+        );
+        assert_eq!(b_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            h.repo_event_drain(a).unwrap(),
+            Vec::<EvRepositoryEvent>::new(),
+            "B's persistent failure does not poison A"
+        );
+        assert_eq!(
+            b_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an A-only drain must not retry B after B's failure was reported"
+        );
+    }
+
+    struct NewSourceDuringCooldown {
+        b_moved: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        registered: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        observed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        emitted_b: bool,
+    }
+
+    impl ObservationSource for NewSourceDuringCooldown {
+        fn register(&mut self, worktree: &WtWorktreeId) -> Result<(), EventError> {
+            self.registered.lock().unwrap().push(worktree.raw.clone());
+            Ok(())
+        }
+
+        fn observe(
+            &mut self,
+            worktree: &WtWorktreeId,
+        ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+            self.observed.lock().unwrap().push(worktree.raw.clone());
+            if worktree.raw == "b"
+                && self.b_moved.load(std::sync::atomic::Ordering::SeqCst)
+                && !self.emitted_b
+            {
+                self.emitted_b = true;
+                return Ok(vec![commit_event(2, "b", "b1")]);
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_new_b_source_does_not_inherit_a_source_cooldown() {
+        let b_moved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let registered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut h = RepoEventHandler::with_source(
+            Box::new(NewSourceDuringCooldown {
+                b_moved: b_moved.clone(),
+                registered: registered.clone(),
+                observed: observed.clone(),
+                emitted_b: false,
+            }),
+            EventConfig {
+                queue_bound: 8,
+                poll_interval: Duration::from_secs(3600),
+            },
+        );
+        let a = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("a"))])
+            .unwrap();
+        h.repo_event_drain(a).unwrap();
+
+        let b = h
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("b"))])
+            .unwrap();
+        assert_eq!(
+            registered.lock().unwrap().as_slice(),
+            &["a".to_string(), "b".to_string()],
+            "B's cutoff is established during subscription"
+        );
+        b_moved.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(oids(&h.repo_event_drain(b).unwrap()), vec!["b1"]);
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            &["a".to_string(), "b".to_string()],
+            "A stays cooled down while never-polled B runs immediately"
+        );
+    }
+
+    enum RecoveryStage {
+        Registering { calls: usize },
+        Observing { calls: usize },
+    }
+
+    struct RecoveringSource {
+        stage: RecoveryStage,
+    }
+
+    impl ObservationSource for RecoveringSource {
+        fn register(&mut self, worktree: &WtWorktreeId) -> Result<(), EventError> {
+            if let RecoveryStage::Registering { calls } = &mut self.stage {
+                *calls += 1;
+                if *calls == 1 {
+                    return Err(EventError::EventSourceLost(worktree.raw.clone()));
+                }
+            }
+            Ok(())
+        }
+
+        fn observe(
+            &mut self,
+            worktree: &WtWorktreeId,
+        ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+            if let RecoveryStage::Observing { calls } = &mut self.stage {
+                *calls += 1;
+                if *calls == 1 {
+                    return Err(EventError::EventSourceFailed(
+                        "temporarily unavailable".into(),
+                    ));
+                }
+            }
+            Ok(vec![commit_event(3, &worktree.raw, "recovered")])
+        }
+    }
+
+    fn recovering_handler(stage: RecoveryStage) -> RepoEventHandler {
+        RepoEventHandler::with_source(
+            Box::new(RecoveringSource { stage }),
+            EventConfig {
+                queue_bound: 8,
+                poll_interval: Duration::from_secs(3600),
+            },
+        )
+    }
+
+    #[test]
+    fn failed_sources_report_once_then_retry_on_the_next_dependent_operation() {
+        let mut registration = recovering_handler(RecoveryStage::Registering { calls: 0 });
+        let reg_sub = registration
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("registration"))])
+            .unwrap();
+        assert_eq!(
+            registration.repo_event_drain(reg_sub),
+            Err(EventError::EventSourceLost("registration".into()))
+        );
+        assert_eq!(
+            oids(&registration.repo_event_drain(reg_sub).unwrap()),
+            vec!["recovered"],
+            "a registration failure retries immediately after being reported"
+        );
+
+        let mut observation = recovering_handler(RecoveryStage::Observing { calls: 0 });
+        let obs_sub = observation
+            .repo_event_subscribe(vec![EvWatch::WatchCommit(wt("observation"))])
+            .unwrap();
+        assert_eq!(
+            observation.repo_event_drain(obs_sub),
+            Err(EventError::EventSourceFailed(
+                "temporarily unavailable".into()
+            ))
+        );
+        assert_eq!(
+            oids(&observation.repo_event_drain(obs_sub).unwrap()),
+            vec!["recovered"],
+            "an observation failure is not held behind the successful-poll cooldown"
+        );
     }
 
     // ── await / deadlines ──
@@ -1948,7 +2316,7 @@ mod tests {
     }
 
     #[test]
-    fn a_watch_on_a_registry_recorded_worktree_succeeds_with_no_manual_register() {
+    fn subscription_registers_a_registry_recorded_source_before_later_movement() {
         // Reproduces the live dev-tree failure: a worktree the Worktree effect
         // created and durably registered, watched by RepoEvent, with NO
         // `MonitorObservations::register` call anywhere in this test — the
@@ -1975,18 +2343,28 @@ mod tests {
             })
             .unwrap();
 
-        let mut h = RepoEventHandler::with_registry(monitor, registry, EventConfig::default());
+        let mut h = RepoEventHandler::with_registry(
+            monitor,
+            registry,
+            EventConfig {
+                queue_bound: 8,
+                poll_interval: Duration::ZERO,
+            },
+        );
         let wire_id = WtWorktreeId {
             raw: worktree_id.as_str().to_string(),
         };
         let sub = h
             .repo_event_subscribe(vec![EvWatch::WatchCommit(wire_id)])
             .unwrap();
+        let moved = repo
+            .writer()
+            .commit_file("a.txt", "later", "after subscription")
+            .unwrap();
         assert_eq!(
-            h.repo_event_drain(sub).unwrap(),
-            vec![],
-            "first sight at observe time reports nothing retroactively, \
-             same as an explicit register"
+            oids(&h.repo_event_drain(sub).unwrap()),
+            vec![moved.as_str()],
+            "subscription-time registration fixes the cutoff before later movement"
         );
     }
 

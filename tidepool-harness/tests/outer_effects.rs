@@ -81,10 +81,7 @@ fn header() -> LogHeader {
 struct NoOpSource;
 
 impl ObservationSource for NoOpSource {
-    fn observe(
-        &mut self,
-        _worktrees: &[WtWorktreeId],
-    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+    fn observe(&mut self, _worktree: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
         Ok(Vec::new())
     }
 }

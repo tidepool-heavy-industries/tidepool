@@ -217,77 +217,72 @@ impl RealGitObservations {
 }
 
 impl ObservationSource for RealGitObservations {
-    fn observe(
-        &mut self,
-        worktrees: &[WtWorktreeId],
-    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
+    fn observe(&mut self, id: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
         let mut out = Vec::new();
-        for id in worktrees {
-            let cwd = match self.trees.get(&id.raw) {
-                Some(p) => p.clone(),
-                None => return Err(EventError::EventSourceLost(id.raw.clone())),
-            };
-            let head = self.read(&cwd, &["rev-parse", "HEAD"])?;
-            let previous = self.seen_head.get(&id.raw).cloned();
-            if previous.as_deref() == Some(head.as_str()) {
-                continue; // idempotent: nothing moved since the last pass
-            }
-            self.seen_head.insert(id.raw.clone(), head.clone());
-            let branch = self
-                .git
-                .run(&cwd, &["symbolic-ref", "--short", "HEAD"])
-                .ok()
-                .map(|o| WtBranchName {
-                    raw: o.trimmed().to_string(),
-                });
-
-            // One id per PASS: co-emitted views of one change share it.
-            let event_id = EvEventId {
-                raw: self.next_event_id,
-            };
-            self.next_event_id += 1;
-
-            let (gained, kind) = match previous.as_deref() {
-                None => (Vec::new(), EvHeadChangeKind::UnknownChange),
-                Some(old) if self.is_ancestor(&cwd, old, &head) => {
-                    let listed =
-                        self.read(&cwd, &["rev-list", "--reverse", &format!("{old}..{head}")])?;
-                    let gained: Vec<String> = listed
-                        .lines()
-                        .map(str::to_string)
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    let kind = EvHeadChangeKind::Advanced(
-                        gained.iter().map(|o| WtGitOid { raw: o.clone() }).collect(),
-                    );
-                    (gained, kind)
-                }
-                Some(old) if self.is_ancestor(&cwd, &head, old) => {
-                    (Vec::new(), EvHeadChangeKind::Rewound)
-                }
-                // Neither is an ancestor of the other: the movement is real but
-                // its shape is not honestly recoverable from HEAD alone.
-                // Degrading here is a correct answer, not a failure.
-                Some(_) => (Vec::new(), EvHeadChangeKind::UnknownChange),
-            };
-
-            for oid in &gained {
-                let mut receipt = self.commit_receipt(&cwd, oid)?;
-                receipt.commit_worktree = id.clone();
-                out.push(EvRepositoryEvent::ObservedCommit(event_id, receipt));
-            }
-            out.push(EvRepositoryEvent::ObservedHeadChange(
-                event_id,
-                EvHeadChangeReceipt {
-                    head_worktree: id.clone(),
-                    old_head: previous.map(|p| WtGitOid { raw: p }),
-                    new_head: WtGitOid { raw: head },
-                    kind,
-                    head_branch: branch,
-                    observed_at_ms: 0,
-                },
-            ));
+        let cwd = match self.trees.get(&id.raw) {
+            Some(p) => p.clone(),
+            None => return Err(EventError::EventSourceLost(id.raw.clone())),
+        };
+        let head = self.read(&cwd, &["rev-parse", "HEAD"])?;
+        let previous = self.seen_head.get(&id.raw).cloned();
+        if previous.as_deref() == Some(head.as_str()) {
+            return Ok(Vec::new()); // idempotent: nothing moved since the last pass
         }
+        self.seen_head.insert(id.raw.clone(), head.clone());
+        let branch = self
+            .git
+            .run(&cwd, &["symbolic-ref", "--short", "HEAD"])
+            .ok()
+            .map(|o| WtBranchName {
+                raw: o.trimmed().to_string(),
+            });
+
+        // One id per PASS: co-emitted views of one change share it.
+        let event_id = EvEventId {
+            raw: self.next_event_id,
+        };
+        self.next_event_id += 1;
+
+        let (gained, kind) = match previous.as_deref() {
+            None => (Vec::new(), EvHeadChangeKind::UnknownChange),
+            Some(old) if self.is_ancestor(&cwd, old, &head) => {
+                let listed =
+                    self.read(&cwd, &["rev-list", "--reverse", &format!("{old}..{head}")])?;
+                let gained: Vec<String> = listed
+                    .lines()
+                    .map(str::to_string)
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                let kind = EvHeadChangeKind::Advanced(
+                    gained.iter().map(|o| WtGitOid { raw: o.clone() }).collect(),
+                );
+                (gained, kind)
+            }
+            Some(old) if self.is_ancestor(&cwd, &head, old) => {
+                (Vec::new(), EvHeadChangeKind::Rewound)
+            }
+            // Neither is an ancestor of the other: the movement is real but
+            // its shape is not honestly recoverable from HEAD alone.
+            // Degrading here is a correct answer, not a failure.
+            Some(_) => (Vec::new(), EvHeadChangeKind::UnknownChange),
+        };
+
+        for oid in &gained {
+            let mut receipt = self.commit_receipt(&cwd, oid)?;
+            receipt.commit_worktree = id.clone();
+            out.push(EvRepositoryEvent::ObservedCommit(event_id, receipt));
+        }
+        out.push(EvRepositoryEvent::ObservedHeadChange(
+            event_id,
+            EvHeadChangeReceipt {
+                head_worktree: id.clone(),
+                old_head: previous.map(|p| WtGitOid { raw: p }),
+                new_head: WtGitOid { raw: head },
+                kind,
+                head_branch: branch,
+                observed_at_ms: 0,
+            },
+        ));
         Ok(out)
     }
 }
@@ -311,11 +306,12 @@ struct Recording<S> {
 }
 
 impl<S: ObservationSource> ObservationSource for Recording<S> {
-    fn observe(
-        &mut self,
-        worktrees: &[WtWorktreeId],
-    ) -> Result<Vec<EvRepositoryEvent>, EventError> {
-        let events = self.inner.observe(worktrees)?;
+    fn register(&mut self, worktree: &WtWorktreeId) -> Result<(), EventError> {
+        self.inner.register(worktree)
+    }
+
+    fn observe(&mut self, worktree: &WtWorktreeId) -> Result<Vec<EvRepositoryEvent>, EventError> {
+        let events = self.inner.observe(worktree)?;
         self.log.lock().extend(events.iter().cloned());
         Ok(events)
     }
@@ -614,7 +610,7 @@ fn booted_repo_with(
     let mut source = RealGitObservations::new([(TREE.to_string(), repo.path().to_path_buf())]);
     // The baseline pass. After it the observer knows where the repository IS,
     // so a later pass reports a delta rather than the whole history.
-    source.observe(&[tree_id()]).expect("baseline pass");
+    source.observe(&tree_id()).expect("baseline pass");
 
     let log: Arc<Mutex<Vec<EvRepositoryEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let handler = RepoEventHandler::with_source(
