@@ -56,6 +56,10 @@ pub enum HsType {
     /// `A -> B` — a function type. Green's async body is currently the sole
     /// function-typed field in the effect contract.
     Fn(Box<HsType>, Box<HsType>),
+    /// `forall a b. T` — an explicitly rank-N type. This is used only when a
+    /// protocol itself requires parametric code, such as an actor handler that
+    /// must accept every result index of a GADT request.
+    Forall(Vec<&'static str>, Box<HsType>),
 }
 
 impl HsType {
@@ -89,6 +93,16 @@ impl HsType {
         HsType::App(Box::new(head), Box::new(arg))
     }
 
+    /// `forall vars. body`.
+    #[must_use]
+    pub fn forall(vars: Vec<&'static str>, body: HsType) -> Self {
+        assert!(
+            !vars.is_empty(),
+            "a forall must bind at least one type variable"
+        );
+        HsType::Forall(vars, Box::new(body))
+    }
+
     /// Bare rendering. Use in arrow-argument position and at the top level —
     /// EXCEPT for an argument that is itself [`HsType::Fn`], which still
     /// needs parenthesizing there (`->` is right-associative, so an
@@ -115,6 +129,9 @@ impl HsType {
                 format!("({})", inner.join(", "))
             }
             HsType::Fn(a, b) => format!("{} -> {}", a.render_arrow_left(), b.render()),
+            HsType::Forall(vars, body) => {
+                format!("forall {}. {}", vars.join(" "), body.render())
+            }
         }
     }
 
@@ -127,7 +144,11 @@ impl HsType {
     #[must_use]
     pub fn render_app_arg(&self) -> String {
         match self {
-            HsType::App(_, _) | HsType::Maybe(_) | HsType::Either(_, _) | HsType::Fn(_, _) => {
+            HsType::App(_, _)
+            | HsType::Maybe(_)
+            | HsType::Either(_, _)
+            | HsType::Fn(_, _)
+            | HsType::Forall(_, _) => {
                 format!("({})", self.render())
             }
             _ => self.render(),
@@ -136,7 +157,7 @@ impl HsType {
 
     fn render_app_head(&self) -> String {
         match self {
-            HsType::Fn(_, _) => format!("({})", self.render()),
+            HsType::Fn(_, _) | HsType::Forall(_, _) => format!("({})", self.render()),
             _ => self.render(),
         }
     }
@@ -147,7 +168,7 @@ impl HsType {
     /// already unambiguous there, same as [`Self::render`].
     fn render_arrow_left(&self) -> String {
         match self {
-            HsType::Fn(_, _) => format!("({})", self.render()),
+            HsType::Fn(_, _) | HsType::Forall(_, _) => format!("({})", self.render()),
             _ => self.render(),
         }
     }
@@ -258,6 +279,11 @@ mod tests {
             (HsType::Named("Proc"), "Proc", "Proc"),
             (HsType::Named("Commit"), "Commit", "Commit"),
             (HsType::Var("a"), "a", "a"),
+            (
+                HsType::forall(vec!["a"], HsType::func(HsType::Var("a"), HsType::Var("a"))),
+                "forall a. a -> a",
+                "(forall a. a -> a)",
+            ),
             (
                 HsType::app(
                     HsType::app(HsType::Named("Eff"), HsType::Var("effs")),

@@ -68,6 +68,8 @@ sitedVerbs =
       "forkCataSited" "Tidepool.Fork" 2 2 True True []
   , verb "deliberate" "Tidepool.Deliberation"
       "deliberateSited" "Tidepool.Deliberation" 2 2 False True [1]
+  , verb "receive" "Tidepool.Actor"
+      "receiveSited" "Tidepool.Actor" 1 1 False True []
   ]
   where
     verb = VerbSpec

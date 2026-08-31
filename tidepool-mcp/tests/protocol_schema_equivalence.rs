@@ -236,9 +236,18 @@ fn deliberate_decl_matches_the_schema_exactly() {
     );
 }
 
-/// ActorLocal is indexed by a unary protocol constructor and an exit type;
-/// this assertion therefore also proves that kinded parameters survive the
-/// schema-to-MCP projection.
+/// The private actor kernel is schema-owned even though its constructors are
+/// absent from the authored surface.
+#[test]
+fn actor_kernel_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::actor_kernel_decl(),
+        &tidepool_protocol::effects::actor_kernel::actor_kernel(),
+    );
+}
+
+/// ActorLocal is indexed by a unary protocol constructor; this assertion also
+/// proves that kinded parameters survive the schema-to-MCP projection.
 #[test]
 fn actor_local_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(
@@ -271,6 +280,7 @@ fn every_schema_effect_is_reachable() {
             "Finalize",
             "Green",
             "Actor",
+            "ActorKernel",
             "ActorLocal",
         ],
         "the migrated set changed — add the new effect's equivalence assertion above"

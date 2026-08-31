@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
@@ -21,6 +22,10 @@ module Tidepool.Actor
   , ActorDefinition (..)
   , startActor
   , runActor
+  , call
+  , cast
+  , receive
+  , serve
   , ActorExit (..)
   , ActorFailure (..)
   , CancelReason (..)
@@ -37,7 +42,8 @@ import Tidepool.Actor.Internal
   )
 import Tidepool.Effects.Core
   ( Actor (..)
-  , ActorBootstrap (..)
+  , ActorKernel (..)
+  , ActorLocal (..)
   , ActorTerminalStatus (..)
   )
 import Tidepool.Internal.ExitCell
@@ -79,16 +85,16 @@ startActor
 startActor (ActorDefinition label startupAction install) startup = do
   let cell = newExitCell startup
       entry _ = do
-        initial <- raiseBootstrap (startupAction startup)
+        initial <- raiseKernel (startupAction startup)
         send ActorReadyWith
-        result <- raiseBootstrap (install startup initial)
+        result <- raiseKernel (install startup initial)
         case fillExitCell cell result of
           () -> pure ()
   (actorId, incarnation) <- send (ActorStartWith label entry)
   pure (ActorRef actorId incarnation cell)
 
-raiseBootstrap :: Eff effs a -> Eff (ActorBootstrap ': effs) a
-raiseBootstrap = raise
+raiseKernel :: Eff effs a -> Eff (ActorKernel ': effs) a
+raiseKernel = raise
 
 -- | Start a supervised one-shot actor and wait for its exact terminal value.
 runActor
@@ -97,6 +103,65 @@ runActor
   -> startup
   -> Eff effs (ActorExit exit)
 runActor definition startup = startActor definition startup >>= awaitExit
+
+-- | Make one synchronous request to an exact actor incarnation. Runtime
+-- lifecycle failure abandons this fragment; it is never fabricated as a
+-- value of the protocol's result type.
+call
+  :: Member Actor effs
+  => ActorRef protocol exit
+  -> protocol result
+  -> Eff effs result
+call (ActorRef actorId incarnation _) request =
+  send (ActorCallWith (actorId, incarnation) request)
+
+-- | Transfer one unit-result request into an exact actor mailbox. Returning
+-- means the mailbox accepted ownership, not that the target handled it.
+cast
+  :: Member Actor effs
+  => ActorRef protocol exit
+  -> protocol ()
+  -> Eff effs ()
+cast (ActorRef actorId incarnation _) request =
+  send (ActorCastWith (actorId, incarnation) request)
+
+-- | Handle one request of any result index and return the next actor state.
+-- Reply authority remains in the runtime; authored code returns an ordinary
+-- pair and never receives a token it could duplicate or forget.
+{-# OPAQUE receive #-}
+receive
+  :: forall next protocol effs
+   . Member (ActorLocal protocol) effs
+  => (forall result. protocol result -> Eff effs (result, next))
+  -> Eff effs next
+receive = receiveSited @next 0
+
+-- Extractor substrate. The stable site key correlates the receive suspension
+-- with its two private settlement steps and gives observability a source-level
+-- identity without exposing a reply token.
+{-# OPAQUE receiveSited #-}
+receiveSited
+  :: forall next protocol effs
+   . Member (ActorLocal protocol) effs
+  => Int
+  -> (forall result. protocol result -> Eff effs (result, next))
+  -> Eff effs next
+receiveSited site handler = send (ActorReceiveWith site kernelHandler)
+  where
+    kernelHandler :: forall result. protocol result -> Eff (ActorKernel ': effs) ()
+    kernelHandler request = do
+      (reply, next) <- raiseKernel (handler request)
+      send (ActorReplyWith site reply)
+      send (ActorContinueWith site next)
+
+-- | Serve requests forever with explicit Haskell state. Actors that may exit
+-- in response to a message use 'receive' directly and return normally.
+serve
+  :: Member (ActorLocal protocol) effs
+  => state
+  -> (forall result. state -> protocol result -> Eff effs (result, state))
+  -> Eff effs exit
+serve state step = receive (step state) >>= \next -> serve next step
 
 -- | Observe this exact actor incarnation's retained terminal result.
 --

@@ -27,7 +27,7 @@ data ActorRef (protocol :: Type -> Type) exit where
 
 data ActorDefinition startup (protocol :: Type -> Type) exit where
   ActorDefinition
-    :: Members '[Deliberate, ActorLocal api exit] actorEffs
+    :: Members '[Deliberate, ActorLocal api] actorEffs
     => Text
     -> (startup -> Eff actorEffs initial)
     -> (startup -> initial -> Eff actorEffs exit)

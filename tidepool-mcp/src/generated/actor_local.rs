@@ -5,9 +5,11 @@
 pub fn actor_local_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "ActorLocal",
-        description: "Private actor-local lifecycle and mailbox substrate. Authored code uses `Tidepool.Actor`; the protocol and exit indexes tie an installed program to its exact actor incarnation.",
+        description: "Private actor-local lifecycle and mailbox substrate. Authored code uses `Tidepool.Actor`; the protocol index ties requests to the installed program. The enclosing ActorDefinition separately fixes successful exit.",
         prompt_card: None,
-        constructors: &[],
+        constructors: &[
+            "ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next",
+        ],
         type_defs: &[],
         extra_imports: &[
             "import Tidepool.Actor",
@@ -15,11 +17,9 @@ pub fn actor_local_decl() -> crate::EffectDecl {
         helpers: &[],
         type_params: &[
             "(api :: Type -> Type)",
-            "exit",
         ],
         default_row_args: &[
             "Maybe",
-            "Void",
         ],
         helpers_row_polymorphic: true,
     }

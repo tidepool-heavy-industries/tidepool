@@ -150,7 +150,7 @@ it and supplies concise Developer context when model judgment is needed.
 
 This rule does not freeze the effect vocabulary. A distinct algebra with its
 own interpreter and useful `Member` constraint may deserve a new effect;
-`ActorLocal protocol exit` is one. Mere lifecycle modes, option bundles, or alternate
+`ActorLocal protocol` is one. Mere lifecycle modes, option bundles, or alternate
 spellings of an existing operation do not.
 
 ### Primary model interaction
@@ -542,7 +542,7 @@ Fork also clones the actor's control continuation. The low-level operation has
 a parent/child result analogous to process fork. The ordinary `forkActors`
 wrapper consumes that distinction internally: the parent receives child
 handles, while each child runs a typed `seed -> Eff effs exit` branch supplied
-at the fork point through its new `ActorLocal protocol exit` interpreter. Returning
+at the fork point through its new `ActorLocal protocol` interpreter. Returning
 from that branch completes the child; it never falls through into the parent's
 post-fork continuation. The parent receives no handle until that child signals
 readiness.

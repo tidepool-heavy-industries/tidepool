@@ -118,6 +118,46 @@ pub fn actor() -> Effect {
                 handling: HandlingClass::Actor,
                 extract: None,
             },
+            Verb {
+                ctor: "ActorCallWith",
+                method: "actor_call_with",
+                args: vec![
+                    Arg {
+                        name: "actor",
+                        ty: address_type(),
+                        rust: RustBinding::Path("(i64, i64)"),
+                    },
+                    Arg {
+                        name: "request",
+                        ty: HsType::app(HsType::Var("protocol"), HsType::Var("result")),
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Var("result"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorCastWith",
+                method: "actor_cast_with",
+                args: vec![
+                    Arg {
+                        name: "actor",
+                        ty: address_type(),
+                        rust: RustBinding::Path("(i64, i64)"),
+                    },
+                    Arg {
+                        name: "request",
+                        ty: HsType::app(HsType::Var("protocol"), HsType::Unit),
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Unit,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
         ],
         // The public wrapper needs the managed cell carried by `ActorRef`, so
         // it is authored in Tidepool.Actor rather than emitted as a second,

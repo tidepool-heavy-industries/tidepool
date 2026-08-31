@@ -86,7 +86,7 @@ async fn public_start_uses_one_exact_resident_path() {
     let session_id = SessionId(93);
     let decls = [
         tidepool_mcp::actor_decl(),
-        tidepool_mcp::actor_bootstrap_decl(),
+        tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::deliberate_decl(),
     ];
@@ -105,7 +105,7 @@ let idleDefinition :: ActorDefinition Int Maybe Int
         "idle-worker"
         (\seed -> pure seed)
         (\_seed initial ->
-          (pure initial :: Eff '[Deliberate, ActorLocal Maybe Int] Int))
+          (pure initial :: Eff '[Deliberate, ActorLocal Maybe] Int))
 
     workerDefinition :: ActorDefinition Int Maybe Int
     workerDefinition =
@@ -117,10 +117,26 @@ let idleDefinition :: ActorDefinition Int Maybe Int
           pure (approved, adjustment))
         (\seed (approved, adjustment) ->
           (pure (if approved then seed + adjustment else seed - adjustment)
-            :: Eff '[Deliberate, ActorLocal Maybe Int] Int))
+            :: Eff '[Deliberate, ActorLocal Maybe] Int))
+
+    serverDefinition :: ActorDefinition Int ((,) Int) Int
+    serverDefinition =
+      ActorDefinition
+        "server"
+        (\seed -> pure seed)
+        (\_seed initial ->
+          (receive (\(delta, result) -> pure (result, initial + delta))
+            :: Eff '[Deliberate, ActorLocal ((,) Int)] Int))
+
+    client :: ActorRef ((,) Int) Int -> Eff '[Actor] Int
+    client ref = do
+      result <- call ref (1, 41)
+      cast ref (0, ())
+      pure result
 in do
     _ <- startActor idleDefinition 10
     _ <- startActor workerDefinition 41
+    _ <- startActor serverDefinition 0
     pure (7 :: Int)
 "#;
     let compiled = match run_turn(HaskellTurnRequest {
@@ -219,7 +235,7 @@ in do
     assert_eq!(provider.requests.lock().len(), 0);
     assert_eq!(registry.lifecycle(idle_child), Ok(ActorLifecycle::Exited));
 
-    let capture_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source);
+    let capture_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone());
     let next_start = capture_runner
         .capture_start(parent_turn.session_context(), parent_outcome)
         .await
@@ -228,7 +244,6 @@ in do
         .start(parent_turn, &provider, next_start, None)
         .await
         .expect("start actor with two prompted sessions");
-    drop(parent_turn);
     assert_eq!(
         registry
             .descriptor(prompted_child)
@@ -241,6 +256,26 @@ in do
         registry.lifecycle(prompted_child),
         Ok(ActorLifecycle::Exited)
     );
+
+    let capture_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source);
+    let server_start = capture_runner
+        .capture_start(parent_turn.session_context(), parent_outcome)
+        .await
+        .expect("capture server entry");
+    let (parent_turn, server, parent_outcome) = starter
+        .start(parent_turn, &provider, server_start, None)
+        .await
+        .expect("start mailbox server");
+    drop(parent_turn);
+    assert_eq!(
+        registry
+            .descriptor(server)
+            .expect("server descriptor")
+            .label(),
+        "server"
+    );
+    assert_eq!(registry.lifecycle(server), Ok(ActorLifecycle::Ready));
+    assert_eq!(provider.requests.lock().len(), 2);
     match parent_outcome {
         ResidentOutcome::Completed { result, .. } => {
             assert_eq!(result.to_json(), serde_json::json!(7));

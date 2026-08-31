@@ -78,7 +78,7 @@ impl ResidentActorStart {
         let lexical_scope = session.mint_isolated_scope();
         let descriptor = ActorDescriptor::new(
             label.clone(),
-            ["ActorBootstrap", "Actor", "ActorLocal", "Deliberate"],
+            ["ActorKernel", "Actor", "ActorLocal", "Deliberate"],
             crate::ActorPlacement {
                 session: session_id,
                 resource_scope: child_realm,

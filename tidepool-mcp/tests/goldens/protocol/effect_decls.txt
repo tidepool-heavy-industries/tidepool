@@ -2173,18 +2173,22 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 `Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits.
 -- end prompt_card.0 --
 
--- constructors (3 items) --
--- constructors[0] (30 bytes) --
-ActorPromoteWith :: Actor Text
+-- constructors (4 items) --
+-- constructors[0] (71 bytes) --
+ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)
 -- end constructors[0] --
 
--- constructors[1] (79 bytes) --
-ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Text -> Actor (Int, Int)
+-- constructors[1] (56 bytes) --
+ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
 -- end constructors[1] --
 
--- constructors[2] (56 bytes) --
-ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
+-- constructors[2] (62 bytes) --
+ActorCallWith :: (Int, Int) -> protocol result -> Actor result
 -- end constructors[2] --
+
+-- constructors[3] (54 bytes) --
+ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- end constructors[3] --
 
 -- end constructors --
 
@@ -2215,21 +2219,71 @@ import Tidepool.Actor
 true
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: ActorKernel ===============================
+
+-- type_name (11 bytes) --
+ActorKernel
+-- end type_name --
+
+-- description (159 bytes) --
+Kernel-private actor control boundary. Trusted Tidepool.Actor wrappers use it for readiness and hidden mailbox settlement; authored code has no operation here.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (3 items) --
+-- constructors[0] (32 bytes) --
+ActorReadyWith :: ActorKernel ()
+-- end constructors[0] --
+
+-- constructors[1] (49 bytes) --
+ActorReplyWith :: Int -> result -> ActorKernel ()
+-- end constructors[1] --
+
+-- constructors[2] (50 bytes) --
+ActorContinueWith :: Int -> next -> ActorKernel ()
+-- end constructors[2] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (21 bytes) --
+import Tidepool.Actor
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (0 items) --
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
 =============================== EFFECT: ActorLocal ===============================
 
 -- type_name (10 bytes) --
 ActorLocal
 -- end type_name --
 
--- description (176 bytes) --
-Private actor-local lifecycle and mailbox substrate. Authored code uses `Tidepool.Actor`; the protocol and exit indexes tie an installed program to its exact actor incarnation.
+-- description (212 bytes) --
+Private actor-local lifecycle and mailbox substrate. Authored code uses `Tidepool.Actor`; the protocol index ties requests to the installed program. The enclosing ActorDefinition separately fixes successful exit.
 -- end description --
 
 -- prompt_card: None --
 
 -- constructors (1 items) --
--- constructors[0] (40 bytes) --
-ActorReadyWith :: ActorLocal api exit ()
+-- constructors[0] (99 bytes) --
+ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next
 -- end constructors[0] --
 
 -- end constructors --
@@ -2247,25 +2301,17 @@ import Tidepool.Actor
 -- helpers (0 items) --
 -- end helpers --
 
--- type_params (2 items) --
+-- type_params (1 items) --
 -- type_params[0] (21 bytes) --
 (api :: Type -> Type)
 -- end type_params[0] --
 
--- type_params[1] (4 bytes) --
-exit
--- end type_params[1] --
-
 -- end type_params --
 
--- default_row_args (2 items) --
+-- default_row_args (1 items) --
 -- default_row_args[0] (5 bytes) --
 Maybe
 -- end default_row_args[0] --
-
--- default_row_args[1] (4 bytes) --
-Void
--- end default_row_args[1] --
 
 -- end default_row_args --
 

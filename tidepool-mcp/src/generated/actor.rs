@@ -10,6 +10,8 @@ pub fn actor_decl() -> crate::EffectDecl {
         constructors: &[
             "ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Actor (Int, Int)",
             "ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus",
+            "ActorCallWith :: (Int, Int) -> protocol result -> Actor result",
+            "ActorCastWith :: (Int, Int) -> protocol () -> Actor ()",
         ],
         type_defs: &[
             "data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)",

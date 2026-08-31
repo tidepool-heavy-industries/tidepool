@@ -89,8 +89,9 @@ This is the canonical status inventory for the plan.
   rooted-entry startup, typed-session capture, readiness resumption, and
   exact parent resumption over the existing machine checkout mechanism. The
   trusted entry wrapper raises the authored row under the kernel-private
-  `ActorBootstrap` effect; `ActorLocal` and model-facing profiles contain no
-  readiness operation. The readiness request validates its child realm before the
+  `ActorKernel` effect; `ActorLocal` and model-facing profiles contain no
+  readiness or settlement operation. Kernel requests validate their child realm
+  and expected phase before the
   registry may publish. The registry owns publication and terminal settlement;
   there is no second actor dispatcher or program-root registry.
 - The construction substrate exposes one public `ActorDefinition` ->
@@ -99,6 +100,10 @@ This is the canonical status inventory for the plan.
   the sole start suspension. A real GHC/JIT/provider vertical covers sealing,
   isolated startup with zero or multiple sequential result-bearing sessions,
   realm-checked readiness, child completion, and parent resume.
+- The model-facing `call`, `cast`, rank-2 `receive`, and `serve` vocabulary is
+  now typed and extractor-backed. `receive` installs an opaque rooted handler
+  and uses one private `ActorKernel` effect for named reply/continue settlement;
+  the Rust mailbox interpreter that consumes those requests remains Stage 4.
 - Effect-schema metadata centrally curates authored constructors, supporting
   types, and helpers. The generated public shim and model-facing descriptions
   consume the same allowlists; internal Core retains the full nominal
@@ -149,8 +154,9 @@ These choices remove branches from the first implementation:
   performs exact sealing internally. Initialization may call the child model
   runtime; installation is pure. V0 has no alternate startup mode or
   lifecycle-specific mini-DSL.
-- One indexed `ActorLocal protocol exit` effect ties the authored continuation's
-  protocol and exit type to the eventual `ActorRef`; its `receive` algebra
+- One indexed `ActorLocal protocol` effect ties the authored continuation's
+  protocol to the definition; `ActorDefinition startup protocol exit` already
+  ties its exit to the eventual `ActorRef`. The `receive` algebra
   exposes no callback registry, public reply token, or parallel mailbox API.
   There is no public `ActorProgram` wrapper around the `Eff` value.
 - Per-instance resource authority uses opaque, capability-specific launch-grant
@@ -415,8 +421,8 @@ Expose the small Haskell actor vocabulary:
 - no `tryStart`/`tryCall`/`tryCast`/`tryWait` mirror family.
 
 `receive` is the sole public mailbox-consumption primitive. Its
-`ActorLocal protocol exit` constraint connects the actor program's protocol and exit
-type to the request. Its rank-2 handler returns the exact protocol result plus
+`ActorLocal protocol` connects the actor program's protocol to the request;
+the enclosing definition separately fixes exit. Its rank-2 handler returns the exact protocol result plus
 the program's next state, while the runtime-private reply obligation cannot
 escape into model-authored Haskell. `serve` and state-machine loops are library
 code over this primitive.

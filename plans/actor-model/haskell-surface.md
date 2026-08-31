@@ -54,22 +54,22 @@ principal, grants, realm, incarnation, and lifecycle phase. Generated imports
 and exports keep raw lifecycle, site, completion-settlement, and bridge
 vocabulary out of routine model use, but do not grant or revoke authority:
 
-For application types `ActorProtocol :: Type -> Type` and `ActorDomainExit ::
-Type`, an entry module may expose aliases like:
+For an application protocol `ActorProtocol :: Type -> Type`, an entry module
+may expose aliases like:
 
 ```haskell
-type ReadOnlyEffects protocol exit =
-  '[ ActorLocal protocol exit
+type ReadOnlyEffects protocol =
+  '[ ActorLocal protocol
    , Actor
    , Deliberate
    , RepoRead
    , Review
    ]
 
-type ReadWriteEffects protocol exit =
-  RepoWrite ': ReadOnlyEffects protocol exit
+type ReadWriteEffects protocol =
+  RepoWrite ': ReadOnlyEffects protocol
 
-type ActorEffects = ReadWriteEffects ActorProtocol ActorDomainExit
+type ActorEffects = ReadWriteEffects ActorProtocol
 type ActorM = Eff ActorEffects
 ```
 
@@ -268,20 +268,23 @@ The model-facing shape is the ordinary `Eff` computation directly:
 
 ```haskell
 receive
-  :: Member (ActorLocal protocol exit) effs
+  :: Member (ActorLocal protocol) effs
   => (forall result. protocol result -> Eff effs (result, next))
   -> Eff effs next
 
 serve
-  :: Member (ActorLocal protocol exit) effs
+  :: Member (ActorLocal protocol) effs
   => state
   -> (forall result. state -> protocol result -> Eff effs (result, state))
   -> Eff effs exit
 serve state step = receive (step state) >>= \next -> serve next step
 ```
 
-`ActorLocal protocol exit` ties the receiving protocol and successful exit type to
-the row used by the installed program and its eventual `ActorRef protocol exit`.
+`ActorLocal protocol` ties the receiving protocol to the row used by the
+installed program. The enclosing `ActorDefinition startup protocol exit`
+already fixes that program's successful exit type and eventual
+`ActorRef protocol exit`; repeating `exit` as a phantom `ActorLocal` index makes
+ordinary `receive` ambiguous in GHC and adds no safety.
 Its ordinary Haskell functions form the public algebra. V0 runs them in the
 selected concrete profile without a general lowering layer. Private substrate
 requests such as readiness remain outside that profile. Generated export
@@ -289,12 +292,12 @@ curation keeps raw vocabulary out of the model's way. Every request is
 interpreted under the current actor principal, so there is no mailbox handle to
 forge, pass, or rewrite during fork.
 
-The trusted entry wrapper uses one private readiness operation while
-bootstrapping the authored computation. Its parked continuation is the
-installed program root. The interpreter accepts it only from the program's
-resource realm, never from a fenced model fragment. This avoids a public
-lifecycle token and a Rust-side program registry without mixing readiness into
-the authored `ActorLocal` algebra.
+The trusted entry wrapper uses a private `ActorKernel` effect for readiness and
+hidden mailbox settlement. Its readiness continuation is the installed program
+root. The interpreter accepts kernel requests only from the program's resource
+realm and expected phase, never from a fenced model fragment. This avoids a
+public lifecycle or reply token and a Rust-side program registry without mixing
+kernel operations into the authored `ActorLocal` algebra.
 
 `receive` suspends without polling, accepts one call or cast, runs the handler
 under the actor's principal, settles the indexed result, and returns only the
@@ -626,15 +629,15 @@ The small public wrapper is conceptually:
 
 ```haskell
 forkActors
-  :: Members '[Actor, ActorLocal protocol exit] effs
+  :: Members '[Actor, ActorLocal protocol] effs
   => NonEmpty seed
   -> (seed -> Eff effs exit)
   -> Eff effs [ActorRef protocol exit]
 ```
 
 This is a useful intersection rather than duplicate actor machinery:
-`ActorLocal` fixes the current incarnation's protocol and successful-exit
-indexes, while `Actor` grants the outward ability to create actors.
+`ActorLocal` fixes the current incarnation's protocol, while the enclosing
+definition fixes successful exit and `Actor` grants outward actor creation.
 
 The runtime-private operation still has a process-fork-like parent/child
 discriminator. The wrapper consumes it: the parent receives ready exact child
