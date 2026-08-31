@@ -20,13 +20,14 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
 use tidepool_eval::Value;
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage};
-use tidepool_repr::SessionId;
 use tidepool_runtime::session::registry::{CheckoutRequest, SlotKind};
 use tidepool_runtime::session::{
     ModuleEnv, OutputSink, ResidentOutcome, ResidentSession, SessionLib,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
+
+mod support;
 
 #[derive(Clone, Default)]
 struct TestSink;
@@ -94,31 +95,13 @@ impl ModelProvider for WorkbenchProvider {
         drop(requests);
         Ok(TurnResponse {
             text: if round == 0 {
-                concat!(
-                    "```haskell\n",
-                    "twice f x = f (f x)\n",
-                    "```\n",
-                    "```haskell\n",
-                    "offset <- pure (twice (+ 1) 38)\n",
-                    "```\n",
-                    "```haskell\n",
-                    "complete \"wrong type\"\n",
-                    "```\n",
-                    "```haskell\n",
-                    "error \"rejected completion must stop the suffix\"\n",
-                    "```"
-                )
-                .into()
+                include_str!("typed_deliberation/initial_response.hs")
+                    .trim_end()
+                    .into()
             } else {
-                concat!(
-                    "```haskell\n",
-                    "complete ((\\n -> pure (offset + twice (+ 1) n)) :: Int -> Eff ActorEffects Int)\n",
-                    "```\n",
-                    "```haskell\n",
-                    "error \"completion must stop the suffix\"\n",
-                    "```"
-                )
-                .into()
+                include_str!("typed_deliberation/correction_response.hs")
+                    .trim_end()
+                    .into()
             },
             usage: Usage::default(),
             reasoning: None,
@@ -131,7 +114,7 @@ impl ModelProvider for WorkbenchProvider {
 async fn fenced_haskell_returns_a_live_typed_closure_without_holding_checkout() {
     eval_harness::require_extract();
 
-    let session_id = SessionId(91);
+    let session_id = support::process_unique_session(91);
     let actor_realm = RealmId::fresh();
     let root = tempfile::tempdir().expect("session root");
     let effects = tidepool_mcp::ensure_effects_module(&[tidepool_mcp::actor_decl()])

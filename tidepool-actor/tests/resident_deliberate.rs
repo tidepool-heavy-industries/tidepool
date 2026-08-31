@@ -17,7 +17,6 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::Response;
 use tidepool_eval::Value;
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage};
-use tidepool_repr::SessionId;
 use tidepool_runtime::session::registry::CheckoutRequest;
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
@@ -25,6 +24,8 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
+
+mod support;
 
 #[derive(Clone, Default)]
 struct TestSink;
@@ -71,7 +72,9 @@ impl ModelProvider for CompletesFromMountedInput {
         );
         self.requests.lock().push(request);
         Ok(TurnResponse {
-            text: "```haskell\ncomplete (case goalInput of Node n _ -> n == 41)\n```".into(),
+            text: include_str!("resident_deliberate/completion_response.hs")
+                .trim_end()
+                .into(),
             usage: Usage::default(),
             reasoning: None,
             reasoning_items: Vec::new(),
@@ -83,7 +86,7 @@ impl ModelProvider for CompletesFromMountedInput {
 async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation() {
     eval_harness::require_extract();
 
-    let session_id = SessionId(92);
+    let session_id = support::process_unique_session(92);
     let actor_realm = RealmId::fresh();
     let effects = tidepool_mcp::ensure_effects_module(&[tidepool_mcp::deliberate_decl()])
         .expect("materialize Deliberate effect module");
@@ -91,10 +94,7 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
     include.push(eval_harness::prelude_path());
     let mut preamble = tidepool_mcp::build_preamble(&[tidepool_mcp::deliberate_decl()], false);
     preamble.push_str("type ActorEffects = '[Deliberate]\n");
-    let source = r#"do
-  answer <- deliberate "Check whether the supplied integer is forty-one." (Node 41 [])
-  pure (if answer then 84 else 0)
-"#;
+    let source = include_str!("resident_deliberate/parent_program.hs");
     let root = tempfile::tempdir().expect("session root");
     let compile_preamble = insert_preamble_imports(&preamble, "Data.Tree");
     let templates = resident_workbench_templates(&compile_preamble, "ActorEffects", "");

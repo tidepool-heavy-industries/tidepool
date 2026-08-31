@@ -20,13 +20,14 @@ use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_eval::Value;
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse, Usage};
-use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
     resident_workbench_templates, run_turn, ModuleEnv, OutputSink, ResidentOutcome,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
+
+mod support;
 
 #[derive(Clone, Default)]
 struct TestSink;
@@ -70,37 +71,9 @@ impl ModelProvider for AuthorsActorAndApprovesStartup {
         drop(requests);
         Ok(TurnResponse {
             text: match ordinal {
-                0 => concat!(
-                    "```haskell\n",
-                    "data DynamicPolicy = DynamicPolicy Int\n",
-                    "data DynamicProtocol result where\n",
-                    "  AddDynamic :: Int -> DynamicProtocol Int\n",
-                    "```\n",
-                    "```haskell\n",
-                    "complete\n",
-                    "  ((let\n",
-                    "      chooseDynamic :: Int -> Eff (ReadOnlyEffects DynamicProtocol) DynamicPolicy\n",
-                    "      chooseDynamic seed = deliberate \"Choose the dynamic base.\" seed\n",
-                    "      definition = ActorDefinition\n",
-                    "        { label = \"model-authored\"\n",
-                    "        , effectProfile = ReadOnly\n",
-                    "        , initialization = chooseDynamic\n",
-                    "        , behavior = \\_ (DynamicPolicy base) ->\n",
-                    "            (receive (\\(AddDynamic delta) -> pure (base + delta, (base +)))\n",
-                    "              :: Eff (ReadOnlyEffects DynamicProtocol) (Int -> Int))\n",
-                    "        , visibleToChild = [\"DynamicPolicy\", \"DynamicProtocol\"]\n",
-                    "        , onShutdown = const (pure ())\n",
-                    "        }\n",
-                    "    in do\n",
-                    "      ref <- startActor definition 40\n",
-                    "      answer <- call ref (AddDynamic 2)\n",
-                    "      outcome <- awaitExit ref\n",
-                    "      case outcome of\n",
-                    "        Completed applyDynamic -> pure (answer + applyDynamic 1)\n",
-                    "        _ -> pure (-1)) :: Eff ActorEffects Int)\n",
-                    "```"
-                )
-                .into(),
+                0 => include_str!("start_surface/child_startup_response.hs")
+                    .trim_end()
+                    .into(),
                 1 => "```haskell\ncomplete (DynamicPolicy 40)\n```".into(),
                 2 => "```haskell\ncomplete True\n```".into(),
                 3 => "```haskell\ncomplete (1 :: Int)\n```".into(),
@@ -120,7 +93,7 @@ impl ModelProvider for AuthorsActorAndApprovesStartup {
 async fn public_start_uses_one_exact_resident_path() {
     eval_harness::require_extract();
 
-    let session_id = SessionId((u64::from(std::process::id()) << 32) | 93);
+    let session_id = support::process_unique_session(93);
     let decls = [
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
@@ -135,83 +108,7 @@ async fn public_start_uses_one_exact_resident_path() {
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().expect("session root");
-    let source = r#"
-let idleDefinition :: ActorDefinition Int Maybe Int
-    idleDefinition =
-      ActorDefinition
-        { label = "idle-worker"
-        , effectProfile = ReadWrite
-        , initialization = \seed -> pure seed
-        , behavior = \_seed initial ->
-            (pure initial :: Eff (ReadWriteEffects Maybe) Int)
-        , visibleToChild = []
-        , onShutdown = \reason -> case reason of
-            ShutdownCompleted -> deliberate "completed shutdown must not deliberate" ()
-            _ -> pure ()
-        }
-
-    workerDefinition :: ActorDefinition Int Maybe Int
-    workerDefinition =
-      ActorDefinition
-        { label = "worker"
-        , effectProfile = ReadOnly
-        , initialization = \seed -> do
-            approved <- deliberate "Approve the supplied seed." seed
-            adjustment <- deliberate "Choose the adjustment." seed
-            pure (approved, adjustment)
-        , behavior = \seed (approved, adjustment) ->
-            (pure (if approved then seed + adjustment else seed - adjustment)
-              :: Eff (ReadOnlyEffects Maybe) Int)
-        , visibleToChild = []
-        , onShutdown = const (pure ())
-        }
-
-    serverDefinition :: ActorDefinition Int ((,) Int) Int
-    serverDefinition =
-      ActorDefinition
-        { label = "server"
-        , effectProfile = ReadOnly
-        , initialization = \seed -> pure seed
-        , behavior = \_seed initial ->
-            (serve initial (\state (delta, result) -> pure (result, state + delta))
-              :: Eff (ReadOnlyEffects ((,) Int)) Int)
-        , visibleToChild = []
-        , onShutdown = \reason -> case reason of
-            ShutdownCancelled -> deliberate "shutdown must not deliberate" ()
-            _ -> pure ()
-        }
-
-    jobDefinition :: ActorDefinition Int ((,) Int) Int
-    jobDefinition =
-      ActorDefinition
-        { label = "job"
-        , effectProfile = ReadOnly
-        , initialization = \seed -> pure seed
-        , behavior = \_seed initial ->
-            (receive (\(delta, result) -> pure (result, initial + delta))
-              :: Eff (ReadOnlyEffects ((,) Int)) Int)
-        , visibleToChild = []
-        , onShutdown = const (pure ())
-        }
-
-in do
-    dynamicProgram <-
-      (deliberate "Define a typed child actor." ()
-        :: Eff ActorEffects (Eff ActorEffects Int))
-    dynamicAnswer <- dynamicProgram
-    _ <- startActor idleDefinition 10
-    _ <- startActor workerDefinition 41
-    server <- startActor serverDefinition 0
-    cast server (1, ())
-    serverAnswer <- call server (2, 41)
-    job <- startActor jobDefinition 10
-    jobAnswer <- call job (5, 42)
-    jobExit <- awaitExit job
-    case jobExit of
-      Completed value ->
-        pure (dynamicAnswer, serverAnswer, jobAnswer, value)
-      _ -> pure (-1, -1, -1, -1)
-"#;
+    let source = include_str!("start_surface/parent_program.hs");
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: source,
         templates: &templates,

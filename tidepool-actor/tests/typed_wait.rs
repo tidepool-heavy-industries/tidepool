@@ -18,6 +18,8 @@ use tidepool_runtime::session::{OutputSink, ResidentOutcome, ResidentSession};
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness::{self, mock, EvalHarness};
 
+mod support;
+
 #[derive(Clone, Default)]
 struct TestSink;
 
@@ -57,7 +59,7 @@ fn ready_actor(
                 label,
                 ["Actor"],
                 ActorPlacement {
-                    session: tidepool_repr::SessionId(1),
+                    session: support::process_unique_session(1),
                     resource_scope: RealmId(realm),
                     lexical_scope: ScopeId::ROOT,
                 },

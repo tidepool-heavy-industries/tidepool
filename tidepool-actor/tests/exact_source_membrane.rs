@@ -6,16 +6,18 @@ use tidepool_actor::{
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
-use tidepool_repr::SessionId;
 use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
 use tidepool_testing::eval_harness;
+
+mod support;
 
 #[test]
 fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
     eval_harness::require_extract();
     let stdlib = eval_harness::prelude_path();
     let root = tempfile::tempdir().expect("session root");
-    let lib = SessionLib::open(SessionId(81), root.path(), ModuleEnv::standalone_default())
+    let session_id = support::process_unique_session(81);
+    let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
         .expect("open declaration plane")
         .with_validation_include(vec![stdlib]);
     let mut session = PersistentSession::new(Some(lib), 1 << 20);
@@ -45,7 +47,7 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
         "fresh reviewer",
         ["Actor"],
         ActorPlacement {
-            session: SessionId(81),
+            session: session_id,
             resource_scope: RealmId::fresh(),
             lexical_scope: actor_scope,
         },
