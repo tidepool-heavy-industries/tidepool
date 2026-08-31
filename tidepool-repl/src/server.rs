@@ -232,17 +232,16 @@ pub struct SessionResumeRequest {
 
 /// Classify one `session_run` item string into a [`BlockItem`].
 ///
-/// Classification strategy (try-cascade):
+/// Classification strategy:
 /// - `:` prefix → [`BlockItem::Meta`] via the shared command lexer and
 ///   this frontend's [`MetaCommand`] extensions.
 /// - Keyword-initiated declarations (`data`, `newtype`, `type`, `class`,
 ///   `instance`, …) → [`BlockItem::Decl`] (unambiguous; skip cascade).
-/// - Everything else → [`BlockItem::Auto`]: `run_block` will attempt the item
-///   as a declaration via `run_def` first; on a GHC parse error it falls back
-///   to [`BlockItem::Stmt`]/`run_eval`.
+/// - Everything else → [`BlockItem::Auto`]: `run_block` uses GHC's batch
+///   classification verdict to select declaration or statement evaluation.
 ///
-/// Misclassification fails LOUD — the wrong handler's GHC error surfaces
-/// immediately rather than silently producing a wrong result.
+/// A missing or malformed verdict fails loudly and does not start a second
+/// compile on a guessed route.
 pub fn classify_item(text: &str) -> Result<BlockItem, String> {
     match classify_workbench_item(text)? {
         WorkbenchItem::Declaration(source) => Ok(BlockItem::Decl(DeclText(source))),

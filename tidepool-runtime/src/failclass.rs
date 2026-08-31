@@ -26,12 +26,9 @@ pub fn classify(err: &RuntimeError) -> FailureEnvelope {
     }
 }
 
-/// The repl's declaration-accumulation path fails with a [`SessionError`] rather
-/// than a [`CompileError`]; map it onto the equivalent compile error and defer
-/// to the ONE classifier so the decl and eval paths agree. (A `SessionError`
-/// stringifies its causes, so a CBOR wire skew reaching the decl path never
-/// surfaces as a structured `ReadError` — but an unparseable diagnostics
-/// report does surface typed, as `MalformedDiagnostics` → VersionSkew.)
+/// The repl's declaration-accumulation path fails with a [`SessionError`]; its
+/// compiler arm retains the original [`CompileError`] and defers directly to
+/// the ONE classifier so declaration and evaluation paths agree.
 #[must_use]
 pub fn classify_session(err: &SessionError) -> FailureEnvelope {
     match err {
@@ -39,11 +36,9 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
             e.kind(),
             e.to_string(),
         ))),
-        SessionError::BinderExtraction(s) | SessionError::ValidationFailed(s) => {
-            classify_compile(&CompileError::ExtractFailed(s.clone()))
-        }
-        SessionError::MalformedDiagnostics(s) => {
-            classify_compile(&CompileError::MalformedDiagnostics(s.clone()))
+        SessionError::Compile(e) => classify_compile(e),
+        SessionError::ValidationFailed(s) => {
+            FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, s.clone())
         }
         // A located-but-skewed toolchain is the same failure as a wire-format
         // mismatch — the two sides were built apart — so it classifies as
@@ -76,15 +71,17 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use tidepool_repr::serial::ReadError;
 
     /// The session decl lane agrees with the eval lane: an unparseable
     /// diagnostics report is a stale/skewed extractor build — VersionSkew,
     /// never "rewrite your Haskell".
     #[test]
     fn session_malformed_diagnostics_is_version_skew_compile() {
-        let env = classify_session(&SessionError::MalformedDiagnostics(
+        let env = classify_session(&SessionError::Compile(CompileError::MalformedDiagnostics(
             "stdout did not parse as a diagnostics report".into(),
-        ));
+        )));
         assert_eq!(env.class, FailureClass::VersionSkew);
         assert_eq!(env.phase, Phase::Compile);
     }
@@ -100,5 +97,36 @@ mod tests {
         )));
         assert_eq!(env.class, FailureClass::Infra);
         assert_eq!(env.phase, Phase::Compile);
+    }
+
+    /// Crossing into `SessionError` must not collapse extractor artifacts into
+    /// a declaration string: each original variant remains matchable and keeps
+    /// the owning compile classifier's failure class.
+    #[test]
+    fn session_compile_boundary_preserves_artifact_variants() {
+        let missing =
+            SessionError::from(CompileError::MissingOutput(PathBuf::from("turn-out.cbor")));
+        assert!(matches!(
+            &missing,
+            SessionError::Compile(CompileError::MissingOutput(_))
+        ));
+        assert_eq!(classify_session(&missing).class, FailureClass::Infra);
+
+        let unreadable = SessionError::from(CompileError::ReadError(ReadError::MissingHeader));
+        assert!(matches!(
+            &unreadable,
+            SessionError::Compile(CompileError::ReadError(ReadError::MissingHeader))
+        ));
+        assert_eq!(
+            classify_session(&unreadable).class,
+            FailureClass::VersionSkew
+        );
+
+        let asks = SessionError::from(CompileError::Asks("not JSON".into()));
+        assert!(matches!(
+            &asks,
+            SessionError::Compile(CompileError::Asks(_))
+        ));
+        assert_eq!(classify_session(&asks).class, FailureClass::VersionSkew);
     }
 }

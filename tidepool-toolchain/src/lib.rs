@@ -42,10 +42,10 @@ pub enum CompileError {
     /// I/O error during file operations or process execution.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
-    /// The `tidepool-extract` process failed (e.g., GHC parse/type error).
-    /// Still used for the synthetic shape-validation errors in the session
-    /// turn/binder-extraction lanes (unrelated to the diagnostics contract).
-    #[error("Haskell compilation failed:\n{0}")]
+    /// The extractor's typed output or an internal compile request violated
+    /// its expected shape. Real GHC source rejections use `Diagnostics`; this
+    /// variant therefore denotes an extractor/runtime contract mismatch.
+    #[error("extractor contract failure: {0}")]
     ExtractFailed(String),
     /// The extractor ran, exited non-zero, and its stdout parsed as a valid
     /// diagnostics report — this is a real GHC compile failure with real spans.

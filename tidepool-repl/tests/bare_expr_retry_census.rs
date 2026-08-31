@@ -2,13 +2,9 @@
 //! extra turn-compile spawn and measures the PURE-vs-MONADIC split that
 //! decides whether a fix is worth landing.
 //!
-//! The extra spawn is NOT `query_inner_type` (`session.rs:2277`): that is
-//! called ONLY from `run_plain_eval` (`session.rs:1619`), which is itself
-//! reached ONLY when `run_eval`'s `verdict` is `None` — i.e. the block's
-//! batch `classify_block` spawn (`session.rs:778`) itself failed. Every item
-//! in a normal `session_run` block gets a real verdict from that one batch
-//! spawn, so `run_plain_eval`/`query_inner_type` never fires here. The actual
-//! +1 is `run_bare_expr`'s (`session.rs:2096`) monadic-first try-cascade: it always
+//! Classification failure now stops the block, and every item that reaches
+//! evaluation has a real verdict from the block's one `classify_block` spawn.
+//! The extra +1 is `run_bare_expr`'s monadic-first try-cascade: it always
 //! compiles `wrap_bare_it_monadic` (`it <- __user`) FIRST, and only on ANY
 //! compile failure retries with `wrap_bare_it_pure` (`let { it = __user }`).
 //! For a PURE bare expression the first attempt is doomed (its `Eff`-typed
@@ -16,8 +12,7 @@
 //! before the real one. `pure_bare_expr_costs_two_turn_compiles` below proves
 //! this directly by asserting the wasted spawn's GHC diagnostic names the
 //! EXACT do-block `wrap_bare_it_monadic` emits (`it <- __user ; pure (it,
-//! toWire it)`) — not `wrap_probe_source`'s `__t <- __probe` shape, which is
-//! what a `query_inner_type` firing would show instead.
+//! toWire it)`).
 
 mod common;
 
@@ -36,8 +31,7 @@ async fn measure_one(server: &TidepoolReplServer, item: &str) -> (u64, bool, Str
 /// **Mechanism, part 1**: a PURE bare expression costs 3 spawns (1 batch
 /// `classify_block` + 2 `run_bare_expr` turn compiles: a doomed
 /// `wrap_bare_it_monadic` attempt, then the real `wrap_bare_it_pure` one) —
-/// not 2 (classify + one turn compile), and not because `query_inner_type`
-/// fired a second probe.
+/// not 2 (classify + one turn compile).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pure_bare_expr_costs_two_turn_compiles() {
     require_extract();

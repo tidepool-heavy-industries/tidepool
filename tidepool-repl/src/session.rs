@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tidepool_codegen::binding_table::{BindingEntry, BoundValue};
-use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::old_space::RootSlot;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::{ResumeInput, Suspendable, SuspendableOutcome};
@@ -33,8 +32,7 @@ use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::pause::PauseGate;
 use tidepool_eval::value::Value;
 use tidepool_mcp::{
-    first_sentence, input_binding_source, library_vocab, template_haskell_show_default,
-    CapturedOutput, EffectDecl, EffectRoster,
+    first_sentence, input_binding_source, library_vocab, CapturedOutput, EffectDecl, EffectRoster,
 };
 use tidepool_repr::{
     BindingName, DataConTable, Generation, SessionId, SessionModule, SessionVarId,
@@ -46,8 +44,7 @@ use tidepool_runtime::session::{
     SessionLib, SourceImports, TurnClassification, TurnKind, ValueTier, WorkSequence,
 };
 use tidepool_runtime::{
-    classify_compile, classify_session, compile_haskell_salted, value_to_json, CompileError,
-    CompileResult, FailureClass, Phase,
+    classify_compile, classify_session, value_to_json, CompileError, FailureClass, Phase,
 };
 
 use crate::command::{
@@ -222,14 +219,6 @@ struct ItemRun {
 // later `session_resume`.
 // ---------------------------------------------------------------------------
 
-/// [`Session::run_plain_eval`]'s tail: the turn's own [`DataConTable`] (needed
-/// to render the run result via `value_to_json`) and the probed inner type
-/// (`a` in `M a`).
-struct PlainEvalTail {
-    table: DataConTable,
-    inner_type: Option<String>,
-}
-
 /// [`Session::run_bind`]'s tail: the bound name, the value-binding generation
 /// it mints, the binder's identity/tier/type from the extract, and the source
 /// text recorded as the binding's `defining_expr`.
@@ -276,13 +265,7 @@ struct BareExprTail {
 /// which `finish_*` closes the item out — the same `finish_*` the
 /// ran-to-completion path calls, so nothing about completion is duplicated
 /// across the two arms.
-// The plain-eval variant carries the turn's whole `DataConTable` and is much
-// the largest; there is at most ONE pending tail per session, so the size
-// asymmetry costs one enum-sized slot, not a per-item allocation.
-#[allow(clippy::large_enum_variant)]
 enum PendingTail {
-    /// [`Session::run_plain_eval`] — resumes against the turn's OWN table.
-    PlainEval(PlainEvalTail),
     /// [`Session::run_bind`] — resumes through the `Bind{forced}` policy.
     Bind(BindTail),
     /// [`Session::run_multi_bind`] — resumes through `Project{n_fields}`.
@@ -298,25 +281,16 @@ impl PendingTail {
     /// The [`DataConTable`] this tail's run was driven against. Everything that
     /// crosses the machine boundary for this item — the bridged `ask` request,
     /// the bridged answer, the completed value — is keyed on it, so a resume
-    /// must use the same one the run did. Only the plain-eval path carries its
-    /// own table (a standalone turn's metadata); the rest run against the
+    /// must use the same one the run did. Resident-session paths all use the
     /// accumulated session table.
     fn run_table<'a>(&'a self, session_table: &'a DataConTable) -> &'a DataConTable {
-        match self {
-            PendingTail::PlainEval(t) => &t.table,
-            PendingTail::Bind(_)
-            | PendingTail::MultiBind(_)
-            | PendingTail::Reference(_)
-            | PendingTail::BareExpr(_) => session_table,
-        }
+        session_table
     }
 
     /// The label a run failure on this path reports under.
     fn error_label(&self) -> &'static str {
         match self {
-            PendingTail::PlainEval(_) | PendingTail::Reference(_) | PendingTail::BareExpr(_) => {
-                "runtime error"
-            }
+            PendingTail::Reference(_) | PendingTail::BareExpr(_) => "runtime error",
             PendingTail::Bind(_) => "bind runtime error",
             PendingTail::MultiBind(_) => "multi-bind runtime error",
         }
@@ -534,7 +508,8 @@ impl Session {
     /// The GHC include path for a turn: the session's base includes (generated
     /// `Tidepool.Effects` + prelude/stdlib) plus the live `Lib.G<g>` dir. Borrows
     /// `&self`, so block-scope the result before any `&mut self` call (e.g.
-    /// `query_inner_type`) — same constraint the inlined copies had.
+    /// another mutable session operation) — same constraint the inlined copies
+    /// had.
     fn turn_include(&self) -> Vec<&Path> {
         let mut include: Vec<&Path> = self.cfg.base_include.iter().map(PathBuf::as_path).collect();
         include.push(self.core.lib().include_dir());
@@ -693,8 +668,9 @@ impl Session {
     /// batches into a decl run), or `None` for a bind/expression/meta (a
     /// singleton). A keyword decl is one lexically; an `Auto` item is one iff
     /// its precomputed verdict — GHC's parser, via the block's one batch
-    /// [`classify_block`] spawn — says `Decl`. A missing verdict means the
-    /// `Auto` item is NOT decl-shaped, so it takes the resilient per-item path.
+    /// [`classify_block`] spawn — says `Decl`. Classification failure stops the
+    /// block before this function is reached, so an `Auto` item always has a
+    /// verdict here.
     ///
     /// Returns the text (not a bool) so the segment scan can carry the decl
     /// sources as it walks, without re-matching items to recover them.
@@ -719,12 +695,10 @@ impl Session {
     /// [`BlockCursor`] are stowed on the session, and `session_resume`
     /// re-enters at [`Self::resume_block`] to run the remaining items.
     ///
-    /// `Auto` items dispatch straight from this batch's classify verdict when
-    /// one is present, never paying for a doomed `run_def` probe GHC's own
-    /// parser already ruled out. With no verdict (batch classify failed) they
-    /// fall back to the try-cascade: `run_def` first, then `run_eval` on a GHC
-    /// parse error (a type/scope error means the item IS a declaration, just a
-    /// broken one, and surfaces as-is).
+    /// `Auto` items dispatch straight from this batch's GHC classify verdict,
+    /// never paying for a doomed `run_def` probe. A missing or malformed
+    /// classification artifact stops the block; it cannot authorize a second,
+    /// unrelated compile.
     fn run_block<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         items: &[BlockItem],
@@ -733,9 +707,8 @@ impl Session {
         verbose: bool,
     ) -> TurnStep {
         // Batch-classify every Auto/Stmt item in ONE extract spawn regardless
-        // of block length; verdicts map back onto original indices. A batch
-        // failure degrades exactly as a per-item classify failure would: every
-        // verdict stays `None` and `run_eval` falls back to `run_plain_eval`.
+        // of block length; verdicts map back onto original indices. This typed
+        // result is the sole authority for declaration-vs-expression routing.
         let verdict_indices: Vec<usize> = items
             .iter()
             .enumerate()
@@ -755,20 +728,9 @@ impl Session {
                         verdicts[slot] = Some(v);
                     }
                 }
-                // A stale extract is NOT something to degrade around. Without
-                // verdicts every bind would fall to the plain-eval path and
-                // fail with `parse error on input '<-'` — an error about the
-                // user's Haskell, for a deployment problem they cannot see.
-                // `MalformedDiagnostics` is the boundary's version-skew
-                // reading, so it stops the block with the real reason.
-                Err(CompileError::MalformedDiagnostics(msg)) => {
-                    return TurnStep::Completed(TurnOutcome::Error(msg))
+                Err(err) => {
+                    return TurnStep::Completed(TurnOutcome::Error(compile_fail(&err, "", None)))
                 }
-                // Any other failure (the extractor genuinely unavailable) keeps
-                // the resilient path: verdicts stay `None`, decl-shaped items
-                // take the per-item route, and GHC re-reports any real error
-                // from the compile itself.
-                Err(_) => {}
             }
         }
 
@@ -1056,12 +1018,6 @@ impl Session {
     ) -> ItemStep {
         let input = answer.into_input(tail.run_table(self.core.session_table()));
         match tail {
-            PendingTail::PlainEval(t) => {
-                let outcome = self
-                    .core
-                    .resume_with_table(&t.table, handlers, captured, input);
-                self.settle(PendingTail::PlainEval(t), outcome, handlers, captured)
-            }
             PendingTail::Reference(t) => {
                 let outcome = self.core.resume_session(handlers, captured, input);
                 self.settle(PendingTail::Reference(t), outcome, handlers, captured)
@@ -1101,11 +1057,6 @@ impl Session {
     ) {
         let input = ResumeInput::Abort(reason);
         match tail {
-            PendingTail::PlainEval(t) => {
-                let _ = self
-                    .core
-                    .resume_with_table(&t.table, handlers, captured, input);
-            }
             PendingTail::Reference(_) => {
                 let _ = self.core.resume_session(handlers, captured, input);
             }
@@ -1219,7 +1170,6 @@ impl Session {
     /// Run the completion bookkeeping for a finished `Value`-completing tail.
     fn finish_value_tail(&mut self, tail: PendingTail, value: Value) -> TurnOutcome {
         match tail {
-            PendingTail::PlainEval(t) => self.finish_plain_eval(t, value),
             PendingTail::Reference(t) => self.finish_reference_fragment(t, value),
             PendingTail::Bind(t) => match self.core.take_bound_root() {
                 Some(slot) => self.finish_bind(t, slot),
@@ -1305,32 +1255,19 @@ impl Session {
                 })
             }
             Err(e) => {
-                // Materialize is the right fallback when the RHS references (a)
-                // a materialized session value, or (b) the `input` payload lane
-                // (value/stmt-plane only). Detect (b) by the decl error itself —
-                // "not in scope: input" — not by scanning the text: a user's own
-                // locally-bound `input` compiles fine on the decl plane and
-                // never trips this. Any other decl failure is a real error —
-                // surface it rather than materialize a broken binding.
-                let err_str = e.to_string();
+                // Materialize is the right fallback when the RHS depends on a
+                // value-plane provider: either a live materialized binding or
+                // this run's `input` payload. These dependencies are known from
+                // session state and source-name references; rendered GHC text
+                // never controls the route. Any other declaration failure is a
+                // real error and surfaces unchanged.
                 let refs_materialized_value = self
                     .core
                     .bindings()
                     .iter_current()
                     .any(|(n, _)| mentions_word(expr_text, &n.0));
-                // Whole-word `input` (GHC: "Variable not in scope: input :: Value"),
-                // never `inputText`/`input'` — check the char after the match is not
-                // an identifier continuation.
-                let refs_input_lane = {
-                    let needle = "not in scope: input";
-                    err_str.match_indices(needle).any(|(i, _)| {
-                        let after = &err_str[i + needle.len()..];
-                        !after
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_alphanumeric() || c == '\'' || c == '_')
-                    })
-                };
+                let refs_input_lane =
+                    self.eval_input.is_some() && mentions_word(expr_text, "input");
                 if refs_materialized_value || refs_input_lane {
                     None
                 } else {
@@ -1413,7 +1350,7 @@ impl Session {
     /// Run a single block item (no batching): the per-item dispatch used both
     /// for stmt/meta items and as the fallback when a decl batch fails. `verdict`
     /// is this item's precomputed classify verdict from `run_block`'s batch
-    /// spawn (`None` for `Decl`/`Meta`, or when the batch classify failed);
+    /// spawn (`None` only for explicit `Decl`/`Meta` items);
     /// `run_eval` (on the `Stmt`/`Auto` paths) and `Auto`'s own dispatch below
     /// both consume it.
     fn run_one_item<H: DispatchEffect<CapturedOutput>>(
@@ -1431,14 +1368,9 @@ impl Session {
             ),
             BlockItem::Meta(meta) => (ItemKind::Meta, ItemStep::Done(self.run_meta(meta))),
             // GHC's parser already classified this item (the block's batch
-            // `classify_block` spawn) — when that verdict is present, dispatch
-            // straight from it instead of paying for a doomed `run_def` probe
-            // first: a `Decl` verdict runs as a declaration directly, a
-            // `Bind`/`Expr` verdict runs `run_eval` directly. The try-cascade
-            // (attempt `run_def`, fall back to `run_eval` on a GHC parse
-            // error) is a degradation path for when NO verdict is available
-            // (the batch classify itself failed) — there, GHC's parser is the
-            // only way left to tell decl from stmt.
+            // `classify_block` spawn): a `Decl` verdict runs as a declaration,
+            // and a `Bind`/`Expr` verdict runs `run_eval`. No rendered compiler
+            // text participates in this decision.
             BlockItem::Auto(expr) => match verdict {
                 Some(v) if v.kind == TurnKind::Decl => {
                     (ItemKind::Decl, ItemStep::Done(self.run_def(&expr.0)))
@@ -1447,16 +1379,14 @@ impl Session {
                     ItemKind::Stmt,
                     self.run_eval(&expr.0, verdict, handlers, captured),
                 ),
-                None => {
-                    let def_result = self.run_def(&expr.0);
-                    match def_result {
-                        TurnOutcome::Error(ref msg) if is_parse_error(msg) => (
-                            ItemKind::Stmt,
-                            self.run_eval(&expr.0, verdict, handlers, captured),
-                        ),
-                        other => (ItemKind::Decl, ItemStep::Done(other)),
-                    }
-                }
+                None => (
+                    ItemKind::Stmt,
+                    ItemStep::Done(TurnOutcome::Error(tag_failure(
+                        FailureClass::VersionSkew,
+                        Phase::Compile,
+                        "block item is missing its compiler classification verdict".into(),
+                    ))),
+                ),
             },
         }
     }
@@ -1466,8 +1396,7 @@ impl Session {
     /// from `run_block`'s one batch [`classify_block`] spawn for the whole
     /// block; a BIND (`x <- e` / `let x = e`) roots a value on the live heap, a
     /// reference-with-live-bindings injects the session ifaces, and a plain
-    /// expression (no bindings) stays on the plain-eval path
-    /// ([`Self::run_plain_eval`]).
+    /// expression (no bindings) takes the bare-expression path.
     fn run_eval<H: DispatchEffect<CapturedOutput>>(
         &mut self,
         expr_text: &str,
@@ -1476,12 +1405,17 @@ impl Session {
         captured: &CapturedOutput,
     ) -> ItemStep {
         // Bind-vs-expr + bound names come from GHC (parse-only, via the
-        // block's batch classify). A missing verdict (batch classify failed —
-        // e.g. extractor unavailable) falls back to the plain path, where GHC
-        // re-reports any real error.
+        // block's batch classify). A missing verdict is a contract failure,
+        // never permission to guess a route and launch another compile.
         let classification = match verdict {
             Some(c) => c,
-            None => return self.run_plain_eval(expr_text, handlers, captured),
+            None => {
+                return ItemStep::Done(TurnOutcome::Error(tag_failure(
+                    FailureClass::VersionSkew,
+                    Phase::Compile,
+                    "block item is missing its compiler classification verdict".into(),
+                )))
+            }
         };
 
         if classification.kind == TurnKind::Bind {
@@ -1530,110 +1464,9 @@ impl Session {
         }
     }
 
-    /// The plain expression path: compile an `M a` expression against the
-    /// session include and run it on the resident machine. Used when the turn
-    /// neither binds nor references a session binding.
-    fn run_plain_eval<H: DispatchEffect<CapturedOutput>>(
-        &mut self,
-        expr_text: &str,
-        handlers: &mut H,
-        captured: &CapturedOutput,
-    ) -> ItemStep {
-        let preamble = self.patched_preamble();
-        let mut imports = self
-            .core
-            .lib()
-            .current_module()
-            .map(|m| format!("{}\n", m.module_name()))
-            .unwrap_or_default();
-        // Same per-turn quasi-quoter gating as `turn_imports` (this path
-        // assembles its imports independently of session_imports).
-        if tidepool_mcp::uses_qq(expr_text) {
-            imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)\n");
-        }
-        // Clone (not take): `input` stays in scope for EVERY item in the block
-        // — including items that run after an in-block `ask`/resume — and for the
-        // type-probe recompiles below. The worker resets `eval_input` per job.
-        let eval_input = self.eval_input.clone();
-        let source = template_haskell_show_default(
-            &preamble,
-            &self.cfg.effect_stack,
-            expr_text,
-            &imports,
-            "",
-            eval_input.as_ref(),
-            None,
-        );
-
-        let salt = self.core.lib().cache_salt();
-        // Block-scope `include` so the borrow on `self.cfg.base_include` is
-        // released before we call `query_inner_type` (which needs `&mut self`).
-        let compile_result = {
-            let include = self.turn_include();
-            compile_haskell_salted(&source, "result", &include, Some(&salt))
-        };
-        let CompileResult {
-            expr,
-            mut table,
-            warnings,
-        } = match compile_result {
-            Ok(r) => r,
-            // No `user_lines` computed here (this is the plain-eval path, not a
-            // session-turn compile) — `None` is the correct default for this site.
-            Err(e) => return ItemStep::Done(TurnOutcome::Error(compile_fail(&e, &source, None))),
-        };
-        if warnings.has_io {
-            return ItemStep::Done(io_type_fail());
-        }
-        table.populate_siblings_from_expr(&expr);
-
-        // Query the inner value type (`a` in `M a`) via the bind mechanism:
-        // `__t <- <expr>` gives `__t :: a`, not the Eff-wrapped action type.
-        let inner_type = self.query_inner_type(expr_text);
-
-        let tail = PlainEvalTail { table, inner_type };
-
-        let run_result = if self.core.is_bootstrapped() {
-            // Later turn: add this expression as a fragment against ITS OWN table
-            // (a standalone plain-eval turn carries its own metadata) with an
-            // empty env, and run it on the resident machine.
-            match self.core.add_fragment_with_table(
-                "repl_turn",
-                &expr,
-                &tail.table,
-                &ExternalEnv::new(),
-            ) {
-                Ok(fid) => self
-                    .core
-                    .run_funcid_with_table(fid, &tail.table, handlers, captured),
-                Err(e) => {
-                    return ItemStep::Done(TurnOutcome::Error(run_fail("JIT re-entry error", e)))
-                }
-            }
-        } else {
-            // First turn: bootstrap the machine from `expr` (the seed IS the
-            // program) and publish the cancel handle BEFORE running, so a runaway
-            // on this bare-expression path is cancellable from the start.
-            if let Err(e) = self.core.bootstrap_if_needed(&expr, &tail.table) {
-                return ItemStep::Done(TurnOutcome::Error(run_fail("JIT compile error", e)));
-            }
-            self.publish_cancel();
-            self.core.run_entry(&tail.table, handlers, captured)
-        };
-
-        self.settle(PendingTail::PlainEval(tail), run_result, handlers, captured)
-    }
-
-    /// Post-run bookkeeping for [`Self::run_plain_eval`]: render the value
-    /// against the turn's own table and the probed inner type.
-    fn finish_plain_eval(&mut self, tail: PlainEvalTail, value: Value) -> TurnOutcome {
-        self.value_outcome(value_to_json(&value, &tail.table, 0), tail.inner_type)
-    }
-
     /// Assemble a [`TurnOutcome::Value`], truncating an oversized rendered
     /// value to the result budget and stashing the elided subtrees for
-    /// `:stub <n>` (see [`crate::truncate`]). Shared by the plain-eval and
-    /// reference paths — the two that render a value.
+    /// `:stub <n>` (see [`crate::truncate`]).
     fn value_outcome(
         &mut self,
         rendered: serde_json::Value,
@@ -2244,45 +2077,6 @@ impl Session {
 
         let rendered = value_to_json(&rendered_value, self.core.session_table(), 0);
         self.value_outcome_bound_it(rendered, Some(tail.type_display))
-    }
-
-    /// Compile-only type query: returns the inner value type `a` for a monadic
-    /// expression of type `M a` / `Eff '[…] a`. Hoists the expr to a module-level
-    /// `__probe` binding then binds `__t <- __probe` so `__t :: a` (the monadic
-    /// bind peels the Eff head) — see `wrap_probe_source` for why the module-level
-    /// binding matters (a trailing `where` can attach there but not on a
-    /// do-statement). Consumes a throwaway generation to avoid iface collisions
-    /// with subsequent real binds. Returns `None` if the compile fails (e.g. a
-    /// non-monadic expression, which has no inner type to peel).
-    fn query_inner_type(&mut self, expr_text: &str) -> Option<String> {
-        let g = self.core.val_gen().next();
-        self.core.set_val_gen(g);
-        let preamble = self.patched_preamble();
-        let inject = self.live_val_modules();
-        let imports = self.turn_imports(expr_text);
-        let eval_input = self.eval_input.clone();
-        let wrapped = wrap_probe_source(
-            &preamble,
-            &self.cfg.effect_stack,
-            &imports,
-            expr_text,
-            eval_input.as_ref(),
-        );
-        let include = self.turn_include();
-        let names = vec!["__t".to_string()];
-        compile_session_turn(
-            &wrapped,
-            &include,
-            self.session_root(),
-            &inject,
-            Some(SessionBind {
-                names: &names,
-                gen: g.0,
-            }),
-        )
-        .ok()
-        .and_then(|turn| turn.binders.into_iter().next())
-        .map(|b| b.type_display)
     }
 
     /// Meta-command handler — `:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`.
@@ -2915,8 +2709,7 @@ fn user_code_line_range(wrapped: &str, text: &str) -> Option<(usize, usize)> {
 /// Prepend the greppable failure-class/phase tag line onto a repl error message
 /// so a caller can branch on class/phase, exactly as the MCP server's envelope
 /// does. Both servers share the ONE `tidepool_runtime` classifier; this only
-/// formats. The original message is embedded verbatim, so string sniffs over it
-/// (e.g. `is_parse_error`) still match.
+/// formats; routing decisions never inspect this rendered text.
 fn tag_failure(class: FailureClass, phase: Phase, body: String) -> String {
     format!(
         "**failure-class:** `{}`  **phase:** `{}`\n{}",
@@ -2970,13 +2763,16 @@ fn compile_fail(err: &CompileError, source: &str, user_lines: Option<(usize, usi
 }
 
 /// A compile-phase failure envelope from the declaration path's [`SessionError`].
-/// The body is the ORIGINAL `"<prefix>: <err>"` text (not the classifier's
-/// re-messaging), so the Auto decl→stmt fallback's `is_parse_error` sniff still
-/// finds the "binder extraction failed" marker; the envelope supplies only the
-/// class/phase tag.
+/// Compiler errors use the owning classifier's message so structured GHC
+/// diagnostics and actionable wire-version details are not replaced by the
+/// outer enum's terse `Display` text.
 fn session_fail(err: &SessionError, prefix: &str) -> String {
     let env = classify_session(err);
-    tag_failure(env.class, env.phase, format!("{prefix}: {err}"))
+    let detail = match err {
+        SessionError::Compile(_) => env.message.clone(),
+        _ => err.to_string(),
+    };
+    tag_failure(env.class, env.phase, format!("{prefix}: {detail}"))
 }
 
 /// A run-phase JIT/eval failure envelope (always runtime/run), with `context`
@@ -3474,24 +3270,6 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
         TurnOutcome::Error(e) => serde_json::json!({ "error": e }),
         TurnOutcome::Block { .. } => serde_json::json!({ "error": "nested block" }),
     }
-}
-
-/// Return `true` when a `run_def` error message indicates a GHC parse (not
-/// type or scope) error, so the try-cascade in `run_block` can fall back from
-/// `run_def` to `run_eval` for items that are expressions, not declarations.
-/// Case-insensitive to tolerate minor GHC version variation.
-///
-/// Also treats "binder extraction failed" as a not-a-declaration signal:
-/// that's the parse/scope STAGE (pre-typecheck), so a failure there —
-/// including on a non-declaration input like `123 :: Int` — means "try it as
-/// an expression." A genuine-but-type-broken declaration parses fine here and
-/// fails later as a "declaration type-check failed" error instead, which does
-/// NOT match and so surfaces as a decl error.
-fn is_parse_error(msg: &str) -> bool {
-    let lower = msg.to_lowercase();
-    lower.contains("parse error")
-        || lower.contains("lexical error")
-        || lower.contains("binder extraction failed")
 }
 
 /// Extract the declared head name from a Haskell type declaration string.

@@ -46,7 +46,7 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
 /// response — used to assert "nothing was registered" without also comparing
 /// `generation`/`valGeneration` counters, which a `:t` probe legitimately
 /// bumps (it consumes a throwaway generation to avoid an iface collision with
-/// the NEXT real bind — see `Session::query_inner_type`'s doc).
+/// the NEXT real bind).
 fn bindings_only(s: &str) -> serde_json::Value {
     serde_json::from_str::<serde_json::Value>(s)
         .ok()

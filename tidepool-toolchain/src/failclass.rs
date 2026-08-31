@@ -118,10 +118,10 @@ impl FailureEnvelope {
 #[must_use]
 pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
     match err {
-        // The extractor ran and exited non-zero: GHC rejected the user's code.
-        // (A spawn failure is `Io(NotFound)` below, not this.)
+        // Real GHC rejections carry `Diagnostics`. This arm is reserved for a
+        // malformed extractor artifact or impossible internal request shape.
         CompileError::ExtractFailed(_) => {
-            FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, err.to_string())
+            FailureEnvelope::new(FailureClass::VersionSkew, Phase::Compile, err.to_string())
         }
         // The extractor ran, exited non-zero, and its stdout parsed as a valid
         // diagnostics report — a real GHC compile failure with real spans. The
@@ -194,11 +194,11 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn extract_failure_is_user_haskell_compile() {
+    fn extractor_contract_failure_is_version_skew_compile() {
         let env = classify_compile(&CompileError::ExtractFailed(
-            "Variable not in scope: garbage".into(),
+            "TurnOut CBOR: malformed".into(),
         ));
-        assert_eq!(env.class, FailureClass::UserHaskell);
+        assert_eq!(env.class, FailureClass::VersionSkew);
         assert_eq!(env.phase, Phase::Compile);
     }
 

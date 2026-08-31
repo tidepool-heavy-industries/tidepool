@@ -112,10 +112,8 @@ pub enum BlockItem {
     /// to `run_eval`, which classifies bind vs expr from the block's precomputed
     /// batch verdict (`run_block`'s one `classify_block` spawn for the whole block).
     Stmt(ExprText),
-    /// An ambiguous item that needs the try-cascade: `run_block` attempts it
-    /// as a declaration via `run_def` first; on a GHC parse error it falls
-    /// back to `run_eval`. A non-parse error (type error, scope error, …) is
-    /// returned as-is — the item IS a declaration, just a broken one.
+    /// Haskell whose declaration/expression route is chosen from the block's
+    /// compiler-produced classification verdict.
     Auto(ExprText),
     /// A meta-command (`:reset`, `:t`, …) — routed to `run_meta`.
     Meta(MetaCommand),

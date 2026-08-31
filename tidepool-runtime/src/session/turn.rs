@@ -1051,7 +1051,13 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
         )));
     }
 
-    let json = std::fs::read_to_string(&out_path).map_err(CompileError::Io)?;
+    let json = std::fs::read_to_string(&out_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CompileError::MissingOutput(out_path.clone())
+        } else {
+            CompileError::Io(error)
+        }
+    })?;
     parse_classify_json(&json, items.len())
 }
 
@@ -1439,6 +1445,29 @@ mod tests {
         assert!(
             !log_path.exists(),
             "classify_block(&[]) spawned the extractor"
+        );
+    }
+
+    /// A successful classifier process that omits its required artifact is an
+    /// infrastructure failure, not an expression verdict and not user Haskell.
+    #[test]
+    fn classify_block_missing_artifact_stays_typed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let fake = dir.path().join("fake-extract");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
+
+        let err = classify_block(&["pure (1 :: Int)"]).unwrap_err();
+        assert!(
+            matches!(err, CompileError::MissingOutput(_)),
+            "missing classify.json must stay MissingOutput, got {err:?}"
+        );
+        assert_eq!(
+            crate::classify_compile(&err).class,
+            crate::FailureClass::Infra
         );
     }
 

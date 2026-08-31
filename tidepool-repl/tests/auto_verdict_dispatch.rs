@@ -9,9 +9,11 @@ use common::*;
 use std::os::unix::fs::PermissionsExt;
 
 /// An `Auto` item classified `Expr` compiles `__result` exactly once and never
-/// attempts a declaration compile targeting `result`.
+/// attempts a declaration compile targeting `result`. Conversely, a missing
+/// classification artifact stops after the classifier spawn and cannot launch
+/// either compile route.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_expr_verdict_skips_declaration_probe() {
+async fn auto_expr_verdict_routes_once_but_missing_artifact_does_not_route() {
     require_extract();
     let real_extract =
         std::env::var("TIDEPOOL_EXTRACT").expect("require_extract() installs TIDEPOOL_EXTRACT");
@@ -75,5 +77,38 @@ async fn auto_expr_verdict_skips_declaration_probe() {
         expr_compile_attempts, 1,
         "expected exactly one expression compile (target `__result`) for \
          this turn. Full extract call log:\n{log}"
+    );
+
+    // Fault phase: the extractor exits successfully but omits classify.json.
+    // `classify_block` therefore returns a typed missing-artifact failure.
+    // That failure must end the block after this ONE spawn, rather than being
+    // rendered and sniffed as permission to try a declaration or expression.
+    let fault_log = wrap_dir.path().join("fault-calls.log");
+    let faulty = wrap_dir.path().join("tidepool-extract-missing-classify");
+    std::fs::write(
+        &faulty,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> {}\nexit 0\n",
+            fault_log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&faulty, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("TIDEPOOL_EXTRACT", &faulty);
+
+    let fault = repl.eval("pure (2 :: Int)").await;
+    assert!(
+        fault.is_error,
+        "missing classifier artifact must fail: {fault:?}"
+    );
+    assert!(
+        fault.text.contains("**failure-class:** `infra`"),
+        "missing classifier artifact must retain its infrastructure class: {fault:?}"
+    );
+    let fault_calls = std::fs::read_to_string(&fault_log).unwrap_or_default();
+    assert_eq!(
+        fault_calls.lines().count(),
+        1,
+        "missing classifier artifact must not launch a fallback compile: {fault_calls}"
     );
 }

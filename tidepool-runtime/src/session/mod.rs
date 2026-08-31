@@ -113,20 +113,15 @@ pub enum SessionError {
     /// gen module, etc.).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// GHC binder extraction failed (parse error in the declaration, or the
-    /// extractor was unavailable / produced unreadable output).
-    #[error("binder extraction failed: {0}")]
-    BinderExtraction(String),
+    /// The compiler/extractor boundary rejected the declaration turn. Keep
+    /// the original variant intact: callers must be able to distinguish real
+    /// GHC diagnostics from missing, malformed, or unreadable artifacts.
+    #[error(transparent)]
+    Compile(#[from] crate::CompileError),
     /// The candidate gen module failed to type-check via GHC. The declaration
     /// log has been rolled back; the session remains usable.
     #[error("declaration type-check failed: {0}")]
     ValidationFailed(String),
-    /// The extractor exited non-zero and its stdout did not parse as the
-    /// diagnostics report — a stale/skewed extractor build, not the user's
-    /// declaration (mirrors `CompileError::MalformedDiagnostics` →
-    /// `FailureClass::VersionSkew`).
-    #[error("malformed extract diagnostics: {0}")]
-    MalformedDiagnostics(String),
     /// The toolchain itself is misconfigured — no extract, no stdlib, or a
     /// skewed extract/stdlib pair. Never caused by the user's declaration.
     #[error("toolchain: {0}")]
@@ -146,37 +141,6 @@ pub enum SessionError {
     /// declaration; a caller bug in the mount seam's two-step idiom.
     #[error("no live binding for `{name}` in scope {scope:?} (the mount seam's placeholder bind must run first, under the same name)")]
     UnknownBinding { scope: ScopeId, name: String },
-}
-
-/// [`crate::CompileError`] → [`SessionError`]: an environment problem stays
-/// `Io`, a stale/skewed extractor stays `MalformedDiagnostics`, and every
-/// user-Haskell-shaped rejection collapses into `BinderExtraction`.
-fn compile_error_to_session_error(e: crate::CompileError) -> SessionError {
-    use crate::CompileError;
-    match e {
-        CompileError::Io(io) => SessionError::Io(io),
-        CompileError::MalformedDiagnostics(msg) => SessionError::MalformedDiagnostics(msg),
-        CompileError::Diagnostics(diags) => SessionError::BinderExtraction(
-            diags
-                .iter()
-                .map(|d| d.message.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-        ),
-        CompileError::ExtractFailed(msg) => SessionError::BinderExtraction(msg),
-        CompileError::MissingOutput(path) => SessionError::BinderExtraction(format!(
-            "extractor produced no turn output: {}",
-            path.display()
-        )),
-        CompileError::ReadError(err) => SessionError::BinderExtraction(err.to_string()),
-        // This lane never requests the asks sidecar (it never reaches
-        // `compile_targets`), but the variant must still map somewhere:
-        // treat it the same as any other wire artifact this reader rejected.
-        CompileError::Asks(msg) => SessionError::BinderExtraction(msg),
-        CompileError::IOTypeDetected => {
-            SessionError::BinderExtraction("IO type detected in decl turn".to_string())
-        }
-    }
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -506,8 +470,9 @@ impl SessionLib {
     /// Empty / whitespace-only `decl_text` is a **no-op**: returns the current
     /// generation without bumping it.
     ///
-    /// Syntactically-invalid declarations are rejected here (GHC's parser fails →
-    /// `SessionError::BinderExtraction`) and the log is left untouched.
+    /// Syntactically-invalid declarations are rejected here as structured GHC
+    /// diagnostics (`SessionError::Compile(CompileError::Diagnostics(_))`) and
+    /// the log is left untouched.
     ///
     /// Declarations that parse but fail to type-check are also rejected: the
     /// candidate gen module is compiled via a thin wrapper; on failure the log is
@@ -621,12 +586,12 @@ impl SessionLib {
             }),
             target: None,
         })
-        .map_err(compile_error_to_session_error)?;
+        .map_err(SessionError::Compile)?;
         let items = match turn_result {
             TurnResult::Decl { items, .. } => items,
             other => {
-                return Err(SessionError::BinderExtraction(format!(
-                    "decl verdict produced an unexpected TurnResult variant: {other:?}"
+                return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
+                    format!("decl verdict produced an unexpected TurnResult variant: {other:?}"),
                 )))
             }
         };
@@ -786,7 +751,8 @@ impl SessionLib {
 
         // A misconfigured $TIDEPOOL_EXTRACT is the same environment problem a
         // spawn failure is (`Io` → Infra), never the user's declaration.
-        let mut cmd = ExtractCmd::new().map_err(|e| SessionError::Io(e.into()))?;
+        let mut cmd = ExtractCmd::new()
+            .map_err(|e| SessionError::Compile(crate::CompileError::Io(e.into())))?;
         // Default build-products dir (see `crate::paths::apply_build_products_dir`'s
         // doc) — this validation spawn does a real full typecheck of the
         // candidate's stdlib closure, so it benefits from the same
@@ -811,11 +777,13 @@ impl SessionLib {
             cmd.session_root(&self.root).inject_vals(inject_modules);
         }
 
-        // Spawn failure is an environment problem (`Io` → Infra), never
-        // `BinderExtraction` (which classifies as the user's Haskell).
-        let run = cmd
-            .run()
-            .map_err(|e| SessionError::Io(crate::extract_spawn_error(e.source)))?;
+        // Spawn failure is an environment problem (`CompileError::Io` →
+        // Infra), never a declaration diagnostic.
+        let run = cmd.run().map_err(|e| {
+            SessionError::Compile(crate::CompileError::Io(crate::extract_spawn_error(
+                e.source,
+            )))
+        })?;
         let output = &run.output;
 
         if !run.success() {
@@ -823,7 +791,11 @@ impl SessionLib {
             // user's declaration — the same split every extract call site makes.
             let report = match crate::diag::parse_diag_report(&output.stdout, &output.stderr) {
                 Ok(r) => r,
-                Err(msg) => return Err(SessionError::MalformedDiagnostics(msg)),
+                Err(msg) => {
+                    return Err(SessionError::Compile(
+                        crate::CompileError::MalformedDiagnostics(msg),
+                    ))
+                }
             };
             let rel = rendered.module.relative_hs_path();
             // Speak item-relative coordinates: GHC's line numbers point into
