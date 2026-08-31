@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tidepool_actor::{
-    run_typed_deliberation, ActorAgentSession, ActorDescriptor, ActorMachineRegistry,
-    ActorPlacement, ActorRegistry, ActorWorkbenchSource, ResidentActorWorkbench, StartInitiator,
-    TypedGoal,
+    run_result_session, ActorAgentSession, ActorDescriptor, ActorMachineRegistry, ActorPlacement,
+    ActorRegistry, ActorWorkbenchSource, CompletionExpectation, ResidentActorWorkbench,
+    StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -184,11 +184,11 @@ async fn fenced_haskell_returns_a_live_typed_closure_without_holding_checkout() 
         requests: Mutex::new(Vec::new()),
     };
 
-    let entry = run_typed_deliberation(
+    let entry = run_result_session(
         &mut admitted,
         &provider,
         &mut workbench,
-        TypedGoal::new(
+        CompletionExpectation::new(
             "Build an effectful increment-by-two entry function.",
             expected,
         ),

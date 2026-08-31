@@ -21,8 +21,8 @@ use crate::generated::actor::ActorReq;
 use crate::resident_workbench::ResidentActorStartupStep;
 use crate::{
     ActorDescriptor, ActorExitKind, ActorRegistry, ActorRegistryError, ActorTerminal,
-    ResidentActorRunner, ResidentActorWorkbenchError, ResidentDeliberationError,
-    ResidentDeliberationExecutor, StartInitiator, TurnLease,
+    ResidentActorRunner, ResidentActorWorkbenchError, ResidentCompletionError,
+    ResidentCompletionExecutor, StartInitiator, TurnLease,
 };
 
 /// One parked parent continuation paired with exclusive custody of its child
@@ -135,16 +135,16 @@ pub enum ResidentActorStartError {
     #[error(transparent)]
     Workbench(#[from] ResidentActorWorkbenchError),
     #[error(transparent)]
-    Deliberation(#[from] ResidentDeliberationError),
+    Completion(#[from] ResidentCompletionError),
 }
 
 /// Runtime-owned prompted startup. This is orchestration over the permanent
-/// registry, resident runner, and typed-deliberation executor—not another
+/// registry, resident runner, and result-session executor—not another
 /// actor execution mechanism.
 pub struct ResidentActorStarter<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
-    deliberations: ResidentDeliberationExecutor<H, O>,
+    completions: ResidentCompletionExecutor<H, O>,
 }
 
 impl<H, O> ResidentActorStarter<H, O> {
@@ -152,12 +152,12 @@ impl<H, O> ResidentActorStarter<H, O> {
     pub fn new(
         registry: ActorRegistry,
         runner: ResidentActorRunner<H, O>,
-        deliberations: ResidentDeliberationExecutor<H, O>,
+        completions: ResidentCompletionExecutor<H, O>,
     ) -> Self {
         Self {
             registry,
             runner,
-            deliberations,
+            completions,
         }
     }
 }
@@ -196,15 +196,15 @@ where
                     .capture_startup_step(child_context.clone(), outcome, child_realm)
                     .await?
                 {
-                    ResidentActorStartupStep::Deliberate(deliberation) => {
+                    ResidentActorStartupStep::Deliberate(completion) => {
                         let admitted = match admitted.as_mut() {
                             Some(admitted) => admitted,
                             None => admitted
                                 .insert(child_session.begin_startup_agent_session(&starting)?),
                         };
                         outcome = self
-                            .deliberations
-                            .resolve_admitted(admitted, provider, deliberation, sink.clone())
+                            .completions
+                            .resolve_admitted(admitted, provider, completion, sink.clone())
                             .await?;
                     }
                     ResidentActorStartupStep::Ready(readiness) => break readiness,

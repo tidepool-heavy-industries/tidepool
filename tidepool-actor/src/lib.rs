@@ -8,7 +8,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 mod agent_session;
-mod deliberation;
+mod completion;
 mod event;
 mod executor;
 mod generated;
@@ -24,16 +24,16 @@ mod wait;
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
 };
-pub use deliberation::{
-    DeliberationCaptureError, DeliberationRequest, DeliberationRequestError, ResidentDeliberation,
-    ResidentDeliberationError, ResidentDeliberationExecutor,
+pub use completion::{
+    CompletionCaptureError, CompletionRequest, CompletionRequestError, ResidentCompletion,
+    ResidentCompletionError, ResidentCompletionExecutor,
 };
 pub use event::{
     ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,
     EventCausality, MailboxMessageKind, ModelUsage, StartInitiator, WaitDisposition,
 };
 pub use executor::{
-    run_typed_deliberation, AgentBlockStop, AgentExecutionError, AgentWorkbench, TypedGoal,
+    run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use mailbox::{

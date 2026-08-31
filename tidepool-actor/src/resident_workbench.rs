@@ -92,7 +92,7 @@ pub(crate) struct ResidentActorReadiness {
 /// Other nominal effects will join this classifier when their actor-local
 /// interpreters land; they must never be mistaken for readiness.
 pub(crate) enum ResidentActorStartupStep {
-    Deliberate(crate::ResidentDeliberation),
+    Deliberate(crate::ResidentCompletion),
     Ready(ResidentActorReadiness),
 }
 
@@ -137,14 +137,14 @@ pub enum ResidentActorWorkbenchError {
     Join(tokio::task::JoinError),
     #[error("typed completion suspended without a live payload")]
     MissingCompletionPayload,
-    #[error("could not mount the typed deliberation input: {0}")]
+    #[error("could not mount the typed completion input: {0}")]
     InputMount(String),
     #[error("actor protocol violation: {0}")]
     ActorProtocol(String),
     #[error("could not bridge an actor protocol value: {0}")]
     Bridge(#[from] tidepool_bridge::BridgeError),
     #[error(transparent)]
-    DeliberationCapture(#[from] crate::DeliberationCaptureError),
+    CompletionCapture(#[from] crate::CompletionCaptureError),
     #[error(transparent)]
     StartCapture(#[from] crate::ActorStartCaptureError),
 }
@@ -209,7 +209,7 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    /// Mount the authoritative input for the current deliberation under the
+    /// Mount the authoritative input for the current completion under the
     /// one stable workbench name `goalInput`.
     ///
     /// GHC compiles the binding identity and thin interface, but its
@@ -285,7 +285,7 @@ where
             .await
     }
 
-    pub(crate) async fn resume_deliberation(
+    pub(crate) async fn resume_completion(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
@@ -371,12 +371,12 @@ where
             .await
     }
 
-    pub async fn capture_deliberation(
+    pub async fn capture_completion(
         &self,
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
         actor_realm: RealmId,
-    ) -> Result<crate::ResidentDeliberation, ResidentActorWorkbenchError> {
+    ) -> Result<crate::ResidentCompletion, ResidentActorWorkbenchError> {
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "actor startup completed before its required deliberation".into(),
@@ -385,8 +385,8 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let table = session.data_con_table().clone();
-                crate::ResidentDeliberation::capture(session, hole, &request, &table, actor_realm)
-                    .map_err(ResidentActorWorkbenchError::DeliberationCapture)
+                crate::ResidentCompletion::capture(session, hole, &request, &table, actor_realm)
+                    .map_err(ResidentActorWorkbenchError::CompletionCapture)
             })
             .await
     }
@@ -408,14 +408,14 @@ where
                 match constructor.rsplit('.').next() {
                     Some("DeliberateWith") => {
                         let table = session.data_con_table().clone();
-                        let deliberate = crate::ResidentDeliberation::capture(
+                        let completion = crate::ResidentCompletion::capture(
                             session,
                             hole,
                             &request,
                             &table,
                             actor_realm,
                         )?;
-                        Ok(ResidentActorStartupStep::Deliberate(deliberate))
+                        Ok(ResidentActorStartupStep::Deliberate(completion))
                     }
                     Some("ActorReadyWith")
                         if session.parked_realm(&hole) == Some(actor_realm) =>

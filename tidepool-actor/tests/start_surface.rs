@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tidepool_actor::{
     ActorDescriptor, ActorLifecycle, ActorMachineRegistry, ActorPlacement, ActorRegistry,
     ActorTurnKind, ActorWorkbenchSource, ResidentActorRunner, ResidentActorStarter,
-    ResidentDeliberationExecutor, StartInitiator,
+    ResidentCompletionExecutor, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -197,9 +197,9 @@ in do
         .capture_start(parent_context, start_outcome)
         .await
         .expect("capture and seal child entry");
-    let deliberations =
-        ResidentDeliberationExecutor::new(Arc::clone(&machines), workbench_source.clone());
-    let starter = ResidentActorStarter::new(registry.clone(), runner, deliberations);
+    let completions =
+        ResidentCompletionExecutor::new(Arc::clone(&machines), workbench_source.clone());
+    let starter = ResidentActorStarter::new(registry.clone(), runner, completions);
     let provider = ApprovesStartup {
         requests: Mutex::new(Vec::new()),
     };

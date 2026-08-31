@@ -7,7 +7,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tidepool_actor::{
     ActorAgentSession, ActorDescriptor, ActorMachineRegistry, ActorPlacement, ActorRegistry,
-    ActorTurnKind, ActorWorkbenchSource, ResidentDeliberation, ResidentDeliberationExecutor,
+    ActorTurnKind, ActorWorkbenchSource, ResidentCompletion, ResidentCompletionExecutor,
     StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
@@ -178,14 +178,10 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
         )
         .expect("run to deliberate suspension");
     let pending = match initial {
-        ResidentOutcome::Suspended { hole, request, .. } => ResidentDeliberation::capture(
-            &mut machine,
-            hole,
-            &request,
-            &compiled.table,
-            actor_realm,
-        )
-        .expect("capture typed deliberation"),
+        ResidentOutcome::Suspended { hole, request, .. } => {
+            ResidentCompletion::capture(&mut machine, hole, &request, &compiled.table, actor_realm)
+                .expect("capture typed completion")
+        }
         ResidentOutcome::Completed { .. } => panic!("deliberate must suspend"),
     };
     assert_eq!(pending.request().input_type, "Tree Int");
@@ -208,11 +204,11 @@ async fn public_deliberate_mounts_live_input_and_resumes_its_exact_continuation(
         requests: Mutex::new(Vec::new()),
     };
 
-    let executor = ResidentDeliberationExecutor::new(Arc::clone(&machines), workbench_source);
+    let executor = ResidentCompletionExecutor::new(Arc::clone(&machines), workbench_source);
     let (haskell_turn, completed) = executor
         .resolve(&agent, haskell_turn, &provider, pending, None)
         .await
-        .expect("resolve resident deliberation");
+        .expect("resolve resident completion");
     assert_eq!(haskell_turn.kind(), ActorTurnKind::Haskell);
     drop(haskell_turn);
 

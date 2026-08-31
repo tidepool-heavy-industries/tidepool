@@ -1,4 +1,4 @@
-//! The one provider/fenced-Haskell loop used by typed actor deliberations.
+//! The one provider/fenced-Haskell loop used by result-bearing agent sessions.
 //!
 //! Provider transcript mechanics remain in [`crate::ActorAgentSession`], and
 //! resident compilation/execution remains behind [`AgentWorkbench`]. This
@@ -21,12 +21,12 @@ const PROVIDER_API_ATTEMPTS: usize = 3;
 /// The authoritative input and completion type remain mounted in Haskell;
 /// these strings orient the model and render `:goal`-equivalent context.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedGoal {
+pub struct CompletionExpectation {
     pub task: String,
     pub expected_type: String,
 }
 
-impl TypedGoal {
+impl CompletionExpectation {
     #[must_use]
     pub fn new(task: impl Into<String>, expected_type: impl Into<String>) -> Self {
         Self {
@@ -74,11 +74,11 @@ pub enum AgentExecutionError<WorkbenchError> {
 /// session. The admission guard lives in `admitted` across provider waits and
 /// every workbench segment; a concrete workbench acquires machine ownership
 /// only inside `execute`.
-pub async fn run_typed_deliberation<Workbench>(
+pub async fn run_result_session<Workbench>(
     admitted: &mut AdmittedAgentSession,
     provider: &dyn DynModelProvider,
     workbench: &mut Workbench,
-    goal: TypedGoal,
+    completion: CompletionExpectation,
     max_tokens: Option<u32>,
     sink: Option<StreamSink>,
 ) -> Result<Workbench::Completion, AgentExecutionError<Workbench::Error>>
@@ -87,9 +87,9 @@ where
 {
     admitted.queue_developer(format!(
         "Current typed Haskell goal: produce `{}`. The authoritative input is mounted as `goalInput` in the resident workbench; complete the goal through its typed completion action.",
-        goal.expected_type
+        completion.expected_type
     ));
-    admitted.queue_user(goal.task);
+    admitted.queue_user(completion.task);
 
     loop {
         let assistant =
@@ -102,6 +102,9 @@ where
             continue;
         }
 
+        // Keep the mutable workbench borrow inside this loop. The runtime's
+        // closure-based helper intentionally cannot lend one `&mut` owner
+        // across successive async calls without extra synchronization.
         let total = assistant.blocks.len();
         let mut sequence = tidepool_runtime::session::WorkSequence::new(
             assistant
@@ -348,11 +351,11 @@ mod tests {
             seen: Vec::new(),
         };
 
-        let value = run_typed_deliberation(
+        let value = run_result_session(
             &mut admitted,
             &provider,
             &mut workbench,
-            TypedGoal::new("produce the answer", "Answer"),
+            CompletionExpectation::new("produce the answer", "Answer"),
             None,
             None,
         )
@@ -386,11 +389,11 @@ mod tests {
             seen: Vec::new(),
         };
 
-        let value = run_typed_deliberation(
+        let value = run_result_session(
             &mut admitted,
             &provider,
             &mut workbench,
-            TypedGoal::new("review", "Review"),
+            CompletionExpectation::new("review", "Review"),
             None,
             None,
         )
@@ -433,11 +436,11 @@ mod tests {
             seen: Vec::new(),
         };
 
-        run_typed_deliberation(
+        run_result_session(
             &mut admitted,
             &provider,
             &mut workbench,
-            TypedGoal::new("answer", "Answer"),
+            CompletionExpectation::new("answer", "Answer"),
             None,
             None,
         )

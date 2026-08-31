@@ -1,4 +1,4 @@
-//! Decoding and settlement metadata for the public Haskell `deliberate` effect.
+//! Completion capture and settlement for the public Haskell `deliberate` effect.
 //!
 //! The request's input field is decoded only to validate constructor shape.
 //! Its authoritative heap value is claimed separately from the parked frame's
@@ -18,13 +18,13 @@ use tidepool_runtime::YieldSite;
 
 use crate::generated::deliberate::DeliberateReq;
 use crate::{
-    run_typed_deliberation, ActorAgentSession, ActorMachineRegistry, ActorRegistryError,
-    ActorWorkbenchSource, AgentExecutionError, ResidentActorWorkbench, ResidentActorWorkbenchError,
-    TurnLease, TypedGoal,
+    run_result_session, ActorAgentSession, ActorMachineRegistry, ActorRegistryError,
+    ActorWorkbenchSource, AgentExecutionError, CompletionExpectation, ResidentActorWorkbench,
+    ResidentActorWorkbenchError, TurnLease,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliberationRequest {
+pub struct CompletionRequest {
     pub task: String,
     pub input_type: String,
     pub input_modules: Vec<String>,
@@ -33,32 +33,32 @@ pub struct DeliberationRequest {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeliberationRequestError {
+pub enum CompletionRequestError {
     #[error(transparent)]
     Decode(#[from] BridgeError),
-    #[error("deliberation request carried invalid site id {0}")]
+    #[error("completion request carried invalid site id {0}")]
     InvalidSite(i64),
-    #[error("deliberation site {0} is absent from its GHC metadata")]
+    #[error("completion site {0} is absent from its GHC metadata")]
     MissingSite(u64),
-    #[error("deliberation site {site} describes {actual} live input types, expected one")]
+    #[error("completion site {site} describes {actual} live input types, expected one")]
     InputArity { site: u64, actual: usize },
 }
 
-impl DeliberationRequest {
+impl CompletionRequest {
     pub fn decode(
         request: &Value,
         table: &DataConTable,
         sites: &[YieldSite],
-    ) -> Result<Self, DeliberationRequestError> {
+    ) -> Result<Self, CompletionRequestError> {
         let DeliberateReq::DeliberateWith(site, _input, task) =
             DeliberateReq::from_value(request, table)?;
-        let site = u64::try_from(site).map_err(|_| DeliberationRequestError::InvalidSite(site))?;
+        let site = u64::try_from(site).map_err(|_| CompletionRequestError::InvalidSite(site))?;
         let metadata = sites
             .iter()
             .find(|metadata| metadata.site == site)
-            .ok_or(DeliberationRequestError::MissingSite(site))?;
+            .ok_or(CompletionRequestError::MissingSite(site))?;
         let [input] = metadata.inputs.as_slice() else {
-            return Err(DeliberationRequestError::InputArity {
+            return Err(CompletionRequestError::InputArity {
                 site,
                 actual: metadata.inputs.len(),
             });
@@ -77,21 +77,21 @@ impl DeliberationRequest {
 /// with exclusive custody of the request's live input. This is the complete
 /// obligation crossing into the model/Haskell executor: neither the input nor
 /// the continuation can be reconstructed from bridged metadata.
-pub struct ResidentDeliberation {
-    request: DeliberationRequest,
+pub struct ResidentCompletion {
+    request: CompletionRequest,
     hole: ResidentHole,
     input: RootCustody,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DeliberationCaptureError {
+pub enum CompletionCaptureError {
     #[error(transparent)]
-    Decode(#[from] DeliberationRequestError),
-    #[error("typed deliberation suspended without its declared live input")]
+    Decode(#[from] CompletionRequestError),
+    #[error("result-bearing agent session suspended without its declared live input")]
     MissingInput,
 }
 
-impl ResidentDeliberation {
+impl ResidentCompletion {
     /// Decode and claim a newly suspended `deliberate` request while its
     /// resident machine is checked out. The input is immediately rehomed to
     /// the actor realm so disposable execution scopes cannot invalidate it.
@@ -101,16 +101,16 @@ impl ResidentDeliberation {
         request: &Value,
         table: &DataConTable,
         actor_realm: tidepool_codegen::suspension::RealmId,
-    ) -> Result<Self, DeliberationCaptureError>
+    ) -> Result<Self, CompletionCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
         let sites = session.parked_program_provenance(&hole).unwrap_or_default();
-        let decoded = DeliberationRequest::decode(request, table, &sites.sites())?;
+        let decoded = CompletionRequest::decode(request, table, &sites.sites())?;
         let input = session
             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
-            .ok_or(DeliberationCaptureError::MissingInput)?;
+            .ok_or(CompletionCaptureError::MissingInput)?;
         Ok(Self {
             request: decoded,
             hole,
@@ -119,13 +119,13 @@ impl ResidentDeliberation {
     }
 
     #[must_use]
-    pub fn request(&self) -> &DeliberationRequest {
+    pub fn request(&self) -> &CompletionRequest {
         &self.request
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ResidentDeliberationError {
+pub enum ResidentCompletionError {
     #[error(transparent)]
     Admission(#[from] ActorRegistryError),
     #[error(transparent)]
@@ -134,17 +134,17 @@ pub enum ResidentDeliberationError {
     Execution(#[from] AgentExecutionError<ResidentActorWorkbenchError>),
 }
 
-/// Shared resident dependencies for resolving typed actor deliberations.
+/// Shared resident dependencies for resolving typed completion obligations.
 /// The executor owns no actor turn and keeps no machine checked out between
 /// calls; one instance can therefore serve every actor using the same machine
 /// registry and trusted Haskell source facade.
-pub struct ResidentDeliberationExecutor<H, O> {
+pub struct ResidentCompletionExecutor<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
     max_tokens: Option<u32>,
 }
 
-impl<H, O> ResidentDeliberationExecutor<H, O> {
+impl<H, O> ResidentCompletionExecutor<H, O> {
     #[must_use]
     pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
         Self {
@@ -161,7 +161,7 @@ impl<H, O> ResidentDeliberationExecutor<H, O> {
     }
 }
 
-impl<H, O> ResidentDeliberationExecutor<H, O>
+impl<H, O> ResidentCompletionExecutor<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -176,12 +176,12 @@ where
         agent: &ActorAgentSession,
         haskell_turn: TurnLease,
         provider: &dyn DynModelProvider,
-        deliberation: ResidentDeliberation,
+        completion: ResidentCompletion,
         sink: Option<StreamSink>,
-    ) -> Result<(TurnLease, ResidentOutcome), ResidentDeliberationError> {
+    ) -> Result<(TurnLease, ResidentOutcome), ResidentCompletionError> {
         let mut admitted = agent.enter_from_haskell_turn(haskell_turn)?;
         let outcome = self
-            .resolve_admitted(&mut admitted, provider, deliberation, sink)
+            .resolve_admitted(&mut admitted, provider, completion, sink)
             .await?;
         let haskell_turn = admitted.return_to_haskell()?;
         Ok((haskell_turn, outcome))
@@ -191,14 +191,14 @@ where
         &self,
         admitted: &mut crate::AdmittedAgentSession,
         provider: &dyn DynModelProvider,
-        deliberation: ResidentDeliberation,
+        completion: ResidentCompletion,
         sink: Option<StreamSink>,
-    ) -> Result<ResidentOutcome, ResidentDeliberationError> {
-        let ResidentDeliberation {
+    ) -> Result<ResidentOutcome, ResidentCompletionError> {
+        let ResidentCompletion {
             request,
             hole,
             input,
-        } = deliberation;
+        } = completion;
         let mut type_modules = request.input_modules.clone();
         for module in &request.output_modules {
             if !type_modules.contains(module) {
@@ -214,17 +214,17 @@ where
         workbench
             .mount_goal_input(admitted, request.input_type, input)
             .await?;
-        let answer = run_typed_deliberation(
+        let answer = run_result_session(
             admitted,
             provider,
             &mut workbench,
-            TypedGoal::new(request.task, request.output_type),
+            CompletionExpectation::new(request.task, request.output_type),
             self.max_tokens,
             sink,
         )
         .await?;
         let outcome = workbench
-            .resume_deliberation(admitted.session_context(), hole, answer)
+            .resume_completion(admitted.session_context(), hole, answer)
             .await?;
         Ok(outcome)
     }
