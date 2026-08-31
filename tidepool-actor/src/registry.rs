@@ -470,7 +470,16 @@ impl ActorRegistry {
 
         match (&mut *delivery, reply) {
             (MailboxDelivery::Call(call), Some(value)) if call.target == actor => {
-                reply_call_in(&mut state, call.call, value)?;
+                match reply_call_in(&mut state, call.call, value) {
+                    Ok(()) => {}
+                    // The caller may cancel after dequeue while this actor is
+                    // running its handler. The work still happened: release
+                    // the now-undeliverable reply and commit the callee's next
+                    // state rather than converting caller cancellation into
+                    // callee failure.
+                    Err(MailboxFailure::UnknownCall(id)) if id == call.call => {}
+                    Err(error) => return Err(error),
+                }
                 call.settled = true;
             }
             (MailboxDelivery::Cast(cast), None) if cast._lease.actor() == actor => {}
@@ -2055,6 +2064,50 @@ mod tests {
         ));
         assert_eq!(delivered_dropped.load(Ordering::SeqCst), 1);
         assert_eq!(late_reply_dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_caller_does_not_fail_a_resident_callee_that_already_ran() {
+        let registry = ActorRegistry::new();
+        let caller = ready_root(&registry);
+        let target = ready_in(&registry, Some(caller), "target", SessionId(1));
+        let ticket = registry
+            .call(caller, target, probe(SessionId(1)).0)
+            .expect("call");
+        let mut delivery = registry
+            .dequeue(target)
+            .expect("dequeue")
+            .expect("delivery");
+        let MailboxDelivery::Call(call) = &mut delivery else {
+            panic!("expected call");
+        };
+        drop(call.take_value());
+
+        // Cancellation removes the call while the target still owns its
+        // admitted mailbox turn, exactly the race a resident handler sees.
+        drop(ticket);
+        let (reply, reply_dropped) = probe(SessionId(1));
+        registry
+            .settle_resident_delivery(
+                target,
+                &mut delivery,
+                Some(reply),
+                InstalledActorState::Completed(ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "completed after caller cancellation".into(),
+                }),
+            )
+            .expect("callee commits independently of caller cancellation");
+
+        assert_eq!(reply_dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.lifecycle(target), Ok(ActorLifecycle::Exited));
+        assert!(matches!(
+            registry.observe_exit(target),
+            Ok(ExitObservation::Exited(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                ..
+            }))
+        ));
     }
 
     #[test]
