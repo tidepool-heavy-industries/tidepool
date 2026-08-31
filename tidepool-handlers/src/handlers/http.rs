@@ -615,15 +615,20 @@ mod tests {
     /// A normal-size body streams through `read_body_capped` unaffected.
     #[test]
     fn read_body_capped_allows_small_body() {
-        use std::io::Write;
+        use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
-        std::thread::spawn(move || {
+        let server = std::thread::spawn(move || {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
             };
+            // Consume the request before closing the socket. Closing with
+            // unread peer data is allowed to produce a TCP RST, which made
+            // this otherwise-local body test intermittently fail in ureq.
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
             let body = b"{\"hello\":\"world\"}";
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -642,6 +647,7 @@ mod tests {
             HttpHandler::read_body_capped(resp, &final_url).unwrap(),
             "{\"hello\":\"world\"}"
         );
+        server.join().unwrap();
     }
 
     // -------------------------------------------------------------------
