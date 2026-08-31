@@ -1,9 +1,10 @@
-//! Four extension-set surfaces exist across the workspace and legitimately
+//! Five extension-set surfaces exist across the workspace and legitimately
 //! differ in scope — that's fine, as long as every delta is DECLARED and
 //! TESTED rather than incidental:
 //!
-//!   - `tidepool_mcp::preamble::EVAL_PRAGMAS` — the canonical eval dialect.
-//!   - `tidepool_mcp::preamble::decl_pragmas()` — EVAL_PRAGMAS +
+//!   - `tidepool_runtime::session::EVAL_PRAGMAS` — the canonical eval dialect,
+//!     re-exported by `tidepool_mcp` for frontend callers.
+//!   - `tidepool_runtime::session::declaration_pragmas()` — EVAL_PRAGMAS +
 //!     `NoMonomorphismRestriction` (session decl modules generalize pure binds).
 //!   - the `LANGUAGE` block inside
 //!     `tidepool_runtime::session::turn::DECL_TEMPLATE_SOURCE` — a PARSE-ONLY
@@ -22,13 +23,9 @@
 //!     `Tidepool.Harness.Prelude` gets the identical dialect an eval author
 //!     gets — "one dialect everywhere", repo CLAUDE.md).
 //!
-//! `tidepool-runtime` sits BELOW `tidepool-mcp` in the workspace dependency
-//! graph and cannot import `EVAL_PRAGMAS` itself (documented in both
-//! `binders.rs` and `render.rs`) — this crate is where a cross-surface
-//! comparison becomes possible, the same reason `tidepool-testing`'s
-//! `mock_stack_matches_production` (a lower-layer hand-maintained mirror
-//! checked from a higher layer that can see both sides) already lives where
-//! it does.
+//! The parse-only template and standalone declaration environment now derive
+//! from runtime-owned dialect policy. This higher-layer test additionally
+//! guards the unavoidable Haskell-source mirror.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -95,6 +92,7 @@ fn binder_parse_pragmas_is_exact_subset_of_eval_pragmas() {
         "FlexibleContexts",
         "FlexibleInstances",
         "UndecidableInstances",
+        "RankNTypes",
         "PartialTypeSignatures",
         "ExtendedDefaultRules",
         "BlockArguments",

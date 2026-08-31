@@ -287,35 +287,7 @@ impl ModuleEnv {
     #[must_use]
     pub fn standalone_default() -> ModuleEnv {
         ModuleEnv {
-            // NoMonomorphismRestriction: pure binds routed as decls must
-            // generalize (see EVAL_PRAGMAS note in tidepool-mcp).
-            //
-            // MUST track the production decl module's extension set
-            // (`tidepool_mcp::decl_pragmas` = EVAL_PRAGMAS + NMR) so this
-            // test/standalone default is FAITHFUL — else a decl valid in
-            // production fails here (or vice-versa). The layer boundary
-            // (runtime can't see mcp) blocks sharing the list, so it is
-            // mirrored here; the sole intentional divergence is
-            // `NoImplicitPrelude` (standalone relies on the implicit Prelude,
-            // via its plain-toolchain imports below) — every other extension
-            // in `decl_pragmas` must appear here too. `OverloadedRecordDot`
-            // and `DuplicateRecordFields` must both stay present so record-dot
-            // (`h.path`, a core idiom) compiles here as well.
-            //
-            // `test_standalone_default_tracks_decl_pragmas` (below) asserts
-            // that set equality (modulo the one documented delta), so this
-            // cannot drift silently: it caught `DeriveGeneric`/`DeriveAnyClass`
-            // missing here, the same drift class as the earlier
-            // `OverloadedRecordDot`/`DuplicateRecordFields` gap.
-            pragmas: "{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction, DataKinds, TypeOperators, \
-                      FlexibleContexts, FlexibleInstances, UndecidableInstances, GADTs, KindSignatures, \
-                      PartialTypeSignatures, ScopedTypeVariables, ExtendedDefaultRules, \
-                      LambdaCase, TupleSections, MultiWayIf, RecordWildCards, NamedFieldPuns, \
-                      ViewPatterns, BangPatterns, TypeApplications, BlockArguments, \
-                      NumericUnderscores, MultilineStrings, DeriveFunctor, DeriveFoldable, \
-                      DeriveTraversable, DeriveGeneric, DeriveAnyClass, QuasiQuotes, \
-                      DuplicateRecordFields, OverloadedRecordDot, OverloadedLabels #-}"
-                .to_string(),
+            pragmas: super::standalone_declaration_pragmas(),
             imports: vec![
                 "import qualified Tidepool.Data.Text as T".to_string(),
                 "import qualified Data.Map.Strict as Map".to_string(),

@@ -67,6 +67,11 @@ This is the canonical status inventory for the plan.
   ordered/prefix-preserving block cursor, and canonical declaration, bind, and
   pure/effectful expression templates. REPL, harness, and actor frontends use
   those mechanics rather than carrying their own parser or cursor.
+- The resident runtime also owns the canonical model-authored Haskell dialect.
+  MCP re-exports it, declaration and standalone environments derive their
+  intentional variants, and the unavoidable Haskell extractor mirror is
+  cross-language tested; adding `RankNTypes` no longer requires another
+  hand-copied Rust extension list.
 - `tidepool-actor` owns one multi-round agent-session executor. Its
   resident adapter checks the machine out only for a Haskell segment, compiles
   against the actor's exact source view, and returns a GHC-checked live value

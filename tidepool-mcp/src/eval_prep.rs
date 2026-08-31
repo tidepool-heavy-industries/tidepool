@@ -1449,13 +1449,15 @@ mod tests {
         assert!(core.contains("ActorWaitWith ::"), "{core}");
         assert!(
             shim.contains(
-                "hiding (ActorTerminalStatus, ActorPromoteWith, ActorStartWith, ActorWaitWith)"
+                "hiding (ActorTerminalStatus, ActorStartWith, ActorWaitWith, ActorCallWith, ActorCastWith)"
             ),
             "{shim}"
         );
         assert!(!shim.contains("DeliberateWith"), "{shim}");
         assert!(!shim.contains("AskUserWith"), "{shim}");
         assert!(crate::authored_name_is_hidden("Actor", "ActorStartWith"));
+        assert!(crate::authored_name_is_hidden("Actor", "ActorCallWith"));
+        assert!(crate::authored_name_is_hidden("Actor", "ActorCastWith"));
         assert!(!crate::authored_name_is_hidden("AskUser", "AskUserWith"));
     }
 

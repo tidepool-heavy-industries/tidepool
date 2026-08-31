@@ -16,6 +16,7 @@
 //! planes are handled elsewhere; this module is a standalone, usable
 //! declaration REPL on its own.
 
+mod dialect;
 pub mod engine;
 pub mod facade;
 pub mod kernel;
@@ -27,6 +28,8 @@ pub mod supervisor;
 pub mod turn;
 pub mod view;
 pub mod workbench;
+
+pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
 
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 

@@ -197,7 +197,7 @@ pub struct TurnTemplate {
 /// wrapper, authored once and spliced via `{{TURN}}`.
 ///
 /// The pragma block is deliberately a SUBSET of the canonical eval dialect
-/// (`tidepool_mcp::preamble::EVAL_PRAGMAS`): this pass PARSES but never
+/// ([`super::EVAL_PRAGMAS`]): this pass PARSES but never
 /// typechecks or renames, so extensions that only affect type inference,
 /// instance resolution, or scoping have no business here. That delta is
 /// declared and enforced — `tidepool-mcp`'s `pragma_set_consistency` test
