@@ -118,10 +118,12 @@ This is the canonical status inventory for the plan.
   queue and the existing harness checkout path at once; the former global
   notification could wake the wrong session and has been removed.
 - One resident lifecycle component owns Rust-forced subtree termination: it
-  publishes terminal state first to stop admission and settle obligations,
-  then closes every captured actor realm, attempting the whole subtree even if
-  one cleanup fails. Resident continuation failures and failed/unpublishable
-  startup use this path; the cooperative typed shutdown hook remains unlanded.
+  captures the exact cleanup set and publishes terminal state in one registry
+  critical section, then closes every captured actor realm, attempting the
+  whole subtree even if one cleanup fails. A concurrently admitted child can
+  therefore never be cancelled without its realm entering cleanup. Resident
+  continuation failures and failed/unpublishable startup use this path; the
+  cooperative typed shutdown hook remains unlanded.
 - Resident mailbox custody now follows the canonical ownership protocol:
   accepted requests are rehomed to the target realm, replies are rehomed to
   the caller realm before atomic publication, and a completed callee can close

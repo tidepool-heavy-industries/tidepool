@@ -645,13 +645,7 @@ impl ActorRegistry {
     ) -> Result<ActorSessionContext, ActorRegistryError> {
         let state = self.inner.state.lock();
         let actor_entry = entry(&state, actor)?;
-        Ok(ActorSessionContext {
-            actor,
-            placement: actor_entry.descriptor.placement,
-            effect_policy: actor_entry.descriptor.effect_policy,
-            live_payload: actor_entry.descriptor.live_payload,
-            source_imports: actor_entry.descriptor.source_imports.clone(),
-        })
+        Ok(session_context_for(actor, actor_entry))
     }
 
     /// Return the immutable startup descriptor retained for this exact
@@ -994,16 +988,33 @@ impl ActorRegistry {
         );
     }
 
-    /// Retain a terminal outcome and recursively cancel descendants. Ordinary
-    /// child failure never changes its owner.
+    /// Retain a terminal outcome and recursively cancel descendants in the
+    /// registry. Ordinary child failure never changes its owner.
+    ///
+    /// Resident execution owners must use [`crate::ResidentActorLifecycle`]
+    /// so the same transition also drives machine-realm cleanup.
     pub fn finish(
         &self,
         actor: ActorRef,
         terminal: ActorTerminal,
     ) -> Result<(), ActorRegistryError> {
+        self.finish_for_cleanup(actor, terminal).map(drop)
+    }
+
+    /// Linearize subtree termination and capture every resident resource
+    /// context covered by that same transition. Cleanup must not discover the
+    /// tree in a separate pass: a concurrently admitted child could otherwise
+    /// become terminal without its realm entering the cleanup set.
+    pub(crate) fn finish_for_cleanup(
+        &self,
+        actor: ActorRef,
+        terminal: ActorTerminal,
+    ) -> Result<Vec<(ActorRef, ActorSessionContext)>, ActorRegistryError> {
         let mut state = self.inner.state.lock();
         entry(&state, actor)?;
-        exit_subtree(&mut state, actor, terminal)
+        let cleanup = owned_subtree_contexts(&state, actor)?;
+        exit_subtree(&mut state, actor, terminal)?;
+        Ok(cleanup)
     }
 
     pub fn lifecycle(&self, actor: ActorRef) -> Result<ActorLifecycle, ActorRegistryError> {
@@ -1326,6 +1337,30 @@ fn clear_parked(state: &mut RegistryState, actor: ActorRef, obligation: ParkedOb
         if entry.parked == Some(obligation) {
             entry.parked = None;
         }
+    }
+}
+
+fn owned_subtree_contexts(
+    state: &RegistryState,
+    root: ActorRef,
+) -> Result<Vec<(ActorRef, ActorSessionContext)>, ActorRegistryError> {
+    let mut pending = vec![root];
+    let mut contexts = Vec::new();
+    while let Some(actor) = pending.pop() {
+        let actor_entry = entry(state, actor)?;
+        pending.extend(actor_entry.children.iter().copied());
+        contexts.push((actor, session_context_for(actor, actor_entry)));
+    }
+    Ok(contexts)
+}
+
+fn session_context_for(actor: ActorRef, entry: &ActorEntry) -> ActorSessionContext {
+    ActorSessionContext {
+        actor,
+        placement: entry.descriptor.placement,
+        effect_policy: entry.descriptor.effect_policy,
+        live_payload: entry.descriptor.live_payload,
+        source_imports: entry.descriptor.source_imports.clone(),
     }
 }
 
@@ -1816,8 +1851,8 @@ mod tests {
         let sibling = registry
             .publish_ready(sibling_starting)
             .expect("publish sibling");
-        registry
-            .finish(
+        let cleanup = registry
+            .finish_for_cleanup(
                 root,
                 ActorTerminal {
                     kind: ActorExitKind::Completed,
@@ -1825,6 +1860,17 @@ mod tests {
                 },
             )
             .expect("finish root");
+        assert_eq!(
+            cleanup
+                .iter()
+                .map(|(actor, context)| {
+                    assert_eq!(*actor, context.actor);
+                    *actor
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root, child, sibling]),
+            "the terminal transition must atomically return every owned realm, including an already-terminal child"
+        );
         assert_eq!(registry.lifecycle(sibling), Ok(ActorLifecycle::Exited));
         assert_eq!(
             registry

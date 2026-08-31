@@ -50,14 +50,7 @@ where
         actor: ActorRef,
         terminal: ActorTerminal,
     ) -> Result<(), ResidentLifecycleError> {
-        let mut pending = vec![actor];
-        let mut actors = Vec::new();
-        while let Some(current) = pending.pop() {
-            pending.extend(self.registry.children(current)?);
-            actors.push((current, self.registry.session_context(current)?));
-        }
-
-        self.registry.finish(actor, terminal)?;
+        let actors = self.registry.finish_for_cleanup(actor, terminal)?;
 
         let mut first_error = None;
         for (current, context) in actors.into_iter().rev() {
