@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use crate::{ActorEvent, ActorEventRecord, ActorRef, ActorTerminal};
+use crate::{ActorEffectProfile, ActorEvent, ActorEventRecord, ActorRef, ActorTerminal};
 
 /// Presentation-neutral observability state folded from authoritative actor
 /// events. It is a view, never the source used for runtime admission.
@@ -9,6 +9,8 @@ pub struct ActorTimeline {
     pub actor: ActorRef,
     pub owner: Option<ActorRef>,
     pub label: String,
+    pub profile: ActorEffectProfile,
+    pub effect_stack: Vec<String>,
     pub lifecycle: TimelineLifecycle,
     pub model_messages: u64,
     pub haskell_batches: u64,
@@ -79,7 +81,13 @@ impl ActorTimelines {
     }
 
     fn apply(&mut self, record: &ActorEventRecord) -> Result<(), TimelineError> {
-        if let ActorEvent::Created { owner, label, .. } = &record.event {
+        if let ActorEvent::Created {
+            owner,
+            label,
+            profile,
+            effect_stack,
+        } = &record.event
+        {
             if self.actors.contains_key(&record.actor) {
                 return Err(TimelineError::DuplicateCreation(record.actor));
             }
@@ -96,6 +104,8 @@ impl ActorTimelines {
                     actor: record.actor,
                     owner: *owner,
                     label: label.clone(),
+                    profile: *profile,
+                    effect_stack: effect_stack.clone(),
                     lifecycle: TimelineLifecycle::Initializing,
                     model_messages: 0,
                     haskell_batches: 0,
@@ -188,8 +198,8 @@ fn event_name(event: &ActorEvent) -> &'static str {
 mod tests {
     use super::*;
     use crate::{
-        ActorDescriptor, ActorExitKind, ActorPlacement, ActorRegistry, ActorTerminal,
-        StartInitiator,
+        ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRegistry,
+        ActorTerminal, StartInitiator,
     };
     use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
 
@@ -207,7 +217,8 @@ mod tests {
                         resource_scope: RealmId::ROOT,
                         lexical_scope: ScopeId::ROOT,
                     },
-                ),
+                )
+                .with_profile(ActorEffectProfile::ReadOnly),
                 StartInitiator::Runtime,
             )
             .expect("start actor");
@@ -226,6 +237,8 @@ mod tests {
         let timelines = ActorTimelines::fold(&events).expect("fold events");
         let timeline = timelines.get(actor).expect("actor timeline");
         assert_eq!(timeline.label, "reviewer");
+        assert_eq!(timeline.profile, ActorEffectProfile::ReadOnly);
+        assert_eq!(timeline.effect_stack, ["Deliberate"]);
         assert_eq!(timeline.lifecycle, TimelineLifecycle::Exited);
         assert_eq!(
             timeline.terminal,

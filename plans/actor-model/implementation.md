@@ -141,7 +141,9 @@ This is the canonical status inventory for the plan.
 - Actor descriptors and creation events carry immutable `ReadWrite` or
   `ReadOnly` profile identity. The registry enforces the initial attenuation
   lattice before allocating a child identity: `ReadWrite` may preserve or
-  attenuate, while `ReadOnly` may only preserve `ReadOnly`.
+  attenuate, while `ReadOnly` may only preserve `ReadOnly`. The neutral actor
+  timeline retains profile and descriptive effect-stack metadata for
+  observability without using either for runtime authorization.
 
 ### Not landed
 
