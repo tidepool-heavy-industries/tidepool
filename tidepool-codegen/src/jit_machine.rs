@@ -2661,6 +2661,28 @@ impl JitEffectMachine {
         self.machine_state.deregister_persistent_root(slot.addr());
     }
 
+    /// Abandon a persistent root produced for a materialization that failed
+    /// BEFORE it entered the persistent binding table.
+    ///
+    /// This is deliberately separate from [`Self::retire_scope_root`]: there
+    /// is no retiring scope and no live [`BindingEntry`](crate::binding_table::BindingEntry)
+    /// here. The caller must establish all of the following:
+    ///
+    /// - `slot` is a registered persistent root minted for this machine;
+    /// - no `BindingEntry` contains it, and no [`ValueHandle`] holds it;
+    /// - this is its exactly-once abandonment.
+    ///
+    /// The caller witnesses the ledger decrement. This method leaves old-space
+    /// bytes allocated, exactly like scope retirement; it only removes the
+    /// slot from the GC trace list.
+    pub fn abandon_uncommitted_root(&mut self, slot: crate::old_space::RootSlot) {
+        debug_assert!(
+            !self.handle_holds_root(slot),
+            "an uncommitted root must not still be owned by a ValueHandle"
+        );
+        self.machine_state.deregister_persistent_root(slot.addr());
+    }
+
     /// Whether any LIVE [`ValueHandle`] still holds `slot` — the
     /// handle-registry half of [`Self::retire_scope_root`]'s sole-ownership
     /// clause, so a retirement site can debug-assert it rather than assume it.
@@ -3639,5 +3661,24 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn abandon_uncommitted_root_releases_its_ledger_entry() {
+        let (expr, table) = make_gc_forcing_setup(1);
+        let mut machine = JitEffectMachine::compile_session(&expr, &table, 2048)
+            .expect("compile session machine");
+        let mut slot: *mut u8 = std::ptr::null_mut();
+        unsafe {
+            machine.register_persistent_root(&mut slot as *mut *mut u8);
+        }
+        let root = unsafe { crate::old_space::RootSlot::new(&mut slot as *mut *mut u8) };
+        assert_eq!(machine.persistent_roots_count(), 1);
+        assert!(!machine.handle_holds_root(root));
+
+        machine.abandon_uncommitted_root(root);
+
+        assert_eq!(machine.persistent_roots_count(), 0);
     }
 }

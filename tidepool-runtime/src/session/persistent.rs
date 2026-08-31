@@ -1271,11 +1271,12 @@ impl PersistentSession {
         let count = entries.len();
         let roots_before = machine.persistent_roots_count();
         for entry in entries {
-            machine.retire_scope_root(entry.value.root());
+            machine.abandon_uncommitted_root(entry.value.root());
         }
+        let roots_after = machine.persistent_roots_count();
         debug_assert_eq!(
-            roots_before - machine.persistent_roots_count(),
-            count,
+            roots_before.checked_sub(roots_after),
+            Some(count),
             "every failed materialization entry must release exactly one persistent root"
         );
     }
