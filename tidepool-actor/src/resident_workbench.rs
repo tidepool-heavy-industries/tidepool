@@ -88,6 +88,14 @@ pub(crate) struct ResidentActorReadiness {
     hole: ResidentHole,
 }
 
+/// The only two suspensions the trusted V0 initialization driver settles.
+/// Other nominal effects will join this classifier when their actor-local
+/// interpreters land; they must never be mistaken for readiness.
+pub(crate) enum ResidentActorStartupStep {
+    Deliberate(crate::ResidentDeliberation),
+    Ready(ResidentActorReadiness),
+}
+
 impl<H, O> ResidentActorRunner<H, O> {
     #[must_use]
     pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {
@@ -383,12 +391,12 @@ where
             .await
     }
 
-    pub(crate) async fn capture_readiness(
+    pub(crate) async fn capture_startup_step(
         &self,
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
         actor_realm: RealmId,
-    ) -> Result<ResidentActorReadiness, ResidentActorWorkbenchError> {
+    ) -> Result<ResidentActorStartupStep, ResidentActorWorkbenchError> {
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "actor startup completed without reaching readiness".into(),
@@ -397,14 +405,29 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let constructor = request_constructor(&request, session.data_con_table());
-                if constructor.rsplit('.').next() != Some("ActorReadyWith")
-                    || session.parked_realm(&hole) != Some(actor_realm)
-                {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "actor startup expected private readiness in {actor_realm:?}, got {constructor}"
-                    )));
+                match constructor.rsplit('.').next() {
+                    Some("DeliberateWith") => {
+                        let table = session.data_con_table().clone();
+                        let deliberate = crate::ResidentDeliberation::capture(
+                            session,
+                            hole,
+                            &request,
+                            &table,
+                            actor_realm,
+                        )?;
+                        Ok(ResidentActorStartupStep::Deliberate(deliberate))
+                    }
+                    Some("ActorReadyWith")
+                        if session.parked_realm(&hole) == Some(actor_realm) =>
+                    {
+                        Ok(ResidentActorStartupStep::Ready(ResidentActorReadiness {
+                            hole,
+                        }))
+                    }
+                    _ => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "actor initialization suspended on unsupported `{constructor}` in {actor_realm:?}"
+                    ))),
                 }
-                Ok(ResidentActorReadiness { hole })
             })
             .await
     }

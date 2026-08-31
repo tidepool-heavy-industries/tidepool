@@ -96,9 +96,9 @@ This is the canonical status inventory for the plan.
 - The construction substrate exposes one public `ActorDefinition` ->
   `startActor` route. Its private sealing step materializes a content-addressed
   exact facade directly from the rooted entry's GHC provenance while capturing
-  the sole start suspension. A real GHC/JIT/provider vertical covers sealing, isolated
-  startup, one result-bearing session, realm-checked readiness, child completion,
-  and parent resume.
+  the sole start suspension. A real GHC/JIT/provider vertical covers sealing,
+  isolated startup with zero or multiple sequential result-bearing sessions,
+  realm-checked readiness, child completion, and parent resume.
 - Effect-schema metadata centrally curates authored constructors, supporting
   types, and helpers. The generated public shim and model-facing descriptions
   consume the same allowlists; internal Core retains the full nominal
@@ -120,8 +120,6 @@ This is the canonical status inventory for the plan.
 - full sealing validation for explicit model-visible value exports and
   shadow-drift/type-coherence probes beyond the landed nominal-head facade;
 - lifecycle advisories and typed shutdown execution;
-- initialization with zero or more `deliberate` calls; the landed vertical
-  currently proves exactly one;
 - model-authored dynamic definitions and internally sealed child deployments;
 - immutable live-binding snapshots or structural context fork;
 - the DevSwarm actor entry and deletion of the old selfharness path.
@@ -366,8 +364,7 @@ add a program-root registry beside the resident continuation machinery.
 4. run the rooted child entry, whose authored initialization action carries the
    typed startup value;
 5. service each sequential User-role result-bearing session through the Stage 2
-   executor until initialization returns (the landed proof currently covers
-   one);
+   executor until initialization returns;
 6. validate, while still unpublished, that installation parked the private
    readiness request in the child's own resource realm;
 7. publish readiness, settle the parent's start continuation with the exact

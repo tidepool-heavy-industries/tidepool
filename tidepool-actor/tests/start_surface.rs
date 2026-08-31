@@ -62,9 +62,16 @@ impl ModelProvider for ApprovesStartup {
         request: TurnRequest,
         _sink: Option<StreamSink>,
     ) -> Result<TurnResponse, ProviderError> {
-        self.requests.lock().push(request);
+        let mut requests = self.requests.lock();
+        let ordinal = requests.len();
+        requests.push(request);
+        drop(requests);
         Ok(TurnResponse {
-            text: "```haskell\ncomplete True\n```".into(),
+            text: match ordinal {
+                0 => "```haskell\ncomplete True\n```".into(),
+                1 => "```haskell\ncomplete (1 :: Int)\n```".into(),
+                _ => panic!("startup requested an unexpected third model session"),
+            },
             usage: Usage::default(),
             reasoning: None,
             reasoning_items: Vec::new(),
@@ -92,16 +99,27 @@ async fn public_start_uses_one_exact_resident_path() {
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().expect("session root");
     let source = r#"
-let workerDefinition :: ActorDefinition Int Maybe Int
+let idleDefinition :: ActorDefinition Int Maybe Int
+    idleDefinition =
+      ActorDefinition
+        "idle-worker"
+        (\seed -> pure seed)
+        (\_seed initial ->
+          (pure initial :: Eff '[Deliberate, ActorLocal Maybe Int] Int))
+
+    workerDefinition :: ActorDefinition Int Maybe Int
     workerDefinition =
       ActorDefinition
         "worker"
-        (\seed ->
-          deliberate "Approve the supplied seed." seed)
-        (\seed approved ->
-          (pure (if approved then seed + 1 else seed - 1)
+        (\seed -> do
+          approved <- deliberate "Approve the supplied seed." seed
+          adjustment <- deliberate "Choose the adjustment." seed
+          pure (approved, adjustment))
+        (\seed (approved, adjustment) ->
+          (pure (if approved then seed + adjustment else seed - adjustment)
             :: Eff '[Deliberate, ActorLocal Maybe Int] Int))
 in do
+    _ <- startActor idleDefinition 10
     _ <- startActor workerDefinition 41
     pure (7 :: Int)
 "#;
@@ -179,27 +197,50 @@ in do
         .capture_start(parent_context, start_outcome)
         .await
         .expect("capture and seal child entry");
-    let deliberations = ResidentDeliberationExecutor::new(Arc::clone(&machines), workbench_source);
+    let deliberations =
+        ResidentDeliberationExecutor::new(Arc::clone(&machines), workbench_source.clone());
     let starter = ResidentActorStarter::new(registry.clone(), runner, deliberations);
     let provider = ApprovesStartup {
         requests: Mutex::new(Vec::new()),
     };
 
-    let (parent_turn, child, parent_outcome) = starter
+    let (parent_turn, idle_child, parent_outcome) = starter
         .start(parent_turn, &provider, start, None)
         .await
         .expect("start sealed actor");
     assert_eq!(parent_turn.kind(), ActorTurnKind::Haskell);
+    assert_eq!(
+        registry
+            .descriptor(idle_child)
+            .expect("child descriptor")
+            .label(),
+        "idle-worker"
+    );
+    assert_eq!(provider.requests.lock().len(), 0);
+    assert_eq!(registry.lifecycle(idle_child), Ok(ActorLifecycle::Exited));
+
+    let capture_runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source);
+    let next_start = capture_runner
+        .capture_start(parent_turn.session_context(), parent_outcome)
+        .await
+        .expect("capture second child entry");
+    let (parent_turn, prompted_child, parent_outcome) = starter
+        .start(parent_turn, &provider, next_start, None)
+        .await
+        .expect("start actor with two prompted sessions");
     drop(parent_turn);
     assert_eq!(
         registry
-            .descriptor(child)
-            .expect("child descriptor")
+            .descriptor(prompted_child)
+            .expect("prompted child descriptor")
             .label(),
         "worker"
     );
-    assert_eq!(provider.requests.lock().len(), 1);
-    assert_eq!(registry.lifecycle(child), Ok(ActorLifecycle::Exited));
+    assert_eq!(provider.requests.lock().len(), 2);
+    assert_eq!(
+        registry.lifecycle(prompted_child),
+        Ok(ActorLifecycle::Exited)
+    );
     match parent_outcome {
         ResidentOutcome::Completed { result, .. } => {
             assert_eq!(result.to_json(), serde_json::json!(7));

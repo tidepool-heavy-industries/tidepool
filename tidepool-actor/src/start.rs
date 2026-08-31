@@ -18,6 +18,7 @@ use tidepool_runtime::session::{
 };
 
 use crate::generated::actor::ActorReq;
+use crate::resident_workbench::ResidentActorStartupStep;
 use crate::{
     ActorDescriptor, ActorExitKind, ActorRegistry, ActorRegistryError, ActorTerminal,
     ResidentActorRunner, ResidentActorWorkbenchError, ResidentDeliberationError,
@@ -184,42 +185,38 @@ where
         let child_context = self.registry.session_context(starting.actor())?;
 
         let startup_result = async {
-            let mut admitted = child_session.begin_startup_agent_session(&starting)?;
-            let first = self
+            let mut admitted = None;
+            let mut outcome = self
                 .runner
                 .run_rooted_entry(child_context.clone(), entry, child_realm)
                 .await?;
-            let deliberation = self
-                .runner
-                .capture_deliberation(child_context.clone(), first, child_realm)
-                .await?;
-            let ready = self
-                .deliberations
-                .resolve_admitted(&mut admitted, provider, deliberation, sink)
-                .await?;
+            let readiness = loop {
+                match self
+                    .runner
+                    .capture_startup_step(child_context.clone(), outcome, child_realm)
+                    .await?
+                {
+                    ResidentActorStartupStep::Deliberate(deliberation) => {
+                        let admitted = match admitted.as_mut() {
+                            Some(admitted) => admitted,
+                            None => admitted
+                                .insert(child_session.begin_startup_agent_session(&starting)?),
+                        };
+                        outcome = self
+                            .deliberations
+                            .resolve_admitted(admitted, provider, deliberation, sink.clone())
+                            .await?;
+                    }
+                    ResidentActorStartupStep::Ready(readiness) => break readiness,
+                }
+            };
             drop(admitted);
-            Ok::<_, ResidentActorStartError>(ready)
+            Ok::<_, ResidentActorStartError>(readiness)
         }
         .await;
 
         let readiness = match startup_result {
-            Ok(ready) => match self
-                .runner
-                .capture_readiness(child_context.clone(), ready, child_realm)
-                .await
-            {
-                Ok(readiness) => readiness,
-                Err(error) => {
-                    self.registry.abort_start(
-                        starting,
-                        ActorTerminal {
-                            kind: ActorExitKind::Failed,
-                            summary: error.to_string(),
-                        },
-                    )?;
-                    return Err(error.into());
-                }
-            },
+            Ok(readiness) => readiness,
             Err(error) => {
                 self.registry.abort_start(
                     starting,
