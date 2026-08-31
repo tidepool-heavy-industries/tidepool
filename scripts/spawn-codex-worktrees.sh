@@ -7,7 +7,8 @@ Usage: scripts/spawn-codex-worktrees.sh [options] WORKTREE...
 
 Open one tmux window with one Codex process per worktree, arranged in tiled
 panes. A WORKTREE may be a path or a name under .exo/worktrees. Every worktree
-must contain prompt.md.tmp.
+must contain prompt.md.tmp. Every worker reads the repository's shared
+scripts/codex-worktree-guidance.md before its parcel prompt.
 
 Options:
   --session NAME   tmux session to create/use (default: current session when
@@ -139,8 +140,11 @@ for item in "${requested[@]}"; do
   worktrees+=("$worktree")
 done
 
+guidance="$repo_root/scripts/codex-worktree-guidance.md"
+[[ -f $guidance ]] || die "missing shared worker guidance: $guidance"
+worker_prompt=$(printf 'read %s and prompt.md.tmp, then begin work; both are authoritative, with the narrower parcel prompt winning on conflicts' "$guidance")
 pane_command=$(printf 'exec codex --strict-config -m %q -c %q %q' \
-  "$model" "model_reasoning_effort=$effort" "read prompt.md.tmp and begin work")
+  "$model" "model_reasoning_effort=$effort" "$worker_prompt")
 
 if $dry_run; then
   printf 'session: %s\n' "${session:-<current-or-tidepool-codex>}"
