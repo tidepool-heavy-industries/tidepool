@@ -2051,6 +2051,40 @@ mod tests {
     }
 
     #[test]
+    fn wait_registration_hands_off_an_active_turn_without_an_admission_gap() {
+        let registry = ActorRegistry::new();
+        let waiter = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        let turn = registry
+            .begin_turn(waiter, ActorTurnKind::Haskell)
+            .expect("admit authored turn");
+
+        let wait = registry
+            .register_wait(waiter, target)
+            .expect("park before releasing authored turn");
+        assert!(matches!(
+            registry.begin_turn(waiter, ActorTurnKind::Haskell),
+            Err(ActorRegistryError::Busy {
+                actor,
+                active: ActorTurnKind::Haskell,
+            }) if actor == waiter
+        ));
+
+        drop(turn);
+        assert!(matches!(
+            registry.begin_turn(waiter, ActorTurnKind::Haskell),
+            Err(ActorRegistryError::Parked {
+                actor,
+                obligation: ParkedObligation::Wait(id),
+            }) if actor == waiter && id == wait.id()
+        ));
+        drop(wait);
+        registry
+            .begin_turn(waiter, ActorTurnKind::Haskell)
+            .expect("wait cancellation restores admission");
+    }
+
+    #[test]
     fn waits_and_calls_reject_cycles_across_both_obligation_kinds() {
         let registry = ActorRegistry::new();
         let first = ready_root(&registry);

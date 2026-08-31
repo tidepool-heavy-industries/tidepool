@@ -217,8 +217,11 @@ where
         let context = turn.session_context();
         let result: Result<ResidentWait, ResidentMailboxError> = async {
             let request = self.runner.capture_wait(context.clone(), outcome).await?;
-            drop(turn);
             let wait = crate::ActorWait::register_target(&self.registry, waiter, request.target)?;
+            // Establish the parked obligation while this exact Haskell turn
+            // still owns admission. Releasing first would allow another turn
+            // to enter the actor between suspension and wait registration.
+            drop(turn);
             Ok(ResidentWait {
                 waiter,
                 context,

@@ -112,7 +112,9 @@ This is the canonical status inventory for the plan.
 - Resident `awaitExit` now parks through the existing exact wait registry and
   resumes with terminal metadata only. A real mailbox-driven child fills its
   shared Haskell `ExitCell`, replies, exits, and is then observed with the same
-  typed value; no Rust exit-value store or second root registry exists.
+  typed value; no Rust exit-value store or second root registry exists. Wait
+  registration now takes over the active Haskell turn before that turn releases
+  admission, so suspension exposes no re-entry gap.
 - Shared resident-machine `checkout_wait` now provides one FIFO admission gate
   and notification channel per session. This is the actor runnable-segment
   queue and the existing harness checkout path at once; the former global
