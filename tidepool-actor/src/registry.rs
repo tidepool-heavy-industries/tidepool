@@ -250,6 +250,22 @@ pub(crate) struct ActorCleanup {
     pub(crate) shutdown: Option<RootCustody>,
 }
 
+/// Atomic custody transfer for every resident resource covered by one
+/// terminal subtree transition.
+pub(crate) struct ActorCleanupBatch {
+    actors: Vec<ActorCleanup>,
+}
+
+impl ActorCleanupBatch {
+    fn new(actors: Vec<ActorCleanup>) -> Self {
+        Self { actors }
+    }
+
+    pub(crate) fn into_actors(self) -> impl DoubleEndedIterator<Item = ActorCleanup> {
+        self.actors.into_iter()
+    }
+}
+
 struct QueuedMessage {
     id: MessageId,
     sender: ActorRef,
@@ -524,7 +540,7 @@ impl ActorRegistry {
         delivery: &mut MailboxDelivery,
         reply: Option<MailboxValue>,
         next: InstalledActorState,
-    ) -> Result<Option<ActorCleanup>, MailboxFailure> {
+    ) -> Result<Option<ActorCleanupBatch>, MailboxFailure> {
         let mut state = self.inner.state.lock();
         require_ready(&state, actor)?;
         let actor_entry = entry(&state, actor)?;
@@ -578,8 +594,9 @@ impl ActorRegistry {
                 Ok(None)
             }
             InstalledActorState::Completed(terminal) => {
-                exit_subtree(&mut state, actor, terminal)?;
-                Ok(Some(cleanup_for(&mut state, actor)?))
+                finish_subtree_for_cleanup(&mut state, actor, terminal)
+                    .map(Some)
+                    .map_err(Into::into)
             }
         }
     }
@@ -599,12 +616,12 @@ impl ActorRegistry {
         &self,
         mut starting: StartingActor,
         terminal: ActorTerminal,
-    ) -> Result<ActorCleanup, ActorRegistryError> {
+    ) -> Result<ActorCleanupBatch, ActorRegistryError> {
         self.validate_starting(&starting)?;
         let mut state = self.inner.state.lock();
         let actor = starting.actor;
         match entry(&state, actor)?.lifecycle {
-            ActorLifecycle::Initializing => exit_subtree(&mut state, actor, terminal)?,
+            ActorLifecycle::Initializing => {}
             ActorLifecycle::Ready => {
                 return Err(ActorRegistryError::AlreadyReady(starting.actor));
             }
@@ -612,8 +629,9 @@ impl ActorRegistry {
                 return Err(ActorRegistryError::Exited(starting.actor));
             }
         }
+        let cleanup = finish_subtree_for_cleanup(&mut state, actor, terminal)?;
         starting.armed = false;
-        cleanup_for(&mut state, actor)
+        Ok(cleanup)
     }
 
     /// Admit one serialized actor turn. Dropping the lease restores admission
@@ -1058,15 +1076,9 @@ impl ActorRegistry {
         &self,
         actor: ActorRef,
         terminal: ActorTerminal,
-    ) -> Result<Vec<ActorCleanup>, ActorRegistryError> {
+    ) -> Result<ActorCleanupBatch, ActorRegistryError> {
         let mut state = self.inner.state.lock();
-        entry(&state, actor)?;
-        let actors = owned_subtree_refs(&state, actor)?;
-        exit_subtree(&mut state, actor, terminal)?;
-        actors
-            .into_iter()
-            .map(|actor| cleanup_for(&mut state, actor))
-            .collect()
+        finish_subtree_for_cleanup(&mut state, actor, terminal)
     }
 
     pub fn lifecycle(&self, actor: ActorRef) -> Result<ActorLifecycle, ActorRegistryError> {
@@ -1437,6 +1449,24 @@ fn cleanup_for(
             .ok_or(ActorRegistryError::Exited(actor))?,
         shutdown: actor_entry.shutdown.take(),
     })
+}
+
+/// Linearize one terminal subtree transition and transfer custody of every
+/// resident resource covered by it. All runtime-owned termination paths use
+/// this helper so a recursively exited child cannot be omitted from cleanup.
+fn finish_subtree_for_cleanup(
+    state: &mut RegistryState,
+    actor: ActorRef,
+    terminal: ActorTerminal,
+) -> Result<ActorCleanupBatch, ActorRegistryError> {
+    entry(state, actor)?;
+    let actors = owned_subtree_refs(state, actor)?;
+    exit_subtree(state, actor, terminal)?;
+    actors
+        .into_iter()
+        .map(|actor| cleanup_for(state, actor))
+        .collect::<Result<Vec<_>, _>>()
+        .map(ActorCleanupBatch::new)
 }
 
 fn session_context_for(actor: ActorRef, entry: &ActorEntry) -> ActorSessionContext {
@@ -1947,6 +1977,7 @@ mod tests {
             .expect("finish root");
         assert_eq!(
             cleanup
+                .actors
                 .iter()
                 .map(|cleanup| {
                     assert_eq!(cleanup.actor, cleanup.context.actor);
@@ -2385,6 +2416,59 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn resident_completion_transfers_cleanup_for_the_entire_owned_subtree() {
+        let registry = ActorRegistry::new();
+        let caller = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        let child = ready_in(&registry, Some(target), "child", SessionId(1));
+        let mut ticket = registry
+            .call(caller, target, probe(SessionId(1)).0)
+            .expect("call");
+        let mut delivery = registry
+            .dequeue(target)
+            .expect("dequeue")
+            .expect("delivery");
+        let MailboxDelivery::Call(call) = &mut delivery else {
+            panic!("expected call");
+        };
+        drop(call.take_value());
+
+        let cleanup = registry
+            .settle_resident_delivery(
+                target,
+                &mut delivery,
+                Some(probe(SessionId(1)).0),
+                InstalledActorState::Completed(ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "handler completed".into(),
+                }),
+            )
+            .expect("settle completed resident actor")
+            .expect("completed actor transfers a cleanup batch");
+
+        assert_eq!(
+            cleanup
+                .actors
+                .iter()
+                .map(|cleanup| cleanup.actor)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([target, child]),
+            "the terminal transition must transfer every recursively exited realm"
+        );
+        assert!(matches!(
+            registry.observe_exit(child),
+            Ok(ExitObservation::Exited(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                ..
+            }))
+        ));
+        let CallStatus::Reply(reply) = ticket.poll().expect("poll reply") else {
+            panic!("reply must remain observable");
+        };
+        drop(reply);
     }
 
     #[test]

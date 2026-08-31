@@ -65,23 +65,23 @@ where
         terminal: ActorTerminal,
     ) -> Result<(), ResidentLifecycleError> {
         let cleanup = self.registry.abort_start_for_cleanup(starting, terminal)?;
-        self.cleanup(vec![cleanup]).await
+        self.cleanup(cleanup).await
     }
 
     pub(crate) async fn cleanup_terminal(
         &self,
-        cleanup: crate::registry::ActorCleanup,
+        cleanup: crate::registry::ActorCleanupBatch,
     ) -> Result<(), ResidentLifecycleError> {
-        self.cleanup(vec![cleanup]).await
+        self.cleanup(cleanup).await
     }
 
     async fn cleanup(
         &self,
-        actors: Vec<crate::registry::ActorCleanup>,
+        actors: crate::registry::ActorCleanupBatch,
     ) -> Result<(), ResidentLifecycleError> {
         let mut first_shutdown_error = None;
         let mut first_cleanup_error = None;
-        for cleanup in actors.into_iter().rev() {
+        for cleanup in actors.into_actors().rev() {
             let realm = cleanup.context.placement.resource_scope;
             if let Some(shutdown) = cleanup.shutdown {
                 if let Err(source) = self

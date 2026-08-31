@@ -129,7 +129,8 @@ This is the canonical status inventory for the plan.
   critical section, then closes every captured actor realm, attempting the
   whole subtree even if one cleanup fails. A concurrently admitted child can
   therefore never be cancelled without its realm entering cleanup. Resident
-  continuation failures and failed/unpublishable startup use this path.
+  continuation failures, failed/unpublishable startup, and ordinary resident
+  mailbox completion use this same atomic cleanup-batch path.
 - The full Haskell `ActorDefinition` GADT selects `ReadWrite` or `ReadOnly`,
   carries exact child-visible exports, and installs one typed cooperative
   shutdown hook before readiness. The lifecycle owner runs hooks child-first
@@ -491,12 +492,14 @@ forced-cleanup, shutdown, or exit-value retention mechanism.
 The call/cancel/reply linearization cases are now pinned: caller cancellation
 after handler admission does not fail the callee, target exit before reply
 fails the exact call while delivery retains its request until released, and a
-reply published before target exit remains observable. Remaining acceptance
-covers the rest of queued-root teardown, stale incarnations, subtree
-termination, quiet normal completion, and shutdown that cannot obtain Haskell
-execution before the watchdog. The first real request/reply child vertical is
-landed; advisory inference is not a gate for proving application-message
-semantics.
+reply published before target exit remains observable. Normal resident
+completion now transfers one typed cleanup batch for the entire recursively
+terminated subtree; it cannot publish child exits while stranding their realms
+or shutdown hooks. Remaining acceptance covers cancellation while the startup
+future itself is being dropped, quiet normal completion, and shutdown that
+cannot obtain Haskell execution before the watchdog. The first real
+request/reply child vertical is landed; advisory inference is not a gate for
+proving application-message semantics.
 
 ## 8. Stage 5 — dynamic sealing and caller-checked authority
 
