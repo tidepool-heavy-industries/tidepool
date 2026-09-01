@@ -4,7 +4,7 @@
 //! stock interactive agent is attached to each installed Haskell MCP policy;
 //! tmux is process ownership and observability, never message transport.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1082,6 +1082,11 @@ async fn launch_prepared_interactive_application(
         let _ = std::fs::remove_dir_all(&socket_root);
         return Ok(None);
     }
+    let launch_environment = actor_launch_environment(
+        config.pane_environment.clone(),
+        proxy_environment,
+        actor == root,
+    );
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
@@ -1089,12 +1094,8 @@ async fn launch_prepared_interactive_application(
             cwd: workspace.clone(),
             program: command.program,
             args: command.args,
-            environment: {
-                let mut environment = config.pane_environment.clone();
-                environment.extend(proxy_environment);
-                environment
-            },
-            unset_environment: workspace_local_toolchain_pins(actor == root),
+            environment: launch_environment.set,
+            unset_environment: launch_environment.unset,
         }),
     )
     .await
@@ -1171,6 +1172,29 @@ fn workspace_local_toolchain_pins(is_root: bool) -> BTreeSet<String> {
     .into_iter()
     .map(str::to_owned)
     .collect()
+}
+
+struct ActorLaunchEnvironment {
+    set: BTreeMap<String, String>,
+    unset: BTreeSet<String>,
+}
+
+/// Compose the host environment and actor-local credentials before handing
+/// them to tmux. A worker's explicit unsets win over values captured from the
+/// root process; handing the same name to both tmux channels is ambiguous and
+/// rejected by the deployment adapter.
+fn actor_launch_environment(
+    mut inherited: BTreeMap<String, String>,
+    actor_local: BTreeMap<String, String>,
+    is_root: bool,
+) -> ActorLaunchEnvironment {
+    inherited.extend(actor_local);
+    let unset = workspace_local_toolchain_pins(is_root);
+    inherited.retain(|name, _| !unset.contains(name));
+    ActorLaunchEnvironment {
+        set: inherited,
+        unset,
+    }
 }
 
 async fn deliver_pending(
@@ -1593,8 +1617,20 @@ mod tests {
 
     #[test]
     fn worker_launch_unsets_source_checkout_extractor_pins() {
+        let launch = actor_launch_environment(
+            BTreeMap::from([
+                ("PATH".into(), "/bin".into()),
+                ("TIDEPOOL_EXTRACT".into(), "/source/tidepool-extract".into()),
+                (
+                    "TIDEPOOL_EXTRACT_WORKER".into(),
+                    "/source/tidepool-extract-worker".into(),
+                ),
+            ]),
+            BTreeMap::from([("TIDEPOOL_ACTOR_PROXY_ENDPOINT".into(), "socket".into())]),
+            false,
+        );
         assert_eq!(
-            workspace_local_toolchain_pins(false),
+            launch.unset,
             [
                 "TIDEPOOL_EXTRACT".to_string(),
                 "TIDEPOOL_EXTRACT_DAEMON_SOCKET".to_string(),
@@ -1603,11 +1639,32 @@ mod tests {
             .into_iter()
             .collect()
         );
+        assert_eq!(launch.set.get("PATH").map(String::as_str), Some("/bin"));
+        assert_eq!(
+            launch
+                .set
+                .get("TIDEPOOL_ACTOR_PROXY_ENDPOINT")
+                .map(String::as_str),
+            Some("socket")
+        );
+        assert!(launch
+            .unset
+            .iter()
+            .all(|name| !launch.set.contains_key(name)));
     }
 
     #[test]
     fn root_launch_retains_its_source_checkout_toolchain() {
-        assert!(workspace_local_toolchain_pins(true).is_empty());
+        let launch = actor_launch_environment(
+            BTreeMap::from([("TIDEPOOL_EXTRACT".into(), "/source/extract".into())]),
+            BTreeMap::new(),
+            true,
+        );
+        assert!(launch.unset.is_empty());
+        assert_eq!(
+            launch.set.get("TIDEPOOL_EXTRACT").map(String::as_str),
+            Some("/source/extract")
+        );
     }
 
     struct ScriptedPush {
