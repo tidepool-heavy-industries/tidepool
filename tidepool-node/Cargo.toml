@@ -14,8 +14,10 @@ description = "Durable delivery and proxy substrate for Tidepool actor nodes"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tidepool-actor.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "net"] }
 
 [dev-dependencies]
 tempfile.workspace = true

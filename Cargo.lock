@@ -4197,8 +4197,10 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tidepool-actor",
  "tidepool-atomic-write",
  "tidepool-repr",
+ "tokio",
 ]
 
 [[package]]
