@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::MonotonicIdIssuer;
 use tidepool_runtime::session::RootCustody;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::agent_session::AgentSessionState;
 use crate::mailbox::{InstalledActorState, InstalledReceiver};
@@ -142,6 +143,36 @@ pub enum ActorTurnKind {
     Mailbox,
 }
 
+/// Ephemeral, identity-only readiness emitted by registry state transitions.
+/// The registry remains authoritative: each wake tells the host which exact
+/// item to recheck and carries no lifecycle state or live-value custody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorRuntimeWake {
+    ActorReady { actor: ActorRef },
+    MailboxReady { actor: ActorRef },
+    CallReady { caller: ActorRef, call: CallId },
+    WaitReady { waiter: ActorRef, wait: WaitId },
+    ActorExited { actor: ActorRef },
+}
+
+/// The sole receiving end of an [`ActorRegistry`]'s ephemeral readiness
+/// stream. It is intentionally not clonable: scheduling has one owner.
+pub struct ActorRuntimeWakes {
+    receiver: UnboundedReceiver<ActorRuntimeWake>,
+}
+
+impl ActorRuntimeWakes {
+    pub async fn recv(&mut self) -> Option<ActorRuntimeWake> {
+        self.receiver.recv().await
+    }
+
+    /// Nonblocking host-loop probe. `None` means no wake is currently queued;
+    /// authoritative readiness must still be rechecked in the registry.
+    pub fn try_recv(&mut self) -> Option<ActorRuntimeWake> {
+        self.receiver.try_recv().ok()
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum ActorRegistryError {
     #[error("actor {0:?} is unknown")]
@@ -200,6 +231,8 @@ pub enum ActorRegistryError {
         expected: ActorTurnKind,
         active: Option<ActorTurnKind>,
     },
+    #[error("the actor runtime wake receiver has already been claimed")]
+    WakeReceiverClaimed,
 }
 
 /// Thread-safe ownership and lifecycle registry. It intentionally does not
@@ -225,6 +258,8 @@ struct RegistryState {
     waits: HashMap<WaitId, WaitEntry>,
     next_stream_sequence: u64,
     events: Vec<ActorEventRecord>,
+    wake_sender: Option<UnboundedSender<ActorRuntimeWake>>,
+    wake_receiver_claimed: bool,
 }
 
 struct ActorEntry {
@@ -352,6 +387,20 @@ impl ActorRegistry {
         }
     }
 
+    /// Claim the sole ephemeral runtime-wake stream for this registry.
+    /// Publication is disabled until this method is called, so registries
+    /// without a production host never accumulate an unread queue.
+    pub fn take_runtime_wakes(&self) -> Result<ActorRuntimeWakes, ActorRegistryError> {
+        let mut state = self.inner.state.lock();
+        if state.wake_receiver_claimed {
+            return Err(ActorRegistryError::WakeReceiverClaimed);
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        state.wake_sender = Some(sender);
+        state.wake_receiver_claimed = true;
+        Ok(ActorRuntimeWakes { receiver })
+    }
+
     /// Allocate an initializing actor. The returned token is deliberately not
     /// an `ActorRef`; callers publish a usable reference only after authored
     /// startup and installation have completed.
@@ -459,6 +508,7 @@ impl ActorRegistry {
             EventCausality::default(),
             ActorEvent::Ready,
         )?;
+        wake(&mut state, ActorRuntimeWake::ActorReady { actor });
         starting.armed = false;
         Ok(actor)
     }
@@ -590,7 +640,11 @@ impl ActorRegistry {
 
         match next {
             InstalledActorState::Receiving(receiver) => {
-                entry_mut(&mut state, actor)?.receiver = Some(receiver);
+                let actor_entry = entry_mut(&mut state, actor)?;
+                actor_entry.receiver = Some(receiver);
+                if !actor_entry.mailbox.is_empty() {
+                    wake(&mut state, ActorRuntimeWake::MailboxReady { actor });
+                }
                 Ok(None)
             }
             InstalledActorState::Completed(terminal) => {
@@ -747,14 +801,14 @@ impl ActorRegistry {
         let id = MessageId(self.inner.message_ids.next_raw());
         let mut state = self.inner.state.lock();
         validate_delivery(&state, caller, target, &value)?;
-        entry_mut(&mut state, target)?
-            .mailbox
-            .push_back(QueuedMessage {
-                id,
-                sender: caller,
-                value,
-                call: None,
-            });
+        let target_entry = entry_mut(&mut state, target)?;
+        let mailbox_was_empty = target_entry.mailbox.is_empty();
+        target_entry.mailbox.push_back(QueuedMessage {
+            id,
+            sender: caller,
+            value,
+            call: None,
+        });
         record(
             &mut state,
             target,
@@ -769,6 +823,9 @@ impl ActorRegistry {
                 kind: MailboxMessageKind::Cast,
             },
         )?;
+        if mailbox_was_empty {
+            wake(&mut state, ActorRuntimeWake::MailboxReady { actor: target });
+        }
         Ok(id)
     }
 
@@ -802,14 +859,14 @@ impl ActorRegistry {
             },
         );
         entry_mut(&mut state, caller)?.parked = Some(ParkedObligation::Call(call));
-        entry_mut(&mut state, target)?
-            .mailbox
-            .push_back(QueuedMessage {
-                id,
-                sender: caller,
-                value,
-                call: Some(call),
-            });
+        let target_entry = entry_mut(&mut state, target)?;
+        let mailbox_was_empty = target_entry.mailbox.is_empty();
+        target_entry.mailbox.push_back(QueuedMessage {
+            id,
+            sender: caller,
+            value,
+            call: Some(call),
+        });
         record(
             &mut state,
             target,
@@ -824,6 +881,9 @@ impl ActorRegistry {
                 kind: MailboxMessageKind::Call,
             },
         )?;
+        if mailbox_was_empty {
+            wake(&mut state, ActorRuntimeWake::MailboxReady { actor: target });
+        }
         Ok(CallTicket {
             id: call,
             caller,
@@ -991,6 +1051,9 @@ impl ActorRegistry {
             },
             ActorEvent::WaitRegistered { wait, waiter },
         )?;
+        if entry(&state, target)?.terminal.is_some() {
+            wake(&mut state, ActorRuntimeWake::WaitReady { waiter, wait });
+        }
         Ok(WaitTicket {
             id: wait,
             waiter,
@@ -1177,6 +1240,7 @@ impl ActorRegistry {
                 disposition: CallDisposition::DeliveryAbandoned,
             },
         );
+        wake(&mut state, ActorRuntimeWake::CallReady { caller, call });
     }
 }
 
@@ -1529,6 +1593,16 @@ fn record(
     Ok(())
 }
 
+fn wake(state: &mut RegistryState, item: ActorRuntimeWake) {
+    let disconnected = state
+        .wake_sender
+        .as_ref()
+        .is_some_and(|sender| sender.send(item).is_err());
+    if disconnected {
+        state.wake_sender = None;
+    }
+}
+
 fn exit_subtree(
     state: &mut RegistryState,
     actor: ActorRef,
@@ -1556,6 +1630,15 @@ fn exit_subtree(
             owner_observing,
         },
     )?;
+    wake(state, ActorRuntimeWake::ActorExited { actor });
+    let ready_waits: Vec<_> = state
+        .waits
+        .iter()
+        .filter_map(|(wait, entry)| (entry.target == actor).then_some((entry.waiter, *wait)))
+        .collect();
+    for (waiter, wait) in ready_waits {
+        wake(state, ActorRuntimeWake::WaitReady { waiter, wait });
+    }
     for child in children {
         exit_subtree(
             state,
@@ -1706,6 +1789,7 @@ fn settle_call_failure(
         },
         ActorEvent::CallSettled { call, disposition },
     );
+    wake(state, ActorRuntimeWake::CallReady { caller, call });
 }
 
 fn reply_call_in(
@@ -1748,6 +1832,7 @@ fn reply_call_in(
             disposition: CallDisposition::Replied,
         },
     )?;
+    wake(state, ActorRuntimeWake::CallReady { caller, call });
     Ok(())
 }
 
@@ -1772,6 +1857,155 @@ mod tests {
 
     fn ready_root(registry: &ActorRegistry) -> ActorRef {
         ready_in(registry, None, "root", SessionId(1))
+    }
+
+    #[test]
+    fn runtime_wake_receiver_is_unique_and_mailbox_bursts_are_level_triggered() {
+        let registry = ActorRegistry::new();
+        let mut wakes = registry.take_runtime_wakes().expect("claim wake stream");
+        assert!(matches!(
+            registry.take_runtime_wakes(),
+            Err(ActorRegistryError::WakeReceiverClaimed)
+        ));
+        let caller = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::ActorReady { actor: caller })
+        );
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::ActorReady { actor: target })
+        );
+
+        registry
+            .cast(
+                caller,
+                target,
+                MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0))),
+            )
+            .expect("accept cast");
+        registry
+            .cast(
+                caller,
+                target,
+                MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0))),
+            )
+            .expect("accept second cast");
+
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::MailboxReady { actor: target })
+        );
+        assert_eq!(wakes.try_recv(), None);
+    }
+
+    #[test]
+    fn call_and_wait_wakes_name_the_exact_parked_obligation() {
+        let registry = ActorRegistry::new();
+        let mut wakes = registry.take_runtime_wakes().expect("claim wake stream");
+        let caller = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        assert!(wakes.try_recv().is_some());
+        assert!(wakes.try_recv().is_some());
+
+        let call = registry
+            .call(
+                caller,
+                target,
+                MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0))),
+            )
+            .expect("accept call");
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::MailboxReady { actor: target })
+        );
+        let call_id = call.id();
+        let MailboxDelivery::Call(delivery) = registry
+            .dequeue(target)
+            .expect("dequeue call")
+            .expect("call delivery")
+        else {
+            panic!("expected call delivery");
+        };
+        delivery
+            .reply(MailboxValue::probe(
+                SessionId(1),
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .expect("reply");
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::CallReady {
+                caller,
+                call: call_id,
+            })
+        );
+        drop(call);
+
+        let waiter = ready_in(&registry, None, "waiter", SessionId(1));
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::ActorReady { actor: waiter })
+        );
+        let wait = registry
+            .register_wait(waiter, target)
+            .expect("register wait");
+        let wait_id = wait.id();
+        registry
+            .finish(
+                target,
+                ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "done".into(),
+                },
+            )
+            .expect("finish target");
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::ActorExited { actor: target })
+        );
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::WaitReady {
+                waiter,
+                wait: wait_id,
+            })
+        );
+    }
+
+    #[test]
+    fn wait_registered_after_exit_is_woken_without_a_scan() {
+        let registry = ActorRegistry::new();
+        let mut wakes = registry.take_runtime_wakes().expect("claim wake stream");
+        let waiter = ready_root(&registry);
+        let target = ready_in(&registry, None, "target", SessionId(1));
+        assert!(wakes.try_recv().is_some());
+        assert!(wakes.try_recv().is_some());
+        registry
+            .finish(
+                target,
+                ActorTerminal {
+                    kind: ActorExitKind::Failed,
+                    summary: "failed".into(),
+                },
+            )
+            .expect("finish target");
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::ActorExited { actor: target })
+        );
+
+        let wait = registry
+            .register_wait(waiter, target)
+            .expect("register retained wait");
+        assert_eq!(
+            wakes.try_recv(),
+            Some(ActorRuntimeWake::WaitReady {
+                waiter,
+                wait: wait.id(),
+            })
+        );
     }
 
     fn ready_in(

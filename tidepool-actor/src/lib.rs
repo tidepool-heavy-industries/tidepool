@@ -49,8 +49,9 @@ pub use mount::{
 };
 pub use profile::ActorEffectProfile;
 pub use registry::{
-    ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorTerminal,
-    ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor, TurnLease,
+    ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorRuntimeWake,
+    ActorRuntimeWakes, ActorTerminal, ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery,
+    StartingActor, TurnLease,
 };
 pub use resident_lifecycle::{
     ResidentActorLifecycle, ResidentLifecycleError, ResidentLifecyclePolicy,
