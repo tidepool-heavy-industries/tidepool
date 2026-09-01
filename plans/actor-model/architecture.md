@@ -133,6 +133,58 @@ parse process arguments, choose filesystem layouts, maintain actor registries,
 construct provider envelopes, assign identifiers, serialize internal values,
 or implement scheduling loops.
 
+### Self-hosting shape: iterative worktree hylomorphisms
+
+The intended coding-agent organization is an iterative hylomorphism over
+worktrees. This is the core Exomonad-style self-hosting shape, not merely an
+implementation technique for DevSwarm:
+
+1. **Unfold:** an actor turns a goal or work node into smaller typed actor
+   definitions, dependencies, worktree grants, and acceptance contracts.
+2. **Execute:** child actors work independently and return typed outcomes such
+   as commits, test receipts, review findings, questions, or rejected work.
+3. **Fold:** an owner reviews and integrates those outcomes into one coherent
+   branch and updated understanding of the problem.
+4. **Re-unfold:** the fold may expose a new boundary, delete planned work, or
+   produce a more precise next decomposition. The process repeats until the
+   root contract is satisfied.
+
+The complete tree need not exist in advance. An initial Haskell program may
+encode a detailed plan, a rough subsystem sketch, or only the next sound
+decision. A node may execute directly, translate written plan steps into
+child orchestration, refine an underspecified subsystem, discover work through
+inspection, or create another planner. The program writes the remainder of
+its organization as it unfolds.
+
+Conversely, self-writing is not a requirement to improvise. Well-understood
+work may be almost entirely preplanned: a parent supplies the dependency
+shape and acceptance criteria, subsystem actors expand only their local
+holes, and small leaves perform mechanical changes. Static structure and
+runtime discovery compose in the same tree.
+
+Intelligence is heterogeneous by node. Stronger model configurations are
+reserved for unresolved semantic boundaries, decomposition, and integration;
+small well-specified transformations can use cheaper configurations. Model
+selection and budgets are launch policy interpreted by Rust, while Haskell
+expresses the typed work structure and escalation points. A child can return
+an unresolved question instead of guessing, allowing its owner to refine the
+contract or launch a stronger successor.
+
+Git is the durable work substrate for coding actors, not their communication
+protocol. A granted worktree isolates a branch; a commit is a reviewable
+product that can travel in a typed exit; and joins are explicit integration
+decisions. Live actor messages still carry richer values, definitions,
+handles, and evidence. The actor ownership tree, planning tree, and Git
+branch tree may correspond for a particular job but are not required to be
+identical.
+
+Folds are hierarchical. A leaf can fold edits into one commit, a subsystem
+can fold several commits into a coherent branch, and a root can fold subsystem
+branches into the accepted revision. Each level receives compact typed
+outcomes and evidence rather than every descendant's complete conversation.
+Independent review operates at these join points and checks the exact
+candidate revision.
+
 ### Surface-selection rule
 
 The Rust kernel may be comprehensive; the Haskell DSL should not be. It is an

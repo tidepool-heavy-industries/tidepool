@@ -625,6 +625,28 @@ exits, and leave the owner to decide and integrate in ordinary Haskell. This
 vertical proves the host, provider, profile, grant, and supervision seams
 without waiting for structural fork or lifecycle advisories.
 
+Then prove the recursive organization rather than freezing DevSwarm into one
+precomputed fanout. The first self-hosting slice must support:
+
+- a partially preplanned subsystem tree with at least one node that refines
+  its own local plan;
+- worktree-backed microtasks whose typed exits carry exact commit and focused
+  verification receipts;
+- heterogeneous launch policy, with expensive reasoning used for a real
+  design or integration boundary and cheaper execution used for a bounded
+  mechanical leaf;
+- a reviewed fold that accepts or rejects child commits against their exact
+  revisions; and
+- a second unfold whose shape is chosen from the first fold's findings rather
+  than fixed before execution.
+
+This is an acceptance vertical, not a generic workflow algebra. Express its
+task and result types in ordinary Haskell, keep worktree allocation, Git
+operations, model selection, budgets, and cleanup behind Rust-interpreted
+launch capabilities, and extract reusable combinators only from the working
+program. The actor, planning, and Git trees must not be forced into one shared
+registry or node identity.
+
 `tidepool-agent` remains the only coding-backend package. Its `AgentId` is a
 backend-saga identity attached to an actor, not another lifecycle principal.
 `tidepool-worktree::AgentRef` should be renamed or narrowed when actor
@@ -708,6 +730,10 @@ The plan is complete when:
 
 - a real DevSwarm owner runs as a Haskell actor with a resident model and
   workbench;
+- it completes at least two adaptive unfold/fold rounds over worktree-backed
+  child actors, with the later decomposition derived from the earlier fold;
+- the same organization mixes preplanned structure, locally discovered work,
+  and heterogeneous model cost without changing actor semantics;
 - it can define, internally seal, fresh-spawn, call, supervise, and fork typed child
   actors;
 - actors exchange function-bearing values under caller-checked authority;

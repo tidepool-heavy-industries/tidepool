@@ -32,6 +32,13 @@ may produce typed values—often closures or actor
 definitions—which the fixed program can test, install, invoke, send, or
 retain for rollback.
 
+At the system level, those actors form an adaptive unfold/execute/fold loop
+over worktrees. The organization may begin as a detailed plan, a partial
+subsystem sketch, or a discovered next step; actors recursively refine it into
+heterogeneous child work, fold typed commits and evidence back upward, and
+then unfold again from what integration revealed. The canonical contract is
+[the architecture's self-hosting shape](architecture.md#self-hosting-shape-iterative-worktree-hylomorphisms).
+
 ## Accepted direction
 
 - An actor combines one accumulating model conversation, one persistent
