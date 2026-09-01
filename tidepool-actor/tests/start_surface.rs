@@ -99,6 +99,36 @@ struct BlocksDuringChildStartup {
     child_startup_entered: Notify,
 }
 
+struct PanicsDuringChildStartup {
+    requests: Mutex<usize>,
+}
+
+impl ModelProvider for PanicsDuringChildStartup {
+    async fn complete(
+        &self,
+        _request: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        let ordinal = {
+            let mut requests = self.requests.lock();
+            let ordinal = *requests;
+            *requests += 1;
+            ordinal
+        };
+        if ordinal == 0 {
+            return Ok(TurnResponse {
+                text: include_str!("start_surface/child_startup_response.hs")
+                    .trim_end()
+                    .into(),
+                usage: Usage::default(),
+                reasoning: None,
+                reasoning_items: Vec::new(),
+            });
+        }
+        panic!("injected child-startup provider panic")
+    }
+}
+
 impl ModelProvider for BlocksDuringChildStartup {
     async fn complete(
         &self,
@@ -290,6 +320,38 @@ async fn host_shutdown_cancels_provider_backed_child_startup_and_quiesces() {
         "{:#?}",
         shutdown.run.failures
     );
+}
+
+#[tokio::test]
+async fn child_startup_panic_fails_the_root_and_still_quiesces() {
+    let prepared = prepare_parent(96);
+    let provider = Arc::new(PanicsDuringChildStartup {
+        requests: Mutex::new(0),
+    });
+    let mut host = ResidentActorHost::new(
+        prepared.source,
+        provider,
+        None,
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    )
+    .expect("construct actor host");
+    let root = host
+        .launch_root(ResidentActorRoot::new(
+            prepared.descriptor,
+            prepared.machine,
+            prepared.outcome,
+        ))
+        .await
+        .expect("launch prepared root");
+
+    let report = host.run_until_idle().await.expect("drive failed startup");
+    assert_eq!(report.failures.len(), 1, "{:#?}", report.failures);
+    assert_eq!(report.exited, 1);
+    let shutdown = host.shutdown().await.expect("quiesce failed startup");
+    assert_eq!(shutdown.removed_sessions, 1);
+    assert_eq!(shutdown.terminal_roots.len(), 1);
+    assert_eq!(shutdown.terminal_roots[0].0, root);
+    assert_eq!(shutdown.terminal_roots[0].1.kind, ActorExitKind::Failed);
 }
 
 #[tokio::test]
