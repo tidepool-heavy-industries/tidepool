@@ -16,7 +16,8 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod actor_host;
 pub mod compile_report;
-pub mod prelude;
+pub mod haskell_sources;
+pub mod shoal;
 pub use tidepool_bridge as bridge;
 pub use tidepool_bridge_derive as bridge_derive;
 pub use tidepool_codegen as codegen;

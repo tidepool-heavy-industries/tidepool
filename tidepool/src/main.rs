@@ -133,10 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // file in, restart, done). Must run before any handler reads the env.
     server_common::load_secrets_logged();
 
-    let prelude_dir = tidepool::prelude::ensure_prelude()?;
+    let prelude_dir = tidepool::haskell_sources::ensure_stdlib()?;
 
     // `--write-toolchain-stamp`: record the pair and exit, before any server
-    // machinery starts. Deliberately runs AFTER `ensure_prelude` so the stamp
+    // machinery starts. Deliberately runs AFTER `ensure_stdlib` so the stamp
     // records exactly the stdlib a real startup would resolve.
     if args.write_toolchain_stamp {
         return write_toolchain_stamp(&prelude_dir);

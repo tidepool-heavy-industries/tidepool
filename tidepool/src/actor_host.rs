@@ -17,7 +17,8 @@ use tidepool_actor::{
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
-    InteractiveNodeLaunch, ReasoningEffort,
+    InteractiveAgentSpec, InteractiveLaunchMode, InteractiveMcpServer, InteractiveProxyBinding,
+    ReasoningEffort,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -34,7 +35,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tokio::net::UnixListener;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 const POLICY_MODULE: &str = "Tidepool.Actors.DevSwarm";
 const POLICY_ENTRY: &str = "rootPolicy";
@@ -43,10 +44,21 @@ const POLICY_EFFECTS: &str = "RootEffects";
 pub struct ActorHostConfig {
     pub workspace: PathBuf,
     pub policy_root: PathBuf,
-    pub node_program: String,
+    pub run_root: PathBuf,
+    pub root_binding_path: PathBuf,
+    pub proxy_program: String,
+    pub proxy_args: Vec<String>,
     pub tmux_session: String,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
+    pub root_launch_mode: InteractiveLaunchMode,
+    pub pane_environment: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActorHostReady {
+    pub root: ActorRef,
+    pub thread: BackendThreadId,
 }
 
 struct NoResidentProvider;
@@ -63,7 +75,7 @@ impl ModelProvider for NoResidentProvider {
     }
 }
 
-struct NodeDeployment {
+struct InteractiveDeployment {
     actor: ActorRef,
     pane: TmuxPaneId,
     thread: BackendThreadId,
@@ -73,20 +85,21 @@ struct NodeDeployment {
     socket_root: PathBuf,
 }
 
-struct NodeFleet {
+struct InteractiveFleet {
     registry: ActorRegistry,
     root: ActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
     tmux: TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
+    readiness: oneshot::Sender<ActorHostReady>,
 }
 
-pub async fn run(config: ActorHostConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let run_id = uuid::Uuid::new_v4();
-    let run_root = tidepool_runtime::paths::cache_dir()
-        .join("actor-host")
-        .join(run_id.to_string());
+pub async fn run(
+    config: ActorHostConfig,
+    readiness: oneshot::Sender<ActorHostReady>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
 
     let registry = ActorRegistry::new();
@@ -101,21 +114,27 @@ pub async fn run(config: ActorHostConfig) -> Result<(), Box<dyn std::error::Erro
     let deployments = host.take_deployments()?;
     let root_actor = host.launch_root(root).await?;
 
-    let tmux = TmuxSession::new(&config.tmux_session);
-    tmux.ensure().await?;
+    let tmux = TmuxSession::new(&config.tmux_session)?;
+    if !tmux.exists().await? {
+        return Err(runtime_error(format!(
+            "Shoal tmux session {:?} does not exist",
+            config.tmux_session
+        )));
+    }
     let backend = native_interactive_backend();
     let (shutdown, shutdown_rx) = watch::channel(false);
     let mut host_task =
         tokio::spawn(host.run_until_shutdown(wait_for_shutdown(shutdown_rx.clone())));
-    let mut nodes_task = tokio::spawn(run_nodes(
+    let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
-        NodeFleet {
+        InteractiveFleet {
             registry,
             root: root_actor,
             config,
             run_root,
             tmux,
             backend,
+            readiness,
         },
         shutdown_rx,
     ));
@@ -128,34 +147,34 @@ pub async fn run(config: ActorHostConfig) -> Result<(), Box<dyn std::error::Erro
                 tidepool_actor::ResidentActorHostError,
             >,
         ),
-        Nodes(Result<(), String>),
+        Applications(Result<(), String>),
     }
     let first = tokio::select! {
-        signal = tokio::signal::ctrl_c() => {
+        signal = operator_shutdown() => {
             signal?;
             FirstStop::Signal
         }
         result = &mut host_task => FirstStop::Host(result.map_err(join_error)?),
-        result = &mut nodes_task => FirstStop::Nodes(result.map_err(join_error)?),
+        result = &mut applications_task => FirstStop::Applications(result.map_err(join_error)?),
     };
     shutdown.send_replace(true);
 
     match first {
         FirstStop::Signal => {
             host_task.await.map_err(join_error)??;
-            nodes_task
+            applications_task
                 .await
                 .map_err(join_error)?
                 .map_err(runtime_error)?;
         }
         FirstStop::Host(result) => {
             result?;
-            nodes_task
+            applications_task
                 .await
                 .map_err(join_error)?
                 .map_err(runtime_error)?;
         }
-        FirstStop::Nodes(result) => {
+        FirstStop::Applications(result) => {
             result.map_err(runtime_error)?;
             host_task.await.map_err(join_error)??;
         }
@@ -184,7 +203,7 @@ fn compile_root(
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
     include.push(config.policy_root.clone());
-    include.push(crate::prelude::ensure_prelude()?);
+    include.push(crate::haskell_sources::ensure_stdlib()?);
     let preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble(&declarations, false),
         POLICY_MODULE,
@@ -249,19 +268,21 @@ fn compile_root(
     ))
 }
 
-async fn run_nodes(
+async fn run_interactive_applications(
     mut lifecycle: mpsc::UnboundedReceiver<ResidentActorDeployment>,
-    fleet: NodeFleet,
+    fleet: InteractiveFleet,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let NodeFleet {
+    let InteractiveFleet {
         registry,
         root,
         config,
         run_root,
         tmux,
         backend,
+        readiness,
     } = fleet;
+    let mut readiness = Some(readiness);
     let mut deployments = Vec::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
     let failure = loop {
@@ -271,10 +292,10 @@ async fn run_nodes(
             _ = health.tick() => {
                 if let Some(deployment) = deployments
                     .iter()
-                    .find(|deployment: &&NodeDeployment| deployment.service.is_finished())
+                    .find(|deployment: &&InteractiveDeployment| deployment.service.is_finished())
                 {
                     break Some(format!(
-                        "interactive node for actor {:?} exited before host shutdown",
+                        "interactive application for actor {:?} exited before host shutdown",
                         deployment.actor
                     ));
                 }
@@ -288,7 +309,7 @@ async fn run_nodes(
                 let Some(event) = event else { break None };
                 match event {
                     ResidentActorDeployment::PolicyInstalled(installation) => {
-                        match launch_node(
+                        match launch_interactive_application(
                             installation,
                             root,
                             &config,
@@ -296,7 +317,17 @@ async fn run_nodes(
                             &tmux,
                             Arc::clone(&backend),
                         ).await {
-                            Ok(deployment) => deployments.push(deployment),
+                            Ok(deployment) => {
+                                if deployment.actor == root {
+                                    if let Some(sender) = readiness.take() {
+                                        let _ = sender.send(ActorHostReady {
+                                            root,
+                                            thread: deployment.thread.clone(),
+                                        });
+                                    }
+                                }
+                                deployments.push(deployment);
+                            }
                             Err(error) => break Some(error),
                         }
                     }
@@ -311,9 +342,9 @@ async fn run_nodes(
                         ).await {
                             break Some(error);
                         }
-                        if let Some(index) = deployments.iter().position(|node| node.actor == actor) {
+                        if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
-                            if let Err(error) = retire_node(deployment, &tmux).await {
+                            if let Err(error) = retire_interactive_application(deployment, &tmux).await {
                                 break Some(error);
                             }
                         }
@@ -358,17 +389,17 @@ async fn run_nodes(
     }
 }
 
-async fn launch_node(
+async fn launch_interactive_application(
     installation: ResidentMcpInstallation,
     root: ActorRef,
     config: &ActorHostConfig,
     run_root: &Path,
     tmux: &TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
-) -> Result<NodeDeployment, String> {
+) -> Result<InteractiveDeployment, String> {
     let actor = installation.actor;
-    let node_root = run_root.join(format!("{}-{}", actor.id.0, actor.incarnation.0));
-    std::fs::create_dir_all(&node_root).map_err(|error| error.to_string())?;
+    let actor_root = run_root.join(format!("{}-{}", actor.id.0, actor.incarnation.0));
+    std::fs::create_dir_all(&actor_root).map_err(|error| error.to_string())?;
     let run_socket_id = run_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -383,23 +414,45 @@ async fn launch_node(
     let endpoint = socket_root.join("mcp.sock");
     let listener = UnixListener::bind(&endpoint).map_err(|error| error.to_string())?;
     let credential = NodeCredential(uuid::Uuid::new_v4().to_string());
-    let binding_path = node_root.join("binding.json");
+    let binding_path = if actor == root {
+        config.root_binding_path.clone()
+    } else {
+        actor_root.join("binding.json")
+    };
     let inbox = DurableInbox::<String>::open(
-        node_root.join("inbox.jsonl"),
-        node_root.join("inbox.cursor"),
+        actor_root.join("inbox.jsonl"),
+        actor_root.join("inbox.cursor"),
     )
     .map_err(|error| error.to_string())?;
-    let launch = InteractiveNodeLaunch {
+    let binding = InteractiveProxyBinding {
         actor,
         endpoint,
         credential: credential.clone(),
         binding_path: binding_path.clone(),
         workspace: config.workspace.clone(),
+    };
+    let launch_mode = if actor == root {
+        config.root_launch_mode.clone()
+    } else {
+        InteractiveLaunchMode::Fresh
+    };
+    let proxy_environment = binding.environment();
+    let spec = InteractiveAgentSpec {
+        mode: launch_mode,
         model: config.model.clone(),
         effort: config.effort,
         developer_instructions: developer_instructions(actor == root),
-        initial_prompt: initial_prompt(actor == root),
+        initial_prompt: Some(initial_prompt(actor == root)),
+        mcp: InteractiveMcpServer {
+            name: "tidepool_actor".into(),
+            command: config.proxy_program.clone(),
+            args: config.proxy_args.clone(),
+            cwd: config.workspace.to_string_lossy().into_owned(),
+            forward_env: proxy_environment.keys().cloned().collect(),
+            required: true,
+        },
     };
+    let command = backend.render(&spec).map_err(|error| error.to_string())?;
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
         .map_err(|error| error.to_string())?;
     let service = tokio::spawn(async move {
@@ -409,7 +462,7 @@ async fn launch_node(
                 return Err("actor identity does not match this endpoint".into());
             }
             if candidate.credential != credential {
-                return Err("node launch credential is invalid".into());
+                return Err("actor proxy credential is invalid".into());
             }
             Ok(())
         })
@@ -429,9 +482,13 @@ async fn launch_node(
         .spawn_window(&TmuxLaunch {
             window_name: format!("actor-{}-{}", actor.id.0, actor.incarnation.0),
             cwd: config.workspace.clone(),
-            program: config.node_program.clone(),
-            args: vec!["host".into()],
-            environment: launch.environment(),
+            program: command.program,
+            args: command.args,
+            environment: {
+                let mut environment = config.pane_environment.clone();
+                environment.extend(proxy_environment);
+                environment
+            },
         })
         .await
     {
@@ -447,25 +504,11 @@ async fn launch_node(
     let thread = match wait_for_binding(&binding_path, &service).await {
         Ok(thread) => thread,
         Err(error) => {
-            abandon_node(tmux, &pane, service, &socket_root).await;
+            abandon_interactive_application(tmux, &pane, service, &socket_root).await;
             return Err(error);
         }
     };
-    let initial = if actor == root {
-        "Runtime binding confirmed."
-    } else {
-        "Runtime binding confirmed; continue the typed startup assignment."
-    };
-    if let Err(error) = inbox.publish(initial.into()) {
-        abandon_node(tmux, &pane, service, &socket_root).await;
-        return Err(error.to_string());
-    }
-    if let Err(error) = deliver_pending(&inbox, &thread, backend.as_ref(), &config.workspace).await
-    {
-        abandon_node(tmux, &pane, service, &socket_root).await;
-        return Err(error);
-    }
-    Ok(NodeDeployment {
+    Ok(InteractiveDeployment {
         actor,
         pane,
         thread,
@@ -496,14 +539,14 @@ async fn deliver_pending(
 }
 
 async fn flush_inbox(
-    deployment: &NodeDeployment,
+    deployment: &InteractiveDeployment,
     backend: &dyn InteractiveAgentBackend,
     workspace: &Path,
 ) -> Result<(), String> {
     deliver_pending(&deployment.inbox, &deployment.thread, backend, workspace).await
 }
 
-fn record_delivery_result(deployment: &mut NodeDeployment, result: Result<(), String>) {
+fn record_delivery_result(deployment: &mut InteractiveDeployment, result: Result<(), String>) {
     match result {
         Ok(()) => {
             if deployment.last_delivery_error.take().is_some() {
@@ -523,14 +566,14 @@ async fn notify_owner(
     actor: ActorRef,
     terminal: &ActorTerminal,
     registry: &ActorRegistry,
-    deployments: &mut [NodeDeployment],
+    deployments: &mut [InteractiveDeployment],
     backend: &dyn InteractiveAgentBackend,
     workspace: &Path,
 ) -> Result<(), String> {
     let Some(owner) = registry.owner(actor).map_err(|error| error.to_string())? else {
         return Ok(());
     };
-    let Some(owner_node) = deployments.iter_mut().find(|node| node.actor == owner) else {
+    let Some(owner_application) = deployments.iter_mut().find(|app| app.actor == owner) else {
         return Ok(());
     };
     let descriptor = registry
@@ -547,16 +590,19 @@ async fn notify_owner(
         actor,
         terminal.summary
     );
-    owner_node
+    owner_application
         .inbox
         .publish(message)
         .map_err(|error| error.to_string())?;
-    let result = flush_inbox(owner_node, backend, workspace).await;
-    record_delivery_result(owner_node, result);
+    let result = flush_inbox(owner_application, backend, workspace).await;
+    record_delivery_result(owner_application, result);
     Ok(())
 }
 
-async fn retire_node(mut deployment: NodeDeployment, tmux: &TmuxSession) -> Result<(), String> {
+async fn retire_interactive_application(
+    mut deployment: InteractiveDeployment,
+    tmux: &TmuxSession,
+) -> Result<(), String> {
     tmux.kill_pane(&deployment.pane)
         .await
         .map_err(|error| format!("stop actor {:?}: {error}", deployment.actor))?;
@@ -575,7 +621,7 @@ async fn retire_node(mut deployment: NodeDeployment, tmux: &TmuxSession) -> Resu
     Ok(())
 }
 
-async fn abandon_node(
+async fn abandon_interactive_application(
     tmux: &TmuxSession,
     pane: &TmuxPaneId,
     service: tokio::task::JoinHandle<Result<(), String>>,
@@ -622,6 +668,25 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
+async fn operator_shutdown() -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+            _ = hangup.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
+}
+
 fn developer_instructions(root: bool) -> String {
     if root {
         "You are a Tidepool root actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Use them to start and collect supervised workers; Rust owns process and actor lifecycle. A child-exit wake is informational: collect the exact typed result through collect_worker."
@@ -660,7 +725,7 @@ mod tests {
     use super::*;
     use tidepool_actor::ResidentHostParkedKind;
     use tidepool_agent::{
-        AgentBackendError, InteractiveAgentProcess, InteractiveAgentSpec, InteractiveFuture,
+        AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };
     use tidepool_testing::eval_harness;
 
@@ -670,14 +735,12 @@ mod tests {
     }
 
     impl InteractiveAgentBackend for ScriptedPush {
-        fn launch(
+        fn render(
             &self,
-            _spec: InteractiveAgentSpec,
-        ) -> InteractiveFuture<'_, Box<dyn InteractiveAgentProcess>> {
-            Box::pin(async {
-                Err(AgentBackendError::ProtocolRejected {
-                    detail: "launch is outside this delivery test".into(),
-                })
+            _spec: &InteractiveAgentSpec,
+        ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+            Err(AgentBackendError::ProtocolRejected {
+                detail: "render is outside this delivery test".into(),
             })
         }
 
@@ -739,19 +802,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checked_in_devswarm_policy_installs_the_root_tool_surface() {
+    async fn bundled_devswarm_policy_installs_the_root_tool_surface() {
         eval_harness::require_extract();
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace root")
             .to_path_buf();
+        let runtime = tempfile::tempdir().unwrap();
         let config = ActorHostConfig {
-            policy_root: workspace.join("haskell/actors"),
+            policy_root: crate::haskell_sources::ensure_actor_policy().unwrap(),
             workspace,
-            node_program: "unused-in-compile-test".into(),
+            run_root: runtime.path().join("run"),
+            root_binding_path: runtime.path().join("root-binding.json"),
+            proxy_program: "unused-in-compile-test".into(),
+            proxy_args: vec!["proxy".into()],
             tmux_session: "unused-in-compile-test".into(),
             model: None,
             effort: None,
+            root_launch_mode: InteractiveLaunchMode::Fresh,
+            pane_environment: std::collections::BTreeMap::new(),
         };
         let session_root = tempfile::tempdir().expect("session root");
         let registry = ActorRegistry::new();

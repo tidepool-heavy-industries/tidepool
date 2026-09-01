@@ -112,6 +112,23 @@ The `tidepool` binary is an [MCP](https://modelcontextprotocol.io/) server that 
 }
 ```
 
+### 4. Start an actor ensemble with Shoal
+
+`cargo install tidepool` also installs `shoal`. With tmux, Codex, and the GHC
+toolchain available, start the bundled typed DevSwarm policy from any project:
+
+```bash
+shoal init
+```
+
+Shoal creates a `shoal-<project>` tmux session. One host process owns every
+resident Haskell actor; each interactive actor is an ordinary Codex TUI in its
+own pane. Detach with `Ctrl-b d`. Recreate the actor runtime while resuming the
+root Codex conversation with `shoal init --recreate`.
+
+Use `--no-attach` for headless startup; it prints the exact attach, host-log,
+status-file, and teardown commands.
+
 **Environment variables:**
 - `TIDEPOOL_EXTRACT` — path to the `tidepool-extract` binary (falls back to `tidepool-extract` on `$PATH`)
 - `TIDEPOOL_PRELUDE_DIR` — override the Haskell stdlib source root (normally embedded in the binary). Must point at a directory containing `Tidepool/Prelude.hs` — a set-but-invalid value is a hard startup error, not a silent fall-through.

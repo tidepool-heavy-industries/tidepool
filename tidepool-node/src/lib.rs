@@ -1,4 +1,4 @@
-//! Backend-neutral substrate for durable actor-node delivery and proxying.
+//! Backend-neutral substrate for durable interactive-actor delivery and proxying.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,4 +11,4 @@ pub use proxy::{
     accept_proxy, connect_proxy, proxy_stdio, NodeCredential, NodeHandshake, NodeProxyError,
     NODE_PROTOCOL_VERSION,
 };
-pub use tmux::{TmuxLaunch, TmuxNodeError, TmuxPaneId, TmuxSession};
+pub use tmux::{TmuxLaunch, TmuxNodeError, TmuxPaneId, TmuxSession, TmuxSessionName};

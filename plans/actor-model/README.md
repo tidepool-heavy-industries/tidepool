@@ -41,6 +41,11 @@ heterogeneous child work, fold typed commits and evidence back upward, and
 then unfold again from what integration revealed. The canonical contract is
 [the architecture's self-hosting shape](architecture.md#self-hosting-shape-iterative-worktree-hylomorphisms).
 
+The first production composition root is `shoal`: one host process owns the
+resident Haskell machine and every actor, while external Codex TUIs occupy
+tmux panes and connect through authenticated `shoal proxy` MCP children. This
+is deployment topology, not a second actor identity or scheduler.
+
 ## Accepted direction
 
 - An actor combines one persistent Haskell environment, one serial control

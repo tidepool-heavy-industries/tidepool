@@ -925,8 +925,8 @@ Implement this boundary in order:
    resumable rollout does not exist until the first user message; later input
    uses the durable inbox and native push path.
 
-   The checked-in `Tidepool.Actors.DevSwarm` policy and
-   `tidepool-actor-host` composition are landed. The root exposes typed
+   The bundled `Tidepool.Actors.DevSwarm` policy and `shoal host` composition
+   are landed. The root exposes typed
    stateful `actorStatus`, `spawnWorker`, `listWorkers`, and `collectWorker`
    tools. A spawned worker stabilizes at its own `serveTools` policy, is handed
    to deployment through the host's single-consumer lifecycle stream, exposes
@@ -935,33 +935,25 @@ Implement this boundary in order:
    MCP-routed `startActor`, child-policy installation, terminal MCP settlement,
    and exact typed collection without opening an interactive process.
 
-   The deployment path is also landed: bind an authenticated private proxy,
-   launch one `tidepool-agent-node host` per exact incarnation in tmux, validate
-   the rollout binding discovered by the MCP child, then deliver and acknowledge
-   one durable startup message through the backend's native push operation.
+   The deployment path binds an authenticated private proxy and launches Codex
+   directly in one tmux pane per interactive incarnation. Codex starts
+   `shoal proxy` as its stdio MCP child; there is no per-actor wrapper process.
+   The host validates the rollout binding discovered by that proxy. The one
+   launch-time User prompt starts a fresh or resumed interactive session;
+   subsequent lifecycle input uses the durable native push operation.
    Successful MCP settlement is linearized at the next stable policy boundary:
    another invocation await or typed actor completion. Ordered deployment
    retirement then notifies the owner through the same durable native push and
-   reaps the exact child node. Temporary push failure retains the unacknowledged
+   reaps the exact child pane. Temporary push failure retains the unacknowledged
    row for retry.
 
-   A bounded live stock-TUI run on Codex 0.149.0 passed on 2026-09-01. The root
-   called `actor_status`, accepted `spawn_worker`, and produced a second exact
-   actor pane. That worker discovered its own rollout, acknowledged its durable
-   startup message, called `current_assignment`, and performed the supplied
-   review in its own context. Ctrl-C removed both exact panes and reaped the
-   daemon/node processes.
-
-   The subsequent in-memory fold passed a second bounded live stock-TUI run on
-   Codex 0.149.0 with `gpt-5.6-terra` at medium effort on 2026-09-01. The root
-   started a keyed worker without doing its task, the worker read its typed
-   assignment, inspected `README.md`, and completed only through `finish_work`.
-   The root's blocking `collect_worker` returned the exact retained
-   `WorkCompleted (WorkerResult ...)`, removed the key from Haskell state, and
-   the worker pane was reaped. The independent owner wake arrived afterward
-   and a second collection returned `WorkerNotFound`, demonstrating that native
-   lifecycle input is informational and does not duplicate typed exit custody.
-   Ctrl-C then removed the root pane and reaped every daemon/node process.
+   `shoal init` owns the exact tmux session lifecycle and publishes typed
+   `Starting`, `Ready`, `Failed`, or `Exited` run status. `--recreate` creates a
+   new actor incarnation while resuming a valid retained root conversation;
+   child conversations remain fresh. Killing the tmux session tears down the
+   host, Codex panes, and proxy children as one operational unit. The exact
+   retained worker exit remains the Haskell policy's pull-based result; native
+   lifecycle delivery is informational and cannot duplicate that custody.
 
    Filesystem profile handlers, worktree grants, policy reload, and
    commit/evidence folding remain later work; the initial production machine

@@ -21,8 +21,8 @@ pub mod spawn;
 
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
-    InteractiveAgentBackend, InteractiveAgentProcess, InteractiveAgentSpec, InteractiveFuture,
-    InteractiveLaunchMode, InteractiveMcpServer, InteractiveNodeLaunch,
+    InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
+    InteractiveLaunchMode, InteractiveMcpServer, InteractiveProxyBinding,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -52,11 +52,10 @@ pub async fn read_interactive_binding(
         .map(|binding| binding.thread)
 }
 
-/// Run the installed interactive-agent MCP sidecar.
-///
-/// Backend vocabulary remains contained in its adapter; the small binary calls
-/// this neutral entry point and therefore does not learn the concrete backend.
-pub async fn run_interactive_node() -> Result<(), Box<dyn std::error::Error>> {
-    backend::codex::node::run_from_env().await?;
+/// Run the installed interactive-agent MCP proxy from its typed environment
+/// binding. The caller supplies the ordinary CLI subcommand boundary; this
+/// function never inspects process arguments.
+pub async fn run_interactive_proxy() -> Result<(), Box<dyn std::error::Error>> {
+    backend::codex::node::run_proxy_from_env().await?;
     Ok(())
 }

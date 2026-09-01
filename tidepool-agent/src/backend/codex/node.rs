@@ -5,92 +5,35 @@
 //! and reports it to Tidepool. Subsequent delivery uses the public queue
 //! command; no app-server impersonation or transcript mutation is involved.
 
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::interactive::{
-    ENV_NODE_ACTOR_ID, ENV_NODE_BINDING_PATH, ENV_NODE_CREDENTIAL, ENV_NODE_DEVELOPER_INSTRUCTIONS,
-    ENV_NODE_ENDPOINT, ENV_NODE_INCARNATION, ENV_NODE_INITIAL_PROMPT, ENV_NODE_MODEL,
-    ENV_NODE_REASONING_EFFORT, ENV_NODE_WORKSPACE,
+    ENV_ACTOR_BINDING_PATH, ENV_ACTOR_ID, ENV_ACTOR_INCARNATION, ENV_ACTOR_WORKSPACE,
+    ENV_PROXY_CREDENTIAL, ENV_PROXY_ENDPOINT,
 };
 use crate::{
-    AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentProcess,
+    AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, ReasoningEffort,
 };
 use tidepool_actor::{ActorId, ActorRef, Incarnation};
 use tidepool_node::{NodeCredential, NodeHandshake};
-
-/// Run either the pane-owning host or its stdio MCP child.
-pub async fn run_from_env() -> Result<(), AgentBackendError> {
-    match std::env::args().nth(1).as_deref() {
-        Some("host") => run_host_from_env().await,
-        Some("proxy") => run_sidecar_from_env().await,
-        Some(mode) => Err(AgentBackendError::ProtocolRejected {
-            detail: format!("unknown interactive node mode {mode:?}; expected `host` or `proxy`"),
-        }),
-        None => Err(AgentBackendError::ProtocolRejected {
-            detail: "interactive node mode is required (`host` or `proxy`)".into(),
-        }),
-    }
-}
-
-/// Own one stock Codex TUI for the lifetime of the surrounding tmux pane.
-async fn run_host_from_env() -> Result<(), AgentBackendError> {
-    let executable = std::env::current_exe()
-        .map_err(|error| unavailable("resolve interactive node executable", error))?;
-    let executable = executable
-        .to_str()
-        .ok_or_else(|| AgentBackendError::ProtocolRejected {
-            detail: "interactive node executable path is not UTF-8".into(),
-        })?
-        .to_string();
-    let workspace = required_env(ENV_NODE_WORKSPACE)?;
-    let effort = optional_effort()?;
-    let spec = InteractiveAgentSpec {
-        mode: InteractiveLaunchMode::Fresh,
-        cwd: workspace.clone(),
-        model: optional_env(ENV_NODE_MODEL),
-        effort,
-        developer_instructions: required_env(ENV_NODE_DEVELOPER_INSTRUCTIONS)?,
-        initial_prompt: Some(required_env(ENV_NODE_INITIAL_PROMPT)?),
-        mcp: crate::InteractiveMcpServer {
-            name: "tidepool_actor".into(),
-            command: executable,
-            args: vec!["proxy".into()],
-            cwd: workspace,
-            forward_env: vec![
-                ENV_NODE_ENDPOINT.into(),
-                ENV_NODE_ACTOR_ID.into(),
-                ENV_NODE_INCARNATION.into(),
-                ENV_NODE_CREDENTIAL.into(),
-                ENV_NODE_BINDING_PATH.into(),
-                ENV_NODE_WORKSPACE.into(),
-            ],
-            required: true,
-        },
-    };
-    let backend = CodexInteractiveBackend;
-    let mut process = backend.launch(spec).await?;
-    process.wait().await
-}
 
 /// Run the concrete stdio sidecar configured by the daemon-owned launch.
 ///
 /// Rollout discovery is a background task: the TUI may require MCP
 /// initialization before it creates its session file, so binding discovery
 /// must never delay or deadlock the MCP handshake.
-pub async fn run_sidecar_from_env() -> Result<(), AgentBackendError> {
-    let endpoint = required_path(ENV_NODE_ENDPOINT)?;
-    let binding_path = required_path(ENV_NODE_BINDING_PATH)?;
-    let workspace = required_path(ENV_NODE_WORKSPACE)?;
+pub async fn run_proxy_from_env() -> Result<(), AgentBackendError> {
+    let endpoint = required_path(ENV_PROXY_ENDPOINT)?;
+    let binding_path = required_path(ENV_ACTOR_BINDING_PATH)?;
+    let workspace = required_path(ENV_ACTOR_WORKSPACE)?;
     let actor = ActorRef {
-        id: ActorId(required_u64(ENV_NODE_ACTOR_ID)?),
-        incarnation: Incarnation(required_u64(ENV_NODE_INCARNATION)?),
+        id: ActorId(required_u64(ENV_ACTOR_ID)?),
+        incarnation: Incarnation(required_u64(ENV_ACTOR_INCARNATION)?),
     };
-    let credential = NodeCredential(required_env(ENV_NODE_CREDENTIAL)?);
+    let credential = NodeCredential(required_env(ENV_PROXY_CREDENTIAL)?);
     let handshake = NodeHandshake::current(actor, credential);
 
     let discovery = tokio::spawn(discover_and_bind(
@@ -122,28 +65,8 @@ async fn discover_and_bind(parent_pid: u32, cwd: PathBuf, binding_path: PathBuf)
 
 fn required_env(name: &'static str) -> Result<String, AgentBackendError> {
     std::env::var(name).map_err(|_| AgentBackendError::ProtocolRejected {
-        detail: format!("interactive node launch is missing {name}"),
+        detail: format!("interactive actor proxy is missing {name}"),
     })
-}
-
-fn optional_env(name: &'static str) -> Option<String> {
-    std::env::var(name).ok().filter(|value| !value.is_empty())
-}
-
-fn optional_effort() -> Result<Option<ReasoningEffort>, AgentBackendError> {
-    let Some(value) = optional_env(ENV_NODE_REASONING_EFFORT) else {
-        return Ok(None);
-    };
-    match value.as_str() {
-        "low" => Ok(Some(ReasoningEffort::Low)),
-        "medium" => Ok(Some(ReasoningEffort::Medium)),
-        "high" => Ok(Some(ReasoningEffort::High)),
-        _ => Err(AgentBackendError::ProtocolRejected {
-            detail: format!(
-                "interactive node has invalid {ENV_NODE_REASONING_EFFORT}={value:?}; expected low, medium, or high"
-            ),
-        }),
-    }
 }
 
 fn required_path(name: &'static str) -> Result<PathBuf, AgentBackendError> {
@@ -155,7 +78,7 @@ fn required_u64(name: &'static str) -> Result<u64, AgentBackendError> {
     value
         .parse()
         .map_err(|_| AgentBackendError::ProtocolRejected {
-            detail: format!("interactive node launch has invalid {name}={value:?}"),
+            detail: format!("interactive actor proxy has invalid {name}={value:?}"),
         })
 }
 
@@ -163,54 +86,12 @@ fn required_u64(name: &'static str) -> Result<u64, AgentBackendError> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexInteractiveBackend;
 
-struct CodexInteractiveProcess {
-    child: tokio::process::Child,
-}
-
-impl InteractiveAgentProcess for CodexInteractiveProcess {
-    fn wait(&mut self) -> InteractiveFuture<'_, ()> {
-        Box::pin(async move {
-            let status = self
-                .child
-                .wait()
-                .await
-                .map_err(|error| unavailable("wait for interactive process", error))?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(AgentBackendError::RunFailed {
-                    detail: format!("interactive process exited with {status}"),
-                })
-            }
-        })
-    }
-
-    fn shutdown(mut self: Box<Self>) -> InteractiveFuture<'static, ()> {
-        Box::pin(async move {
-            self.child
-                .start_kill()
-                .map_err(|error| unavailable("stop interactive process", error))?;
-            self.child
-                .wait()
-                .await
-                .map_err(|error| unavailable("reap interactive process", error))?;
-            Ok(())
-        })
-    }
-}
-
 impl InteractiveAgentBackend for CodexInteractiveBackend {
-    fn launch(
+    fn render(
         &self,
-        spec: InteractiveAgentSpec,
-    ) -> InteractiveFuture<'_, Box<dyn InteractiveAgentProcess>> {
-        Box::pin(async move {
-            let mut command = command_for(&spec)?;
-            let child = command
-                .spawn()
-                .map_err(|error| unavailable("launch interactive process", error))?;
-            Ok(Box::new(CodexInteractiveProcess { child }) as Box<dyn InteractiveAgentProcess>)
-        })
+        spec: &InteractiveAgentSpec,
+    ) -> Result<InteractiveAgentCommand, AgentBackendError> {
+        command_for(spec)
     }
 
     fn push<'a>(
@@ -231,7 +112,7 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     }
 }
 
-fn command_for(spec: &InteractiveAgentSpec) -> Result<Command, AgentBackendError> {
+fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, AgentBackendError> {
     validate_mcp_name(&spec.mcp.name)?;
     let mut command = Command::new("codex");
     match &spec.mode {
@@ -305,13 +186,14 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<Command, AgentBackendError
         command.arg(prompt);
     }
 
-    command
-        .current_dir(&spec.cwd)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    Ok(command)
+    Ok(InteractiveAgentCommand {
+        program: "codex".into(),
+        args: command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect(),
+    })
 }
 
 fn push_config_string(
@@ -609,27 +491,22 @@ mod tests {
     fn fresh_tui_launch_carries_startup_prompt_and_only_its_scoped_mcp_server() {
         let spec = InteractiveAgentSpec {
             mode: InteractiveLaunchMode::Fresh,
-            cwd: "/tmp/work".to_string(),
             model: Some("gpt-test".to_string()),
             effort: Some(ReasoningEffort::Medium),
             developer_instructions: "actor charter".to_string(),
             initial_prompt: Some("initialize through typed tools".to_string()),
             mcp: crate::InteractiveMcpServer {
                 name: "tidepool_actor".to_string(),
-                command: "tidepool-node".to_string(),
+                command: "/tmp/shoal".to_string(),
                 args: vec!["proxy".to_string()],
                 cwd: "/tmp/work".to_string(),
-                forward_env: vec!["TIDEPOOL_NODE_ENDPOINT".to_string()],
+                forward_env: vec!["TIDEPOOL_ACTOR_PROXY_ENDPOINT".to_string()],
                 required: true,
             },
         };
         let command = command_for(&spec).unwrap();
-        let args = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(command.as_std().get_program(), "codex");
+        let args = command.args;
+        assert_eq!(command.program, "codex");
         assert!(!args.iter().any(|arg| arg == "resume" || arg == "fork"));
         assert!(args
             .iter()
@@ -643,6 +520,12 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg.contains("mcp_servers.tidepool_actor.command")));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "mcp_servers.tidepool_actor.command=\"/tmp/shoal\""));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "mcp_servers.tidepool_actor.args=[\"proxy\"]"));
         assert!(args
             .iter()
             .any(|arg| arg.contains("developer_instructions")));
@@ -664,7 +547,6 @@ mod tests {
     fn mcp_name_cannot_escape_its_config_namespace() {
         let mut spec = InteractiveAgentSpec {
             mode: InteractiveLaunchMode::Fresh,
-            cwd: "/tmp/work".to_string(),
             model: None,
             effort: None,
             developer_instructions: String::new(),

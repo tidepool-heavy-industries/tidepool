@@ -1,4 +1,4 @@
-# Actor-node substrate
+# Interactive actor deployment substrate
 
 This crate owns backend-neutral mechanics at the boundary between a Tidepool
 actor and an external interactive agent process: durable pushed-message

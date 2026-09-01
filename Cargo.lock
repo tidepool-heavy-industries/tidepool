@@ -3842,6 +3842,7 @@ dependencies = [
  "tempfile",
  "tidepool-actor",
  "tidepool-agent",
+ "tidepool-atomic-write",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",
@@ -4214,6 +4215,7 @@ dependencies = [
  "tidepool-atomic-write",
  "tidepool-repr",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

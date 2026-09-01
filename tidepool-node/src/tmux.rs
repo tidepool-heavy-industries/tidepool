@@ -1,4 +1,4 @@
-//! Exact tmux-pane ownership for interactive actor nodes.
+//! Exact tmux-pane ownership for interactive actor applications.
 //!
 //! Tmux is a deployment and observability adapter here, never a message
 //! transport. Model input goes through the backend's supported push channel.
@@ -7,6 +7,45 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use tokio::process::Command;
+
+/// A tmux session name safe to use as an exact target.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TmuxSessionName(String);
+
+impl TmuxSessionName {
+    pub fn parse(value: impl Into<String>) -> Result<Self, TmuxNodeError> {
+        let value = value.into();
+        if !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            Ok(Self(value))
+        } else {
+            Err(TmuxNodeError::InvalidSessionName(value))
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for TmuxSessionName {
+    type Error = TmuxNodeError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<TmuxSessionName> for String {
+    fn from(value: TmuxSessionName) -> Self {
+        value.0
+    }
+}
 
 /// Stable tmux pane identity, immune to window names and base-index changes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -44,7 +83,7 @@ impl From<TmuxPaneId> for String {
     }
 }
 
-/// One actor-node process launched in a fresh tmux window.
+/// One interactive actor application launched in a fresh tmux window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxLaunch {
     pub window_name: String,
@@ -52,80 +91,123 @@ pub struct TmuxLaunch {
     pub program: String,
     pub args: Vec<String>,
     /// Values are passed with tmux's `-e`, never interpolated into the shell
-    /// command that starts the node host.
+    /// command that starts the application.
     pub environment: BTreeMap<String, String>,
 }
 
 /// A tmux session selected by name and optional dedicated server socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxSession {
-    name: String,
+    name: TmuxSessionName,
     socket: Option<String>,
 }
 
 impl TmuxSession {
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
+    pub fn new(name: impl Into<String>) -> Result<Self, TmuxNodeError> {
+        Ok(Self {
+            name: TmuxSessionName::parse(name)?,
             socket: None,
-        }
+        })
+    }
+
+    pub fn with_socket(
+        name: impl Into<String>,
+        socket: impl Into<String>,
+    ) -> Result<Self, TmuxNodeError> {
+        Ok(Self {
+            name: TmuxSessionName::parse(name)?,
+            socket: Some(socket.into()),
+        })
     }
 
     #[must_use]
-    pub fn with_socket(name: impl Into<String>, socket: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            socket: Some(socket.into()),
-        }
+    pub fn name(&self) -> &TmuxSessionName {
+        &self.name
     }
 
-    /// Ensure the named tmux session exists before actor windows are added.
-    pub async fn ensure(&self) -> Result<(), TmuxNodeError> {
-        let status = self
+    pub async fn exists(&self) -> Result<bool, TmuxNodeError> {
+        let output = self
             .command()
-            .args(["has-session", "-t", &self.name])
-            .status()
+            .args(["has-session", "-t", self.name.as_str()])
+            .output()
             .await
             .map_err(|source| TmuxNodeError::Io {
                 operation: "has-session",
                 source,
             })?;
-        if status.success() {
-            return Ok(());
-        }
+        Ok(output.status.success())
+    }
+
+    /// Create the session and run its initial process directly in the first
+    /// pane. Existing sessions are an error; callers choose recreation
+    /// explicitly rather than racing through an implicit ensure operation.
+    pub async fn create(&self, launch: &TmuxLaunch) -> Result<TmuxPaneId, TmuxNodeError> {
+        validate_launch(launch)?;
         let output = self
-            .command()
-            .args(["new-session", "-d", "-s", &self.name])
+            .create_command(launch)
             .output()
             .await
             .map_err(|source| TmuxNodeError::Io {
                 operation: "new-session",
                 source,
             })?;
-        if output.status.success() {
+        if !output.status.success() {
+            return Err(TmuxNodeError::Command {
+                operation: "new-session",
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        TmuxPaneId::parse(String::from_utf8_lossy(&output.stdout).trim())
+    }
+
+    /// Kill this exact session. Absence is already the desired state.
+    pub async fn kill(&self) -> Result<(), TmuxNodeError> {
+        if !self.exists().await? {
+            return Ok(());
+        }
+        let output = self
+            .command()
+            .args(["kill-session", "-t", self.name.as_str()])
+            .output()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "kill-session",
+                source,
+            })?;
+        if output.status.success() || !self.exists().await? {
             Ok(())
         } else {
-            // Another creator may have won the race between `has-session`
-            // and `new-session`; recheck before reporting failure.
-            let raced = self
-                .command()
-                .args(["has-session", "-t", &self.name])
-                .status()
-                .await
-                .map_err(|source| TmuxNodeError::Io {
-                    operation: "has-session",
-                    source,
-                })?;
-            if raced.success() {
-                Ok(())
-            } else {
-                Err(TmuxNodeError::Command {
-                    operation: "new-session",
-                    status: output.status,
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                })
-            }
+            Err(TmuxNodeError::Command {
+                operation: "kill-session",
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+
+    /// Enter the session from either a plain terminal or an existing tmux
+    /// client. This avoids tmux's nested-session refusal.
+    pub async fn attach_or_switch(&self) -> Result<(), TmuxNodeError> {
+        let operation = if std::env::var_os("TMUX").is_some() {
+            "switch-client"
+        } else {
+            "attach-session"
+        };
+        let status = self
+            .command()
+            .args([operation, "-t", self.name.as_str()])
+            .status()
+            .await
+            .map_err(|source| TmuxNodeError::Io { operation, source })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(TmuxNodeError::Command {
+                operation,
+                status,
+                stderr: "tmux did not attach or switch the client".into(),
+            })
         }
     }
 
@@ -150,6 +232,11 @@ impl TmuxSession {
     }
 
     pub async fn kill_pane(&self, pane: &TmuxPaneId) -> Result<(), TmuxNodeError> {
+        // Pane ids are server-global. Prove that this exact pane is still in
+        // the owned session before issuing a destructive tmux command.
+        if !self.contains_pane(pane).await? {
+            return Ok(());
+        }
         let output = self
             .command()
             .args(["kill-pane", "-t", pane.as_str()])
@@ -162,9 +249,9 @@ impl TmuxSession {
         if output.status.success() {
             Ok(())
         } else {
-            // Exact-pane teardown is idempotent: a process that already
-            // exited may have removed its pane before the owner reaps it.
-            if !self.list_panes().await?.contains(pane) {
+            // Exact-pane teardown is idempotent: a process that exits between
+            // the membership check and kill may remove its pane first.
+            if !self.contains_pane(pane).await? {
                 Ok(())
             } else {
                 Err(TmuxNodeError::Command {
@@ -179,7 +266,7 @@ impl TmuxSession {
     pub async fn list_panes(&self) -> Result<HashSet<TmuxPaneId>, TmuxNodeError> {
         let output = self
             .command()
-            .args(["list-panes", "-a", "-F", "#{pane_id}"])
+            .args(["list-panes", "-t", self.name.as_str(), "-F", "#{pane_id}"])
             .output()
             .await
             .map_err(|source| TmuxNodeError::Io {
@@ -200,6 +287,22 @@ impl TmuxSession {
             .collect()
     }
 
+    async fn contains_pane(&self, pane: &TmuxPaneId) -> Result<bool, TmuxNodeError> {
+        if !self.exists().await? {
+            return Ok(false);
+        }
+        match self.list_panes().await {
+            Ok(panes) => Ok(panes.contains(pane)),
+            Err(error) => {
+                if self.exists().await? {
+                    Err(error)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("tmux");
         if let Some(socket) = &self.socket {
@@ -214,7 +317,29 @@ impl TmuxSession {
             .arg("new-window")
             .arg("-d")
             .arg("-t")
-            .arg(&self.name)
+            .arg(self.name.as_str())
+            .arg("-n")
+            .arg(&launch.window_name)
+            .arg("-c")
+            .arg(&launch.cwd);
+        for (name, value) in &launch.environment {
+            command.arg("-e").arg(format!("{name}={value}"));
+        }
+        command
+            .arg("-P")
+            .arg("-F")
+            .arg("#{pane_id}")
+            .arg(render_shell_command(&launch.program, &launch.args));
+        command
+    }
+
+    fn create_command(&self, launch: &TmuxLaunch) -> Command {
+        let mut command = self.command();
+        command
+            .arg("new-session")
+            .arg("-d")
+            .arg("-s")
+            .arg(self.name.as_str())
             .arg("-n")
             .arg(&launch.window_name)
             .arg("-c")
@@ -236,16 +361,19 @@ fn validate_launch(launch: &TmuxLaunch) -> Result<(), TmuxNodeError> {
         return Err(TmuxNodeError::InvalidProgram);
     }
     for name in launch.environment.keys() {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || name.as_bytes()[0].is_ascii_digit()
-        {
+        if !valid_environment_name(name) {
             return Err(TmuxNodeError::InvalidEnvironmentName(name.clone()));
         }
     }
     Ok(())
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && !name.as_bytes()[0].is_ascii_digit()
 }
 
 fn render_shell_command(program: &str, args: &[String]) -> String {
@@ -262,11 +390,13 @@ fn quote_shell_word(value: &str) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TmuxNodeError {
+    #[error("invalid tmux session name {0:?}")]
+    InvalidSessionName(String),
     #[error("invalid tmux pane id {0:?}")]
     InvalidPaneId(String),
-    #[error("actor-node program is empty or contains NUL")]
+    #[error("tmux launch program is empty or contains NUL")]
     InvalidProgram,
-    #[error("invalid actor-node environment name {0:?}")]
+    #[error("invalid tmux launch environment name {0:?}")]
     InvalidEnvironmentName(String),
     #[error("tmux {operation} could not run: {source}")]
     Io {
@@ -312,7 +442,7 @@ mod tests {
             ]),
         };
         validate_launch(&launch).unwrap();
-        let session = TmuxSession::with_socket("swarm", "sock");
+        let session = TmuxSession::with_socket("swarm", "sock").unwrap();
         let command = session.spawn_window_command(&launch);
         let args = command
             .as_std()
@@ -345,5 +475,52 @@ mod tests {
             validate_launch(&launch),
             Err(TmuxNodeError::InvalidEnvironmentName(_))
         ));
+    }
+
+    #[test]
+    fn session_names_are_exact_validated_targets() {
+        assert_eq!(
+            TmuxSessionName::parse("shoal-tidepool_2").unwrap().as_str(),
+            "shoal-tidepool_2"
+        );
+        for invalid in ["", "has:target", "has.dot", "has space", "🐟"] {
+            assert!(TmuxSessionName::parse(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dedicated_socket_session_has_exact_create_and_kill_lifecycle() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let session = TmuxSession::with_socket(
+            format!("shoal_test_{}", &suffix[..8]),
+            format!("shoal-test-{}", &suffix[..8]),
+        )
+        .unwrap();
+        let neighbor = TmuxSession::with_socket(
+            format!("shoal_neighbor_{}", &suffix[..8]),
+            format!("shoal-test-{}", &suffix[..8]),
+        )
+        .unwrap();
+        let launch = TmuxLaunch {
+            window_name: "Host".into(),
+            cwd: std::env::temp_dir(),
+            program: "sleep".into(),
+            args: vec!["60".into()],
+            environment: BTreeMap::new(),
+        };
+
+        let pane = session.create(&launch).await.unwrap();
+        assert!(session.exists().await.unwrap());
+        assert!(session.list_panes().await.unwrap().contains(&pane));
+        assert!(session.create(&launch).await.is_err());
+
+        let foreign_pane = neighbor.create(&launch).await.unwrap();
+        session.kill_pane(&foreign_pane).await.unwrap();
+        assert!(neighbor.list_panes().await.unwrap().contains(&foreign_pane));
+
+        session.kill().await.unwrap();
+        assert!(!session.exists().await.unwrap());
+        session.kill().await.unwrap();
+        neighbor.kill().await.unwrap();
     }
 }

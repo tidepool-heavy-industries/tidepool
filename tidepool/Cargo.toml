@@ -16,6 +16,10 @@ name = "tidepool"
 path = "src/main.rs"
 
 [[bin]]
+name = "shoal"
+path = "src/bin/shoal.rs"
+
+[[bin]]
 name = "tidepool-selfharness"
 path = "src/bin/tidepool-selfharness.rs"
 
@@ -41,6 +45,7 @@ tidepool-agent.workspace = true
 tidepool-actor.workspace = true
 tidepool-model.workspace = true
 tidepool-node.workspace = true
+tidepool-atomic-write.workspace = true
 tidepool-web.workspace = true
 serde.workspace = true
 serde_json.workspace = true
