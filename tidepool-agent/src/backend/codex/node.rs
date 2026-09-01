@@ -184,6 +184,17 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, A
         spec.mcp.required.to_string(),
     );
     push_config_value(&mut command, &format!("{prefix}.enabled"), "true".into());
+    // This is the host-installed, actor-scoped control plane, not an
+    // arbitrary MCP server discovered from user configuration. Its endpoint
+    // is authenticated to the actor principal and Rust still enforces every
+    // operation. Codex has no human approval channel in this deployment
+    // (`approval_policy=never`), so leaving MCP approval in `auto` makes
+    // truthful mutating tools such as `spawn_worker` impossible to call.
+    push_config_string(
+        &mut command,
+        &format!("{prefix}.default_tools_approval_mode"),
+        "approve",
+    )?;
 
     if let Some(prompt) = &spec.initial_prompt {
         command.arg(prompt);
@@ -542,6 +553,9 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "mcp_servers.tidepool_actor.required=true"));
+        assert!(args.iter().any(|arg| {
+            arg == "mcp_servers.tidepool_actor.default_tools_approval_mode=\"approve\""
+        }));
         assert!(args
             .iter()
             .any(|arg| arg == "mcp_servers.tidepool_actor.env={}"));
