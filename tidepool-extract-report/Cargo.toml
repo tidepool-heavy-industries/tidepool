@@ -1,6 +1,6 @@
 [package]
 name = "tidepool-extract-report"
-description = "Typed response protocol for the Tidepool Haskell compiler worker"
+description = "Typed response and artifact protocols for the Tidepool Haskell compiler worker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,3 +13,4 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+blake3.workspace = true

@@ -8,10 +8,20 @@ use std::path::{Path, PathBuf};
 
 use tidepool_extract_cmd::{resolve_bin, BinSource, ExtractCmd, Launcher, ResolvedBin};
 
+const EXTRACT_COMPLETE_FILE: &str = ".tidepool-extract-complete";
 /// A resolved local `.hs` input: its canonicalized path and content.
 type HsDep = (PathBuf, Vec<u8>);
 /// A path that couldn't be read, paired with the underlying io error.
 type PathReadError = (PathBuf, std::io::Error);
+
+struct ExtractArtifact {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+struct ExtractArtifacts {
+    artifacts: Vec<ExtractArtifact>,
+}
 
 /// Expands the `haskell_eval!` macro.
 ///
@@ -149,9 +159,8 @@ fn resolve_hs_path(
     // local module transitively reachable from its `import`s (heuristic
     // textual resolution, not GHC's own module graph — see
     // `resolve_transitive_hs_deps`), the target binding, and the producer
-    // identity (see `extract_identity`). `run_tidepool_extract` publishes the
-    // dir with an atomic rename, so a partially-written dir is never visible
-    // under the final name.
+    // identity (see `extract_identity`). `run_tidepool_extract` validates the
+    // complete artifact set before publishing the dir with an atomic rename.
     let key = content_key(&src_bytes, binding_name.as_deref(), &deps);
     let dep_paths: Vec<PathBuf> = deps.into_iter().map(|(p, _)| p).collect();
     let output_dir = Path::new(&manifest_dir)
@@ -637,26 +646,14 @@ fn run_tidepool_extract(
     // The output dir name already encodes the resolved input set (entry file
     // plus every transitively resolved local import — see
     // `resolve_transitive_hs_deps`), the target, and the producer identity
-    // (see `extract_identity`), so reusing an existing dir is sound to the
-    // extent that key covers what the extractor actually reads; any gap is
-    // a heuristic-resolution miss, not an unkeyed input (see the callers'
-    // comments for what is and isn't covered). The publish rename below is
-    // atomic, so a partially-written dir is never visible under the final
-    // name. Concurrent expansions (e.g. `--all-targets` compiling a bin and
-    // its test harness in parallel) converge on one dir instead of
-    // clobbering a shared one.
-    if output_dir.exists() {
+    // (see `extract_identity`). A hit must additionally carry a valid
+    // completion manifest for every required, decodable artifact. The publish
+    // rename below is atomic, so a partially-written dir is never visible under
+    // the final name. Concurrent expansions converge on one validated dir.
+    let Some(tmp_path) = scratch_for_extract(output_dir, target)? else {
         return Ok(());
-    }
-    let tmp_dir = tmp_sibling(output_dir);
-    if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!(
-                "failed to clear stale tmp dir {}: {e}",
-                tmp_dir.display()
-            ));
-        }
-    }
+    };
+    let tmp_dir = ScratchDir(tmp_path);
 
     // $TIDEPOOL_EXTRACT (the same override every test tier honors) wins over
     // PATH — a repo with a freshly built extract must never be trumped by a
@@ -670,13 +667,16 @@ fn run_tidepool_extract(
     // The argument list is built ONCE and launched by whichever launcher wins
     // — the nix fallback below re-runs this same argv through
     // `Launcher::nix_run` instead of spelling every flag a second time.
-    cmd.input(hs_path).output_dir(&tmp_dir);
+    cmd.input(hs_path).output_dir(tmp_dir.path());
     if let Some(name) = target {
         cmd.target(name);
     }
 
     match cmd.run() {
-        Ok(run) if run.success() => return publish_extract_dir(&tmp_dir, output_dir),
+        Ok(run) if run.success() => {
+            prepare_extract_dir(tmp_dir.path(), target)?;
+            return publish_extract_dir(tmp_dir.path(), output_dir, target);
+        }
         Ok(run) => {
             // The binary ran and failed — this IS the diagnostic (a GHC type
             // error, a missing binding, ...). Surface it verbatim; falling
@@ -700,13 +700,15 @@ fn run_tidepool_extract(
         }
     }
 
-    // Fall back: find flake root and use nix run
     let flake_root = find_flake_root(manifest_dir).ok_or_else(|| {
         "tidepool-extract not found on PATH and no flake.nix in any parent directory".to_string()
     })?;
 
     match cmd.run_with(&Launcher::nix_run(&flake_root)) {
-        Ok(run) if run.success() => publish_extract_dir(&tmp_dir, output_dir),
+        Ok(run) if run.success() => {
+            prepare_extract_dir(tmp_dir.path(), target)?;
+            publish_extract_dir(tmp_dir.path(), output_dir, target)
+        }
         Ok(run) => Err(format!(
             "nix run tidepool-extract failed (exit {}):\n{}",
             run.output.status,
@@ -1031,28 +1033,290 @@ fn collect_include_dirs(
     Ok(out)
 }
 
-/// Per-process scratch sibling of a content-addressed dir. Keyed by pid so
-/// concurrent processes never share a scratch dir; a leftover from a killed
-/// build with the same pid is cleared before use.
-fn tmp_sibling(dir: &Path) -> PathBuf {
+/// A scratch sibling unique across processes and same-process macro expansions.
+fn unique_sibling(dir: &Path, role: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(0);
     let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("out");
-    dir.with_file_name(format!("{name}.tmp-{}", std::process::id()))
+    let sequence = NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed);
+    dir.with_file_name(format!("{name}.{role}-{}-{sequence}", std::process::id()))
+}
+
+/// Owns an unpublished extract directory. A successful publish renames the
+/// path away; every error path automatically removes whatever the extractor
+/// left behind.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = remove_cache_entry(&self.0);
+    }
+}
+
+fn remove_cache_entry(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn create_scratch(output_dir: &Path) -> Result<PathBuf, String> {
+    let parent = output_dir.parent().ok_or_else(|| {
+        format!(
+            "extract output has no parent directory: {}",
+            output_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| {
+        format!(
+            "failed to create extract cache parent {}: {e}",
+            parent.display()
+        )
+    })?;
+    loop {
+        let scratch = unique_sibling(output_dir, "tmp");
+        match std::fs::create_dir(&scratch) {
+            Ok(()) => return Ok(scratch),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "failed to reserve extract scratch directory {}: {e}",
+                    scratch.display()
+                ));
+            }
+        }
+    }
+}
+
+/// Return a private scratch directory for a miss, or `None` for a valid hit.
+/// Invalid entries are atomically moved aside before rebuilding. If another
+/// publisher replaced the entry between validation and rename, its valid
+/// directory is restored (or the still-present winner is used).
+fn scratch_for_extract(output_dir: &Path, target: Option<&str>) -> Result<Option<PathBuf>, String> {
+    loop {
+        if !output_dir.exists() {
+            return create_scratch(output_dir).map(Some);
+        }
+        if validate_extract_dir(output_dir, target).is_ok() {
+            return Ok(None);
+        }
+
+        let rejected = unique_sibling(output_dir, "rejected");
+        match std::fs::rename(output_dir, &rejected) {
+            Ok(()) => {
+                if validate_extract_dir(&rejected, target).is_ok() {
+                    match std::fs::rename(&rejected, output_dir) {
+                        Ok(()) => return Ok(None),
+                        Err(_) if validate_extract_dir(output_dir, target).is_ok() => {
+                            let _ = std::fs::remove_dir_all(&rejected);
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "failed to restore concurrent extract cache entry {}: {e}",
+                                output_dir.display()
+                            ));
+                        }
+                    }
+                }
+                remove_cache_entry(&rejected).map_err(|e| {
+                    format!(
+                        "failed to remove invalid extract cache entry {}: {e}",
+                        rejected.display()
+                    )
+                })?;
+                return create_scratch(output_dir).map(Some);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(format!(
+                    "failed to reject invalid extract cache entry {}: {e}",
+                    output_dir.display()
+                ));
+            }
+        }
+    }
 }
 
 /// Atomically publish a finished extract dir under its content-addressed
 /// name. Losing the rename race to another process is success — the winner
 /// published identical content.
-fn publish_extract_dir(tmp_dir: &Path, output_dir: &Path) -> Result<(), String> {
+fn publish_extract_dir(
+    tmp_dir: &Path,
+    output_dir: &Path,
+    target: Option<&str>,
+) -> Result<(), String> {
     match std::fs::rename(tmp_dir, output_dir) {
         Ok(()) => Ok(()),
         Err(_) if output_dir.exists() => {
             let _ = std::fs::remove_dir_all(tmp_dir);
-            Ok(())
+            validate_extract_dir(output_dir, target).map(|_| ())
         }
         Err(e) => Err(format!(
             "failed to publish extract output {}: {e}",
             output_dir.display()
         )),
+    }
+}
+
+/// Validate a successful extractor output and write its completion manifest last.
+/// The containing scratch directory is not published until this succeeds.
+fn prepare_extract_dir(dir: &Path, target: Option<&str>) -> Result<(), String> {
+    let validated = required_extract_artifacts(dir, target)?;
+    for artifact in &validated.artifacts {
+        validate_artifact(&artifact.name, &artifact.bytes)?;
+    }
+    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
+        validated
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.name.as_str(), Some(artifact.bytes.as_slice()))),
+    );
+    std::fs::write(dir.join(EXTRACT_COMPLETE_FILE), manifest.encode()).map_err(|e| {
+        format!(
+            "failed to write extract completion metadata in {}: {e}",
+            dir.display()
+        )
+    })
+}
+
+/// A hit is valid only when its manifest matches this expansion mode and every
+/// required artifact is readable, unchanged, and decodes at macro-expansion time.
+fn validate_extract_dir(dir: &Path, target: Option<&str>) -> Result<ExtractArtifacts, String> {
+    let manifest_path = dir.join(EXTRACT_COMPLETE_FILE);
+    let bytes = std::fs::read(&manifest_path).map_err(|e| {
+        format!(
+            "incomplete tidepool macro cache entry {}: cannot read {}: {e}",
+            dir.display(),
+            manifest_path.display()
+        )
+    })?;
+    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(&bytes)
+        .map_err(|error| {
+            format!(
+                "incompatible or corrupt tidepool macro cache completion metadata {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+    let validated = required_extract_artifacts(dir, target)?;
+    let expected_names: Vec<&str> = validated
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.name.as_str())
+        .collect();
+    let stored_names: Vec<&str> = manifest
+        .entries()
+        .iter()
+        .map(|entry| entry.name())
+        .collect();
+    if stored_names != expected_names {
+        return Err(format!(
+            "incomplete tidepool macro cache entry {}: artifact set does not match completion metadata",
+            dir.display()
+        ));
+    }
+    for (entry, artifact) in manifest.entries().iter().zip(&validated.artifacts) {
+        if !entry.matches(&artifact.bytes) {
+            return Err(format!(
+                "corrupt tidepool macro cache artifact: {}",
+                dir.join(&artifact.name).display()
+            ));
+        }
+        validate_artifact(&artifact.name, &artifact.bytes)?;
+    }
+    Ok(validated)
+}
+
+fn required_extract_artifacts(
+    dir: &Path,
+    target: Option<&str>,
+) -> Result<ExtractArtifacts, String> {
+    let mut names = vec!["meta.cbor".to_string()];
+    if let Some(target) = target {
+        names.push(format!("{target}.cbor"));
+        names.push("asks.json".to_string());
+    } else {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot enumerate extract output {}: {e}", dir.display()))?;
+        let mut bindings = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|e| format!("cannot enumerate extract output {}: {e}", dir.display()))?
+                .path();
+            if path.extension().is_some_and(|ext| ext == "cbor")
+                && path.file_name().is_some_and(|name| name != "meta.cbor")
+            {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        format!("extract artifact name is not UTF-8: {}", path.display())
+                    })?;
+                bindings.push(name.to_string());
+            }
+        }
+        bindings.sort();
+        if bindings.is_empty() {
+            return Err(format!(
+                "incomplete extract output {}: no binding .cbor was produced",
+                dir.display()
+            ));
+        }
+        let multiple = bindings.len() > 1;
+        for binding in bindings {
+            if multiple {
+                let base = binding
+                    .strip_suffix(".cbor")
+                    .ok_or_else(|| format!("invalid binding artifact name {binding}"))?;
+                names.push(format!("{base}.asks.json"));
+            } else {
+                names.push("asks.json".to_string());
+            }
+            names.push(binding);
+        }
+    }
+    names.sort();
+    let artifacts = names
+        .into_iter()
+        .map(|name| {
+            let path = dir.join(&name);
+            std::fs::read(&path)
+                .map(|bytes| (name, bytes))
+                .map_err(|e| {
+                    format!(
+                        "incomplete extract output: cannot read {}: {e}",
+                        path.display()
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(name, bytes)| ExtractArtifact { name, bytes })
+        .collect();
+    Ok(ExtractArtifacts { artifacts })
+}
+
+fn validate_artifact(name: &str, bytes: &[u8]) -> Result<(), String> {
+    if name == "meta.cbor" {
+        tidepool_repr::serial::read_metadata(bytes)
+            .map(|_| ())
+            .map_err(|e| format!("invalid extractor metadata {name}: {e}"))
+    } else if name.ends_with(".cbor") {
+        tidepool_repr::serial::read_cbor(bytes)
+            .map(|_| ())
+            .map_err(|e| format!("invalid extractor artifact {name}: {e}"))
+    } else if name.ends_with("asks.json") && bytes.is_empty() {
+        Err(format!("invalid extractor artifact {name}: empty file"))
+    } else {
+        Ok(())
     }
 }
 
@@ -1139,6 +1403,37 @@ fn find_single_binding(output_dir: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_extract_dir(label: &str, target: &str) -> PathBuf {
+        let dir = temp_dir(label);
+        write_valid_extract(&dir, target);
+        dir
+    }
+
+    fn write_valid_extract(dir: &Path, target: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../haskell/test/Identity_cbor");
+        std::fs::write(
+            dir.join(format!("{target}.cbor")),
+            std::fs::read(fixtures.join("identity.cbor")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("meta.cbor"),
+            std::fs::read(fixtures.join("meta.cbor")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("asks.json"), "[]").unwrap();
+    }
+
+    fn assert_cache_miss(dir: &Path, target: Option<&str>) {
+        let scratch = scratch_for_extract(dir, target)
+            .expect("cache lookup must succeed")
+            .expect("invalid cache entry must become a miss");
+        assert!(!dir.exists(), "invalid final entry must be removed");
+        assert!(scratch.is_dir(), "private scratch must be reserved");
+        assert_eq!(std::fs::read_dir(scratch).unwrap().count(), 0);
+    }
 
     /// Per-test scratch dir under the OS temp dir, unique by test label +
     /// pid + thread id (nextest gives each test its own process, but plain
@@ -1324,5 +1619,165 @@ mod tests {
             "the compile error must name the offending path, got: {rendered}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn completed_extract_directory_is_a_valid_hit() {
+        let dir = valid_extract_dir("complete-hit", "result");
+        prepare_extract_dir(&dir, Some("result")).unwrap();
+        assert!(validate_extract_dir(&dir, Some("result")).is_ok());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn missing_required_cbor_turns_a_completed_hit_into_a_miss() {
+        let dir = valid_extract_dir("missing-cbor", "result");
+        prepare_extract_dir(&dir, Some("result")).unwrap();
+        std::fs::remove_file(dir.join("result.cbor")).unwrap();
+        assert_cache_miss(&dir, Some("result"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn corrupt_cbor_turns_a_completed_hit_into_a_miss() {
+        let dir = valid_extract_dir("corrupt-cbor", "result");
+        prepare_extract_dir(&dir, Some("result")).unwrap();
+        std::fs::write(dir.join("result.cbor"), "bad").unwrap();
+        assert_cache_miss(&dir, Some("result"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn untargeted_mode_records_every_produced_binding() {
+        let dir = valid_extract_dir("untargeted", "identity");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../haskell/test/Identity_cbor");
+        std::fs::write(
+            dir.join("apply.cbor"),
+            std::fs::read(fixtures.join("apply.cbor")).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join("asks.json")).unwrap();
+        std::fs::write(dir.join("identity.asks.json"), "[]").unwrap();
+        std::fs::write(dir.join("apply.asks.json"), "[]").unwrap();
+        prepare_extract_dir(&dir, None).unwrap();
+        let validated = validate_extract_dir(&dir, None).unwrap();
+        for name in [
+            "identity.cbor",
+            "identity.asks.json",
+            "apply.cbor",
+            "apply.asks.json",
+        ] {
+            assert!(
+                validated
+                    .artifacts
+                    .iter()
+                    .any(|artifact| artifact.name == name),
+                "manifest omitted {name}"
+            );
+        }
+
+        std::fs::remove_file(dir.join("apply.asks.json")).unwrap();
+        assert!(validate_extract_dir(&dir, None).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn missing_or_corrupt_metadata_turns_a_completed_hit_into_a_miss() {
+        for (label, replacement) in [
+            ("missing-meta", None),
+            ("corrupt-meta", Some(b"bad".as_slice())),
+        ] {
+            let dir = valid_extract_dir(label, "result");
+            prepare_extract_dir(&dir, Some("result")).unwrap();
+            match replacement {
+                Some(bytes) => std::fs::write(dir.join("meta.cbor"), bytes).unwrap(),
+                None => std::fs::remove_file(dir.join("meta.cbor")).unwrap(),
+            }
+            assert_cache_miss(&dir, Some("result"));
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[test]
+    fn freshly_produced_invalid_artifacts_fail_before_publication() {
+        let dir = valid_extract_dir("fresh-invalid", "result");
+        std::fs::write(dir.join("meta.cbor"), "bad").unwrap();
+        assert!(prepare_extract_dir(&dir, Some("result")).is_err());
+        assert!(!dir.join(EXTRACT_COMPLETE_FILE).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn absent_corrupt_or_stale_completion_metadata_becomes_a_miss() {
+        let absent = valid_extract_dir("absent-completion", "result");
+        assert_cache_miss(&absent, Some("result"));
+        std::fs::remove_dir_all(absent).ok();
+
+        let corrupt = valid_extract_dir("corrupt-completion", "result");
+        prepare_extract_dir(&corrupt, Some("result")).unwrap();
+        std::fs::write(corrupt.join(EXTRACT_COMPLETE_FILE), "bad").unwrap();
+        assert_cache_miss(&corrupt, Some("result"));
+        std::fs::remove_dir_all(corrupt).ok();
+
+        let stale = valid_extract_dir("stale-completion", "result");
+        prepare_extract_dir(&stale, Some("result")).unwrap();
+        assert_cache_miss(&stale, Some("other"));
+        std::fs::remove_dir_all(stale).ok();
+    }
+
+    #[test]
+    fn interrupted_scratch_directory_is_never_a_hit() {
+        let final_dir = temp_dir("interrupted-final").join("final");
+        let scratch = unique_sibling(&final_dir, "tmp");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("result.cbor"), "partial").unwrap();
+        let next = scratch_for_extract(&final_dir, Some("result"))
+            .unwrap()
+            .expect("an unpublished scratch is still a miss");
+        assert_ne!(scratch, next, "same-process scratches must be unique");
+        std::fs::remove_dir_all(final_dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn failed_extract_cleans_its_private_scratch_directory() {
+        let path = temp_dir("scratch-cleanup");
+        {
+            let scratch = ScratchDir(path.clone());
+            std::fs::create_dir_all(scratch.path()).unwrap();
+            std::fs::write(scratch.path().join("partial"), "partial").unwrap();
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn concurrent_identical_publishers_converge_on_one_valid_directory() {
+        let root = temp_dir("concurrent-publish");
+        let final_dir = root.join("final");
+        let left = scratch_for_extract(&final_dir, Some("result"))
+            .unwrap()
+            .unwrap();
+        let right = scratch_for_extract(&final_dir, Some("result"))
+            .unwrap()
+            .unwrap();
+        assert_ne!(left, right);
+        write_valid_extract(&left, "result");
+        write_valid_extract(&right, "result");
+        prepare_extract_dir(&left, Some("result")).unwrap();
+        prepare_extract_dir(&right, Some("result")).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let publish = |scratch: PathBuf, barrier: std::sync::Arc<std::sync::Barrier>| {
+            let final_dir = final_dir.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                publish_extract_dir(&scratch, &final_dir, Some("result"))
+            })
+        };
+        let a = publish(left, barrier.clone());
+        let b = publish(right, barrier);
+        assert!(a.join().unwrap().is_ok());
+        assert!(b.join().unwrap().is_ok());
+        assert!(validate_extract_dir(&final_dir, Some("result")).is_ok());
+        std::fs::remove_dir_all(root).ok();
     }
 }

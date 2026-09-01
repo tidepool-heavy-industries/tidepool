@@ -1,9 +1,12 @@
-//! Typed stdout protocol emitted by the Tidepool Haskell compiler worker.
+//! Typed protocols emitted by the Tidepool Haskell compiler worker.
 //!
-//! This crate owns only the wire schema and strict decoding. Compilation
-//! policy, diagnostic rendering, and process-status interpretation belong to
-//! `tidepool-toolchain`; the procedural macro also consumes this schema but
-//! deliberately retains its own old-binary fallback policy.
+//! This crate owns the dependency-light wire products shared by independent
+//! extractor consumers: the stdout report and the integrity manifest for a
+//! completed artifact set. Compilation policy, cache layout, publication,
+//! diagnostic rendering, and process-status interpretation remain with each
+//! consumer.
+
+pub mod artifact_manifest;
 
 /// The diagnostics report version understood by this build.
 pub const REPORT_VERSION: u32 = 2;

@@ -773,9 +773,6 @@ fn fingerprint_dir_relative(root: &Path, hasher: &mut blake3::Hasher) {
     }
 }
 
-/// Manifest tag, so a truncated or foreign file cannot be read as a manifest.
-const ARTIFACT_MANIFEST_TAG: &[u8] = b"artifact-set-v1";
-
 /// Load a cached invocation's FULL artifact set, in the order `names` requests
 /// it. `Some(v)` only when the stored manifest names exactly `names`, in
 /// order, and every present artifact's bytes still hash to what the manifest
@@ -789,22 +786,24 @@ const ARTIFACT_MANIFEST_TAG: &[u8] = b"artifact-set-v1";
 pub fn artifacts_load(key: &InvocationKey, names: &[&str]) -> Option<Vec<Option<Vec<u8>>>> {
     let dir = cache_dir()?;
     let manifest = fs::read(dir.join(format!("{key}.ok"))).ok()?;
-    let entries = parse_manifest(&manifest)?;
+    let manifest =
+        tidepool_extract_report::artifact_manifest::ArtifactManifest::decode(&manifest).ok()?;
+    let entries = manifest.entries();
     if entries.len() != names.len() {
         return None;
     }
 
     let mut out = Vec::with_capacity(names.len());
-    for (i, (expected, (name, digest))) in names.iter().zip(entries.iter()).enumerate() {
-        if name.as_str() != *expected {
+    for (i, (expected, entry)) in names.iter().zip(entries.iter()).enumerate() {
+        if entry.name() != *expected {
             return None;
         }
-        let Some(digest) = digest else {
+        if entry.digest().is_none() {
             out.push(None);
             continue;
-        };
+        }
         let bytes = fs::read(dir.join(format!("{key}.a{i}"))).ok()?;
-        if blake3::hash(&bytes).as_bytes() != digest {
+        if !entry.matches(&bytes) {
             return None;
         }
         out.push(Some(bytes));
@@ -825,76 +824,24 @@ pub fn artifacts_store(key: &InvocationKey, artifacts: &[(&str, Option<&[u8]>)])
     let sentinel = dir.join(format!("{key}.ok"));
     let _ = fs::remove_file(&sentinel);
 
-    let mut manifest = Vec::new();
-    frame_bytes(&mut manifest, ARTIFACT_MANIFEST_TAG);
-    frame_bytes(&mut manifest, &(artifacts.len() as u64).to_le_bytes());
-    for (i, (name, bytes)) in artifacts.iter().enumerate() {
-        frame_bytes(&mut manifest, name.as_bytes());
-        match bytes {
-            Some(bytes) => {
-                use std::io::Write;
-                let Ok(mut tmp) = tempfile::NamedTempFile::new_in(&dir) else {
-                    return;
-                };
-                if tmp.write_all(bytes).is_err() {
-                    return;
-                }
-                if tmp.persist(dir.join(format!("{key}.a{i}"))).is_err() {
-                    return;
-                }
-                manifest.push(1u8);
-                frame_bytes(&mut manifest, blake3::hash(bytes).as_bytes());
+    for (i, (_, bytes)) in artifacts.iter().enumerate() {
+        if let Some(bytes) = bytes {
+            use std::io::Write;
+            let Ok(mut tmp) = tempfile::NamedTempFile::new_in(&dir) else {
+                return;
+            };
+            if tmp.write_all(bytes).is_err() {
+                return;
             }
-            None => manifest.push(0u8),
+            if tmp.persist(dir.join(format!("{key}.a{i}"))).is_err() {
+                return;
+            }
         }
     }
-    let _ = fs::write(&sentinel, &manifest);
-}
-
-/// Length-prefixed field into a byte buffer — the [`frame`] discipline, for
-/// the manifest rather than a hasher.
-fn frame_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    out.extend_from_slice(bytes);
-}
-
-/// Parse a manifest into `(name, Some(digest) | None)` entries. Any
-/// malformation — wrong tag, truncation, trailing bytes — is `None`, i.e. a
-/// miss.
-fn parse_manifest(bytes: &[u8]) -> Option<Vec<(String, Option<[u8; 32]>)>> {
-    let mut cur = 0usize;
-    if take_framed(bytes, &mut cur)? != ARTIFACT_MANIFEST_TAG {
-        return None;
-    }
-    let count = u64::from_le_bytes(take_framed(bytes, &mut cur)?.try_into().ok()?);
-    let count = usize::try_from(count).ok()?;
-    let mut out = Vec::with_capacity(count.min(1024));
-    for _ in 0..count {
-        let name = String::from_utf8(take_framed(bytes, &mut cur)?.to_vec()).ok()?;
-        let digest = match take(bytes, &mut cur, 1)?[0] {
-            0 => None,
-            1 => Some(<[u8; 32]>::try_from(take_framed(bytes, &mut cur)?).ok()?),
-            _ => return None,
-        };
-        out.push((name, digest));
-    }
-    // Trailing bytes mean this is not the manifest we wrote.
-    if cur != bytes.len() {
-        return None;
-    }
-    Some(out)
-}
-
-fn take<'a>(bytes: &'a [u8], cur: &mut usize, n: usize) -> Option<&'a [u8]> {
-    let end = cur.checked_add(n)?;
-    let slice = bytes.get(*cur..end)?;
-    *cur = end;
-    Some(slice)
-}
-
-fn take_framed<'a>(bytes: &'a [u8], cur: &mut usize) -> Option<&'a [u8]> {
-    let len = u64::from_le_bytes(take(bytes, cur, 8)?.try_into().ok()?);
-    take(bytes, cur, usize::try_from(len).ok()?)
+    let manifest = tidepool_extract_report::artifact_manifest::ArtifactManifest::from_artifacts(
+        artifacts.iter().map(|(name, bytes)| (*name, *bytes)),
+    );
+    let _ = tidepool_atomic_write::write_best_effort(&sentinel, &manifest.encode());
 }
 
 #[cfg(test)]
