@@ -989,6 +989,7 @@ async fn launch_prepared_interactive_application(
     let command = backend
         .render(&spec)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildCommand, error))?;
+    let command = command_for_workspace(command, actor == root);
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildPolicy, error))?;
     let service = tokio::spawn(async move {
@@ -1094,6 +1095,33 @@ async fn launch_prepared_interactive_application(
             expected: expected_resume,
         },
     }))
+}
+
+/// Worker worktrees must discover extractor binaries that match their own
+/// sources. The host's explicit extractor pins point at its source checkout
+/// and are therefore invalid across the worktree boundary. Root panes remain
+/// in that source checkout and retain the initiating environment unchanged.
+fn command_for_workspace(
+    command: tidepool_agent::InteractiveAgentCommand,
+    is_root: bool,
+) -> tidepool_agent::InteractiveAgentCommand {
+    if is_root {
+        return command;
+    }
+
+    let mut args = vec![
+        "-u".to_string(),
+        "TIDEPOOL_EXTRACT".to_string(),
+        "-u".to_string(),
+        "TIDEPOOL_EXTRACT_WORKER".to_string(),
+        "--".to_string(),
+        command.program,
+    ];
+    args.extend(command.args);
+    tidepool_agent::InteractiveAgentCommand {
+        program: "env".to_string(),
+        args,
+    }
 }
 
 async fn deliver_pending(
@@ -1506,6 +1534,41 @@ mod tests {
         assert!(resumed.contains("were not restored"));
         assert!(resumed.contains("WorkerPending is a cooperative yield signal"));
         assert!(resumed.contains("never sleep or repeatedly call collect_worker"));
+    }
+
+    #[test]
+    fn worker_launch_unsets_source_checkout_extractor_pins() {
+        let command = InteractiveAgentCommand {
+            program: "codex".into(),
+            args: vec!["resume".into(), "thread-id".into()],
+        };
+
+        assert_eq!(
+            command_for_workspace(command, false),
+            InteractiveAgentCommand {
+                program: "env".into(),
+                args: vec![
+                    "-u".into(),
+                    "TIDEPOOL_EXTRACT".into(),
+                    "-u".into(),
+                    "TIDEPOOL_EXTRACT_WORKER".into(),
+                    "--".into(),
+                    "codex".into(),
+                    "resume".into(),
+                    "thread-id".into(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn root_launch_retains_its_source_checkout_toolchain() {
+        let command = InteractiveAgentCommand {
+            program: "codex".into(),
+            args: vec!["resume".into(), "thread-id".into()],
+        };
+
+        assert_eq!(command_for_workspace(command.clone(), true), command);
     }
 
     struct ScriptedPush {
