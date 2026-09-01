@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tidepool_actor::{
-    ActorDescriptor, ActorPlacement, ActorRegistry, ActorWorkbenchSource, ResidentActorHost,
-    ResidentActorRoot, ResidentHostParkedKind, ResidentLifecyclePolicy,
+    ActorDescriptor, ActorPlacement, ActorRegistry, ActorWorkbenchSource, ResidentActorDeployment,
+    ResidentActorHost, ResidentActorRoot, ResidentHostParkedKind, ResidentLifecyclePolicy,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -88,7 +88,10 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
          data EchoOutput = EchoOutput {{ doubled :: Int }} deriving (Generic, ToJSON)\n\
          data SpawnInput = SpawnInput {{ seed :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data SpawnOutput = SpawnOutput {{ started :: Bool }} deriving (Generic, ToJSON)\n\
-         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput }} deriving (Generic)\n"
+         data StateInput = StateInput {{ next :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
+         data StateQuery = StateQuery deriving (Generic, FromJSON, JsonSchema)\n\
+         data StateOutput = StateOutput {{ current :: Int }} deriving (Generic, ToJSON)\n\
+         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput, currentValue :: mode :- Call StateQuery StateOutput, setValue :: mode :- Update StateInput StateOutput, finishValue :: mode :- Finish StateQuery StateOutput }} deriving (Generic)\n"
     );
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
@@ -154,10 +157,10 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         ResidentLifecyclePolicy::new(Duration::ZERO),
     )
     .expect("construct actor host");
-    let mut installations = host
-        .take_mcp_installations()
+    let mut deployments = host
+        .take_deployments()
         .expect("take deployment handoff stream");
-    assert!(host.take_mcp_installations().is_err());
+    assert!(host.take_deployments().is_err());
     let actor = host
         .launch_root(ResidentActorRoot::new(descriptor, machine, outcome))
         .await
@@ -168,9 +171,12 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         .expect("install resident policy");
     assert_eq!(report.parked[&ResidentHostParkedKind::McpPolicy], 1);
 
-    let installation = installations
+    let ResidentActorDeployment::PolicyInstalled(installation) = deployments
         .try_recv()
-        .expect("root policy is handed to deployment");
+        .expect("root policy is handed to deployment")
+    else {
+        panic!("root policy retired before installation");
+    };
     assert_eq!(installation.actor, actor);
     let policy = installation.policy;
     let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(policy)
@@ -213,6 +219,62 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         result.structured_content,
         Some(serde_json::json!({"started": true}))
     );
+    let ResidentActorDeployment::Retired {
+        actor: child,
+        terminal: child_terminal,
+    } = deployments
+        .try_recv()
+        .expect("a child without an MCP policy still retires")
+    else {
+        panic!("the completed child unexpectedly installed a policy");
+    };
+    assert_ne!(child, actor);
+    assert_eq!(
+        child_terminal.kind,
+        tidepool_actor::ActorExitKind::Completed
+    );
+
+    let arguments = serde_json::json!({"next": 23})
+        .as_object()
+        .expect("object arguments")
+        .clone();
+    let result = server
+        .dispatch_tool("set_value", arguments)
+        .await
+        .expect("dispatch state update");
+    assert_eq!(
+        result.structured_content,
+        Some(serde_json::json!({"current": 23}))
+    );
+    let result = server
+        .dispatch_tool("current_value", serde_json::Map::new())
+        .await
+        .expect("dispatch state read");
+    assert_eq!(
+        result.structured_content,
+        Some(serde_json::json!({"current": 23}))
+    );
+
+    let result = server
+        .dispatch_tool("finish_value", serde_json::Map::new())
+        .await
+        .expect("terminal tool reply settles");
+    assert_eq!(
+        result.structured_content,
+        Some(serde_json::json!({"current": 23}))
+    );
+    let ResidentActorDeployment::Retired {
+        actor: retired,
+        terminal,
+    } = tokio::time::timeout(Duration::from_secs(1), deployments.recv())
+        .await
+        .expect("deployment retirement timeout")
+        .expect("deployment stream remains open")
+    else {
+        panic!("policy was installed twice instead of retired");
+    };
+    assert_eq!(retired, actor);
+    assert_eq!(terminal.kind, tidepool_actor::ActorExitKind::Completed);
 
     request_shutdown.send(()).expect("request host shutdown");
     let shutdown = hosted

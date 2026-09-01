@@ -46,11 +46,10 @@ mailbox, terminal records, and event stream. A single incarnation may not
 silently change form; recreation is a new incarnation.
 
 For a resident actor, Haskell controls when to open a result-bearing agent
-session and fixes its result type. Rust may initiate a serialized advisory
-session for an abnormal lifecycle fact not already observed by Haskell. An
-agent-backed actor instead receives pushed runtime facts through its durable
-node inbox and invokes Haskell-authored operations through its actor-scoped MCP
-server. Rust does not create a second administrative API beside that program.
+session and fixes its result type. An agent-backed actor receives runtime facts
+through its durable node inbox and invokes Haskell-authored operations through
+its actor-scoped MCP server. Rust does not create a second administrative API
+or lifecycle session beside that program.
 
 ## 2. Actor components
 
@@ -70,7 +69,7 @@ inventory, not a required Rust struct layout.
 | capability grants | Owned, launch-derived, inherited, revoked, and fork-policy metadata |
 | runtime resource scope | Parked frames, handles, cancellation state, and live roots |
 | durable namespace | Explicit access to the existing JSON get/put backend |
-| supervision state | Lifecycle owner, children, terminal records, advisories, stop reason, and deadlines |
+| supervision state | Lifecycle owner, children, terminal records, owner-wake delivery, stop reason, and deadlines |
 
 The mailbox and Haskell program are sequential for one actor. Concurrency is
 expressed by several actors and asynchronous actor operations between them.
@@ -105,8 +104,8 @@ Actor admission changes phase; it is never reacquired recursively. If an
 admitted authored Haskell turn suspends on `deliberate`, the effect dispatcher
 transfers that same admission into the agent-session executor. Completion
 resumes the parked continuation under the same admission. Startup derives its
-first admission from the unpublished-start capability, while an advisory
-obtains one only at a quiescent owner boundary. The implementation may refine
+first admission from the unpublished-start capability. Backend-native owner
+wakes do not enter this scheduler or re-enter Haskell. The implementation may refine
 the current `TurnLease` into a phase-aware guard, but it must not add another
 lock or call `begin_turn` from inside an already-admitted turn.
 
@@ -242,15 +241,14 @@ operations; evaluating the actor's Haskell is not modeled as one.
 
 The common agent-session executor owns this response-to-block-to-resident-run
 loop. A session opened by `deliberate` carries one typed `Complete output`
-expectation; an advisory session carries no `Complete` effect and settles by
-acknowledging exact event keys. Initialization may open ordinary result-bearing
-sessions, but is not a third session kind. These settlement shapes do not grow
-separate parsers or execution engines.
+expectation. Initialization may open the same result-bearing session, but is
+not a second session kind. Lifecycle wake delivery is backend input, not
+another executor or completion shape.
 One admitted agent session owns the actor for the complete interaction: its
 provider rounds, ordered fenced-Haskell execution, transport retries, and
 corrective rounds. A provider response is only a borrowed round inside that
 session; completing or dropping the response does not create an interleaving
-point. Mailbox work, advisories, and another model interaction may begin only
+point. Mailbox work and another model interaction may begin only
 after the enclosing session settles or is abandoned.
 
 When `deliberate` opens a session from the actor program, the executor owns the
@@ -266,25 +264,36 @@ exact actor incarnation, per-actor sequence, ownership and causality context,
 and relevant turn, block, call, suspension, or terminal identity. The initial
 event vocabulary covers lifecycle, ownership, mailbox settlement, provider
 turns, extracted Haskell, compilation and execution, suspension and resumption,
-advisories, compaction, capability refusal, failures, and resource counters.
+native lifecycle delivery, compaction, capability refusal, failures, and
+resource counters.
 
 Events record authoritative facts, but the journal is not the mutable actor
 registry or a serialization of the live heap. Closures, continuations, roots,
 and mailboxes remain runtime-owned and appear only through opaque identities
 and lifecycle facts. Transcript reconstruction, ownership-tree views,
 per-actor timelines, streaming, usage accounting, and GUI presentation are
-folds over the neutral stream. Developer advisories are provider inputs derived
+folds over the neutral stream. Native owner notifications are delivery derived
 from runtime facts, not substitutes for the event record.
 
 ### Provider roles
 
-Rust appends actor lifecycle, ownership, tracking, fork, exit, and capability
-facts as Developer messages. Task prompts supplied by Haskell `deliberate`
-calls, including calls during initialization, use the User role. If a runtime
-fact changes during an active model round, Rust queues it for the next legal
-provider boundary. This
-is provider-context management, not a generated Haskell declaration or binding
-rewrite.
+Task prompts supplied by Haskell `deliberate`, including calls during
+initialization, use the User role. Runtime facts should use Developer context
+when the backend exposes that distinction. The stock Codex V0 instead uses its
+public native queue operation, whose role is backend-owned; the message is
+clearly identified as Tidepool lifecycle input. This is provider-context
+management, not a generated Haskell declaration or binding rewrite.
+
+Developer context is a high-authority policy and runtime-fact plane, not a
+generic notification bucket. Reserve it for Tidepool-attested invariants,
+actor identity and phase, exact declaration/type/binding receipts, capability
+constraints, and lifecycle facts; never use it for an ordinary delegated task
+or an unverified model claim. Prefer compact Haskell-shaped renderings when
+the fact belongs to the model's typed working world—for example `z :: Foo` or
+an immutable binding inventory—because they compose with its GHCi mental
+model. Such text describes trusted context but does not itself mutate the
+Haskell environment. Use an executable `haskell` fence only when the normal
+fenced-code path is deliberately meant to run it.
 
 A legal boundary starts a new provider response; Rust cannot inject a message
 into an inference already generating. The initial implementation sends the
@@ -354,7 +363,7 @@ rather than hang forever or silently run a second handler against actor-local
 state. That failure is Rust-owned lifecycle state, not a constructor added
 to the domain protocol.
 
-### Failure settlement and lifecycle advisory
+### Failure settlement and owner wake
 
 When an actor effect cannot complete, Rust classifies the concrete failure and
 consults the operation interpreter. The ordinary Haskell DSL neither receives
@@ -378,8 +387,8 @@ The second case does not synthesize an effect result or resume failed Haskell.
 The model may write a new fragment—perhaps starting a different child—because
 it is already inside the ordinary GHCi-style interaction. It is not a separate
 recovery or diagnostic protocol. The immutable `ActorExit` retains terminal
-program failure for exact `awaitExit`; an otherwise-unobserved abnormal exit
-advises the owner. No final inference session runs in a dying actor.
+program failure for exact `awaitExit`. No final inference session runs in a
+dying actor.
 
 The runtime never synthesizes the missing success value, retries through model
 judgment, nominates a replacement actor, or resumes an unsatisfiable
@@ -396,8 +405,8 @@ Normal target termination is not a failed `awaitExit`: it returns the retained
 `ActorExit exit`. Temporary failure while reading that exact terminal record
 is retried mechanically. A stale or invalid exact-incarnation reference is
 terminal; `awaitExit ref` never substitutes another actor, even one with the same
-`protocol` and `exit` types. After observing an exit, authored Haskell or an advisory
-session may explicitly start a successor.
+`protocol` and `exit` types. After observing an exit, authored Haskell or the
+agent operating it may explicitly start a successor.
 
 Long-lived or failure-prone delegated work should therefore use explicit
 supervision: start a child, observe its exact typed exit with `awaitExit`, and start
@@ -406,49 +415,26 @@ control flow assisted by the resident model, not transparent runtime replay.
 Synchronous `call` remains appropriate where target death genuinely makes the
 current obligation unsatisfiable.
 
-Advisory creation is linearized at the child's terminal transition. If the
-owner already has an active `awaitExit` for that exact child, the typed exit settles
-the wait and suppresses an advisory. If the owner has a pending call to that
-child, the call's terminal failure records the exit and suppresses a duplicate
-advisory; termination of the caller is independently visible to its owner.
-Otherwise an abnormal or unexpected exit creates exactly one advisory keyed by
-owner, child incarnation, and terminal sequence. A later `awaitExit` does not
-retract an advisory already created.
+Every child terminal transition publishes one informational lifecycle input
+to a live agent-backed owner. Completion, failure, and cancellation follow the
+same path; an active `awaitExit` does not suppress it. Delivery uses the node's
+durable inbox and backend-native wake operation, matching Exomonad's initial
+push model. Stock Codex therefore receives queued input through `codex queue`;
+a literal Developer-role injection remains backend-specific later hardening.
 
-The advisory runs at the next quiescent boundary. Its Developer message may
-cause the model to inspect state, start a successor, message another actor, or
-simply acknowledge it. Fenced Haskell may execute through the ordinary
-workbench under the owner's principal; what does not happen is resumption or
-re-entry of the owner's parked authored-program continuation. No heterogeneous
-Haskell lifecycle event is constructed. Normal completion and routine
-owner-requested cancellation are quiet.
+The notification contains exact actor identity, immutable label, exit kind,
+and summary, but it is not a Haskell event and cannot supply the typed result.
+The owner obtains authority-bearing data only through its retained `ActorRef`
+and `awaitExit`. The Haskell policy may then start a successor, collect a
+result, or ignore the fact in ordinary typed control flow.
 
-One actor still has at most one active agent session or other turn of any kind.
-Events arriving during inference are queued in order and may be coalesced into
-one factual Developer update.
-Events arriving during active Haskell execution wait until it parks or
-completes; the runtime never re-enters that session.
-
-Each advisory has a separate absolute budget of four provider responses.
-Exhaustion acknowledges and closes that advisory, records the condition, and
-returns the owner to normal scheduling; it never terminates the owner. Several
-events may share one presentation, but acknowledgment records the exact set of
-advisory keys and never collapses their identity. Events arriving during
-an advisory remain queued and may join its next presented batch.
-
-Provider failure follows the obligation it interrupted. After bounded
-transport retry, failure during a result-bearing agent session makes that
-continuation unsatisfiable and terminates the actor; failure during unpublished
-startup cleans up the child and terminates its caller. An advisory has no typed result
-obligation, so provider failure records and closes that advisory without
-killing the owner. None of these cases creates a second transcript or a hidden
-provider continuation.
-
-Result-bearing and advisory sessions run through one Rust-owned agent-session
-executor. The former uses a typed-completion obligation and the latter a keyed-
-acknowledgment obligation. These supply provider-role inputs, live bindings and
-actions, budgets, and settlement, but never separate provider loops, fenced-
-block runners, schedulers, or conversation paths.
+Delivery never re-enters a Haskell continuation. Input arriving during
+inference remains ordered in the durable inbox and is acknowledged only after
+the backend accepts the native push. A temporary delivery failure leaves the
+row pending for retry and never kills the owner. Provider failure inside a
+result-bearing resident session still follows the typed obligation it
+interrupted; lifecycle delivery does not create another provider executor,
+completion token, or recovery protocol.
 
 ## 6. Actor construction
 
@@ -761,11 +747,10 @@ exit variants around the successful payload. An abnormal or unexpected child
 exit never automatically kills its owner. Rust retains immutable terminal
 metadata for observation through `awaitExit (ActorRef protocol exit)`; a successful
 Haskell exit value remains in the managed cell shared by copies of that exact
-reference. Abnormal failure and forced or unexpected cancellation either
-settle an already-observing wait or call, or schedule the single keyed advisory
-defined above. Normal
-completion and routine owner-requested cancellation are quiet. Unexpected
-exits do not require a heterogeneous Haskell system-event type.
+reference. Calls and waits settle independently through their exact
+obligations. Every child terminal transition also publishes one informational
+native wake to a live agent-backed owner; this never requires a heterogeneous
+Haskell system-event type.
 
 `ActorRef` is conceptually a copyable routing identity paired with a shared,
 typed, single-assignment Haskell exit cell. Completion publishes the successful
@@ -780,8 +765,8 @@ target termination returns normally.
 
 When an owner terminates for any reason, Rust recursively terminates and reaps
 its owned subtree. This is a lifecycle rule, not failure propagation in the
-other direction: a child crash is retained for exact observation and, when not
-already observed, advises its owner. Detachment, reparenting, and adoption are
+other direction: every child exit is retained for exact observation and wakes
+its live agent-backed owner. Detachment, reparenting, and adoption are
 plausible later extensions but are absent from the initial API. Restart or an
 effect-stack change creates a new actor incarnation and a new `ActorRef`.
 
@@ -841,8 +826,9 @@ ultimate owner of every external resource.
     actor-local effect profile and interpreter policy. Rust routes by nominal
     request identity,
     never by union position or a duplicated effect-row ABI.
-14. Abnormal or unexpected child exit is observed through an active exact
-   obligation or one keyed advisory, and never kills the owner implicitly.
+14. Every child exit remains available through exact typed observation and
+   produces one informational native wake for a live agent-backed owner; it
+   never kills the owner implicitly.
 15. No actor reference escapes before startup readiness.
 16. Owner termination recursively terminates every actor in its owned subtree.
 17. Haskell enters a shared machine session only through its existing checkout;

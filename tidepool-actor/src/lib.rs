@@ -43,9 +43,9 @@ pub use executor::{
     run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
 };
 pub use host::{
-    ResidentActorHost, ResidentActorHostError, ResidentActorRoot, ResidentHostParkedKind,
-    ResidentHostRunReport, ResidentHostShutdownReport, ResidentHostTaskError,
-    ResidentMcpInstallation,
+    ResidentActorDeployment, ResidentActorHost, ResidentActorHostError, ResidentActorRoot,
+    ResidentHostParkedKind, ResidentHostRunReport, ResidentHostShutdownReport,
+    ResidentHostTaskError, ResidentMcpInstallation,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use mailbox::{

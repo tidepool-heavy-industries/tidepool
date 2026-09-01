@@ -60,8 +60,8 @@ pub enum ResidentActorHostError {
     DuplicateSession(tidepool_repr::SessionId),
     #[error("actor {0:?} already has owned host work")]
     DuplicateTask(ActorRef),
-    #[error("the resident MCP installation stream was already taken")]
-    McpInstallationsTaken,
+    #[error("the resident actor deployment stream was already taken")]
+    DeploymentsTaken,
     #[error(transparent)]
     Registry(#[from] ActorRegistryError),
     #[error(transparent)]
@@ -142,6 +142,20 @@ pub struct ResidentMcpInstallation {
     pub policy: Arc<crate::ResidentMcpPolicy>,
 }
 
+/// Ordered deployment lifecycle for actors hosted by this runtime.
+///
+/// Policy installation is optional. Retirement is emitted for every hosted
+/// actor, after the host has settled any terminal tool reply and completed the
+/// actor's mandatory cleanup epilogue.
+#[derive(Clone)]
+pub enum ResidentActorDeployment {
+    PolicyInstalled(ResidentMcpInstallation),
+    Retired {
+        actor: ActorRef,
+        terminal: ActorTerminal,
+    },
+}
+
 struct ResidentHostRuntime<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
@@ -163,6 +177,7 @@ enum HostedActorState {
 struct HostedActor {
     cancel: watch::Sender<bool>,
     state: HostedActorState,
+    retirement_emitted: bool,
 }
 
 struct StartedChild {
@@ -275,8 +290,8 @@ pub struct ResidentActorHost<H, O> {
     mcp_awaits: HashMap<ActorRef, crate::resident_mcp::ResidentMcpAwait>,
     mcp_requests: mpsc::UnboundedSender<crate::resident_mcp::ResidentMcpInvocation>,
     mcp_request_rx: mpsc::UnboundedReceiver<crate::resident_mcp::ResidentMcpInvocation>,
-    mcp_installations: mpsc::UnboundedSender<ResidentMcpInstallation>,
-    mcp_installation_rx: Option<mpsc::UnboundedReceiver<ResidentMcpInstallation>>,
+    deployments: mpsc::UnboundedSender<ResidentActorDeployment>,
+    deployment_rx: Option<mpsc::UnboundedReceiver<ResidentActorDeployment>>,
     roots: BTreeSet<ActorRef>,
     failures: Vec<(ActorRef, ResidentHostTaskError)>,
     cleanup_failures: Vec<(ActorRef, ResidentLifecycleError)>,
@@ -295,18 +310,19 @@ where
         self.mcp_policies.get(&actor).cloned()
     }
 
-    /// Take the sole live-policy deployment stream before starting the host
-    /// loop.
+    /// Take the sole actor-deployment lifecycle stream before starting the
+    /// host loop.
     ///
-    /// The stream is an optional observer for hosts that deploy an external
-    /// transport for each policy. Dropping it does not uninstall policies or
-    /// affect local access through [`Self::mcp_policy`].
-    pub fn take_mcp_installations(
+    /// The stream is an optional observer for composition roots that attach
+    /// external transports or deliver owner wakes. Dropping it does not alter
+    /// actor lifecycle, uninstall policies, or affect local access through
+    /// [`Self::mcp_policy`].
+    pub fn take_deployments(
         &mut self,
-    ) -> Result<mpsc::UnboundedReceiver<ResidentMcpInstallation>, ResidentActorHostError> {
-        self.mcp_installation_rx
+    ) -> Result<mpsc::UnboundedReceiver<ResidentActorDeployment>, ResidentActorHostError> {
+        self.deployment_rx
             .take()
-            .ok_or(ResidentActorHostError::McpInstallationsTaken)
+            .ok_or(ResidentActorHostError::DeploymentsTaken)
     }
 
     pub fn new(
@@ -328,7 +344,7 @@ where
         let starter = ResidentActorStarter::new(Arc::clone(&lifecycle), completions.clone());
         let mailbox = ResidentActorMailbox::new(Arc::clone(&lifecycle));
         let (mcp_requests, mcp_request_rx) = mpsc::unbounded_channel();
-        let (mcp_installations, mcp_installation_rx) = mpsc::unbounded_channel();
+        let (deployments, deployment_rx) = mpsc::unbounded_channel();
         Ok(Self {
             runtime: Arc::new(ResidentHostRuntime {
                 registry,
@@ -350,8 +366,8 @@ where
             mcp_awaits: HashMap::new(),
             mcp_requests,
             mcp_request_rx,
-            mcp_installations,
-            mcp_installation_rx: Some(mcp_installation_rx),
+            deployments,
+            deployment_rx: Some(deployment_rx),
             roots: BTreeSet::new(),
             failures: Vec::new(),
             cleanup_failures: Vec::new(),
@@ -610,6 +626,7 @@ where
                 entry.insert(HostedActor {
                     cancel,
                     state: HostedActorState::Running,
+                    retirement_emitted: false,
                 });
                 receiver
             }
@@ -721,8 +738,7 @@ where
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::Exited;
                 }
-                self.mcp_awaits.remove(&actor);
-                self.mcp_policies.remove(&actor);
+                self.retire_actor_deployment(actor);
                 if let Some(error) = cleanup_failure {
                     self.cleanup_failures.push((actor, error));
                 }
@@ -735,8 +751,7 @@ where
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::Exited;
                 }
-                self.mcp_awaits.remove(&actor);
-                self.mcp_policies.remove(&actor);
+                self.retire_actor_deployment(actor);
                 self.failures.push((actor, error));
                 if let Some(error) = cleanup_failure {
                     self.cleanup_failures.push((actor, error));
@@ -752,18 +767,21 @@ where
             if !self.wakes.take(ActorRuntimeWake::ActorExited { actor }) {
                 continue;
             }
+            let mut task_still_running = false;
             if let Some(hosted) = self.actors.get_mut(&actor) {
                 // An exit wake reports the registry's terminal transition; it
                 // is not permission to cancel the task that may still own the
                 // actor's mandatory cleanup epilogue. Only host closing sends
                 // cancellation. A running task reports `Exited`/`Failed` after
                 // its epilogue settles; actors with no task can be marked now.
-                if !matches!(hosted.state, HostedActorState::Running) {
+                task_still_running = matches!(hosted.state, HostedActorState::Running);
+                if !task_still_running {
                     hosted.state = HostedActorState::Exited;
                 }
             }
-            self.mcp_awaits.remove(&actor);
-            self.mcp_policies.remove(&actor);
+            if !task_still_running {
+                self.retire_actor_deployment(actor);
+            }
             self.wakes.take(ActorRuntimeWake::MailboxReady { actor });
             self.calls.retain(|(caller, call), _| {
                 if *caller == actor {
@@ -885,11 +903,15 @@ where
     }
 
     fn register_children(&mut self, children: Vec<StartedChild>) {
+        let mut exited = Vec::new();
         for child in children {
             let actor = child.actor;
             let state = match child.state {
                 crate::start::ResidentStartedActorState::IdleReceiver => HostedActorState::Idle,
-                crate::start::ResidentStartedActorState::Exited => HostedActorState::Exited,
+                crate::start::ResidentStartedActorState::Exited => {
+                    exited.push(actor);
+                    HostedActorState::Exited
+                }
                 crate::start::ResidentStartedActorState::McpPolicy(awaiting) => {
                     self.install_mcp_policy(actor, awaiting);
                     HostedActorState::McpPolicy
@@ -897,8 +919,15 @@ where
             };
             self.actors.entry(actor).or_insert_with(|| {
                 let (cancel, _) = watch::channel(false);
-                HostedActor { cancel, state }
+                HostedActor {
+                    cancel,
+                    state,
+                    retirement_emitted: false,
+                }
             });
+        }
+        for actor in exited {
+            self.retire_actor_deployment(actor);
         }
     }
 
@@ -915,10 +944,33 @@ where
             ));
             self.mcp_policies.insert(actor, Arc::clone(&policy));
             let _ = self
-                .mcp_installations
-                .send(ResidentMcpInstallation { actor, policy });
+                .deployments
+                .send(ResidentActorDeployment::PolicyInstalled(
+                    ResidentMcpInstallation { actor, policy },
+                ));
         }
         self.mcp_awaits.insert(actor, awaiting);
+    }
+
+    fn retire_actor_deployment(&mut self, actor: ActorRef) {
+        self.mcp_awaits.remove(&actor);
+        self.mcp_policies.remove(&actor);
+        let Some(hosted) = self.actors.get_mut(&actor) else {
+            debug_assert!(false, "retired an actor absent from the host");
+            return;
+        };
+        if hosted.retirement_emitted {
+            return;
+        }
+        let Ok(ExitObservation::Exited(terminal)) = self.runtime.registry.observe_exit(actor)
+        else {
+            debug_assert!(false, "retired actor deployment without a terminal record");
+            return;
+        };
+        hosted.retirement_emitted = true;
+        let _ = self
+            .deployments
+            .send(ResidentActorDeployment::Retired { actor, terminal });
     }
 }
 
@@ -1021,6 +1073,23 @@ where
         .ok_or(ResidentHostTaskError::Cancelled)??;
         match boundary {
             ResidentActorBoundary::Completed => {
+                if let Some(mut state) = mcp.take() {
+                    let result = state.result.take().ok_or_else(|| {
+                        ResidentHostTaskError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "actor completed an MCP invocation without replying".into(),
+                            ),
+                        )
+                    })?;
+                    let response = state.response.take().ok_or_else(|| {
+                        ResidentHostTaskError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "actor MCP invocation lost its response channel".into(),
+                            ),
+                        )
+                    })?;
+                    let _ = response.send(Ok(result));
+                }
                 drop(turn);
                 let cleanup_failure = runtime
                     .lifecycle

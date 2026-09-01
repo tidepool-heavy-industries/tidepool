@@ -181,16 +181,15 @@ This is the canonical status inventory for the plan.
   the production host. The full host vertical already performs a repeatable
   late wait after the target has exited. Provider-backed startup cancellation,
   startup panic cleanup, quiescence, and session removal are also landed;
-- the first production provider/profile composition and capability-specific
-  worktree launch grant;
+- capability-specific worktree launch grants and the adaptive recursive
+  worktree policy built on them;
 - an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
   require it, but current profiles, facades, and nominal handlers must leave it
   additive without changing the actor API, program images, profile semantics,
   or Rust dispatch. Constructor curation remains interaction hygiene rather
   than authority;
-- lifecycle advisories;
 - immutable live-binding snapshots or structural context fork;
-- the DevSwarm actor entry and deletion of the old selfharness path.
+- deletion of the superseded selfharness path.
 
 The legacy harness and REPL are migration inputs and behavior oracles, not
 architectures to preserve.
@@ -292,15 +291,10 @@ Acceptance:
 
 Complete one result-bearing agent session before adding actor construction.
 
-The actor-owned executor has one provider/Haskell loop and an internal sealed
-obligation interface. V0 needs two obligation shapes:
-
-- **typed completion**, used by sessions opened through `deliberate`;
-- **advisory acknowledgment**, added after the production host is running.
-
-This is an internal Rust distinction, not a universal model-facing option
-record. Both shapes use the same conversation, provider call path, fenced
-parser, workbench, actor admission, and event stream.
+The actor-owned executor has one provider/Haskell loop and one internal sealed
+typed-completion obligation, used by sessions opened through `deliberate`.
+Backend-native input to an interactive actor remains backend input; it does
+not create a second executor or acknowledgment protocol.
 
 `Deliberate` remains the Haskell effect and `deliberate` the operation that
 opens a result-bearing session. Rust modules, state machines, and events should
@@ -310,15 +304,15 @@ expectation; do not reintroduce a `Deliberation` or `Goal` runtime object.
 Refine the current actor `TurnLease` into the one phase-aware admission guard
 if necessary. A `deliberate` suspension transfers the already-held authored-
 program admission into the executor; it must not call `begin_turn` again.
-Startup derives the same guard from `StartingActor`, while a root session or
-advisory starts it from an idle actor. This is a state transition in one
-serialization mechanism, not a nested lease protocol.
+Startup derives the same guard from `StartingActor`, while a root session
+starts it from an idle actor. This is a state transition in one serialization
+mechanism, not a nested lease protocol.
 
 Deliver typed completion first:
 
 - mount the goal input as a live Haskell binding;
 - add exactly one scoped `Complete output` effect to a workbench with a typed
-  caller; advisory workbenches have none;
+  caller;
 - retain any outer return expectations privately so authored Haskell can see
   and settle only the innermost one;
 - expose `complete`, with no public obligation id or token, and have GHC check
@@ -511,8 +505,7 @@ completion now transfers one typed cleanup batch for the entire recursively
 terminated subtree; it cannot publish child exits while stranding their realms
 or shutdown hooks. Remaining acceptance covers cancellation while the startup
 future itself is being dropped. The lifecycle-owned shutdown admission
-watchdog is landed. The first real request/reply child vertical is landed;
-advisory inference is not a gate for proving application-message semantics.
+watchdog is landed. The first real request/reply child vertical is landed.
 
 ## 8. Stage 5 — dynamic sealing and caller-checked authority
 
@@ -850,7 +843,7 @@ Implement it as these reviewable boundaries:
      external-test layout.
 
 This tranche deliberately excludes provider/profile production composition,
-worktree grants, lifecycle advisories, structural fork, compiler-endpoint
+worktree grants, owner-wake delivery, structural fork, compiler-endpoint
 identity, and declaration-receipt cleanup. Those begin only after the host
 vertical establishes the runtime ownership boundary.
 
@@ -934,27 +927,45 @@ Implement this boundary in order:
 
    The checked-in `Tidepool.Actors.DevSwarm` policy and
    `tidepool-actor-host` composition are landed. The root exposes typed
-   `actorStatus` and `spawnWorker` tools; a spawned worker stabilizes at its own
-   `serveTools` policy, is handed to deployment through the host's
-   single-consumer live-policy stream, and exposes its typed startup assignment.
-   A focused GHC/JIT test proves root installation, MCP-routed `startActor`, and
-   child-policy installation without opening an interactive process.
+   stateful `actorStatus`, `spawnWorker`, `listWorkers`, and `collectWorker`
+   tools. A spawned worker stabilizes at its own `serveTools` policy, is handed
+   to deployment through the host's single-consumer lifecycle stream, exposes
+   its typed startup assignment, and completes through `finishWork` with a
+   retained `WorkerResult`. A focused GHC/JIT test proves root installation,
+   MCP-routed `startActor`, child-policy installation, terminal MCP settlement,
+   and exact typed collection without opening an interactive process.
 
    The deployment path is also landed: bind an authenticated private proxy,
    launch one `tidepool-agent-node host` per exact incarnation in tmux, validate
    the rollout binding discovered by the MCP child, then deliver and acknowledge
    one durable startup message through the backend's native push operation.
-   Successful MCP settlement is linearized only after the Haskell policy parks
-   for its next invocation.
+   Successful MCP settlement is linearized at the next stable policy boundary:
+   another invocation await or typed actor completion. Ordered deployment
+   retirement then notifies the owner through the same durable native push and
+   reaps the exact child node. Temporary push failure retains the unacknowledged
+   row for retry.
 
    A bounded live stock-TUI run on Codex 0.149.0 passed on 2026-09-01. The root
    called `actor_status`, accepted `spawn_worker`, and produced a second exact
    actor pane. That worker discovered its own rollout, acknowledged its durable
    startup message, called `current_assignment`, and performed the supplied
    review in its own context. Ctrl-C removed both exact panes and reaped the
-   daemon/node processes. Filesystem profile handlers, worktree grants, policy
-   reload, and the full DevSwarm fold remain later work; the initial production
-   machine intentionally handles no ambient filesystem effect.
+   daemon/node processes.
+
+   The subsequent in-memory fold passed a second bounded live stock-TUI run on
+   Codex 0.149.0 with `gpt-5.6-terra` at medium effort on 2026-09-01. The root
+   started a keyed worker without doing its task, the worker read its typed
+   assignment, inspected `README.md`, and completed only through `finish_work`.
+   The root's blocking `collect_worker` returned the exact retained
+   `WorkCompleted (WorkerResult ...)`, removed the key from Haskell state, and
+   the worker pane was reaped. The independent owner wake arrived afterward
+   and a second collection returned `WorkerNotFound`, demonstrating that native
+   lifecycle input is informational and does not duplicate typed exit custody.
+   Ctrl-C then removed the root pane and reaped every daemon/node process.
+
+   Filesystem profile handlers, worktree grants, policy reload, and
+   commit/evidence folding remain later work; the initial production machine
+   intentionally handles no ambient filesystem effect.
 
    Port only the following Exomonad mechanisms into their Tidepool owners:
    stock-TUI command construction, rollout discovery and versioned binding,
@@ -973,7 +984,7 @@ Express the first coding jobs with fresh actors. One-shot implementation and
 review use `runActor`, return candidate/review products in typed successful
 exits, and leave the owner to decide and integrate in ordinary Haskell. This
 vertical proves the host, provider, profile, grant, and supervision seams
-without waiting for structural fork or lifecycle advisories.
+without waiting for structural fork or native owner wakes.
 
 Then prove the recursive organization rather than freezing DevSwarm into one
 precomputed fanout. The first self-hosting slice must support:
@@ -1018,21 +1029,18 @@ Tree-shaped UI may remain as a projection over actor events. Durable get/put,
 worktree recovery, operator gates, and generic JSONL mechanics retain their
 existing owners.
 
-## 11. Stage 8 — lifecycle advisory
+## 11. Stage 8 — lifecycle delivery hardening
 
-Add one keyed advisory for an abnormal exit not already observed by an active
-call or wait. It uses the production host and the same agent-session executor
-with an advisory-ack obligation, and may execute fenced Haskell under the
-owner's principal to inspect state, start a successor, or message another
-actor. It does not resume or re-enter the owner's parked authored-program
-continuation. Four unanswered provider responses close and record the advisory
-without killing the owner.
+The production V0 wakes a live agent-backed owner for every child exit through
+the same durable backend-native delivery used by Exomonad. Typed results remain
+behind `ActorRef` and `awaitExit`; the notification carries only exact identity,
+label, terminal class, and summary. Delivery never re-enters Haskell and an
+unaccepted push remains pending for retry.
 
-Acceptance covers advisory deduplication, exact-key acknowledgment, several
-events coalesced without identity loss, events arriving during inference, and
-an owner parked on unrelated work. An unavailable provider closes the advisory
-without killing its owner, while the same terminal provider failure during a
-result-bearing session terminates the actor.
+Later hardening may add literal Developer-role injection where a backend
+supports it, batching for high-volume subtrees, and richer delivery
+observability. Do not add a second lifecycle executor, acknowledgment effect, or
+heterogeneous Haskell lifecycle inbox.
 
 ## 12. Stage 9 — structural context fork
 
@@ -1090,7 +1098,7 @@ The plan is complete when:
 - `ReadWrite` and `ReadOnly` actors share one machine through nominal request
   routing, and spawn edges never amplify profiles;
 - startup publishes only ready exact references and exits remain repeatable;
-- advisories inform the model without inventing a Haskell lifecycle inbox or
+- owner wakes inform the model without inventing a Haskell lifecycle inbox or
   re-entering the authored continuation;
 - automated checks and fresh review refer to the exact accepted revision;
 - the old selfharness state/answerer/tree paths are deleted;

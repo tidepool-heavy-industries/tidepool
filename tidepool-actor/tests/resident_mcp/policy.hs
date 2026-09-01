@@ -10,8 +10,7 @@ let childDefinition :: ActorDefinition Int Maybe Int
         , onShutdown = const (pure ())
         }
 
-    tools :: ResidentTools (AsServerT (Eff ActorEffects))
-    tools =
+    tools current =
       ResidentTools
         { doubleValue =
             tool "Double one integer." $ \request ->
@@ -20,5 +19,14 @@ let childDefinition :: ActorDefinition Int Maybe Int
             tool "Start one supervised child actor." $ \request -> do
               _ <- startActor childDefinition request.seed
               pure (SpawnOutput True)
+        , currentValue =
+            tool "Return the current resident state." $ \_ ->
+              pure (StateOutput current)
+        , setValue =
+            updateTool "Replace the resident state." $ \request ->
+              pure (StateOutput request.next, request.next)
+        , finishValue =
+            finishTool "Reply and complete with the current state." $ \_ ->
+              pure (StateOutput current, current)
         }
-in serveTools tools
+in serveToolsWith 0 tools

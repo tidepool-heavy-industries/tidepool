@@ -20,6 +20,14 @@ explicitly tagged `haskell` or `hs` fence executes. Design for fast typed
 self-extension and compiler-guided repair, not for models that cannot follow
 that execution contract.
 
+Developer context carries only trusted harness policy and runtime-attested
+facts. Render type, declaration, binding, capability, and lifecycle receipts
+in compact Haskell-shaped text where possible, so they reinforce rather than
+interrupt the model's typed working vocabulary. They remain context, not
+secret source rewriting: actual values and authority are installed through
+the Haskell/interpreter boundary, and executable fences retain their ordinary
+explicit meaning. User messages carry tasks and domain requests.
+
 The routine vocabulary should stay close to:
 
 ```haskell
@@ -245,8 +253,8 @@ an old, precise transition type.
 An owner can have children with unrelated exit types because exit observation
 is tied to each `ActorRef protocol exit`. `awaitExit` returns that child's exact exit
 type. Unexpected lifecycle events do not enter a heterogeneous Haskell system
-inbox; Rust instead schedules a Developer-triggered advisory turn in the
-owner's model context at the next quiescent provider boundary.
+inbox; Rust sends informational backend-native input to a live agent-backed
+owner, which may invoke an authored tool to observe the exact exit.
 
 Installing the returned `Eff actorEffs exit` computation is the readiness
 linearization point. The
@@ -325,6 +333,27 @@ may exit in response to a message uses `receive` directly and returns its
 can therefore use different authored structures without creating runtime
 actor modes.
 
+Agent-backed actors project an equally ordinary typed tools record. `Call` and
+`Notify` leave recursive policy state unchanged; `Update` replies and installs
+new state; `Finish` replies and returns the actor's typed exit:
+
+```haskell
+serveToolsWith
+  :: state
+  -> (state -> tools (AsActorT (Eff effs) state exit))
+  -> Eff effs exit
+
+updateTool :: Text -> (input -> m (output, state)) -> endpoint
+finishTool :: Text -> (input -> m (output, exit)) -> endpoint
+```
+
+These last two signatures abbreviate the mode-indexed endpoint types rather
+than pretending they are standalone values. All four endpoint forms use one
+generic record traversal and one declaration/dispatch table. State remains an
+ordinary Haskell value captured by the recursive server; Rust owns no mirror
+of it. A terminal reply settles at actor completion before the external policy
+transport is retired.
+
 The ordinary supervised-worker path is a discoverable library composition,
 not another effect:
 
@@ -382,15 +411,13 @@ multi-result calls wait for a concrete protocol that needs them. Rust records
 terminal failure, attempts the authored shutdown hook, and performs final
 cleanup without a provider request in the dying actor.
 
-An abnormal child exit opens an advisory only when no active `awaitExit` or
-failed call obligation already observes that exact terminal transition. Its
-workbench may execute fenced Haskell under the owner's principal, including
-ordinary actor operations, and exposes a scoped `ackLifecycle` action for the
-exact presented advisory keys. This wakes inference at a quiescent actor
-boundary, but it neither resumes nor re-enters the actor's authored Haskell
-continuation. The complete deduplication, budgeting, and provider-failure
-contract is in
-[architecture.md](architecture.md#failure-settlement-and-lifecycle-advisory).
+Every child exit produces an informational backend-native wake for a live
+agent-backed owner. It neither resumes nor re-enters the actor's authored
+Haskell continuation and exposes no lifecycle event value or acknowledgment
+effect. The model obtains the exact typed outcome only by invoking authored
+tools that use the retained `ActorRef` and `awaitExit`; the wake may be ignored.
+The delivery contract is in
+[architecture.md](architecture.md#failure-settlement-and-owner-wake).
 
 ## 4. Result-bearing agent sessions
 
@@ -442,10 +469,11 @@ complete
   -> Eff effs a
 ```
 
-Any workbench execution with a typed caller receives exactly one current
-`Complete output`; an advisory session has none. Completion is scoped to the
-whole possibly multi-round agent session, not to one provider response. The
-model may define and test substantial Haskell before calling `complete`.
+Any workbench execution opened through `deliberate` receives exactly one
+current `Complete output`. Ordinary backend input to an interactive actor has
+no typed completion expectation. Completion is scoped to the whole possibly
+multi-round agent session, not to one provider response. The model may define
+and test substantial Haskell before calling `complete`.
 
 Return expectations may nest internally, but authored Haskell sees only the
 innermost one. The runtime retains outer expectations privately and restores
@@ -664,10 +692,10 @@ references remain present as Haskell values, but child use fails with
 
 [architecture.md](architecture.md#9-supervision-and-shutdown) owns lifecycle
 semantics. The Haskell consequences are small: one actor is non-reentrant;
-`ActorRef protocol exit` supports repeatable typed `awaitExit`; abnormal exits create
-advisory model turns, not Haskell events; and `ActorDefinition` supplies a
-`ShutdownReason` handler for cooperative cleanup. Rust owns recursive subtree
-termination and the twelve-hour watchdog.
+`ActorRef protocol exit` supports repeatable typed `awaitExit`; every child
+exit creates an informational native owner wake, not a Haskell event; and
+`ActorDefinition` supplies a `ShutdownReason` handler for cooperative cleanup.
+Rust owns recursive subtree termination and the twelve-hour watchdog.
 
 ## 12. Type staging boundary
 

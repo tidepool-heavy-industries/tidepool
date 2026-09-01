@@ -19,10 +19,9 @@
 -- >   , reportProgress :: mode :- Notify Progress
 -- >   } deriving (Generic)
 --
--- @AsServerT m@ interprets those endpoints as concrete 'Tool' values.
--- 'compileTools' walks that interpretation once and derives each declaration
--- and dispatch entry from the same selector and 'Tool' value. Other
--- interpretations can be added without changing the authored record.
+-- @AsServerT m@ interprets coupled headless tools; @AsActorT m state exit@
+-- adds resident state transitions and typed actor completion. Both traverse
+-- the same record entries, so declarations and dispatch cannot drift.
 --
 -- A tool input's @input_schema@ is 'Tidepool.Aeson.Schema.JsonSchema' — the
 -- schema of the SAME generic encoding 'Tidepool.Aeson.FromJSON.FromJSON'
@@ -32,21 +31,28 @@ module Tidepool.Agent.Contract
   ( -- * Endpoint algebra and server interpretation
     Call
   , Notify
+  , Update
+  , Finish
   , AsServerT
+  , AsActorT
   , (:-)
 
     -- * Tool values
   , Tool (..)
   , tool
   , notify
+  , updateTool
+  , finishTool
 
     -- * Input schema (re-exported; the schema of the generic JSON encoding)
   , JsonSchema (..)
 
     -- * Generic compilation
   , HasAgentApi
+  , HasActorApi
   , compileTools
   , serveTools
+  , serveToolsWith
   , declarationsToJson
   , CompiledTools (..)
   , ToolDeclaration (..)
@@ -84,20 +90,34 @@ data Call input output
 -- server mode.
 data Notify input
 
+-- | A request\/response endpoint that installs new resident policy state.
+data Update input output
+
+-- | A request\/response endpoint that completes its actor after replying.
+data Finish input output
+
 -- | The server-side interpretation of a tools record.
 data AsServerT (m :: Type -> Type)
+
+-- | Resident-actor interpretation of a tools record. State and exit belong to
+-- the surrounding server, not to the external wire protocol.
+data AsActorT (m :: Type -> Type) state exit
 
 -- | Interpret one endpoint under a record mode. The closed fallthrough gives
 -- an author-facing error at an unsupported field.
 type family mode :- endpoint where
   AsServerT m :- Call input output = Tool m input output
   AsServerT m :- Notify input = Tool m input ()
+  AsActorT m state exit :- Call input output = Tool m input output
+  AsActorT m state exit :- Notify input = Tool m input ()
+  AsActorT m state exit :- Update input output = UpdateTool m state input output
+  AsActorT m state exit :- Finish input output = FinishTool m exit input output
   mode :- endpoint =
     TypeError
       ( 'Text "unsupported agent tool endpoint: `"
           ':<>: 'ShowType endpoint
           ':<>: 'Text "`."
-          ':$$: 'Text "A tools-record field must have type `mode :- Call input output` or `mode :- Notify input`."
+          ':$$: 'Text "A tools-record field must use Call, Notify, Update, or Finish under a compatible server interpretation."
       )
 
 infixr 0 :-
@@ -108,8 +128,8 @@ infixr 0 :-
 
 -- | Documentation and handler are values, not type-level 'GHC.TypeLits.Symbol's
 -- — so a description can be assembled with resident state (@fmt@) at agent
--- creation. Compiled once per agent thread (Codex dynamic tools are
--- thread-scoped, not turn-scoped).
+-- creation. A resident state transition rebuilds handler closures while Rust
+-- requires the declared tool surface itself to remain stable.
 data Tool m input output = Tool
   { description :: Text
   , handler :: input -> m output
@@ -123,6 +143,24 @@ tool = Tool
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
 notify :: Text -> (input -> m ()) -> Tool m input ()
 notify = Tool
+
+data UpdateTool m state input output = UpdateTool
+  { updateDescription :: Text
+  , updateHandler :: input -> m (output, state)
+  }
+
+-- | Build an endpoint that replies and replaces recursive server state.
+updateTool :: Text -> (input -> m (output, state)) -> UpdateTool m state input output
+updateTool = UpdateTool
+
+data FinishTool m exit input output = FinishTool
+  { finishDescription :: Text
+  , finishHandler :: input -> m (output, exit)
+  }
+
+-- | Build an endpoint that replies and then returns a typed actor exit.
+finishTool :: Text -> (input -> m (output, exit)) -> FinishTool m exit input output
+finishTool = FinishTool
 
 -- ---------------------------------------------------------------------------
 -- compileTools — one field-ordered traversal, declaration + dispatch from
@@ -216,35 +254,35 @@ toSnakeCase = T.pack . go . T.unpack
 -- selector. Both the declaration and the dispatch table entry in
 -- 'compileTools' are plain projections of this SAME list; there is no
 -- second traversal that could disagree with the first.
-data ToolEntry m = ToolEntry
+data ToolEntry m result = ToolEntry
   { entryRecordName :: Text
   , entrySelector :: Text
   , entryWireName :: Text
   , entryDescription :: Text
   , entryInputSchema :: Value
-  , entryRun :: StructuralValue -> m StructuralValue
+  , entryRun :: StructuralValue -> m result
   }
 
 -- | The single Generic traversal: read the selector name, obtain the input
 -- schema and the description/handler from the 'Tool' value found at that
 -- leaf, and produce ONE entry carrying everything both the declaration and
 -- the dispatcher need.
-class GCompileTools (f :: Type -> Type) m where
-  gCompileEntries :: f a -> [ToolEntry m]
+class GCompileTools (f :: Type -> Type) m result where
+  gCompileEntries :: f a -> [ToolEntry m result]
 
-instance (Datatype d, GCompileTools f m) => GCompileTools (M1 D d f) m where
+instance (Datatype d, GCompileTools f m result) => GCompileTools (M1 D d f) m result where
   gCompileEntries (M1 x) = map setRecordName (gCompileEntries x)
     where
       setRecordName e = e {entryRecordName = recName}
       recName = T.pack (datatypeName (M1 Proxy :: M1 D d Proxy ()))
 
-instance GCompileTools f m => GCompileTools (M1 C c f) m where
+instance GCompileTools f m result => GCompileTools (M1 C c f) m result where
   gCompileEntries (M1 x) = gCompileEntries x
 
-instance (GCompileTools a m, GCompileTools b m) => GCompileTools (a :*: b) m where
+instance (GCompileTools a m result, GCompileTools b m result) => GCompileTools (a :*: b) m result where
   gCompileEntries (a :*: b) = gCompileEntries a ++ gCompileEntries b
 
-instance GCompileTools U1 m where
+instance GCompileTools U1 m result where
   gCompileEntries U1 = []
 
 -- | An agent tools record itself must be a single-constructor product of
@@ -255,7 +293,7 @@ instance
     ( 'Text "an agent tools record must be a single-constructor record of endpoints; "
         ':<>: 'Text "this type has multiple constructors."
     ) =>
-  GCompileTools (a :+: b) m
+  GCompileTools (a :+: b) m result
   where
   gCompileEntries _ = error "unreachable: multi-constructor tools record is a compile-time TypeError"
 
@@ -263,7 +301,7 @@ instance
 -- the same instance as request/response tools.
 instance
   (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
-  GCompileTools (M1 S s (K1 R (Tool m input output))) m
+  GCompileTools (M1 S s (K1 R (Tool m input output))) m StructuralValue
   where
   gCompileEntries (M1 (K1 (Tool desc h))) =
     [ ToolEntry
@@ -280,6 +318,72 @@ instance
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
+data ActorToolStep state exit
+  = ActorToolStay StructuralValue
+  | ActorToolUpdate StructuralValue state
+  | ActorToolFinish StructuralValue exit
+
+instance
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  GCompileTools
+    (M1 S s (K1 R (Tool m input output)))
+    m
+    (ActorToolStep state exit)
+  where
+  gCompileEntries (M1 (K1 (Tool desc h))) =
+    [ actorEntry fieldName desc $ \input ->
+        ActorToolStay . toJSON <$> h input
+    ]
+    where
+      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+instance
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  GCompileTools
+    (M1 S s (K1 R (UpdateTool m state input output)))
+    m
+    (ActorToolStep state exit)
+  where
+  gCompileEntries (M1 (K1 (UpdateTool desc h))) =
+    [ actorEntry fieldName desc $ \input ->
+        (\(output, state) -> ActorToolUpdate (toJSON output) state) <$> h input
+    ]
+    where
+      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+instance
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  GCompileTools
+    (M1 S s (K1 R (FinishTool m exit input output)))
+    m
+    (ActorToolStep state exit)
+  where
+  gCompileEntries (M1 (K1 (FinishTool desc h))) =
+    [ actorEntry fieldName desc $ \input ->
+        (\(output, exit) -> ActorToolFinish (toJSON output) exit) <$> h input
+    ]
+    where
+      fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
+
+actorEntry
+  :: forall input m result
+   . (FromJSON input, JsonSchema input)
+  => Text
+  -> Text
+  -> (input -> m result)
+  -> ToolEntry m result
+actorEntry fieldName desc run =
+  ToolEntry
+    { entryRecordName = T.empty
+    , entrySelector = fieldName
+    , entryWireName = fieldName
+    , entryDescription = desc
+    , entryInputSchema = jsonSchema (Proxy :: Proxy input)
+    , entryRun = \sv -> case fromJSON sv of
+        Success input' -> run input'
+        Error msg -> error (T.unpack fieldName ++ ": tool dispatch could not decode input: " ++ msg)
+    }
+
 -- | The constraints needed to walk the server interpretation of a tools
 -- record.
 --
@@ -290,7 +394,15 @@ instance
 -- Do not "tidy" this into a class.
 type HasAgentApi tools m =
   ( Generic (tools (AsServerT m))
-  , GCompileTools (Rep (tools (AsServerT m))) m
+  , GCompileTools (Rep (tools (AsServerT m))) m StructuralValue
+  )
+
+type HasActorApi tools m state exit =
+  ( Generic (tools (AsActorT m state exit))
+  , GCompileTools
+      (Rep (tools (AsActorT m state exit)))
+      m
+      (ActorToolStep state exit)
   )
 
 -- | Compile a server-interpreted tools record into declarations and a
@@ -301,8 +413,21 @@ compileTools ::
   tools (AsServerT m) ->
   Either ToolCompileError (CompiledTools m)
 compileTools v =
-  let raw = gCompileEntries (from v) :: [ToolEntry m]
-      named = [e {entryWireName = toSnakeCase (entrySelector e)} | e <- raw]
+  toCompiledTools
+    <$> compileEntrySet
+      (gCompileEntries (from v) :: [ToolEntry m StructuralValue])
+
+data CompiledEntrySet m result = CompiledEntrySet
+  { entryDeclarations :: [ToolDeclaration]
+  , entryDispatch :: ToolName -> StructuralValue -> m result
+  , entrySynopsis :: Text
+  }
+
+compileEntrySet
+  :: [ToolEntry m result]
+  -> Either ToolCompileError (CompiledEntrySet m result)
+compileEntrySet raw =
+  let named = [e {entryWireName = toSnakeCase (entrySelector e)} | e <- raw]
    in case checkNames named of
         Left err -> Left err
         Right () ->
@@ -311,11 +436,19 @@ compileTools v =
                 Just run -> run sv
                 Nothing -> error (T.unpack (T.pack "compileTools: dispatch called with unknown tool \"" <> n <> T.pack "\""))
            in Right
-                CompiledTools
-                  { declarations = [ToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) | e <- named]
-                  , dispatch = dispatchFn
-                  , synopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
+                CompiledEntrySet
+                  { entryDeclarations = [ToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) | e <- named]
+                  , entryDispatch = dispatchFn
+                  , entrySynopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
                   }
+
+toCompiledTools :: CompiledEntrySet m StructuralValue -> CompiledTools m
+toCompiledTools compiled =
+  CompiledTools
+    { declarations = entryDeclarations compiled
+    , dispatch = entryDispatch compiled
+    , synopsis = entrySynopsis compiled
+    }
 
 -- | The one external encoding of a compiled declaration set.
 declarationsToJson :: [ToolDeclaration] -> Value
@@ -335,30 +468,59 @@ declarationsToJson decls =
 -- Haskell under the actor's normal effect row.
 serveTools ::
   forall tools effs exit.
-  (HasAgentApi tools (Eff effs), Member ActorMcp effs) =>
-  tools (AsServerT (Eff effs)) ->
+  (HasActorApi tools (Eff effs) () exit, Member ActorMcp effs) =>
+  tools (AsActorT (Eff effs) () exit) ->
   Eff effs exit
-serveTools tools = case compileTools tools of
-  Left err -> error (T.unpack (renderToolCompileError err))
-  Right compiled -> loop compiled
-  where
-    loop compiled = do
-      (name, arguments) <-
-        send
-          ( ActorMcpAwaitWith
-              (declarationsToJson (declarations compiled))
-              (synopsis compiled)
-          )
-      result <- dispatch compiled name arguments
-      send (ActorMcpReplyWith result)
-      loop compiled
+serveTools tools = serveToolsWith () (const tools)
 
-checkNames :: [ToolEntry m] -> Either ToolCompileError ()
+-- | Serve one stable declaration surface with ordinary recursive Haskell
+-- state. The builder may close plain handlers over the current state; only an
+-- 'Update' endpoint can replace it, and only a 'Finish' endpoint can return.
+serveToolsWith ::
+  forall tools effs state exit.
+  (HasActorApi tools (Eff effs) state exit, Member ActorMcp effs) =>
+  state ->
+  (state -> tools (AsActorT (Eff effs) state exit)) ->
+  Eff effs exit
+serveToolsWith initial build = loop initial
+  where
+    loop state =
+      case compileActorTools (build state) of
+        Left err -> error (T.unpack (renderToolCompileError err))
+        Right compiled -> do
+          (name, arguments) <-
+            send
+              ( ActorMcpAwaitWith
+                  (declarationsToJson (entryDeclarations compiled))
+                  (entrySynopsis compiled)
+              )
+          step <- entryDispatch compiled name arguments
+          case step of
+            ActorToolStay result -> do
+              send (ActorMcpReplyWith result)
+              loop state
+            ActorToolUpdate result next -> do
+              send (ActorMcpReplyWith result)
+              loop next
+            ActorToolFinish result exit -> do
+              send (ActorMcpReplyWith result)
+              pure exit
+
+compileActorTools ::
+  forall tools m state exit.
+  HasActorApi tools m state exit =>
+  tools (AsActorT m state exit) ->
+  Either ToolCompileError (CompiledEntrySet m (ActorToolStep state exit))
+compileActorTools v =
+  compileEntrySet
+    (gCompileEntries (from v) :: [ToolEntry m (ActorToolStep state exit)])
+
+checkNames :: [ToolEntry m result] -> Either ToolCompileError ()
 checkNames named = do
   mapM_ checkIdentifier named
   checkDuplicates named
 
-checkIdentifier :: ToolEntry m -> Either ToolCompileError ()
+checkIdentifier :: ToolEntry m result -> Either ToolCompileError ()
 checkIdentifier e = case validIdentifier (entryWireName e) of
   Right () -> Right ()
   Left reason -> Left (InvalidToolIdentifier (entryRecordName e) (entrySelector e) (entryWireName e) reason)
@@ -382,7 +544,7 @@ validIdentifier n
 -- camelCase sibling (@askParent@) normalize to the identical wire name —
 -- the realistic, common way this collision happens (not a contrived
 -- adversarial spelling).
-checkDuplicates :: [ToolEntry m] -> Either ToolCompileError ()
+checkDuplicates :: [ToolEntry m result] -> Either ToolCompileError ()
 checkDuplicates named = case firstDup (map entryWireName named) of
   Nothing -> Right ()
   Just w ->

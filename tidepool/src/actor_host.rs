@@ -11,12 +11,12 @@ use std::time::Duration;
 use frunk::HNil;
 use rmcp::ServiceExt;
 use tidepool_actor::{
-    ActorDescriptor, ActorEffectProfile, ActorPlacement, ActorRef, ActorRegistry,
-    ActorWorkbenchSource, ResidentActorHost, ResidentActorRoot, ResidentLifecyclePolicy,
-    ResidentMcpInstallation,
+    ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorRegistry,
+    ActorTerminal, ActorWorkbenchSource, ResidentActorDeployment, ResidentActorHost,
+    ResidentActorRoot, ResidentLifecyclePolicy, ResidentMcpInstallation,
 };
 use tidepool_agent::{
-    native_interactive_backend, read_interactive_binding, InteractiveAgentBackend,
+    native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
     InteractiveNodeLaunch, ReasoningEffort,
 };
 use tidepool_codegen::scope::ScopeId;
@@ -66,8 +66,20 @@ impl ModelProvider for NoResidentProvider {
 struct NodeDeployment {
     actor: ActorRef,
     pane: TmuxPaneId,
+    thread: BackendThreadId,
+    inbox: DurableInbox<String>,
+    last_delivery_error: Option<String>,
     service: tokio::task::JoinHandle<Result<(), String>>,
     socket_root: PathBuf,
+}
+
+struct NodeFleet {
+    registry: ActorRegistry,
+    root: ActorRef,
+    config: ActorHostConfig,
+    run_root: PathBuf,
+    tmux: TmuxSession,
+    backend: Arc<dyn InteractiveAgentBackend>,
 }
 
 pub async fn run(config: ActorHostConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -80,13 +92,13 @@ pub async fn run(config: ActorHostConfig) -> Result<(), Box<dyn std::error::Erro
     let registry = ActorRegistry::new();
     let (source, root) = compile_root(&config, &run_root)?;
     let mut host = ResidentActorHost::new(
-        registry,
+        registry.clone(),
         source,
         Arc::new(NoResidentProvider),
         None,
         ResidentLifecyclePolicy::default(),
     )?;
-    let installations = host.take_mcp_installations()?;
+    let deployments = host.take_deployments()?;
     let root_actor = host.launch_root(root).await?;
 
     let tmux = TmuxSession::new(&config.tmux_session);
@@ -96,12 +108,15 @@ pub async fn run(config: ActorHostConfig) -> Result<(), Box<dyn std::error::Erro
     let mut host_task =
         tokio::spawn(host.run_until_shutdown(wait_for_shutdown(shutdown_rx.clone())));
     let mut nodes_task = tokio::spawn(run_nodes(
-        installations,
-        root_actor,
-        config,
-        run_root,
-        tmux,
-        backend,
+        deployments,
+        NodeFleet {
+            registry,
+            root: root_actor,
+            config,
+            run_root,
+            tmux,
+            backend,
+        },
         shutdown_rx,
     ));
 
@@ -235,16 +250,20 @@ fn compile_root(
 }
 
 async fn run_nodes(
-    mut installations: mpsc::UnboundedReceiver<ResidentMcpInstallation>,
-    root: ActorRef,
-    config: ActorHostConfig,
-    run_root: PathBuf,
-    tmux: TmuxSession,
-    backend: Arc<dyn InteractiveAgentBackend>,
+    mut lifecycle: mpsc::UnboundedReceiver<ResidentActorDeployment>,
+    fleet: NodeFleet,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    let NodeFleet {
+        registry,
+        root,
+        config,
+        run_root,
+        tmux,
+        backend,
+    } = fleet;
     let mut deployments = Vec::new();
-    let mut health = tokio::time::interval(Duration::from_millis(250));
+    let mut health = tokio::time::interval(Duration::from_secs(1));
     let failure = loop {
         tokio::select! {
             biased;
@@ -259,19 +278,46 @@ async fn run_nodes(
                         deployment.actor
                     ));
                 }
+                for deployment in &mut deployments {
+                    let result =
+                        flush_inbox(deployment, backend.as_ref(), &config.workspace).await;
+                    record_delivery_result(deployment, result);
+                }
             }
-            installation = installations.recv() => {
-                let Some(installation) = installation else { break None };
-                match launch_node(
-                    installation,
-                    root,
-                    &config,
-                    &run_root,
-                    &tmux,
-                    Arc::clone(&backend),
-                ).await {
-                    Ok(deployment) => deployments.push(deployment),
-                    Err(error) => break Some(error),
+            event = lifecycle.recv() => {
+                let Some(event) = event else { break None };
+                match event {
+                    ResidentActorDeployment::PolicyInstalled(installation) => {
+                        match launch_node(
+                            installation,
+                            root,
+                            &config,
+                            &run_root,
+                            &tmux,
+                            Arc::clone(&backend),
+                        ).await {
+                            Ok(deployment) => deployments.push(deployment),
+                            Err(error) => break Some(error),
+                        }
+                    }
+                    ResidentActorDeployment::Retired { actor, terminal } => {
+                        if let Err(error) = notify_owner(
+                            actor,
+                            &terminal,
+                            &registry,
+                            &mut deployments,
+                            backend.as_ref(),
+                            &config.workspace,
+                        ).await {
+                            break Some(error);
+                        }
+                        if let Some(index) = deployments.iter().position(|node| node.actor == actor) {
+                            let deployment = deployments.swap_remove(index);
+                            if let Err(error) = retire_node(deployment, &tmux).await {
+                                break Some(error);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -414,30 +460,119 @@ async fn launch_node(
         abandon_node(tmux, &pane, service, &socket_root).await;
         return Err(error.to_string());
     }
-    let cwd = config.workspace.to_string_lossy();
-    let pending = match inbox.pending() {
-        Ok(pending) => pending,
-        Err(error) => {
-            abandon_node(tmux, &pane, service, &socket_root).await;
-            return Err(error.to_string());
-        }
-    };
-    for message in pending {
-        if let Err(error) = backend.push(&cwd, &thread, &message.payload).await {
-            abandon_node(tmux, &pane, service, &socket_root).await;
-            return Err(error.to_string());
-        }
-        if let Err(error) = inbox.acknowledge(message.sequence) {
-            abandon_node(tmux, &pane, service, &socket_root).await;
-            return Err(error.to_string());
-        }
+    if let Err(error) = deliver_pending(&inbox, &thread, backend.as_ref(), &config.workspace).await
+    {
+        abandon_node(tmux, &pane, service, &socket_root).await;
+        return Err(error);
     }
     Ok(NodeDeployment {
         actor,
         pane,
+        thread,
+        inbox,
+        last_delivery_error: None,
         service,
         socket_root,
     })
+}
+
+async fn deliver_pending(
+    inbox: &DurableInbox<String>,
+    thread: &BackendThreadId,
+    backend: &dyn InteractiveAgentBackend,
+    workspace: &Path,
+) -> Result<(), String> {
+    let cwd = workspace.to_string_lossy();
+    for message in inbox.pending().map_err(|error| error.to_string())? {
+        backend
+            .push(&cwd, thread, &message.payload)
+            .await
+            .map_err(|error| error.to_string())?;
+        inbox
+            .acknowledge(message.sequence)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn flush_inbox(
+    deployment: &NodeDeployment,
+    backend: &dyn InteractiveAgentBackend,
+    workspace: &Path,
+) -> Result<(), String> {
+    deliver_pending(&deployment.inbox, &deployment.thread, backend, workspace).await
+}
+
+fn record_delivery_result(deployment: &mut NodeDeployment, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            if deployment.last_delivery_error.take().is_some() {
+                tracing::info!(actor = ?deployment.actor, "actor inbox delivery recovered");
+            }
+        }
+        Err(error) => {
+            if deployment.last_delivery_error.as_deref() != Some(error.as_str()) {
+                tracing::warn!(actor = ?deployment.actor, %error, "actor inbox delivery is pending retry");
+            }
+            deployment.last_delivery_error = Some(error);
+        }
+    }
+}
+
+async fn notify_owner(
+    actor: ActorRef,
+    terminal: &ActorTerminal,
+    registry: &ActorRegistry,
+    deployments: &mut [NodeDeployment],
+    backend: &dyn InteractiveAgentBackend,
+    workspace: &Path,
+) -> Result<(), String> {
+    let Some(owner) = registry.owner(actor).map_err(|error| error.to_string())? else {
+        return Ok(());
+    };
+    let Some(owner_node) = deployments.iter_mut().find(|node| node.actor == owner) else {
+        return Ok(());
+    };
+    let descriptor = registry
+        .descriptor(actor)
+        .map_err(|error| error.to_string())?;
+    let kind = match terminal.kind {
+        ActorExitKind::Completed => "completed",
+        ActorExitKind::Failed => "failed",
+        ActorExitKind::Cancelled => "was cancelled",
+    };
+    let message = format!(
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}. Inspect and collect its exact typed result through your actor tools.",
+        descriptor.label(),
+        actor,
+        terminal.summary
+    );
+    owner_node
+        .inbox
+        .publish(message)
+        .map_err(|error| error.to_string())?;
+    let result = flush_inbox(owner_node, backend, workspace).await;
+    record_delivery_result(owner_node, result);
+    Ok(())
+}
+
+async fn retire_node(mut deployment: NodeDeployment, tmux: &TmuxSession) -> Result<(), String> {
+    tmux.kill_pane(&deployment.pane)
+        .await
+        .map_err(|error| format!("stop actor {:?}: {error}", deployment.actor))?;
+    match tokio::time::timeout(Duration::from_secs(5), &mut deployment.service).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(format!("actor MCP service task: {error}")),
+        Err(_) => {
+            deployment.service.abort();
+            return Err(format!(
+                "actor {:?} MCP service did not stop after retirement",
+                deployment.actor
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&deployment.socket_root);
+    Ok(())
 }
 
 async fn abandon_node(
@@ -488,17 +623,19 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 }
 
 fn developer_instructions(root: bool) -> String {
-    let role = if root { "root" } else { "worker" };
-    format!(
-        "You are a Tidepool {role} actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Use those tools to inspect and act; Rust owns process and actor lifecycle."
-    )
+    if root {
+        "You are a Tidepool root actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Use them to start and collect supervised workers; Rust owns process and actor lifecycle. A child-exit wake is informational: collect the exact typed result through collect_worker."
+    } else {
+        "You are a Tidepool worker actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Retrieve your assignment, do the work, then call finish_work exactly once with its typed result; Rust owns process and actor lifecycle."
+    }
+    .into()
 }
 
 fn initial_prompt(root: bool) -> String {
     if root {
         "Initialize your Tidepool root actor through its typed tools, report its status, and end this turn."
     } else {
-        "Initialize this Tidepool worker through its typed tools. Retrieve the typed startup assignment and begin it."
+        "Initialize this Tidepool worker through its typed tools. Retrieve the typed startup assignment, complete it, and submit the result with finish_work."
     }
     .into()
 }
@@ -522,7 +659,84 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 mod tests {
     use super::*;
     use tidepool_actor::ResidentHostParkedKind;
+    use tidepool_agent::{
+        AgentBackendError, InteractiveAgentProcess, InteractiveAgentSpec, InteractiveFuture,
+    };
     use tidepool_testing::eval_harness;
+
+    struct ScriptedPush {
+        fail: std::sync::atomic::AtomicBool,
+        messages: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl InteractiveAgentBackend for ScriptedPush {
+        fn launch(
+            &self,
+            _spec: InteractiveAgentSpec,
+        ) -> InteractiveFuture<'_, Box<dyn InteractiveAgentProcess>> {
+            Box::pin(async {
+                Err(AgentBackendError::ProtocolRejected {
+                    detail: "launch is outside this delivery test".into(),
+                })
+            })
+        }
+
+        fn push<'a>(
+            &'a self,
+            _cwd: &'a str,
+            _thread: &'a BackendThreadId,
+            message: &'a str,
+        ) -> InteractiveFuture<'a, ()> {
+            Box::pin(async move {
+                self.messages.lock().unwrap().push(message.into());
+                if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(AgentBackendError::BackendUnavailable {
+                        detail: "temporary push failure".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn archive<'a>(
+            &'a self,
+            _cwd: &'a str,
+            _thread: &'a BackendThreadId,
+        ) -> InteractiveFuture<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row() {
+        let root = tempfile::tempdir().expect("inbox root");
+        let inbox = DurableInbox::open(root.path().join("rows"), root.path().join("cursor"))
+            .expect("open inbox");
+        inbox.publish("child completed".into()).expect("publish");
+        let backend = ScriptedPush {
+            fail: std::sync::atomic::AtomicBool::new(true),
+            messages: std::sync::Mutex::new(Vec::new()),
+        };
+        let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
+
+        assert!(deliver_pending(&inbox, &thread, &backend, root.path())
+            .await
+            .is_err());
+        assert_eq!(inbox.pending().expect("pending after refusal").len(), 1);
+
+        backend
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        deliver_pending(&inbox, &thread, &backend, root.path())
+            .await
+            .expect("retry accepted");
+        assert!(inbox.pending().expect("acked inbox").is_empty());
+        assert_eq!(
+            *backend.messages.lock().unwrap(),
+            ["child completed", "child completed"]
+        );
+    }
 
     #[tokio::test]
     async fn checked_in_devswarm_policy_installs_the_root_tool_surface() {
@@ -551,14 +765,16 @@ mod tests {
             ResidentLifecyclePolicy::default(),
         )
         .expect("construct host");
-        let mut installations = host
-            .take_mcp_installations()
-            .expect("take deployment stream");
+        let mut deployments = host.take_deployments().expect("take deployment stream");
         let actor = host.launch_root(root).await.expect("launch root");
         let report = host.run_until_idle().await.expect("install policy");
         assert!(report.failures.is_empty());
         assert_eq!(report.parked[&ResidentHostParkedKind::McpPolicy], 1);
-        let root_installation = installations.try_recv().expect("root policy installation");
+        let ResidentActorDeployment::PolicyInstalled(root_installation) =
+            deployments.try_recv().expect("root policy installation")
+        else {
+            panic!("root policy retired before installation");
+        };
         assert_eq!(root_installation.actor, actor);
         let policy = root_installation.policy;
         let names = policy
@@ -566,17 +782,28 @@ mod tests {
             .iter()
             .map(|declaration| declaration.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["actor_status", "spawn_worker"]);
+        assert_eq!(
+            names,
+            [
+                "actor_status",
+                "spawn_worker",
+                "list_workers",
+                "collect_worker"
+            ]
+        );
 
         let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
         let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
         let hosted = tokio::spawn(host.run_until_shutdown(async move {
             let _ = shutdown_requested.await;
         }));
-        let arguments = serde_json::json!({"assignment": "inspect one focused boundary"})
-            .as_object()
-            .expect("object arguments")
-            .clone();
+        let arguments = serde_json::json!({
+            "workKey": "review-1",
+            "assignment": "inspect one focused boundary"
+        })
+        .as_object()
+        .expect("object arguments")
+        .clone();
         let result = server
             .dispatch_tool("spawn_worker", arguments)
             .await
@@ -586,10 +813,20 @@ mod tests {
             let report = hosted.await.expect("host task").expect("shutdown host");
             panic!("{result:?}; host failures: {:?}", report.run.failures);
         }
-        let worker = tokio::time::timeout(Duration::from_secs(1), installations.recv())
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerStarted",
+                "workKey": "review-1"
+            }))
+        );
+        let worker = tokio::time::timeout(Duration::from_secs(1), deployments.recv())
             .await
             .expect("worker installation timeout")
             .expect("worker policy installation");
+        let ResidentActorDeployment::PolicyInstalled(worker) = worker else {
+            panic!("worker policy retired before installation");
+        };
         assert_ne!(worker.actor, actor);
         let worker_names = worker
             .policy
@@ -597,7 +834,78 @@ mod tests {
             .iter()
             .map(|declaration| declaration.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(worker_names, ["actor_status", "current_assignment"]);
+        assert_eq!(
+            worker_names,
+            ["actor_status", "current_assignment", "finish_work"]
+        );
+        let worker_actor = worker.actor;
+        let worker_server =
+            DynamicMcpServer::from_resident_policy(worker.policy).expect("worker MCP server");
+        let assignment = worker_server
+            .dispatch_tool("current_assignment", serde_json::Map::new())
+            .await
+            .expect("read typed assignment");
+        assert_eq!(
+            assignment.structured_content,
+            Some(serde_json::json!({
+                "assignment": "inspect one focused boundary"
+            }))
+        );
+        let finish = serde_json::json!({
+            "summary": "boundary is clean",
+            "evidence": ["focused test"]
+        })
+        .as_object()
+        .expect("finish arguments")
+        .clone();
+        let finished = worker_server
+            .dispatch_tool("finish_work", finish)
+            .await
+            .expect("finish worker");
+        assert_eq!(
+            finished.structured_content,
+            Some(serde_json::json!({"accepted": true}))
+        );
+        let retired = tokio::time::timeout(Duration::from_secs(1), deployments.recv())
+            .await
+            .expect("worker retirement timeout")
+            .expect("worker retirement");
+        assert!(matches!(
+            retired,
+            ResidentActorDeployment::Retired { actor, terminal }
+                if actor == worker_actor && terminal.kind == ActorExitKind::Completed
+        ));
+
+        let collect = serde_json::json!({"workKey": "review-1"})
+            .as_object()
+            .expect("collect arguments")
+            .clone();
+        let collected = server
+            .dispatch_tool("collect_worker", collect)
+            .await
+            .expect("collect worker");
+        assert_eq!(
+            collected.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerCollected",
+                "workKey": "review-1",
+                "outcome": {
+                    "tag": "WorkCompleted",
+                    "result": {
+                        "summary": "boundary is clean",
+                        "evidence": ["focused test"]
+                    }
+                }
+            }))
+        );
+        let pending = server
+            .dispatch_tool("list_workers", serde_json::Map::new())
+            .await
+            .expect("list workers");
+        assert_eq!(
+            pending.structured_content,
+            Some(serde_json::json!({"workKeys": []}))
+        );
         request_shutdown.send(()).expect("request shutdown");
         hosted.await.expect("host task").expect("shutdown host");
     }

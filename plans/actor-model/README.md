@@ -64,13 +64,15 @@ then unfold again from what integration revealed. The canonical contract is
   the actor's principal and grants. Authored libraries remain
   `Member`-polymorphic; a later Haskell intent-to-kernel split must not require
   a reflected row ABI in Rust.
-- One actor-turn admission spans a complete agent session, while shorter
-  machine checkouts serialize only its Haskell run segments. Result-bearing
-  and advisory sessions share the same provider/fenced-Haskell executor.
+- One actor-turn admission spans a complete result-bearing agent session,
+  while shorter machine checkouts serialize only its Haskell run segments.
+  Lifecycle wake delivery is backend input, not a second session executor.
 - One neutral actor event stream records runtime truth. Views, durable logs,
-  Developer advisories, and UI are projections; none is a second registry.
-- Moving a value does not move authority. Unexpected child failure informs but
-  does not kill its owner; owner termination recursively ends its subtree.
+  native owner notifications, and UI are projections; none is a second
+  registry.
+- Moving a value does not move authority. Every child exit informs but does
+  not kill its live agent-backed owner; owner termination recursively ends its
+  subtree.
 - Model-authored verification should normally run authoritative checks and an
   independent fresh-actor review before acceptance.
 
@@ -100,7 +102,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |
-| agent session | One serialized, possibly multi-round execution of the resident model and fenced-Haskell workbench; it may carry a typed `Complete output` expectation or an advisory acknowledgment |
+| agent session | One serialized, possibly multi-round execution of the resident model and fenced-Haskell workbench with a typed `Complete output` expectation |
 | effect profile | A named model-facing effect row and matching interpreter policy; initially `ReadWrite` or `ReadOnly` |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
 | program image | The exact declarations, interface metadata, and live roots captured while `startActor` seals a definition |
@@ -108,7 +110,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | execution principal | The runtime identity under whose authority Haskell is currently executing |
 | capability | An opaque live value whose operations are authorized by Rust at use time |
 | actor interpreter | Rust-owned nominal handlers and lifecycle policy enforcing requests under one actor principal |
-| advisory turn | A Developer-triggered model session for an abnormal runtime fact with no parked Haskell result obligation |
+| owner wake | Informational backend-native input derived from a child exit; typed results remain behind the exact `ActorRef` |
 
 ## Relationship to existing work
 
