@@ -413,7 +413,9 @@ fn compile_root(
         gen: 1,
         verdict: None,
         target: None,
-    })? {
+    })
+    .map_err(render_root_compile_failure)?
+    {
         TurnResult::Expr { compiled, .. } => compiled,
         other => {
             return Err(runtime_error(format!(
@@ -463,6 +465,31 @@ fn compile_root(
         ActorWorkbenchSource::new(preamble, include),
         ResidentActorRoot::new(descriptor, machine, outcome),
     ))
+}
+
+fn render_root_compile_failure(
+    failure: tidepool_runtime::session::TurnFailure,
+) -> Box<dyn std::error::Error> {
+    let source = failure.attempted_source.as_deref().unwrap_or_default();
+    let detail = match &failure.error {
+        tidepool_runtime::CompileError::Diagnostics(diagnostics)
+        | tidepool_runtime::CompileError::WorkerFailure(diagnostics) => {
+            tidepool_runtime::diag::render_diagnostics(
+                diagnostics,
+                &tidepool_runtime::diag::RenderOpts {
+                    anchor: "Expr.hs",
+                    label: "<actor-policy>",
+                    user_lines: None,
+                    line_offset: 0,
+                    col_indent: 0,
+                    drop_foreign_gen_warnings_except: None,
+                    source,
+                },
+            )
+        }
+        _ => failure.to_string(),
+    };
+    runtime_error(format!("root actor policy compilation failed:\n{detail}"))
 }
 
 async fn run_interactive_applications(

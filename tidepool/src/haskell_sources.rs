@@ -92,4 +92,14 @@ mod tests {
             content_hash(SOURCES)
         );
     }
+
+    #[test]
+    fn embedded_stdlib_contains_production_internal_modules_only() {
+        assert!(EMBEDDED_STDLIB
+            .iter()
+            .any(|(path, _)| *path == "Tidepool/Internal/ExitCell.hs"));
+        assert!(!EMBEDDED_STDLIB
+            .iter()
+            .any(|(path, _)| *path == "Tidepool/Internal/DataTextProbe.hs"));
+    }
 }

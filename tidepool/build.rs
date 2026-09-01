@@ -79,12 +79,19 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            // Skip the test-only probe and the CBOR build-artifact dir.
-            if name == "Internal" || name == "Prelude_cbor" {
+            if name == "Prelude_cbor" {
                 continue;
             }
             collect(root, &path, out);
         } else if path.extension().is_some_and(|e| e == "hs") {
+            // This module exists only to probe a GHC representation detail;
+            // other `Internal` modules are production library dependencies.
+            if path
+                .file_name()
+                .is_some_and(|name| name == "DataTextProbe.hs")
+            {
+                continue;
+            }
             #[allow(clippy::expect_used, reason = "under root")]
             let rel = path
                 .strip_prefix(root)

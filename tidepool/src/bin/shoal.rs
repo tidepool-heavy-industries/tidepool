@@ -14,6 +14,9 @@ struct Cli {
 enum Command {
     /// Create a project-local actor run in its own tmux session.
     Init {
+        /// Repository the ensemble will work in. Defaults to the current project.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
         #[arg(long)]
         session: Option<String>,
         #[arg(long)]
@@ -71,6 +74,7 @@ impl From<Effort> for ReasoningEffort {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Init {
+            workspace,
             session,
             recreate,
             no_attach,
@@ -78,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             effort,
         } => {
             tidepool::shoal::init(tidepool::shoal::InitOptions {
+                workspace,
                 session,
                 recreate,
                 no_attach,
@@ -121,13 +126,20 @@ mod tests {
     #[test]
     fn clap_exposes_the_three_process_boundaries() {
         assert!(matches!(
-            Cli::try_parse_from(["shoal", "init", "--no-attach"])
+            Cli::try_parse_from([
+                "shoal",
+                "init",
+                "--workspace",
+                "/tmp/project",
+                "--no-attach"
+            ])
                 .unwrap()
                 .command,
             Command::Init {
+                workspace: Some(workspace),
                 no_attach: true,
                 ..
-            }
+            } if workspace == PathBuf::from("/tmp/project")
         ));
         assert!(matches!(
             Cli::try_parse_from(["shoal", "proxy"]).unwrap().command,

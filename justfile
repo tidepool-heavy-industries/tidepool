@@ -61,5 +61,12 @@ doctor:
 shoal-init *args:
     {{ nix }} scripts/shoal-init.sh "$@"
 
+# Build Shoal from this checkout and run it against the independent console
+# repository. Extra arguments are forwarded to `shoal init`.
+[positional-arguments]
+shoal-console *args:
+    test -d "$HOME/dev/shoal-console/.git" || { echo "missing $HOME/dev/shoal-console; initialize it first" >&2; exit 1; }
+    {{ nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-console"
+
 # Pre-review gate: checks, suite-manifest validation, and fixture freshness.
 verify: check suite-check fixtures-check

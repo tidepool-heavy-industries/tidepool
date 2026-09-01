@@ -20,6 +20,7 @@ const STATUS_VERSION: u32 = 2;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct InitOptions {
+    pub workspace: Option<PathBuf>,
     pub session: Option<String>,
     pub recreate: bool,
     pub no_attach: bool,
@@ -66,8 +67,13 @@ pub enum RunPhase {
 }
 
 pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let workspace = tidepool_runtime::paths::find_project_root(&cwd).unwrap_or(cwd);
+    let workspace = match options.workspace {
+        Some(workspace) => workspace,
+        None => {
+            let cwd = std::env::current_dir()?;
+            tidepool_runtime::paths::find_project_root(&cwd).unwrap_or(cwd)
+        }
+    };
     let workspace = std::fs::canonicalize(workspace)?;
     let session_name = options
         .session
