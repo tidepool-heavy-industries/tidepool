@@ -511,6 +511,17 @@ application ends the Shoal run. A post-terminal failure to contain an orphaned
 native process may still fail the run as a resource-containment invariant, but
 it cannot revise the already-published child exit.
 
+Interactive application ownership precedes conversation binding. A fresh
+stock Codex TUI has no thread identity until its first real User submission.
+Shoal therefore registers the pane, durable inbox, MCP listener, and cleanup
+resources immediately and reports the root as awaiting input; it does not
+manufacture an inference turn merely to obtain an identifier. The first real
+submission starts the configured MCP child, after which rollout discovery
+binds the exact thread and enables native lifecycle pushes. Binding discovery
+has no user-input deadline and remains subordinate to exact pane ownership.
+Workers normally cross this boundary immediately because their assignment is
+their genuine launch-time User prompt.
+
 ## 6. Actor construction
 
 The three context relationships are deliberately distinct:

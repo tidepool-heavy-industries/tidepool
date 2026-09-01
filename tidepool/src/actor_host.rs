@@ -74,9 +74,16 @@ pub struct ActorHostConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct ActorHostReady {
-    pub root: ActorRef,
-    pub thread: BackendThreadId,
+pub enum ActorHostReadiness {
+    /// The root pane is selected and accepts its first real User input, but a
+    /// fresh backend conversation does not yet have a thread identity.
+    AwaitingInput { root: ActorRef },
+    /// The MCP sidecar proved the exact surrounding thread, enabling native
+    /// lifecycle pushes without changing application ownership.
+    Ready {
+        root: ActorRef,
+        thread: BackendThreadId,
+    },
 }
 
 struct NoResidentProvider;
@@ -96,15 +103,33 @@ impl ModelProvider for NoResidentProvider {
 struct InteractiveDeployment {
     actor: ActorRef,
     pane: TmuxPaneId,
-    thread: BackendThreadId,
+    workspace: PathBuf,
     inbox: Arc<DurableInbox<String>>,
-    delivery_shutdown: Option<oneshot::Sender<()>>,
-    delivery: tokio::task::JoinHandle<()>,
+    connection: InteractiveConnection,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: PathBuf,
     worktree: Option<WorktreeHandle>,
     worktree_binding: Option<ActiveBinding>,
     failure_reported: bool,
+}
+
+enum InteractiveConnection {
+    // Pane, inbox, proxy listener, and cleanup are already owned in this state.
+    AwaitingBinding,
+    Bound {
+        delivery_shutdown: oneshot::Sender<()>,
+        delivery: tokio::task::JoinHandle<()>,
+    },
+}
+
+struct InteractiveBindingRequest {
+    path: PathBuf,
+    expected: Option<BackendThreadId>,
+}
+
+struct LaunchedInteractiveApplication {
+    deployment: InteractiveDeployment,
+    binding: InteractiveBindingRequest,
 }
 
 struct OwnerNotification {
@@ -192,7 +217,7 @@ struct InteractiveFleet {
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     control: ResidentActorHostControl,
-    readiness: oneshot::Sender<ActorHostReady>,
+    readiness: mpsc::UnboundedSender<ActorHostReadiness>,
 }
 
 #[derive(Clone)]
@@ -208,7 +233,7 @@ struct InteractiveLaunchContext {
 
 pub async fn run(
     config: ActorHostConfig,
-    readiness: oneshot::Sender<ActorHostReady>,
+    readiness: mpsc::UnboundedSender<ActorHostReadiness>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
@@ -457,13 +482,13 @@ async fn run_interactive_applications(
         config,
         run_root,
         tmux: tmux.clone(),
-        backend,
+        backend: Arc::clone(&backend),
         worktrees,
         bindings: Arc::clone(&bindings),
     };
-    let mut readiness = Some(readiness);
     let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
+    let mut binding_discoveries = JoinSet::new();
     let mut pending_launches = HashMap::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
@@ -475,7 +500,12 @@ async fn run_interactive_applications(
             _ = health.tick() => {
                 if let Some(index) = deployments.iter().position(|deployment| {
                     !deployment.failure_reported
-                        && (deployment.service.is_finished() || deployment.delivery.is_finished())
+                        && (deployment.service.is_finished()
+                            || matches!(
+                                &deployment.connection,
+                                InteractiveConnection::Bound { delivery, .. }
+                                    if delivery.is_finished()
+                            ))
                 }) {
                     let actor = deployments[index].actor;
                     deployments[index].failure_reported = true;
@@ -560,16 +590,24 @@ async fn run_interactive_applications(
             }
             launched = launches.join_next(), if !launches.is_empty() => {
                 match launched {
-                    Some(Ok((actor, Ok(Some(deployment))))) => {
+                    Some(Ok((actor, Ok(Some(launched))))) => {
                         pending_launches.remove(&actor);
-                        if deployment.actor == root {
-                            if let Some(sender) = readiness.take() {
-                                let _ = sender.send(ActorHostReady {
-                                    root,
-                                    thread: deployment.thread.clone(),
-                                });
-                            }
+                        let deployment = launched.deployment;
+                        if actor == root {
+                            let _ = readiness.send(ActorHostReadiness::AwaitingInput { root });
                         }
+                        let pane = deployment.pane.clone();
+                        let tmux = tmux.clone();
+                        binding_discoveries.spawn(async move {
+                            let result = discover_interactive_binding(
+                                actor,
+                                launched.binding,
+                                &tmux,
+                                &pane,
+                            )
+                            .await;
+                            (actor, result)
+                        });
                         deployments.push(deployment);
                     }
                     Some(Ok((actor, Ok(None)))) => {
@@ -605,6 +643,66 @@ async fn run_interactive_applications(
                     None => {}
                 }
             }
+            discovered = binding_discoveries.join_next(), if !binding_discoveries.is_empty() => {
+                match discovered {
+                    Some(Ok((actor, Ok(thread)))) => {
+                        let Some(deployment) = deployments.iter_mut().find(|app| app.actor == actor) else {
+                            continue;
+                        };
+                        if !matches!(deployment.connection, InteractiveConnection::AwaitingBinding) {
+                            break Some(format!("interactive application {actor:?} published more than one conversation binding"));
+                        }
+                        let (delivery_shutdown, stop_delivery) = oneshot::channel();
+                        let delivery = tokio::spawn(run_delivery_pump(
+                            actor,
+                            Arc::clone(&deployment.inbox),
+                            thread.clone(),
+                            Arc::clone(&backend),
+                            deployment.workspace.clone(),
+                            stop_delivery,
+                        ));
+                        deployment.connection = InteractiveConnection::Bound {
+                            delivery_shutdown,
+                            delivery,
+                        };
+                        if actor == root {
+                            let _ = readiness.send(ActorHostReadiness::Ready {
+                                root,
+                                thread,
+                            });
+                        }
+                    }
+                    Some(Ok((actor, Err(error)))) => {
+                        let Some(deployment) = deployments.iter_mut().find(|app| app.actor == actor) else {
+                            continue;
+                        };
+                        deployment.failure_reported = true;
+                        if actor == root {
+                            break Some(error.to_string());
+                        }
+                        let result = control
+                            .fail_external_application(
+                                actor,
+                                ExternalApplicationFailure {
+                                    class: error.operation.failure_class(),
+                                    detail: error.detail,
+                                },
+                            )
+                            .await;
+                        match result {
+                            Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
+                            Ok(ExternalFailureDisposition::UnknownOrStale) => {
+                                break Some(format!("resident host rejected the exact binding actor {actor:?} as unknown or stale"));
+                            }
+                            Err(report_error) => {
+                                break Some(format!("report child binding failure for {actor:?}: {report_error}"));
+                            }
+                        }
+                    }
+                    Some(Err(error)) => break Some(format!("interactive binding task: {error}")),
+                    None => {}
+                }
+            }
             retired = retirements.join_next(), if !retirements.is_empty() => {
                 match retired {
                     Some(Ok(Ok(()))) => {}
@@ -630,8 +728,8 @@ async fn run_interactive_applications(
     let launch_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut completed = Vec::new();
         while let Some(result) = launches.join_next().await {
-            if let Ok((_actor, Ok(Some(deployment)))) = result {
-                completed.push(deployment);
+            if let Ok((_actor, Ok(Some(launched)))) = result {
+                completed.push(launched.deployment);
             }
         }
         completed
@@ -641,6 +739,8 @@ async fn run_interactive_applications(
         Ok(completed) => deployments.extend(completed),
         Err(_) => launches.abort_all(),
     }
+    binding_discoveries.abort_all();
+    while binding_discoveries.join_next().await.is_some() {}
     for deployment in deployments {
         let tmux = tmux.clone();
         let bindings = Arc::clone(&bindings);
@@ -693,7 +793,7 @@ async fn launch_interactive_application(
     installation: ResidentMcpInstallation,
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<()>,
-) -> Result<Option<InteractiveDeployment>, InteractiveApplicationError> {
+) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let actor = installation.actor;
     let prepared = prepare_actor_worktree(&installation, &context)?;
     let worktree = prepared.as_ref().map(|(handle, _)| handle.clone());
@@ -701,9 +801,9 @@ async fn launch_interactive_application(
         launch_prepared_interactive_application(installation, context.clone(), worktree, cancelled)
             .await;
     match (result, prepared) {
-        (Ok(Some(mut deployment)), Some((_handle, binding))) => {
-            deployment.worktree_binding = Some(binding);
-            Ok(Some(deployment))
+        (Ok(Some(mut launched)), Some((_handle, binding))) => {
+            launched.deployment.worktree_binding = Some(binding);
+            Ok(Some(launched))
         }
         (Ok(Some(deployment)), None) => Ok(Some(deployment)),
         (Ok(None), Some((_handle, binding))) => {
@@ -802,7 +902,7 @@ async fn launch_prepared_interactive_application(
     context: InteractiveLaunchContext,
     worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<()>,
-) -> Result<Option<InteractiveDeployment>, InteractiveApplicationError> {
+) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveLaunchContext {
         root,
         config,
@@ -962,54 +1062,37 @@ async fn launch_prepared_interactive_application(
         }
     };
 
-    let thread = tokio::select! {
-        biased;
-        _ = &mut cancelled => {
-            abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-            return Ok(None);
-        }
-        result = wait_for_binding(actor, &binding_path, &service) => match result {
-            Ok(thread) => thread,
-            Err(error) => {
-                abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
-                return Err(error);
-            }
-        }
-    };
-    if let Some(expected) = expected_resume {
-        if expected != thread {
+    if actor == root {
+        if let Err(error) = tmux.select_window_for_pane(&pane).await {
             abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
             return Err(application_error(
                 actor,
-                InteractiveOperation::DiscoverBinding,
-                format!(
-                    "resume published thread {} instead of retained thread {}",
-                    thread.0, expected.0
-                ),
+                InteractiveOperation::LaunchProcess,
+                error,
             ));
         }
     }
-    let (delivery_shutdown, stop_delivery) = oneshot::channel();
-    let delivery = tokio::spawn(run_delivery_pump(
-        actor,
-        Arc::clone(&inbox),
-        thread.clone(),
-        backend,
-        workspace,
-        stop_delivery,
-    ));
-    Ok(Some(InteractiveDeployment {
-        actor,
-        pane,
-        thread,
-        inbox,
-        delivery_shutdown: Some(delivery_shutdown),
-        delivery,
-        service,
-        socket_root,
-        worktree,
-        worktree_binding: None,
-        failure_reported: false,
+    if cancelled.try_recv().is_ok() {
+        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
+        return Ok(None);
+    }
+    Ok(Some(LaunchedInteractiveApplication {
+        deployment: InteractiveDeployment {
+            actor,
+            pane,
+            workspace,
+            inbox,
+            connection: InteractiveConnection::AwaitingBinding,
+            service,
+            socket_root,
+            worktree,
+            worktree_binding: None,
+            failure_reported: false,
+        },
+        binding: InteractiveBindingRequest {
+            path: binding_path,
+            expected: expected_resume,
+        },
     }))
 }
 
@@ -1129,9 +1212,17 @@ async fn retire_interactive_application(
     bindings: &Arc<Mutex<BindingTable>>,
     binding_terminal: BindingTerminal,
 ) -> Result<(), InteractiveApplicationError> {
-    if let Some(shutdown) = deployment.delivery_shutdown.take() {
-        let _ = shutdown.send(());
-    }
+    let mut delivery = match deployment.connection {
+        InteractiveConnection::AwaitingBinding => None,
+        InteractiveConnection::Bound {
+            delivery_shutdown,
+            delivery,
+            ..
+        } => {
+            let _ = delivery_shutdown.send(());
+            Some(delivery)
+        }
+    };
     let stop_error =
         tmux.kill_pane(&deployment.pane).await.err().map(|error| {
             application_error(deployment.actor, InteractiveOperation::StopProcess, error)
@@ -1142,11 +1233,12 @@ async fn retire_interactive_application(
             &mut deployment.service,
             APPLICATION_TASK_GRACE_TIMEOUT,
         ),
-        stop_retired_delivery(
-            deployment.actor,
-            &mut deployment.delivery,
-            APPLICATION_TASK_GRACE_TIMEOUT,
-        ),
+        async {
+            if let Some(delivery) = delivery.as_mut() {
+                stop_retired_delivery(deployment.actor, delivery, APPLICATION_TASK_GRACE_TIMEOUT)
+                    .await;
+            }
+        },
     );
     let _ = std::fs::remove_dir_all(&deployment.socket_root);
     let binding_error = if let Some(binding) = deployment.worktree_binding.take() {
@@ -1226,34 +1318,47 @@ async fn abandon_interactive_application(
     let _ = std::fs::remove_dir_all(socket_root);
 }
 
-async fn wait_for_binding(
+async fn discover_interactive_binding(
     actor: ActorRef,
-    path: &Path,
-    service: &tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
+    request: InteractiveBindingRequest,
+    tmux: &TmuxSession,
+    pane: &TmuxPaneId,
 ) -> Result<tidepool_agent::BackendThreadId, InteractiveApplicationError> {
-    tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            if service.is_finished() {
-                return Err(application_error(
-                    actor,
-                    InteractiveOperation::DiscoverBinding,
-                    "MCP service stopped before rollout binding",
-                ));
+    let mut binding_poll = tokio::time::interval(Duration::from_millis(100));
+    let mut pane_health = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            _ = binding_poll.tick() => {
+                if let Ok(thread) = read_interactive_binding(&request.path).await {
+                    if let Some(expected) = &request.expected {
+                        if expected != &thread {
+                            return Err(application_error(
+                                actor,
+                                InteractiveOperation::DiscoverBinding,
+                                format!(
+                                    "resume published thread {} instead of retained thread {}",
+                                    thread.0, expected.0
+                                ),
+                            ));
+                        }
+                    }
+                    return Ok(thread);
+                }
             }
-            if let Ok(thread) = read_interactive_binding(path).await {
-                return Ok(thread);
+            _ = pane_health.tick() => {
+                let panes = tmux.list_panes().await.map_err(|error| {
+                    application_error(actor, InteractiveOperation::DiscoverBinding, error)
+                })?;
+                if !panes.contains(pane) {
+                    return Err(application_error(
+                        actor,
+                        InteractiveOperation::DiscoverBinding,
+                        "interactive application exited before conversation binding",
+                    ));
+                }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    })
-    .await
-    .map_err(|_| {
-        application_error(
-            actor,
-            InteractiveOperation::DiscoverBinding,
-            format!("rollout binding timed out at {}", path.display()),
-        )
-    })?
+    }
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -1334,6 +1439,57 @@ mod tests {
     };
     use tidepool_testing::eval_harness;
     use tidepool_worktree::WorktreeSpec;
+
+    #[tokio::test]
+    async fn idle_application_waits_for_its_first_real_conversation_binding() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let session = TmuxSession::with_socket(
+            format!("shoal_binding_{}", &suffix[..8]),
+            format!("shoal-binding-{}", &suffix[..8]),
+        )
+        .unwrap();
+        let pane = session
+            .create(&TmuxLaunch {
+                window_name: "Root".into(),
+                cwd: std::env::temp_dir(),
+                program: "sleep".into(),
+                args: vec!["60".into()],
+                environment: std::collections::BTreeMap::new(),
+            })
+            .await
+            .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("binding.json");
+        let actor = ActorRef::first(tidepool_actor::ActorId(1));
+        let binding = discover_interactive_binding(
+            actor,
+            InteractiveBindingRequest {
+                path: path.clone(),
+                expected: None,
+            },
+            &session,
+            &pane,
+        );
+        tokio::pin!(binding);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut binding)
+                .await
+                .is_err()
+        );
+        let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
+        tidepool_agent::persist_interactive_binding(&path, thread.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), &mut binding)
+                .await
+                .unwrap()
+                .unwrap(),
+            thread
+        );
+        session.kill().await.unwrap();
+    }
 
     #[test]
     fn root_starts_idle_while_workers_receive_their_assignment_kickoff() {

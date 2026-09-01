@@ -14,10 +14,10 @@ use tidepool_agent::{
     ReasoningEffort,
 };
 use tidepool_node::{TmuxLaunch, TmuxSession};
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
-const STATUS_VERSION: u32 = 1;
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
+const STATUS_VERSION: u32 = 2;
+const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct InitOptions {
     pub session: Option<String>,
@@ -52,6 +52,9 @@ pub struct RunStatus {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunPhase {
     Starting,
+    AwaitingInput {
+        root_actor: ActorRef,
+    },
     Ready {
         root_actor: ActorRef,
         root_thread: BackendThreadId,
@@ -89,6 +92,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         // fails closed.
         resolve_root_launch_mode(true, &root_binding_path).await?;
         tmux.kill().await?;
+    } else {
+        clear_fresh_root_binding(&root_binding_path)?;
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -150,24 +155,28 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         return Err(error.into());
     }
 
-    let ready = match wait_until_ready(&tmux, &status_path, &run_id).await {
-        Ok(ready) => ready,
+    let interactive = match wait_until_interactive(&tmux, &status_path, &run_id).await {
+        Ok(interactive) => interactive,
         Err(failure) => {
             let _ = tmux.kill().await;
             return Err(failure);
         }
     };
-    let RunPhase::Ready {
-        root_actor,
-        root_thread,
-    } = &ready.phase
-    else {
-        unreachable!("wait_until_ready returns only Ready")
-    };
-    println!(
-        "Shoal ready in tmux session {session_name:?}: actor {root_actor:?}, thread {}",
-        root_thread.0
-    );
+    match &interactive.phase {
+        RunPhase::AwaitingInput { root_actor } => println!(
+            "Shoal ready in tmux session {session_name:?}: actor {root_actor:?} is idle; its conversation will bind on the first real input"
+        ),
+        RunPhase::Ready {
+            root_actor,
+            root_thread,
+        } => println!(
+            "Shoal ready in tmux session {session_name:?}: actor {root_actor:?}, thread {}",
+            root_thread.0
+        ),
+        RunPhase::Starting | RunPhase::Failed { .. } | RunPhase::Exited => {
+            unreachable!("wait_until_interactive returns only interactive phases")
+        }
+    }
     println!("status: {}", status_path.display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
@@ -203,7 +212,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
         resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
 
     let policy_root = crate::haskell_sources::ensure_actor_policy()?;
-    let (readiness_tx, readiness_rx) = oneshot::channel();
+    let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
             workspace: options.workspace.clone(),
@@ -222,33 +231,40 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     );
 
     tokio::pin!(run);
-    tokio::pin!(readiness_rx);
-    tokio::select! {
-        ready = &mut readiness_rx => {
-            let ready = match ready {
-                Ok(ready) => ready,
-                Err(_) => return run.await,
-            };
-            persist_interactive_binding(
-                &options.root_binding_path,
-                ready.thread.clone(),
-            )
-            .await?;
-            let status = RunStatus::new(
-                &options.run_id,
-                &options.workspace,
-                &options.session,
-                RunPhase::Ready {
-                    root_actor: ready.root,
-                    root_thread: ready.thread,
-                },
-            );
-            write_status(&options.status_path, &status)?;
+    loop {
+        tokio::select! {
+            readiness = readiness_rx.recv() => match readiness {
+                Some(crate::actor_host::ActorHostReadiness::AwaitingInput { root }) => {
+                    let status = RunStatus::new(
+                        &options.run_id,
+                        &options.workspace,
+                        &options.session,
+                        RunPhase::AwaitingInput { root_actor: root },
+                    );
+                    write_status(&options.status_path, &status)?;
+                }
+                Some(crate::actor_host::ActorHostReadiness::Ready { root, thread }) => {
+                    persist_interactive_binding(
+                        &options.root_binding_path,
+                        thread.clone(),
+                    )
+                    .await?;
+                    let status = RunStatus::new(
+                        &options.run_id,
+                        &options.workspace,
+                        &options.session,
+                        RunPhase::Ready {
+                            root_actor: root,
+                            root_thread: thread,
+                        },
+                    );
+                    write_status(&options.status_path, &status)?;
+                }
+                None => return run.await,
+            },
+            result = &mut run => return result,
         }
-        result = &mut run => return result,
     }
-
-    run.await
 }
 
 async fn resolve_root_launch_mode(
@@ -267,6 +283,17 @@ async fn resolve_root_launch_mode(
                 binding_path.display()
             ))
         })
+}
+
+fn clear_fresh_root_binding(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(runtime_error(format!(
+            "cannot clear stale root conversation binding {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn settle_host_result(
@@ -307,23 +334,27 @@ async fn preflight() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn wait_until_ready(
+async fn wait_until_interactive(
     tmux: &TmuxSession,
     status_path: &Path,
     run_id: &str,
 ) -> Result<RunStatus, Box<dyn std::error::Error>> {
-    tokio::time::timeout(READY_TIMEOUT, async {
+    tokio::time::timeout(INTERACTIVE_START_TIMEOUT, async {
         loop {
             if let Ok(bytes) = tokio::fs::read(status_path).await {
                 let status: RunStatus = serde_json::from_slice(&bytes)?;
                 if status.run_id == run_id {
                     match &status.phase {
-                        RunPhase::Ready { .. } => return Ok(status),
+                        RunPhase::AwaitingInput { .. } | RunPhase::Ready { .. } => {
+                            return Ok(status)
+                        }
                         RunPhase::Failed { error } => {
                             return Err(runtime_error(format!("Shoal host failed: {error}")))
                         }
                         RunPhase::Exited => {
-                            return Err(runtime_error("Shoal host exited before becoming ready"))
+                            return Err(runtime_error(
+                                "Shoal host exited before becoming interactive",
+                            ))
                         }
                         RunPhase::Starting => {}
                     }
@@ -331,7 +362,7 @@ async fn wait_until_ready(
             }
             if !tmux.exists().await? {
                 return Err(runtime_error(
-                    "Shoal tmux session exited before becoming ready",
+                    "Shoal tmux session exited before becoming interactive",
                 ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -340,7 +371,7 @@ async fn wait_until_ready(
     .await
     .map_err(|_| {
         runtime_error(format!(
-            "Shoal did not become ready within {READY_TIMEOUT:?}"
+            "Shoal did not become interactive within {INTERACTIVE_START_TIMEOUT:?}"
         ))
     })?
 }
@@ -469,20 +500,21 @@ mod tests {
 
     #[test]
     fn run_status_round_trips_as_a_closed_sum() {
-        let status = RunStatus::new(
-            "run-1",
-            Path::new("/tmp/work"),
-            "shoal-work",
+        let root_actor = ActorRef::first(tidepool_actor::ActorId(9));
+        for phase in [
+            RunPhase::AwaitingInput { root_actor },
             RunPhase::Ready {
-                root_actor: ActorRef::first(tidepool_actor::ActorId(9)),
+                root_actor,
                 root_thread: BackendThreadId("thread".into()),
             },
-        );
-        let encoded = serde_json::to_vec(&status).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<RunStatus>(&encoded).unwrap(),
-            status
-        );
+        ] {
+            let status = RunStatus::new("run-1", Path::new("/tmp/work"), "shoal-work", phase);
+            let encoded = serde_json::to_vec(&status).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<RunStatus>(&encoded).unwrap(),
+                status
+            );
+        }
     }
 
     #[test]
@@ -526,5 +558,16 @@ mod tests {
             resolve_root_launch_mode(false, &missing).await.unwrap(),
             InteractiveLaunchMode::Fresh
         );
+    }
+
+    #[test]
+    fn fresh_launch_discards_a_previous_runs_conversation_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let binding = root.path().join("root-binding.json");
+        std::fs::write(&binding, "stale").unwrap();
+
+        clear_fresh_root_binding(&binding).unwrap();
+        assert!(!binding.exists());
+        clear_fresh_root_binding(&binding).unwrap();
     }
 }

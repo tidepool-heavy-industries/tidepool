@@ -957,6 +957,15 @@ Implement this boundary in order:
    Developer context and therefore applies to the next real turn. A worker's
    launch-time User prompt remains its actual assignment kickoff; subsequent
    lifecycle input uses the durable native push operation.
+   Stock Codex does not allocate a fresh conversation identity before its first
+   real submission. Shoal therefore owns the pane, inbox, listener, and cleanup
+   record first and publishes `AwaitingInput`; the first User turn transitions
+   the same application monotonically to bound `Ready` state and enables native
+   push. There is no artificial input deadline. Exact-pane disappearance before
+   binding is an application failure, and the root pane is selected before
+   `shoal init` attaches. An explicitly fresh launch clears any retained root
+   binding from a previous run; only `--recreate` may consume that continuity
+   record.
    Because one interactive actor admits one turn at a time, a pushed lifecycle
    input cannot run until the current turn yields. `WorkerPending` therefore
    directs the model to continue only immediately runnable work or end the
@@ -972,8 +981,9 @@ Implement this boundary in order:
    lifecycle loop does not await external Codex I/O.
 
    `shoal init` owns the exact tmux session lifecycle and publishes typed
-   `Starting`, `Ready`, `Failed`, or `Exited` run status. `--recreate` creates a
-   new actor incarnation while resuming a valid retained root conversation.
+   `Starting`, `AwaitingInput`, `Ready`, `Failed`, or `Exited` run status.
+   `--recreate` creates a new actor incarnation while resuming a valid retained
+   root conversation.
    Resume fails closed when the retained binding is invalid, and the new
    incarnation receives explicit reconciliation context stating that old
    handles, workers, exits, inbox rows, and resident state were not restored.

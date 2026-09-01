@@ -231,6 +231,34 @@ impl TmuxSession {
         TmuxPaneId::parse(String::from_utf8_lossy(&output.stdout).trim())
     }
 
+    /// Select the window containing an exact pane owned by this session.
+    ///
+    /// A detached session retains this selection, so a later attach lands on
+    /// the actor application rather than its background host window.
+    pub async fn select_window_for_pane(&self, pane: &TmuxPaneId) -> Result<(), TmuxNodeError> {
+        if !self.contains_pane(pane).await? {
+            return Err(TmuxNodeError::PaneNotOwned(pane.as_str().into()));
+        }
+        let output = self
+            .command()
+            .args(["select-window", "-t", pane.as_str()])
+            .output()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "select-window",
+                source,
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(TmuxNodeError::Command {
+                operation: "select-window",
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+
     pub async fn kill_pane(&self, pane: &TmuxPaneId) -> Result<(), TmuxNodeError> {
         // Pane ids are server-global. Prove that this exact pane is still in
         // the owned session before issuing a destructive tmux command.
@@ -266,7 +294,14 @@ impl TmuxSession {
     pub async fn list_panes(&self) -> Result<HashSet<TmuxPaneId>, TmuxNodeError> {
         let output = self
             .command()
-            .args(["list-panes", "-t", self.name.as_str(), "-F", "#{pane_id}"])
+            .args([
+                "list-panes",
+                "-s",
+                "-t",
+                self.name.as_str(),
+                "-F",
+                "#{pane_id}",
+            ])
             .output()
             .await
             .map_err(|source| TmuxNodeError::Io {
@@ -395,6 +430,8 @@ pub enum TmuxNodeError {
     InvalidSessionName(String),
     #[error("invalid tmux pane id {0:?}")]
     InvalidPaneId(String),
+    #[error("tmux pane {0:?} does not belong to the owned session")]
+    PaneNotOwned(String),
     #[error("tmux launch program is empty or contains NUL")]
     InvalidProgram,
     #[error("invalid tmux launch environment name {0:?}")]
@@ -515,7 +552,33 @@ mod tests {
         assert!(session.list_panes().await.unwrap().contains(&pane));
         assert!(session.create(&launch).await.is_err());
 
+        let mut actor_launch = launch.clone();
+        actor_launch.window_name = "RootActor".into();
+        let actor_pane = session.spawn_window(&actor_launch).await.unwrap();
+        session.select_window_for_pane(&actor_pane).await.unwrap();
+        let selected = session
+            .command()
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                session.name.as_str(),
+                "#{window_name}",
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(selected.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&selected.stdout).trim(),
+            "RootActor"
+        );
+
         let foreign_pane = neighbor.create(&launch).await.unwrap();
+        assert!(matches!(
+            session.select_window_for_pane(&foreign_pane).await,
+            Err(TmuxNodeError::PaneNotOwned(_))
+        ));
         session.kill_pane(&foreign_pane).await.unwrap();
         assert!(neighbor.list_panes().await.unwrap().contains(&foreign_pane));
 

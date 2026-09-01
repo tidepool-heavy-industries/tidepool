@@ -125,6 +125,9 @@ Shoal creates a `shoal-<project>` tmux session. One host process owns every
 resident Haskell actor; each interactive actor is an ordinary Codex TUI in its
 own pane. Worker actors receive retained managed worktrees; the root remains in
 the source checkout and is instructed to orchestrate rather than implement.
+The fresh root opens ready and idle without spending an inference turn. Its
+conversation identity binds on the first real prompt, after which Shoal can
+deliver lifecycle wakes through Codex's native queue.
 Detach with `Ctrl-b d`. `shoal init --recreate` starts a new actor incarnation
 while retaining the root Codex conversation. It fails if the retained binding
 is unavailable and tells the resumed model explicitly that prior handles,
