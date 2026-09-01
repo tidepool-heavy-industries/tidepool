@@ -172,10 +172,11 @@ This is the canonical status inventory for the plan.
 ### Not landed
 
 - the remaining Stage 6 adversarial acceptance cases: cancellation specifically
-  during readiness resumption, duplicate root-session launch, an outer host-task
-  panic, and host-level dead-call/late-wait assertions. The host vertical,
-  provider-backed startup cancellation, startup panic cleanup, quiescence, and
-  session removal are landed;
+  during readiness resumption and a host-level dead-call assertion. Duplicate
+  root-session rejection and an outer host-task panic are covered through the
+  production host. The full host vertical already performs a repeatable late
+  wait after the target has exited. Provider-backed startup cancellation,
+  startup panic cleanup, quiescence, and session removal are also landed;
 - the first production provider/profile composition and capability-specific
   worktree launch grant;
 - an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
@@ -756,7 +757,7 @@ do not create an empty host facade and fill it in later.
 
 7. [ ] **Prove one real host vertical before adding Stage 7 policy.**
 
-   - Bootstrap a root through the host, run `Deliberate`, start a child, serve
+   - [x] Bootstrap a root through the host, run `Deliberate`, start a child, serve
      a call and cast, await its typed exit, and shut the root subtree down.
    - Deterministically cancel once during provider-backed startup and once
      during readiness resumption. Both cases publish one terminal result, run
@@ -764,7 +765,9 @@ do not create an empty host facade and fill it in later.
      admission.
    - Exercise early and duplicate wake delivery, call failure on target exit,
      a repeatable late wait, mailbox FIFO/tail requeue, task panic, shutdown
-     admission timeout, and quiescent host completion.
+     admission timeout, and quiescent host completion. The wake cases, late
+     wait, outer task panic, and quiescent completion are landed; the dead-call
+     host case and readiness-specific cancellation remain.
    - Use adjacent Haskell fixtures and focused actor targets. This host
      vertical is the next major boundary at which the broader actor test set
      is warranted; intermediate commits use narrow unit tests.
@@ -795,7 +798,9 @@ Implement it as these reviewable boundaries:
      the resumed parent outcome before consuming any buffered wake.
    - Test duplicate scheduling as a typed host error, duplicate session launch
      rejection before publication, and cancellation while the provider and
-     readiness continuation are pending.
+     readiness continuation are pending. Duplicate session rejection is
+     landed; readiness-resumption cancellation still needs a real blocking
+     seam rather than a production test hook.
 
 3. [x] **Installed actor boundary routing.**
 
@@ -815,6 +820,8 @@ Implement it as these reviewable boundaries:
      quiescence predicate.
    - Exercise task panic and shutdown-admission timeout without aborting tasks
      or stranding a realm. Return and assert the typed shutdown report.
+     Outer task panic and quiescence are landed; the existing lifecycle tests
+     cover admission timeout below the host composition boundary.
 
 5. [ ] **Major-boundary verification and surface contraction.**
 

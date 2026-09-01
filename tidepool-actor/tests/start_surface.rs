@@ -12,10 +12,10 @@ use parking_lot::Mutex;
 use tidepool_actor::{
     ActorAgentSession, ActorDescriptor, ActorEvent, ActorExitKind, ActorLifecycle,
     ActorMachineRegistry, ActorPlacement, ActorRegistry, ActorTerminal, ActorTurnKind,
-    ActorWorkbenchSource, OutboundSettlement, ResidentActorHost, ResidentActorLifecycle,
-    ResidentActorMailbox, ResidentActorRoot, ResidentActorRunner, ResidentActorStarter,
-    ResidentCallPoll, ResidentCompletionExecutor, ResidentLifecyclePolicy, ResidentWaitPoll,
-    StartInitiator,
+    ActorWorkbenchSource, OutboundSettlement, ResidentActorHost, ResidentActorHostError,
+    ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRoot, ResidentActorRunner,
+    ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor, ResidentHostTaskError,
+    ResidentLifecyclePolicy, ResidentWaitPoll, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -103,6 +103,18 @@ struct PanicsDuringChildStartup {
     requests: Mutex<usize>,
 }
 
+struct PanicsImmediately;
+
+impl ModelProvider for PanicsImmediately {
+    async fn complete(
+        &self,
+        _request: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        panic!("injected root-deliberation provider panic")
+    }
+}
+
 impl ModelProvider for PanicsDuringChildStartup {
     async fn complete(
         &self,
@@ -165,9 +177,13 @@ struct PreparedParent {
 }
 
 fn prepare_parent(discriminator: u32) -> PreparedParent {
+    let session_id = support::process_unique_session(discriminator);
+    prepare_parent_in(session_id)
+}
+
+fn prepare_parent_in(session_id: tidepool_repr::SessionId) -> PreparedParent {
     eval_harness::require_extract();
 
-    let session_id = support::process_unique_session(discriminator);
     let decls = [
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
@@ -243,6 +259,48 @@ fn prepare_parent(discriminator: u32) -> PreparedParent {
         outcome,
         source: ActorWorkbenchSource::new(preamble, include),
     }
+}
+
+#[tokio::test]
+async fn duplicate_root_session_is_rejected_before_actor_publication() {
+    let session_id = support::process_unique_session(98);
+    let first = prepare_parent_in(session_id);
+    let second = prepare_parent_in(session_id);
+    let mut host = ResidentActorHost::new(
+        first.source,
+        Arc::new(AuthorsActorAndApprovesStartup {
+            requests: Mutex::new(Vec::new()),
+        }),
+        None,
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    )
+    .expect("construct actor host");
+    let root = host
+        .launch_root(ResidentActorRoot::new(
+            first.descriptor,
+            first.machine,
+            first.outcome,
+        ))
+        .await
+        .expect("launch first root");
+
+    let error = host
+        .launch_root(ResidentActorRoot::new(
+            second.descriptor,
+            second.machine,
+            second.outcome,
+        ))
+        .await
+        .expect_err("duplicate session must be rejected");
+    assert!(matches!(
+        error,
+        ResidentActorHostError::DuplicateSession(actual) if actual == session_id
+    ));
+
+    let shutdown = host.shutdown().await.expect("quiesce first root");
+    assert_eq!(shutdown.terminal_roots.len(), 1);
+    assert_eq!(shutdown.terminal_roots[0].0, root);
+    assert_eq!(shutdown.terminal_roots[0].1.kind, ActorExitKind::Cancelled);
 }
 
 #[tokio::test]
@@ -348,6 +406,37 @@ async fn child_startup_panic_fails_the_root_and_still_quiesces() {
     assert_eq!(report.failures.len(), 1, "{:#?}", report.failures);
     assert_eq!(report.exited, 1);
     let shutdown = host.shutdown().await.expect("quiesce failed startup");
+    assert_eq!(shutdown.removed_sessions, 1);
+    assert_eq!(shutdown.terminal_roots.len(), 1);
+    assert_eq!(shutdown.terminal_roots[0].0, root);
+    assert_eq!(shutdown.terminal_roots[0].1.kind, ActorExitKind::Failed);
+}
+
+#[tokio::test]
+async fn outer_actor_task_panic_is_typed_and_quiesces() {
+    let prepared = prepare_parent(99);
+    let mut host = ResidentActorHost::new(
+        prepared.source,
+        Arc::new(PanicsImmediately),
+        None,
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    )
+    .expect("construct actor host");
+    let root = host
+        .launch_root(ResidentActorRoot::new(
+            prepared.descriptor,
+            prepared.machine,
+            prepared.outcome,
+        ))
+        .await
+        .expect("launch prepared root");
+
+    let report = host.run_until_idle().await.expect("drive panicking root");
+    assert!(matches!(
+        report.failures.as_slice(),
+        [(actor, ResidentHostTaskError::Panicked)] if *actor == root
+    ));
+    let shutdown = host.shutdown().await.expect("quiesce panicking root");
     assert_eq!(shutdown.removed_sessions, 1);
     assert_eq!(shutdown.terminal_roots.len(), 1);
     assert_eq!(shutdown.terminal_roots[0].0, root);
