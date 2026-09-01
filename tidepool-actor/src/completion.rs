@@ -144,6 +144,16 @@ pub struct ResidentCompletionExecutor<H, O> {
     max_tokens: Option<u32>,
 }
 
+impl<H, O> Clone for ResidentCompletionExecutor<H, O> {
+    fn clone(&self) -> Self {
+        Self {
+            machines: Arc::clone(&self.machines),
+            source: self.source.clone(),
+            max_tokens: self.max_tokens,
+        }
+    }
+}
+
 impl<H, O> ResidentCompletionExecutor<H, O> {
     #[must_use]
     pub fn new(machines: Arc<ActorMachineRegistry<H, O>>, source: ActorWorkbenchSource) -> Self {

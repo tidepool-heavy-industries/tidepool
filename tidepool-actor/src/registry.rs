@@ -618,6 +618,45 @@ impl ActorRegistry {
             .ok_or(ActorRegistryError::ReceiverMissing(actor))
     }
 
+    /// Commit the stable receiver reached by an authored Haskell turn and
+    /// release that exact admission in the same registry critical section.
+    pub(crate) fn install_resident_receiver(
+        &self,
+        mut turn: TurnLease,
+        receiver: InstalledReceiver,
+    ) -> Result<(), ActorRegistryError> {
+        let actor_ref = turn.actor;
+        if turn.kind != ActorTurnKind::Haskell {
+            return Err(ActorRegistryError::TurnTransitionMismatch {
+                actor: actor_ref,
+                expected: ActorTurnKind::Haskell,
+                active: Some(turn.kind),
+            });
+        }
+        let mut state = self.inner.state.lock();
+        let actor = entry_mut(&mut state, actor_ref)?;
+        if actor.active_turn != Some(ActorTurnKind::Haskell) {
+            return Err(ActorRegistryError::TurnTransitionMismatch {
+                actor: actor_ref,
+                expected: ActorTurnKind::Haskell,
+                active: actor.active_turn,
+            });
+        }
+        if actor.receiver.is_some() {
+            return Err(ActorRegistryError::ReceiverAlreadyInstalled(actor_ref));
+        }
+        actor.receiver = Some(receiver);
+        actor.active_turn = None;
+        turn.released = true;
+        if !actor.mailbox.is_empty() {
+            wake(
+                &mut state,
+                ActorRuntimeWake::MailboxReady { actor: actor_ref },
+            );
+        }
+        Ok(())
+    }
+
     /// Atomically publish a call reply (when present) and commit the callee's
     /// next stable state. The delivery retains its mailbox turn lease across
     /// the transition; this method is the sole resident-handler settlement

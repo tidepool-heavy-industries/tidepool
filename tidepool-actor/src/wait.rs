@@ -4,7 +4,7 @@ use tidepool_repr::DataConTable;
 
 use crate::generated::actor::ActorReq;
 use crate::{
-    ActorExitKind, ActorId, ActorRef, ActorRegistry, ActorTerminal, Incarnation, WaitError,
+    ActorExitKind, ActorId, ActorRef, ActorRegistry, ActorTerminal, Incarnation, WaitError, WaitId,
     WaitTicket,
 };
 
@@ -31,6 +31,10 @@ pub enum ActorWaitError {
 }
 
 impl ActorWait {
+    pub(crate) fn id(&self) -> WaitId {
+        self.ticket.id()
+    }
+
     /// Decode `ActorWaitWith` and register the wait after the caller's active
     /// Haskell turn lease has been released.
     pub fn register(

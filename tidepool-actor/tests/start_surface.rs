@@ -12,9 +12,10 @@ use parking_lot::Mutex;
 use tidepool_actor::{
     ActorAgentSession, ActorDescriptor, ActorEvent, ActorExitKind, ActorLifecycle,
     ActorMachineRegistry, ActorPlacement, ActorRegistry, ActorTerminal, ActorTurnKind,
-    ActorWorkbenchSource, OutboundSettlement, ResidentActorLifecycle, ResidentActorMailbox,
-    ResidentActorRunner, ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor,
-    ResidentLifecyclePolicy, ResidentWaitPoll, StartInitiator,
+    ActorWorkbenchSource, OutboundSettlement, ResidentActorHost, ResidentActorLifecycle,
+    ResidentActorMailbox, ResidentActorRoot, ResidentActorRunner, ResidentActorStarter,
+    ResidentCallPoll, ResidentCompletionExecutor, ResidentLifecyclePolicy, ResidentWaitPoll,
+    StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -92,11 +93,18 @@ impl ModelProvider for AuthorsActorAndApprovesStartup {
     }
 }
 
-#[tokio::test]
-async fn public_start_uses_one_exact_resident_path() {
+struct PreparedParent {
+    _session_root: tempfile::TempDir,
+    descriptor: ActorDescriptor,
+    machine: ResidentSession<NoHandlers, TestSink>,
+    outcome: ResidentOutcome,
+    source: ActorWorkbenchSource,
+}
+
+fn prepare_parent(discriminator: u32) -> PreparedParent {
     eval_harness::require_extract();
 
-    let session_id = support::process_unique_session(93);
+    let session_id = support::process_unique_session(discriminator);
     let decls = [
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
@@ -110,13 +118,12 @@ async fn public_start_uses_one_exact_resident_path() {
     preamble.push_str("type ActorEffects = '[Actor, Deliberate]\n");
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
-    let root = tempfile::tempdir().expect("session root");
-    let source = include_str!("start_surface/parent_program.hs");
+    let session_root = tempfile::tempdir().expect("session root");
     let compiled = match run_turn(HaskellTurnRequest {
-        turn_text: source,
+        turn_text: include_str!("start_surface/parent_program.hs"),
         templates: &templates,
         include: &include_refs,
-        session_root: root.path(),
+        session_root: session_root.path(),
         inject_modules: &[],
         gen: 1,
         verdict: None,
@@ -128,9 +135,13 @@ async fn public_start_uses_one_exact_resident_path() {
         other => panic!("actor program should compile as an expression, got {other:?}"),
     };
 
-    let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
-        .expect("open declaration plane")
-        .with_validation_include(include.clone());
+    let lib = SessionLib::open(
+        session_id,
+        session_root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .expect("open declaration plane")
+    .with_validation_include(include.clone());
     let mut machine = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
@@ -145,7 +156,7 @@ async fn public_start_uses_one_exact_resident_path() {
         EffectRunPolicy::SuspendAll,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
-    let parent_outcome = machine
+    let outcome = machine
         .run_with_sites(
             "start_parent",
             &compiled.expr,
@@ -153,25 +164,69 @@ async fn public_start_uses_one_exact_resident_path() {
             &compiled.asks,
         )
         .expect("run parent to start suspension");
+    let descriptor = ActorDescriptor::new(
+        "parent",
+        ["Actor", "Deliberate"],
+        ActorPlacement {
+            session: session_id,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: ScopeId::ROOT,
+        },
+    );
+    PreparedParent {
+        _session_root: session_root,
+        descriptor,
+        machine,
+        outcome,
+        source: ActorWorkbenchSource::new(preamble, include),
+    }
+}
+
+#[tokio::test]
+async fn host_owns_the_complete_resident_actor_vertical() {
+    let prepared = prepare_parent(94);
+    let provider = Arc::new(AuthorsActorAndApprovesStartup {
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut host = ResidentActorHost::new(
+        prepared.source,
+        provider.clone(),
+        None,
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    )
+    .expect("construct actor host");
+    host.launch_root(ResidentActorRoot::new(
+        prepared.descriptor,
+        prepared.machine,
+        prepared.outcome,
+    ))
+    .await
+    .expect("launch prepared root");
+
+    let report = host.run_until_idle().await.expect("drive actor host");
+    assert_eq!(report.roots, 1);
+    assert_eq!(report.idle, 0);
+    assert_eq!(report.exited, 6);
+    assert!(report.parked.is_empty());
+    assert!(report.failures.is_empty(), "{:#?}", report.failures);
+    assert_eq!(report.cleanup_failures.len(), 1);
+    assert_eq!(provider.requests.lock().len(), 4);
+}
+
+#[tokio::test]
+async fn public_start_uses_one_exact_resident_path() {
+    let prepared = prepare_parent(93);
+    let session_id = prepared.descriptor.placement().session;
+    let parent_realm = prepared.descriptor.placement().resource_scope;
+    let machine = prepared.machine;
+    let parent_outcome = prepared.outcome;
+    let workbench_source = prepared.source;
 
     let machines = Arc::new(ActorMachineRegistry::new());
     assert!(machines.insert_idle(session_id, machine).is_none());
     let registry = ActorRegistry::new();
-    let parent_realm = RealmId::fresh();
     let parent_start = registry
-        .begin_start(
-            None,
-            ActorDescriptor::new(
-                "parent",
-                ["Actor", "Deliberate"],
-                ActorPlacement {
-                    session: session_id,
-                    resource_scope: parent_realm,
-                    lexical_scope: ScopeId::ROOT,
-                },
-            ),
-            StartInitiator::Runtime,
-        )
+        .begin_start(None, prepared.descriptor, StartInitiator::Runtime)
         .expect("begin parent");
     let parent = registry
         .publish_ready(parent_start)
@@ -180,7 +235,6 @@ async fn public_start_uses_one_exact_resident_path() {
         .begin_turn(parent, ActorTurnKind::Haskell)
         .expect("admit parent Haskell turn");
     let parent_context = parent_turn.session_context();
-    let workbench_source = ActorWorkbenchSource::new(preamble, include);
     let runner = ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone());
     let provider = AuthorsActorAndApprovesStartup {
         requests: Mutex::new(Vec::new()),

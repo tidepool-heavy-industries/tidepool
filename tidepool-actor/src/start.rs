@@ -260,13 +260,28 @@ pub struct ResidentActorStarter<H, O> {
 /// Exclusive custody of an actor between registry allocation and readiness
 /// publication. Cancellable or unwind-catching phase futures borrow this
 /// owner, so they cannot discard the token needed for authoritative cleanup.
-struct UnpublishedResidentActor {
+pub(crate) struct UnpublishedResidentActor {
     starting: crate::StartingActor,
     context: crate::ActorSessionContext,
     realm: RealmId,
 }
 
 impl UnpublishedResidentActor {
+    pub(crate) fn begin(
+        registry: &ActorRegistry,
+        owner: Option<crate::ActorRef>,
+        descriptor: ActorDescriptor,
+        initiator: StartInitiator,
+    ) -> Result<Self, ActorRegistryError> {
+        let realm = descriptor.placement().resource_scope;
+        let starting = registry.begin_start(owner, descriptor, initiator)?;
+        Ok(Self {
+            context: registry.session_context(starting.actor())?,
+            starting,
+            realm,
+        })
+    }
+
     async fn abort<H, O>(
         self,
         lifecycle: &crate::ResidentActorLifecycle<H, O>,
@@ -279,7 +294,7 @@ impl UnpublishedResidentActor {
         lifecycle.abort_starting(self.starting, terminal).await
     }
 
-    async fn publish<H, O>(
+    pub(crate) async fn publish<H, O>(
         mut self,
         registry: &ActorRegistry,
         lifecycle: &crate::ResidentActorLifecycle<H, O>,
@@ -358,15 +373,12 @@ where
         let owner = parent_turn.actor();
         let parent_context = parent_turn.session_context();
         let (descriptor, parent_hole, entry) = start.into_parts();
-        let child_realm = descriptor.placement().resource_scope;
-        let starting =
-            self.registry
-                .begin_start(Some(owner), descriptor, StartInitiator::Policy)?;
-        let unpublished = UnpublishedResidentActor {
-            context: self.registry.session_context(starting.actor())?,
-            starting,
-            realm: child_realm,
-        };
+        let unpublished = UnpublishedResidentActor::begin(
+            &self.registry,
+            Some(owner),
+            descriptor,
+            StartInitiator::Policy,
+        )?;
         let child_session = self.registry.startup_agent_session(&unpublished.starting)?;
 
         let startup_result = await_startup_phase(

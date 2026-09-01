@@ -68,6 +68,18 @@ pub struct ResidentWait {
     wait: crate::ActorWait,
 }
 
+impl ResidentCall {
+    pub(crate) fn key(&self) -> (ActorRef, crate::CallId) {
+        (self.caller, self.ticket.id())
+    }
+}
+
+impl ResidentWait {
+    pub(crate) fn key(&self) -> (ActorRef, crate::WaitId) {
+        (self.waiter, self.wait.id())
+    }
+}
+
 pub enum ResidentWaitPoll {
     Pending(ResidentWait),
     Continued {
@@ -121,14 +133,20 @@ where
         turn: TurnLease,
         outcome: ResidentOutcome,
     ) -> Result<OutboundSettlement, ResidentMailboxError> {
+        let context = turn.session_context();
+        let outbound = self.runner.capture_outbound(context, outcome).await?;
+        self.submit_captured_outbound(turn, outbound).await
+    }
+
+    pub(crate) async fn submit_captured_outbound(
+        &self,
+        turn: TurnLease,
+        outbound: ResidentOutbound,
+    ) -> Result<OutboundSettlement, ResidentMailboxError> {
         let caller = turn.actor();
         let context = turn.session_context();
         let result: Result<OutboundSettlement, ResidentMailboxError> = async {
-            match self
-                .runner
-                .capture_outbound(context.clone(), outcome)
-                .await?
-            {
+            match outbound {
                 ResidentOutbound::Cast {
                     target,
                     continuation,
@@ -224,10 +242,19 @@ where
         turn: TurnLease,
         outcome: ResidentOutcome,
     ) -> Result<ResidentWait, ResidentMailboxError> {
+        let context = turn.session_context();
+        let request = self.runner.capture_wait(context, outcome).await?;
+        self.submit_captured_wait(turn, request).await
+    }
+
+    pub(crate) async fn submit_captured_wait(
+        &self,
+        turn: TurnLease,
+        request: crate::mailbox::ResidentWaitRequest,
+    ) -> Result<ResidentWait, ResidentMailboxError> {
         let waiter = turn.actor();
         let context = turn.session_context();
         let result: Result<ResidentWait, ResidentMailboxError> = async {
-            let request = self.runner.capture_wait(context.clone(), outcome).await?;
             let wait = crate::ActorWait::register_target(&self.registry, waiter, request.target)?;
             // Establish the parked obligation while this exact Haskell turn
             // still owns admission. Releasing first would allow another turn

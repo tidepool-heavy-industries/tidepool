@@ -12,6 +12,7 @@ mod completion;
 mod event;
 mod executor;
 mod generated;
+mod host;
 mod identity;
 mod mailbox;
 mod mount;
@@ -37,6 +38,10 @@ pub use event::{
 };
 pub use executor::{
     run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
+};
+pub use host::{
+    ResidentActorHost, ResidentActorHostError, ResidentActorRoot, ResidentHostParkedKind,
+    ResidentHostRunReport, ResidentHostTaskError,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use mailbox::{
