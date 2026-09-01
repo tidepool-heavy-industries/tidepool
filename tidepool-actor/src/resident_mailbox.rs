@@ -41,7 +41,7 @@ pub enum ResidentMailboxError {
 pub enum OutboundSettlement {
     Continued {
         turn: TurnLease,
-        outcome: ResidentOutcome,
+        outcome: Box<ResidentOutcome>,
     },
     Pending(ResidentCall),
 }
@@ -57,7 +57,7 @@ pub enum ResidentCallPoll {
     Pending(ResidentCall),
     Continued {
         turn: TurnLease,
-        outcome: ResidentOutcome,
+        outcome: Box<ResidentOutcome>,
     },
 }
 
@@ -72,7 +72,7 @@ pub enum ResidentWaitPoll {
     Pending(ResidentWait),
     Continued {
         turn: TurnLease,
-        outcome: ResidentOutcome,
+        outcome: Box<ResidentOutcome>,
     },
 }
 
@@ -145,7 +145,10 @@ where
                         .await?;
                     self.registry.cast(caller, target, request)?;
                     let outcome = self.runner.resume_unit(context, continuation).await?;
-                    Ok(OutboundSettlement::Continued { turn, outcome })
+                    Ok(OutboundSettlement::Continued {
+                        turn,
+                        outcome: Box::new(outcome),
+                    })
                 }
                 ResidentOutbound::Call {
                     target,
@@ -199,7 +202,10 @@ where
                         .runner
                         .resume_live(pending.context, pending.continuation, reply.into_custody())
                         .await?;
-                    Ok(ResidentCallPoll::Continued { turn, outcome })
+                    Ok(ResidentCallPoll::Continued {
+                        turn,
+                        outcome: Box::new(outcome),
+                    })
                 }
             }
         }
@@ -264,7 +270,10 @@ where
                 .runner
                 .resume_terminal(pending.context, pending.continuation, terminal)
                 .await?;
-            Ok(ResidentWaitPoll::Continued { turn, outcome })
+            Ok(ResidentWaitPoll::Continued {
+                turn,
+                outcome: Box::new(outcome),
+            })
         }
         .await;
         if let Err(error) = &result {

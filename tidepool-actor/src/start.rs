@@ -6,6 +6,7 @@
 //! primitive used by green threads.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::Arc;
 
 use tidepool_bridge::{BridgeError, FromCore};
@@ -228,6 +229,8 @@ mod tests {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorStartError {
+    #[error("actor startup was cancelled")]
+    Cancelled,
     #[error(transparent)]
     Registry(#[from] ActorRegistryError),
     #[error(transparent)]
@@ -286,6 +289,24 @@ where
         start: ResidentActorStart,
         sink: Option<StreamSink>,
     ) -> Result<(TurnLease, crate::ActorRef, ResidentOutcome), ResidentActorStartError> {
+        self.start_until_cancelled(parent_turn, provider, start, sink, std::future::pending())
+            .await
+    }
+
+    /// Run startup under a cooperative cancellation signal. The signal may
+    /// stop ordinary startup work, but terminal publication, shutdown hooks,
+    /// and realm cleanup always run to completion before this returns.
+    pub(crate) async fn start_until_cancelled<C>(
+        &self,
+        parent_turn: TurnLease,
+        provider: &dyn DynModelProvider,
+        start: ResidentActorStart,
+        sink: Option<StreamSink>,
+        mut cancelled: C,
+    ) -> Result<(TurnLease, crate::ActorRef, ResidentOutcome), ResidentActorStartError>
+    where
+        C: Future<Output = ()> + Unpin,
+    {
         let owner = parent_turn.actor();
         let parent_context = parent_turn.session_context();
         let (descriptor, parent_hole, entry) = start.into_parts();
@@ -296,7 +317,7 @@ where
         let child_session = self.registry.startup_agent_session(&starting)?;
         let child_context = self.registry.session_context(starting.actor())?;
 
-        let startup_result = async {
+        let startup_result = await_or_cancelled(&mut cancelled, async {
             let mut admitted = None;
             let mut outcome = self
                 .runner
@@ -332,12 +353,12 @@ where
             };
             drop(admitted);
             Ok::<_, ResidentActorStartError>(readiness)
-        }
+        })
         .await;
 
         let readiness = match startup_result {
-            Ok(readiness) => readiness,
-            Err(error) => {
+            Some(Ok(readiness)) => readiness,
+            Some(Err(error)) => {
                 self.abort_starting(
                     starting,
                     ActorTerminal {
@@ -348,15 +369,21 @@ where
                 .await?;
                 return Err(error);
             }
+            None => {
+                self.abort_starting(starting, cancelled_terminal()).await?;
+                return Err(ResidentActorStartError::Cancelled);
+            }
         };
 
-        let child = match self
-            .runner
-            .resume_readiness(child_context.clone(), readiness)
-            .await
+        let child = match await_or_cancelled(
+            &mut cancelled,
+            self.runner
+                .resume_readiness(child_context.clone(), readiness),
+        )
+        .await
         {
-            Ok(child) => child,
-            Err(error) => {
+            Some(Ok(child)) => child,
+            Some(Err(error)) => {
                 self.abort_starting(
                     starting,
                     ActorTerminal {
@@ -367,16 +394,22 @@ where
                 .await?;
                 return Err(error.into());
             }
+            None => {
+                self.abort_starting(starting, cancelled_terminal()).await?;
+                return Err(ResidentActorStartError::Cancelled);
+            }
         };
         let completed = matches!(child, ResidentOutcome::Completed { .. });
         if !completed {
-            let receiver = match self
-                .runner
-                .capture_receiver(child_context.clone(), child, child_realm)
-                .await
+            let receiver = match await_or_cancelled(
+                &mut cancelled,
+                self.runner
+                    .capture_receiver(child_context.clone(), child, child_realm),
+            )
+            .await
             {
-                Ok(receiver) => receiver,
-                Err(error) => {
+                Some(Ok(receiver)) => receiver,
+                Some(Err(error)) => {
                     self.abort_starting(
                         starting,
                         ActorTerminal {
@@ -386,6 +419,10 @@ where
                     )
                     .await?;
                     return Err(error.into());
+                }
+                None => {
+                    self.abort_starting(starting, cancelled_terminal()).await?;
+                    return Err(ResidentActorStartError::Cancelled);
                 }
             };
             if let Err(error) = self.registry.install_starting_receiver(&starting, receiver) {
@@ -423,13 +460,15 @@ where
                 Err(error) => return Err(error.into()),
             }
         }
-        let parent = match self
-            .runner
-            .resume_starting_parent(parent_context, parent_hole, actor)
-            .await
+        let parent = match await_or_cancelled(
+            &mut cancelled,
+            self.runner
+                .resume_starting_parent(parent_context, parent_hole, actor),
+        )
+        .await
         {
-            Ok(parent) => parent,
-            Err(error) => {
+            Some(Ok(parent)) => parent,
+            Some(Err(error)) => {
                 let _ = self
                     .lifecycle
                     .force_terminate(
@@ -444,7 +483,53 @@ where
                     .await;
                 return Err(error.into());
             }
+            None => {
+                let _ = self
+                    .lifecycle
+                    .force_terminate(actor, cancelled_terminal())
+                    .await;
+                return Err(ResidentActorStartError::Cancelled);
+            }
         };
         Ok((parent_turn, actor, parent))
+    }
+}
+
+async fn await_or_cancelled<T>(
+    cancelled: &mut (impl Future<Output = ()> + Unpin),
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = cancelled => None,
+        result = work => Some(result),
+    }
+}
+
+fn cancelled_terminal() -> ActorTerminal {
+    ActorTerminal {
+        kind: ActorExitKind::Cancelled,
+        summary: "startup cancelled before settlement".into(),
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    #[tokio::test]
+    async fn cancellation_wins_an_unpublished_startup_tie() {
+        let mut cancelled = std::future::ready(());
+        assert_eq!(
+            super::await_or_cancelled(&mut cancelled, std::future::ready(41)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_startup_progresses_without_cancellation() {
+        let mut cancelled = std::future::pending();
+        assert_eq!(
+            super::await_or_cancelled(&mut cancelled, std::future::ready(41)).await,
+            Some(41)
+        );
     }
 }

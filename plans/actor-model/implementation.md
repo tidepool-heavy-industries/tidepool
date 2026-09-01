@@ -683,6 +683,10 @@ do not create an empty host facade and fill it in later.
 
 5. [ ] **Move startup custody into structured host task ownership.**
 
+   - [x] The one startup driver now accepts an in-band cancellation signal at
+     every ordinary await. Before publication it transfers the unpublished
+     actor through lifecycle cleanup; after publication it force-terminates
+     the child. Terminal publication and cleanup are never cancellable.
    - Factor the existing startup driver so its unpublished token, child realm,
      parent lease/hole, entry root, readiness continuation, and any captured
      cleanup batch live outside each individually cancellable await.

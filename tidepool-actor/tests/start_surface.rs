@@ -246,7 +246,7 @@ async fn public_start_uses_one_exact_resident_path() {
         .await
         .expect("resume dynamic reply")
     {
-        ResidentCallPoll::Continued { turn, outcome } => (turn, outcome),
+        ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome),
         ResidentCallPoll::Pending(_) => panic!("dynamic call must be settled"),
     };
     let wait = mailbox
@@ -258,7 +258,7 @@ async fn public_start_uses_one_exact_resident_path() {
         .await
         .expect("resume model-authored child exit")
     {
-        ResidentWaitPoll::Continued { turn, outcome } => (turn, outcome),
+        ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome),
         ResidentWaitPoll::Pending(_) => {
             panic!("completed model-authored child wait must settle immediately")
         }
@@ -351,7 +351,7 @@ async fn public_start_uses_one_exact_resident_path() {
         .await
         .expect("submit cast")
     {
-        OutboundSettlement::Continued { turn, outcome } => (turn, outcome),
+        OutboundSettlement::Continued { turn, outcome } => (turn, *outcome),
         OutboundSettlement::Pending(_) => panic!("cast must continue after acceptance"),
     };
     assert!(mailbox.dispatch_one(server).await.expect("dispatch cast"));
@@ -369,7 +369,7 @@ async fn public_start_uses_one_exact_resident_path() {
         .await
         .expect("resume replied call")
     {
-        ResidentCallPoll::Continued { turn, outcome } => (turn, outcome),
+        ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome),
         ResidentCallPoll::Pending(_) => panic!("dispatched call must be settled"),
     };
 
@@ -393,7 +393,7 @@ async fn public_start_uses_one_exact_resident_path() {
     assert_eq!(registry.lifecycle(job), Ok(ActorLifecycle::Exited));
     let (parent_turn, parent_outcome) =
         match mailbox.poll_call(pending).await.expect("resume job reply") {
-            ResidentCallPoll::Continued { turn, outcome } => (turn, outcome),
+            ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome),
             ResidentCallPoll::Pending(_) => panic!("job call must be settled"),
         };
     let wait = mailbox
@@ -405,7 +405,7 @@ async fn public_start_uses_one_exact_resident_path() {
         .await
         .expect("resume typed job exit")
     {
-        ResidentWaitPoll::Continued { turn, outcome } => (turn, outcome),
+        ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome),
         ResidentWaitPoll::Pending(_) => panic!("completed job wait must settle immediately"),
     };
     drop(parent_turn);
