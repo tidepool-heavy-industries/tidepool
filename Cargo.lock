@@ -3865,6 +3865,7 @@ dependencies = [
 name = "tidepool-actor"
 version = "0.1.0"
 dependencies = [
+ "frunk",
  "futures-util",
  "parking_lot",
  "serde",
@@ -3876,6 +3877,7 @@ dependencies = [
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
+ "tidepool-handlers",
  "tidepool-mcp",
  "tidepool-model",
  "tidepool-model-output",

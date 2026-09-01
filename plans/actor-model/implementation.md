@@ -408,7 +408,9 @@ strengthens this same operation rather than adding another construction path
 or image registry.
 
 The process composition root is the sole bootstrap exception: it creates the
-initial root actor and installs its interpreter policy directly. Child
+single actor registry, binds that same registry into authorized handlers and
+the host, creates the initial root actor, and installs its interpreter policy
+directly. Child
 construction, including the first test child, goes through the same registry
 lifecycle and `startActor` path that model-authored Haskell will use.
 
@@ -659,11 +661,13 @@ do not create an empty host facade and fill it in later.
    - Add `tidepool-actor/src/host.rs` only in the same change that makes it
      launch a prepared root and own at least one real actor task. Do not land a
      public bundle of forwarding accessors first.
-   - The host constructs and owns the registry, machine registry, runner,
-     completion executor, starter, mailbox adapter, lifecycle owner, sole wake
-     receiver, actor-task set, and parked call/wait tables. Tests may inspect
-     behavior through typed reports and the neutral event stream; they must not
-     require public getters for each substrate component.
+   - The host consumes the composition root's single registry, then constructs
+     and owns the machine registry, runner, completion executor, starter,
+     mailbox adapter, lifecycle owner, sole wake receiver, actor-task set, and
+     parked call/wait tables. The same registry may already be captured by
+     authorized handlers; there is no alternate host-owned registry. Tests may
+     inspect behavior through typed reports and the neutral event stream; they
+     must not require public getters for each substrate component.
    - [x] Starter and mailbox construction already require the same injected
      `ResidentActorLifecycle`; neither constructs a private lifecycle policy.
    - The composition root owns that lifecycle and passes it to every host
@@ -867,39 +871,44 @@ inventing a generic capability framework:
 
 Do not construct separate resident machine types for `ReadWrite` and
 `ReadOnly`. Actors of both profiles share one machine, while profile identity
-belongs to an exact actor incarnation. The first production handler therefore
-uses the actor principal already installed in `EffectContext` to query the
+belongs to an exact actor incarnation. Profile-aware handlers therefore use
+the actor principal installed in `EffectContext` to query the
 registry's authoritative descriptor before delegating a nominal request.
 
 Implement this boundary in order:
 
-1. Thread the already-installed `SessionRunContext.principal` into effect
+1. [x] Thread the already-installed `SessionRunContext.principal` into effect
    dispatch. `EffectContext` currently carries only the constructor table and
    handler user state, so handlers cannot yet authorize the actor selected by
    `set_actor_execution`; fix that common seam rather than adding actor-global
    mutable state or capturing a principal in a handler instance. Non-resident
    callers use the explicit system principal.
-2. Add one reusable authorization decision at the actor/runtime boundary. It
+2. [x] Add one reusable authorization decision at the actor/runtime boundary. It
    accepts the exact dispatch principal and requested operation class, reads
    the retained descriptor, and returns a closed allow/refuse result. `FsRead`
    is allowed for both initial profiles; `FsWrite` is allowed only for
-   `ReadWrite`. Missing, stale, initializing, and exited principals refuse
-   rather than falling through to another handler.
-3. Keep operation classification nominal and generated where possible. Do not
+   `ReadWrite`. Missing, stale, and exited principals refuse rather than
+   falling through to another handler. An initializing actor is admitted under
+   its selected profile because authored initialization executes before
+   publication; the private startup owner still prevents external use of its
+   reference.
+3. [x] Keep operation classification nominal and generated where possible. Do not
    inspect rendered request strings, rely on HList position, or duplicate the
    Haskell profile rows as a Rust tag prefix. The gate decides a class; the
    existing filesystem handlers still decode and execute the concrete request.
-4. Compose one production actor handler around the shared `FsRead` backend and
-   `FsWrite` handler. The composition root supplies the workspace root and
-   registry; actor startup does not construct handlers. Definitions and profile
+4. [x] Provide one reusable profile-authorizing handler decorator and compose
+   it around the shared `FsRead` backend and `FsWrite` handler in the resident
+   proof. The eventual production composition root supplies the workspace root
+   and registry; actor startup does not construct handlers, and no speculative
+   production-stack builder exists before that root. Definitions and profile
    names convey no filesystem authority without this interpreter and its
    resource root.
-5. Test the decision table without GHC, then run one focused resident vertical
+5. [x] Test the decision table without GHC, then run one focused resident vertical
    in which a `ReadWrite` actor writes, a `ReadOnly` actor reads, and a
    `ReadOnly` write is refused by Rust even if a malformed or stale program
    manages to issue the nominal request. The compile-failure fixture remains a
    model-surface hygiene test, not the authorization proof.
-6. Only after that vertical, add the production provider/root launch recipe.
+6. [ ] Only after that vertical, add the production provider/root launch recipe.
    Reuse `ResidentActorHost`; do not create a harness-local actor scheduler or
    a second profile registry.
 
