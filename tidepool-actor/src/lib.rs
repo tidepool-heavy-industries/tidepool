@@ -21,6 +21,7 @@ mod profile;
 mod registry;
 mod resident_lifecycle;
 mod resident_mailbox;
+mod resident_mcp;
 mod resident_workbench;
 mod start;
 mod timeline;
@@ -67,6 +68,7 @@ pub use resident_mailbox::{
     OutboundSettlement, ResidentActorMailbox, ResidentCall, ResidentCallPoll, ResidentMailboxError,
     ResidentWait, ResidentWaitPoll,
 };
+pub use resident_mcp::{ResidentMcpError, ResidentMcpPolicy};
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError,

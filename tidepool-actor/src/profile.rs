@@ -30,11 +30,19 @@ impl ActorEffectProfile {
                 "ActorKernel",
                 "FsWrite",
                 "ActorLocal",
+                "ActorMcp",
                 "Actor",
                 "Deliberate",
                 "FsRead",
             ],
-            Self::ReadOnly => &["ActorKernel", "ActorLocal", "Actor", "Deliberate", "FsRead"],
+            Self::ReadOnly => &[
+                "ActorKernel",
+                "ActorLocal",
+                "ActorMcp",
+                "Actor",
+                "Deliberate",
+                "FsRead",
+            ],
         }
     }
 }

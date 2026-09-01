@@ -15,7 +15,8 @@ tidepool-runtime.workspace = true
 tidepool-eval.workspace = true
 tidepool-repr.workspace = true
 tidepool-effect.workspace = true
-tidepool-node.workspace = true
+tidepool-actor.workspace = true
+tidepool-tool.workspace = true
 rmcp.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "signal", "sync", "test-util"] }

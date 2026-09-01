@@ -3884,6 +3884,7 @@ dependencies = [
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
+ "tidepool-tool",
  "tokio",
 ]
 
@@ -3905,6 +3906,7 @@ dependencies = [
  "tidepool-extract-cmd",
  "tidepool-node",
  "tidepool-repr",
+ "tidepool-tool",
  "tidepool-worktree",
  "tokio",
  "tracing",
@@ -4165,16 +4167,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tidepool-actor",
  "tidepool-bridge",
  "tidepool-bridge-derive",
  "tidepool-codegen",
  "tidepool-effect",
  "tidepool-eval",
- "tidepool-node",
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
+ "tidepool-tool",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4354,6 +4357,14 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "tidepool-tool"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -257,6 +257,10 @@ data ActorKernel a where
 data ActorLocal (api :: Type -> Type) a where
   ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next
 
+data ActorMcp a where
+  ActorMcpAwaitWith :: Value -> Text -> ActorMcp (Text, Value)
+  ActorMcpReplyWith :: Value -> ActorMcp ()
+
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
 say :: forall effs. Member Console effs => Text -> Eff effs ()

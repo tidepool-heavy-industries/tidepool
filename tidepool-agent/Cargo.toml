@@ -18,6 +18,7 @@ tidepool-extract-cmd.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-actor.workspace = true
 tidepool-node.workspace = true
+tidepool-tool.workspace = true
 # pidfd_open/pidfd_send_signal + poll for the app-server canceller: a cycle
 # thread blocked in a seam call holds `&mut` on its backend, so reaping it
 # from another thread goes by pidfd (see driver.rs's PidFdSlot docs).

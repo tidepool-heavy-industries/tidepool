@@ -131,6 +131,8 @@ pub(crate) enum ResidentActorBoundary {
     Outbound(ResidentOutbound),
     Wait(ResidentWaitRequest),
     Receive(InstalledReceiver),
+    McpAwait(crate::resident_mcp::ResidentMcpAwait),
+    McpReply(crate::resident_mcp::ResidentMcpReply),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -149,7 +151,7 @@ impl ResidentKernelBoundary {
 }
 
 impl ResidentActorBoundary {
-    fn operation(&self) -> &'static str {
+    pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
             Self::Deliberate(_) => "deliberate",
@@ -158,6 +160,8 @@ impl ResidentActorBoundary {
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
             Self::Wait(_) => "awaitExit",
             Self::Receive(_) => "receive",
+            Self::McpAwait(_) => "actor MCP await",
+            Self::McpReply(_) => "actor MCP reply",
         }
     }
 }
@@ -176,6 +180,7 @@ enum ResidentRequest {
     Actor(crate::generated::actor::ActorReq),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
+    ActorMcp(crate::generated::actor_mcp::ActorMcpReq),
     Deliberate(crate::generated::deliberate::DeliberateReq),
     Complete(CompleteReq),
 }
@@ -206,6 +211,7 @@ impl ResidentRequest {
             Self::ActorLocal,
             crate::generated::actor_local::ActorLocalReq
         );
+        try_member!(Self::ActorMcp, crate::generated::actor_mcp::ActorMcpReq);
         try_member!(
             Self::Deliberate,
             crate::generated::deliberate::DeliberateReq
@@ -238,6 +244,12 @@ impl ResidentRequest {
             Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
                 ..,
             )) => "receive",
+            Self::ActorMcp(crate::generated::actor_mcp::ActorMcpReq::ActorMcpAwaitWith(..)) => {
+                "actor MCP await"
+            }
+            Self::ActorMcp(crate::generated::actor_mcp::ActorMcpReq::ActorMcpReplyWith(..)) => {
+                "actor MCP reply"
+            }
             Self::Deliberate(crate::generated::deliberate::DeliberateReq::DeliberateWith(..)) => {
                 "deliberate"
             }
@@ -306,6 +318,8 @@ pub enum ResidentActorWorkbenchError {
     StartCapture(#[from] crate::ActorStartCaptureError),
     #[error(transparent)]
     WaitCapture(#[from] crate::ActorWaitError),
+    #[error("invalid actor MCP declaration set: {0}")]
+    McpDeclarations(serde_json::Error),
 }
 
 impl<H, O> ResidentMachineAccess<H, O>
@@ -572,6 +586,39 @@ where
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
                     ) => capture_receiver_boundary(session, hole, site, actor_realm),
+                    ResidentRequest::ActorMcp(
+                        crate::generated::actor_mcp::ActorMcpReq::ActorMcpAwaitWith(
+                            declarations,
+                            synopsis,
+                        ),
+                    ) => {
+                        let declarations = tidepool_runtime::value_to_json(
+                            &declarations,
+                            session.data_con_table(),
+                            0,
+                        );
+                        let declarations = serde_json::from_value(declarations)
+                            .map_err(ResidentActorWorkbenchError::McpDeclarations)?;
+                        Ok(ResidentActorBoundary::McpAwait(
+                            crate::resident_mcp::ResidentMcpAwait {
+                                continuation: hole,
+                                declarations,
+                                synopsis,
+                            },
+                        ))
+                    }
+                    ResidentRequest::ActorMcp(
+                        crate::generated::actor_mcp::ActorMcpReq::ActorMcpReplyWith(result),
+                    ) => Ok(ResidentActorBoundary::McpReply(
+                        crate::resident_mcp::ResidentMcpReply {
+                            continuation: hole,
+                            result: tidepool_runtime::value_to_json(
+                                &result,
+                                session.data_con_table(),
+                                0,
+                            ),
+                        },
+                    )),
                     ResidentRequest::Deliberate(
                         crate::generated::deliberate::DeliberateReq::DeliberateWith(..),
                     ) => {
@@ -918,6 +965,23 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = ().to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_mcp_invocation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = (name, arguments).to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

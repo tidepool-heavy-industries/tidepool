@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use tidepool_node::ToolDeclaration;
+pub use tidepool_tool::ToolDeclaration;
 
 /// Tidepool's identity for one agent. Minted by the registry, never by a
 /// backend — a backend thread id may be reassigned or absent (an ephemeral
@@ -46,7 +46,7 @@ pub struct ToolCall {
     pub thread: BackendThreadId,
     pub turn: TurnId,
     /// The wire name the child invoked — one of the declared
-    /// [`tidepool_node::ToolDeclaration::name`]s, or something else entirely, which is
+    /// [`tidepool_tool::ToolDeclaration::name`]s, or something else entirely, which is
     /// a fact the parent must be able to refuse rather than a fact to assume.
     pub tool: String,
     /// The child's arguments, as JSON. Named-field objects: the model is the
@@ -184,7 +184,7 @@ pub enum ModelPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpec {
     pub ephemeral: bool,
-    pub dynamic_tools: Vec<tidepool_node::ToolDeclaration>,
+    pub dynamic_tools: Vec<tidepool_tool::ToolDeclaration>,
 }
 
 /// One work cycle: one turn on one thread, in one workspace.
@@ -201,7 +201,7 @@ pub struct CycleSpec {
     pub task: String,
     /// JSON Schema constraining the terminal message. Derived from the
     /// caller's result type by the structural interpreter — no authored
-    /// Haskell writes one, same rule as [`tidepool_node::ToolDeclaration::input_schema`].
+    /// Haskell writes one, same rule as [`tidepool_tool::ToolDeclaration::input_schema`].
     pub output_schema: Option<serde_json::Value>,
     pub model: ModelPolicy,
     pub effort: ReasoningEffort,

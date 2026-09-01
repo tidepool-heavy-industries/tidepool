@@ -127,12 +127,13 @@ import Tidepool.Agent.Contract
   , HasAgentApi
   , ToolName
   , compileTools
+  , declarationsToJson
   , renderToolCompileError
   )
 import Tidepool.Worktree (renderWorktreeError)
 import Tidepool.Aeson.FromJSON (FromJSON, fromJSON, resultToEither)
 import Tidepool.Aeson.Schema (JsonSchema (..))
-import Tidepool.Aeson.Value (Value, object, toJSON, (.=))
+import Tidepool.Aeson.Value (Value, toJSON)
 import Data.Text (Text)
 import qualified Tidepool.Data.Text as T
 
@@ -363,22 +364,6 @@ spawnAgentWithTools rounds tools spec =
       case begun of
         Left err -> pure (Left err)
         Right step -> driveToolLoop @r rounds compiled 0 step
-
--- | The tools array the runtime reads: @[{name, description, inputSchema}]@.
---
--- ALWAYS an array, @[]@ for zero tools — a non-array @tools@ argument is
--- REFUSED by the runtime (@SpawnDriveFailed StageAllocating@), never read as
--- "no tools".
-declarationsToJson :: [ToolDeclaration] -> Value
-declarationsToJson decls =
-  toJSON
-    [ object
-        [ "name" .= dtdName d
-        , "description" .= dtdDescription d
-        , "inputSchema" .= dtdInputSchema d
-        ]
-    | d <- decls
-    ]
 
 -- | Answer parked calls until the turn completes, then decode its payload.
 --

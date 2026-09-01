@@ -10,7 +10,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
-use tidepool_node::ToolDeclaration;
+use tidepool_effect::dispatch::DispatchEffect;
+use tidepool_runtime::session::OutputSink;
+use tidepool_tool::ToolDeclaration;
 
 pub type ToolDispatchFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolDispatchError>> + Send + 'static>>;
@@ -57,6 +59,29 @@ impl DynamicMcpServer {
             declarations: declarations.into(),
             dispatcher: Arc::new(dispatcher),
             instructions,
+        })
+    }
+
+    /// Project one installed resident Haskell policy into MCP. Actor
+    /// admission and continuation ownership remain inside the policy; this
+    /// adapter owns only MCP declaration and result shapes.
+    pub fn from_resident_policy<H, O>(
+        policy: Arc<tidepool_actor::ResidentMcpPolicy<H, O>>,
+    ) -> Result<Self, DynamicMcpError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        let declarations = policy.declarations().to_vec();
+        let instructions = policy.instructions().map(str::to_owned);
+        Self::new(declarations, instructions, move |name, arguments| {
+            let policy = Arc::clone(&policy);
+            Box::pin(async move {
+                policy
+                    .dispatch(name, arguments)
+                    .await
+                    .map_err(|error| ToolDispatchError::Failed(error.to_string()))
+            })
         })
     }
 

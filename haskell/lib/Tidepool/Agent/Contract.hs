@@ -46,6 +46,8 @@ module Tidepool.Agent.Contract
     -- * Generic compilation
   , HasAgentApi
   , compileTools
+  , serveTools
+  , declarationsToJson
   , CompiledTools (..)
   , ToolDeclaration (..)
   , ToolCompileError (..)
@@ -65,9 +67,11 @@ import Data.Kind (Type)
 import Data.Proxy (Proxy (..))
 import GHC.Generics
 import GHC.TypeLits (TypeError, ErrorMessage (..))
-import Tidepool.Aeson.Value (Value, ToJSON (..))
+import Tidepool.Aeson.Value (Value, ToJSON (..), object, (.=))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON)
 import Tidepool.Aeson.Schema (JsonSchema (..))
+import Control.Monad.Freer (Eff, Member, send)
+import Tidepool.Effects.Core (ActorMcp (..))
 
 -- ---------------------------------------------------------------------------
 -- Endpoint algebra and server interpretation
@@ -312,6 +316,42 @@ compileTools v =
                   , dispatch = dispatchFn
                   , synopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
                   }
+
+-- | The one external encoding of a compiled declaration set.
+declarationsToJson :: [ToolDeclaration] -> Value
+declarationsToJson decls =
+  toJSON
+    [ object
+        [ "name" .= dtdName d
+        , "description" .= dtdDescription d
+        , "inputSchema" .= dtdInputSchema d
+        ]
+    | d <- decls
+    ]
+
+-- | Install an immutable tools record as this actor's resident MCP policy.
+-- Rust resumes this loop only with names from the declarations published by
+-- the same 'CompiledTools' value; decoding and handler execution stay in
+-- Haskell under the actor's normal effect row.
+serveTools ::
+  forall tools effs exit.
+  (HasAgentApi tools (Eff effs), Member ActorMcp effs) =>
+  tools (AsServerT (Eff effs)) ->
+  Eff effs exit
+serveTools tools = case compileTools tools of
+  Left err -> error (T.unpack (renderToolCompileError err))
+  Right compiled -> loop compiled
+  where
+    loop compiled = do
+      (name, arguments) <-
+        send
+          ( ActorMcpAwaitWith
+              (declarationsToJson (declarations compiled))
+              (synopsis compiled)
+          )
+      result <- dispatch compiled name arguments
+      send (ActorMcpReplyWith result)
+      loop compiled
 
 checkNames :: [ToolEntry m] -> Either ToolCompileError ()
 checkNames named = do

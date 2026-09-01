@@ -25,6 +25,7 @@ tidepool-model.workspace = true
 tidepool-model-output.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
+tidepool-tool.workspace = true
 
 [dev-dependencies]
 frunk.workspace = true

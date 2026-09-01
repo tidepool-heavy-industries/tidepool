@@ -9,6 +9,7 @@
 pub mod actor;
 pub mod actor_kernel;
 pub mod actor_local;
+pub mod actor_mcp;
 pub mod ask;
 pub mod ask_user;
 pub mod console;
@@ -56,6 +57,7 @@ pub fn all() -> Vec<Effect> {
         actor::actor(),
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
+        actor_mcp::actor_mcp(),
     ]
 }
 

@@ -135,6 +135,7 @@ pub fn actor_generated_files() -> Vec<GeneratedFile> {
         effects::actor::actor(),
         effects::actor_kernel::actor_kernel(),
         effects::actor_local::actor_local(),
+        effects::actor_mcp::actor_mcp(),
         effects::deliberate::deliberate(),
     ]
     .into_iter()

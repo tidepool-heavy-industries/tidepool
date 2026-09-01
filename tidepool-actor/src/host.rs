@@ -120,6 +120,7 @@ pub struct ResidentHostRunReport {
 pub enum ResidentHostParkedKind {
     Call,
     Wait,
+    McpPolicy,
 }
 
 #[derive(Debug)]
@@ -143,6 +144,7 @@ enum HostedActorState {
     Idle,
     ParkedCall,
     ParkedWait,
+    McpPolicy,
     Exited,
 }
 
@@ -151,7 +153,7 @@ struct HostedActor {
     state: HostedActorState,
 }
 
-enum HostTaskResult {
+enum HostTaskResult<H, O> {
     Idle {
         actor: ActorRef,
         children: Vec<ActorRef>,
@@ -164,6 +166,11 @@ enum HostTaskResult {
     ParkedWait {
         actor: ActorRef,
         pending: ResidentWait,
+        children: Vec<ActorRef>,
+    },
+    McpPolicy {
+        actor: ActorRef,
+        policy: Arc<crate::ResidentMcpPolicy<H, O>>,
         children: Vec<ActorRef>,
     },
     Exited {
@@ -202,10 +209,11 @@ pub struct ResidentActorHost<H, O> {
     provider: Arc<dyn DynModelProvider>,
     sink: Option<StreamSink>,
     wakes: ActorRuntimeWakes,
-    tasks: FuturesUnordered<BoxFuture<'static, HostTaskResult>>,
+    tasks: FuturesUnordered<BoxFuture<'static, HostTaskResult<H, O>>>,
     actors: HashMap<ActorRef, HostedActor>,
     calls: HashMap<(ActorRef, CallId), ResidentCall>,
     waits: HashMap<(ActorRef, WaitId), ResidentWait>,
+    mcp_policies: HashMap<ActorRef, Arc<crate::ResidentMcpPolicy<H, O>>>,
     roots: BTreeSet<ActorRef>,
     failures: Vec<(ActorRef, ResidentHostTaskError)>,
     cleanup_failures: Vec<(ActorRef, ResidentLifecycleError)>,
@@ -217,6 +225,13 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    /// Return the installed resident MCP policy for an exact actor
+    /// incarnation, once that actor has reached `serveTools`.
+    #[must_use]
+    pub fn mcp_policy(&self, actor: ActorRef) -> Option<Arc<crate::ResidentMcpPolicy<H, O>>> {
+        self.mcp_policies.get(&actor).cloned()
+    }
+
     pub fn new(
         registry: ActorRegistry,
         source: ActorWorkbenchSource,
@@ -252,6 +267,7 @@ where
             actors: HashMap::new(),
             calls: HashMap::new(),
             waits: HashMap::new(),
+            mcp_policies: HashMap::new(),
             roots: BTreeSet::new(),
             failures: Vec::new(),
             cleanup_failures: Vec::new(),
@@ -363,6 +379,9 @@ where
                 }
                 HostedActorState::ParkedWait => {
                     *parked.entry(ResidentHostParkedKind::Wait).or_default() += 1;
+                }
+                HostedActorState::McpPolicy => {
+                    *parked.entry(ResidentHostParkedKind::McpPolicy).or_default() += 1;
                 }
             }
         }
@@ -555,7 +574,7 @@ where
         Ok(())
     }
 
-    fn install_task_result(&mut self, result: HostTaskResult) {
+    fn install_task_result(&mut self, result: HostTaskResult<H, O>) {
         match result {
             HostTaskResult::Idle { actor, children } => {
                 self.register_children(children);
@@ -585,6 +604,17 @@ where
                 self.waits.insert(key, pending);
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::ParkedWait;
+                }
+            }
+            HostTaskResult::McpPolicy {
+                actor,
+                policy,
+                children,
+            } => {
+                self.register_children(children);
+                self.mcp_policies.insert(actor, policy);
+                if let Some(hosted) = self.actors.get_mut(&actor) {
+                    hosted.state = HostedActorState::McpPolicy;
                 }
             }
             HostTaskResult::Exited {
@@ -722,7 +752,7 @@ async fn drive_actor<H, O>(
     actor: ActorRef,
     work: HostWork,
     cancel: watch::Receiver<bool>,
-) -> Result<HostTaskResult, ResidentHostTaskError>
+) -> Result<HostTaskResult<H, O>, ResidentHostTaskError>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
@@ -880,6 +910,28 @@ where
             ResidentActorBoundary::Receive(receiver) => {
                 runtime.registry.install_resident_receiver(turn, receiver)?;
                 return Ok(HostTaskResult::Idle { actor, children });
+            }
+            ResidentActorBoundary::McpAwait(awaiting) => {
+                drop(turn);
+                let policy = Arc::new(crate::resident_mcp::install_resident_mcp(
+                    actor,
+                    runtime.registry.clone(),
+                    runtime.runner.clone(),
+                    Arc::clone(&runtime.lifecycle),
+                    awaiting,
+                ));
+                return Ok(HostTaskResult::McpPolicy {
+                    actor,
+                    policy,
+                    children,
+                });
+            }
+            ResidentActorBoundary::McpReply(_) => {
+                return Err(ResidentHostTaskError::Workbench(
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "actor MCP reply reached the host without an invocation".into(),
+                    ),
+                ));
             }
         }
     }
