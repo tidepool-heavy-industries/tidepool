@@ -7,8 +7,10 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures_util::FutureExt;
 use tidepool_bridge::{BridgeError, FromCore};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
@@ -231,6 +233,10 @@ mod tests {
 pub enum ResidentActorStartError {
     #[error("actor startup was cancelled")]
     Cancelled,
+    #[error("actor initialization panicked")]
+    InitializationPanicked,
+    #[error("actor startup panicked while resuming its parent")]
+    ParentResumePanicked,
     #[error(transparent)]
     Registry(#[from] ActorRegistryError),
     #[error(transparent)]
@@ -249,6 +255,48 @@ pub struct ResidentActorStarter<H, O> {
     runner: ResidentActorRunner<H, O>,
     completions: ResidentCompletionExecutor<H, O>,
     lifecycle: Arc<crate::ResidentActorLifecycle<H, O>>,
+}
+
+/// Exclusive custody of an actor between registry allocation and readiness
+/// publication. Cancellable or unwind-catching phase futures borrow this
+/// owner, so they cannot discard the token needed for authoritative cleanup.
+struct UnpublishedResidentActor {
+    starting: crate::StartingActor,
+    context: crate::ActorSessionContext,
+    realm: RealmId,
+}
+
+impl UnpublishedResidentActor {
+    async fn abort<H, O>(
+        self,
+        lifecycle: &crate::ResidentActorLifecycle<H, O>,
+        terminal: ActorTerminal,
+    ) -> Result<(), ResidentLifecycleError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        lifecycle.abort_starting(self.starting, terminal).await
+    }
+
+    async fn publish<H, O>(
+        mut self,
+        registry: &ActorRegistry,
+        lifecycle: &crate::ResidentActorLifecycle<H, O>,
+    ) -> Result<crate::ActorRef, ResidentActorStartError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        match registry.publish_ready_borrowed(&mut self.starting) {
+            Ok(actor) => Ok(actor),
+            Err(error) => {
+                let terminal = failed_terminal(error.to_string());
+                self.abort(lifecycle, terminal).await?;
+                Err(error.into())
+            }
+        }
+    }
 }
 
 impl<H, O> ResidentActorStarter<H, O> {
@@ -275,10 +323,10 @@ where
 {
     async fn abort_starting(
         &self,
-        starting: crate::StartingActor,
+        unpublished: UnpublishedResidentActor,
         terminal: ActorTerminal,
     ) -> Result<(), ResidentActorStartError> {
-        self.lifecycle.abort_starting(starting, terminal).await?;
+        unpublished.abort(&self.lifecycle, terminal).await?;
         Ok(())
     }
 
@@ -314,53 +362,81 @@ where
         let starting =
             self.registry
                 .begin_start(Some(owner), descriptor, StartInitiator::Policy)?;
-        let child_session = self.registry.startup_agent_session(&starting)?;
-        let child_context = self.registry.session_context(starting.actor())?;
+        let unpublished = UnpublishedResidentActor {
+            context: self.registry.session_context(starting.actor())?,
+            starting,
+            realm: child_realm,
+        };
+        let child_session = self.registry.startup_agent_session(&unpublished.starting)?;
 
-        let startup_result = await_or_cancelled(&mut cancelled, async {
-            let mut admitted = None;
-            let mut outcome = self
-                .runner
-                .run_rooted_entry(child_context.clone(), entry, child_realm)
-                .await?;
-            let readiness = loop {
-                match self
+        let startup_result = await_startup_phase(
+            &mut cancelled,
+            AssertUnwindSafe(async {
+                let mut admitted = None;
+                let mut outcome = self
                     .runner
-                    .capture_startup_step(child_context.clone(), outcome, child_realm)
-                    .await?
-                {
-                    ResidentActorStartupStep::InstallShutdown(shutdown) => {
-                        let (continuation, hook) = shutdown.into_parts();
-                        self.registry.install_starting_shutdown(&starting, hook)?;
-                        outcome = self
-                            .runner
-                            .resume_unit(child_context.clone(), continuation)
-                            .await?;
+                    .run_rooted_entry(unpublished.context.clone(), entry, unpublished.realm)
+                    .await?;
+                let readiness = loop {
+                    match self
+                        .runner
+                        .capture_startup_step(
+                            unpublished.context.clone(),
+                            outcome,
+                            unpublished.realm,
+                        )
+                        .await?
+                    {
+                        ResidentActorStartupStep::InstallShutdown(shutdown) => {
+                            let (continuation, hook) = shutdown.into_parts();
+                            self.registry
+                                .install_starting_shutdown(&unpublished.starting, hook)?;
+                            outcome = self
+                                .runner
+                                .resume_unit(unpublished.context.clone(), continuation)
+                                .await?;
+                        }
+                        ResidentActorStartupStep::Deliberate(completion) => {
+                            let admitted = match admitted.as_mut() {
+                                Some(admitted) => admitted,
+                                None => admitted.insert(
+                                    child_session
+                                        .begin_startup_agent_session(&unpublished.starting)?,
+                                ),
+                            };
+                            outcome = self
+                                .completions
+                                .resolve_admitted(admitted, provider, completion, sink.clone())
+                                .await?;
+                        }
+                        ResidentActorStartupStep::Ready(readiness) => break readiness,
                     }
-                    ResidentActorStartupStep::Deliberate(completion) => {
-                        let admitted = match admitted.as_mut() {
-                            Some(admitted) => admitted,
-                            None => admitted
-                                .insert(child_session.begin_startup_agent_session(&starting)?),
-                        };
-                        outcome = self
-                            .completions
-                            .resolve_admitted(admitted, provider, completion, sink.clone())
-                            .await?;
-                    }
-                    ResidentActorStartupStep::Ready(readiness) => break readiness,
+                };
+                drop(admitted);
+                let child = self
+                    .runner
+                    .resume_readiness(unpublished.context.clone(), readiness)
+                    .await?;
+                let completed = matches!(child, ResidentOutcome::Completed { .. });
+                if !completed {
+                    let receiver = self
+                        .runner
+                        .capture_receiver(unpublished.context.clone(), child, unpublished.realm)
+                        .await?;
+                    self.registry
+                        .install_starting_receiver(&unpublished.starting, receiver)?;
                 }
-            };
-            drop(admitted);
-            Ok::<_, ResidentActorStartError>(readiness)
-        })
+                Ok::<_, ResidentActorStartError>(completed)
+            })
+            .catch_unwind(),
+        )
         .await;
 
-        let readiness = match startup_result {
-            Some(Ok(readiness)) => readiness,
-            Some(Err(error)) => {
+        let completed = match startup_result {
+            StartupPhaseOutcome::Completed(Ok(completed)) => completed,
+            StartupPhaseOutcome::Completed(Err(error)) => {
                 self.abort_starting(
-                    starting,
+                    unpublished,
                     ActorTerminal {
                         kind: ActorExitKind::Failed,
                         summary: error.to_string(),
@@ -369,81 +445,21 @@ where
                 .await?;
                 return Err(error);
             }
-            None => {
-                self.abort_starting(starting, cancelled_terminal()).await?;
-                return Err(ResidentActorStartError::Cancelled);
-            }
-        };
-
-        let child = match await_or_cancelled(
-            &mut cancelled,
-            self.runner
-                .resume_readiness(child_context.clone(), readiness),
-        )
-        .await
-        {
-            Some(Ok(child)) => child,
-            Some(Err(error)) => {
+            StartupPhaseOutcome::Panicked => {
                 self.abort_starting(
-                    starting,
-                    ActorTerminal {
-                        kind: ActorExitKind::Failed,
-                        summary: error.to_string(),
-                    },
+                    unpublished,
+                    failed_terminal(ResidentActorStartError::InitializationPanicked.to_string()),
                 )
                 .await?;
-                return Err(error.into());
+                return Err(ResidentActorStartError::InitializationPanicked);
             }
-            None => {
-                self.abort_starting(starting, cancelled_terminal()).await?;
-                return Err(ResidentActorStartError::Cancelled);
-            }
-        };
-        let completed = matches!(child, ResidentOutcome::Completed { .. });
-        if !completed {
-            let receiver = match await_or_cancelled(
-                &mut cancelled,
-                self.runner
-                    .capture_receiver(child_context.clone(), child, child_realm),
-            )
-            .await
-            {
-                Some(Ok(receiver)) => receiver,
-                Some(Err(error)) => {
-                    self.abort_starting(
-                        starting,
-                        ActorTerminal {
-                            kind: ActorExitKind::Failed,
-                            summary: error.to_string(),
-                        },
-                    )
+            StartupPhaseOutcome::Cancelled => {
+                self.abort_starting(unpublished, cancelled_terminal())
                     .await?;
-                    return Err(error.into());
-                }
-                None => {
-                    self.abort_starting(starting, cancelled_terminal()).await?;
-                    return Err(ResidentActorStartError::Cancelled);
-                }
-            };
-            if let Err(error) = self.registry.install_starting_receiver(&starting, receiver) {
-                self.abort_starting(
-                    starting,
-                    ActorTerminal {
-                        kind: ActorExitKind::Failed,
-                        summary: error.to_string(),
-                    },
-                )
-                .await?;
-                return Err(error.into());
-            }
-        }
-        let actor = match self.registry.publish_ready(starting) {
-            Ok(actor) => actor,
-            Err(error) => {
-                let _ = self.runner.close_realm(child_context, child_realm).await;
-                return Err(error.into());
+                return Err(ResidentActorStartError::Cancelled);
             }
         };
+        let actor = unpublished.publish(&self.registry, &self.lifecycle).await?;
         if completed {
             let cleanup = self
                 .lifecycle
@@ -460,15 +476,19 @@ where
                 Err(error) => return Err(error.into()),
             }
         }
-        let parent = match await_or_cancelled(
+        let parent = match await_startup_phase(
             &mut cancelled,
-            self.runner
-                .resume_starting_parent(parent_context, parent_hole, actor),
+            AssertUnwindSafe(self.runner.resume_starting_parent(
+                parent_context,
+                parent_hole,
+                actor,
+            ))
+            .catch_unwind(),
         )
         .await
         {
-            Some(Ok(parent)) => parent,
-            Some(Err(error)) => {
+            StartupPhaseOutcome::Completed(Ok(parent)) => parent,
+            StartupPhaseOutcome::Completed(Err(error)) => {
                 let _ = self
                     .lifecycle
                     .force_terminate(
@@ -483,7 +503,17 @@ where
                     .await;
                 return Err(error.into());
             }
-            None => {
+            StartupPhaseOutcome::Panicked => {
+                let _ = self
+                    .lifecycle
+                    .force_terminate(
+                        actor,
+                        failed_terminal(ResidentActorStartError::ParentResumePanicked.to_string()),
+                    )
+                    .await;
+                return Err(ResidentActorStartError::ParentResumePanicked);
+            }
+            StartupPhaseOutcome::Cancelled => {
                 let _ = self
                     .lifecycle
                     .force_terminate(actor, cancelled_terminal())
@@ -495,14 +525,24 @@ where
     }
 }
 
-async fn await_or_cancelled<T>(
+#[derive(Debug, PartialEq, Eq)]
+enum StartupPhaseOutcome<T> {
+    Completed(T),
+    Cancelled,
+    Panicked,
+}
+
+async fn await_startup_phase<T, Panic>(
     cancelled: &mut (impl Future<Output = ()> + Unpin),
-    work: impl Future<Output = T>,
-) -> Option<T> {
+    work: impl Future<Output = Result<T, Panic>>,
+) -> StartupPhaseOutcome<T> {
     tokio::select! {
         biased;
-        () = cancelled => None,
-        result = work => Some(result),
+        () = cancelled => StartupPhaseOutcome::Cancelled,
+        result = work => match result {
+            Ok(value) => StartupPhaseOutcome::Completed(value),
+            Err(_) => StartupPhaseOutcome::Panicked,
+        },
     }
 }
 
@@ -513,14 +553,23 @@ fn cancelled_terminal() -> ActorTerminal {
     }
 }
 
+fn failed_terminal(summary: String) -> ActorTerminal {
+    ActorTerminal {
+        kind: ActorExitKind::Failed,
+        summary,
+    }
+}
+
 #[cfg(test)]
 mod cancellation_tests {
+    use futures_util::FutureExt;
+
     #[tokio::test]
     async fn cancellation_wins_an_unpublished_startup_tie() {
         let mut cancelled = std::future::ready(());
         assert_eq!(
-            super::await_or_cancelled(&mut cancelled, std::future::ready(41)).await,
-            None
+            super::await_startup_phase(&mut cancelled, async { Ok::<_, ()>(41) }).await,
+            super::StartupPhaseOutcome::Cancelled
         );
     }
 
@@ -528,8 +577,22 @@ mod cancellation_tests {
     async fn ordinary_startup_progresses_without_cancellation() {
         let mut cancelled = std::future::pending();
         assert_eq!(
-            super::await_or_cancelled(&mut cancelled, std::future::ready(41)).await,
-            Some(41)
+            super::await_startup_phase(&mut cancelled, async { Ok::<_, ()>(41) }).await,
+            super::StartupPhaseOutcome::Completed(41)
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_is_a_typed_startup_phase_outcome() {
+        let mut cancelled = std::future::pending();
+        assert_eq!(
+            super::await_startup_phase(
+                &mut cancelled,
+                std::panic::AssertUnwindSafe(async { panic!("injected startup panic") })
+                    .catch_unwind(),
+            )
+            .await,
+            super::StartupPhaseOutcome::<()>::Panicked
         );
     }
 }

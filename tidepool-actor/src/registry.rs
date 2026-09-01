@@ -519,7 +519,16 @@ impl ActorRegistry {
         &self,
         mut starting: StartingActor,
     ) -> Result<ActorRef, ActorRegistryError> {
-        self.validate_starting(&starting)?;
+        self.publish_ready_borrowed(&mut starting)
+    }
+
+    /// Publish while leaving the private startup capability with its
+    /// structured owner on failure, so that owner can run awaited cleanup.
+    pub(crate) fn publish_ready_borrowed(
+        &self,
+        starting: &mut StartingActor,
+    ) -> Result<ActorRef, ActorRegistryError> {
+        self.validate_starting(starting)?;
         let mut state = self.inner.state.lock();
         let actor = starting.actor;
         match entry(&state, actor)?.lifecycle {

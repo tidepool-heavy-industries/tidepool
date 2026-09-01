@@ -10,6 +10,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+futures-util.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
