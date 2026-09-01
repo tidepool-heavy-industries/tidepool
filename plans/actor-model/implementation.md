@@ -171,13 +171,11 @@ This is the canonical status inventory for the plan.
 
 ### Not landed
 
-- structured startup-task ownership that turns in-band cancellation or panic
-  into awaited lifecycle cleanup. The cooperative cancellation seam is
-  landed, but only the Stage 6 host can keep the owning task alive through its
-  epilogue; arbitrary executor destruction is not an asynchronously
-  recoverable lifecycle event;
-- one production actor-system host that owns actor tasks and routes runnable
-  start/session/mailbox/call/wait work without polling;
+- the remaining Stage 6 adversarial acceptance cases: cancellation specifically
+  during readiness resumption, duplicate root-session launch, an outer host-task
+  panic, and host-level dead-call/late-wait assertions. The host vertical,
+  provider-backed startup cancellation, startup panic cleanup, quiescence, and
+  session removal are landed;
 - the first production provider/profile composition and capability-specific
   worktree launch grant;
 - an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
@@ -651,7 +649,7 @@ do not create an empty host facade and fill it in later.
      wake arriving before pending-handle installation and repeated wakes for
      the same mailbox.
 
-3. [ ] **Create the production host only once it owns real work.**
+3. [x] **Create the production host only once it owns real work.**
 
    - Add `tidepool-actor/src/host.rs` only in the same change that makes it
      launch a prepared root and own at least one real actor task. Do not land a
@@ -678,7 +676,7 @@ do not create an empty host facade and fill it in later.
      do not add a provider registry or expose model configuration to authored
      Haskell before Stage 7 defines launch recipes.
 
-4. [ ] **Drive one actor through typed boundaries.**
+4. [x] **Drive one actor through typed boundaries.**
 
    - Keep actor futures directly in one host-owned unordered task set rather
      than spawning detached Tokio tasks. Each future owns cloned runtime
@@ -705,7 +703,7 @@ do not create an empty host facade and fill it in later.
      admission remains the enforcing invariant, while the task table makes
      duplicate scheduling a host error instead of routine contention.
 
-5. [ ] **Move startup custody into structured host task ownership.**
+5. [x] **Move startup custody into structured host task ownership.**
 
    - [x] The one startup driver now accepts an in-band cancellation signal at
      every ordinary await. Before publication it transfers the unpublished
@@ -737,7 +735,7 @@ do not create an empty host facade and fill it in later.
      sealed entry and startup sessions. Do not force those inputs through one
      fake generic startup program merely to share code.
 
-6. [ ] **Own shutdown and quiescence.**
+6. [x] **Own shutdown and quiescence.**
 
    - Model host lifecycle with a closed `Open`/`Closing` state. The transition
      to `Closing` is idempotent, stops launch and delivery acceptance, and
@@ -776,7 +774,7 @@ do not create an empty host facade and fill it in later.
 The next linear tranche ends when the production-host vertical above passes.
 Implement it as these reviewable boundaries:
 
-1. [ ] **Unpublished-start ownership refactor.**
+1. [x] **Unpublished-start ownership refactor.**
 
    - Work in `start.rs` and `resident_lifecycle.rs`; introduce no host facade.
    - Move initialization state outside cancellable/caught phase futures, then
@@ -787,7 +785,7 @@ Implement it as these reviewable boundaries:
    - Run the actor library tests filtered to startup/lifecycle plus strict
      Clippy for `tidepool-actor`; do not run the extractor-backed vertical yet.
 
-2. [ ] **Host composition root plus root/`Deliberate`/`Start` path.**
+2. [x] **Host composition root plus root/`Deliberate`/`Start` path.**
 
    - Add `host.rs`, the direct unordered task set, exact task table, in-band
      cancellation senders, and one event loop over task results and registry
@@ -799,7 +797,7 @@ Implement it as these reviewable boundaries:
      rejection before publication, and cancellation while the provider and
      readiness continuation are pending.
 
-3. [ ] **Installed actor boundary routing.**
+3. [x] **Installed actor boundary routing.**
 
    - Route completion and stable `Receive`; then add `Cast`, `Call`, and `Wait`
      using the existing `ResidentActorMailbox` operations.
@@ -810,7 +808,7 @@ Implement it as these reviewable boundaries:
      message per task. Test FIFO, tail requeue, early wake, duplicate wake,
      dead-target call failure, and repeatable late wait.
 
-4. [ ] **Structured closing and quiescence.**
+4. [x] **Structured closing and quiescence.**
 
    - Reject new work, cooperatively cancel every root task, keep polling task
      epilogues and runtime wakes, and drain lifecycle cleanup to the explicit

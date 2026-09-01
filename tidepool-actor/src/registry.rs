@@ -1695,6 +1695,7 @@ fn exit_subtree(
     if entry(state, actor)?.lifecycle == ActorLifecycle::Exited {
         return Ok(());
     }
+    let was_published = entry(state, actor)?.lifecycle == ActorLifecycle::Ready;
     let children: Vec<_> = entry(state, actor)?.children.iter().copied().collect();
     settle_actor_obligations(state, actor);
     {
@@ -1714,7 +1715,9 @@ fn exit_subtree(
             owner_observing,
         },
     )?;
-    wake(state, ActorRuntimeWake::ActorExited { actor });
+    if was_published {
+        wake(state, ActorRuntimeWake::ActorExited { actor });
+    }
     let ready_waits: Vec<_> = state
         .waits
         .iter()
@@ -3135,6 +3138,31 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn unpublished_exit_is_journaled_without_an_unroutable_runtime_wake() {
+        let registry = ActorRegistry::new();
+        let mut wakes = registry.take_runtime_wakes().expect("claim runtime wakes");
+        let starting = registry
+            .begin_start(None, descriptor("broken"), StartInitiator::Runtime)
+            .expect("begin startup");
+        registry
+            .abort_start(
+                starting,
+                ActorTerminal {
+                    kind: ActorExitKind::Failed,
+                    summary: "initializer failed".into(),
+                },
+            )
+            .expect("abort startup");
+
+        wakes.drain_available();
+        assert!(wakes.is_empty());
+        assert!(registry
+            .events()
+            .iter()
+            .any(|record| matches!(record.event, ActorEvent::Exited { .. })));
     }
 
     #[test]
