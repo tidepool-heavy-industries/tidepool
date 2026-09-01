@@ -624,8 +624,14 @@ where
                 continue;
             }
             if let Some(hosted) = self.actors.get_mut(&actor) {
-                hosted.cancel.send_replace(true);
-                hosted.state = HostedActorState::Exited;
+                // An exit wake reports the registry's terminal transition; it
+                // is not permission to cancel the task that may still own the
+                // actor's mandatory cleanup epilogue. Only host closing sends
+                // cancellation. A running task reports `Exited`/`Failed` after
+                // its epilogue settles; actors with no task can be marked now.
+                if !matches!(hosted.state, HostedActorState::Running) {
+                    hosted.state = HostedActorState::Exited;
+                }
             }
             self.wakes.take(ActorRuntimeWake::MailboxReady { actor });
             self.calls.retain(|(caller, call), _| {

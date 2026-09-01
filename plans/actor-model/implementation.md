@@ -171,11 +171,11 @@ This is the canonical status inventory for the plan.
 
 ### Not landed
 
-- the remaining Stage 6 adversarial acceptance cases: cancellation specifically
-  during readiness resumption and a host-level dead-call assertion. Duplicate
-  root-session rejection and an outer host-task panic are covered through the
-  production host. The full host vertical already performs a repeatable late
-  wait after the target has exited. Provider-backed startup cancellation,
+- the remaining Stage 6 adversarial acceptance case is cancellation
+  specifically during readiness resumption. Duplicate root-session rejection,
+  an outer host-task panic, and a dead synchronous callee are covered through
+  the production host. The full host vertical already performs a repeatable
+  late wait after the target has exited. Provider-backed startup cancellation,
   startup panic cleanup, quiescence, and session removal are also landed;
 - the first production provider/profile composition and capability-specific
   worktree launch grant;
@@ -766,8 +766,8 @@ do not create an empty host facade and fill it in later.
    - Exercise early and duplicate wake delivery, call failure on target exit,
      a repeatable late wait, mailbox FIFO/tail requeue, task panic, shutdown
      admission timeout, and quiescent host completion. The wake cases, late
-     wait, outer task panic, and quiescent completion are landed; the dead-call
-     host case and readiness-specific cancellation remain.
+     wait, dead-target call, outer task panic, and quiescent completion are
+     landed; readiness-specific cancellation remains.
    - Use adjacent Haskell fixtures and focused actor targets. This host
      vertical is the next major boundary at which the broader actor test set
      is warranted; intermediate commits use narrow unit tests.

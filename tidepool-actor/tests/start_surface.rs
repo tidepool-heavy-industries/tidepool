@@ -11,11 +11,12 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tidepool_actor::{
     ActorAgentSession, ActorDescriptor, ActorEvent, ActorExitKind, ActorLifecycle,
-    ActorMachineRegistry, ActorPlacement, ActorRegistry, ActorTerminal, ActorTurnKind,
-    ActorWorkbenchSource, OutboundSettlement, ResidentActorHost, ResidentActorHostError,
-    ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRoot, ResidentActorRunner,
-    ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor, ResidentHostTaskError,
-    ResidentLifecyclePolicy, ResidentWaitPoll, StartInitiator,
+    ActorMachineRegistry, ActorPlacement, ActorRegistry, ActorRegistryError, ActorTerminal,
+    ActorTurnKind, ActorWorkbenchSource, MailboxFailure, OutboundSettlement, ResidentActorHost,
+    ResidentActorHostError, ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRoot,
+    ResidentActorRunner, ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor,
+    ResidentHostTaskError, ResidentLifecyclePolicy, ResidentMailboxError, ResidentWaitPoll,
+    StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -182,6 +183,13 @@ fn prepare_parent(discriminator: u32) -> PreparedParent {
 }
 
 fn prepare_parent_in(session_id: tidepool_repr::SessionId) -> PreparedParent {
+    prepare_parent_program(session_id, include_str!("start_surface/parent_program.hs"))
+}
+
+fn prepare_parent_program(
+    session_id: tidepool_repr::SessionId,
+    program: &'static str,
+) -> PreparedParent {
     eval_harness::require_extract();
 
     let decls = [
@@ -199,7 +207,7 @@ fn prepare_parent_in(session_id: tidepool_repr::SessionId) -> PreparedParent {
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
     let compiled = match run_turn(HaskellTurnRequest {
-        turn_text: include_str!("start_surface/parent_program.hs"),
+        turn_text: program,
         templates: &templates,
         include: &include_refs,
         session_root: session_root.path(),
@@ -259,6 +267,49 @@ fn prepare_parent_in(session_id: tidepool_repr::SessionId) -> PreparedParent {
         outcome,
         source: ActorWorkbenchSource::new(preamble, include),
     }
+}
+
+#[tokio::test]
+async fn dead_synchronous_callee_fails_the_root_through_the_typed_host_boundary() {
+    let prepared = prepare_parent_program(
+        support::process_unique_session(100),
+        include_str!("start_surface/dead_call_parent.hs"),
+    );
+    let mut host = ResidentActorHost::new(
+        prepared.source,
+        Arc::new(PanicsImmediately),
+        None,
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    )
+    .expect("construct actor host");
+    let root = host
+        .launch_root(ResidentActorRoot::new(
+            prepared.descriptor,
+            prepared.machine,
+            prepared.outcome,
+        ))
+        .await
+        .expect("launch prepared root");
+
+    let report = host.run_until_idle().await.expect("drive dead-target call");
+    assert!(
+        matches!(
+            report.failures.as_slice(),
+            [(
+                actor,
+            ResidentHostTaskError::Mailbox(ResidentMailboxError::Mailbox(
+                MailboxFailure::Registry(ActorRegistryError::Exited(_))
+            ))
+            )] if *actor == root
+        ),
+        "{:#?}",
+        report.failures
+    );
+    let shutdown = host.shutdown().await.expect("quiesce failed root");
+    assert_eq!(shutdown.removed_sessions, 1);
+    assert_eq!(shutdown.terminal_roots.len(), 1);
+    assert_eq!(shutdown.terminal_roots[0].0, root);
+    assert_eq!(shutdown.terminal_roots[0].1.kind, ActorExitKind::Failed);
 }
 
 #[tokio::test]
