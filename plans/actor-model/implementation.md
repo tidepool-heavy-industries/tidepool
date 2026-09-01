@@ -931,22 +931,22 @@ Implement this boundary in order:
    uses the durable inbox and native push path.
 
    The bundled `Tidepool.Actors.DevSwarm` policy and `shoal host` composition
-   are landed. The root exposes typed
-   stateful `actorStatus`, `spawnWorker`, `listWorkers`, and blocking `awaitWorker`
-   tools. A spawned worker stabilizes at its own `serveTools` policy, is handed
-   to deployment through the host's single-consumer lifecycle stream, exposes
-   its typed startup assignment, and completes through `finishWork` with a
-   retained `WorkerResult`. A focused GHC/JIT test proves root installation,
+   are landed. The root exposes typed stateful `actorStatus`, `spawnWorker`,
+   `listWorkers`, nonblocking `collectWorker`, and explicit `ackWorker` tools.
+   A spawned worker stabilizes at its own `serveTools` policy, is handed to
+   deployment through the host's single-consumer lifecycle stream, exposes its
+   typed startup assignment, and completes through `finishWork` with a retained
+   `CandidateReceipt`. A focused GHC/JIT test proves root installation,
    MCP-routed `startActor`, child-policy installation, terminal MCP settlement,
-   and exact typed collection without opening an interactive process.
+   replayable typed collection, and acknowledgement without opening an
+   interactive process.
 
    Tool declarations retain input and output schemas plus the Haskell endpoint
    kind (`Call`, `Notify`, `Update`, or `Finish`) through MCP projection. The
    kind describes resident policy control flow. MCP projection marks the
    intrinsically stateful kinds as not read-only while leaving ordinary
    `Call` mutability unspecified; it does not guess destructiveness,
-   idempotence, or open-world behavior. `awaitWorker` states explicitly that
-   it blocks the root actor's sole policy turn until the selected worker exits.
+   idempotence, or open-world behavior.
 
    The deployment path binds an authenticated private proxy and launches Codex
    directly in one tmux pane per interactive incarnation. Codex starts
@@ -957,6 +957,12 @@ Implement this boundary in order:
    Developer context and therefore applies to the next real turn. A worker's
    launch-time User prompt remains its actual assignment kickoff; subsequent
    lifecycle input uses the durable native push operation.
+   Because one interactive actor admits one turn at a time, a pushed lifecycle
+   input cannot run until the current turn yields. `WorkerPending` therefore
+   directs the model to continue only immediately runnable work or end the
+   turn; it never directs the model to sleep or poll. The lifecycle wake is the
+   cue for one nonblocking collection. A delayed wake after explicit
+   acknowledgement is a no-op.
    Successful MCP settlement is linearized at the next stable policy boundary:
    another invocation await or typed actor completion. Ordered deployment
    retirement then notifies the owner through the same durable native push and

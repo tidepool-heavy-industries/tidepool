@@ -815,7 +815,9 @@ application-level `WorkerHandle`. Its policy has these semantics:
 - retrying an acknowledged key reports `WorkerAlreadyAcknowledged` and never
   starts another actor; keys remain reserved for this root incarnation;
 - `collect_worker handle` is nonblocking and non-consuming, returning pending,
-  the repeatable exact outcome, already-acknowledged, or unknown;
+  the repeatable exact outcome, already-acknowledged, or unknown; pending is a
+  cooperative yield signal, so the interactive root ends its turn rather than
+  sleeping or polling and Shoal starts a new turn on lifecycle transition;
 - `ack_worker handle` is valid only after `collect_worker` has observed a
   terminal result, drops the retained `ActorRef`, and leaves a tombstone; and
 - `list_workers` reports handles and their current application state.

@@ -228,7 +228,7 @@ rootPolicy = serveToolsWith [] tools
             tool "List every worker key reserved in this root incarnation and its collection phase." $ \_ ->
               pure (Workers (map summarize records))
         , collectWorker =
-            updateTool "Nonblocking, non-consuming collection. A terminal candidate or failure is replayed identically until explicit acknowledgement." $ \request ->
+            updateTool "Nonblocking, non-consuming collection. A terminal candidate or failure is replayed identically until explicit acknowledgement. WorkerPending means yield the current agent turn: do not sleep or poll. Shoal will wake the root after a lifecycle transition." $ \request ->
               case findByHandle request.worker records of
                 Nothing -> pure (WorkerNotFound request.worker, records)
                 Just record -> collectRecord record records

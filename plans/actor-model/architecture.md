@@ -483,8 +483,14 @@ result, or ignore the fact in ordinary typed control flow.
 
 Delivery never re-enters a Haskell continuation. Input arriving during
 inference remains ordered in the durable inbox and is acknowledged only after
-the backend accepts the native push. A temporary delivery failure leaves the
-row pending for retry and never kills the owner. Provider failure inside a
+the backend accepts the native push. An interactive actor is cooperatively
+scheduled: a lifecycle input cannot begin another agent turn until the current
+one yields. Accordingly, a nonblocking pending collection result means
+“continue other immediately runnable work or end this turn,” never “sleep and
+poll.” The lifecycle input begins the turn that performs the next collection.
+Delayed or duplicate correlation for an already acknowledged worker is
+harmless and requires no policy action. A temporary delivery failure leaves
+the row pending for retry and never kills the owner. Provider failure inside a
 result-bearing resident session still follows the typed obligation it
 interrupted; lifecycle delivery does not create another provider executor,
 completion token, or recovery protocol.

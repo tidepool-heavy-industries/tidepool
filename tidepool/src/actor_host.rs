@@ -1104,7 +1104,7 @@ fn prepare_owner_notification(
         })
         .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} Use collect_worker for a nonblocking, replayable typed result; this notification carries correlation only.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This wake is the cue to call collect_worker once for its nonblocking, replayable typed result; it carries correlation only. If that worker was already acknowledged, no further action is required.",
         descriptor.label(),
         actor,
         terminal.summary
@@ -1293,7 +1293,7 @@ fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Use the actor tools to start and await workers. Rust owns process and actor lifecycle. A child-exit wake is informational: retrieve the exact typed result through await_worker.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
     } else {
         "You are a Tidepool worker actor. Your process working directory is an owned retained git worktree; never edit the parent checkout. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
     }
@@ -1348,6 +1348,8 @@ mod tests {
         );
         assert!(resumed.contains("Previous actor handles"));
         assert!(resumed.contains("were not restored"));
+        assert!(resumed.contains("WorkerPending is a cooperative yield signal"));
+        assert!(resumed.contains("never sleep or repeatedly call collect_worker"));
     }
 
     struct ScriptedPush {
@@ -1545,15 +1547,16 @@ mod tests {
             .declarations()
             .iter()
             .all(|declaration| declaration.output_schema.is_some()));
-        assert_eq!(
-            policy
-                .declarations()
-                .iter()
-                .find(|declaration| declaration.name == "collect_worker")
-                .expect("collect worker declaration")
-                .kind,
-            tidepool_agent::ToolKind::Update
-        );
+        let collect_worker = policy
+            .declarations()
+            .iter()
+            .find(|declaration| declaration.name == "collect_worker")
+            .expect("collect worker declaration");
+        assert_eq!(collect_worker.kind, tidepool_agent::ToolKind::Update);
+        assert!(collect_worker.description.contains("do not sleep or poll"));
+        assert!(collect_worker
+            .description
+            .contains("Shoal will wake the root"));
 
         let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
         let control = host.control();
