@@ -918,6 +918,18 @@ async fn launch_prepared_interactive_application(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
     );
+    let additional_writable_roots = worktree
+        .as_ref()
+        .map(|handle| {
+            worktrees
+                .worktree_git_common_dir(handle)
+                .map(|path| vec![path.to_string_lossy().into_owned()])
+                .map_err(|error| {
+                    application_error(actor, InteractiveOperation::PrepareRuntime, error)
+                })
+        })
+        .transpose()?
+        .unwrap_or_default();
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
@@ -977,6 +989,7 @@ async fn launch_prepared_interactive_application(
         effort: config.effort,
         developer_instructions,
         initial_prompt,
+        additional_writable_roots,
         mcp: InteractiveMcpServer {
             name: "tidepool_actor".into(),
             command: config.proxy_program.clone(),

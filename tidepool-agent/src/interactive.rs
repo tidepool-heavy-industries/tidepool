@@ -109,6 +109,9 @@ pub struct InteractiveAgentSpec {
     /// First user message. A fresh stock TUI needs this to create the rollout
     /// addressed by subsequent native push operations.
     pub initial_prompt: Option<String>,
+    /// Directories writable in addition to the process working root. Linked
+    /// worktree deployments use this for their resolved shared Git metadata.
+    pub additional_writable_roots: Vec<String>,
     pub mcp: InteractiveMcpServer,
 }
 

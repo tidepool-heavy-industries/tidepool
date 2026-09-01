@@ -90,6 +90,12 @@ fn clean_creation_from_current_repository_leaves_source_untouched() {
         handle.receipt().origin,
         WorktreeOrigin::CurrentRepository
     ));
+    assert_eq!(
+        manager
+            .worktree_git_common_dir(&handle)
+            .expect("resolve shared Git metadata"),
+        repo.path().join(".git")
+    );
 }
 
 #[test]

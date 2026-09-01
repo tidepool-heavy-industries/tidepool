@@ -361,6 +361,18 @@ impl WorktreeManager {
         Ok(GitOid::from_raw(out.trimmed()))
     }
 
+    /// Resolve the shared Git metadata directory that makes native commits
+    /// from this linked checkout possible.
+    pub fn worktree_git_common_dir(
+        &self,
+        handle: &WorktreeHandle,
+    ) -> Result<PathBuf, WorktreeError> {
+        if !worktree_present(handle.cwd()) {
+            return Err(WorktreeError::WorktreeLost(handle.id().clone()));
+        }
+        inspect::git_common_dir(&self.git, handle.cwd())
+    }
+
     /// Observe the current submitted repository state as one bounded,
     /// internally consistent operation. This does not seal the worktree.
     pub fn observe_submission(

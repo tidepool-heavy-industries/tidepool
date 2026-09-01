@@ -170,6 +170,21 @@ pub mod inspect {
         Ok(PathBuf::from(out.trimmed()))
     }
 
+    /// Absolute path of the shared Git metadata used by `cwd`.
+    ///
+    /// A linked worktree's `.git` is only a pointer file. Callers granting a
+    /// process enough filesystem authority to commit must grant the resolved
+    /// common directory, not assume that `<worktree>/.git` is a directory.
+    pub fn git_common_dir(git: &GitCli, cwd: &Path) -> Result<PathBuf, WorktreeError> {
+        let out = git
+            .run(
+                cwd,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .map_err(|_| WorktreeError::NotARepository(cwd.to_path_buf()))?;
+        Ok(PathBuf::from(out.trimmed()))
+    }
+
     /// One parsed `git status --porcelain=v1 -z` entry. `x`/`y` are the index
     /// and worktree status columns; `path` is repository-relative.
     struct StatusEntry<'a> {

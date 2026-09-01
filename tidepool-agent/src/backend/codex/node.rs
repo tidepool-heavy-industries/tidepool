@@ -130,7 +130,10 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, A
         .arg("--ask-for-approval")
         .arg("never")
         .arg("--sandbox")
-        .arg("danger-full-access");
+        .arg("workspace-write");
+    for root in &spec.additional_writable_roots {
+        command.arg("--add-dir").arg(root);
+    }
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
@@ -498,6 +501,7 @@ mod tests {
             effort: Some(ReasoningEffort::Medium),
             developer_instructions: "actor charter".to_string(),
             initial_prompt: Some("initialize through typed tools".to_string()),
+            additional_writable_roots: vec!["/tmp/shared-git".to_string()],
             mcp: crate::InteractiveMcpServer {
                 name: "tidepool_actor".to_string(),
                 command: "/tmp/shoal".to_string(),
@@ -519,7 +523,10 @@ mod tests {
             .any(|args| args == ["--ask-for-approval", "never"]));
         assert!(args
             .windows(2)
-            .any(|args| args == ["--sandbox", "danger-full-access"]));
+            .any(|args| args == ["--sandbox", "workspace-write"]));
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["--add-dir", "/tmp/shared-git"]));
         assert!(args
             .iter()
             .any(|arg| arg.contains("mcp_servers.tidepool_actor.command")));
@@ -554,6 +561,7 @@ mod tests {
             effort: None,
             developer_instructions: String::new(),
             initial_prompt: None,
+            additional_writable_roots: Vec::new(),
             mcp: crate::InteractiveMcpServer {
                 name: "bad.name".to_string(),
                 command: "proxy".to_string(),
