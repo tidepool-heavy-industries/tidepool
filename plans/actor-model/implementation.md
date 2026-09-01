@@ -951,9 +951,12 @@ Implement this boundary in order:
    The deployment path binds an authenticated private proxy and launches Codex
    directly in one tmux pane per interactive incarnation. Codex starts
    `shoal proxy` as its stdio MCP child; there is no per-actor wrapper process.
-   The host validates the rollout binding discovered by that proxy. The one
-   launch-time User prompt starts a fresh or resumed interactive session;
-   subsequent lifecycle input uses the durable native push operation.
+   The host validates the rollout binding discovered by that proxy. Root
+   incarnations start ready and idle; Shoal does not manufacture a User turn
+   merely to query their status. Resume reconciliation is constitutional
+   Developer context and therefore applies to the next real turn. A worker's
+   launch-time User prompt remains its actual assignment kickoff; subsequent
+   lifecycle input uses the durable native push operation.
    Successful MCP settlement is linearized at the next stable policy boundary:
    another invocation await or typed actor completion. Ordered deployment
    retirement then notifies the owner through the same durable native push and
