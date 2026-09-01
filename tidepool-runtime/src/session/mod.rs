@@ -68,9 +68,9 @@ pub use workbench::{
 
 pub use turn::{
     assemble_bind_module, assemble_expression_module, classify_block, insert_preamble_imports,
-    place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn, ExpressionLift,
-    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn, DeclarationReceipt,
+    ExpressionLift, TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest,
+    TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
 };
 
 use std::collections::HashMap;
@@ -81,7 +81,8 @@ use tidepool_extract_cmd::ExtractCmd;
 use tidepool_repr::{Generation, SessionId, SessionModule};
 
 pub use render::{
-    subtract_import_list_names, DeclLog, DeclTurn, ExportItem, ModuleEnv, RenderedModule,
+    subtract_import_list_names, DeclLog, DeclTurn, DeclarationKind, ExportItem, ModuleEnv,
+    RenderedModule,
 };
 
 /// The stdlib include dir a candidate gen module needs at validation time, or
@@ -414,6 +415,20 @@ impl SessionLib {
         self.log.current_heads_at(self.scope_tip(scope))
     }
 
+    /// Current GHC declaration exports with their exact defining generations.
+    /// Unlike [`Self::current_decl_heads`], this preserves value/type/class kind
+    /// and constructor/method metadata.
+    #[must_use]
+    pub fn current_declarations(&self) -> Vec<(ExportItem, u64)> {
+        self.current_declarations_in(ScopeId::ROOT)
+    }
+
+    /// Scoped [`Self::current_declarations`].
+    #[must_use]
+    pub fn current_declarations_in(&self, scope: ScopeId) -> Vec<(ExportItem, u64)> {
+        self.log.current_items_at(self.scope_tip(scope))
+    }
+
     /// Select a model-visible export membrane from the exact declaration
     /// module currently visible in `scope`. Names are declaration heads; a
     /// selected data type or class carries all GHC-reported constructors or
@@ -556,13 +571,33 @@ impl SessionLib {
         import_modules: &[String],
         inject_modules: &[String],
     ) -> Result<Generation, SessionError> {
+        let Some(receipt) = self.declaration_receipt(decl_texts)? else {
+            return Ok(self.scope_tip(scope));
+        };
+        self.define_batch_with_receipt_and_vals_in(
+            scope,
+            decl_texts,
+            &receipt,
+            import_modules,
+            inject_modules,
+        )
+    }
+
+    /// Ask GHC for the declaration facts that will authorize a commit. This is
+    /// parse-only and mutates neither the log nor the generated module tree.
+    /// The returned receipt must be passed unchanged to
+    /// [`Self::define_batch_with_receipt_and_vals_in`].
+    pub(crate) fn declaration_receipt(
+        &self,
+        decl_texts: &[&str],
+    ) -> Result<Option<DeclarationReceipt>, SessionError> {
         let sources: Vec<String> = decl_texts
             .iter()
             .filter(|s| !s.trim().is_empty())
             .map(|s| (*s).to_string())
             .collect();
         if sources.is_empty() {
-            return Ok(self.scope_tip(scope));
+            return Ok(None);
         }
 
         let combined = sources.join("\n\n");
@@ -583,25 +618,49 @@ impl SessionLib {
             verdict: Some(TurnClassification {
                 kind: TurnKind::Decl,
                 binders: Vec::new(),
+                items: Vec::new(),
             }),
             target: None,
         })
         .map_err(|failure| SessionError::Compile(failure.error))?;
-        let items = match turn_result {
-            TurnResult::Decl { items, .. } => items,
+        let receipt = match turn_result {
+            TurnResult::Decl(receipt) => receipt,
             other => {
                 return Err(SessionError::Compile(crate::CompileError::ExtractFailed(
                     format!("decl verdict produced an unexpected TurnResult variant: {other:?}"),
                 )))
             }
         };
+        Ok(Some(receipt))
+    }
+
+    /// Commit `decl_texts` using the exact GHC receipt previously returned by
+    /// [`Self::declaration_receipt`]. Keeping receipt acquisition separate from
+    /// mutation lets [`PersistentSession`] derive value-plane eviction and
+    /// validation imports from the same facts before this atomic commit.
+    pub(crate) fn define_batch_with_receipt_and_vals_in(
+        &mut self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+        receipt: &DeclarationReceipt,
+        import_modules: &[String],
+        inject_modules: &[String],
+    ) -> Result<Generation, SessionError> {
+        let sources: Vec<String> = decl_texts
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| (*s).to_string())
+            .collect();
+        if sources.is_empty() {
+            return Ok(self.scope_tip(scope));
+        }
 
         let tip_before = self.tips.get(&scope).copied();
         let gen = self.push_turn_in(
             scope,
             DeclTurn {
                 sources,
-                items,
+                items: receipt.items.clone(),
                 retracts: Vec::new(),
                 parent: None, // set inside push_turn_in from scope's tip
             },

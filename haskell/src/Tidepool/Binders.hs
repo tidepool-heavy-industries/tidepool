@@ -179,10 +179,13 @@ parseTurnKind s      = error ("unrecognized turn kind: " ++ s)
 -- the turn statement introduces binders (@x <- e@ / @let x = e@), 'KExpr' for
 -- a bare expression (@BodyStmt@). @sbBinders@ are the bound names (GHC-sourced),
 -- empty for an expr turn. The Rust runtime picks the wrap template + the bind
--- path from this signal — it never parses Haskell itself.
+-- path from this signal — it never parses Haskell itself. @sbDeclItems@ are
+-- the structured export facts from that same parse; signatures and non-decl
+-- turns carry none.
 data StmtBinders = StmtBinders
-  { sbKind    :: TurnKind
-  , sbBinders :: [String]
+  { sbKind      :: TurnKind
+  , sbBinders   :: [String]
+  , sbDeclItems :: [ExportItem]
   } deriving (Eq, Show)
 
 -- | Which wrapper template a verdict selects — a refinement of 'TurnKind': a
@@ -305,7 +308,7 @@ classifyTurn
   -> StmtBinders
 classifyTurn declRes stmtRes modRes
   | POk _ lstmt <- stmtRes, isBindStmt lstmt =
-      StmtBinders KBind (map occStr (collectLStmtBinders CollNoDictBinders lstmt))
+      StmtBinders KBind (map occStr (collectLStmtBinders CollNoDictBinders lstmt)) []
   | POk _ ldecl <- declRes, Just sb <- declNameVerdict ldecl = sb
   -- MULTI-DECLARATION items (a sig + its equation, mutually-referencing
   -- equations — one turn, several top-level decls). `parseDeclaration` and
@@ -323,10 +326,13 @@ classifyTurn declRes stmtRes modRes
   , length decls >= 2
   , verdicts <- map declNameVerdict decls
   , all isJust verdicts =
-      StmtBinders KDecl (nub (concatMap sbBinders (catMaybes verdicts)))
-  | POk _ _ <- stmtRes = StmtBinders KExpr []
-  | POk _ _ <- declRes = StmtBinders KDecl []
-  | otherwise = StmtBinders KExpr []
+      StmtBinders
+        KDecl
+        (nub (concatMap sbBinders (catMaybes verdicts)))
+        (concatMap sbDeclItems (catMaybes verdicts))
+  | POk _ _ <- stmtRes = StmtBinders KExpr [] []
+  | POk _ ldecl <- declRes = StmtBinders KDecl [] (declItems ldecl)
+  | otherwise = StmtBinders KExpr [] []
 
 -- | Whether a parsed statement introduces binders (@BindStmt@/@LetStmt@) rather
 -- than being a bare expression (@BodyStmt@).
@@ -348,11 +354,11 @@ isBindStmt lstmt = case unLoc lstmt of
 -- the caller's expr/other-decl precedence.
 declNameVerdict :: LHsDecl GhcPs -> Maybe StmtBinders
 declNameVerdict ldecl = case unLoc ldecl of
-  SigD _ sig  -> Just (StmtBinders KDecl (sigBinders sig))
-  TyClD _ _   -> Just (StmtBinders KDecl [])
+  SigD _ sig  -> Just (StmtBinders KDecl (sigBinders sig) [])
+  TyClD _ _   -> Just (StmtBinders KDecl [] (declItems ldecl))
   ValD _ bind -> case map occStr (collectHsBindBinders CollNoDictBinders bind) of
     []    -> Nothing
-    names -> Just (StmtBinders KDecl names)
+    names -> Just (StmtBinders KDecl names (declItems ldecl))
   _           -> Nothing
 
 -- | The names a signature declares (@f, g :: T@ → @["f","g"]@). Only the
@@ -380,19 +386,31 @@ stmtExtensions =
   ]
 
 -- | The @--classify@ CLI contract: one verdict per positional file, in argv
--- order. @kind@ and @binders@ are verbatim the same shape a single
--- 'StmtBinders' always rendered.
+-- order. Declaration verdicts also carry the structured export items harvested
+-- from the same GHC parse. A signature has binders but no export item; an
+-- equation has an 'EValue'. That distinction lets the resident block runner
+-- keep signatures with their equations while splitting true redefinitions.
 --
--- > {"verdicts":[{"kind":"bind","binders":["x"]},
--- >              {"kind":"decl","binders":["sq"]},
--- >              {"kind":"expr","binders":[]}]}
+-- > {"verdicts":[{"kind":"bind","binders":["x"],"items":[]},
+-- >              {"kind":"decl","binders":["sq"],"items":[["EValue","sq"]]},
+-- >              {"kind":"expr","binders":[],"items":[]}]}
 renderVerdictsJson :: [StmtBinders] -> String
 renderVerdictsJson sbs =
   "{\"verdicts\":[" ++ intercalate "," (map renderVerdict sbs) ++ "]}"
   where
-    renderVerdict (StmtBinders kind binders) =
+    renderVerdict (StmtBinders kind binders items) =
       "{\"kind\":" ++ jsonString (turnKindWireName kind)
-        ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]}"
+        ++ ",\"binders\":[" ++ intercalate "," (map jsonString binders) ++ "]"
+        ++ ",\"items\":[" ++ intercalate "," (map renderExportItem items) ++ "]}"
+
+    renderExportItem (EValue name) =
+      "[\"EValue\"," ++ jsonString name ++ "]"
+    renderExportItem (EType name cons) =
+      "[\"EType\"," ++ jsonString name ++ ",["
+        ++ intercalate "," (map jsonString cons) ++ "]]"
+    renderExportItem (EClass name methods) =
+      "[\"EClass\"," ++ jsonString name ++ ",["
+        ++ intercalate "," (map jsonString methods) ++ "]]"
 
 --------------------------------------------------------------------------------
 -- Turn-mode rich result (--turn) — a tagged variant over the verdict

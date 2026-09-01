@@ -1043,15 +1043,15 @@ where
         declaration_source,
     } = *compiled;
     match result {
-        TurnResult::Decl { binders, .. } => {
+        TurnResult::Decl(receipt) => {
             match session.define_scoped_in(context.placement.lexical_scope, &[&declaration_source])
             {
                 Ok(generation) => Ok(BlockExecution::Committed(format!(
                     "defined {} at generation {}",
-                    if binders.is_empty() {
+                    if receipt.binders.is_empty() {
                         "declaration".to_string()
                     } else {
-                        binders.join(", ")
+                        receipt.binders.join(", ")
                     },
                     generation.0
                 ))),

@@ -1713,7 +1713,7 @@ impl Harness {
         })?;
 
         match outcome {
-            TurnResult::Decl { .. } => {
+            TurnResult::Decl(_) => {
                 let checkout = self.checkout_run_waiting(node).await?;
                 // Into the node's OWN scope: the definition joins that scope's
                 // decl tip (which already re-exports its ancestors'), so it is
@@ -2149,7 +2149,7 @@ impl Harness {
             // node after item 1 of a multi-bind block).
             let terminal = index + 1 == items.len();
             let step_outcome = match outcome {
-                TurnResult::Decl { .. } => {
+                TurnResult::Decl(_) => {
                     return Err(HarnessError::Resident(
                         "internal: batch verdict said bind/expr but the compile returned a decl"
                             .into(),

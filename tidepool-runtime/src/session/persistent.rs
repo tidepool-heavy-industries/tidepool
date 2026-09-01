@@ -135,7 +135,10 @@ pub struct MaterializationSetCommit {
 pub struct DeclarationPlaneCommit {
     pub generation: Generation,
     pub module: SessionModule,
-    pub names: Vec<String>,
+    /// The value/type/class exports GHC reported for the committed source.
+    pub items: Vec<super::ExportItem>,
+    /// Same-scope materialized values actually evicted by those exports.
+    pub evicted_values: Vec<String>,
 }
 
 impl PersistentSession {
@@ -1290,14 +1293,37 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         decl_texts: &[&str],
-        names: &[&str],
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        let mut names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
-        names.sort();
-        names.dedup();
+        #[allow(clippy::expect_used, reason = "decl plane present")]
+        let lib = self.lib.as_ref().expect("decl plane present");
+        let Some(receipt) = lib.declaration_receipt(decl_texts)? else {
+            let generation = lib.scope_tip(scope);
+            return Ok(DeclarationPlaneCommit {
+                generation,
+                module: SessionModule::lib(generation),
+                items: Vec::new(),
+                evicted_values: Vec::new(),
+            });
+        };
+        let mut replaced_names: Vec<String> = receipt
+            .items
+            .iter()
+            .flat_map(super::ExportItem::all_names)
+            .map(str::to_owned)
+            .collect();
+        replaced_names.sort();
+        replaced_names.dedup();
+        let mut evicted_values: Vec<String> = self
+            .bindings
+            .iter_current_in(&self.scopes, scope)
+            .into_iter()
+            .filter(|(name, _)| replaced_names.iter().any(|replaced| replaced == &name.0))
+            .map(|(name, _)| name.0.clone())
+            .collect();
+        evicted_values.sort();
         // The candidate declaration owns these names, so it must not import
         // their old Val modules unqualified while GHC validates it.  Keep them
         // injected: already-compiled fragments may still need their ifaces,
@@ -1306,7 +1332,7 @@ impl PersistentSession {
             .bindings
             .iter_current_in(&self.scopes, scope)
             .into_iter()
-            .filter(|(name, _)| !names.iter().any(|replaced| replaced == &name.0))
+            .filter(|(name, _)| !replaced_names.iter().any(|replaced| replaced == &name.0))
             .map(|(_, entry)| entry.module.module_name())
             .collect();
         import_modules.sort();
@@ -1317,14 +1343,21 @@ impl PersistentSession {
             .lib
             .as_mut()
             .expect("decl plane present")
-            .define_batch_with_vals_in(scope, decl_texts, &import_modules, &inject_modules)?;
-        for name in &names {
+            .define_batch_with_receipt_and_vals_in(
+                scope,
+                decl_texts,
+                &receipt,
+                &import_modules,
+                &inject_modules,
+            )?;
+        for name in &replaced_names {
             self.bindings.remove_current_in(scope, name);
         }
         Ok(DeclarationPlaneCommit {
             generation,
             module: SessionModule::lib(generation),
-            names,
+            items: receipt.items,
+            evicted_values,
         })
     }
 
@@ -1332,9 +1365,8 @@ impl PersistentSession {
     pub fn define_replacing_values(
         &mut self,
         decl_texts: &[&str],
-        names: &[&str],
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.define_replacing_values_in(ScopeId::ROOT, decl_texts, names)
+        self.define_replacing_values_in(ScopeId::ROOT, decl_texts)
     }
 
     /// Resolve `name` as seen FROM `scope`: local frame first, then each

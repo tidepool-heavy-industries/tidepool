@@ -39,18 +39,18 @@ use tidepool_repr::{
 };
 use tidepool_runtime::session::{
     assemble_bind_module, classify_block, extract_ask_request, insert_preamble_imports,
-    place_turn_stmt, subtract_import_list_names, BoundBinder, CompiledTurn, GateDispatcher,
-    ModuleEnv, PersistentSession, SessionCompileView, SessionError, SessionLib, SourceImports,
-    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
-    TurnTemplate, ValueTier, WorkSequence,
+    place_turn_stmt, subtract_import_list_names, BoundBinder, CompiledTurn, ExportItem,
+    GateDispatcher, ModuleEnv, PersistentSession, SessionCompileView, SessionError, SessionLib,
+    SourceImports, TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest,
+    TurnResult, TurnTemplate, ValueTier, WorkSequence,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, value_to_json, CompileError, FailureClass, Phase,
 };
 
 use crate::command::{
-    BlockItem, BlockItemResult, BlockValue, BoundComponent, ExprText, ItemKind, MetaCommand,
-    ResponseShape, SessionCommand, TurnOutcome,
+    BlockItem, BlockItemResult, BlockValue, BoundComponent, DeclarationMetadata, ExprText,
+    ItemKind, MetaCommand, ResponseShape, SessionCommand, TurnOutcome,
 };
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
@@ -83,7 +83,7 @@ pub enum TurnStep {
 }
 
 struct ReplCompileFailure {
-    error: CompileError,
+    error: Box<CompileError>,
     source: String,
     user_lines: Option<(usize, usize)>,
 }
@@ -204,7 +204,7 @@ pub struct Session {
     /// PURE binds routed into the decl plane (`x <- pure e` / `let x = e` → the
     /// decl `x = e`, which generalizes). They have no heap value — they resolve
     /// via the decl-module import — but they ARE part of the session
-    /// environment, so this registry surfaces them in `:bindings`/stale/etc.
+    /// environment, so this registry surfaces them in `:bindings`.
     /// alongside effectful (materialized) binds. Latest-wins per name; a
     /// cross-plane rebind removes the name from the other plane.
     pure_binds: std::collections::BTreeMap<String, PureBind>,
@@ -214,11 +214,10 @@ pub struct Session {
     scratch_gen: u64,
 }
 
-/// A pure bind that lives in the decl plane (GHCi-environment model): its value
-/// is its source (`defining_expr`), re-instantiated per use by GHC. No root.
+/// A pure bind that lives in the decl plane (GHCi-environment model). Its
+/// source is owned by the declaration log and re-instantiated per use by GHC.
 struct PureBind {
     type_display: String,
-    defining_expr: String,
     gen: Generation,
 }
 
@@ -459,12 +458,13 @@ fn bound_value(tier: ValueTier, slot: RootSlot) -> BoundValue {
 }
 
 /// The text of an item [`Session::run_block`]'s batch classify needs a verdict
-/// for (`Auto`/`Stmt`), or `None` for a `Decl`/`Meta` item (unambiguous
-/// already, no GHC verdict needed).
+/// for (`Decl`/`Auto`/`Stmt`), or `None` for a meta-command. Explicit
+/// declarations still need the structured export items carried by the verdict.
 fn block_item_text(item: &BlockItem) -> Option<&str> {
     match item {
         BlockItem::Auto(e) | BlockItem::Stmt(e) => Some(&e.0),
-        BlockItem::Decl(_) | BlockItem::Meta(_) => None,
+        BlockItem::Decl(d) => Some(&d.0),
+        BlockItem::Meta(_) => None,
     }
 }
 
@@ -830,28 +830,34 @@ impl Session {
             // the batch path never re-matches items to recover their text.
             let start = index;
             let mut texts: Vec<String> = vec![first.to_string()];
+            let mut defined_heads: Vec<String> = cursor.verdicts[index]
+                .as_ref()
+                .into_iter()
+                .flat_map(|verdict| &verdict.items)
+                .map(|item| item.head_name().to_string())
+                .collect();
             let mut end = index + 1;
             while end < cursor.sequence.len() {
                 match self
                     .decl_shaped_text(&cursor.sequence.items()[end], cursor.verdicts[end].as_ref())
                 {
                     Some(t) => {
-                        // Within-block REDEFINITION ends the segment: if this
-                        // item defines a head an earlier item in the segment
-                        // also DEFINES (not a sig+binding pair — those must
-                        // batch), batching would hand GHC two equation groups
-                        // it merges as multi-clause (first wins). Splitting
-                        // starts a new generation, so replace-latest applies,
-                        // matching the cross-turn GHCi-parity rule. (#320)
-                        let h = decl_head(t);
-                        if !h.is_empty()
-                            && defines_head(t, h)
-                            && texts
-                                .iter()
-                                .any(|prev| decl_head(prev) == h && defines_head(prev, h))
+                        // A GHC-reported export repeated within this segment is
+                        // a real redefinition. Signatures report no export, so
+                        // `f :: T` followed by `f x = ...` remains one commit;
+                        // operators and multi-name patterns need no special
+                        // lexical cases.
+                        let item_exports = cursor.verdicts[end]
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|verdict| &verdict.items);
+                        if item_exports
+                            .clone()
+                            .any(|item| defined_heads.iter().any(|head| head == item.head_name()))
                         {
                             break;
                         }
+                        defined_heads.extend(item_exports.map(|item| item.head_name().to_string()));
                         texts.push(t.to_string());
                         end += 1;
                     }
@@ -872,10 +878,14 @@ impl Session {
             let mut stop = false;
             match batched {
                 Some(receipt) => {
-                    for (k, text) in texts.iter().enumerate() {
+                    let type_display = self.probe_single_declaration_type(&receipt.items);
+                    for (k, _) in texts.iter().enumerate() {
+                        let items = cursor.verdicts[start + k]
+                            .as_ref()
+                            .map_or(&[][..], |verdict| verdict.items.as_slice());
                         let outcome = self.defined_outcome(
-                            text,
-                            decl_head(text).to_string(),
+                            items,
+                            type_display.as_deref(),
                             receipt.generation,
                         );
                         if cursor.absorb(ItemRun {
@@ -1219,35 +1229,42 @@ impl Session {
         &mut self,
         decl_texts: &[&str],
     ) -> Result<tidepool_runtime::session::DeclarationPlaneCommit, SessionError> {
-        let heads: Vec<&str> = decl_texts.iter().map(|text| decl_head(text)).collect();
-        let receipt = self.core.define_replacing_values(decl_texts, &heads)?;
-        for name in &receipt.names {
+        let receipt = self.core.define_replacing_values(decl_texts)?;
+        for name in receipt.items.iter().flat_map(ExportItem::all_names) {
             self.pure_binds.remove(name);
         }
         Ok(receipt)
     }
 
+    fn name_is_live(&self, name: &str) -> bool {
+        self.core.bindings().resolve(name).is_some()
+            || self
+                .core
+                .lib()
+                .current_declarations()
+                .iter()
+                .any(|(item, _)| item.all_names().any(|owned| owned == name))
+    }
+
     /// Declaration handler: append the declaration to the Lane-A log + regenerate
     /// the gen-versioned `Lib.G<g>` module.
     fn run_def(&mut self, decl_text: &str) -> TurnOutcome {
-        let head = decl_head(decl_text).to_string();
         match self.define_scoped(&[decl_text]) {
-            Ok(receipt) => self.defined_outcome(decl_text, head, receipt.generation),
+            Ok(receipt) => {
+                let type_display = self.probe_single_declaration_type(&receipt.items);
+                self.defined_outcome(&receipt.items, type_display.as_deref(), receipt.generation)
+            }
             Err(e) => TurnOutcome::Error(session_fail(&e, "declaration failed")),
         }
     }
 
     /// If `expr_text` is a PURE bind of `name`, route it as the top-level decl
     /// `name = <rhs>` (so GHC generalizes it — GHCi parity) and return a `Bound`
-    /// outcome. Returns `None` when it is not a pure bind, or when the decl
-    /// route fails because the RHS needs the value plane (a reference the val
-    /// imports don't cover, e.g. the `input` payload lane, or a self-reference
-    /// `let x = … x …`) — the caller then falls back to the materialize path.
-    ///
-    /// A decl failure for any OTHER reason (a plain type error) is returned as
-    /// `Some(Error)`, not `None`: materializing that case would paper over a
-    /// real error with a broken binding (a polymorphic value forced into a
-    /// monomorphic `Tier1Closure` fails cryptically later, on reference).
+    /// outcome. Returns `None` only when it is not a pure bind. Callers decide
+    /// whether the `input` lane or an existing-name monadic shadow requires
+    /// materialization before entering this function; a declaration failure is
+    /// preserved as a structured error rather than retried through another
+    /// semantic route.
     ///
     /// `define_batch` always shadows wildcard-imported names (ledger #36) so a
     /// pure bind can shadow a Prelude/Library/effect-verb name exactly as a
@@ -1257,15 +1274,16 @@ impl Session {
         let decl = pure_bind_to_decl(expr_text, name)?;
         match self.define_scoped(&[decl.as_str()]) {
             Ok(receipt) => {
-                let type_display = self.probe_pure_type(name).unwrap_or_default();
-                // Register in the environment (decl plane) so :bindings/stale/etc.
+                let type_display = self
+                    .probe_single_declaration_type(&receipt.items)
+                    .unwrap_or_default();
+                // Register in the environment (decl plane) so :bindings
                 // see it; `bind_pure` evicts any materialized binding of `name`
                 // from the value plane (cross-plane shadow, one-plane invariant).
                 self.bind_pure(
                     name,
                     PureBind {
                         type_display: type_display.clone(),
-                        defining_expr: expr_text.to_string(),
                         gen: receipt.generation,
                     },
                 );
@@ -1274,26 +1292,7 @@ impl Session {
                     type_display,
                 })
             }
-            Err(e) => {
-                // Materialize is the right fallback when the RHS depends on a
-                // value-plane provider: either a live materialized binding or
-                // this run's `input` payload. These dependencies are known from
-                // session state and source-name references; rendered GHC text
-                // never controls the route. Any other declaration failure is a
-                // real error and surfaces unchanged.
-                let refs_materialized_value = self
-                    .core
-                    .bindings()
-                    .iter_current()
-                    .any(|(n, _)| mentions_word(expr_text, &n.0));
-                let refs_input_lane =
-                    self.eval_input.is_some() && mentions_word(expr_text, "input");
-                if refs_materialized_value || refs_input_lane {
-                    None
-                } else {
-                    Some(TurnOutcome::Error(session_fail(&e, "bind compile error")))
-                }
-            }
+            Err(e) => Some(TurnOutcome::Error(session_fail(&e, "bind compile error"))),
         }
     }
 
@@ -1308,7 +1307,7 @@ impl Session {
     /// constrained bind (`f h = h.path :: HasField "path" r a => r -> a`, the
     /// core record-dot idiom) can't monomorphize the unresolved constraint and
     /// the probe FAILS — an empty type display; NMR reports it faithfully.
-    fn probe_pure_type(&mut self, name: &str) -> Option<String> {
+    fn probe_name_type(&mut self, name: &str) -> Option<String> {
         let preamble = to_nmr_pragmas(&self.patched_preamble());
         let imports = self.session_imports();
         let eval_input = self.eval_input.clone();
@@ -1322,6 +1321,7 @@ impl Session {
             TurnClassification {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
+                items: Vec::new(),
             },
             self.core.val_gen(),
         )
@@ -1329,50 +1329,48 @@ impl Session {
         .and_then(|compiled| compiled.compiled.warnings.captured_type)
     }
 
-    /// Build the `Defined` outcome for one decl head at generation `gen`,
-    /// computing the `stale` set (live binds whose defining expression
-    /// references this (re)defined name — notebook display truthfulness) and
-    /// the inferred `type` the server had at compile time (#317).
-    /// Shared by `run_def` and the whole-block decl-batch path. `text` is the
-    /// decl item's source, used to gate the type probe to VALUE bindings.
-    fn defined_outcome(&mut self, text: &str, head: String, gen: Generation) -> TurnOutcome {
-        let mut stale: Vec<String> = self
-            .core
-            .bindings()
-            .iter_current()
-            .filter(|(_, e)| {
-                e.defining_expr
-                    .as_deref()
-                    .is_some_and(|src| mentions_word(src, &head))
+    /// Probe the inferred type only when a commit introduces exactly one value
+    /// export. This is the declaration path's one centralized GHC-backed probe:
+    /// multi-head commits do not fan out into one compiler spawn per head.
+    fn probe_single_declaration_type(&mut self, items: &[ExportItem]) -> Option<String> {
+        let mut values = items.iter().filter_map(|item| match item {
+            ExportItem::Value { name } => Some(name.as_str()),
+            ExportItem::Type { .. } | ExportItem::Class { .. } => None,
+        });
+        let name = values.next()?;
+        if values.next().is_some() {
+            return None;
+        }
+        self.probe_name_type(name)
+    }
+
+    fn defined_outcome(
+        &self,
+        items: &[ExportItem],
+        type_display: Option<&str>,
+        gen: Generation,
+    ) -> TurnOutcome {
+        let declarations = items
+            .iter()
+            .map(|item| match item {
+                ExportItem::Value { name } => DeclarationMetadata::Value {
+                    name: name.clone(),
+                    type_display: type_display.map(str::to_owned),
+                },
+                ExportItem::Type { name, cons } => DeclarationMetadata::Type {
+                    name: name.clone(),
+                    constructors: cons.clone(),
+                },
+                ExportItem::Class { name, methods } => DeclarationMetadata::Class {
+                    name: name.clone(),
+                    methods: methods.clone(),
+                },
             })
-            .map(|(n, _)| n.0.clone())
             .collect();
-        // Pure binds (decl-backed) that reference the redefined head are also
-        // stale (they hold their old generalized value until re-run).
-        stale.extend(
-            self.pure_binds
-                .iter()
-                .filter(|(_, pb)| mentions_word(&pb.defining_expr, &head))
-                .map(|(n, _)| n.clone()),
-        );
-        // Paint the inferred type — render every mutation fully, once, at
-        // mutation time. Best-effort: only for items with an actual DEFINING
-        // equation for `head` (a value/function binding — `defines_head` is
-        // false for type/class/data/instance/import/fixity decls and for a
-        // signature-only item in a split sig+bind pair, so the primary bind
-        // item is the one painted). The probe is one extra extract compile;
-        // its failure never fails the decl — the field is simply omitted.
-        let type_display = if defines_head(text, &head) {
-            self.probe_pure_type(&head)
-        } else {
-            None
-        };
         TurnOutcome::Defined {
             generation: gen.0,
             module: tidepool_repr::SessionModule::lib(gen).module_name(),
-            head,
-            type_display,
-            stale,
+            declarations,
         }
     }
 
@@ -1458,15 +1456,16 @@ impl Session {
                     let name = name.clone();
                     // A PURE bind (`let x = e`, `x <- pure e`) is routed into the
                     // decl plane as `x = e` so it GENERALIZES (GHCi parity)
-                    // instead of freezing to a monomorphic heap value; falls back
-                    // to materialize when the RHS is out of decl scope.
-                    //
-                    // EXCEPT a self-referential monadic pure bind (`n <- pure
-                    // (n+1)`): the decl route would emit the RECURSIVE top-level
-                    // `n = n + 1` (self-forcing blackhole). GHCi's `>>=` reads the
-                    // PRIOR `n` and shadows — exactly what materialize does — so
-                    // divert straight to it.
-                    if !self_referential_monadic_pure_bind(expr_text, &name) {
+                    // instead of freezing to a monomorphic heap value. A
+                    // monadic bind that shadows an existing name materializes:
+                    // its RHS is evaluated in the old scope, whereas rewriting
+                    // it as `name = rhs` would make it recursive. A request
+                    // carrying the `input` lane also materializes conservatively;
+                    // the declaration plane has no such provider. Neither
+                    // decision scans Haskell source for guessed references.
+                    let monadic_shadow =
+                        !expr_text.trim_start().starts_with("let ") && self.name_is_live(&name);
+                    if !monadic_shadow && self.eval_input.is_none() {
                         // The decl route compiles and validates but never runs
                         // the machine, so it cannot suspend.
                         if let Some(outcome) = self.try_pure_bind_as_decl(expr_text, &name) {
@@ -1566,7 +1565,7 @@ impl Session {
             let source = attempted_source.unwrap_or_default();
             let user_lines = user_code_line_range(&source, turn_text);
             ReplCompileFailure {
-                error,
+                error: Box::new(error),
                 source,
                 user_lines,
             }
@@ -1576,11 +1575,11 @@ impl Session {
                 bound, compiled, ..
             } => (bound, compiled),
             TurnResult::Expr { compiled, .. } => (Vec::new(), compiled),
-            TurnResult::Decl { .. } => {
+            TurnResult::Decl(_) => {
                 return Err(ReplCompileFailure {
-                    error: CompileError::ExtractFailed(
+                    error: Box::new(CompileError::ExtractFailed(
                         "REPL compile adapter received a declaration outcome".to_string(),
-                    ),
+                    )),
                     source: String::new(),
                     user_lines: None,
                 })
@@ -1624,6 +1623,7 @@ impl Session {
             TurnClassification {
                 kind: TurnKind::Bind,
                 binders: vec![name.clone()],
+                items: Vec::new(),
             },
             g,
         ) {
@@ -1773,6 +1773,7 @@ impl Session {
             TurnClassification {
                 kind: TurnKind::Bind,
                 binders: Vec::new(),
+                items: Vec::new(),
             },
             self.core.val_gen(),
         ) {
@@ -1822,6 +1823,7 @@ impl Session {
             TurnClassification {
                 kind: TurnKind::Bind,
                 binders: names.clone(),
+                items: Vec::new(),
             },
             g,
         ) {
@@ -2058,6 +2060,7 @@ impl Session {
             TurnClassification {
                 kind: TurnKind::Bind,
                 binders: it_names,
+                items: Vec::new(),
             },
             g,
         ) {
@@ -2270,6 +2273,7 @@ impl Session {
                     TurnClassification {
                         kind: TurnKind::Bind,
                         binders: vec!["__t".to_string()],
+                        items: Vec::new(),
                     },
                     probe_gen,
                 ) {
@@ -2459,16 +2463,28 @@ impl Session {
         let mut entries: Vec<serde_json::Value> = Vec::new();
         // Decl plane: current in-scope heads (latest-wins), minus pure-bind
         // names (those are surfaced as `bind` below).
-        for (name, gen) in self.core.lib().current_decl_heads() {
-            if self.pure_binds.contains_key(&name) {
+        for (item, gen) in self.core.lib().current_declarations() {
+            let name = item.head_name();
+            if self.pure_binds.contains_key(name) {
                 continue;
             }
-            entries.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": name,
                 "type": "",
                 "kind": "decl",
+                "declarationKind": item.kind().as_str(),
                 "generation": gen,
-            }));
+            });
+            match item {
+                ExportItem::Type { cons, .. } => {
+                    entry["constructors"] = serde_json::json!(cons);
+                }
+                ExportItem::Class { methods, .. } => {
+                    entry["methods"] = serde_json::json!(methods);
+                }
+                ExportItem::Value { .. } => {}
+            }
+            entries.push(entry);
         }
         // Value plane: materialized (effectful) binds.
         for (name, entry) in self.core.bindings().iter_current() {
@@ -2606,6 +2622,7 @@ impl Session {
             TurnClassification {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
+                items: Vec::new(),
             },
             self.core.val_gen(),
         );
@@ -3166,156 +3183,6 @@ fn pure_bind_to_decl(expr_text: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Whether `expr_text` is a MONADIC pure bind (`name <- pure e` /
-/// `name <- return e`) whose RHS `e` references `name`. Such a bind must read
-/// the PRIOR `name` and shadow — GHCi `>>=` semantics (`pure e >>= \name -> …`
-/// evaluates `e` in the outer scope, so `name` there is the old binding). The
-/// decl route ([`pure_bind_to_decl`]) would instead emit a top-level
-/// `name = e`, which in Haskell is RECURSIVE (`n = n + 1` self-forces to a
-/// blackhole). So these divert to the materialize/shadow path.
-///
-/// `let name = e` is deliberately EXCLUDED: Haskell `let` is recursive, so
-/// `let n = n + 1` looping matches GHCi — only the `<-` form shadows.
-fn self_referential_monadic_pure_bind(expr_text: &str, name: &str) -> bool {
-    let t = expr_text.trim();
-    if t.starts_with("let ") {
-        return false;
-    }
-    let Some(rhs) = t
-        .strip_prefix(name)
-        .map(str::trim_start)
-        .and_then(|a| a.strip_prefix("<-"))
-        .map(str::trim_start)
-    else {
-        return false;
-    };
-    ["pure ", "return "]
-        .iter()
-        .find_map(|kw| rhs.strip_prefix(kw))
-        .is_some_and(|e| mentions_word(e, name))
-}
-
-/// Whether `text` contains `word` as a whole identifier (Haskell ident
-/// boundaries: alnum, `_`, `'`). Used to find binds that reference a
-/// redefined decl (the `stale:` field).
-fn mentions_word(text: &str, word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'';
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    while let Some(rel) = text[start..].find(word) {
-        let i = start + rel;
-        let before_ok = i == 0 || !text[..i].chars().next_back().is_some_and(ident);
-        let after = i + word.len();
-        let after_ok = after >= bytes.len() || !text[after..].chars().next().is_some_and(ident);
-        if before_ok && after_ok {
-            return true;
-        }
-        start = i + 1;
-    }
-    false
-}
-
-/// Whether a decl item's text contains a DEFINING equation for `head` (as
-/// opposed to only a type signature `head :: T`). Drives the within-block
-/// redefinition split in the decl batcher (#320): sig+binding pairs must stay
-/// batched; two defining items for one head must not. A heuristic over lines
-/// (operator heads in prefix parens are not detected — GHC's verdict stays
-/// authoritative for what actually compiles).
-fn defines_head(text: &str, head: &str) -> bool {
-    if head.is_empty() {
-        return false;
-    }
-    text.lines().any(|l| {
-        let l = l.trim_start();
-        match l.strip_prefix(head) {
-            Some(rest) => {
-                let boundary_ok = rest
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '\''));
-                boundary_ok && !rest.trim_start().starts_with("::")
-            }
-            None => false,
-        }
-    })
-}
-
-/// Strip leading blank lines and `--` line comments so `decl_head` extracts
-/// the real token instead of the comment marker. A leading `-- slugify a
-/// title\nslug t = ...` must classify head `"slug"`, not `"--"` — a stray
-/// `"--"` head poisons the type-probe gate (`defines_head`), the within-block
-/// redefinition splitter, and `mentions_word`'s stale-bind detection, since
-/// all three key off the (wrong) head text.
-///
-/// Follows the Haskell lexical rule that a dash run immediately followed by
-/// another symbol character is an OPERATOR, not a comment (`-->`, `|--`), so
-/// such lines are left alone for the caller's own parsing.
-fn strip_leading_comments(text: &str) -> &str {
-    const SYMBOL_CHARS: &str = "!#$%&*+./<=>?@\\^|~:-";
-    let mut s = text;
-    loop {
-        let trimmed = s.trim_start_matches(char::is_whitespace);
-        match trimmed.strip_prefix("--") {
-            Some(rest) if !rest.starts_with(|c: char| SYMBOL_CHARS.contains(c)) => {
-                s = match rest.find('\n') {
-                    Some(nl) => &rest[nl + 1..],
-                    None => "",
-                };
-            }
-            _ => return trimmed,
-        }
-    }
-}
-
-/// Extract the declared head identifier from a Haskell declaration string,
-/// for the slim `{"decl":"name"}` block item result. Strips keyword prefixes
-/// for type/class/instance declarations; for function definitions returns the
-/// first identifier. Returns `""` for empty or unrecognised text.
-fn decl_head(text: &str) -> &str {
-    let s = strip_leading_comments(text).trim();
-    // Import: name the module being imported, not the `import` keyword. (#317)
-    if let Some(rest) = s.strip_prefix("import ") {
-        let rest = rest.trim_start();
-        let rest = rest.strip_prefix("qualified ").unwrap_or(rest).trim_start();
-        let end = rest
-            .find(|c: char| c.is_whitespace() || c == '(')
-            .unwrap_or(rest.len());
-        return rest[..end].trim_end();
-    }
-    // Fixity: name the operator(s) being fixed, not the `infixl`/`infixr`/`infix`
-    // keyword (skip the optional precedence digits). (#317)
-    for kw in &["infixl ", "infixr ", "infix "] {
-        if let Some(rest) = s.strip_prefix(kw) {
-            return rest
-                .trim_start()
-                .trim_start_matches(|c: char| c.is_ascii_digit())
-                .trim();
-        }
-    }
-    for kw in &["data ", "newtype ", "type ", "class ", "instance "] {
-        if let Some(rest) = s.strip_prefix(kw) {
-            let end = rest
-                .find(|c: char| c.is_whitespace() || c == '(' || c == '=')
-                .unwrap_or(rest.len());
-            return rest[..end].trim_end();
-        }
-    }
-    // Prefix operator definition `(<>) x y = …` / `(<>) = …`: name the operator
-    // rather than returning "" (the `(` used to zero the token). (#317)
-    if let Some(rest) = s.strip_prefix('(') {
-        if let Some(close) = rest.find(')') {
-            return rest[..close].trim();
-        }
-    }
-    let end = s
-        .find(|c: char| c.is_whitespace() || c == '(' || c == ':' || c == '=')
-        .unwrap_or(s.len());
-    &s[..end]
-}
-
 /// Compute the slim inline JSON result for one block item (the default shape).
 /// Fields are merged directly into the item object in `Block::render()`.
 /// The `value` key is present here but stripped for the final expression item
@@ -3330,23 +3197,29 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
             "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
             "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
         }),
-        TurnOutcome::Defined {
-            head,
-            type_display,
-            stale,
-            ..
-        } => {
-            let mut obj = serde_json::json!({ "decl": head });
-            // Paint the inferred type the server had at compile time, so
-            // `{decl:"heatOf"}` doesn't cost the caller a `:t` (#317). Omitted
-            // (best-effort) for non-value decls and probe failures.
-            if let Some(ty) = type_display.as_deref().filter(|t| !t.is_empty()) {
-                obj["type"] = serde_json::json!(ty);
+        TurnOutcome::Defined { declarations, .. } => {
+            let metadata: Vec<serde_json::Value> = declarations
+                .iter()
+                .map(DeclarationMetadata::to_json)
+                .collect();
+            if let [declaration] = metadata.as_slice() {
+                let mut obj = declaration.clone();
+                obj["decl"] = obj["name"].take();
+                obj["declKind"] = obj["kind"].take();
+                if let Some(map) = obj.as_object_mut() {
+                    map.remove("name");
+                    map.remove("kind");
+                }
+                obj
+            } else {
+                serde_json::json!({
+                    "decl": declarations
+                        .iter()
+                        .map(DeclarationMetadata::name)
+                        .collect::<Vec<_>>(),
+                    "declarations": metadata,
+                })
             }
-            if !stale.is_empty() {
-                obj["stale"] = serde_json::json!(stale);
-            }
-            obj
         }
         TurnOutcome::Value {
             value,
@@ -3445,9 +3318,8 @@ fn browse_effects(decls: &[EffectDecl], only: Option<&str>) -> serde_json::Value
 
 #[cfg(test)]
 mod slim_tests {
-    use super::self_referential_monadic_pure_bind;
     use super::{browse_effects, EffectDecl};
-    use super::{decl_head, pure_bind_to_decl, slim_item_result, strip_leading_comments};
+    use super::{pure_bind_to_decl, slim_item_result};
 
     /// Two-effect fixture mirroring the real decl shape: a comment-prefixed
     /// helper (so the sig line is not the first line) and a multi-sentence
@@ -3557,30 +3429,7 @@ mod slim_tests {
         );
     }
 
-    #[test]
-    fn self_ref_monadic_pure_bind_detected() {
-        // The accumulator idiom: `<-` form referencing the prior binding — must
-        // divert to materialize (shadow), NOT the recursive decl route.
-        assert!(self_referential_monadic_pure_bind("n <- pure (n + 1)", "n"));
-        assert!(self_referential_monadic_pure_bind(
-            "xs <- return (0 : xs)",
-            "xs"
-        ));
-        // Non-self-referential `<-` pure binds still take the decl route.
-        assert!(!self_referential_monadic_pure_bind("xs <- pure []", "xs"));
-        assert!(!self_referential_monadic_pure_bind(
-            "n <- pure (m + 1)",
-            "n"
-        ));
-        // `let` is recursive in GHCi — left on the decl route intentionally.
-        assert!(!self_referential_monadic_pure_bind("let n = n + 1", "n"));
-        // A substring of the name is not a self-reference (whole-word only).
-        assert!(!self_referential_monadic_pure_bind(
-            "n <- pure (nn + 1)",
-            "n"
-        ));
-    }
-    use crate::command::TurnOutcome;
+    use crate::command::{DeclarationMetadata, TurnOutcome};
 
     #[test]
     fn lib_brick_hint_reframes_lib_only_errors() {
@@ -3603,59 +3452,6 @@ mod slim_tests {
     }
 
     #[test]
-    fn decl_head_extracts_names() {
-        assert_eq!(decl_head("slug t = T.replace \" \" \"-\" t"), "slug");
-        assert_eq!(decl_head("data Foo = Bar | Baz"), "Foo");
-        assert_eq!(
-            decl_head("newtype Wrapper a = Wrapper { unwrap :: a }"),
-            "Wrapper"
-        );
-        assert_eq!(decl_head("type Name = Text"), "Name");
-        assert_eq!(decl_head("class MyClass a where"), "MyClass");
-        assert_eq!(decl_head("  f x = x + 1"), "f");
-        assert_eq!(decl_head(""), "");
-        // #317: import → module, fixity → operator, prefix-op def → operator.
-        assert_eq!(decl_head("import Data.Char"), "Data.Char");
-        assert_eq!(decl_head("import qualified Data.Map as M"), "Data.Map");
-        assert_eq!(decl_head("infixl 6 <+>"), "<+>");
-        assert_eq!(decl_head("infixr 5 >>>"), ">>>");
-        assert_eq!(decl_head("(<+>) = (++)"), "<+>");
-        assert_eq!(decl_head("(<>) x y = x <> y"), "<>");
-    }
-
-    #[test]
-    fn decl_head_skips_leading_comments() {
-        // A leading `-- comment` line must not poison the head as "--".
-        assert_eq!(
-            decl_head("-- slugify a title\nslug t = T.replace \" \" \"-\" t"),
-            "slug"
-        );
-        // Blank lines + multiple comment lines before the real decl.
-        assert_eq!(
-            decl_head("\n-- first note\n-- second note\ndata Foo = Bar"),
-            "Foo"
-        );
-        // A dash-run immediately followed by a symbol char is an OPERATOR, not
-        // a comment (Haskell lexical rule) — left untouched.
-        assert_eq!(decl_head("(-->) x y = x"), "-->");
-        assert_eq!(strip_leading_comments("--> merge x y"), "--> merge x y");
-    }
-
-    #[test]
-    fn defines_head_sig_vs_binding() {
-        use super::defines_head;
-        // A binding defines; a bare signature does not.
-        assert!(defines_head("rf x = x + 1", "rf"));
-        assert!(!defines_head("rf :: Int -> Int", "rf"));
-        // Sig+binding in one item defines.
-        assert!(defines_head("rf :: Int -> Int\nrf x = x + 1", "rf"));
-        // Identifier-boundary: `rfoo` does not define `rf`.
-        assert!(!defines_head("rfoo x = 1", "rf"));
-        // Multi-clause single item defines (once).
-        assert!(defines_head("f 0 = 0\nf n = n", "f"));
-    }
-
-    #[test]
     fn slim_item_result_shapes() {
         let bound = TurnOutcome::Bound {
             name: "vs".into(),
@@ -3668,14 +3464,14 @@ mod slim_tests {
         let defined = TurnOutcome::Defined {
             generation: 1,
             module: "Tidepool.Session.Lib.G1".into(),
-            head: "slug".into(),
-            type_display: Some("Text -> Text".into()),
-            stale: Vec::new(),
+            declarations: vec![DeclarationMetadata::Value {
+                name: "slug".into(),
+                type_display: Some("Text -> Text".into()),
+            }],
         };
         let r = slim_item_result(&defined);
         assert_eq!(r["decl"], "slug");
         assert_eq!(r["type"], "Text -> Text", "inferred type painted (#317)");
-        assert!(r.get("stale").is_none(), "no stale key when nothing stale");
         assert!(r.get("generation").is_none(), "no generation in slim decl");
         assert!(r.get("module").is_none(), "no module in slim decl");
 
@@ -3683,12 +3479,15 @@ mod slim_tests {
         let defined_no_type = TurnOutcome::Defined {
             generation: 1,
             module: "Tidepool.Session.Lib.G1".into(),
-            head: "Node".into(),
-            type_display: None,
-            stale: Vec::new(),
+            declarations: vec![DeclarationMetadata::Type {
+                name: "Node".into(),
+                constructors: vec!["Node".into()],
+            }],
         };
         let r = slim_item_result(&defined_no_type);
         assert_eq!(r["decl"], "Node");
+        assert_eq!(r["declKind"], "type");
+        assert_eq!(r["constructors"], serde_json::json!(["Node"]));
         assert!(r.get("type").is_none(), "no type key for a non-value decl");
     }
 }
@@ -3851,7 +3650,6 @@ mod reset_tests {
             "marker".to_string(),
             PureBind {
                 type_display: "Int".to_string(),
-                defining_expr: "42".to_string(),
                 gen: Generation(1),
             },
         );
@@ -3901,7 +3699,6 @@ mod reset_tests {
             "x".to_string(),
             PureBind {
                 type_display: "Int".to_string(),
-                defining_expr: "1".to_string(),
                 gen: Generation(1),
             },
         );
@@ -3909,7 +3706,6 @@ mod reset_tests {
             "y".to_string(),
             PureBind {
                 type_display: "Int".to_string(),
-                defining_expr: "1".to_string(),
                 gen: Generation(1),
             },
         );

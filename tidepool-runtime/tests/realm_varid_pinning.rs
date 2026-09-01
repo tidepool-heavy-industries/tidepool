@@ -134,6 +134,7 @@ fn compile_bind_turn(
         verdict: Some(TurnClassification {
             kind: TurnKind::Bind,
             binders: vec!["x".to_string()],
+            items: Vec::new(),
         }),
         target: None,
     })
@@ -248,6 +249,7 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
         verdict: Some(TurnClassification {
             kind: TurnKind::Expr,
             binders: Vec::new(),
+            items: Vec::new(),
         }),
         target: None,
     })

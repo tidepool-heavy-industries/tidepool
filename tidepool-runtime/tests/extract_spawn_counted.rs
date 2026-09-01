@@ -51,6 +51,7 @@ fn run_turn_increments_the_process_global_spawn_count() {
         verdict: Some(TurnClassification {
             kind: TurnKind::Expr,
             binders: Vec::new(),
+            items: Vec::new(),
         }),
         target: None,
     };

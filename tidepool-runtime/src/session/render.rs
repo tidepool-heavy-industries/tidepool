@@ -38,6 +38,25 @@ pub enum ExportItem {
     Class { name: String, methods: Vec<String> },
 }
 
+/// The namespace-level kind of one GHC-reported declaration export.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclarationKind {
+    Value,
+    Type,
+    Class,
+}
+
+impl DeclarationKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeclarationKind::Value => "value",
+            DeclarationKind::Type => "type",
+            DeclarationKind::Class => "class",
+        }
+    }
+}
+
 /// Parenthesize an operator name for an export/`hiding` list (`.+` → `(.+)`).
 /// Normal identifiers (alphanumeric/`_`-leading) and already-parenthesized names
 /// pass through unchanged. Without this, a `session_def`'d operator like `(.+)`
@@ -51,6 +70,16 @@ fn op_wrap(name: &str) -> String {
 }
 
 impl ExportItem {
+    /// The closed declaration kind GHC assigned this export.
+    #[must_use]
+    pub fn kind(&self) -> DeclarationKind {
+        match self {
+            ExportItem::Value { .. } => DeclarationKind::Value,
+            ExportItem::Type { .. } => DeclarationKind::Type,
+            ExportItem::Class { .. } => DeclarationKind::Class,
+        }
+    }
+
     /// The head identifier (the value name, the type/class name).
     #[must_use]
     pub fn head_name(&self) -> &str {
@@ -178,17 +207,28 @@ impl DeclLog {
     /// `tidepool://session/bindings` live-state snapshot.
     #[must_use]
     pub fn current_heads_at(&self, tip: Generation) -> Vec<(String, u64)> {
-        let mut map: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        self.current_items_at(tip)
+            .into_iter()
+            .map(|(item, generation)| (item.head_name().to_string(), generation))
+            .collect()
+    }
+
+    /// The exact current export items paired with their defining generation.
+    /// This is the metadata-preserving form of [`Self::current_heads_at`].
+    #[must_use]
+    pub fn current_items_at(&self, tip: Generation) -> Vec<(ExportItem, u64)> {
+        let mut map: std::collections::BTreeMap<String, (ExportItem, u64)> =
+            std::collections::BTreeMap::new();
         for g in self.chain_from_root(tip) {
             let turn = &self.turns[(g.0 - 1) as usize];
             for r in &turn.retracts {
                 map.remove(r);
             }
             for item in &turn.items {
-                map.insert(item.head_name().to_string(), g.0);
+                map.insert(item.head_name().to_string(), (item.clone(), g.0));
             }
         }
-        map.into_iter().collect()
+        map.into_values().collect()
     }
 
     /// Exact export items visible at `tip`, latest definition winning by head

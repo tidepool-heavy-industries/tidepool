@@ -87,6 +87,10 @@ pub struct TurnClassification {
     pub kind: TurnKind,
     /// The bound/declared names (GHC-sourced). Empty for a bare expr.
     pub binders: Vec<String>,
+    /// Structured declaration exports from the same GHC parse. Empty for
+    /// bind/expr turns and for declarations such as signatures or instances
+    /// that introduce no export by themselves.
+    pub items: Vec<ExportItem>,
 }
 
 /// Which wrapper template a verdict selects. A refinement of [`TurnKind`]:
@@ -284,11 +288,7 @@ pub enum TurnResult {
     /// export items, harvested by the extract's whole-module decl parse —
     /// NOT by the statement parse that serves the verdict, which cannot cover
     /// a multi-declaration batch.
-    Decl {
-        /// The declared names (GHC-sourced).
-        binders: Vec<String>,
-        items: Vec<ExportItem>,
-    },
+    Decl(DeclarationReceipt),
     /// A bind (`x <- e` / `let x = e`).
     Bind {
         /// The verdict's bound/declared names.
@@ -311,6 +311,15 @@ pub enum TurnResult {
         /// anchor.
         wrapped_source: String,
     },
+}
+
+/// GHC's complete parse-only receipt for one declaration turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclarationReceipt {
+    /// Declared names from the verdict/whole-module parse.
+    pub binders: Vec<String>,
+    /// Exported values, types, and classes, including constructor/method facts.
+    pub items: Vec<ExportItem>,
 }
 
 /// The preamble's `default (...)` declaration line — the same import
@@ -567,7 +576,7 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// selector is caught here, before any process is spawned.
 pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
-        Some(TurnClassification { kind, binders }) => {
+        Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
                 clippy::expect_used,
                 reason = "TemplateSelector::for_verdict is total over TurnKind"
@@ -666,7 +675,9 @@ fn decode_turn_output_dir(dir: &Path) -> Result<TurnResult, CompileError> {
     let turn_out = decode_turn_out(&turn_out_bytes)?;
 
     match turn_out {
-        DecodedTurnOut::Decl { binders, items } => Ok(TurnResult::Decl { binders, items }),
+        DecodedTurnOut::Decl { binders, items } => {
+            Ok(TurnResult::Decl(DeclarationReceipt { binders, items }))
+        }
         DecodedTurnOut::Bind {
             binders,
             variant,
@@ -1060,7 +1071,7 @@ fn classify_protocol_failure(detail: String) -> CompileError {
     ))
 }
 
-/// Parse `{"verdicts":[{kind,binders}, ...]}`. A verdict count that does not
+/// Parse `{"verdicts":[{kind,binders,items}, ...]}`. A verdict count that does not
 /// match the item count is a clean, loud [`CompileError::ExtractFailed`] — a
 /// silent length mismatch would misalign every downstream item against the
 /// wrong verdict.
@@ -1136,7 +1147,73 @@ fn parse_one_verdict(v: &serde_json::Value) -> Result<TurnClassification, Compil
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(TurnClassification { kind, binders })
+    let items = v
+        .get("items")
+        .ok_or_else(|| {
+            CompileError::MalformedDiagnostics(format!(
+                "classify verdict: missing `items` field for kind {kind_str:?}"
+            ))
+        })?
+        .as_array()
+        .ok_or_else(|| {
+            CompileError::MalformedDiagnostics(format!(
+                "classify verdict: `items` field is not an array for kind {kind_str:?}"
+            ))
+        })?
+        .iter()
+        .map(parse_classify_export_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TurnClassification {
+        kind,
+        binders,
+        items,
+    })
+}
+
+fn parse_classify_export_item(v: &serde_json::Value) -> Result<ExportItem, CompileError> {
+    let malformed = |detail: &str| {
+        CompileError::MalformedDiagnostics(format!(
+            "classify verdict: malformed declaration item ({detail}): {v}"
+        ))
+    };
+    let fields = v.as_array().ok_or_else(|| malformed("expected array"))?;
+    let tag = fields
+        .first()
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| malformed("missing string tag"))?;
+    let name = || {
+        fields
+            .get(1)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| malformed("missing string name"))
+    };
+    let children = || {
+        fields
+            .get(2)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| malformed("missing child-name array"))?
+            .iter()
+            .map(|child| {
+                child
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| malformed("non-string child name"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    match (tag, fields.len()) {
+        ("EValue", 2) => Ok(ExportItem::Value { name: name()? }),
+        ("EType", 3) => Ok(ExportItem::Type {
+            name: name()?,
+            cons: children()?,
+        }),
+        ("EClass", 3) => Ok(ExportItem::Class {
+            name: name()?,
+            methods: children()?,
+        }),
+        _ => Err(malformed("unknown tag or arity")),
+    }
 }
 
 #[cfg(test)]
@@ -1311,8 +1388,11 @@ mod tests {
 
     #[test]
     fn classify_block_verdict_count_mismatch_is_clean_error() {
-        let err = parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x"]}]}"#, 2)
-            .unwrap_err();
+        let err = parse_classify_json(
+            r#"{"verdicts":[{"kind":"bind","binders":["x"],"items":[]}]}"#,
+            2,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, CompileError::ExtractFailed(_)),
             "expected ExtractFailed, got {err:?}"
@@ -1321,25 +1401,36 @@ mod tests {
 
     #[test]
     fn parses_bind_classification() {
-        let cs =
-            parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x"]}]}"#, 1).unwrap();
+        let cs = parse_classify_json(
+            r#"{"verdicts":[{"kind":"bind","binders":["x"],"items":[]}]}"#,
+            1,
+        )
+        .unwrap();
         assert_eq!(cs[0].kind, TurnKind::Bind);
         assert_eq!(cs[0].binders, vec!["x".to_string()]);
     }
 
     #[test]
     fn parses_expr_classification() {
-        let cs = parse_classify_json(r#"{"verdicts":[{"kind":"expr","binders":[]}]}"#, 1).unwrap();
+        let cs = parse_classify_json(
+            r#"{"verdicts":[{"kind":"expr","binders":[],"items":[]}]}"#,
+            1,
+        )
+        .unwrap();
         assert_eq!(cs[0].kind, TurnKind::Expr);
         assert!(cs[0].binders.is_empty());
     }
 
     #[test]
     fn parses_decl_classification() {
-        let cs =
-            parse_classify_json(r#"{"verdicts":[{"kind":"decl","binders":["sq"]}]}"#, 1).unwrap();
+        let cs = parse_classify_json(
+            r#"{"verdicts":[{"kind":"decl","binders":["sq"],"items":[["EValue","sq"]]}]}"#,
+            1,
+        )
+        .unwrap();
         assert_eq!(cs[0].kind, TurnKind::Decl);
         assert_eq!(cs[0].binders, vec!["sq".to_string()]);
+        assert_eq!(cs[0].items, vec![ExportItem::Value { name: "sq".into() }]);
     }
 
     /// Any `kind` other than `decl`/`bind`/`expr` is a loud infrastructure
@@ -1349,8 +1440,11 @@ mod tests {
     /// verdict run as a bare expression instead of surfacing the corruption.
     #[test]
     fn unknown_kind_is_malformed_diagnostics_not_silent_expr() {
-        let err =
-            parse_classify_json(r#"{"verdicts":[{"kind":"weird","binders":[]}]}"#, 1).unwrap_err();
+        let err = parse_classify_json(
+            r#"{"verdicts":[{"kind":"weird","binders":[],"items":[]}]}"#,
+            1,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, CompileError::MalformedDiagnostics(_)),
             "expected MalformedDiagnostics, got {err:?}"
@@ -1361,7 +1455,8 @@ mod tests {
     /// `TurnKind::Expr` default.
     #[test]
     fn missing_kind_is_malformed_diagnostics_not_silent_expr() {
-        let err = parse_classify_json(r#"{"verdicts":[{"binders":["x"]}]}"#, 1).unwrap_err();
+        let err =
+            parse_classify_json(r#"{"verdicts":[{"binders":["x"],"items":[]}]}"#, 1).unwrap_err();
         assert!(
             matches!(err, CompileError::MalformedDiagnostics(_)),
             "expected MalformedDiagnostics, got {err:?}"
@@ -1373,8 +1468,11 @@ mod tests {
     /// a bind against the wrong binder set instead of failing.
     #[test]
     fn non_string_binder_is_malformed_diagnostics_not_silently_dropped() {
-        let err = parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":["x",5]}]}"#, 1)
-            .unwrap_err();
+        let err = parse_classify_json(
+            r#"{"verdicts":[{"kind":"bind","binders":["x",5],"items":[]}]}"#,
+            1,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, CompileError::MalformedDiagnostics(_)),
             "expected MalformedDiagnostics, got {err:?}"
@@ -1386,8 +1484,11 @@ mod tests {
     /// verdict into a discard bind.
     #[test]
     fn malformed_binder_list_is_malformed_diagnostics_not_silent_empty() {
-        let non_array =
-            parse_classify_json(r#"{"verdicts":[{"kind":"bind","binders":"x"}]}"#, 1).unwrap_err();
+        let non_array = parse_classify_json(
+            r#"{"verdicts":[{"kind":"bind","binders":"x","items":[]}]}"#,
+            1,
+        )
+        .unwrap_err();
         assert!(
             matches!(non_array, CompileError::MalformedDiagnostics(_)),
             "expected MalformedDiagnostics for non-array binders, got {non_array:?}"
@@ -1533,6 +1634,7 @@ mod tests {
             verdict: Some(TurnClassification {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
+                items: Vec::new(),
             }),
             target: None,
         };
@@ -1578,6 +1680,7 @@ mod tests {
             verdict: Some(TurnClassification {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
+                items: Vec::new(),
             }),
             target: None,
         };
@@ -1624,6 +1727,7 @@ mod tests {
             verdict: Some(TurnClassification {
                 kind: TurnKind::Expr,
                 binders: Vec::new(),
+                items: Vec::new(),
             }),
             target: None,
         })
@@ -2088,6 +2192,24 @@ mod tests {
                 "{}: old-path binders mismatch",
                 case.name
             );
+            if case.kind == TurnKind::Decl {
+                let (_, want_heads) = decl_expectations(case.name);
+                assert_eq!(
+                    old.items
+                        .iter()
+                        .map(ExportItem::head_name)
+                        .collect::<Vec<_>>(),
+                    want_heads,
+                    "{}: classify receipt heads mismatch",
+                    case.name
+                );
+            } else {
+                assert!(
+                    old.items.is_empty(),
+                    "{}: non-declaration verdict carried declaration items",
+                    case.name
+                );
+            }
 
             // New path: `run_turn`, fed the SAME verdict just obtained (the
             // batch-classify shape) so this exercises template
@@ -2121,16 +2243,20 @@ mod tests {
                     let result = run_turn(req)
                         .unwrap_or_else(|e| panic!("{}: run_turn failed: {e:?}", case.name));
                     match (case.kind, result) {
-                        (TurnKind::Decl, TurnResult::Decl { binders, items }) => {
+                        (TurnKind::Decl, TurnResult::Decl(receipt)) => {
                             let (want_binders, want_heads) = decl_expectations(case.name);
                             assert_eq!(
-                                binder_names(&binders),
+                                binder_names(&receipt.binders),
                                 want_binders,
                                 "{}: new-path decl binders mismatch",
                                 case.name
                             );
                             assert_eq!(
-                                items.iter().map(ExportItem::head_name).collect::<Vec<_>>(),
+                                receipt
+                                    .items
+                                    .iter()
+                                    .map(ExportItem::head_name)
+                                    .collect::<Vec<_>>(),
                                 want_heads,
                                 "{}: harvested export-item heads mismatch",
                                 case.name

@@ -463,6 +463,80 @@ async fn sig_and_binding_split_across_items() {
     assert!(val.contains("42"), "sig1 41: expected 42, got {val}");
 }
 
+/// GHC's per-item export receipt, not a Rust head scanner, separates a true
+/// within-block redefinition from a signature/equation pair. Prefix operators
+/// are the old scanner's negative case: it did not recognize their defining
+/// equations and GHC merged both into one first-clause-wins group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operator_redefinition_in_one_block_is_latest_generation() {
+    require_extract();
+    let repl = Repl::new();
+    let out = repl
+        .run(&[
+            "infixl 6 <+>",
+            "(<+>) x y = x + y",
+            "(<+>) x y = x * y",
+            "pure ((2 :: Int) <+> 3)",
+        ])
+        .await;
+    let text = out.expect_ok("operator redefinition in one block");
+    assert!(
+        text.contains('6'),
+        "latest operator equation must win (2 * 3), got: {text}"
+    );
+    assert!(
+        text.contains("<+>") && text.contains("\"declKind\":\"value\""),
+        "operator response must use the GHC value receipt: {text}"
+    );
+}
+
+/// Public declaration metadata preserves the receipt's kind-specific children.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declaration_response_carries_type_and_class_receipts() {
+    require_extract();
+    let repl = Repl::new();
+
+    let ty_turn = repl
+        .def("data ReceiptShape = ReceiptCircle | ReceiptRect")
+        .await;
+    let ty = ty_turn.expect_ok("define receipt type");
+    assert!(ty.contains("\"declKind\":\"type\""), "type kind: {ty}");
+    assert!(
+        ty.contains("ReceiptCircle") && ty.contains("ReceiptRect"),
+        "constructors must ride the type receipt: {ty}"
+    );
+
+    let class_turn = repl
+        .def("class ReceiptClass a where { receiptMethod :: a -> Int }")
+        .await;
+    let class = class_turn.expect_ok("define receipt class");
+    assert!(
+        class.contains("\"declKind\":\"class\"") && class.contains("receiptMethod"),
+        "class method must ride the class receipt: {class}"
+    );
+}
+
+/// A single GHC declaration can introduce several value heads. The response,
+/// commit, and later scope all use that multi-item receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_name_pattern_receipt_commits_every_value() {
+    require_extract();
+    let repl = Repl::new();
+    let defined_turn = repl
+        .def("(receiptLeft, receiptRight) = ((1 :: Int), (2 :: Int))")
+        .await;
+    let defined = defined_turn.expect_ok("define multi-name pattern");
+    assert!(
+        defined.contains("receiptLeft") && defined.contains("receiptRight"),
+        "both GHC-reported heads must be public: {defined}"
+    );
+    let value = repl.eval_ok("pure (receiptLeft + receiptRight)").await;
+    assert!(
+        value.contains('3'),
+        "both committed values must resolve: {value}"
+    );
+}
+
 /// WHOLE-BLOCK DECL ELABORATION (M1): mutually-recursive functions defined in
 /// SEPARATE items of one block resolve (batched together).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -541,8 +615,10 @@ async fn non_value_decl_omits_type() {
         text.contains("Widget317"),
         "decl head present for the data decl, got: {text}"
     );
+    let response: serde_json::Value =
+        serde_json::from_str(&text).expect("data declaration response is JSON");
     assert!(
-        !text.contains("\"type\""),
+        response.get("type").is_none(),
         "a data decl has no term-level type — field omitted, got: {text}"
     );
 }

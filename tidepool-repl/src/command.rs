@@ -41,6 +41,65 @@ pub struct BoundComponent {
     pub type_display: String,
 }
 
+/// One committed declaration export in a public response. The variants mirror
+/// GHC's `ExportItem` receipt so kind-specific metadata cannot drift into the
+/// wrong declaration kind.
+#[derive(Clone, Debug)]
+pub enum DeclarationMetadata {
+    Value {
+        name: String,
+        type_display: Option<String>,
+    },
+    Type {
+        name: String,
+        constructors: Vec<String>,
+    },
+    Class {
+        name: String,
+        methods: Vec<String>,
+    },
+}
+
+impl DeclarationMetadata {
+    pub fn name(&self) -> &str {
+        match self {
+            DeclarationMetadata::Value { name, .. }
+            | DeclarationMetadata::Type { name, .. }
+            | DeclarationMetadata::Class { name, .. } => name,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            DeclarationMetadata::Value { .. } => "value",
+            DeclarationMetadata::Type { .. } => "type",
+            DeclarationMetadata::Class { .. } => "class",
+        }
+    }
+
+    pub fn to_json(&self) -> Json {
+        match self {
+            DeclarationMetadata::Value { name, type_display } => {
+                let mut value = serde_json::json!({ "name": name, "kind": self.kind() });
+                if let Some(ty) = type_display.as_deref().filter(|ty| !ty.is_empty()) {
+                    value["type"] = serde_json::json!(ty);
+                }
+                value
+            }
+            DeclarationMetadata::Type { name, constructors } => serde_json::json!({
+                "name": name,
+                "kind": self.kind(),
+                "constructors": constructors,
+            }),
+            DeclarationMetadata::Class { name, methods } => serde_json::json!({
+                "name": name,
+                "kind": self.kind(),
+                "methods": methods,
+            }),
+        }
+    }
+}
+
 /// A `session_run` block's last-expression result: the rendered value plus its
 /// type and truncation-hint METADATA — the three only ever describe the SAME
 /// value, so they travel as one struct rather than three independently
@@ -239,17 +298,7 @@ pub enum TurnOutcome {
     Defined {
         generation: u64,
         module: String,
-        head: String,
-        /// The GHC-inferred (generalized) type of the declared VALUE head, as
-        /// the server had it at compile time — so `{decl:"heatOf"}` doesn't
-        /// cost the caller a `:t` round-trip (#317). `None` for
-        /// type/class/data/instance/import/fixity decls (no term-level type) or
-        /// when the best-effort probe failed — a probe failure never fails the
-        /// decl, it just omits the field.
-        type_display: Option<String>,
-        /// Live binds whose defining expression references this (re)defined
-        /// name — they still hold their OLD value (notebook-frame staleness).
-        stale: Vec<String>,
+        declarations: Vec<DeclarationMetadata>,
     },
     /// A meta-command item produced this structured result.
     Meta(Json),
@@ -304,19 +353,17 @@ impl TurnOutcome {
             TurnOutcome::Defined {
                 generation,
                 module,
-                type_display,
-                stale,
-                ..
+                declarations,
             } => {
-                let mut obj = serde_json::json!({
+                let obj = serde_json::json!({
                     "defined": true,
                     "generation": generation,
                     "module": module,
-                    "stale": stale,
+                    "declarations": declarations
+                        .iter()
+                        .map(DeclarationMetadata::to_json)
+                        .collect::<Vec<_>>(),
                 });
-                if let Some(ty) = type_display.as_deref().filter(|t| !t.is_empty()) {
-                    obj["type"] = serde_json::json!(ty);
-                }
                 obj.to_string()
             }
             TurnOutcome::Meta(v) => {

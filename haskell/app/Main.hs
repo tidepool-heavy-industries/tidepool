@@ -478,8 +478,8 @@ runClassifyMode timing args =
 -- anything but the three wire-name strings the Rust caller ever forwards.
 parseTurnVerdictArg :: String -> IO StmtBinders
 parseTurnVerdictArg s = case break (== ':') s of
-  (kind, "")      -> return (StmtBinders (parseTurnKind kind) [])
-  (kind, ':' : ns) -> return (StmtBinders (parseTurnKind kind) (splitComma ns))
+  (kind, "")      -> return (StmtBinders (parseTurnKind kind) [] [])
+  (kind, ':' : ns) -> return (StmtBinders (parseTurnKind kind) (splitComma ns) [])
   _               -> error ("--turn: malformed --turn-verdict: " ++ s)
 
 splitComma :: String -> [String]

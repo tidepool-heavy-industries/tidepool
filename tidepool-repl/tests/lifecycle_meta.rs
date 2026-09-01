@@ -403,10 +403,11 @@ async fn program_repaint_round_trips() {
     assert!(out.contains("42"), "replay value: expected 42, got {out}");
 }
 
-/// Redefining a decl that a live bind referenced reports the bind as `stale`
-/// (notebook-frame display truthfulness — the value doesn't recompute).
+/// The declaration receipt does not yet carry references, so redefinition
+/// makes no stale-dependency claim. In particular, names appearing in a string
+/// literal must not recreate the old lexical false positive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn redefine_reports_stale_binds() {
+async fn redefine_makes_no_lexical_stale_dependency_claim() {
     require_extract();
     let repl = Repl::new();
 
@@ -416,18 +417,21 @@ async fn redefine_reports_stale_binds() {
     repl.eval("y <- pure (factor 10)")
         .await
         .expect_ok("bind y = factor 10");
+    repl.eval("label <- pure (T.pack \"factor\")")
+        .await
+        .expect_ok("bind label containing factor as text");
 
-    // Redefine factor — y still holds the OLD value; the response must say so.
+    // Both `y`'s real reference and `label`'s string occurrence are outside the
+    // current receipt. The server therefore reports neither as stale.
     let redef = repl.def("factor x = x * (100 :: Int)").await;
     let text = redef.expect_ok("redefine factor");
-    assert!(text.contains("stale"), "expected stale marker: {text}");
-    assert!(text.contains('y'), "expected bind y named stale: {text}");
-
-    // A redefine touching nothing bound reports no stale key.
-    let unrelated = repl.def("other x = x + (1 :: Int)").await;
-    let ut = unrelated.expect_ok("def other");
     assert!(
-        !ut.contains("stale"),
-        "unrelated redefine should not be stale: {ut}"
+        !text.contains("stale"),
+        "reference-free GHC receipt must not emit a lexical stale claim: {text}"
     );
+
+    // The old materialized value remains exactly what it was; no recomputation
+    // is implied by omitting the unsupported dependency claim.
+    let old = repl.eval_ok("pure y").await;
+    assert!(old.contains("20"), "bound y retains its old value: {old}");
 }
