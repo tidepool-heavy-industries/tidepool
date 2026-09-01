@@ -5,8 +5,8 @@ use std::thread::JoinHandle;
 
 use tidepool_agent::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use tidepool_agent::seam::{
-    AgentActivity, AgentBackendError, AgentId, BackendThreadId, CycleResultPayload,
-    DynamicToolDeclaration, ModelPolicy, ReasoningEffort, TokenUsage, ToolCallId, ToolOutcome,
+    AgentActivity, AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, ModelPolicy,
+    ReasoningEffort, TokenUsage, ToolCallId, ToolDeclaration, ToolOutcome,
 };
 use tidepool_agent::spawn::{
     format_running_agents, AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun,
@@ -1127,7 +1127,7 @@ impl Drop for SubagentHandler {
 fn request_from_wire(
     spec: AgSpawnSpec,
     schema: JsonArg,
-    tools: Vec<tidepool_agent::seam::DynamicToolDeclaration>,
+    tools: Vec<tidepool_agent::seam::ToolDeclaration>,
     model: ModelPolicy,
     effort: ReasoningEffort,
 ) -> Result<SpawnRequest, SpawnError> {
@@ -1175,7 +1175,7 @@ fn allocating_worktree_failure(e: WireWorktreeError) -> SpawnError {
 /// agent that then refuses every call it makes.
 fn tool_declarations_from_wire(
     tools: &serde_json::Value,
-) -> Result<Vec<DynamicToolDeclaration>, SpawnError> {
+) -> Result<Vec<ToolDeclaration>, SpawnError> {
     let drive_failure = |detail: String| {
         SpawnError::SpawnDriveFailed(AgSpawnStage::StageAllocating, format!("tools: {detail}"))
     };
@@ -1194,7 +1194,7 @@ fn tool_declarations_from_wire(
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| drive_failure(format!("declaration {i} has no {name} string")))
             };
-            Ok(DynamicToolDeclaration {
+            Ok(ToolDeclaration {
                 name: field("name")?.to_string(),
                 description: field("description")?.to_string(),
                 input_schema: item

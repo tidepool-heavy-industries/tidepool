@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use tidepool_node::ToolDeclaration;
+
 /// Tidepool's identity for one agent. Minted by the registry, never by a
 /// backend — a backend thread id may be reassigned or absent (an ephemeral
 /// thread that failed to start still needs an identity to report the failure
@@ -23,21 +25,6 @@ pub struct BackendThreadId(pub String);
 /// A backend's identity for one turn on a thread. Opaque, as above.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TurnId(pub String);
-
-/// One dynamic tool as declared to a backend at agent creation, frozen for
-/// the lifetime of the agent thread — Codex dynamic tools are thread-scoped,
-/// not turn-scoped, so this is not re-negotiable mid-agent.
-///
-/// `input_schema` is JSON Schema because that is what every current backend
-/// speaks, not because the authored surface knows about JSON Schema; it is
-/// derived from the endpoint's input type by the structural interpreter.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DynamicToolDeclaration {
-    /// The normalized wire name (snake_case of the record selector).
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-}
 
 /// A backend's identity for one parked tool call. Opaque, as above — it is the
 /// correlation token a reply must carry back, and Tidepool only ever echoes it.
@@ -59,7 +46,7 @@ pub struct ToolCall {
     pub thread: BackendThreadId,
     pub turn: TurnId,
     /// The wire name the child invoked — one of the declared
-    /// [`DynamicToolDeclaration::name`]s, or something else entirely, which is
+    /// [`tidepool_node::ToolDeclaration::name`]s, or something else entirely, which is
     /// a fact the parent must be able to refuse rather than a fact to assume.
     pub tool: String,
     /// The child's arguments, as JSON. Named-field objects: the model is the
@@ -197,7 +184,7 @@ pub enum ModelPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSpec {
     pub ephemeral: bool,
-    pub dynamic_tools: Vec<DynamicToolDeclaration>,
+    pub dynamic_tools: Vec<tidepool_node::ToolDeclaration>,
 }
 
 /// One work cycle: one turn on one thread, in one workspace.
@@ -214,7 +201,7 @@ pub struct CycleSpec {
     pub task: String,
     /// JSON Schema constraining the terminal message. Derived from the
     /// caller's result type by the structural interpreter — no authored
-    /// Haskell writes one, same rule as [`DynamicToolDeclaration::input_schema`].
+    /// Haskell writes one, same rule as [`tidepool_node::ToolDeclaration::input_schema`].
     pub output_schema: Option<serde_json::Value>,
     pub model: ModelPolicy,
     pub effort: ReasoningEffort,

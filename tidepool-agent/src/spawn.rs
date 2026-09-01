@@ -48,9 +48,9 @@ use tidepool_worktree::{
 
 use crate::backend::AgentBackend;
 use crate::seam::{
-    AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec,
-    DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
-    ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
+    AgentBackendError, AgentId, BackendThreadId, CycleResultPayload, CycleSpec, ModelPolicy,
+    ReasoningEffort, ThreadSpec, TokenUsage, ToolCall, ToolCallId, ToolDeclaration, ToolOutcome,
+    ToolReply, TurnEvent, TurnId,
 };
 
 /// Render zero, one, or many mid-turn agent ids for a `NotRunning`-shaped
@@ -204,7 +204,7 @@ pub struct SpawnRequest {
     pub output_schema: Option<serde_json::Value>,
     /// The tools this agent may call, compiled from the caller's tools record.
     /// Frozen for the agent's life — dynamic tools are thread-scoped.
-    pub tools: Vec<DynamicToolDeclaration>,
+    pub tools: Vec<ToolDeclaration>,
     /// Which model tier, and how hard it should think. Supplied by the caller
     /// rather than fixed here: the two are budget decisions, and a budget is
     /// granted to an operator, not baked into a saga.

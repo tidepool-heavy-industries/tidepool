@@ -123,7 +123,7 @@ import Tidepool.Effects
 import Tidepool.Agent.Contract
   ( AsServerT
   , CompiledTools (..)
-  , DynamicToolDeclaration (..)
+  , ToolDeclaration (..)
   , HasAgentApi
   , ToolName
   , compileTools
@@ -369,7 +369,7 @@ spawnAgentWithTools rounds tools spec =
 -- ALWAYS an array, @[]@ for zero tools — a non-array @tools@ argument is
 -- REFUSED by the runtime (@SpawnDriveFailed StageAllocating@), never read as
 -- "no tools".
-declarationsToJson :: [DynamicToolDeclaration] -> Value
+declarationsToJson :: [ToolDeclaration] -> Value
 declarationsToJson decls =
   toJSON
     [ object

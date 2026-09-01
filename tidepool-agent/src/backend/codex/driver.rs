@@ -44,8 +44,8 @@ use crate::backend::codex::process::{last_agent_message_text, Session, SessionEr
 use crate::backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 use crate::seam::{
     AgentActivity, AgentBackendError, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
-    DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,
-    ToolCallId, ToolOutcome, ToolReply, TurnEvent, TurnId,
+    ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall, ToolCallId, ToolDeclaration,
+    ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 
 /// The cheap-plumbing tier, in preference order.
@@ -639,7 +639,7 @@ fn thread_start_params(spec: &ThreadSpec) -> ThreadStartWithDynamicTools {
 }
 
 /// Project one seam tool declaration onto the codex wire shape.
-fn declaration_to_spec(declaration: &DynamicToolDeclaration) -> DynamicToolSpec {
+fn declaration_to_spec(declaration: &ToolDeclaration) -> DynamicToolSpec {
     DynamicToolSpec::Function(DynamicToolFunctionSpec {
         name: declaration.name.clone(),
         description: declaration.description.clone(),
@@ -986,7 +986,7 @@ mod tests {
     fn thread_start_projects_seam_tool_declarations() {
         let params = thread_start_params(&ThreadSpec {
             ephemeral: false,
-            dynamic_tools: vec![DynamicToolDeclaration {
+            dynamic_tools: vec![ToolDeclaration {
                 name: "ask_parent".to_string(),
                 description: "Ask the parent.".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),

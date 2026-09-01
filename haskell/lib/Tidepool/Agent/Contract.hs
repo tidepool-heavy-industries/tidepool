@@ -47,7 +47,7 @@ module Tidepool.Agent.Contract
   , HasAgentApi
   , compileTools
   , CompiledTools (..)
-  , DynamicToolDeclaration (..)
+  , ToolDeclaration (..)
   , ToolCompileError (..)
   , renderToolCompileError
   , ToolName
@@ -126,17 +126,17 @@ notify = Tool
 -- ---------------------------------------------------------------------------
 
 -- | Wire-visible tool identity. Plain 'Text', matching
--- @tidepool_agent::seam::DynamicToolDeclaration@'s @name@ on the Rust side.
+-- @tidepool_node::ToolDeclaration@'s @name@ on the Rust side.
 type ToolName = Text
 
 -- | The JSON value shuttled across dispatch.
 type StructuralValue = Value
 
 -- | One dynamic tool as declared to a backend at agent creation. Field order
--- and names line up with @tidepool_agent::seam::DynamicToolDeclaration@
+-- and names line up with @tidepool_node::ToolDeclaration@
 -- (@{name, description, input_schema}@); this type does not depend on that
 -- crate, it just doesn't invent a gratuitously different shape.
-data DynamicToolDeclaration = DynamicToolDeclaration
+data ToolDeclaration = ToolDeclaration
   { dtdName :: Text
   , dtdDescription :: Text
   , dtdInputSchema :: Value
@@ -144,7 +144,7 @@ data DynamicToolDeclaration = DynamicToolDeclaration
   deriving (Eq, Show)
 
 data CompiledTools m = CompiledTools
-  { declarations :: [DynamicToolDeclaration]
+  { declarations :: [ToolDeclaration]
   , dispatch :: ToolName -> StructuralValue -> m StructuralValue
   , synopsis :: Text
   }
@@ -308,7 +308,7 @@ compileTools v =
                 Nothing -> error (T.unpack (T.pack "compileTools: dispatch called with unknown tool \"" <> n <> T.pack "\""))
            in Right
                 CompiledTools
-                  { declarations = [DynamicToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) | e <- named]
+                  { declarations = [ToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) | e <- named]
                   , dispatch = dispatchFn
                   , synopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
                   }
