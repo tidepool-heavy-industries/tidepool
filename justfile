@@ -54,5 +54,12 @@ fixtures-update:
 doctor:
     {{ nix }} scripts/toolchain-doctor.sh
 
+# Build a matched local extractor/worker/Shoal set and start a fresh actor run.
+# Pass Shoal init flags after `--`, for example:
+#   just shoal-init -- --session shoal-tidepool-fresh --no-attach
+[positional-arguments]
+shoal-init *args:
+    {{ nix }} scripts/shoal-init.sh "$@"
+
 # Pre-review gate: checks, suite-manifest validation, and fixture freshness.
 verify: check suite-check fixtures-check
