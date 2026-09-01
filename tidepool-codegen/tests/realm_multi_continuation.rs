@@ -22,17 +22,18 @@ use tidepool_codegen::heap_bridge;
 use tidepool_codegen::jit_machine::JitEffectMachine;
 use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspendableOutcome,
+    SuspensionRun,
 };
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_effect::dispatch::EffectContext;
 use tidepool_effect::error::EffectError;
-use tidepool_effect::Response;
+use tidepool_effect::{EffectRunPolicy, Response};
 use tidepool_eval::value::Value;
 use tidepool_repr::datacon::DataCon;
 use tidepool_repr::datacon_table::DataConTable;
 use tidepool_repr::frame::CoreFrame;
 use tidepool_repr::types::*;
-use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
+use tidepool_repr::{CoreExpr, Literal, PrincipalId, TreeBuilder};
 
 use tidepool_heap::layout as heap_layout;
 
@@ -341,6 +342,65 @@ fn build_mid_effect_suspend(captured_n: i64, effect_req: i64, ask_req: i64) -> C
     b.build()
 }
 
+/// Suspend first, then issue a handled nominal request after resumption. This
+/// makes the handler observation belong to the resumed continuation rather
+/// than its caller's current machine entry.
+fn build_suspend_then_mid_effect(ask_req: i64, effect_req: i64) -> CoreExpr {
+    let mut b = TreeBuilder::new();
+
+    let resumed = b.push(CoreFrame::Var(VarId(0)));
+    let handled = b.push(CoreFrame::Var(VarId(1)));
+    let pair = b.push(CoreFrame::Con {
+        tag: PAIR_ID,
+        fields: vec![resumed, handled],
+    });
+    let val = b.push(CoreFrame::Con {
+        tag: VAL_ID,
+        fields: vec![pair],
+    });
+    let handled_lam = b.push(CoreFrame::Lam {
+        binder: VarId(1),
+        body: val,
+    });
+    let handled_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![handled_lam],
+    });
+    let effect_payload = b.push(CoreFrame::Lit(Literal::LitInt(effect_req)));
+    let effect_request = b.push(CoreFrame::Con {
+        tag: MID_REQUEST_ID,
+        fields: vec![effect_payload],
+    });
+    let effect_tag = b.push(CoreFrame::Lit(Literal::LitWord(MID_EFFECT_TAG)));
+    let effect_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![effect_tag, effect_request],
+    });
+    let after_resume = b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![effect_union, handled_leaf],
+    });
+    let resume_lam = b.push(CoreFrame::Lam {
+        binder: VarId(0),
+        body: after_resume,
+    });
+    let resume_leaf = b.push(CoreFrame::Con {
+        tag: LEAF_ID,
+        fields: vec![resume_lam],
+    });
+    let ask_tag = b.push(CoreFrame::Lit(Literal::LitWord(MID_ASK_TAG)));
+    let ask_payload = b.push(CoreFrame::Lit(Literal::LitInt(ask_req)));
+    let ask_union = b.push(CoreFrame::Con {
+        tag: UNION_ID,
+        fields: vec![ask_tag, ask_payload],
+    });
+    b.push(CoreFrame::Con {
+        tag: E_ID,
+        fields: vec![ask_union, resume_leaf],
+    });
+    b.build()
+}
+
 /// W2's sibling of [`build_mid_effect_suspend`]: identical shape, except `v1`
 /// (the dispatched effect's answer — a STREAMED list here) is embedded
 /// UNFORCED as the Triple's field directly, not wrapped in `C1`. Forcing it
@@ -511,6 +571,28 @@ impl DispatchEffect<()> for MidEffectDispatch {
                     expected: 1,
                     got: fields.len(),
                 })
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+struct PrincipalDispatch {
+    expected: PrincipalId,
+    calls: usize,
+}
+
+impl DispatchEffect<()> for PrincipalDispatch {
+    fn dispatch(
+        &mut self,
+        request: &Value,
+        cx: &EffectContext<'_, ()>,
+    ) -> Result<Option<Response>, EffectError> {
+        match request {
+            Value::Con(id, fields) if *id == MID_REQUEST_ID && fields.len() == 1 => {
+                assert_eq!(cx.principal(), self.expected);
+                self.calls += 1;
+                Ok(Some(Response::Complete(fields[0].clone())))
             }
             _ => Ok(None),
         }
@@ -1138,6 +1220,43 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
 // materialized answer are both ordinary nursery allocations protected only
 // by `register_stowed_root`, exactly like F3/F4's captured chain.
 // ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[serial]
+fn parked_continuation_retains_its_dispatch_principal() {
+    in_test_thread(|| {
+        let table = adversarial_table();
+        let expected = PrincipalId::new(77, 4);
+        let mut machine =
+            JitEffectMachine::compile_session(&build_suspend_then_mid_effect(9, 55), &table, 4096)
+                .expect("compile_session");
+        let mut dispatch = PrincipalDispatch { expected, calls: 0 };
+        let run = SuspensionRun::main(&table, EffectRunPolicy::HandleOrSuspend, RealmId(0))
+            .with_principal(expected);
+        let id = match machine
+            .run_until_suspension(run, &mut dispatch, &())
+            .expect("initial suspension")
+        {
+            ParkedOutcome::Suspended { id, .. } => id,
+            other => panic!("initial ask must suspend, got {other:?}"),
+        };
+        assert_eq!(dispatch.calls, 0);
+
+        match machine
+            .resume_continuation(
+                id,
+                &mut dispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(12))),
+            )
+            .expect("resume continuation")
+        {
+            ParkedOutcome::CompletedValue(_) => {}
+            other => panic!("resumed request must complete, got {other:?}"),
+        }
+        assert_eq!(dispatch.calls, 1);
+    });
+}
 
 #[test]
 #[serial]

@@ -23,7 +23,7 @@ use tidepool_effect::{
     LivePayloadPolicy,
 };
 use tidepool_eval::value::Value;
-use tidepool_repr::{CoreExpr, DataConTable};
+use tidepool_repr::{CoreExpr, DataConTable, PrincipalId};
 
 use crate::context::VMContext;
 use crate::effect_machine::{CompiledEffectMachine, ConTags};
@@ -125,12 +125,23 @@ enum ParkTarget {
     /// The continuation registry, under a fresh id in this runtime resource scope.
     Registry {
         realm: RealmId,
+        /// Retained with the continuation so another actor's later machine
+        /// entry cannot become the authority for this computation.
+        principal: PrincipalId,
         kind: ParkKind,
         /// Retained with the continuation so resume preserves routing policy.
         effect_policy: EffectRunPolicy,
         /// Request-field policy replayed on every suspension of this run.
         live_payload: LivePayloadPolicy,
     },
+}
+
+impl ParkTarget {
+    fn principal(&self) -> PrincipalId {
+        match self {
+            Self::Registry { principal, .. } => *principal,
+        }
+    }
 }
 
 /// Result of the shared registry body before public projection.
@@ -1345,6 +1356,7 @@ impl JitEffectMachine {
             table,
             handlers,
             user,
+            park.principal(),
             "",
             effect_policy,
             yield_result,
@@ -1380,6 +1392,7 @@ impl JitEffectMachine {
         table: &DataConTable,
         handlers: &mut H,
         user: &U,
+        principal: PrincipalId,
         effect_policy: EffectRunPolicy,
         input: ResumeInput,
         materialization: ResultMaterialization,
@@ -1467,6 +1480,7 @@ impl JitEffectMachine {
                     table,
                     handlers,
                     user,
+                    principal,
                     "",
                     effect_policy,
                     yield_result,
@@ -1596,6 +1610,7 @@ impl JitEffectMachine {
             } => {
                 let ParkTarget::Registry {
                     realm,
+                    principal,
                     kind,
                     effect_policy,
                     live_payload,
@@ -1649,6 +1664,7 @@ impl JitEffectMachine {
                 let id = self.park_continuation(
                     continuation,
                     realm,
+                    principal,
                     kind,
                     park_cancel_flag,
                     Arc::new(table.clone()),
@@ -2250,6 +2266,7 @@ impl JitEffectMachine {
         &mut self,
         continuation: *mut u8,
         realm: RealmId,
+        principal: PrincipalId,
         kind: ParkKind,
         cancel_flag: Arc<AtomicBool>,
         table: Arc<DataConTable>,
@@ -2268,6 +2285,7 @@ impl JitEffectMachine {
         let id = self.resources.park(ContinuationFrame {
             cell,
             realm,
+            principal,
             effect_policy,
             kind,
             live_payload_root,
@@ -2303,6 +2321,7 @@ impl JitEffectMachine {
             run.completion.materialization(),
             ParkTarget::Registry {
                 realm: run.realm,
+                principal: run.principal,
                 kind: run.completion,
                 effect_policy: run.effect_policy,
                 live_payload: run.live_payload,
@@ -2334,19 +2353,21 @@ impl JitEffectMachine {
     ) -> Result<ParkedOutcome, JitError> {
         // Inspect without removing: validation failures must leave the frame
         // parked and rooted so the caller can retry.
-        let (realm, kind, effect_policy, live_payload) = match self.resources.continuation(id) {
-            Some(frame) => (
-                frame.realm,
-                frame.kind,
-                frame.effect_policy,
-                frame.live_payload,
-            ),
-            None => {
-                return Err(JitError::Effect(EffectError::Handler(format!(
-                    "resume_continuation: no continuation parked under {id:?}"
-                ))))
-            }
-        };
+        let (realm, principal, kind, effect_policy, live_payload) =
+            match self.resources.continuation(id) {
+                Some(frame) => (
+                    frame.realm,
+                    frame.principal,
+                    frame.kind,
+                    frame.effect_policy,
+                    frame.live_payload,
+                ),
+                None => {
+                    return Err(JitError::Effect(EffectError::Handler(format!(
+                        "resume_continuation: no continuation parked under {id:?}"
+                    ))))
+                }
+            };
         // Validate before consuming the frame or running the continuation.
         if let ResumeInput::Answer(val) = &input {
             if let Err(reason) = answer_force_nf(val) {
@@ -2387,11 +2408,13 @@ impl JitEffectMachine {
             &table,
             handlers,
             user,
+            principal,
             effect_policy,
             input,
             kind.materialization(),
             ParkTarget::Registry {
                 realm,
+                principal,
                 kind,
                 effect_policy,
                 live_payload,
@@ -2848,6 +2871,7 @@ fn drive_to_done<U, H: DispatchEffect<U>>(
         table,
         handlers,
         user,
+        PrincipalId::SYSTEM,
         resume_suffix,
         EffectRunPolicy::HandleOrError,
         yield_result,
@@ -2891,6 +2915,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
     table: &DataConTable,
     handlers: &mut H,
     user: &U,
+    principal: PrincipalId,
     resume_suffix: &str,
     effect_policy: EffectRunPolicy,
     mut yield_result: Yield,
@@ -2957,7 +2982,7 @@ fn drive_effect_loop<U, H: DispatchEffect<U>>(
                 let req_val =
                     crate::host_fns::surface_error(bridge_res.map_err(JitError::HeapBridge))?;
                 log::debug!(target: "tidepool::effects", "effect request={:?}", req_val);
-                let cx = EffectContext::with_user(table, user);
+                let cx = EffectContext::with_principal(table, principal, user);
                 let response = match effect_policy {
                     EffectRunPolicy::SuspendAll => None,
                     EffectRunPolicy::HandleOrError | EffectRunPolicy::HandleOrSuspend => {

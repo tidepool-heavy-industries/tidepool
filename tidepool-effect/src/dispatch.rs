@@ -5,7 +5,7 @@ use frunk::{HCons, HNil};
 use tidepool_bridge::error::BridgeError;
 use tidepool_bridge::{FromCore, ToCore};
 use tidepool_eval::value::Value;
-use tidepool_repr::{DataConId, DataConTable};
+use tidepool_repr::{DataConId, DataConTable, PrincipalId};
 /// A handler's answer to an effect request.
 #[derive(Debug)]
 pub enum Response {
@@ -32,17 +32,31 @@ impl From<Value> for Response {
 
 /// Shared context passed to effect handlers during dispatch.
 ///
-/// Carries the [`DataConTable`] (needed for `FromCore`/`ToCore` conversions) and
-/// an optional user-defined state value `U` that handlers can read.
+/// Carries the [`DataConTable`] (needed for `FromCore`/`ToCore` conversions),
+/// the exact runtime principal for this execution entry, and an optional
+/// user-defined state value `U` that handlers can read.
 pub struct EffectContext<'a, U = ()> {
     table: &'a DataConTable,
+    principal: PrincipalId,
     user: &'a U,
 }
 
 impl<'a, U> EffectContext<'a, U> {
     /// Create a new context with a user state value and data constructor table.
+    ///
+    /// This compatibility constructor is for non-actor execution. Actor-aware
+    /// runtimes must use [`Self::with_principal`].
     pub fn with_user(table: &'a DataConTable, user: &'a U) -> Self {
-        Self { table, user }
+        Self::with_principal(table, PrincipalId::SYSTEM, user)
+    }
+
+    /// Create a context for one exact runtime principal.
+    pub fn with_principal(table: &'a DataConTable, principal: PrincipalId, user: &'a U) -> Self {
+        Self {
+            table,
+            principal,
+            user,
+        }
     }
 
     /// Convert a Rust value into a complete response for the JIT.
@@ -80,6 +94,11 @@ impl<'a, U> EffectContext<'a, U> {
     /// Access the data constructor table (for manual `FromCore`/`ToCore` calls).
     pub fn table(&self) -> &DataConTable {
         self.table
+    }
+
+    /// Exact authority installed for this execution entry.
+    pub fn principal(&self) -> PrincipalId {
+        self.principal
     }
 
     /// Access the user-defined state.
@@ -234,5 +253,16 @@ mod tests {
             Response::Complete(Value::Lit(Literal::LitInt(42))) => {}
             other => panic!("expected LitInt(42), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn effect_context_distinguishes_system_and_explicit_principals() {
+        let table = empty_table();
+        let system = EffectContext::with_user(&table, &());
+        assert_eq!(system.principal(), PrincipalId::SYSTEM);
+
+        let expected = PrincipalId::new(17, 3);
+        let actor = EffectContext::with_principal(&table, expected, &());
+        assert_eq!(actor.principal(), expected);
     }
 }

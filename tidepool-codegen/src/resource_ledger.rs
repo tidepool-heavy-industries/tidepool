@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_repr::DataConTable;
+use tidepool_repr::{DataConTable, PrincipalId};
 
 use crate::old_space::RootSlot;
 use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
@@ -21,6 +21,7 @@ use crate::suspension::{ContinuationId, ParkKind, RealmId, ValueHandle};
 pub(crate) struct ContinuationFrame {
     pub(crate) cell: Box<*mut u8>,
     pub(crate) realm: RealmId,
+    pub(crate) principal: PrincipalId,
     pub(crate) effect_policy: EffectRunPolicy,
     pub(crate) kind: ParkKind,
     pub(crate) live_payload_root: Option<RootSlot>,

@@ -41,7 +41,7 @@ impl<Handlers: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<Handlers>
         request: &Value,
         context: &EffectContext<'_, TestSink>,
     ) -> Result<Option<Response>, EffectError> {
-        let unit_context = EffectContext::with_user(context.table(), &());
+        let unit_context = EffectContext::with_principal(context.table(), context.principal(), &());
         self.0.dispatch(request, &unit_context)
     }
 }

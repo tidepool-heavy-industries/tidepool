@@ -78,7 +78,7 @@ impl<H: DispatchEffect<()>> DispatchEffect<TestSink> for AsSink<H> {
         if request_constructor(request, cx.table()).rsplit('.').next() == Some("Ask") {
             return Ok(None);
         }
-        let unit_cx = EffectContext::with_user(cx.table(), &());
+        let unit_cx = EffectContext::with_principal(cx.table(), cx.principal(), &());
         self.0.dispatch(request, &unit_cx)
     }
 }

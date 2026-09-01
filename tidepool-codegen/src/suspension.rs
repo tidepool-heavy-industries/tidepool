@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cranelift_module::FuncId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_eval::value::Value;
-use tidepool_repr::DataConTable;
+use tidepool_repr::{DataConTable, PrincipalId};
 
 /// Identity of a continuation parked in one machine. Ids are never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,6 +84,7 @@ pub struct SuspensionRun<'a> {
     pub table: &'a DataConTable,
     pub effect_policy: EffectRunPolicy,
     pub realm: RealmId,
+    pub principal: PrincipalId,
     pub completion: ParkKind,
     pub live_payload: LivePayloadPolicy,
 }
@@ -96,6 +97,7 @@ impl<'a> SuspensionRun<'a> {
             table,
             effect_policy,
             realm,
+            principal: PrincipalId::SYSTEM,
             completion: ParkKind::Plain,
             live_payload: LivePayloadPolicy::None,
         }
@@ -114,6 +116,7 @@ impl<'a> SuspensionRun<'a> {
             table,
             effect_policy,
             realm,
+            principal: PrincipalId::SYSTEM,
             completion,
             live_payload: LivePayloadPolicy::None,
         }
@@ -124,6 +127,13 @@ impl<'a> SuspensionRun<'a> {
     #[must_use]
     pub fn with_live_payload(mut self, policy: LivePayloadPolicy) -> Self {
         self.live_payload = policy;
+        self
+    }
+
+    /// Run every handled request under one exact runtime authority.
+    #[must_use]
+    pub fn with_principal(mut self, principal: PrincipalId) -> Self {
+        self.principal = principal;
         self
     }
 }

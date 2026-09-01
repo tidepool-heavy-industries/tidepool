@@ -1434,11 +1434,13 @@ where
         let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         let realm = self.run_context.resource_scope;
+        let principal = self.run_context.principal;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run =
                 SuspensionRun::fragment(func_id, table, effect_policy, realm, ParkKind::Plain)
-                    .with_live_payload(live_payload);
+                    .with_live_payload(live_payload)
+                    .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
@@ -1510,6 +1512,7 @@ where
         // tenured as-is.
         let forced = matches!(binder.tier, ValueTier::Tier0Data);
         let realm = self.run_context.resource_scope;
+        let principal = self.run_context.principal;
         let run_exec_started = std::time::Instant::now();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
             let run = SuspensionRun::fragment(
@@ -1519,7 +1522,8 @@ where
                 realm,
                 ParkKind::Binding { forced },
             )
-            .with_live_payload(live_payload);
+            .with_live_payload(live_payload)
+            .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, realm))
@@ -1580,6 +1584,7 @@ where
         // closed) rather than parked. Suspension-capable turns are `run`'s
         // job. The shared issuer keeps it distinct from every caller scope.
         let child_realm = RealmId::fresh();
+        let principal = self.run_context.principal;
         let effect_policy = self.core.effect_policy();
         let live_payload = self.core.live_payload_policy();
         let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
@@ -1590,7 +1595,8 @@ where
                 child_realm,
                 ParkKind::Plain,
             )
-            .with_live_payload(live_payload);
+            .with_live_payload(live_payload)
+            .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|o| project_parked(machine, o, child_realm))
@@ -1951,10 +1957,12 @@ where
         // Completed live results belong to the actor/session realm, not the
         // shorter-lived turn realm that happened to produce them.
         let owning_realm = self.run_context.resource_scope;
+        let principal = self.run_context.principal;
         self.on_eval_thread(move |machine, table, handlers, captured| {
             let run =
                 SuspensionRun::fragment(function, table, effect_policy, realm, ParkKind::Plain)
-                    .with_live_payload(live_payload);
+                    .with_live_payload(live_payload)
+                    .with_principal(principal);
             machine
                 .run_until_suspension(run, handlers, captured)
                 .map(|outcome| project_parked(machine, outcome, owning_realm))
