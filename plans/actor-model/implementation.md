@@ -171,11 +171,11 @@ This is the canonical status inventory for the plan.
 
 ### Not landed
 
-- cancellation-safe cleanup when an asynchronous startup future is dropped;
-  this must land with the Stage 6 host whose structured task ownership can
-  retain the cleanup future to completion. A standalone borrowed guard cannot
-  make dropping itself or its consuming cancellation future safe without a
-  forbidden detached task or cleanup queue;
+- structured startup-task ownership that turns in-band cancellation or panic
+  into awaited lifecycle cleanup. The cooperative cancellation seam is
+  landed, but only the Stage 6 host can keep the owning task alive through its
+  epilogue; arbitrary executor destruction is not an asynchronously
+  recoverable lifecycle event;
 - one production actor-system host that owns actor tasks and routes runnable
   start/session/mailbox/call/wait work without polling;
 - the first production provider/profile composition and capability-specific
@@ -600,11 +600,12 @@ admission and `SessionRegistry::checkout_wait` remains the authority for
 machine admission. Do not build separate per-operation schedulers or a façade
 whose only behavior is forwarding to several public structs.
 
-Before the host launches asynchronous starts, dropping a startup task must
-transfer its exact unpublished cleanup batch to the existing lifecycle owner.
-The lifecycle owner runs cooperative shutdown when possible, bounds admission
-wait with a watchdog, and closes every captured realm regardless of hook
-failure or timeout.
+Before the host launches asynchronous starts, it must own each startup through
+settlement. In-band cancellation or a caught task panic transfers the exact
+unpublished cleanup batch to the existing lifecycle owner and the task remains
+driven until that epilogue finishes. The lifecycle owner runs cooperative
+shutdown when possible, bounds admission wait with a watchdog, and closes every
+captured realm regardless of hook failure or timeout.
 
 Acceptance covers cancellation during a provider-backed startup and during
 readiness resumption, exactly-once terminal publication, child-first hook/root
@@ -652,10 +653,14 @@ do not create an empty host facade and fill it in later.
 
 3. [ ] **Create the production host only once it owns real work.**
 
-   - Add one `tidepool-actor` host that constructs and owns the registry,
-     machine registry, runner, completion executor, starter, mailbox adapter,
-     lifecycle owner, wake receiver, actor-task set, and parked call/wait
-     tables.
+   - Add `tidepool-actor/src/host.rs` only in the same change that makes it
+     launch a prepared root and own at least one real actor task. Do not land a
+     public bundle of forwarding accessors first.
+   - The host constructs and owns the registry, machine registry, runner,
+     completion executor, starter, mailbox adapter, lifecycle owner, sole wake
+     receiver, actor-task set, and parked call/wait tables. Tests may inspect
+     behavior through typed reports and the neutral event stream; they must not
+     require public getters for each substrate component.
    - [x] Starter and mailbox construction already require the same injected
      `ResidentActorLifecycle`; neither constructs a private lifecycle policy.
    - The composition root owns that lifecycle and passes it to every host
@@ -663,17 +668,36 @@ do not create an empty host facade and fill it in later.
    - Keep registry actor admission and runtime machine checkout as the two
      existing nested gates. The host adds neither another actor lock nor a
      second machine scheduler.
+   - The first root-launch input consumes an already compiled resident machine,
+     its first outcome, its exact descriptor, and Rust-selected provider
+     metadata. Compilation remains outside the actor scheduler; after launch,
+     the host owns the machine and actor lifecycle. Reject duplicate session
+     installation before actor publication.
    - Provider handles are Rust-selected launch metadata owned by actor tasks.
-     Stage 6 may inject test providers directly; do not prematurely expose
-     provider/model configuration to authored Haskell before Stage 7 defines
-     launch recipes.
+     Stage 6 uses one injected `Arc<dyn DynModelProvider>` for the vertical;
+     do not add a provider registry or expose model configuration to authored
+     Haskell before Stage 7 defines launch recipes.
 
 4. [ ] **Drive one actor through typed boundaries.**
 
+   - Keep actor futures directly in one host-owned unordered task set rather
+     than spawning detached Tokio tasks. Each future owns cloned runtime
+     components, an `Arc` provider handle, its cancellation receiver, and the
+     exact linear boundary custody it is advancing. This preserves logical
+     concurrency while leaving the host as the structured owner.
+   - Add private closed types for task key, task phase, and task result. The
+     task table is keyed by exact actor incarnation and records one of
+     runnable, starting, or parked; strings, event text, and `JoinHandle`
+     state are not scheduling authority.
    - A runnable actor task advances one admitted turn until it completes or
      parks on a model session, child start, call, wait, or stable receive.
+     The task owns the `TurnLease` until that transition is installed; no host
+     branch reconstructs admission from the registry after the fact.
    - Task results return typed next work to the host. The host installs parked
      call/wait custody before honoring any buffered settlement wake.
+   - The event loop selects between completed task futures and the sole
+     `ActorRuntimeWakes` receiver. It consumes only exact buffered wake keys;
+     it never scans the registry for general runnable work.
    - Mailbox dispatch runs at most one accepted message per task. If more
      messages remain, it re-enqueues that actor at the tail; no actor drains an
      unbounded mailbox while peers are runnable.
@@ -687,23 +711,37 @@ do not create an empty host facade and fill it in later.
      every ordinary await. Before publication it transfers the unpublished
      actor through lifecycle cleanup; after publication it force-terminates
      the child. Terminal publication and cleanup are never cancellable.
-   - Factor the existing startup driver so its unpublished token, child realm,
-     parent lease/hole, entry root, readiness continuation, and any captured
-     cleanup batch live outside each individually cancellable await.
+   - Factor the existing startup driver into a private unpublished-start
+     owner plus phase operations. The owner holds the `StartingActor`, child
+     realm and context, parent lease/hole when present, entry root, readiness
+     continuation, and any captured cleanup batch outside each individually
+     cancellable or unwind-catching operation.
+   - Catch unwind around provider/runtime phase work while the unpublished
+     owner remains outside the caught future. On panic, convert the task to one
+     typed host failure, atomically abort the initializing actor, and await the
+     same lifecycle cleanup before reporting task completion. Do not try to
+     recover custody after the whole startup future has already unwound.
    - Host cancellation is a signal, never task abortion. Dropping a provider
      or machine-wait future returns control to the task state, which atomically
      aborts unpublished startup through `ActorRegistry`, transfers the exact
      `ActorCleanupBatch` to the one lifecycle owner, and awaits cleanup before
      the task may finish.
-   - Catch task panic at the same ownership boundary and run the same terminal
-     epilogue. The host must not use `JoinHandle::abort`, `abort_all`, detached
-     cleanup, asynchronous `Drop`, or a second cleanup queue.
-   - Root bootstrap and child `startActor` use the same unpublished-start
-     driver. Their only difference is whether successful publication resumes
-     a parent continuation; do not grow a parallel root lifecycle.
+   - The host must not use `JoinHandle::abort`, `abort_all`, detached cleanup,
+     asynchronous `Drop`, or a second cleanup queue. The supported shutdown
+     contract consumes or mutably borrows the live host and drains it; arbitrary
+     executor destruction is not misrepresented as an asynchronously
+     recoverable event.
+   - Root bootstrap and child `startActor` share the same unpublished registry
+     custody and terminal epilogue. Their initialization producers differ:
+     the root arrives as a prepared machine/outcome, while a child runs its
+     sealed entry and startup sessions. Do not force those inputs through one
+     fake generic startup program merely to share code.
 
 6. [ ] **Own shutdown and quiescence.**
 
+   - Model host lifecycle with a closed `Open`/`Closing` state. The transition
+     to `Closing` is idempotent, stops launch and delivery acceptance, and
+     sends cancellation through each task's in-band signal exactly once.
    - Closing the host rejects new roots, children, and mailbox submissions;
      signals every owned root; and lets owner termination recursively settle
      descendants through the existing atomic cleanup-batch path.
@@ -711,8 +749,12 @@ do not create an empty host facade and fill it in later.
      actor work has stopped. A shutdown admission timeout records the existing
      neutral failure event and cannot strand the remaining subtree.
    - Quiescence means no actor task, unpublished startup, pending call/wait,
-     runnable wake, or unprocessed cleanup remains. Return a typed summary of
-     terminal roots and cleanup failures rather than a Boolean.
+     runnable wake, or unprocessed cleanup remains. The drain loop must check
+     all five conditions after absorbing currently queued wakes.
+   - Return a typed shutdown report containing terminal roots and every cleanup
+     failure rather than a Boolean or first-error-only result. Per-subtree
+     lifecycle cleanup may retain its current first-error API internally; the
+     host report accumulates failures across independently owned roots/tasks.
 
 7. [ ] **Prove one real host vertical before adding Stage 7 policy.**
 
@@ -728,6 +770,71 @@ do not create an empty host facade and fill it in later.
    - Use adjacent Haskell fixtures and focused actor targets. This host
      vertical is the next major boundary at which the broader actor test set
      is warranted; intermediate commits use narrow unit tests.
+
+### Stage 6 execution tranche
+
+The next linear tranche ends when the production-host vertical above passes.
+Implement it as these reviewable boundaries:
+
+1. [ ] **Unpublished-start ownership refactor.**
+
+   - Work in `start.rs` and `resident_lifecycle.rs`; introduce no host facade.
+   - Move initialization state outside cancellable/caught phase futures, then
+     preserve the existing success behavior through the new owner.
+   - Add focused cancellation and injected-panic tests before and after ready
+     publication. Prove one terminal transition, one hook/root settlement,
+     realm closure, and restored parent admission.
+   - Run the actor library tests filtered to startup/lifecycle plus strict
+     Clippy for `tidepool-actor`; do not run the extractor-backed vertical yet.
+
+2. [ ] **Host composition root plus root/`Deliberate`/`Start` path.**
+
+   - Add `host.rs`, the direct unordered task set, exact task table, in-band
+     cancellation senders, and one event loop over task results and registry
+     wakes.
+   - Consume a prepared root, advance its typed `Deliberate` boundary, capture
+     its `Start`, and run the child through the unpublished-start owner. Install
+     the resumed parent outcome before consuming any buffered wake.
+   - Test duplicate scheduling as a typed host error, duplicate session launch
+     rejection before publication, and cancellation while the provider and
+     readiness continuation are pending.
+
+3. [ ] **Installed actor boundary routing.**
+
+   - Route completion and stable `Receive`; then add `Cast`, `Call`, and `Wait`
+     using the existing `ResidentActorMailbox` operations.
+   - Store parked call/wait objects in the host before checking buffered
+     `CallReady`/`WaitReady` wakes. A wake rechecks one exact key and either
+     resumes it or leaves it parked; it never manufactures a result.
+   - Schedule mailbox-ready actors at the runnable tail and dispatch one
+     message per task. Test FIFO, tail requeue, early wake, duplicate wake,
+     dead-target call failure, and repeatable late wait.
+
+4. [ ] **Structured closing and quiescence.**
+
+   - Reject new work, cooperatively cancel every root task, keep polling task
+     epilogues and runtime wakes, and drain lifecycle cleanup to the explicit
+     quiescence predicate.
+   - Exercise task panic and shutdown-admission timeout without aborting tasks
+     or stranding a realm. Return and assert the typed shutdown report.
+
+5. [ ] **Major-boundary verification and surface contraction.**
+
+   - Move the manual orchestration in `tests/start_surface.rs` into an adjacent
+     host fixture/vertical rather than duplicating it. Large Haskell programs
+     remain `include_str!` fixtures.
+   - Run formatting, `git diff --check`, strict actor Clippy, actor library
+     tests, and the one Nix-backed host vertical. This is the tranche's major
+     boundary; broader workspace batteries remain unnecessary.
+   - Audit `lib.rs` exports after the host is the production consumer. Make
+     starter/mailbox/workbench orchestration types crate-private where no
+     external production caller remains; do not preserve the old manual path
+     solely for tests.
+
+This tranche deliberately excludes provider/profile production composition,
+worktree grants, lifecycle advisories, structural fork, compiler-endpoint
+identity, and declaration-receipt cleanup. Those begin only after the host
+vertical establishes the runtime ownership boundary.
 
 ## 10. Stage 7 — first production actor and DevSwarm vertical
 
