@@ -126,7 +126,7 @@ impl ExtractRequest {
                 6 => Field::AllClosed,
                 7 => Field::TargetModuleOnly,
                 8 => Field::Include(decoder.os_string()?),
-                9 | 10 | 14 => return Err(ProtocolError::new(format!("retired field tag {tag}"))),
+                9 | 10 | 14 => return Err(ProtocolError::RetiredFieldTag(tag)),
                 11 => Field::BindGen(decoder.u64()?),
                 12 => Field::SessionRoot(decoder.os_string()?),
                 13 => Field::InjectVal(decoder.os_string()?),
@@ -141,7 +141,7 @@ impl ExtractRequest {
                 21 => Field::ClassifyOut(decoder.os_string()?),
                 24 => Field::HarnessProfile,
                 25 => Field::BuildProductsDir(decoder.os_string()?),
-                other => return Err(ProtocolError::new(format!("unknown field tag {other}"))),
+                other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
         }
@@ -156,13 +156,9 @@ impl ExtractRequest {
     /// depending on the payload's hexadecimal transport representation.
     pub fn decode_worker_argv(args: &[OsString]) -> Result<Self, ProtocolError> {
         if args.len() != 2 || args[0] != WORKER_REQUEST_FLAG {
-            return Err(ProtocolError::new(
-                "worker argv must be exactly --worker-request-v3 PAYLOAD",
-            ));
+            return Err(ProtocolError::InvalidWorkerArgv);
         }
-        let payload = args[1]
-            .to_str()
-            .ok_or_else(|| ProtocolError::new("worker request payload is not UTF-8"))?;
+        let payload = args[1].to_str().ok_or(ProtocolError::NonUtf8Payload)?;
         Self::decode(&unhex(payload)?)
     }
 
@@ -324,7 +320,7 @@ struct Decoder<'a> {
 impl<'a> Decoder<'a> {
     fn new(bytes: &'a [u8]) -> Result<Self, ProtocolError> {
         if bytes.get(..MAGIC.len()) != Some(MAGIC) {
-            return Err(ProtocolError::new("invalid worker request header"));
+            return Err(ProtocolError::InvalidHeader);
         }
         Ok(Self {
             bytes,
@@ -337,7 +333,7 @@ impl<'a> Decoder<'a> {
             .cursor
             .checked_add(len)
             .filter(|end| *end <= self.bytes.len())
-            .ok_or_else(|| ProtocolError::new("truncated worker request"))?;
+            .ok_or(ProtocolError::Truncated)?;
         let value = &self.bytes[self.cursor..end];
         self.cursor = end;
         Ok(value)
@@ -348,19 +344,17 @@ impl<'a> Decoder<'a> {
     }
 
     fn u32(&mut self) -> Result<u32, ProtocolError> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?
-                .try_into()
-                .map_err(|_| ProtocolError::new("invalid u32 frame"))?,
-        ))
+        Ok(u32::from_le_bytes(self.fixed()?))
     }
 
     fn u64(&mut self) -> Result<u64, ProtocolError> {
-        Ok(u64::from_le_bytes(
-            self.take(8)?
-                .try_into()
-                .map_err(|_| ProtocolError::new("invalid u64 frame"))?,
-        ))
+        Ok(u64::from_le_bytes(self.fixed()?))
+    }
+
+    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], ProtocolError> {
+        let mut value = [0; N];
+        value.copy_from_slice(self.take(N)?);
+        Ok(value)
     }
 
     fn frame(&mut self) -> Result<&'a [u8], ProtocolError> {
@@ -369,8 +363,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn string(&mut self) -> Result<String, ProtocolError> {
-        String::from_utf8(self.frame()?.to_vec())
-            .map_err(|_| ProtocolError::new("worker request text is not UTF-8"))
+        String::from_utf8(self.frame()?.to_vec()).map_err(|_| ProtocolError::NonUtf8Text)
     }
 
     fn os_string(&mut self) -> Result<OsString, ProtocolError> {
@@ -381,28 +374,42 @@ impl<'a> Decoder<'a> {
         if self.cursor == self.bytes.len() {
             Ok(())
         } else {
-            Err(ProtocolError::new("trailing worker request bytes"))
+            Err(ProtocolError::TrailingBytes)
         }
     }
 }
 
 /// A malformed versioned worker request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProtocolError {
-    message: String,
-}
-
-impl ProtocolError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
+pub enum ProtocolError {
+    InvalidWorkerArgv,
+    NonUtf8Payload,
+    InvalidHeader,
+    Truncated,
+    NonUtf8Text,
+    TrailingBytes,
+    OddHexLength,
+    NonHexData,
+    RetiredFieldTag(u8),
+    UnknownFieldTag(u8),
 }
 
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        match self {
+            Self::InvalidWorkerArgv => {
+                f.write_str("worker argv must be exactly --worker-request-v3 PAYLOAD")
+            }
+            Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
+            Self::InvalidHeader => f.write_str("invalid worker request header"),
+            Self::Truncated => f.write_str("truncated worker request"),
+            Self::NonUtf8Text => f.write_str("worker request text is not UTF-8"),
+            Self::TrailingBytes => f.write_str("trailing worker request bytes"),
+            Self::OddHexLength => f.write_str("worker request payload has odd length"),
+            Self::NonHexData => f.write_str("worker request payload contains non-hexadecimal data"),
+            Self::RetiredFieldTag(tag) => write!(f, "retired field tag {tag}"),
+            Self::UnknownFieldTag(tag) => write!(f, "unknown field tag {tag}"),
+        }
     }
 }
 
@@ -482,7 +489,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 fn unhex(text: &str) -> Result<Vec<u8>, ProtocolError> {
     if !text.len().is_multiple_of(2) {
-        return Err(ProtocolError::new("worker request payload has odd length"));
+        return Err(ProtocolError::OddHexLength);
     }
     text.as_bytes()
         .chunks_exact(2)
@@ -499,9 +506,7 @@ fn hex_digit(byte: u8) -> Result<u8, ProtocolError> {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(ProtocolError::new(
-            "worker request payload contains non-hexadecimal data",
-        )),
+        _ => Err(ProtocolError::NonHexData),
     }
 }
 
@@ -574,6 +579,30 @@ mod tests {
     }
 
     #[test]
+    fn worker_argv_rejects_retired_version_markers() {
+        let request = ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap();
+        let payload = OsString::from(hex(&request.encode()));
+        for flag in ["--worker-request-v1", "--worker-request-v2"] {
+            assert_eq!(
+                ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
+                ProtocolError::InvalidWorkerArgv
+            );
+        }
+    }
+
+    #[test]
+    fn typed_protocol_rejects_retired_magic_versions() {
+        for magic in [b"TPREQ001", b"TPREQ002"] {
+            let mut request = magic.to_vec();
+            request.extend_from_slice(&0u32.to_le_bytes());
+            assert_eq!(
+                ExtractRequest::decode(&request).unwrap_err(),
+                ProtocolError::InvalidHeader
+            );
+        }
+    }
+
+    #[test]
     fn typed_protocol_round_trips_every_field_shape() {
         let args = vec![
             "Expr.hs".into(),
@@ -611,16 +640,16 @@ mod tests {
         unknown.extend_from_slice(&1u32.to_le_bytes());
         unknown.push(255);
         assert_eq!(
-            ExtractRequest::decode(&unknown).unwrap_err().to_string(),
-            "unknown field tag 255"
+            ExtractRequest::decode(&unknown).unwrap_err(),
+            ProtocolError::UnknownFieldTag(255)
         );
 
         let request = ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap();
         let mut truncated = request.encode();
         truncated.pop();
         assert_eq!(
-            ExtractRequest::decode(&truncated).unwrap_err().to_string(),
-            "truncated worker request"
+            ExtractRequest::decode(&truncated).unwrap_err(),
+            ProtocolError::Truncated
         );
     }
 
@@ -631,8 +660,8 @@ mod tests {
             request.extend_from_slice(&1u32.to_le_bytes());
             request.push(tag);
             assert_eq!(
-                ExtractRequest::decode(&request).unwrap_err().to_string(),
-                format!("retired field tag {tag}")
+                ExtractRequest::decode(&request).unwrap_err(),
+                ProtocolError::RetiredFieldTag(tag)
             );
         }
     }

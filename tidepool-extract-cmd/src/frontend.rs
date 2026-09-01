@@ -63,7 +63,10 @@ fn worker_payload(args: &[OsString]) -> Result<Option<OsString>, FrontendError> 
         return Ok(None);
     }
     match args {
-        [_, payload] => Ok(Some(payload.clone())),
+        [_, payload] => {
+            ExtractRequest::decode_worker_argv(args)?;
+            Ok(Some(payload.clone()))
+        }
         [_] => Err(FrontendError::Usage(format!(
             "{WORKER_REQUEST_FLAG} requires a payload"
         ))),
@@ -144,6 +147,7 @@ fn exit_code(status: ExitStatus) -> u8 {
 #[derive(Debug)]
 pub enum FrontendError {
     Usage(String),
+    WorkerProtocol(crate::request::ProtocolError),
     Io(io::Error),
     Daemon(String),
 }
@@ -154,13 +158,43 @@ impl From<crate::request::CliError> for FrontendError {
     }
 }
 
+impl From<crate::request::ProtocolError> for FrontendError {
+    fn from(error: crate::request::ProtocolError) -> Self {
+        Self::WorkerProtocol(error)
+    }
+}
+
 impl std::fmt::Display for FrontendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Usage(message) | Self::Daemon(message) => f.write_str(message),
+            Self::WorkerProtocol(error) => error.fmt(f),
             Self::Io(error) => error.fmt(f),
         }
     }
 }
 
 impl std::error::Error for FrontendError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_arguments_are_the_exact_usage_error() {
+        assert!(matches!(run(Vec::new()), Err(FrontendError::Usage(message)) if message == USAGE));
+    }
+
+    #[test]
+    fn typed_worker_payload_must_decode() {
+        let error = worker_payload(&[
+            WORKER_REQUEST_FLAG.into(),
+            "54505245513030330100000009".into(),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FrontendError::WorkerProtocol(crate::request::ProtocolError::RetiredFieldTag(9))
+        ));
+    }
+}

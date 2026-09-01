@@ -263,6 +263,7 @@ fn remove_socket(path: &Path) -> Result<(), FrontendError> {
 
 fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
     if matches!(argv.as_slice(), [flag, _] if flag == crate::request::WORKER_REQUEST_FLAG) {
+        ExtractRequest::decode_worker_argv(&argv)?;
         return Ok(argv);
     }
     if argv
@@ -477,7 +478,9 @@ mod tests {
 
     #[test]
     fn typed_worker_request_must_be_the_complete_argv() {
-        let valid = vec![crate::request::WORKER_REQUEST_FLAG.into(), "payload".into()];
+        let valid = ExtractRequest::from_cli(&["Expr.hs".into()])
+            .unwrap()
+            .worker_argv();
         assert_eq!(normalize_worker_argv(valid.clone()).unwrap(), valid);
 
         let mixed = vec![
@@ -486,6 +489,20 @@ mod tests {
             "payload".into(),
         ];
         assert!(normalize_worker_argv(mixed).is_err());
+    }
+
+    #[test]
+    fn malformed_typed_worker_request_is_rejected() {
+        let malformed = vec![
+            crate::request::WORKER_REQUEST_FLAG.into(),
+            "54505245513030330100000009".into(),
+        ];
+        assert!(matches!(
+            normalize_worker_argv(malformed),
+            Err(FrontendError::WorkerProtocol(
+                crate::request::ProtocolError::RetiredFieldTag(9)
+            ))
+        ));
     }
 
     fn encode_response_bytes(code: i32, stdout: &[u8], stderr: &[u8]) -> Vec<u8> {

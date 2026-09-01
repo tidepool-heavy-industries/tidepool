@@ -7,6 +7,7 @@ checks :: IO [Check]
 checks = pure
   [ check "typed request decodes fields and a binary generation" typedRequestDecodes
   , check "unknown request versions are rejected" wrongVersionRejected
+  , check "retired request flags are rejected" retiredFlagsRejected
   , check "unknown field tags are rejected" unknownTagRejected
   , check "retired session-bind field tags are rejected explicitly" retiredTagsRejected
   , check "truncated fields are rejected" truncatedFieldRejected
@@ -20,8 +21,15 @@ typedRequestDecodes = case workerRequestFromArgv ["--worker-request-v3", payload
     payload = "5450524551303033020000000101000000780b2a00000000000000"
 
 wrongVersionRejected :: Bool
-wrongVersionRejected = isLeft (workerRequestFromArgv
-  ["--worker-request-v3", "424144564552303100000000"])
+wrongVersionRejected = all rejected ["5450524551303031", "5450524551303032"]
+  where
+    rejected magic = isLeft (workerRequestFromArgv ["--worker-request-v3", magic ++ "00000000"])
+
+retiredFlagsRejected :: Bool
+retiredFlagsRejected = all rejected ["--worker-request-v1", "--worker-request-v2"]
+  where
+    rejected flag = isLeft (workerRequestFromArgv [flag, validPayload])
+    validPayload = "545052455130303300000000"
 
 unknownTagRejected :: Bool
 unknownTagRejected = isLeft (workerRequestFromArgv
