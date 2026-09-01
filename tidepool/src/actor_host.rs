@@ -1896,6 +1896,58 @@ mod tests {
                 "worker": worker_handle.clone()
             }))
         );
+        let premature_acknowledgement = server
+            .dispatch_tool(
+                "ack_worker",
+                serde_json::json!({"worker": worker_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("refuse acknowledgement before collection");
+        assert_eq!(
+            premature_acknowledgement.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerNotCollected",
+                "worker": worker_handle.clone()
+            }))
+        );
+        let unknown_handle = serde_json::json!({"workerId": "forged-worker-handle"});
+        let unknown_collection = server
+            .dispatch_tool(
+                "collect_worker",
+                serde_json::json!({"worker": unknown_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("collect unknown worker");
+        assert_eq!(
+            unknown_collection.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerNotFound",
+                "worker": unknown_handle.clone()
+            }))
+        );
+        let unknown_acknowledgement = server
+            .dispatch_tool(
+                "ack_worker",
+                serde_json::json!({"worker": unknown_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("acknowledge unknown worker");
+        assert_eq!(
+            unknown_acknowledgement.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerAcknowledgementUnknown",
+                "worker": unknown_handle
+            }))
+        );
         let assignment = worker_server
             .dispatch_tool("current_assignment", serde_json::Map::new())
             .await
@@ -1996,6 +2048,20 @@ mod tests {
                 "tag": "WorkerAcknowledged",
                 "worker": worker_handle.clone()
             }))
+        );
+        let replayed_acknowledgement = server
+            .dispatch_tool(
+                "ack_worker",
+                serde_json::json!({"worker": worker_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("replay acknowledgement");
+        assert_eq!(
+            replayed_acknowledgement.structured_content,
+            acknowledged.structured_content
         );
         let after_ack = server
             .dispatch_tool(
