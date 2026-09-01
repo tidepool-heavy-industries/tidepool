@@ -634,19 +634,16 @@ do not create an empty host facade and fill it in later.
      `Reply`/`Continue` out of the installed-program result type. Their current
      trusted drivers remain their sole interpreters.
 
-2. [ ] **Add one typed runtime-wake contract at registry linearization points.**
+2. [x] **Complete the one typed runtime-wake contract.**
 
-   - Use one closed sum for ready actor work: mailbox accepted, call settled,
-     wait target exited, actor published ready, and actor became terminal.
-   - Emit readiness from the same registry critical section that changes the
-     authoritative state. Emission must not await, block on channel capacity,
-     or call back into the host while holding the registry lock. The
-     notification carries identities only; custody and lifecycle truth remain
-     in the registry and existing linear tickets.
-   - The production host owns the sole receiving end. It buffers an early
-     call/wait wake until the corresponding parked continuation has been
-     installed, and deduplicates mailbox readiness by exact actor
-     incarnation. A wake is a level-trigger for rechecking one named item, not
+   - [x] The registry emits one closed identity-only sum for mailbox acceptance,
+     call settlement, wait-target exit, ready publication, and terminal
+     publication from the same critical section that changes authoritative
+     state. Emission neither awaits nor transfers custody.
+   - [x] The sole receiving end is itself the host-side accumulator. It
+     buffers an early call/wait wake until the corresponding parked
+     continuation has been installed, and deduplicates mailbox readiness by
+     exact actor incarnation. A wake is a level-trigger for rechecking one named item, not
      permission to scan every actor or obligation.
    - Do not derive scheduling from the neutral event log, add per-operation
      `Notify` objects, or create another durable queue. Unit tests must cover a
@@ -659,10 +656,10 @@ do not create an empty host facade and fill it in later.
      machine registry, runner, completion executor, starter, mailbox adapter,
      lifecycle owner, wake receiver, actor-task set, and parked call/wait
      tables.
-   - Inject the same `ResidentActorLifecycle` and
-     `ResidentLifecyclePolicy` into starter, mailbox, and host tasks. Remove
-     their independent default lifecycle construction; there must be one
-     shutdown policy per host.
+   - [x] Starter and mailbox construction already require the same injected
+     `ResidentActorLifecycle`; neither constructs a private lifecycle policy.
+   - The composition root owns that lifecycle and passes it to every host
+     task. There must be one shutdown policy per host.
    - Keep registry actor admission and runtime machine checkout as the two
      existing nested gates. The host adds neither another actor lock nor a
      second machine scheduler.

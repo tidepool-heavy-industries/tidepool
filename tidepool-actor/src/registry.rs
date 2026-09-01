@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -146,7 +146,7 @@ pub enum ActorTurnKind {
 /// Ephemeral, identity-only readiness emitted by registry state transitions.
 /// The registry remains authoritative: each wake tells the host which exact
 /// item to recheck and carries no lifecycle state or live-value custody.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActorRuntimeWake {
     ActorReady { actor: ActorRef },
     MailboxReady { actor: ActorRef },
@@ -159,17 +159,43 @@ pub enum ActorRuntimeWake {
 /// stream. It is intentionally not clonable: scheduling has one owner.
 pub struct ActorRuntimeWakes {
     receiver: UnboundedReceiver<ActorRuntimeWake>,
+    ready: HashSet<ActorRuntimeWake>,
 }
 
 impl ActorRuntimeWakes {
-    pub async fn recv(&mut self) -> Option<ActorRuntimeWake> {
-        self.receiver.recv().await
+    /// Wait for at least one registry transition, then absorb every wake that
+    /// is already queued. Returns `false` only after the registry has dropped
+    /// the stream.
+    pub async fn wait(&mut self) -> bool {
+        let Some(wake) = self.receiver.recv().await else {
+            return false;
+        };
+        self.record(wake);
+        self.drain_available();
+        true
     }
 
-    /// Nonblocking host-loop probe. `None` means no wake is currently queued;
-    /// authoritative readiness must still be rechecked in the registry.
-    pub fn try_recv(&mut self) -> Option<ActorRuntimeWake> {
-        self.receiver.try_recv().ok()
+    /// Absorb every currently queued wake without blocking.
+    pub fn drain_available(&mut self) {
+        while let Ok(wake) = self.receiver.try_recv() {
+            self.record(wake);
+        }
+    }
+
+    /// Consume one exact level trigger after the host has installed the state
+    /// needed to service it. Early call and wait settlement therefore remains
+    /// buffered, while repeated mailbox readiness collapses to one recheck.
+    pub fn take(&mut self, wake: ActorRuntimeWake) -> bool {
+        self.ready.remove(&wake)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ready.is_empty() && self.receiver.is_empty()
+    }
+
+    fn record(&mut self, wake: ActorRuntimeWake) {
+        self.ready.insert(wake);
     }
 }
 
@@ -398,7 +424,10 @@ impl ActorRegistry {
         let (sender, receiver) = mpsc::unbounded_channel();
         state.wake_sender = Some(sender);
         state.wake_receiver_claimed = true;
-        Ok(ActorRuntimeWakes { receiver })
+        Ok(ActorRuntimeWakes {
+            receiver,
+            ready: HashSet::new(),
+        })
     }
 
     /// Allocate an initializing actor. The returned token is deliberately not
@@ -1859,6 +1888,11 @@ mod tests {
         ready_in(registry, None, "root", SessionId(1))
     }
 
+    fn assert_wake(wakes: &mut ActorRuntimeWakes, wake: ActorRuntimeWake) {
+        wakes.drain_available();
+        assert!(wakes.take(wake), "missing runtime wake {wake:?}");
+    }
+
     #[test]
     fn runtime_wake_receiver_is_unique_and_mailbox_bursts_are_level_triggered() {
         let registry = ActorRegistry::new();
@@ -1869,14 +1903,8 @@ mod tests {
         ));
         let caller = ready_root(&registry);
         let target = ready_in(&registry, None, "target", SessionId(1));
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::ActorReady { actor: caller })
-        );
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::ActorReady { actor: target })
-        );
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: caller });
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: target });
 
         registry
             .cast(
@@ -1893,11 +1921,13 @@ mod tests {
             )
             .expect("accept second cast");
 
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::MailboxReady { actor: target })
-        );
-        assert_eq!(wakes.try_recv(), None);
+        assert_wake(&mut wakes, ActorRuntimeWake::MailboxReady { actor: target });
+        assert!(wakes.is_empty());
+
+        wakes.record(ActorRuntimeWake::MailboxReady { actor: target });
+        wakes.record(ActorRuntimeWake::MailboxReady { actor: target });
+        assert_wake(&mut wakes, ActorRuntimeWake::MailboxReady { actor: target });
+        assert!(wakes.is_empty());
     }
 
     #[test]
@@ -1906,8 +1936,8 @@ mod tests {
         let mut wakes = registry.take_runtime_wakes().expect("claim wake stream");
         let caller = ready_root(&registry);
         let target = ready_in(&registry, None, "target", SessionId(1));
-        assert!(wakes.try_recv().is_some());
-        assert!(wakes.try_recv().is_some());
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: caller });
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: target });
 
         let call = registry
             .call(
@@ -1916,10 +1946,7 @@ mod tests {
                 MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0))),
             )
             .expect("accept call");
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::MailboxReady { actor: target })
-        );
+        assert_wake(&mut wakes, ActorRuntimeWake::MailboxReady { actor: target });
         let call_id = call.id();
         let MailboxDelivery::Call(delivery) = registry
             .dequeue(target)
@@ -1934,23 +1961,24 @@ mod tests {
                 Arc::new(AtomicUsize::new(0)),
             ))
             .expect("reply");
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::CallReady {
-                caller,
-                call: call_id,
-            })
-        );
+        // Settlement may win the race with host-side parked-continuation
+        // installation. Absorb it now and consume it only after unrelated
+        // registry work proves it remains buffered.
+        wakes.drain_available();
         drop(call);
 
         let waiter = ready_in(&registry, None, "waiter", SessionId(1));
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::ActorReady { actor: waiter })
-        );
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: waiter });
         let wait = registry
             .register_wait(waiter, target)
             .expect("register wait");
+        assert_wake(
+            &mut wakes,
+            ActorRuntimeWake::CallReady {
+                caller,
+                call: call_id,
+            },
+        );
         let wait_id = wait.id();
         registry
             .finish(
@@ -1961,16 +1989,13 @@ mod tests {
                 },
             )
             .expect("finish target");
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::ActorExited { actor: target })
-        );
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::WaitReady {
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorExited { actor: target });
+        assert_wake(
+            &mut wakes,
+            ActorRuntimeWake::WaitReady {
                 waiter,
                 wait: wait_id,
-            })
+            },
         );
     }
 
@@ -1980,8 +2005,8 @@ mod tests {
         let mut wakes = registry.take_runtime_wakes().expect("claim wake stream");
         let waiter = ready_root(&registry);
         let target = ready_in(&registry, None, "target", SessionId(1));
-        assert!(wakes.try_recv().is_some());
-        assert!(wakes.try_recv().is_some());
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: waiter });
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorReady { actor: target });
         registry
             .finish(
                 target,
@@ -1991,20 +2016,17 @@ mod tests {
                 },
             )
             .expect("finish target");
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::ActorExited { actor: target })
-        );
+        assert_wake(&mut wakes, ActorRuntimeWake::ActorExited { actor: target });
 
         let wait = registry
             .register_wait(waiter, target)
             .expect("register retained wait");
-        assert_eq!(
-            wakes.try_recv(),
-            Some(ActorRuntimeWake::WaitReady {
+        assert_wake(
+            &mut wakes,
+            ActorRuntimeWake::WaitReady {
                 waiter,
                 wait: wait.id(),
-            })
+            },
         );
     }
 
