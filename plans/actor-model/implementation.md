@@ -611,6 +611,122 @@ readiness resumption, exactly-once terminal publication, child-first hook/root
 settlement, closure of every captured realm, restoration of parent admission,
 typed wakeup for each runnable source, and quiescent host shutdown.
 
+### Ordered Stage 6 TODOs
+
+Implement these in order. Each item should land as a stable, tested boundary;
+do not create an empty host facade and fill it in later.
+
+1. [ ] **Centralize installed-program boundary classification.**
+
+   - Add one closed actor-boundary sum for the next installed-program boundary:
+     completion, `Deliberate`, `Start`, `Call`, `Cast`, `Wait`, or stable
+     mailbox receive. Each variant owns only its exact payload.
+   - Those payloads own the turn lease, continuation, and live custody needed
+     by that boundary. The host must not recover them from event text or
+     inspect raw `ResidentOutcome` requests in several branches.
+   - Replace the existing rendered-constructor-name classifier rather than
+     adding a second parser. Decode model-visible operations through generated
+     nominal request enums; give `Complete` an equally typed decoder instead
+     of retaining its string special case. Unknown or phase-invalid requests
+     fail the actor through one typed protocol error.
+   - Keep startup-only `InstallShutdown`/`Ready` and kernel-private
+     `Reply`/`Continue` out of the installed-program result type. Their current
+     trusted drivers remain their sole interpreters.
+
+2. [ ] **Add one typed runtime-wake contract at registry linearization points.**
+
+   - Use one closed sum for ready actor work: mailbox accepted, call settled,
+     wait target exited, actor published ready, and actor became terminal.
+   - Emit readiness from the same registry critical section that changes the
+     authoritative state. Emission must not await, block on channel capacity,
+     or call back into the host while holding the registry lock. The
+     notification carries identities only; custody and lifecycle truth remain
+     in the registry and existing linear tickets.
+   - The production host owns the sole receiving end. It buffers an early
+     call/wait wake until the corresponding parked continuation has been
+     installed, and deduplicates mailbox readiness by exact actor
+     incarnation. A wake is a level-trigger for rechecking one named item, not
+     permission to scan every actor or obligation.
+   - Do not derive scheduling from the neutral event log, add per-operation
+     `Notify` objects, or create another durable queue. Unit tests must cover a
+     wake arriving before pending-handle installation and repeated wakes for
+     the same mailbox.
+
+3. [ ] **Create the production host only once it owns real work.**
+
+   - Add one `tidepool-actor` host that constructs and owns the registry,
+     machine registry, runner, completion executor, starter, mailbox adapter,
+     lifecycle owner, wake receiver, actor-task set, and parked call/wait
+     tables.
+   - Inject the same `ResidentActorLifecycle` and
+     `ResidentLifecyclePolicy` into starter, mailbox, and host tasks. Remove
+     their independent default lifecycle construction; there must be one
+     shutdown policy per host.
+   - Keep registry actor admission and runtime machine checkout as the two
+     existing nested gates. The host adds neither another actor lock nor a
+     second machine scheduler.
+   - Provider handles are Rust-selected launch metadata owned by actor tasks.
+     Stage 6 may inject test providers directly; do not prematurely expose
+     provider/model configuration to authored Haskell before Stage 7 defines
+     launch recipes.
+
+4. [ ] **Drive one actor through typed boundaries.**
+
+   - A runnable actor task advances one admitted turn until it completes or
+     parks on a model session, child start, call, wait, or stable receive.
+   - Task results return typed next work to the host. The host installs parked
+     call/wait custody before honoring any buffered settlement wake.
+   - Mailbox dispatch runs at most one accepted message per task. If more
+     messages remain, it re-enqueues that actor at the tail; no actor drains an
+     unbounded mailbox while peers are runnable.
+   - Exactly one host task may own an actor incarnation at a time. Registry
+     admission remains the enforcing invariant, while the task table makes
+     duplicate scheduling a host error instead of routine contention.
+
+5. [ ] **Move startup custody into structured host task ownership.**
+
+   - Factor the existing startup driver so its unpublished token, child realm,
+     parent lease/hole, entry root, readiness continuation, and any captured
+     cleanup batch live outside each individually cancellable await.
+   - Host cancellation is a signal, never task abortion. Dropping a provider
+     or machine-wait future returns control to the task state, which atomically
+     aborts unpublished startup through `ActorRegistry`, transfers the exact
+     `ActorCleanupBatch` to the one lifecycle owner, and awaits cleanup before
+     the task may finish.
+   - Catch task panic at the same ownership boundary and run the same terminal
+     epilogue. The host must not use `JoinHandle::abort`, `abort_all`, detached
+     cleanup, asynchronous `Drop`, or a second cleanup queue.
+   - Root bootstrap and child `startActor` use the same unpublished-start
+     driver. Their only difference is whether successful publication resumes
+     a parent continuation; do not grow a parallel root lifecycle.
+
+6. [ ] **Own shutdown and quiescence.**
+
+   - Closing the host rejects new roots, children, and mailbox submissions;
+     signals every owned root; and lets owner termination recursively settle
+     descendants through the existing atomic cleanup-batch path.
+   - Continue driving cancellation epilogues and realm closure after ordinary
+     actor work has stopped. A shutdown admission timeout records the existing
+     neutral failure event and cannot strand the remaining subtree.
+   - Quiescence means no actor task, unpublished startup, pending call/wait,
+     runnable wake, or unprocessed cleanup remains. Return a typed summary of
+     terminal roots and cleanup failures rather than a Boolean.
+
+7. [ ] **Prove one real host vertical before adding Stage 7 policy.**
+
+   - Bootstrap a root through the host, run `Deliberate`, start a child, serve
+     a call and cast, await its typed exit, and shut the root subtree down.
+   - Deterministically cancel once during provider-backed startup and once
+     during readiness resumption. Both cases publish one terminal result, run
+     child-first shutdown, close every captured realm, and restore parent
+     admission.
+   - Exercise early and duplicate wake delivery, call failure on target exit,
+     a repeatable late wait, mailbox FIFO/tail requeue, task panic, shutdown
+     admission timeout, and quiescent host completion.
+   - Use adjacent Haskell fixtures and focused actor targets. This host
+     vertical is the next major boundary at which the broader actor test set
+     is warranted; intermediate commits use narrow unit tests.
+
 ## 10. Stage 7 — first production actor and DevSwarm vertical
 
 Establish the production composition root before moving provider packages or
