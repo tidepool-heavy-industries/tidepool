@@ -94,77 +94,119 @@ pub fn effects_include() -> [PathBuf; 2] {
         .include_paths()
 }
 
-/// Derive and install the `TIDEPOOL_EXTRACT` env var, returning whether the
-/// extract toolchain is actually usable.
+const EXTRACT_ENV: &str = "TIDEPOOL_EXTRACT";
+const EXTRACT_WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExtractBinaryKind {
+    Frontend,
+    Worker,
+    Unknown,
+}
+
+fn classify_extract_output(stderr: &[u8]) -> ExtractBinaryKind {
+    if stderr.starts_with(b"Usage: tidepool-extract [") {
+        ExtractBinaryKind::Frontend
+    } else if stderr.starts_with(b"worker requires") {
+        ExtractBinaryKind::Worker
+    } else {
+        ExtractBinaryKind::Unknown
+    }
+}
+
+fn probe_extract(bin: &Path) -> ExtractBinaryKind {
+    std::process::Command::new(bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .map(|out| classify_extract_output(&out.stderr))
+        .unwrap_or(ExtractBinaryKind::Unknown)
+}
+
+fn cabal_worker(haskell: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("cabal")
+        .args(["list-bin", "tidepool-extract-bin"])
+        .current_dir(haskell)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (probe_extract(&path) == ExtractBinaryKind::Worker).then_some(path)
+}
+
+/// Derive and install the extractor frontend and worker environment, returning
+/// whether the session-aware toolchain is actually usable.
 ///
 /// This is the one place the "where is the extract binary" question is answered,
 /// so individual tests stop copy-pasting `cabal list-bin` paths (or, worse,
 /// `/nix/store` literals):
 ///
-/// 1. If `TIDEPOOL_EXTRACT` is already set and runs, keep it.
-/// 2. Otherwise try `cabal list-bin tidepool-extract-bin` in `<root>/haskell`
-///    (the dev build — tracks your working tree).
-/// 3. Otherwise fall back to the checked-in nix-profile wrapper
-///    `<root>/haskell/tidepool-extract`.
+/// 1. If `TIDEPOOL_EXTRACT` names the session-aware Rust frontend, keep it.
+/// 2. Otherwise pair `<root>/target/debug/tidepool-extract` with the Cabal-built
+///    `tidepool-extract-bin` worker.
+/// 3. Otherwise try the session-aware frontend on `PATH`.
 ///
-/// Returns `true` iff the resolved binary starts and identifies itself as a
-/// Tidepool extractor. A current compiler worker rejects an empty invocation
-/// with its typed-request error; older frontend binaries print a usage banner.
+/// Frontend and worker identities are deliberately distinct. The worker speaks
+/// a private, versioned protocol and is never a valid value of
+/// `TIDEPOOL_EXTRACT`.
 pub fn extract_env() -> bool {
-    fn runs(bin: &str) -> bool {
-        std::process::Command::new(bin)
-            .stdout(std::process::Stdio::null())
-            .output()
-            .map(|out| {
-                out.stderr
-                    .starts_with(b"worker requires a versioned request")
-                    || out.stderr.starts_with(b"Usage:")
-            })
-            .unwrap_or(false)
-    }
-
-    if let Ok(bin) = std::env::var("TIDEPOOL_EXTRACT") {
-        if runs(&bin) {
-            return true;
-        }
+    if let Some(bin) = std::env::var_os(EXTRACT_ENV) {
+        return probe_extract(Path::new(&bin)) == ExtractBinaryKind::Frontend;
     }
 
     let haskell = repo_root().join("haskell");
-
-    // 2. cabal list-bin (dev build).
-    if let Ok(out) = std::process::Command::new("cabal")
-        .args(["list-bin", "tidepool-extract-bin"])
-        .current_dir(&haskell)
-        .output()
-    {
-        if out.status.success() {
-            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !path.is_empty() && Path::new(&path).exists() {
-                std::env::set_var("TIDEPOOL_EXTRACT", &path);
-                if runs(&path) {
-                    return true;
-                }
-            }
+    let frontend = repo_root().join("target/debug/tidepool-extract");
+    if probe_extract(&frontend) == ExtractBinaryKind::Frontend {
+        let worker = std::env::var_os(EXTRACT_WORKER_ENV)
+            .map(PathBuf::from)
+            .filter(|path| probe_extract(path) == ExtractBinaryKind::Worker)
+            .or_else(|| cabal_worker(&haskell));
+        if let Some(worker) = worker {
+            // Install the pair only after both halves satisfy their contracts.
+            std::env::set_var(EXTRACT_WORKER_ENV, worker);
+            std::env::set_var(EXTRACT_ENV, frontend);
+            return true;
         }
     }
 
-    // 3. Checked-in nix-profile wrapper.
-    let wrapper = haskell.join("tidepool-extract");
-    if wrapper.exists() {
-        let p = wrapper.to_string_lossy().to_string();
-        std::env::set_var("TIDEPOOL_EXTRACT", &p);
-        if runs(&p) {
-            return true;
-        }
+    let path_frontend = Path::new("tidepool-extract");
+    if probe_extract(path_frontend) == ExtractBinaryKind::Frontend {
+        std::env::set_var(EXTRACT_ENV, path_frontend);
+        return true;
     }
 
     false
 }
 
-/// True iff the session-aware `tidepool-extract` is reachable — the standard
-/// skip guard for suites that need GHC (CI without the nix shell). Unlike
-/// [`extract_env`] this does not mutate the environment beyond what a lookup of
-/// an already-set `TIDEPOOL_EXTRACT` implies.
+#[cfg(test)]
+mod extract_env_tests {
+    use super::{classify_extract_output, ExtractBinaryKind};
+
+    #[test]
+    fn extractor_roles_are_not_interchangeable() {
+        assert_eq!(
+            classify_extract_output(b"Usage: tidepool-extract [OPTIONS] <file.hs> ...\n"),
+            ExtractBinaryKind::Frontend
+        );
+        assert_eq!(
+            classify_extract_output(b"worker requires exactly one versioned request\n"),
+            ExtractBinaryKind::Worker
+        );
+        assert_eq!(
+            classify_extract_output(b"Usage: tidepool-extract-bin [OPTIONS]\n"),
+            ExtractBinaryKind::Unknown
+        );
+    }
+}
+
+/// Resolve and install the session-aware extractor pair when available.
+///
+/// This is the standard availability guard for suites that need GHC (CI without
+/// the Nix shell). It has the same environment-installing behavior as
+/// [`extract_env`]; the separate name exists for readable test guards.
 pub fn extract_available() -> bool {
     extract_env()
 }
