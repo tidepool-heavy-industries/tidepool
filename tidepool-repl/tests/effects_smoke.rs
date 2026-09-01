@@ -95,24 +95,28 @@ async fn full_stack_effects_reachable_through_session() {
     );
 }
 
-/// `session_run` items see the FULL eval vocabulary — `M` + the effect verbs,
-/// the `Tidepool.Prelude` shadows, and the `L.`/`Set.` qualified namespaces —
-/// not just the lens-free `T`/`Map` of `standalone_default`. This is the payoff
-/// of the production `session_decl_module_env`: a decl item can be an effectful
-/// verb (`sh :: Text -> M Text`) and use list/set combinators, then be called
-/// from a later `session_run`. (Regression for the decl/eval preamble asymmetry.)
+/// `session_run` items see the FULL eval vocabulary — `M`/`Eff`/`Member` + the
+/// effect verbs, the `Tidepool.Prelude` shadows, and the `L.`/`Set.` qualified
+/// namespaces — not just the lens-free `T`/`Map` of `standalone_default`. This
+/// is the payoff of the production `session_decl_module_env`: a decl item can
+/// compose row-polymorphic effect verbs and use list/set combinators, then be
+/// called from a later `session_run`. (Regression for the decl/eval preamble
+/// asymmetry.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_def_sees_full_eval_vocabulary() {
     require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
-    // A decl that uses `M` + the `run` effect verb (Tidepool.Effects) AND the
-    // `L.`/`Set.` qualified namespaces — all out of scope under the old
-    // T+Map-only decl preamble.
+    // These declarations use both the convenient concrete `M` alias and a
+    // three-effect `Member`-polymorphic program, plus the `L.`/`Set.` qualified
+    // namespaces — all out of scope under the old T+Map-only decl preamble.
     let (is_error, text) = run_single(
         &server,
-        "sh :: Text -> M Text\n\
+        concat!(
+            include_str!("effects_smoke/member_composition.hs"),
+            "\n\n\
+             sh :: Text -> M Text\n\
          sh cmd = run cmd >>= liftEither <&> \\p -> p.stdout\n\
          \n\
          uniqSorted :: [Int] -> [Int]\n\
@@ -121,6 +125,7 @@ async fn session_def_sees_full_eval_vocabulary() {
          -- shell-effect module (Git) must be in DECL scope too\n\
          dirtyCount :: M Int\n\
          dirtyCount = Git.gitStatus >>= liftEither <&> length",
+        ),
         None,
     )
     .await;
@@ -133,6 +138,47 @@ async fn session_def_sees_full_eval_vocabulary() {
     let (is_error, text) = run_single(&server, "sh \"echo decl-vocab-ok\"", None).await;
     assert!(!is_error, "calling `sh`: {text}");
     assert!(text.contains("decl-vocab-ok"), "sh output: {text}");
+
+    // The custom Haskell program composes Exec, FsWrite, and FsRead without
+    // naming their row order. Both branches execute through the production
+    // Rust handlers: the first round-trips command output through the sandbox,
+    // while the second exposes the filesystem authority rejection as the
+    // program's local typed error.
+    let escape_name = format!(
+        "{}-member-composition-escape.txt",
+        tmp.path()
+            .file_name()
+            .expect("tempdir basename")
+            .to_string_lossy()
+    );
+    let escaped_path = tmp
+        .path()
+        .parent()
+        .expect("tempdir parent")
+        .join(&escape_name);
+    assert!(
+        !escaped_path.exists(),
+        "escape probe path must start absent"
+    );
+    let code = format!(
+        "do {{ ok <- captureCommand \"printf member-composed-ok\" \"member-composed.txt\"; \
+         denied <- captureCommand \"printf denied\" \"../{escape_name}\"; \
+         pure (ok, denied) }}"
+    );
+    let (is_error, text) = run_single(&server, &code, None).await;
+    assert!(!is_error, "calling `captureCommand`: {text}");
+    assert!(
+        text.contains("member-composed-ok") && text.contains("CaptureFs"),
+        "composed effect results: {text}"
+    );
+    assert!(
+        text.contains("FsSandbox"),
+        "sandbox failure should stay typed and local: {text}"
+    );
+    assert!(
+        !escaped_path.exists(),
+        "Rust filesystem authority must reject the escape"
+    );
 
     // Use the pure decl that needed L./Set.
     let (is_error, text) = run_single(&server, "pure (uniqSorted [3,1,2,3,1])", None).await;
