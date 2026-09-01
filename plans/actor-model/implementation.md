@@ -996,8 +996,17 @@ Implement this boundary in order:
    closes the handle into its definition, and launches the external process
    only after exact-incarnation binding. Candidate submission combines an
    authored report with one trusted Worktree observation; collection is
-   replayable until explicit acknowledgment. Policy reload, native-tool
-   sandbox projection, and broader commit/evidence folding remain later work.
+   replayable until explicit acknowledgment. Worker Codex processes now use
+   `workspace-write` rooted at their retained checkout, and source-checkout
+   extractor process pins are removed before launch so each worktree resolves
+   tools from its own sources. Linked worktrees still require write access to
+   the repository's shared Git directory. This prevents direct parent-checkout
+   file writes but does not isolate refs, configuration, hooks, objects, or
+   worktree administration; it is containment, not a repository-security
+   boundary. True isolation needs private Git metadata (for example a worker
+   clone) or a narrow mediated submission service, not more shared-directory
+   exceptions. Policy reload and broader commit/evidence folding remain later
+   work.
    `ReadWrite`/`ReadOnly` therefore remain explicitly
    experimental resident-effect classifications rather than process-security
    claims; the initial production machine intentionally handles no ambient

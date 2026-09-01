@@ -4,7 +4,7 @@
 //! stock interactive agent is attached to each installed Haskell MCP policy;
 //! tmux is process ownership and observability, never message transport.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1021,7 +1021,6 @@ async fn launch_prepared_interactive_application(
     let command = backend
         .render(&spec)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildCommand, error))?;
-    let command = command_for_workspace(command, actor == root);
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildPolicy, error))?;
     let service = tokio::spawn(async move {
@@ -1068,6 +1067,7 @@ async fn launch_prepared_interactive_application(
                 environment.extend(proxy_environment);
                 environment
             },
+            unset_environment: workspace_local_toolchain_pins(actor == root),
         }),
     )
     .await
@@ -1129,31 +1129,21 @@ async fn launch_prepared_interactive_application(
     }))
 }
 
-/// Worker worktrees must discover extractor binaries that match their own
-/// sources. The host's explicit extractor pins point at its source checkout
-/// and are therefore invalid across the worktree boundary. Root panes remain
-/// in that source checkout and retain the initiating environment unchanged.
-fn command_for_workspace(
-    command: tidepool_agent::InteractiveAgentCommand,
-    is_root: bool,
-) -> tidepool_agent::InteractiveAgentCommand {
+/// Toolchain processes selected for the source checkout are not valid in a
+/// child worktree. Each worker resolves tools from its own sources instead.
+fn workspace_local_toolchain_pins(is_root: bool) -> BTreeSet<String> {
     if is_root {
-        return command;
+        return BTreeSet::new();
     }
 
-    let mut args = vec![
-        "-u".to_string(),
-        "TIDEPOOL_EXTRACT".to_string(),
-        "-u".to_string(),
-        "TIDEPOOL_EXTRACT_WORKER".to_string(),
-        "--".to_string(),
-        command.program,
-    ];
-    args.extend(command.args);
-    tidepool_agent::InteractiveAgentCommand {
-        program: "env".to_string(),
-        args,
-    }
+    [
+        "TIDEPOOL_EXTRACT",
+        "TIDEPOOL_EXTRACT_WORKER",
+        "TIDEPOOL_EXTRACT_DAEMON_SOCKET",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 async fn deliver_pending(
@@ -1465,7 +1455,7 @@ fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
         };
         format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
     } else {
-        "You are a Tidepool worker actor. Your process working directory is an owned retained git worktree; never edit the parent checkout. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
+        "You are a Tidepool worker actor. Your process working directory is an owned retained git worktree; never edit the parent checkout. The native workspace sandbox prevents parent-checkout file writes, but linked worktrees still share repository metadata: modify only your assigned branch and do not change repository configuration, hooks, other refs, or other worktrees. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
     }
 }
 
@@ -1520,6 +1510,7 @@ mod tests {
                 program: "sleep".into(),
                 args: vec!["60".into()],
                 environment: std::collections::BTreeMap::new(),
+                unset_environment: BTreeSet::new(),
             })
             .await
             .unwrap();
@@ -1575,37 +1566,21 @@ mod tests {
 
     #[test]
     fn worker_launch_unsets_source_checkout_extractor_pins() {
-        let command = InteractiveAgentCommand {
-            program: "codex".into(),
-            args: vec!["resume".into(), "thread-id".into()],
-        };
-
         assert_eq!(
-            command_for_workspace(command, false),
-            InteractiveAgentCommand {
-                program: "env".into(),
-                args: vec![
-                    "-u".into(),
-                    "TIDEPOOL_EXTRACT".into(),
-                    "-u".into(),
-                    "TIDEPOOL_EXTRACT_WORKER".into(),
-                    "--".into(),
-                    "codex".into(),
-                    "resume".into(),
-                    "thread-id".into(),
-                ],
-            }
+            workspace_local_toolchain_pins(false),
+            [
+                "TIDEPOOL_EXTRACT".to_string(),
+                "TIDEPOOL_EXTRACT_DAEMON_SOCKET".to_string(),
+                "TIDEPOOL_EXTRACT_WORKER".to_string(),
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
     #[test]
     fn root_launch_retains_its_source_checkout_toolchain() {
-        let command = InteractiveAgentCommand {
-            program: "codex".into(),
-            args: vec!["resume".into(), "thread-id".into()],
-        };
-
-        assert_eq!(command_for_workspace(command.clone(), true), command);
+        assert!(workspace_local_toolchain_pins(true).is_empty());
     }
 
     struct ScriptedPush {

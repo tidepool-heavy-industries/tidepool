@@ -95,22 +95,18 @@ async fn full_stack_effects_reachable_through_session() {
     );
 }
 
-/// `session_run` items see the FULL eval vocabulary — `M`/`Eff`/`Member` + the
-/// effect verbs, the `Tidepool.Prelude` shadows, and the `L.`/`Set.` qualified
-/// namespaces — not just the lens-free `T`/`Map` of `standalone_default`. This
-/// is the payoff of the production `session_decl_module_env`: a decl item can
-/// compose row-polymorphic effect verbs and use list/set combinators, then be
-/// called from a later `session_run`. (Regression for the decl/eval preamble
-/// asymmetry.)
+/// Declarations and later `session_run` items share the full resident
+/// vocabulary: `M`/`Eff`/`Member`, effect verbs, Prelude shadows, and qualified
+/// library namespaces. Persisted declarations may therefore remain
+/// row-polymorphic until a later invocation selects the concrete session row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_def_sees_full_eval_vocabulary() {
     require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
-    // These declarations use both the convenient concrete `M` alias and a
-    // three-effect `Member`-polymorphic program, plus the `L.`/`Set.` qualified
-    // namespaces — all out of scope under the old T+Map-only decl preamble.
+    // Exercise both the convenient concrete `M` alias and a three-effect
+    // `Member`-polymorphic program alongside qualified library namespaces.
     let (is_error, text) = run_single(
         &server,
         concat!(

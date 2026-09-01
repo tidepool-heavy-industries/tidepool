@@ -140,6 +140,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             program: executable,
             args,
             environment: pane_environment(),
+            unset_environment: std::collections::BTreeSet::new(),
         })
         .await;
     if let Err(error) = launch {

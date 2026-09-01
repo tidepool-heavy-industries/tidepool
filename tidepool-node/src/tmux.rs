@@ -3,7 +3,7 @@
 //! Tmux is a deployment and observability adapter here, never a message
 //! transport. Model input goes through the backend's supported push channel.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use tokio::process::Command;
@@ -93,6 +93,10 @@ pub struct TmuxLaunch {
     /// Values are passed with tmux's `-e`, never interpolated into the shell
     /// command that starts the application.
     pub environment: BTreeMap<String, String>,
+    /// Names removed from the inherited tmux-server environment for this
+    /// process. Tmux has no per-window unset flag, so the launch command uses
+    /// `env -u` before executing the exact program.
+    pub unset_environment: BTreeSet<String>,
 }
 
 /// A tmux session selected by name and optional dedicated server socket.
@@ -365,7 +369,7 @@ impl TmuxSession {
             .arg("-P")
             .arg("-F")
             .arg("#{pane_id}")
-            .arg(render_shell_command(&launch.program, &launch.args));
+            .arg(render_shell_command(launch));
         command
     }
 
@@ -387,7 +391,7 @@ impl TmuxSession {
             .arg("-P")
             .arg("-F")
             .arg("#{pane_id}")
-            .arg(render_shell_command(&launch.program, &launch.args));
+            .arg(render_shell_command(launch));
         command
     }
 }
@@ -396,10 +400,21 @@ fn validate_launch(launch: &TmuxLaunch) -> Result<(), TmuxNodeError> {
     if launch.program.is_empty() || launch.program.as_bytes().contains(&0) {
         return Err(TmuxNodeError::InvalidProgram);
     }
-    for name in launch.environment.keys() {
+    for name in launch
+        .environment
+        .keys()
+        .chain(launch.unset_environment.iter())
+    {
         if !valid_environment_name(name) {
             return Err(TmuxNodeError::InvalidEnvironmentName(name.clone()));
         }
+    }
+    if let Some(name) = launch
+        .environment
+        .keys()
+        .find(|name| launch.unset_environment.contains(*name))
+    {
+        return Err(TmuxNodeError::ConflictingEnvironmentName(name.clone()));
     }
     Ok(())
 }
@@ -412,9 +427,24 @@ fn valid_environment_name(name: &str) -> bool {
         && !name.as_bytes()[0].is_ascii_digit()
 }
 
-fn render_shell_command(program: &str, args: &[String]) -> String {
-    std::iter::once(program)
-        .chain(args.iter().map(String::as_str))
+fn render_shell_command(launch: &TmuxLaunch) -> String {
+    let unsets = launch
+        .unset_environment
+        .iter()
+        .flat_map(|name| ["-u", name.as_str()]);
+    let command =
+        std::iter::once(launch.program.as_str()).chain(launch.args.iter().map(String::as_str));
+    let words = if launch.unset_environment.is_empty() {
+        command.collect::<Vec<_>>()
+    } else {
+        std::iter::once("env")
+            .chain(unsets)
+            .chain(std::iter::once("--"))
+            .chain(command)
+            .collect()
+    };
+    words
+        .into_iter()
         .map(quote_shell_word)
         .collect::<Vec<_>>()
         .join(" ")
@@ -436,6 +466,8 @@ pub enum TmuxNodeError {
     InvalidProgram,
     #[error("invalid tmux launch environment name {0:?}")]
     InvalidEnvironmentName(String),
+    #[error("tmux launch environment name {0:?} is both set and unset")]
+    ConflictingEnvironmentName(String),
     #[error("tmux {operation} could not run: {source}")]
     Io {
         operation: &'static str,
@@ -468,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_uses_tmux_environment_and_quotes_only_the_constant_command() {
+    fn launch_sets_and_unsets_environment_without_interpolating_values() {
         let launch = TmuxLaunch {
             window_name: "🤖 actor.1".into(),
             cwd: PathBuf::from("/tmp/work tree"),
@@ -478,6 +510,7 @@ mod tests {
                 ("TIDEPOOL_ACTOR".into(), "1:2 with spaces".into()),
                 ("TOKEN".into(), "not shell-expanded: $HOME".into()),
             ]),
+            unset_environment: BTreeSet::from(["STALE_TOOL".into()]),
         };
         validate_launch(&launch).unwrap();
         let session = TmuxSession::with_socket("swarm", "sock").unwrap();
@@ -496,22 +529,37 @@ mod tests {
             .any(|pair| pair == ["-e", "TOKEN=not shell-expanded: $HOME"]));
         assert_eq!(
             args.last().unwrap(),
-            "'/tmp/tidepool node' 'host' 'apostrophe'\\''s'"
+            "'env' '-u' 'STALE_TOOL' '--' '/tmp/tidepool node' 'host' 'apostrophe'\\''s'"
         );
     }
 
     #[test]
     fn invalid_environment_names_fail_before_tmux() {
-        let launch = TmuxLaunch {
+        let mut launch = TmuxLaunch {
             window_name: "actor".into(),
             cwd: PathBuf::from("/tmp"),
             program: "node".into(),
             args: Vec::new(),
             environment: BTreeMap::from([("BAD-NAME".into(), "x".into())]),
+            unset_environment: BTreeSet::new(),
         };
         assert!(matches!(
             validate_launch(&launch),
             Err(TmuxNodeError::InvalidEnvironmentName(_))
+        ));
+
+        launch.environment.clear();
+        launch.unset_environment.insert("BAD-NAME".into());
+        assert!(matches!(
+            validate_launch(&launch),
+            Err(TmuxNodeError::InvalidEnvironmentName(_))
+        ));
+
+        launch.unset_environment = BTreeSet::from(["SAME".into()]);
+        launch.environment.insert("SAME".into(), "value".into());
+        assert!(matches!(
+            validate_launch(&launch),
+            Err(TmuxNodeError::ConflictingEnvironmentName(name)) if name == "SAME"
         ));
     }
 
@@ -545,6 +593,7 @@ mod tests {
             program: "sleep".into(),
             args: vec!["60".into()],
             environment: BTreeMap::new(),
+            unset_environment: BTreeSet::new(),
         };
 
         let pane = session.create(&launch).await.unwrap();
