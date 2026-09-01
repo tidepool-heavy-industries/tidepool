@@ -922,13 +922,15 @@ Implement this boundary in order:
    `ReadOnly` write is refused by Rust even if a malformed or stale program
    manages to issue the nominal request. The compile-failure fixture remains a
    model-surface hygiene test, not the authorization proof.
-6. [ ] Finish the first production agent-backed root through
+6. [x] Finish the first production agent-backed root through
    `ResidentActorHost`, which remains the sole scheduler for every callback
    into resident Haskell. Reuse the same registry, machine-access seam, profile
    authorization, root custody, and event stream. The composition root makes
    no OAuth request: the interactive backend owns its conversation, while the
    resident provider is unavailable unless a later policy explicitly installs
-   one.
+   one. A fresh stock TUI receives one launch-time startup prompt because its
+   resumable rollout does not exist until the first user message; later input
+   uses the durable inbox and native push path.
 
    The checked-in `Tidepool.Actors.DevSwarm` policy and
    `tidepool-actor-host` composition are landed. The root exposes typed
@@ -945,11 +947,14 @@ Implement this boundary in order:
    Successful MCP settlement is linearized only after the Haskell policy parks
    for its next invocation.
 
-   Remaining acceptance is one bounded live stock-TUI run proving the root and
-   child panes, real binding discovery, queued startup delivery, and confirmed
-   teardown. Filesystem profile handlers, worktree grants, policy reload, and
-   the full DevSwarm fold remain later work; the initial production machine
-   intentionally handles no ambient filesystem effect.
+   A bounded live stock-TUI run on Codex 0.149.0 passed on 2026-09-01. The root
+   called `actor_status`, accepted `spawn_worker`, and produced a second exact
+   actor pane. That worker discovered its own rollout, acknowledged its durable
+   startup message, called `current_assignment`, and performed the supplied
+   review in its own context. Ctrl-C removed both exact panes and reaped the
+   daemon/node processes. Filesystem profile handlers, worktree grants, policy
+   reload, and the full DevSwarm fold remain later work; the initial production
+   machine intentionally handles no ambient filesystem effect.
 
    Port only the following Exomonad mechanisms into their Tidepool owners:
    stock-TUI command construction, rollout discovery and versioned binding,

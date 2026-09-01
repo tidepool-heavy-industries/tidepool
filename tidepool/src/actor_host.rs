@@ -245,63 +245,71 @@ async fn run_nodes(
 ) -> Result<(), String> {
     let mut deployments = Vec::new();
     let mut health = tokio::time::interval(Duration::from_millis(250));
-    loop {
+    let failure = loop {
         tokio::select! {
             biased;
-            _ = wait_for_shutdown(shutdown.clone()) => break,
+            _ = wait_for_shutdown(shutdown.clone()) => break None,
             _ = health.tick() => {
-                if let Some(index) = deployments
+                if let Some(deployment) = deployments
                     .iter()
-                    .position(|deployment: &NodeDeployment| deployment.service.is_finished())
+                    .find(|deployment: &&NodeDeployment| deployment.service.is_finished())
                 {
-                    let deployment = deployments.swap_remove(index);
-                    let actor = deployment.actor;
-                    let outcome = deployment.service.await
-                        .map_err(|error| format!("actor {actor:?} MCP service task: {error}"))?;
-                    let _ = std::fs::remove_dir_all(&deployment.socket_root);
-                    outcome?;
-                    return Err(format!(
+                    break Some(format!(
                         "interactive node for actor {:?} exited before host shutdown",
-                        actor
+                        deployment.actor
                     ));
                 }
             }
             installation = installations.recv() => {
-                let Some(installation) = installation else { break };
-                let deployment = launch_node(
+                let Some(installation) = installation else { break None };
+                match launch_node(
                     installation,
                     root,
                     &config,
                     &run_root,
                     &tmux,
                     Arc::clone(&backend),
-                ).await?;
-                deployments.push(deployment);
+                ).await {
+                    Ok(deployment) => deployments.push(deployment),
+                    Err(error) => break Some(error),
+                }
             }
         }
-    }
+    };
 
+    let mut cleanup_failure = None;
     for deployment in &deployments {
-        tmux.kill_pane(&deployment.pane)
-            .await
-            .map_err(|error| format!("stop actor {:?}: {error}", deployment.actor))?;
+        if let Err(error) = tmux.kill_pane(&deployment.pane).await {
+            cleanup_failure
+                .get_or_insert_with(|| format!("stop actor {:?}: {error}", deployment.actor));
+        }
     }
     for mut deployment in deployments {
         match tokio::time::timeout(Duration::from_secs(5), &mut deployment.service).await {
             Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => return Err(error),
-            Ok(Err(error)) => return Err(format!("actor MCP service task: {error}")),
+            Ok(Ok(Err(error))) => {
+                cleanup_failure.get_or_insert(error);
+            }
+            Ok(Err(error)) => {
+                cleanup_failure.get_or_insert_with(|| format!("actor MCP service task: {error}"));
+            }
             Err(_) => {
                 deployment.service.abort();
-                return Err(format!(
-                    "actor {:?} MCP service did not stop after its pane exited",
-                    deployment.actor
-                ));
+                cleanup_failure.get_or_insert_with(|| {
+                    format!(
+                        "actor {:?} MCP service did not stop after its pane exited",
+                        deployment.actor
+                    )
+                });
             }
         }
         let _ = std::fs::remove_dir_all(&deployment.socket_root);
     }
-    Ok(())
+    match (failure, cleanup_failure) {
+        (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (None, None) => Ok(()),
+    }
 }
 
 async fn launch_node(
@@ -344,6 +352,7 @@ async fn launch_node(
         model: config.model.clone(),
         effort: config.effort,
         developer_instructions: developer_instructions(actor == root),
+        initial_prompt: initial_prompt(actor == root),
     };
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
         .map_err(|error| error.to_string())?;
@@ -397,9 +406,9 @@ async fn launch_node(
         }
     };
     let initial = if actor == root {
-        "Your Tidepool root actor is live. Inspect your actor-scoped tools, report your status, and wait for the operator's work."
+        "Runtime binding confirmed."
     } else {
-        "You are a newly started Tidepool worker. Inspect your actor-scoped tools, retrieve your typed assignment, and begin the work."
+        "Runtime binding confirmed; continue the typed startup assignment."
     };
     if let Err(error) = inbox.publish(initial.into()) {
         abandon_node(tmux, &pane, service, &socket_root).await;
@@ -483,6 +492,15 @@ fn developer_instructions(root: bool) -> String {
     format!(
         "You are a Tidepool {role} actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Use those tools to inspect and act; Rust owns process and actor lifecycle."
     )
+}
+
+fn initial_prompt(root: bool) -> String {
+    if root {
+        "Initialize your Tidepool root actor through its typed tools, report its status, and end this turn."
+    } else {
+        "Initialize this Tidepool worker through its typed tools. Retrieve the typed startup assignment and begin it."
+    }
+    .into()
 }
 
 fn fresh_session_id() -> SessionId {

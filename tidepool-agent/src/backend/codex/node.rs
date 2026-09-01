@@ -13,8 +13,8 @@ use tokio::process::Command;
 
 use crate::interactive::{
     ENV_NODE_ACTOR_ID, ENV_NODE_BINDING_PATH, ENV_NODE_CREDENTIAL, ENV_NODE_DEVELOPER_INSTRUCTIONS,
-    ENV_NODE_ENDPOINT, ENV_NODE_INCARNATION, ENV_NODE_MODEL, ENV_NODE_REASONING_EFFORT,
-    ENV_NODE_WORKSPACE,
+    ENV_NODE_ENDPOINT, ENV_NODE_INCARNATION, ENV_NODE_INITIAL_PROMPT, ENV_NODE_MODEL,
+    ENV_NODE_REASONING_EFFORT, ENV_NODE_WORKSPACE,
 };
 use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentProcess,
@@ -55,6 +55,7 @@ async fn run_host_from_env() -> Result<(), AgentBackendError> {
         model: optional_env(ENV_NODE_MODEL),
         effort,
         developer_instructions: required_env(ENV_NODE_DEVELOPER_INSTRUCTIONS)?,
+        initial_prompt: Some(required_env(ENV_NODE_INITIAL_PROMPT)?),
         mcp: crate::InteractiveMcpServer {
             name: "tidepool_actor".into(),
             command: executable,
@@ -299,6 +300,10 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<Command, AgentBackendError
         spec.mcp.required.to_string(),
     );
     push_config_value(&mut command, &format!("{prefix}.enabled"), "true".into());
+
+    if let Some(prompt) = &spec.initial_prompt {
+        command.arg(prompt);
+    }
 
     command
         .current_dir(&spec.cwd)
@@ -601,13 +606,14 @@ mod tests {
     }
 
     #[test]
-    fn fresh_tui_launch_is_idle_and_installs_only_its_scoped_mcp_server() {
+    fn fresh_tui_launch_carries_startup_prompt_and_only_its_scoped_mcp_server() {
         let spec = InteractiveAgentSpec {
             mode: InteractiveLaunchMode::Fresh,
             cwd: "/tmp/work".to_string(),
             model: Some("gpt-test".to_string()),
             effort: Some(ReasoningEffort::Medium),
             developer_instructions: "actor charter".to_string(),
+            initial_prompt: Some("initialize through typed tools".to_string()),
             mcp: crate::InteractiveMcpServer {
                 name: "tidepool_actor".to_string(),
                 command: "tidepool-node".to_string(),
@@ -625,7 +631,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(command.as_std().get_program(), "codex");
         assert!(!args.iter().any(|arg| arg == "resume" || arg == "fork"));
-        assert!(!args.iter().any(|arg| arg.contains("initial task")));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "initialize through typed tools"));
         assert!(args
             .windows(2)
             .any(|args| args == ["--ask-for-approval", "never"]));
@@ -660,6 +668,7 @@ mod tests {
             model: None,
             effort: None,
             developer_instructions: String::new(),
+            initial_prompt: None,
             mcp: crate::InteractiveMcpServer {
                 name: "bad.name".to_string(),
                 command: "proxy".to_string(),

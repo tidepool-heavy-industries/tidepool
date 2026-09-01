@@ -295,7 +295,12 @@ where
         self.mcp_policies.get(&actor).cloned()
     }
 
-    /// Take the sole live-policy handoff stream before starting the host loop.
+    /// Take the sole live-policy deployment stream before starting the host
+    /// loop.
+    ///
+    /// The stream is an optional observer for hosts that deploy an external
+    /// transport for each policy. Dropping it does not uninstall policies or
+    /// affect local access through [`Self::mcp_policy`].
     pub fn take_mcp_installations(
         &mut self,
     ) -> Result<mpsc::UnboundedReceiver<ResidentMcpInstallation>, ResidentActorHostError> {

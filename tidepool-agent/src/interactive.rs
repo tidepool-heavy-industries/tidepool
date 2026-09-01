@@ -24,6 +24,7 @@ pub(crate) const ENV_NODE_WORKSPACE: &str = "TIDEPOOL_NODE_WORKSPACE";
 pub(crate) const ENV_NODE_MODEL: &str = "TIDEPOOL_NODE_MODEL";
 pub(crate) const ENV_NODE_REASONING_EFFORT: &str = "TIDEPOOL_NODE_REASONING_EFFORT";
 pub(crate) const ENV_NODE_DEVELOPER_INSTRUCTIONS: &str = "TIDEPOOL_NODE_DEVELOPER_INSTRUCTIONS";
+pub(crate) const ENV_NODE_INITIAL_PROMPT: &str = "TIDEPOOL_NODE_INITIAL_PROMPT";
 
 /// Deployment inputs for one pane-owned interactive agent incarnation.
 ///
@@ -39,6 +40,7 @@ pub struct InteractiveNodeLaunch {
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub developer_instructions: String,
+    pub initial_prompt: String,
 }
 
 impl InteractiveNodeLaunch {
@@ -67,6 +69,7 @@ impl InteractiveNodeLaunch {
                 ENV_NODE_DEVELOPER_INSTRUCTIONS.into(),
                 self.developer_instructions.clone(),
             ),
+            (ENV_NODE_INITIAL_PROMPT.into(), self.initial_prompt.clone()),
         ]);
         if let Some(model) = &self.model {
             environment.insert(ENV_NODE_MODEL.into(), model.clone());
@@ -121,6 +124,9 @@ pub struct InteractiveAgentSpec {
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub developer_instructions: String,
+    /// First user message. A fresh stock TUI needs this to create the rollout
+    /// addressed by subsequent native push operations.
+    pub initial_prompt: Option<String>,
     pub mcp: InteractiveMcpServer,
 }
 
@@ -176,6 +182,7 @@ mod tests {
             model: Some("model-name".into()),
             effort: Some(ReasoningEffort::Medium),
             developer_instructions: "typed tools first".into(),
+            initial_prompt: "initialize".into(),
         };
         let environment = launch.environment();
         assert_eq!(environment[ENV_NODE_ACTOR_ID], "7");
@@ -187,5 +194,6 @@ mod tests {
             environment[ENV_NODE_DEVELOPER_INSTRUCTIONS],
             "typed tools first"
         );
+        assert_eq!(environment[ENV_NODE_INITIAL_PROMPT], "initialize");
     }
 }
