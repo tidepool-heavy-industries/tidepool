@@ -195,6 +195,7 @@ enum HostLifecycle {
 }
 
 /// The sole owner of resident actor scheduling state for one runtime.
+#[must_use = "a live actor host requires shutdown or run_until_shutdown for async cleanup"]
 pub struct ResidentActorHost<H, O> {
     runtime: Arc<ResidentHostRuntime<H, O>>,
     machines: Arc<ActorMachineRegistry<H, O>>,

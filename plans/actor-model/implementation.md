@@ -818,16 +818,21 @@ Implement it as these reviewable boundaries:
 
 5. [ ] **Major-boundary verification and surface contraction.**
 
-   - Move the manual orchestration in `tests/start_surface.rs` into an adjacent
-     host fixture/vertical rather than duplicating it. Large Haskell programs
-     remain `include_str!` fixtures.
-   - Run formatting, `git diff --check`, strict actor Clippy, actor library
+   - [x] Factor the manual `tests/start_surface.rs` setup into one adjacent
+     fixture and add the host vertical without duplicating its Haskell program.
+     Large Haskell programs remain `include_str!` fixtures.
+   - [x] Run formatting, `git diff --check`, strict actor Clippy, actor library
      tests, and the one Nix-backed host vertical. This is the tranche's major
      boundary; broader workspace batteries remain unnecessary.
-   - Audit `lib.rs` exports after the host is the production consumer. Make
+   - [x] Audit `lib.rs` exports after the host is the production consumer. The
+     starter/mailbox/workbench orchestration types now have only white-box
+     integration-test consumers outside the crate; there is no production
+     caller to preserve.
+   - [ ] Move those white-box tests behind crate-owned test modules, then make
      starter/mailbox/workbench orchestration types crate-private where no
-     external production caller remains; do not preserve the old manual path
-     solely for tests.
+     production caller remains. Do not add a default test-support feature,
+     `doc(hidden)` facade, or other fake contraction solely to keep the current
+     external-test layout.
 
 This tranche deliberately excludes provider/profile production composition,
 worktree grants, lifecycle advisories, structural fork, compiler-endpoint
