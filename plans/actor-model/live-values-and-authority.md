@@ -168,6 +168,13 @@ its registered child policy for one handle. The model does not choose an
 arbitrary `Share`/`Rebind` enum, forge a registry identifier, or edit a generic
 grant record.
 
+The first concrete recipe binds one owner-selected managed worktree to a fresh
+DevSwarm worker. The owner creates the worktree, retains its handle, closes that
+same value into the worker definition, and decorates the definition through
+the Worktree module's narrow grant helper. Shoal resolves the redeemed binding
+to choose the external application cwd; it must delete its current automatic
+post-spawn allocation rather than retain two placement paths.
+
 At `startActor`, Rust checks the current principal and the resource's
 registered policy under the child interpreter. It then redeems every
 recipe atomically for the newly allocated child before startup. Any refusal
@@ -180,6 +187,14 @@ This is launch metadata, not part of the program image. General post-start
 `delegate`/`revoke` operations are deferred until a real protocol needs them.
 Actor retirement still revokes grants it owns, and revocation is always
 checked at use by already-copied handles and closures.
+
+The worktree's durable ID may seed a V0 model-facing `WorkerHandle`, but that
+handle is correlation only. It neither reconstructs an `ActorRef` nor grants
+worktree access. Exact Haskell state maps it to the current actor reference and
+request; the worktree interpreter separately checks the actor principal and
+redeemed grant. V0 allocates one fresh worktree per worker and forbids rebind,
+so a later reusable-worktree design must add an explicit binding generation
+rather than silently changing what an old worker handle denotes.
 
 ## 7. Mailbox root ownership
 

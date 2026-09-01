@@ -204,6 +204,56 @@ outcomes and evidence rather than every descendant's complete conversation.
 Independent review operates at these join points and checks the exact
 candidate revision.
 
+### Worktree-backed submission
+
+The first self-hosting worker has one fresh managed worktree selected by its
+owner. The owner attaches a capability-specific launch recipe to the worker's
+definition; `startActor` redeems that recipe under the exact unpublished child
+principal. Shoal resolves the resulting binding when it launches the external
+agent application. This replaces automatic post-spawn worktree allocation:
+there is one worktree owner, one binding, and one authority path.
+
+The external model submits only an authored report. While its `finish_work`
+tool call is waiting, trusted Haskell asks the Rust-owned Worktree interpreter
+for one coherent submission observation and constructs the worker's typed
+successful exit from both values. The owning operation either returns facts
+from one stable observation or a typed unstable-observation failure; it never
+mixes facts read across detected movement. The observation contains:
+
+- durable worktree identity and recorded base commit;
+- either a branch plus observed commit or a detached observed commit;
+- staged, unstaged, and untracked state; and
+- a typed in-progress Git operation when one exists.
+
+This is an observation point, not a worktree seal. The commit is named
+`submittedHead`, never `finalHead`: a clean commit OID is an immutable artifact
+that an owner can review or integrate even if the retained worktree later
+moves. Dirty state is truthful evidence of what was observed, not a stable
+artifact. V0 normally treats a dirty submission as non-integrable; accepting it
+later would require a captured patch/tree digest or a fresh authoritative
+observation.
+
+The whole product remains the exact live Haskell exit carried by `ActorRef`.
+Rust does not keep a second candidate-result registry, rewrite a named MCP
+result, or join model output to repository facts after actor termination.
+Worktree observation and authorization remain Rust mechanics; Haskell owns the
+workflow product and acceptance decision.
+
+The interactive root projects this live state through an idempotent JSON tool
+surface. Its `WorkerHandle` is correlation, not authority; JSON can be forged,
+so every use is checked against Haskell-owned worker state. V0 may derive the
+handle representation from the worker's fresh `WorktreeId`, but exposes a
+distinct type so later workers with zero, reused, or multiple resources do not
+change the model-facing protocol. The private exact `ActorRef`, execution
+principal, and redeemed grants remain the authority.
+
+Collection is a repeatable observation, never an implicit deletion. A separate
+acknowledgment drops the retained `ActorRef` and leaves a small tombstone for
+the rest of the root incarnation. A dropped response, duplicate request, or
+delayed lifecycle wake therefore returns the same receipt or an explicit
+already-acknowledged result, never an ambiguous not-found result. V0 does not
+carry this state across `--recreate`.
+
 ### Surface-selection rule
 
 The Rust kernel may be comprehensive; the Haskell DSL should not be. It is an
@@ -435,6 +485,22 @@ row pending for retry and never kills the owner. Provider failure inside a
 result-bearing resident session still follows the typed obligation it
 interrupted; lifecycle delivery does not create another provider executor,
 completion token, or recovery protocol.
+
+An external interactive agent is an application attached to an actor, not a
+second actor identity or lifecycle owner. A worker-spawn response means the
+resident actor exists and deployment has been requested; it does not promise
+that the external application is already online. Launch failure or unexpected
+application death while the child is live asks `ResidentActorHost` to fail
+that exact actor, making the ordinary retained `ActorExit` authoritative while
+leaving the owner alive. Deployment tasks never mutate the registry directly.
+
+Lifecycle precedence is decided once by the host. If terminal settlement wins
+the race, later application exit is cleanup and cannot rewrite the actor's
+result. If unexpected application death wins while the actor is live, the
+exact child fails and normal subtree cleanup follows. Loss of the root
+application ends the Shoal run. A post-terminal failure to contain an orphaned
+native process may still fail the run as a resource-containment invariant, but
+it cannot revise the already-published child exit.
 
 ## 6. Actor construction
 
@@ -735,6 +801,14 @@ stored JSON and external resources recoverable by their trusted interpreters.
 Live closures, parked continuations, Haskell bindings, and provider contexts do
 not survive. Restart tolerance is not required for the initial actor model.
 
+Shoal's V0 `--recreate` contract is deliberately smaller still: it may resume
+the root provider conversation, but creates a fresh root incarnation and does
+not restore worker records, actor references, bindings, acknowledgments, or
+pending results. The resumed model receives explicit reconciliation context
+that those values are dead. Retained worktrees remain ordinary external
+resources, but are not silently rebound to new actors. Same-incarnation
+collection replay must not be mistaken for restart recovery.
+
 This does not preclude a later program-image or model-context persistence
 scheme; it prevents that speculative work from contaminating the first API.
 
@@ -842,3 +916,13 @@ ultimate owner of every external resource.
 19. A spawn edge may preserve or attenuate its owner's named effect profile,
     never amplify it. Profile membership limits expressible operation classes;
     principals, grants, and opaque handles independently authorize resources.
+20. One worktree-backed worker has one owner-selected fresh worktree and one
+    principal-checked binding; Shoal never allocates a competing implicit tree.
+21. A candidate receipt distinguishes model-authored claims from one coherent
+    Rust-observed repository state and calls its commit `submittedHead`, not
+    `finalHead`.
+22. Collection is repeatable until explicit acknowledgment. MCP response loss
+    cannot silently drop the Haskell `ActorRef` that retains the typed exit.
+23. External child-application failure reaches lifecycle only through the
+    resident host owner and never becomes fleet failure merely because the
+    failed actor was a child.

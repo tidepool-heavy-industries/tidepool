@@ -47,6 +47,10 @@ configuration records.
 
 This is the canonical status inventory for the plan.
 
+The next delivery order is Stage 7B, then Stage 7C. Do not expand the
+self-hosting surface before candidate custody, worktree authority, and exact
+child application failure pass those stages' focused acceptance tests.
+
 ### Landed
 
 - `tidepool-actor` owns exact-incarnation identity, lifecycle state, the
@@ -182,7 +186,8 @@ This is the canonical status inventory for the plan.
   late wait after the target has exited. Provider-backed startup cancellation,
   startup panic cleanup, quiescence, and session removal are also landed;
 - capability-specific worktree launch grants and the adaptive recursive
-  worktree policy built on them;
+  worktree policy built on them, including authoritative candidate submission,
+  replayable collection, and exact external-application failure routing;
 - an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
   require it, but current profiles, facades, and nominal handlers must leave it
   additive without changing the actor API, program images, profile semantics,
@@ -970,14 +975,15 @@ Implement this boundary in order:
 
    Worker deployment now allocates one retained managed worktree per actor and
    launches its interactive process there, eliminating concurrent mutation of
-   the source checkout. Capability-bearing Haskell worktree grants, policy
-   reload, native-tool sandbox projection, and authoritative commit/evidence
-   folding remain later work. `ReadWrite`/`ReadOnly` therefore remain explicitly
+   the source checkout. This automatic post-spawn allocation is transitional
+   and must be replaced, not wrapped, by Stage 7B's owner-selected launch
+   grant. Policy reload, native-tool sandbox projection, and broader
+   commit/evidence folding remain later work. `ReadWrite`/`ReadOnly` therefore remain explicitly
    experimental resident-effect classifications rather than process-security
    claims; the initial production machine intentionally handles no ambient
    filesystem effect.
 
-   Three implementation seams remain deliberately visible instead of being
+   Four implementation seams remain deliberately visible instead of being
    papered over by Shoal-local machinery:
 
    - the root is still compiled and installed by the composition root rather
@@ -1007,8 +1013,170 @@ Implement this boundary in order:
 
 The gate should be extensible by adding typed operation classes and profile
 decisions, not by turning the two initial profiles into a generic dynamic
-capability framework. Per-resource launch grants remain a separate Stage 7B
-concern.
+capability framework.
+
+### Stage 7B — capability-bound, replayable candidate submission
+
+This is the next implementation slice. It replaces Shoal's transitional
+automatic worktree allocation and the destructive `awaitWorker` projection;
+it does not add a second candidate registry or a Rust-special-cased MCP tool.
+
+1. Add one owning Worktree submission-observation operation.
+   - Return durable worktree ID, recorded base commit, `OnBranch branch oid` or
+     `Detached oid`, path-level `DirtySummary`, and typed in-progress operation
+     in one result.
+   - Establish one consistency contract inside `tidepool-worktree`; callers do
+     not compose separately timed head/status/operation reads. Detected
+     movement produces a typed unstable-observation result after bounded
+     internal retry, never a mixed receipt or unbounded wait.
+   - Call the commit `submittedHead`. Do not claim the worktree is sealed.
+   - Reuse `GitCli`, `WorktreeHandle`, `DirtySummary`, and `InProgressKind`; add
+     `Other(String)` to that existing operation enum if unknown state must be
+     retained rather than introducing a stringly parallel type. Do not add a
+     Shoal Git runner or parse rendered Git text.
+   - Test clean branch, detached head, dirty index/worktree/untracked state,
+     in-progress operation, missing tree, and mutation during observation.
+
+2. Land the first capability-specific launch recipe.
+   - The root creates a fresh managed worktree before `startActor` and retains
+     its handle.
+   - The Worktree capability module decorates the worker definition with an
+     opaque recipe for that exact handle; no public generic grant record or
+     recursive startup-value scan is introduced.
+   - Redeem under the caller and unpublished child principals before
+     readiness, using the existing resource/binding owner. Roll back every
+     derived grant and unpublished actor resource if redemption fails; retain
+     the worktree itself under the existing retain-first policy.
+   - Replace `tidepool-worktree::AgentRef` string ownership with or narrow it
+     behind exact actor-principal binding rather than adding another map.
+   - Shoal resolves the redeemed binding for the child cwd and deletes its
+     automatic `ActorRef`-labelled worktree allocation path.
+   - Compose the existing Worktree handler into Shoal once. The root may create
+     a fresh tree; the worker may observe only its granted tree. Creation,
+     merge, and unrelated-handle reads remain refused under the child
+     principal. Generalize any required Haskell helper from concrete `M` to a
+     `Member Worktree effs` constraint instead of hard-coding a stack.
+   - Prove same-principal success, cross-principal refusal, stale recipe/ref
+     refusal, old-incarnation refusal, atomic rollback, and one worktree per
+     external worker.
+
+3. Make successful worker submission truthful at the Haskell boundary.
+   - Split the model input `WorkerReport` from the successful
+     `CandidateReceipt` exit.
+   - Close the granted `WorktreeHandle` into the worker definition. While
+     `finish_work` is pending, the trusted Haskell handler obtains one fresh
+     submission observation and constructs the candidate exit.
+   - A clean submitted OID is the immutable review/integration artifact.
+     Dirty state completes truthfully but is non-integrable by default; the
+     runtime does not silently stash, commit, or patch it.
+   - A repository-observation failure cannot be replaced by model JSON and
+     does not yield `WorkCompleted`.
+   - Prove a real worker commit changes `submittedHead`, leaves the source
+     checkout untouched, and cannot forge its worktree/base/head facts through
+     `finish_work` input.
+
+4. Replace destructive blocking collection with an idempotent state machine.
+   - Add exact nonblocking `pollExit`; preserve repeatable `awaitExit` for
+     ordinary resident control flow.
+   - Introduce a distinct model-facing `WorkerHandle`. V0 may derive its wire
+     representation from the fresh `WorktreeId`, but Haskell state retains the
+     exact `ActorRef` and treats JSON only as correlation.
+   - Retain the normalized typed spawn intent. Look up and compare it before
+     allocating a worktree or deriving a grant. Same key plus same intent
+     returns the existing handle while it is live or collectible; same key plus
+     different assignment or requested launch policy returns
+     `WorkerKeyConflict`; an acknowledged key returns
+     `WorkerAlreadyAcknowledged` and stays reserved. Runtime-issued worktree and
+     grant identities are results of the first accepted intent, not fields a
+     retry must reproduce.
+   - `collect_worker` never removes a record. It returns pending, the same
+     terminal outcome on every call, already-acknowledged, or genuinely
+     unknown.
+   - `ack_worker` drops the exact reference only after `collect_worker` has
+     observed a terminal result and leaves a per-incarnation tombstone.
+     `list_workers` reports pending, collected, and acknowledged state rather
+     than only key strings.
+   - Owner notifications carry the same application `WorkerHandle` alongside
+     exact lifecycle identity. They remain informational and need no ordering
+     guarantee or access to the typed candidate value.
+   - Remove model-facing `await_worker`; do not add `await_any`, timeout,
+     progress, or ordered-notification machinery in this slice.
+
+5. Scope replay honestly.
+   - Result replay, key reservation, and acknowledgment last only for the
+     current root incarnation.
+   - `--recreate` may resume the provider thread but creates fresh actor state
+     and explicitly tells the model that old worker handles, bindings, pending
+     results, and acknowledgments are dead.
+   - Retained worktrees remain discoverable external resources but are not
+     automatically rebound or reconstructed as workers.
+
+Stage 7B acceptance:
+
+- dropping the first collection response and retrying returns the identical
+  `CandidateReceipt`;
+- collection followed by a delayed duplicate terminal wake returns the same
+  receipt, or `WorkerAlreadyAcknowledged` after explicit acknowledgment;
+- dropping an acknowledgment response and retrying reports acknowledged;
+- a dropped spawn response can be recovered by retrying the same typed request,
+  while a changed request conflicts;
+- dirty work is reported truthfully and is distinguishable from a clean
+  immutable submitted commit;
+- exact actor and worktree authority remain private despite forgeable JSON;
+  and
+- no new candidate-result registry, Git runner, scheduler, or worktree
+  allocator exists beside the current owners.
+
+Land this slice as one coherent capability/submission commit or a small series
+whose intermediate states compile but are not presented as self-hosting-ready.
+
+### Stage 7C — exact external-application failure routing
+
+Land this as a separate lifecycle commit because it changes race precedence
+and fleet shutdown behavior.
+
+1. Give deployment supervision one typed control channel into
+   `ResidentActorHost`.
+   - Commands name the exact actor and a structured external-application
+     failure class; rendered `String` remains diagnostic payload, never control
+     flow.
+   - The host remains the only code allowed to settle resident lifecycle,
+     continuation custody, and subtree cleanup. Deployment tasks never mutate
+     `ActorRegistry` directly.
+   - The acknowledged command result distinguishes exact actor failure applied,
+     actor already terminal, and unknown/stale actor. The host decides this
+     race atomically with lifecycle state; the deployment coordinator never
+     infers it from timing or error prose.
+2. Route child failures precisely.
+   - Worktree-binding resolution, command construction, launch, rollout
+     discovery, and unexpected live MCP/process exit fail that exact child.
+   - The parent remains live and observes ordinary `WorkFailed` through its
+     retained reference; one informational lifecycle wake is still delivered.
+   - Root application loss ends the run because no owner can supervise it.
+3. Resolve terminal/application races once.
+   - A terminal actor record wins over later application failure; retirement is
+     bounded cleanup and cannot rewrite the result.
+   - An application failure observed while the actor is live asks the host to
+     publish `Failed` once, then follows normal retirement.
+   - A post-terminal inability to contain an orphaned native process may fail
+     the Shoal run as a resource-containment invariant, but the child's typed
+     result remains immutable.
+4. Keep lifecycle work off the fleet coordinator.
+   - Launch, delivery, retirement, and failure reporting remain independently
+     supervised and bounded.
+   - Child failure is data, not `run_interactive_applications` returning an
+     ensemble error.
+
+Stage 7C acceptance:
+
+- launch failure yields the exact child's retained `WorkFailed` and the root
+  can start and collect another worker;
+- premature live application exit has the same child-local outcome;
+- terminal completion racing proxy/process exit remains `WorkCompleted`;
+- post-terminal cleanup timeout cannot revise or consume the receipt;
+- root application exit still terminates the run; and
+- shutdown and containment paths remain bounded with no orphaned pane, proxy,
+  delivery task, worktree binding, or resident continuation.
 
 Express the first coding jobs with fresh actors. One-shot implementation and
 review use `runActor`, return candidate/review products in typed successful

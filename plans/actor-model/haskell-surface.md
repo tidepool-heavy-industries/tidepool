@@ -194,6 +194,11 @@ awaitExit
   :: Member Actor effs
   => ActorRef protocol exit
   -> Eff effs (ActorExit exit)
+
+pollExit
+  :: Member Actor effs
+  => ActorRef protocol exit
+  -> Eff effs (Maybe (ActorExit exit))
 ```
 
 V0 runs the selected concrete row directly; reusable helpers remain
@@ -228,6 +233,13 @@ after the resulting computation is installed and ready. The startup,
 initialization-artifact, protocol, and successful-exit types need not resemble
 one another. A non-prompted constructor remains absent until a real actor needs
 one.
+
+`pollExit` is the nonblocking observation counterpart to `awaitExit`, not a
+second failure surface. It returns `Nothing` only while the exact target is
+live and returns the same retained `ActorExit` as every later observation once
+terminal. Fixed resident programs normally use `awaitExit`; an interactive MCP
+policy uses `pollExit` when blocking its sole model-facing tool turn would hide
+other completed work.
 
 The outer session that asks a model to author a definition likewise fixes the
 whole result type at its `deliberate` site:
@@ -746,6 +758,73 @@ A model may author the strategy, but it cannot acquire integration authority
 by returning a persuasive record. Runtime-observed command and actor provenance
 remain distinguishable from model-authored claims. This is prompting and actor-
 program policy by default, not a universal evidence ladder in the kernel.
+
+### Worktree-backed worker submission
+
+The first DevSwarm policy uses ordinary application types rather than adding a
+generic workflow algebra. The exact spelling may follow the existing generated
+Worktree types, but the public shape is:
+
+```haskell
+data HeadState
+  = OnBranch BranchName GitOid
+  | Detached GitOid
+
+data WorkingState = WorkingState
+  { changes   :: DirtySummary
+  , operation :: Maybe InProgressKind
+  }
+
+data SubmissionObservation = SubmissionObservation
+  { worktreeId     :: WorktreeId
+  , baseHead       :: GitOid
+  , submittedHead :: HeadState
+  , workingState   :: WorkingState
+  }
+
+data CandidateReceipt = CandidateReceipt
+  { authoredReport :: WorkerReport
+  , repository     :: SubmissionObservation
+  }
+```
+
+One Worktree operation returns `SubmissionObservation` as a coherent fresh
+read or a typed unstable-observation failure. Authored code must not assemble
+it from separately timed `HEAD`, branch, status, and operation calls.
+`InProgressKind` remains one sum type and gains an `Other Text` case if unknown
+Git state must be surfaced; rendered Git text never drives policy. An
+observation failure makes successful submission unsatisfiable rather than
+inviting the model to supply repository facts.
+
+The worker definition closes over its granted `WorktreeHandle`. Its
+`finish_work` input is only `WorkerReport`; the trusted handler performs the
+observation and completes the actor with `CandidateReceipt`. Dirty work still
+completes normally with a truthful receipt. It is not an immutable integration
+artifact, so the owner normally rejects or revises it in V0.
+
+The interactive root keeps the exact `ActorRef` private and exposes an
+application-level `WorkerHandle`. Its policy has these semantics:
+
+- spawning a new key creates one worktree and actor and returns
+  `WorkerAccepted handle` once actor creation succeeds and deployment is
+  requested;
+- retrying the same key with the same typed request returns the same handle;
+- retrying it with a different assignment or requested launch policy returns
+  `WorkerKeyConflict`; lookup and comparison happen before any new worktree or
+  grant is allocated;
+- retrying an acknowledged key reports `WorkerAlreadyAcknowledged` and never
+  starts another actor; keys remain reserved for this root incarnation;
+- `collect_worker handle` is nonblocking and non-consuming, returning pending,
+  the repeatable exact outcome, already-acknowledged, or unknown;
+- `ack_worker handle` is valid only after `collect_worker` has observed a
+  terminal result, drops the retained `ActorRef`, and leaves a tombstone; and
+- `list_workers` reports handles and their current application state.
+
+The request comparison is over the typed normalized request retained in
+Haskell state, never a rendered JSON string or hash chosen by the model.
+Transport acknowledgment cannot roll arbitrary Haskell effects back; these
+idempotent application semantics make an unknown MCP delivery outcome safe to
+retry.
 
 ## 14. What must leave Haskell
 

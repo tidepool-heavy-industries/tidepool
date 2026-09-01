@@ -81,6 +81,14 @@ is deployment topology, not a second actor identity or scheduler.
   subtree.
 - Model-authored verification should normally run authoritative checks and an
   independent fresh-actor review before acceptance.
+- A worktree-backed worker submits a typed exit that combines an explicitly
+  model-authored report with one Rust-observed repository state. Collection is
+  repeatable until explicit acknowledgment; transport delivery never consumes
+  the retained `ActorRef` implicitly.
+- V0 result replay and worker correlation last only for the current root
+  incarnation. `--recreate` starts new actor state and tells the resumed model
+  that every old actor handle, worker binding, and pending result is dead;
+  cross-incarnation recovery is later work.
 
 ## Documents
 
