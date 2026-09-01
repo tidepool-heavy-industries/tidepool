@@ -4303,6 +4303,7 @@ dependencies = [
  "tidepool-optimize",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-toolchain",
 ]
 
 [[package]]

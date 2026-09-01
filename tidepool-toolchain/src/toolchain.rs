@@ -65,11 +65,14 @@
 //! per-eval.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Env var naming the extract binary (step 1 of the extract precedence).
 /// Read here only for the stdlib table's step 3; the extract binary itself is
 /// resolved by [`tidepool_extract_cmd::resolve_bin`].
 pub const ENV_EXTRACT: &str = "TIDEPOOL_EXTRACT";
+/// Env var naming the private compiler worker used by the Rust frontend.
+pub const ENV_EXTRACT_WORKER: &str = "TIDEPOOL_EXTRACT_WORKER";
 /// Env var naming the stdlib root (step 1 of the stdlib precedence).
 pub const ENV_PRELUDE_DIR: &str = "TIDEPOOL_PRELUDE_DIR";
 /// Env var overriding [`stamp_path`].
@@ -79,6 +82,106 @@ pub const ENV_HANDSHAKE: &str = "TIDEPOOL_TOOLCHAIN_HANDSHAKE";
 
 /// The deploy command every skew message points at.
 const REDEPLOY: &str = "scripts/redeploy.sh";
+
+/// The executable role identified by a no-input Tidepool extractor probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtractBinaryRole {
+    Frontend,
+    Worker,
+    Unknown,
+}
+
+/// Classify the stable no-input response of an extractor executable.
+#[must_use]
+pub fn classify_extract_binary(stderr: &[u8]) -> ExtractBinaryRole {
+    if stderr.starts_with(b"Usage: tidepool-extract [") {
+        ExtractBinaryRole::Frontend
+    } else if stderr.starts_with(b"worker requires") {
+        ExtractBinaryRole::Worker
+    } else {
+        ExtractBinaryRole::Unknown
+    }
+}
+
+/// Probe an extractor executable without permitting either binary role to
+/// stand in for the other.
+#[must_use]
+pub fn probe_extract_binary(path: &Path) -> ExtractBinaryRole {
+    Command::new(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .map(|output| classify_extract_binary(&output.stderr))
+        .unwrap_or(ExtractBinaryRole::Unknown)
+}
+
+/// A repository-local frontend and compiler worker validated as a pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DevelopmentExtractPair {
+    frontend: PathBuf,
+    worker: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DevelopmentExtractError {
+    #[error("{ENV_EXTRACT_WORKER}={} is not a Tidepool compiler worker", .0.display())]
+    InvalidWorkerOverride(PathBuf),
+    #[error("could not locate the Cabal compiler worker: {0}")]
+    LocateWorker(#[source] std::io::Error),
+    #[error("`cabal list-bin tidepool-extract-bin` failed with {0}")]
+    CabalFailed(std::process::ExitStatus),
+    #[error("Cabal resolved {} but it is not a Tidepool compiler worker", .0.display())]
+    InvalidCabalWorker(PathBuf),
+}
+
+impl DevelopmentExtractPair {
+    /// Locate an already-built pair in a Tidepool checkout. This never builds
+    /// either half and returns `None` when the frontend is not ready.
+    ///
+    /// # Errors
+    /// Returns a typed error when the frontend exists but its explicit or
+    /// Cabal-resolved worker does not satisfy the worker contract.
+    pub fn discover(repo_root: &Path) -> Result<Option<Self>, DevelopmentExtractError> {
+        let frontend = repo_root.join("target/debug/tidepool-extract");
+        if probe_extract_binary(&frontend) != ExtractBinaryRole::Frontend {
+            return Ok(None);
+        }
+
+        let worker = match std::env::var_os(ENV_EXTRACT_WORKER) {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                if probe_extract_binary(&path) != ExtractBinaryRole::Worker {
+                    return Err(DevelopmentExtractError::InvalidWorkerOverride(path));
+                }
+                path
+            }
+            None => {
+                let output = Command::new("cabal")
+                    .args(["list-bin", "tidepool-extract-bin"])
+                    .current_dir(repo_root.join("haskell"))
+                    .output()
+                    .map_err(DevelopmentExtractError::LocateWorker)?;
+                if !output.status.success() {
+                    return Err(DevelopmentExtractError::CabalFailed(output.status));
+                }
+                let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+                if probe_extract_binary(&path) != ExtractBinaryRole::Worker {
+                    return Err(DevelopmentExtractError::InvalidCabalWorker(path));
+                }
+                path
+            }
+        };
+
+        Ok(Some(Self { frontend, worker }))
+    }
+
+    /// Publish the worker before the frontend, making the frontend assignment
+    /// the point at which the validated pair becomes available to callers.
+    pub fn install(self) {
+        std::env::set_var(ENV_EXTRACT_WORKER, self.worker);
+        std::env::set_var(ENV_EXTRACT, self.frontend);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -93,7 +196,7 @@ pub enum ToolchainError {
     /// the bare name is not on `$PATH`.
     #[error(
         "tidepool-extract not found ({tried}). Set {ENV_EXTRACT} to a built \
-         tidepool-extract-bin, or install the harness with `nix profile install .#tidepool-extract`."
+         tidepool-extract frontend, or install the harness with `nix profile install .#tidepool-extract`."
     )]
     ExtractNotFound {
         /// What was searched for, as the locator crate reported it.
@@ -769,6 +872,22 @@ fn enforce_handshake_identity(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn extractor_roles_are_not_interchangeable() {
+        assert_eq!(
+            classify_extract_binary(b"Usage: tidepool-extract [OPTIONS] <file.hs> ...\n"),
+            ExtractBinaryRole::Frontend
+        );
+        assert_eq!(
+            classify_extract_binary(b"worker requires exactly one versioned request\n"),
+            ExtractBinaryRole::Worker
+        );
+        assert_eq!(
+            classify_extract_binary(b"Usage: tidepool-extract-bin [OPTIONS]\n"),
+            ExtractBinaryRole::Unknown
+        );
+    }
 
     fn test_producer_identity(path: &Path) -> String {
         blake3::hash(&std::fs::read(path).unwrap())

@@ -18,6 +18,7 @@ tidepool-codegen.workspace = true
 proptest = "1.10.0"
 serde_json.workspace = true
 tidepool-runtime.workspace = true
+tidepool-toolchain.workspace = true
 tidepool-mcp.workspace = true
 tidepool-effect.workspace = true
 tidepool-bridge.workspace = true
@@ -44,4 +45,3 @@ harness = false
 [[test]]
 name = "haskell_verified"
 path = "tests/haskell_verified/mod.rs"
-

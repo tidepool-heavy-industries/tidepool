@@ -471,7 +471,7 @@ pub fn compile_invocation(
                                 asks_bytes,
                             }];
                             if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
-                                return Ok(Ok(CompileAttempt::Cached(artifacts)));
+                                return Ok(Ok(CompileAttempt::Cached(Box::new(artifacts))));
                             }
                         }
                     }
@@ -495,9 +495,9 @@ pub fn compile_invocation(
                     if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, inv.targets) {
                         let bytes = total_bytes(&meta_bytes, &raw);
                         on_stage(timing::STAGE_CBOR_READ, load_start.elapsed(), bytes);
-                        return Ok(
-                            assemble(&meta_bytes, &raw, &mut on_stage).map(CompileAttempt::Cached)
-                        );
+                        return Ok(assemble(&meta_bytes, &raw, &mut on_stage)
+                            .map(Box::new)
+                            .map(CompileAttempt::Cached));
                     }
                 }
                 key
@@ -513,7 +513,7 @@ pub fn compile_invocation(
     )
     .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))??;
     let (cmd, run, eval_key, inv_key) = match attempt {
-        CompileAttempt::Cached(artifacts) => return Ok(artifacts),
+        CompileAttempt::Cached(artifacts) => return Ok(*artifacts),
         CompileAttempt::Executed(executed) => executed,
     };
 
@@ -574,7 +574,7 @@ pub fn compile_invocation(
 }
 
 enum CompileAttempt<T> {
-    Cached(CompiledArtifacts),
+    Cached(Box<CompiledArtifacts>),
     Executed(T),
 }
 

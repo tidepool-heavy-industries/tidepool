@@ -94,55 +94,12 @@ pub fn effects_include() -> [PathBuf; 2] {
         .include_paths()
 }
 
-const EXTRACT_ENV: &str = "TIDEPOOL_EXTRACT";
-const EXTRACT_WORKER_ENV: &str = "TIDEPOOL_EXTRACT_WORKER";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExtractBinaryKind {
-    Frontend,
-    Worker,
-    Unknown,
-}
-
-fn classify_extract_output(stderr: &[u8]) -> ExtractBinaryKind {
-    if stderr.starts_with(b"Usage: tidepool-extract [") {
-        ExtractBinaryKind::Frontend
-    } else if stderr.starts_with(b"worker requires") {
-        ExtractBinaryKind::Worker
-    } else {
-        ExtractBinaryKind::Unknown
-    }
-}
-
-fn probe_extract(bin: &Path) -> ExtractBinaryKind {
-    std::process::Command::new(bin)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .map(|out| classify_extract_output(&out.stderr))
-        .unwrap_or(ExtractBinaryKind::Unknown)
-}
-
-fn cabal_worker(haskell: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("cabal")
-        .args(["list-bin", "tidepool-extract-bin"])
-        .current_dir(haskell)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-
-    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    (probe_extract(&path) == ExtractBinaryKind::Worker).then_some(path)
-}
-
 /// Derive and install the extractor frontend and worker environment, returning
 /// whether the session-aware toolchain is actually usable.
 ///
-/// This is the one place the "where is the extract binary" question is answered,
-/// so individual tests stop copy-pasting `cabal list-bin` paths (or, worse,
-/// `/nix/store` literals):
+/// Discovery and role validation belong to `tidepool-toolchain`; this adapter
+/// only installs its result for tests so individual callers do not copy Cabal
+/// paths or `/nix/store` literals:
 ///
 /// 1. If `TIDEPOOL_EXTRACT` names the session-aware Rust frontend, keep it.
 /// 2. Otherwise pair `<root>/target/debug/tidepool-extract` with the Cabal-built
@@ -153,53 +110,30 @@ fn cabal_worker(haskell: &Path) -> Option<PathBuf> {
 /// a private, versioned protocol and is never a valid value of
 /// `TIDEPOOL_EXTRACT`.
 pub fn extract_env() -> bool {
-    if let Some(bin) = std::env::var_os(EXTRACT_ENV) {
-        return probe_extract(Path::new(&bin)) == ExtractBinaryKind::Frontend;
+    use tidepool_toolchain::toolchain::{
+        probe_extract_binary, DevelopmentExtractPair, ExtractBinaryRole, ENV_EXTRACT,
+    };
+
+    if let Some(bin) = std::env::var_os(ENV_EXTRACT) {
+        return probe_extract_binary(Path::new(&bin)) == ExtractBinaryRole::Frontend;
     }
 
-    let haskell = repo_root().join("haskell");
-    let frontend = repo_root().join("target/debug/tidepool-extract");
-    if probe_extract(&frontend) == ExtractBinaryKind::Frontend {
-        let worker = std::env::var_os(EXTRACT_WORKER_ENV)
-            .map(PathBuf::from)
-            .filter(|path| probe_extract(path) == ExtractBinaryKind::Worker)
-            .or_else(|| cabal_worker(&haskell));
-        if let Some(worker) = worker {
-            // Install the pair only after both halves satisfy their contracts.
-            std::env::set_var(EXTRACT_WORKER_ENV, worker);
-            std::env::set_var(EXTRACT_ENV, frontend);
+    match DevelopmentExtractPair::discover(&repo_root()) {
+        Ok(Some(pair)) => {
+            pair.install();
             return true;
         }
+        Ok(None) => {}
+        Err(_) => return false,
     }
 
     let path_frontend = Path::new("tidepool-extract");
-    if probe_extract(path_frontend) == ExtractBinaryKind::Frontend {
-        std::env::set_var(EXTRACT_ENV, path_frontend);
+    if probe_extract_binary(path_frontend) == ExtractBinaryRole::Frontend {
+        std::env::set_var(ENV_EXTRACT, path_frontend);
         return true;
     }
 
     false
-}
-
-#[cfg(test)]
-mod extract_env_tests {
-    use super::{classify_extract_output, ExtractBinaryKind};
-
-    #[test]
-    fn extractor_roles_are_not_interchangeable() {
-        assert_eq!(
-            classify_extract_output(b"Usage: tidepool-extract [OPTIONS] <file.hs> ...\n"),
-            ExtractBinaryKind::Frontend
-        );
-        assert_eq!(
-            classify_extract_output(b"worker requires exactly one versioned request\n"),
-            ExtractBinaryKind::Worker
-        );
-        assert_eq!(
-            classify_extract_output(b"Usage: tidepool-extract-bin [OPTIONS]\n"),
-            ExtractBinaryKind::Unknown
-        );
-    }
 }
 
 /// Resolve and install the session-aware extractor pair when available.
