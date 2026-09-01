@@ -137,6 +137,11 @@ struct OwnerNotification {
     message: String,
 }
 
+struct PendingInteractiveLaunch {
+    cancel: oneshot::Sender<()>,
+    worker_handle: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum InteractiveOperation {
     BindWorktree,
@@ -539,8 +544,20 @@ async fn run_interactive_applications(
                     ResidentActorDeployment::PolicyInstalled(installation) => {
                         let context = launch_context.clone();
                         let actor = installation.actor;
+                        let worker_handle = (actor != root)
+                            .then(|| installation.launch_worktrees.as_slice())
+                            .and_then(|worktrees| match worktrees {
+                                [worktree] => Some(worktree.clone()),
+                                _ => None,
+                            });
                         let (cancel, cancelled) = oneshot::channel();
-                        let previous = pending_launches.insert(actor, cancel);
+                        let previous = pending_launches.insert(
+                            actor,
+                            PendingInteractiveLaunch {
+                                cancel,
+                                worker_handle,
+                            },
+                        );
                         debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
                         launches.spawn(async move {
                             let result = launch_interactive_application(
@@ -552,14 +569,16 @@ async fn run_interactive_applications(
                         });
                     }
                     ResidentActorDeployment::Retired { actor, terminal } => {
-                        if let Some(cancel) = pending_launches.remove(&actor) {
-                            let _ = cancel.send(());
-                        }
+                        let pending_worker_handle = pending_launches.remove(&actor).and_then(|pending| {
+                            let _ = pending.cancel.send(());
+                            pending.worker_handle
+                        });
                         match prepare_owner_notification(
                             actor,
                             &terminal,
                             &registry,
                             &deployments,
+                            pending_worker_handle.as_deref(),
                         ) {
                             Ok(Some(notification)) => {
                                 notifications.spawn(publish_owner_notification(notification));
@@ -722,8 +741,8 @@ async fn run_interactive_applications(
         }
     };
 
-    for (_, cancel) in pending_launches.drain() {
-        let _ = cancel.send(());
+    for (_, pending) in pending_launches.drain() {
+        let _ = pending.cancel.send(());
     }
     let launch_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut completed = Vec::new();
@@ -1201,6 +1220,7 @@ fn prepare_owner_notification(
     terminal: &ActorTerminal,
     registry: &ActorRegistry,
     deployments: &[InteractiveDeployment],
+    pending_worker_handle: Option<&str>,
 ) -> Result<Option<OwnerNotification>, String> {
     let Some(owner) = registry.owner(actor).map_err(|error| error.to_string())? else {
         return Ok(None);
@@ -1225,6 +1245,10 @@ fn prepare_owner_notification(
                 " The worker handle is {{\"workerId\":\"{}\"}}.",
                 worktree.id()
             )
+        })
+        .or_else(|| {
+            pending_worker_handle
+                .map(|worktree| format!(" The worker handle is {{\"workerId\":\"{worktree}\"}}."))
         })
         .unwrap_or_default();
     let message = format!(

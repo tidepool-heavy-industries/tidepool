@@ -554,6 +554,47 @@ mod tests {
     }
 
     #[test]
+    fn resumed_tui_launch_carries_the_same_sandbox_roots_after_the_subcommand() {
+        let mut spec = InteractiveAgentSpec {
+            mode: InteractiveLaunchMode::Resume(BackendThreadId(
+                "019c7724-20a7-7710-bc89-dbc054f9a940".to_string(),
+            )),
+            model: None,
+            effort: None,
+            developer_instructions: String::new(),
+            initial_prompt: None,
+            additional_writable_roots: vec!["/tmp/shared-git".to_string()],
+            mcp: crate::InteractiveMcpServer {
+                name: "tidepool_actor".to_string(),
+                command: "/tmp/shoal".to_string(),
+                args: Vec::new(),
+                cwd: "/tmp/work".to_string(),
+                forward_env: Vec::new(),
+                required: true,
+            },
+        };
+
+        let args = command_for(&spec).unwrap().args;
+        assert_eq!(args[0], "resume");
+        assert_eq!(args[1], "019c7724-20a7-7710-bc89-dbc054f9a940");
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["--sandbox", "workspace-write"]));
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["--add-dir", "/tmp/shared-git"]));
+
+        spec.mode = InteractiveLaunchMode::Fresh;
+        let fresh_args = command_for(&spec).unwrap().args;
+        for option in ["--sandbox", "--add-dir"] {
+            assert_eq!(
+                args.iter().position(|arg| arg == option).unwrap() - 2,
+                fresh_args.iter().position(|arg| arg == option).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn mcp_name_cannot_escape_its_config_namespace() {
         let mut spec = InteractiveAgentSpec {
             mode: InteractiveLaunchMode::Fresh,
