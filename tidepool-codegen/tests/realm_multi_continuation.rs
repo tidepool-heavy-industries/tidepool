@@ -19,7 +19,7 @@ use support::{LinearMachine, SuspensionTestExt};
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge;
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::suspension::{
     ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput, SuspendableOutcome,
     SuspensionRun,
@@ -1166,7 +1166,7 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(1))),
             )
             .expect_err("an unknown id must error, not panic");
-        assert!(format!("{err}").contains("no continuation parked"));
+        assert!(matches!(err, JitError::UnknownContinuation(id) if id == bogus));
 
         let a = park_entry(&mut machine, &table, RealmId(0), 1);
         resume_and_verify(&mut machine, a, 1, 1);
@@ -1182,7 +1182,7 @@ fn resuming_an_unknown_or_already_resumed_id_errors_cleanly() {
                 ResumeInput::Answer(Value::Lit(Literal::LitInt(1))),
             )
             .expect_err("a consumed id must error");
-        assert!(format!("{err}").contains("no continuation parked"));
+        assert!(matches!(err, JitError::UnknownContinuation(id) if id == a));
 
         // And a plain fragment still runs — the machine was never "suspended".
         let frag = machine

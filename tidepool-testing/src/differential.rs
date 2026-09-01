@@ -289,7 +289,10 @@ pub fn classify_jit(e: &JitError) -> JitErrorClass {
         JitError::HeapBridge(_) => JitErrorClass::HeapBridge,
         JitError::Signal(_) => JitErrorClass::Signal,
         JitError::EffectResponseTooLarge { .. } => JitErrorClass::Other,
-        JitError::InvalidSuspensionState(_) | JitError::EmptyProjection => JitErrorClass::Other,
+        JitError::InvalidSuspensionState(_)
+        | JitError::UnknownContinuation(_)
+        | JitError::UnknownValueHandle(_)
+        | JitError::EmptyProjection => JitErrorClass::Other,
         JitError::VarIdCollision(_) => JitErrorClass::Other,
     }
 }

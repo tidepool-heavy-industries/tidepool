@@ -59,10 +59,16 @@ pub enum JitError {
     // lie about the phase.
     #[error(transparent)]
     Signal(#[from] crate::signal_safety::SignalError),
-    #[error("Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results.")]
+    #[error(
+        "Effect handler response too large ({nodes} value nodes, max {limit}). Narrow your query to return fewer results."
+    )]
     EffectResponseTooLarge { nodes: usize, limit: usize },
     #[error("invalid suspension state: {0}")]
     InvalidSuspensionState(&'static str),
+    #[error("no continuation parked under {0:?}")]
+    UnknownContinuation(ContinuationId),
+    #[error("unknown or released value handle {0:?}")]
+    UnknownValueHandle(ValueHandle),
     #[error("a projected bind requires at least one field")]
     EmptyProjection,
     #[error(
@@ -1440,10 +1446,7 @@ impl JitEffectMachine {
                             machine.vmctx_mut() as *const _,
                         );
                     }
-                    return Err(JitError::Effect(EffectError::Handler(format!(
-                        "resume: unknown or released ValueHandle({})",
-                        h.0
-                    ))));
+                    return Err(JitError::UnknownValueHandle(h));
                 }
             },
             ResumeInput::Abort(reason) => {
@@ -2362,11 +2365,7 @@ impl JitEffectMachine {
                     frame.effect_policy,
                     frame.live_payload,
                 ),
-                None => {
-                    return Err(JitError::Effect(EffectError::Handler(format!(
-                        "resume_continuation: no continuation parked under {id:?}"
-                    ))))
-                }
+                None => return Err(JitError::UnknownContinuation(id)),
             };
         // Validate before consuming the frame or running the continuation.
         if let ResumeInput::Answer(val) = &input {
@@ -2571,12 +2570,7 @@ impl JitEffectMachine {
     ) -> Result<tidepool_eval::value::Value, JitError> {
         let entry = match self.resources.handle(handle) {
             Some(e) => e,
-            None => {
-                return Err(JitError::Effect(EffectError::Handler(format!(
-                    "observe: unknown or released ValueHandle({})",
-                    handle.0
-                ))))
-            }
+            None => return Err(JitError::UnknownValueHandle(handle)),
         };
         let slot = entry.slot;
         let tags = self.tags.map_err(JitError::MissingConTags)?;

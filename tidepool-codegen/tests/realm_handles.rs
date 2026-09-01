@@ -27,7 +27,7 @@ use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::heap_bridge::CLOSURE_SENTINEL;
-use tidepool_codegen::jit_machine::JitEffectMachine;
+use tidepool_codegen::jit_machine::{JitEffectMachine, JitError};
 use tidepool_codegen::suspension::{ContinuationId, ParkKind, ParkedOutcome, RealmId, ResumeInput};
 use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
@@ -490,27 +490,50 @@ fn h1_closure_handle_delivered_into_sibling_frame_and_applied() {
         assert_receipts(&machine, 0, 0);
 
         // Released ids error cleanly — never a panic, never aliasing.
-        assert!(
-            machine
-                .resume_continuation(
-                    answerer_id,
-                    &mut NoDispatch,
-                    &(),
-                    ResumeInput::Answer(Value::Lit(Literal::LitInt(1)))
-                )
-                .is_err(),
-            "a closed realm's frame id must be a clean error"
-        );
-        assert!(
-            machine.observe_handle(h).is_err(),
-            "a released handle must be a clean error"
-        );
-        assert!(
-            machine
-                .resume_continuation(loop_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
-                .is_err(),
-            "delivering a released handle must be a clean error"
-        );
+        let err = machine
+            .resume_continuation(
+                answerer_id,
+                &mut NoDispatch,
+                &(),
+                ResumeInput::Answer(Value::Lit(Literal::LitInt(1))),
+            )
+            .expect_err("a closed realm's frame id must be a clean error");
+        assert!(matches!(err, JitError::UnknownContinuation(id) if id == answerer_id));
+
+        let err = machine
+            .observe_handle(h)
+            .expect_err("a released handle must be a clean error");
+        assert!(matches!(err, JitError::UnknownValueHandle(handle) if handle == h));
+
+        // Use a fresh parked frame so this assertion reaches handle lookup;
+        // `loop_id` was consumed by the successful delivery above.
+        let retry = machine
+            .add_function(
+                "released_handle_delivery",
+                &build_applying_parent(8080, 66, 101),
+                &table,
+                &ExternalEnv::new(),
+            )
+            .expect("add released-handle delivery fragment");
+        let retry_id = match machine
+            .run_fragment_suspendable_parked(
+                retry,
+                &table,
+                &mut NoDispatch,
+                &(),
+                LOOP_REALM,
+                ParkKind::Plain,
+            )
+            .expect("park released-handle delivery fragment")
+        {
+            ParkedOutcome::Suspended { id, .. } => id,
+            other => panic!("released-handle delivery fragment must suspend, got {other:?}"),
+        };
+        let err = machine
+            .resume_continuation(retry_id, &mut NoDispatch, &(), ResumeInput::Handle(h))
+            .expect_err("delivering a released handle must be a clean error");
+        assert!(matches!(err, JitError::UnknownValueHandle(handle) if handle == h));
+        assert_receipts(&machine, 0, 0);
 
         disarm_gc_hazards();
         drop(machine);
