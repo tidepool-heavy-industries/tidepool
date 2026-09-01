@@ -863,6 +863,51 @@ inventing a generic capability framework:
 - roll grant redemption back with unpublished startup;
 - preserve integration authority only for the owner.
 
+### Stage 7A — principal-aware profile composition
+
+Do not construct separate resident machine types for `ReadWrite` and
+`ReadOnly`. Actors of both profiles share one machine, while profile identity
+belongs to an exact actor incarnation. The first production handler therefore
+uses the actor principal already installed in `EffectContext` to query the
+registry's authoritative descriptor before delegating a nominal request.
+
+Implement this boundary in order:
+
+1. Thread the already-installed `SessionRunContext.principal` into effect
+   dispatch. `EffectContext` currently carries only the constructor table and
+   handler user state, so handlers cannot yet authorize the actor selected by
+   `set_actor_execution`; fix that common seam rather than adding actor-global
+   mutable state or capturing a principal in a handler instance. Non-resident
+   callers use the explicit system principal.
+2. Add one reusable authorization decision at the actor/runtime boundary. It
+   accepts the exact dispatch principal and requested operation class, reads
+   the retained descriptor, and returns a closed allow/refuse result. `FsRead`
+   is allowed for both initial profiles; `FsWrite` is allowed only for
+   `ReadWrite`. Missing, stale, initializing, and exited principals refuse
+   rather than falling through to another handler.
+3. Keep operation classification nominal and generated where possible. Do not
+   inspect rendered request strings, rely on HList position, or duplicate the
+   Haskell profile rows as a Rust tag prefix. The gate decides a class; the
+   existing filesystem handlers still decode and execute the concrete request.
+4. Compose one production actor handler around the shared `FsRead` backend and
+   `FsWrite` handler. The composition root supplies the workspace root and
+   registry; actor startup does not construct handlers. Definitions and profile
+   names convey no filesystem authority without this interpreter and its
+   resource root.
+5. Test the decision table without GHC, then run one focused resident vertical
+   in which a `ReadWrite` actor writes, a `ReadOnly` actor reads, and a
+   `ReadOnly` write is refused by Rust even if a malformed or stale program
+   manages to issue the nominal request. The compile-failure fixture remains a
+   model-surface hygiene test, not the authorization proof.
+6. Only after that vertical, add the production provider/root launch recipe.
+   Reuse `ResidentActorHost`; do not create a harness-local actor scheduler or
+   a second profile registry.
+
+The gate should be extensible by adding typed operation classes and profile
+decisions, not by turning the two initial profiles into a generic dynamic
+capability framework. Per-resource launch grants remain a separate Stage 7B
+concern.
+
 Express the first coding jobs with fresh actors. One-shot implementation and
 review use `runActor`, return candidate/review products in typed successful
 exits, and leave the owner to decide and integrate in ordinary Haskell. This
