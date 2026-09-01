@@ -10,8 +10,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
-use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_runtime::session::OutputSink;
 use tidepool_tool::ToolDeclaration;
 
 pub type ToolDispatchFuture =
@@ -65,13 +63,9 @@ impl DynamicMcpServer {
     /// Project one installed resident Haskell policy into MCP. Actor
     /// admission and continuation ownership remain inside the policy; this
     /// adapter owns only MCP declaration and result shapes.
-    pub fn from_resident_policy<H, O>(
-        policy: Arc<tidepool_actor::ResidentMcpPolicy<H, O>>,
-    ) -> Result<Self, DynamicMcpError>
-    where
-        H: DispatchEffect<O> + Send + 'static,
-        O: OutputSink + Sync + 'static,
-    {
+    pub fn from_resident_policy(
+        policy: Arc<tidepool_actor::ResidentMcpPolicy>,
+    ) -> Result<Self, DynamicMcpError> {
         let declarations = policy.declarations().to_vec();
         let instructions = policy.instructions().map(str::to_owned);
         Self::new(declarations, instructions, move |name, arguments| {

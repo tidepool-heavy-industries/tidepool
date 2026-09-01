@@ -1,18 +1,15 @@
-//! Captured boundaries for one resident Haskell MCP policy.
+//! Transport-neutral handle for one resident Haskell MCP policy.
 //!
-//! These values are deliberately transport-neutral. The actor runtime owns
-//! the suspended Haskell continuation; `tidepool-mcp` projects the immutable
-//! declarations and supplies invocations above this boundary.
+//! The policy owns no machine, continuation, or scheduler. It only exposes an
+//! immutable tool surface and submits invocations to `ResidentActorHost`, the
+//! sole owner of actor execution.
 
 use std::sync::Arc;
 
-use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_runtime::session::{OutputSink, ResidentHole};
+use tidepool_runtime::session::ResidentHole;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::{
-    ActorExitKind, ActorRef, ActorRegistry, ActorTerminal, ActorTurnKind, ResidentActorLifecycle,
-    ResidentActorRunner,
-};
+use crate::ActorRef;
 
 /// A policy waiting for its next invocation.
 pub(crate) struct ResidentMcpAwait {
@@ -27,37 +24,35 @@ pub(crate) struct ResidentMcpReply {
     pub(crate) result: serde_json::Value,
 }
 
+pub(crate) struct ResidentMcpInvocation {
+    pub(crate) actor: ActorRef,
+    pub(crate) name: String,
+    pub(crate) arguments: serde_json::Value,
+    pub(crate) response: oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentMcpError {
-    #[error(transparent)]
-    Registry(#[from] crate::ActorRegistryError),
-    #[error(transparent)]
-    Workbench(#[from] crate::ResidentActorWorkbenchError),
-    #[error("resident MCP invocation reached `{0}` instead of a reply")]
-    ExpectedReply(&'static str),
-    #[error("resident MCP reply resumed to `{0}` instead of awaiting the next invocation")]
-    ExpectedAwait(&'static str),
-    #[error("resident MCP policy changed its declarations while installed")]
-    DeclarationDrift,
-    #[error("resident MCP policy is unavailable after an earlier failed invocation")]
-    Unavailable,
+    #[error("resident MCP policy is unavailable: {0}")]
+    Unavailable(String),
+    #[error("resident MCP invocation failed: {0}")]
+    Failed(String),
 }
 
-pub struct ResidentMcpPolicy<H, O> {
+/// A cloneable request handle for one exact actor incarnation.
+///
+/// Calls are serialized because a resident actor has one turn at a time. The
+/// host retains and resumes the Haskell continuation through every actor
+/// boundary reached by the tool handler.
+pub struct ResidentMcpPolicy {
     actor: ActorRef,
-    registry: ActorRegistry,
-    runner: ResidentActorRunner<H, O>,
-    lifecycle: Arc<ResidentActorLifecycle<H, O>>,
     declarations: Arc<[tidepool_tool::ToolDeclaration]>,
     instructions: Option<String>,
-    awaiting: tokio::sync::Mutex<Option<ResidentMcpAwait>>,
+    requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
+    dispatch_gate: tokio::sync::Mutex<()>,
 }
 
-impl<H, O> ResidentMcpPolicy<H, O>
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
+impl ResidentMcpPolicy {
     #[must_use]
     pub fn declarations(&self) -> &[tidepool_tool::ToolDeclaration] {
         &self.declarations
@@ -73,87 +68,39 @@ where
         name: String,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, ResidentMcpError> {
-        let result = self.dispatch_inner(name, arguments).await;
-        if let Err(error) = &result {
-            let _ = self
-                .lifecycle
-                .force_terminate(
-                    self.actor,
-                    ActorTerminal {
-                        kind: ActorExitKind::Failed,
-                        summary: error.to_string(),
-                    },
+        let _turn = self.dispatch_gate.lock().await;
+        let (response, receive) = oneshot::channel();
+        self.requests
+            .send(ResidentMcpInvocation {
+                actor: self.actor,
+                name,
+                arguments,
+                response,
+            })
+            .map_err(|_| {
+                ResidentMcpError::Unavailable("the owning actor host has stopped".into())
+            })?;
+        receive
+            .await
+            .map_err(|_| {
+                ResidentMcpError::Unavailable(
+                    "the actor stopped before settling the invocation".into(),
                 )
-                .await;
-        }
-        result
-    }
-
-    async fn dispatch_inner(
-        &self,
-        name: String,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, ResidentMcpError> {
-        let mut slot = self.awaiting.lock().await;
-        let awaiting = slot.take().ok_or(ResidentMcpError::Unavailable)?;
-        let expected_declarations = awaiting.declarations.clone();
-        let context = self.registry.session_context(self.actor)?;
-        let _turn = self
-            .registry
-            .begin_turn(self.actor, ActorTurnKind::Haskell)?;
-        let outcome = self
-            .runner
-            .resume_mcp_invocation(context.clone(), awaiting.continuation, name, arguments)
-            .await?;
-        let reply = match self
-            .runner
-            .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
-            .await?
-        {
-            crate::resident_workbench::ResidentActorBoundary::McpReply(reply) => reply,
-            other => return Err(ResidentMcpError::ExpectedReply(other.operation())),
-        };
-        let result = reply.result;
-        let outcome = self
-            .runner
-            .resume_unit(context.clone(), reply.continuation)
-            .await?;
-        let next = match self
-            .runner
-            .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
-            .await?
-        {
-            crate::resident_workbench::ResidentActorBoundary::McpAwait(next) => next,
-            other => return Err(ResidentMcpError::ExpectedAwait(other.operation())),
-        };
-        if next.declarations != expected_declarations {
-            return Err(ResidentMcpError::DeclarationDrift);
-        }
-        *slot = Some(next);
-        Ok(result)
+            })?
+            .map_err(ResidentMcpError::Failed)
     }
 }
 
-pub(crate) fn install_resident_mcp<H, O>(
+pub(crate) fn install_resident_mcp(
     actor: ActorRef,
-    registry: ActorRegistry,
-    runner: ResidentActorRunner<H, O>,
-    lifecycle: Arc<ResidentActorLifecycle<H, O>>,
-    awaiting: ResidentMcpAwait,
-) -> ResidentMcpPolicy<H, O>
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
-    let declarations = awaiting.declarations.clone().into();
-    let instructions = (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone());
+    requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
+    awaiting: &ResidentMcpAwait,
+) -> ResidentMcpPolicy {
     ResidentMcpPolicy {
         actor,
-        registry,
-        runner,
-        lifecycle,
-        declarations,
-        instructions,
-        awaiting: tokio::sync::Mutex::new(Some(awaiting)),
+        declarations: awaiting.declarations.clone().into(),
+        instructions: (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone()),
+        requests,
+        dispatch_gate: tokio::sync::Mutex::new(()),
     }
 }

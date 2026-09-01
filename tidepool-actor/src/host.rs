@@ -14,7 +14,7 @@ use futures_util::FutureExt;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_model::{DynModelProvider, StreamSink};
 use tidepool_runtime::session::{OutputSink, ResidentOutcome, ResidentSession};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::resident_workbench::ResidentActorBoundary;
 use crate::start::UnpublishedResidentActor;
@@ -153,24 +153,25 @@ struct HostedActor {
     state: HostedActorState,
 }
 
-enum HostTaskResult<H, O> {
+enum HostTaskResult {
     Idle {
         actor: ActorRef,
         children: Vec<ActorRef>,
     },
     ParkedCall {
         actor: ActorRef,
-        pending: ResidentCall,
+        pending: HostCall,
         children: Vec<ActorRef>,
     },
     ParkedWait {
         actor: ActorRef,
-        pending: ResidentWait,
+        pending: HostWait,
         children: Vec<ActorRef>,
     },
     McpPolicy {
         actor: ActorRef,
-        policy: Arc<crate::ResidentMcpPolicy<H, O>>,
+        awaiting: crate::resident_mcp::ResidentMcpAwait,
+        settlement: Option<McpSettlement>,
         children: Vec<ActorRef>,
     },
     Exited {
@@ -185,14 +186,54 @@ enum HostTaskResult<H, O> {
     },
 }
 
+struct McpInvocationState {
+    response: Option<oneshot::Sender<Result<serde_json::Value, String>>>,
+    result: Option<serde_json::Value>,
+    expected_declarations: Arc<[tidepool_tool::ToolDeclaration]>,
+    expected_instructions: Option<String>,
+}
+
+struct McpSettlement {
+    response: oneshot::Sender<Result<serde_json::Value, String>>,
+    result: serde_json::Value,
+}
+
+struct HostCall {
+    pending: ResidentCall,
+    mcp: Option<McpInvocationState>,
+}
+
+impl HostCall {
+    fn key(&self) -> (ActorRef, CallId) {
+        self.pending.key()
+    }
+}
+
+struct HostWait {
+    pending: ResidentWait,
+    mcp: Option<McpInvocationState>,
+}
+
+impl HostWait {
+    fn key(&self) -> (ActorRef, WaitId) {
+        self.pending.key()
+    }
+}
+
 enum HostWork {
     Outcome {
         turn: TurnLease,
         outcome: Box<ResidentOutcome>,
     },
-    Call(ResidentCall),
-    Wait(ResidentWait),
+    Call(HostCall),
+    Wait(HostWait),
     Mailbox,
+    McpInvocation {
+        awaiting: crate::resident_mcp::ResidentMcpAwait,
+        name: String,
+        arguments: serde_json::Value,
+        state: McpInvocationState,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -209,11 +250,14 @@ pub struct ResidentActorHost<H, O> {
     provider: Arc<dyn DynModelProvider>,
     sink: Option<StreamSink>,
     wakes: ActorRuntimeWakes,
-    tasks: FuturesUnordered<BoxFuture<'static, HostTaskResult<H, O>>>,
+    tasks: FuturesUnordered<BoxFuture<'static, HostTaskResult>>,
     actors: HashMap<ActorRef, HostedActor>,
-    calls: HashMap<(ActorRef, CallId), ResidentCall>,
-    waits: HashMap<(ActorRef, WaitId), ResidentWait>,
-    mcp_policies: HashMap<ActorRef, Arc<crate::ResidentMcpPolicy<H, O>>>,
+    calls: HashMap<(ActorRef, CallId), HostCall>,
+    waits: HashMap<(ActorRef, WaitId), HostWait>,
+    mcp_policies: HashMap<ActorRef, Arc<crate::ResidentMcpPolicy>>,
+    mcp_awaits: HashMap<ActorRef, crate::resident_mcp::ResidentMcpAwait>,
+    mcp_requests: mpsc::UnboundedSender<crate::resident_mcp::ResidentMcpInvocation>,
+    mcp_request_rx: mpsc::UnboundedReceiver<crate::resident_mcp::ResidentMcpInvocation>,
     roots: BTreeSet<ActorRef>,
     failures: Vec<(ActorRef, ResidentHostTaskError)>,
     cleanup_failures: Vec<(ActorRef, ResidentLifecycleError)>,
@@ -228,7 +272,7 @@ where
     /// Return the installed resident MCP policy for an exact actor
     /// incarnation, once that actor has reached `serveTools`.
     #[must_use]
-    pub fn mcp_policy(&self, actor: ActorRef) -> Option<Arc<crate::ResidentMcpPolicy<H, O>>> {
+    pub fn mcp_policy(&self, actor: ActorRef) -> Option<Arc<crate::ResidentMcpPolicy>> {
         self.mcp_policies.get(&actor).cloned()
     }
 
@@ -250,6 +294,7 @@ where
         let completions = ResidentCompletionExecutor::new(Arc::clone(&machines), source);
         let starter = ResidentActorStarter::new(Arc::clone(&lifecycle), completions.clone());
         let mailbox = ResidentActorMailbox::new(Arc::clone(&lifecycle));
+        let (mcp_requests, mcp_request_rx) = mpsc::unbounded_channel();
         Ok(Self {
             runtime: Arc::new(ResidentHostRuntime {
                 registry,
@@ -268,6 +313,9 @@ where
             calls: HashMap::new(),
             waits: HashMap::new(),
             mcp_policies: HashMap::new(),
+            mcp_awaits: HashMap::new(),
+            mcp_requests,
+            mcp_request_rx,
             roots: BTreeSet::new(),
             failures: Vec::new(),
             cleanup_failures: Vec::new(),
@@ -342,9 +390,11 @@ where
     ) -> Result<ResidentHostRunReport, ResidentActorHostError> {
         let mut wakes_open = true;
         loop {
+            self.drain_mcp_requests()?;
             self.wakes.drain_available();
             self.service_wakes()?;
             if self.tasks.is_empty() {
+                self.drain_mcp_requests()?;
                 self.wakes.drain_available();
                 self.service_wakes()?;
                 if self.tasks.is_empty() {
@@ -423,6 +473,11 @@ where
                 result = self.tasks.next(), if !self.tasks.is_empty() => {
                     if let Some(result) = result {
                         self.install_task_result(result);
+                    }
+                }
+                request = self.mcp_request_rx.recv() => {
+                    if let Some(request) = request {
+                        self.service_mcp_request(request)?;
                     }
                 }
                 open = self.wakes.wait(), if wakes_open => {
@@ -574,7 +629,7 @@ where
         Ok(())
     }
 
-    fn install_task_result(&mut self, result: HostTaskResult<H, O>) {
+    fn install_task_result(&mut self, result: HostTaskResult) {
         match result {
             HostTaskResult::Idle { actor, children } => {
                 self.register_children(children);
@@ -608,13 +663,25 @@ where
             }
             HostTaskResult::McpPolicy {
                 actor,
-                policy,
+                awaiting,
+                settlement,
                 children,
             } => {
                 self.register_children(children);
-                self.mcp_policies.insert(actor, policy);
+                if !self.mcp_policies.contains_key(&actor) {
+                    let policy = Arc::new(crate::resident_mcp::install_resident_mcp(
+                        actor,
+                        self.mcp_requests.clone(),
+                        &awaiting,
+                    ));
+                    self.mcp_policies.insert(actor, policy);
+                }
+                self.mcp_awaits.insert(actor, awaiting);
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::McpPolicy;
+                }
+                if let Some(settlement) = settlement {
+                    let _ = settlement.response.send(Ok(settlement.result));
                 }
             }
             HostTaskResult::Exited {
@@ -626,6 +693,8 @@ where
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::Exited;
                 }
+                self.mcp_awaits.remove(&actor);
+                self.mcp_policies.remove(&actor);
                 if let Some(error) = cleanup_failure {
                     self.cleanup_failures.push((actor, error));
                 }
@@ -638,6 +707,8 @@ where
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::Exited;
                 }
+                self.mcp_awaits.remove(&actor);
+                self.mcp_policies.remove(&actor);
                 self.failures.push((actor, error));
                 if let Some(error) = cleanup_failure {
                     self.cleanup_failures.push((actor, error));
@@ -663,6 +734,8 @@ where
                     hosted.state = HostedActorState::Exited;
                 }
             }
+            self.mcp_awaits.remove(&actor);
+            self.mcp_policies.remove(&actor);
             self.wakes.take(ActorRuntimeWake::MailboxReady { actor });
             self.calls.retain(|(caller, call), _| {
                 if *caller == actor {
@@ -728,6 +801,61 @@ where
         Ok(())
     }
 
+    fn drain_mcp_requests(&mut self) -> Result<(), ResidentActorHostError> {
+        while let Ok(request) = self.mcp_request_rx.try_recv() {
+            self.service_mcp_request(request)?;
+        }
+        Ok(())
+    }
+
+    fn service_mcp_request(
+        &mut self,
+        request: crate::resident_mcp::ResidentMcpInvocation,
+    ) -> Result<(), ResidentActorHostError> {
+        let unavailable = if self.lifecycle == HostLifecycle::Closing {
+            Some("the actor host is closing")
+        } else if !matches!(
+            self.actors.get(&request.actor).map(|hosted| &hosted.state),
+            Some(HostedActorState::McpPolicy)
+        ) {
+            Some("the actor is not awaiting an MCP invocation")
+        } else {
+            None
+        };
+        if let Some(reason) = unavailable {
+            let _ = request.response.send(Err(reason.into()));
+            return Ok(());
+        }
+
+        let Some(awaiting) = self.mcp_awaits.remove(&request.actor) else {
+            let _ = request
+                .response
+                .send(Err("the actor has no installed MCP continuation".into()));
+            return Ok(());
+        };
+        let Some(policy) = self.mcp_policies.get(&request.actor) else {
+            let _ = request
+                .response
+                .send(Err("the actor has no installed MCP policy".into()));
+            return Ok(());
+        };
+        let state = McpInvocationState {
+            response: Some(request.response),
+            result: None,
+            expected_declarations: policy.declarations().to_vec().into(),
+            expected_instructions: policy.instructions().map(str::to_owned),
+        };
+        self.schedule(
+            request.actor,
+            HostWork::McpInvocation {
+                awaiting,
+                name: request.name,
+                arguments: request.arguments,
+                state,
+            },
+        )
+    }
+
     fn register_children(&mut self, children: Vec<ActorRef>) {
         for child in children {
             self.actors.entry(child).or_insert_with(|| {
@@ -752,15 +880,16 @@ async fn drive_actor<H, O>(
     actor: ActorRef,
     work: HostWork,
     cancel: watch::Receiver<bool>,
-) -> Result<HostTaskResult<H, O>, ResidentHostTaskError>
+) -> Result<HostTaskResult, ResidentHostTaskError>
 where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
     let mut children = Vec::new();
-    let (mut turn, mut outcome) = match work {
-        HostWork::Outcome { turn, outcome } => (turn, *outcome),
+    let (mut turn, mut outcome, mut mcp) = match work {
+        HostWork::Outcome { turn, outcome } => (turn, *outcome, None),
         HostWork::Call(pending) => {
+            let HostCall { pending, mcp } = pending;
             match await_host_operation(cancel.clone(), runtime.mailbox.poll_call(pending))
                 .await
                 .ok_or(ResidentHostTaskError::Cancelled)??
@@ -768,14 +897,15 @@ where
                 ResidentCallPoll::Pending(pending) => {
                     return Ok(HostTaskResult::ParkedCall {
                         actor,
-                        pending,
+                        pending: HostCall { pending, mcp },
                         children,
                     });
                 }
-                ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome),
+                ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome, mcp),
             }
         }
         HostWork::Wait(pending) => {
+            let HostWait { pending, mcp } = pending;
             match await_host_operation(cancel.clone(), runtime.mailbox.poll_wait(pending))
                 .await
                 .ok_or(ResidentHostTaskError::Cancelled)??
@@ -783,11 +913,11 @@ where
                 ResidentWaitPoll::Pending(pending) => {
                     return Ok(HostTaskResult::ParkedWait {
                         actor,
-                        pending,
+                        pending: HostWait { pending, mcp },
                         children,
                     });
                 }
-                ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome),
+                ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome, mcp),
             }
         }
         HostWork::Mailbox => {
@@ -805,6 +935,27 @@ where
                     HostTaskResult::Idle { actor, children }
                 },
             );
+        }
+        HostWork::McpInvocation {
+            awaiting,
+            name,
+            arguments,
+            state,
+        } => {
+            let turn = runtime.registry.begin_turn(actor, ActorTurnKind::Haskell)?;
+            let context = turn.session_context();
+            let outcome = await_host_operation(
+                cancel.clone(),
+                runtime.runner.resume_mcp_invocation(
+                    context,
+                    awaiting.continuation,
+                    name,
+                    arguments,
+                ),
+            )
+            .await
+            .ok_or(ResidentHostTaskError::Cancelled)??;
+            (turn, outcome, Some(state))
         }
     };
     loop {
@@ -888,7 +1039,7 @@ where
                     OutboundSettlement::Pending(pending) => {
                         return Ok(HostTaskResult::ParkedCall {
                             actor,
-                            pending,
+                            pending: HostCall { pending, mcp },
                             children,
                         });
                     }
@@ -903,7 +1054,7 @@ where
                 .ok_or(ResidentHostTaskError::Cancelled)??;
                 return Ok(HostTaskResult::ParkedWait {
                     actor,
-                    pending,
+                    pending: HostWait { pending, mcp },
                     children,
                 });
             }
@@ -913,25 +1064,73 @@ where
             }
             ResidentActorBoundary::McpAwait(awaiting) => {
                 drop(turn);
-                let policy = Arc::new(crate::resident_mcp::install_resident_mcp(
-                    actor,
-                    runtime.registry.clone(),
-                    runtime.runner.clone(),
-                    Arc::clone(&runtime.lifecycle),
-                    awaiting,
-                ));
+                let settlement = if let Some(mut state) = mcp {
+                    let Some(result) = state.result.take() else {
+                        return Err(ResidentHostTaskError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "actor awaited another MCP invocation without replying".into(),
+                            ),
+                        ));
+                    };
+                    let instructions =
+                        (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone());
+                    if awaiting.declarations.as_slice() != state.expected_declarations.as_ref()
+                        || instructions != state.expected_instructions
+                    {
+                        return Err(ResidentHostTaskError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "resident MCP policy changed while installed".into(),
+                            ),
+                        ));
+                    }
+                    Some(McpSettlement {
+                        response: state.response.take().ok_or_else(|| {
+                            ResidentHostTaskError::Workbench(
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "actor MCP invocation lost its response channel".into(),
+                                ),
+                            )
+                        })?,
+                        result,
+                    })
+                } else {
+                    None
+                };
                 return Ok(HostTaskResult::McpPolicy {
                     actor,
-                    policy,
+                    awaiting,
+                    settlement,
                     children,
                 });
             }
-            ResidentActorBoundary::McpReply(_) => {
-                return Err(ResidentHostTaskError::Workbench(
-                    ResidentActorWorkbenchError::ActorProtocol(
+            ResidentActorBoundary::McpReply(reply) => {
+                let state = mcp.as_mut().ok_or_else(|| {
+                    ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
                         "actor MCP reply reached the host without an invocation".into(),
-                    ),
-                ));
+                    ))
+                })?;
+                if state.result.is_some() {
+                    return Err(ResidentHostTaskError::Workbench(
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "actor MCP invocation replied more than once".into(),
+                        ),
+                    ));
+                }
+                if state.response.is_none() {
+                    return Err(ResidentHostTaskError::Workbench(
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "actor MCP invocation lost its response channel".into(),
+                        ),
+                    ));
+                }
+                state.result = Some(reply.result);
+                let context = turn.session_context();
+                outcome = await_host_operation(
+                    cancel.clone(),
+                    runtime.runner.resume_unit(context, reply.continuation),
+                )
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??;
             }
         }
     }

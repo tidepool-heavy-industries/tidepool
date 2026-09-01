@@ -65,7 +65,14 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
     eval_harness::require_extract();
 
     let session = support::process_unique_session(117);
-    let declarations = [tidepool_mcp::actor_mcp_decl()];
+    let declarations = [
+        tidepool_mcp::actor_mcp_decl(),
+        tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_kernel_decl(),
+        tidepool_mcp::actor_local_decl(),
+        tidepool_mcp::deliberate_decl(),
+        tidepool_mcp::fs_read_decl(),
+    ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations)
         .expect("materialize ActorMcp effect module");
     let mut include = effects.include_paths().to_vec();
@@ -76,10 +83,12 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
     );
     let preamble = format!(
         "{preamble}\
-         type ActorEffects = '[ActorMcp]\n\
+         type ActorEffects = '[ActorMcp, Actor]\n\
          data EchoInput = EchoInput {{ value :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data EchoOutput = EchoOutput {{ doubled :: Int }} deriving (Generic, ToJSON)\n\
-         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput }} deriving (Generic)\n"
+         data SpawnInput = SpawnInput {{ seed :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
+         data SpawnOutput = SpawnOutput {{ started :: Bool }} deriving (Generic, ToJSON)\n\
+         data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput }} deriving (Generic)\n"
     );
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
@@ -130,7 +139,7 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         .expect("run policy to its first await");
     let descriptor = ActorDescriptor::new(
         "resident MCP policy",
-        ["ActorMcp"],
+        ["ActorMcp", "Actor"],
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),
@@ -159,22 +168,50 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
     let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(policy)
         .expect("project resident policy into MCP");
     assert_eq!(server.declarations()[0].name, "double_value");
-    for (input, expected) in [(4, 8), (7, 14)] {
+    let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
+    let hosted = tokio::spawn(host.run_until_shutdown(async move {
+        let _ = shutdown_requested.await;
+    }));
+
+    let calls = [(4, 8), (7, 14)].map(|(input, expected)| {
         let arguments = serde_json::json!({"value": input})
             .as_object()
             .expect("object arguments")
             .clone();
-        let result = server
-            .dispatch_tool("double_value", arguments)
-            .await
-            .expect("dispatch resident tool");
-        assert_eq!(
-            result.structured_content,
-            Some(serde_json::json!({"doubled": expected}))
-        );
-    }
+        let server = server.clone();
+        async move {
+            let result = server
+                .dispatch_tool("double_value", arguments)
+                .await
+                .expect("dispatch resident tool");
+            assert_eq!(
+                result.structured_content,
+                Some(serde_json::json!({"doubled": expected}))
+            );
+        }
+    });
+    let [first, second] = calls;
+    tokio::join!(first, second);
 
-    host.shutdown().await.expect("shutdown policy actor");
+    let arguments = serde_json::json!({"seed": 11})
+        .as_object()
+        .expect("object arguments")
+        .clone();
+    let result = server
+        .dispatch_tool("spawn_child", arguments)
+        .await
+        .expect("dispatch spawning tool");
+    assert_eq!(
+        result.structured_content,
+        Some(serde_json::json!({"started": true}))
+    );
+
+    request_shutdown.send(()).expect("request host shutdown");
+    let shutdown = hosted
+        .await
+        .expect("host task joins")
+        .expect("shutdown policy actor");
+    assert!(shutdown.run.failures.is_empty());
     let result = server
         .dispatch_tool("double_value", serde_json::Map::new())
         .await
