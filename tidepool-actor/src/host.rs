@@ -218,12 +218,12 @@ where
     O: OutputSink + Sync + 'static,
 {
     pub fn new(
+        registry: ActorRegistry,
         source: ActorWorkbenchSource,
         provider: Arc<dyn DynModelProvider>,
         sink: Option<StreamSink>,
         lifecycle_policy: ResidentLifecyclePolicy,
     ) -> Result<Self, ResidentActorHostError> {
-        let registry = ActorRegistry::new();
         let wakes = registry.take_runtime_wakes()?;
         let machines = Arc::new(ActorMachineRegistry::new());
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());

@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 use parking_lot::Mutex;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::MonotonicIdIssuer;
+use tidepool_repr::PrincipalId;
 use tidepool_runtime::session::RootCustody;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -11,10 +12,10 @@ use crate::agent_session::AgentSessionState;
 use crate::mailbox::{InstalledActorState, InstalledReceiver};
 use crate::{
     ActorAgentSession, ActorEffectProfile, ActorEvent, ActorEventRecord, ActorExitKind, ActorId,
-    ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports, CallDisposition,
-    CallFailure, CallId, CallStatus, CallTicket, EventCausality, ExitObservation, MailboxFailure,
-    MailboxMessageKind, MailboxValue, MessageId, ParkedObligation, StartInitiator, WaitDisposition,
-    WaitError, WaitId, WaitTicket,
+    ActorOperationClass, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports,
+    CallDisposition, CallFailure, CallId, CallStatus, CallTicket, EventCausality, ExitObservation,
+    MailboxFailure, MailboxMessageKind, MailboxValue, MessageId, ParkedObligation, StartInitiator,
+    WaitDisposition, WaitError, WaitId, WaitTicket,
 };
 
 /// Immutable attributes selected before an actor begins initialization.
@@ -858,6 +859,51 @@ impl ActorRegistry {
     /// never reconstruct it from observability events.
     pub fn descriptor(&self, actor: ActorRef) -> Result<ActorDescriptor, ActorRegistryError> {
         Ok(entry(&self.inner.state.lock(), actor)?.descriptor.clone())
+    }
+
+    /// Authorize one nominal operation against the immutable profile of the
+    /// exact principal currently entering the effect machine.
+    ///
+    /// Initializing actors are admitted because their authored initialization
+    /// runs in the selected profile before reference publication. Unknown,
+    /// stale, and exited principals never fall through to a concrete handler.
+    pub fn authorize_effect(
+        &self,
+        principal: PrincipalId,
+        operation: ActorOperationClass,
+    ) -> Result<(), crate::ActorEffectRefusal> {
+        if principal == PrincipalId::SYSTEM {
+            return Err(crate::ActorEffectRefusal::SystemPrincipal);
+        }
+        let actor = ActorRef {
+            id: ActorId(principal.identity),
+            incarnation: crate::Incarnation(principal.incarnation),
+        };
+        let state = self.inner.state.lock();
+        let Some(actor_entry) = state.actors.get(&actor.id) else {
+            return Err(crate::ActorEffectRefusal::Unknown { principal });
+        };
+        if actor_entry.reference != actor {
+            return Err(crate::ActorEffectRefusal::Stale {
+                given: actor,
+                current: actor_entry.reference,
+            });
+        }
+        if actor_entry.lifecycle == ActorLifecycle::Exited {
+            return Err(crate::ActorEffectRefusal::Exited { actor });
+        }
+        let profile = actor_entry.descriptor.profile;
+        let allowed = match (profile, operation) {
+            (ActorEffectProfile::ReadWrite, _) | (_, ActorOperationClass::FsRead) => true,
+            (ActorEffectProfile::ReadOnly, ActorOperationClass::FsWrite) => false,
+        };
+        allowed
+            .then_some(())
+            .ok_or(crate::ActorEffectRefusal::ProfileDenied {
+                actor,
+                profile,
+                operation,
+            })
     }
 
     pub(crate) fn attach_agent_session(

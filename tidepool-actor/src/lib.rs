@@ -8,6 +8,7 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 mod agent_session;
+mod authorization;
 mod completion;
 mod event;
 mod executor;
@@ -28,6 +29,7 @@ mod wait;
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
 };
+pub use authorization::{ActorEffectRefusal, ActorOperationClass, ActorProfileHandler};
 pub use completion::{
     CompletionCaptureError, CompletionRequest, CompletionRequestError, ResidentCompletion,
     ResidentCompletionError, ResidentCompletionExecutor,

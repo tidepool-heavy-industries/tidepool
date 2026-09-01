@@ -276,6 +276,7 @@ async fn dead_synchronous_callee_fails_the_root_through_the_typed_host_boundary(
         include_str!("start_surface/dead_call_parent.hs"),
     );
     let mut host = ResidentActorHost::new(
+        ActorRegistry::new(),
         prepared.source,
         Arc::new(PanicsImmediately),
         None,
@@ -318,6 +319,7 @@ async fn duplicate_root_session_is_rejected_before_actor_publication() {
     let first = prepare_parent_in(session_id);
     let second = prepare_parent_in(session_id);
     let mut host = ResidentActorHost::new(
+        ActorRegistry::new(),
         first.source,
         Arc::new(AuthorsActorAndApprovesStartup {
             requests: Mutex::new(Vec::new()),
@@ -361,6 +363,7 @@ async fn host_owns_the_complete_resident_actor_vertical() {
         requests: Mutex::new(Vec::new()),
     });
     let mut host = ResidentActorHost::new(
+        ActorRegistry::new(),
         prepared.source,
         provider.clone(),
         None,
@@ -401,6 +404,7 @@ async fn host_shutdown_cancels_provider_backed_child_startup_and_quiesces() {
     });
     let requested = provider.child_startup_entered.notified();
     let mut host = ResidentActorHost::new(
+        ActorRegistry::new(),
         prepared.source,
         provider.clone(),
         None,
@@ -438,6 +442,7 @@ async fn child_startup_panic_fails_the_root_and_still_quiesces() {
         requests: Mutex::new(0),
     });
     let mut host = ResidentActorHost::new(
+        ActorRegistry::new(),
         prepared.source,
         provider,
         None,
@@ -467,6 +472,7 @@ async fn child_startup_panic_fails_the_root_and_still_quiesces() {
 async fn outer_actor_task_panic_is_typed_and_quiesces() {
     let prepared = prepare_parent(99);
     let mut host = ResidentActorHost::new(
+        ActorRegistry::new(),
         prepared.source,
         Arc::new(PanicsImmediately),
         None,
