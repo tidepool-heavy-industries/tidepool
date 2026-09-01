@@ -172,7 +172,11 @@ This is the canonical status inventory for the plan.
 ### Not landed
 
 - the remaining Stage 6 adversarial acceptance case is cancellation
-  specifically during readiness resumption. Duplicate root-session rejection,
+  specifically during readiness resumption. Resident machine access now keeps
+  each checkout receipt inside the blocking task that owns its machine, so
+  dropping a cancelled async waiter cannot strand a session; a deterministic
+  readiness-timing test still needs a real blocking seam. Duplicate
+  root-session rejection,
   an outer host-task panic, and a dead synchronous callee are covered through
   the production host. The full host vertical already performs a repeatable
   late wait after the target has exited. Provider-backed startup cancellation,

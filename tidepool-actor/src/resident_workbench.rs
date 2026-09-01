@@ -357,27 +357,37 @@ where
             .map_err(ResidentActorWorkbenchError::Checkout)?;
         let (mut session, receipt) = checkout.into_parts();
         let source = self.source.clone();
+        let machines = Arc::clone(&self.machines);
 
         let task = tokio::task::spawn_blocking(move || {
-            let outcome = operation(&mut session, &context, &source);
-            let holes = session
-                .parked_holes()
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-            (session, holes, outcome)
+            // The blocking task owns the machine and its linear checkout
+            // receipt together. Its async caller may be cooperatively
+            // cancelled while this closure is running; settlement must not
+            // depend on that caller continuing to poll the JoinHandle.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                operation(&mut session, &context, &source)
+            }));
+            match outcome {
+                Ok(outcome) => {
+                    let holes = session
+                        .parked_holes()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect();
+                    machines.settle_suspended(receipt, session, holes);
+                    outcome
+                }
+                Err(payload) => {
+                    machines.settle_retire(receipt);
+                    std::panic::resume_unwind(payload);
+                }
+            }
         })
         .await;
 
         match task {
-            Ok((session, holes, outcome)) => {
-                self.machines.settle_suspended(receipt, session, holes);
-                outcome
-            }
-            Err(error) => {
-                self.machines.settle_retire(receipt);
-                Err(ResidentActorWorkbenchError::Join(error))
-            }
+            Ok(outcome) => outcome,
+            Err(error) => Err(ResidentActorWorkbenchError::Join(error)),
         }
     }
 }
