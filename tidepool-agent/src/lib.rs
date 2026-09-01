@@ -15,10 +15,15 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod backend;
+pub mod interactive;
 pub mod seam;
 pub mod spawn;
 
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
+pub use interactive::{
+    InteractiveAgentBackend, InteractiveAgentProcess, InteractiveAgentSpec, InteractiveFuture,
+    InteractiveLaunchMode, InteractiveMcpServer,
+};
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     DynamicToolDeclaration, ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall,

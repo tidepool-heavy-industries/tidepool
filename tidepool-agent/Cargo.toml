@@ -15,6 +15,7 @@ codex-codes = "=0.146.4"
 # The shared readable-executable-file check (std-only zero-dep leaf) — see
 # process.rs's is_readable_executable_file.
 tidepool-extract-cmd.workspace = true
+tidepool-atomic-write.workspace = true
 # pidfd_open/pidfd_send_signal + poll for the app-server canceller: a cycle
 # thread blocked in a seam call holds `&mut` on its backend, so reaping it
 # from another thread goes by pidfd (see driver.rs's PidFdSlot docs).
@@ -28,7 +29,8 @@ serde_json.workspace = true
 camino.workspace = true
 sha2 = "0.11"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["process", "rt", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["fs", "process", "rt", "rt-multi-thread", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

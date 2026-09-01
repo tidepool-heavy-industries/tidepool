@@ -1,10 +1,11 @@
-# tidepool-agent — typed headless subagents
+# tidepool-agent — coding-agent backend boundary
 
-**Charter.** Belongs: typed headless subagent spawning — the `AgentBackend`
-step seam, backend adapters (Codex), the cycle saga, model-policy
-allowlists. The ONLY crate that knows a coding backend exists. Does NOT
-belong: the `Subagent` effect handler wiring (`tidepool-handlers`), worktree
-creation itself (`tidepool-worktree`).
+**Charter.** Belongs: typed headless subagent spawning, long-lived interactive
+agent process integration, backend adapters, the cycle saga, and model-policy
+allowlists. The ONLY crate that knows a coding backend exists. Does NOT belong:
+actor lifecycle, durable actor inboxes, MCP policy, the `Subagent` effect
+handler wiring (`tidepool-handlers`), or worktree creation itself
+(`tidepool-worktree`).
 
 The ONLY crate in the workspace that knows a coding backend exists. See the
 repo-root `CLAUDE.md` for the project map and `tidepool-handlers/CLAUDE.md`

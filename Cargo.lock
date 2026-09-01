@@ -3900,10 +3900,12 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tidepool-atomic-write",
  "tidepool-extract-cmd",
  "tidepool-repr",
  "tidepool-worktree",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
