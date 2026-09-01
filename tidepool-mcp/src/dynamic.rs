@@ -1,0 +1,231 @@
+//! Generic MCP service over one typed tool declaration set and live dispatcher.
+//!
+//! This module owns MCP projection only. Actor admission, execution principals,
+//! and Haskell closure invocation belong in the adapter that supplies the
+//! dispatcher.
+
+use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
+use tidepool_node::ToolDeclaration;
+
+pub type ToolDispatchFuture =
+    Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolDispatchError>> + Send + 'static>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ToolDispatchError {
+    #[error("tool call refused: {0}")]
+    Refused(String),
+    #[error("tool execution failed: {0}")]
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DynamicMcpError {
+    #[error("duplicate MCP tool name {0:?}")]
+    DuplicateName(String),
+    #[error("invalid MCP tool name {0:?}")]
+    InvalidName(String),
+    #[error("MCP tool {name:?} has a non-object input schema")]
+    InvalidInputSchema { name: String },
+}
+
+type Dispatcher = dyn Fn(String, serde_json::Value) -> ToolDispatchFuture + Send + Sync + 'static;
+
+/// Cloneable MCP server for one immutable actor-policy installation.
+#[derive(Clone)]
+pub struct DynamicMcpServer {
+    declarations: Arc<[ToolDeclaration]>,
+    dispatcher: Arc<Dispatcher>,
+    instructions: Option<String>,
+}
+
+impl DynamicMcpServer {
+    pub fn new<F>(
+        declarations: Vec<ToolDeclaration>,
+        instructions: Option<String>,
+        dispatcher: F,
+    ) -> Result<Self, DynamicMcpError>
+    where
+        F: Fn(String, serde_json::Value) -> ToolDispatchFuture + Send + Sync + 'static,
+    {
+        validate_declarations(&declarations)?;
+        Ok(Self {
+            declarations: declarations.into(),
+            dispatcher: Arc::new(dispatcher),
+            instructions,
+        })
+    }
+
+    pub fn declarations(&self) -> &[ToolDeclaration] {
+        &self.declarations
+    }
+
+    pub async fn dispatch_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<CallToolResult, McpError> {
+        if !self
+            .declarations
+            .iter()
+            .any(|declaration| declaration.name == name)
+        {
+            return Err(McpError {
+                code: ErrorCode::METHOD_NOT_FOUND,
+                message: format!("Tool not found: {name}").into(),
+                data: None,
+            });
+        }
+        match (self.dispatcher)(name.to_string(), serde_json::Value::Object(arguments)).await {
+            Ok(value) => Ok(CallToolResult::structured(value)),
+            Err(error) => Ok(CallToolResult::error(vec![Content::text(
+                error.to_string(),
+            )])),
+        }
+    }
+
+    fn projected_tools(&self) -> Vec<Tool> {
+        self.declarations
+            .iter()
+            .map(|declaration| {
+                let schema = match &declaration.input_schema {
+                    serde_json::Value::Object(schema) => Arc::new(schema.clone()),
+                    _ => unreachable!("validated by DynamicMcpServer::new"),
+                };
+                crate::server_common::make_tool(&declaration.name, &declaration.description, schema)
+            })
+            .collect()
+    }
+}
+
+impl ServerHandler for DynamicMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: self.instructions.clone(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch_tool(&request.name, request.arguments.unwrap_or_default())
+            .await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: self.projected_tools(),
+            next_cursor: None,
+            meta: None,
+        })
+    }
+}
+
+fn validate_declarations(declarations: &[ToolDeclaration]) -> Result<(), DynamicMcpError> {
+    let mut names = HashSet::new();
+    for declaration in declarations {
+        if !valid_tool_name(&declaration.name) {
+            return Err(DynamicMcpError::InvalidName(declaration.name.clone()));
+        }
+        if !names.insert(&declaration.name) {
+            return Err(DynamicMcpError::DuplicateName(declaration.name.clone()));
+        }
+        if !declaration.input_schema.is_object() {
+            return Err(DynamicMcpError::InvalidInputSchema {
+                name: declaration.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn declaration(name: &str) -> ToolDeclaration {
+        ToolDeclaration {
+            name: name.to_string(),
+            description: format!("Run {name}"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_call_reaches_the_one_dispatcher_and_returns_structured_data() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = DynamicMcpServer::new(
+            vec![declaration("actor_status")],
+            Some("Actor control".to_string()),
+            {
+                let calls = Arc::clone(&calls);
+                move |name, arguments| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        Ok(serde_json::json!({"tool": name, "arguments": arguments}))
+                    })
+                }
+            },
+        )
+        .unwrap();
+        let result = server
+            .dispatch_tool("actor_status", serde_json::Map::new())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"tool": "actor_status", "arguments": {}}))
+        );
+        assert_eq!(server.projected_tools()[0].name, "actor_status");
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_never_reaches_dispatch() {
+        let server = DynamicMcpServer::new(vec![declaration("known")], None, |_, _| {
+            panic!("unknown tools must be rejected before dispatch")
+        })
+        .unwrap();
+        let error = server
+            .dispatch_tool("unknown", serde_json::Map::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn malformed_declaration_sets_are_rejected_at_installation() {
+        assert!(matches!(
+            DynamicMcpServer::new(vec![declaration("bad.name")], None, |_, _| unreachable!()),
+            Err(DynamicMcpError::InvalidName(_))
+        ));
+        assert!(matches!(
+            DynamicMcpServer::new(
+                vec![declaration("same"), declaration("same")],
+                None,
+                |_, _| unreachable!()
+            ),
+            Err(DynamicMcpError::DuplicateName(_))
+        ));
+    }
+}

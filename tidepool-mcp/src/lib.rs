@@ -33,6 +33,9 @@ pub use preamble::*;
 mod describe;
 pub use describe::*;
 
+mod dynamic;
+pub use dynamic::*;
+
 mod lib_isolate;
 pub use lib_isolate::*;
 
