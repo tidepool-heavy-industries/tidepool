@@ -36,6 +36,7 @@ impl ActorEffectProfile {
                 "Actor",
                 "Deliberate",
                 "FsRead",
+                "Worktree",
             ],
             Self::ReadOnly => &[
                 "ActorKernel",
@@ -44,6 +45,7 @@ impl ActorEffectProfile {
                 "Actor",
                 "Deliberate",
                 "FsRead",
+                "Worktree",
             ],
         }
     }

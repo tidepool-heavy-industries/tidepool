@@ -10,12 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use frunk::HNil;
+use frunk::{hlist, HCons, HNil};
+use parking_lot::Mutex;
 use rmcp::ServiceExt;
 use tidepool_actor::{
     ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorRegistry,
-    ActorTerminal, ActorWorkbenchSource, ResidentActorDeployment, ResidentActorHost,
-    ResidentActorRoot, ResidentLifecyclePolicy, ResidentMcpInstallation,
+    ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
+    ExternalApplicationFailureClass, ExternalFailureDisposition, ResidentActorDeployment,
+    ResidentActorHost, ResidentActorHostControl, ResidentActorRoot, ResidentLifecyclePolicy,
+    ResidentMcpInstallation,
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
@@ -25,6 +28,7 @@ use tidepool_agent::{
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+use tidepool_handlers::{ActorWorktreeAuthority, ActorWorktreeHandler, WorktreeHandler};
 use tidepool_mcp::{CapturedOutput, DynamicMcpServer};
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
 use tidepool_node::{
@@ -36,7 +40,10 @@ use tidepool_runtime::session::{
     SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
-use tidepool_worktree::{GitCli, WorktreeHandle, WorktreeManager, WorktreeRegistry, WorktreeSpec};
+use tidepool_worktree::{
+    ActiveBinding, AgentRef as WorktreePrincipal, BindingTable, BindingTerminal, GitCli,
+    WorktreeHandle, WorktreeId, WorktreeManager, WorktreeRegistry,
+};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -47,6 +54,9 @@ const POLICY_EFFECTS: &str = "RootEffects";
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+type ShoalHandlerStack = HCons<ActorWorktreeHandler, HNil>;
+type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 
 #[derive(Clone)]
 pub struct ActorHostConfig {
@@ -93,6 +103,8 @@ struct InteractiveDeployment {
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: PathBuf,
     worktree: Option<WorktreeHandle>,
+    worktree_binding: Option<ActiveBinding>,
+    failure_reported: bool,
 }
 
 struct OwnerNotification {
@@ -102,7 +114,7 @@ struct OwnerNotification {
 
 #[derive(Debug, Clone, Copy)]
 enum InteractiveOperation {
-    CreateWorktree,
+    BindWorktree,
     PrepareRuntime,
     BindProxy,
     BuildCommand,
@@ -117,7 +129,7 @@ enum InteractiveOperation {
 impl fmt::Display for InteractiveOperation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::CreateWorktree => "create worktree",
+            Self::BindWorktree => "bind actor worktree",
             Self::PrepareRuntime => "prepare runtime",
             Self::BindProxy => "bind proxy",
             Self::BuildCommand => "build agent command",
@@ -129,6 +141,24 @@ impl fmt::Display for InteractiveOperation {
             Self::StopProcess => "stop agent process",
         };
         formatter.write_str(name)
+    }
+}
+
+impl InteractiveOperation {
+    fn failure_class(self) -> ExternalApplicationFailureClass {
+        match self {
+            Self::BindWorktree => ExternalApplicationFailureClass::WorktreeBinding,
+            Self::BuildCommand | Self::BuildPolicy => {
+                ExternalApplicationFailureClass::CommandConstruction
+            }
+            Self::LaunchProcess => ExternalApplicationFailureClass::ProcessLaunch,
+            Self::BindProxy
+            | Self::AcceptProxy
+            | Self::ServeMcp
+            | Self::DiscoverBinding
+            | Self::PrepareRuntime => ExternalApplicationFailureClass::ProxyStartup,
+            Self::StopProcess => ExternalApplicationFailureClass::UnexpectedExit,
+        }
     }
 }
 
@@ -160,6 +190,8 @@ struct InteractiveFleet {
     tmux: TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
+    bindings: Arc<Mutex<BindingTable>>,
+    control: ResidentActorHostControl,
     readiness: oneshot::Sender<ActorHostReady>,
 }
 
@@ -171,6 +203,7 @@ struct InteractiveLaunchContext {
     tmux: TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
+    bindings: Arc<Mutex<BindingTable>>,
 }
 
 pub async fn run(
@@ -181,7 +214,16 @@ pub async fn run(
     std::fs::create_dir_all(&run_root)?;
 
     let registry = ActorRegistry::new();
-    let (source, root) = compile_root(&config, &run_root)?;
+    let (worktrees, bindings) = actor_worktree_resources(&config.workspace)?;
+    let bindings = Arc::new(Mutex::new(bindings));
+    let worktree_authority =
+        ActorWorktreeAuthority::new(runtime_namespace(&run_root), Arc::clone(&bindings));
+    let (source, root) = compile_root(
+        &config,
+        &run_root,
+        worktrees.clone(),
+        worktree_authority.clone(),
+    )?;
     let mut host = ResidentActorHost::new(
         registry.clone(),
         source,
@@ -190,7 +232,9 @@ pub async fn run(
         ResidentLifecyclePolicy::default(),
     )?;
     let deployments = host.take_deployments()?;
+    let control = host.control();
     let root_actor = host.launch_root(root).await?;
+    worktree_authority.install_root(root_actor.into());
 
     let tmux = TmuxSession::new(&config.tmux_session)?;
     if !tmux.exists().await? {
@@ -200,7 +244,6 @@ pub async fn run(
         )));
     }
     let backend = native_interactive_backend();
-    let worktrees = actor_worktree_manager(&config.workspace)?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     let mut host_task =
         tokio::spawn(host.run_until_shutdown(wait_for_shutdown(shutdown_rx.clone())));
@@ -214,6 +257,8 @@ pub async fn run(
             tmux,
             backend,
             worktrees,
+            bindings,
+            control,
             readiness,
         },
         shutdown_rx,
@@ -270,9 +315,9 @@ async fn await_applications(
     }
 }
 
-fn actor_worktree_manager(
+fn actor_worktree_resources(
     workspace: &Path,
-) -> Result<WorktreeManager, tidepool_worktree::WorktreeError> {
+) -> Result<(WorktreeManager, BindingTable), tidepool_worktree::WorktreeError> {
     let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
         .to_string();
@@ -280,32 +325,34 @@ fn actor_worktree_manager(
         .join("shoal")
         .join("actor-worktrees")
         .join(project);
-    actor_worktree_manager_at(&root, workspace)
+    actor_worktree_resources_at(&root, workspace)
 }
 
-fn actor_worktree_manager_at(
+fn actor_worktree_resources_at(
     root: &Path,
     workspace: &Path,
-) -> Result<WorktreeManager, tidepool_worktree::WorktreeError> {
+) -> Result<(WorktreeManager, BindingTable), tidepool_worktree::WorktreeError> {
     let registry = WorktreeRegistry::open(root.join("registry"))?;
-    Ok(WorktreeManager::new(
-        GitCli::new(),
-        registry,
-        root.join("checkouts"),
-        workspace,
+    Ok((
+        WorktreeManager::new(GitCli::new(), registry, root.join("checkouts"), workspace),
+        BindingTable::open(root.join("bindings"))?,
     ))
+}
+
+fn runtime_namespace(run_root: &Path) -> String {
+    run_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown-runtime")
+        .to_owned()
 }
 
 fn compile_root(
     config: &ActorHostConfig,
     run_root: &Path,
-) -> Result<
-    (
-        ActorWorkbenchSource,
-        ResidentActorRoot<HNil, CapturedOutput>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+    worktrees: WorktreeManager,
+    worktree_authority: ActorWorktreeAuthority,
+) -> Result<(ActorWorkbenchSource, ShoalRoot), Box<dyn std::error::Error>> {
     let declarations = [
         tidepool_mcp::actor_mcp_decl(),
         tidepool_mcp::actor_decl(),
@@ -313,6 +360,7 @@ fn compile_root(
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::deliberate_decl(),
         tidepool_mcp::fs_read_decl(),
+        tidepool_mcp::worktree_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
@@ -350,14 +398,17 @@ fn compile_root(
     let mut machine = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
-        HNil,
+        hlist![ActorWorktreeHandler::new(
+            WorktreeHandler::from_manager(worktrees),
+            worktree_authority,
+        )],
         CapturedOutput::new(),
         include.clone(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
     )?;
     machine.set_effect_execution(
-        EffectRunPolicy::SuspendAll,
+        EffectRunPolicy::HandleOrSuspend,
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
     let outcome = machine.run_with_sites(
@@ -368,17 +419,16 @@ fn compile_root(
     )?;
     let descriptor = ActorDescriptor::new(
         "devswarm-root",
-        ["ActorMcp", "Actor"],
+        ["ActorMcp", "Actor", "Worktree"],
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),
             lexical_scope: ScopeId::ROOT,
         },
     )
-    // The bootstrap root currently uses a strict subset of the experimental
-    // ReadOnly row and starts only ReadOnly children. Its profile is the spawn
-    // ceiling, not a claim about native Codex process authority.
-    .with_profile(ActorEffectProfile::ReadOnly);
+    // Profiles classify resident Haskell rows, not the native Codex sandbox.
+    // The root allocates worktrees and may attenuate children to ReadOnly.
+    .with_profile(ActorEffectProfile::ReadWrite);
     Ok((
         ActorWorkbenchSource::new(preamble, include),
         ResidentActorRoot::new(descriptor, machine, outcome),
@@ -398,6 +448,8 @@ async fn run_interactive_applications(
         tmux,
         backend,
         worktrees,
+        bindings,
+        control,
         readiness,
     } = fleet;
     let launch_context = InteractiveLaunchContext {
@@ -407,9 +459,10 @@ async fn run_interactive_applications(
         tmux: tmux.clone(),
         backend,
         worktrees,
+        bindings: Arc::clone(&bindings),
     };
     let mut readiness = Some(readiness);
-    let mut deployments = Vec::new();
+    let mut deployments: Vec<InteractiveDeployment> = Vec::new();
     let mut launches = JoinSet::new();
     let mut pending_launches = HashMap::new();
     let mut retirements = JoinSet::new();
@@ -420,16 +473,34 @@ async fn run_interactive_applications(
             biased;
             _ = wait_for_shutdown(shutdown.clone()) => break None,
             _ = health.tick() => {
-                if let Some(deployment) = deployments
-                    .iter()
-                    .find(|deployment: &&InteractiveDeployment| {
-                        deployment.service.is_finished() || deployment.delivery.is_finished()
-                    })
-                {
-                    break Some(format!(
-                        "interactive application for actor {:?} exited before host shutdown",
-                        deployment.actor
-                    ));
+                if let Some(index) = deployments.iter().position(|deployment| {
+                    !deployment.failure_reported
+                        && (deployment.service.is_finished() || deployment.delivery.is_finished())
+                }) {
+                    let actor = deployments[index].actor;
+                    deployments[index].failure_reported = true;
+                    let detail = "interactive application exited before actor settlement".to_string();
+                    if actor == root {
+                        break Some(format!("root {actor:?}: {detail}"));
+                    }
+                    let result = control
+                        .fail_external_application(
+                            actor,
+                            ExternalApplicationFailure {
+                                class: ExternalApplicationFailureClass::UnexpectedExit,
+                                detail,
+                            },
+                        )
+                        .await;
+                    match result {
+                        Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
+                        Ok(ExternalFailureDisposition::UnknownOrStale) => {
+                            break Some(format!("resident host rejected the exact deployed actor {actor:?} as unknown or stale"));
+                        }
+                        Err(error) => {
+                            break Some(format!("report child application failure for {actor:?}: {error}"));
+                        }
+                    }
                 }
             }
             event = lifecycle.recv() => {
@@ -469,8 +540,19 @@ async fn run_interactive_applications(
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
                             let tmux = tmux.clone();
+                            let bindings = Arc::clone(&bindings);
+                            let binding_terminal = if terminal.kind == ActorExitKind::Completed {
+                                BindingTerminal::Completed
+                            } else {
+                                BindingTerminal::Released
+                            };
                             retirements.spawn(async move {
-                                retire_interactive_application(deployment, &tmux).await
+                                retire_interactive_application(
+                                    deployment,
+                                    &tmux,
+                                    &bindings,
+                                    binding_terminal,
+                                ).await
                             });
                         }
                     }
@@ -495,7 +577,29 @@ async fn run_interactive_applications(
                     }
                     Some(Ok((actor, Err(error)))) => {
                         pending_launches.remove(&actor);
-                        break Some(error.to_string());
+                        if actor == root {
+                            break Some(error.to_string());
+                        }
+                        let result = control
+                            .fail_external_application(
+                                actor,
+                                ExternalApplicationFailure {
+                                    class: error.operation.failure_class(),
+                                    detail: error.detail,
+                                },
+                            )
+                            .await;
+                        match result {
+                            Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
+                            Ok(ExternalFailureDisposition::UnknownOrStale) => {
+                                break Some(format!("resident host rejected the exact launching actor {actor:?} as unknown or stale"));
+                            }
+                            Err(report_error) => {
+                                break Some(format!(
+                                    "report child launch failure for {actor:?}: {report_error}"
+                                ));
+                            }
+                        }
                     }
                     Some(Err(error)) => break Some(format!("interactive launch task: {error}")),
                     None => {}
@@ -539,7 +643,11 @@ async fn run_interactive_applications(
     }
     for deployment in deployments {
         let tmux = tmux.clone();
-        retirements.spawn(async move { retire_interactive_application(deployment, &tmux).await });
+        let bindings = Arc::clone(&bindings);
+        retirements.spawn(async move {
+            retire_interactive_application(deployment, &tmux, &bindings, BindingTerminal::Released)
+                .await
+        });
     }
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
@@ -584,6 +692,115 @@ async fn run_interactive_applications(
 async fn launch_interactive_application(
     installation: ResidentMcpInstallation,
     context: InteractiveLaunchContext,
+    cancelled: oneshot::Receiver<()>,
+) -> Result<Option<InteractiveDeployment>, InteractiveApplicationError> {
+    let actor = installation.actor;
+    let prepared = prepare_actor_worktree(&installation, &context)?;
+    let worktree = prepared.as_ref().map(|(handle, _)| handle.clone());
+    let result =
+        launch_prepared_interactive_application(installation, context.clone(), worktree, cancelled)
+            .await;
+    match (result, prepared) {
+        (Ok(Some(mut deployment)), Some((_handle, binding))) => {
+            deployment.worktree_binding = Some(binding);
+            Ok(Some(deployment))
+        }
+        (Ok(Some(deployment)), None) => Ok(Some(deployment)),
+        (Ok(None), Some((_handle, binding))) => {
+            release_worktree_binding(&context.bindings, binding).map_err(|error| {
+                application_error(actor, InteractiveOperation::BindWorktree, error)
+            })?;
+            Ok(None)
+        }
+        (Ok(None), None) => Ok(None),
+        (Err(mut error), Some((_handle, binding))) => {
+            if let Err(rollback) = release_worktree_binding(&context.bindings, binding) {
+                error
+                    .detail
+                    .push_str(&format!("; binding rollback failed: {rollback}"));
+            }
+            Err(error)
+        }
+        (Err(error), None) => Err(error),
+    }
+}
+
+fn prepare_actor_worktree(
+    installation: &ResidentMcpInstallation,
+    context: &InteractiveLaunchContext,
+) -> Result<Option<(WorktreeHandle, ActiveBinding)>, InteractiveApplicationError> {
+    let actor = installation.actor;
+    if actor == context.root {
+        if installation.launch_worktrees.is_empty() {
+            return Ok(None);
+        }
+        return Err(application_error(
+            actor,
+            InteractiveOperation::BindWorktree,
+            "the root application may not carry a child worktree recipe",
+        ));
+    }
+    let [raw_id] = installation.launch_worktrees.as_slice() else {
+        return Err(application_error(
+            actor,
+            InteractiveOperation::BindWorktree,
+            format!(
+                "an interactive worker requires exactly one worktree recipe, received {}",
+                installation.launch_worktrees.len()
+            ),
+        ));
+    };
+    if !WorktreeId::is_path_safe(raw_id) {
+        return Err(application_error(
+            actor,
+            InteractiveOperation::BindWorktree,
+            "the worktree recipe carried an invalid durable id",
+        ));
+    }
+    let id = WorktreeId::from_raw(raw_id.clone());
+    let handle = context
+        .worktrees
+        .lookup(&id)
+        .map_err(|error| application_error(actor, InteractiveOperation::BindWorktree, error))?
+        .ok_or_else(|| {
+            application_error(
+                actor,
+                InteractiveOperation::BindWorktree,
+                format!("worktree {id} is not registered"),
+            )
+        })?;
+    let principal = WorktreePrincipal::exact_actor(
+        &runtime_namespace(&context.run_root),
+        actor.id.0,
+        actor.incarnation.0,
+    );
+    let binding = context
+        .bindings
+        .lock()
+        .bind(handle.id(), &principal, current_time_ms())
+        .map_err(|error| application_error(actor, InteractiveOperation::BindWorktree, error))?;
+    Ok(Some((handle, binding)))
+}
+
+fn release_worktree_binding(
+    bindings: &Arc<Mutex<BindingTable>>,
+    binding: ActiveBinding,
+) -> Result<(), tidepool_worktree::WorktreeError> {
+    binding.release(&mut bindings.lock())
+}
+
+fn current_time_ms() -> i64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
+}
+
+async fn launch_prepared_interactive_application(
+    installation: ResidentMcpInstallation,
+    context: InteractiveLaunchContext,
+    worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<()>,
 ) -> Result<Option<InteractiveDeployment>, InteractiveApplicationError> {
     let InteractiveLaunchContext {
@@ -593,23 +810,10 @@ async fn launch_interactive_application(
         tmux,
         backend,
         worktrees,
+        bindings: _,
     } = context;
     let actor = installation.actor;
-    let worktree = if actor == root {
-        None
-    } else {
-        let label = format!("shoal-{}-{}", actor.id.0, actor.incarnation.0);
-        Some(
-            tokio::task::spawn_blocking(move || {
-                worktrees.create(&WorktreeSpec::from_current_repository(label))
-            })
-            .await
-            .map_err(|error| application_error(actor, InteractiveOperation::CreateWorktree, error))?
-            .map_err(|error| {
-                application_error(actor, InteractiveOperation::CreateWorktree, error)
-            })?,
-        )
-    };
+    let _ = worktrees;
     let workspace = worktree.as_ref().map_or_else(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
@@ -804,6 +1008,8 @@ async fn launch_interactive_application(
         service,
         socket_root,
         worktree,
+        worktree_binding: None,
+        failure_reported: false,
     }))
 }
 
@@ -886,20 +1092,19 @@ fn prepare_owner_notification(
         ActorExitKind::Failed => "failed",
         ActorExitKind::Cancelled => "was cancelled",
     };
-    let workspace = deployments
+    let worker_handle = deployments
         .iter()
         .find(|application| application.actor == actor)
         .and_then(|application| application.worktree.as_ref())
         .map(|worktree| {
             format!(
-                " Its retained worktree is {} on branch {}.",
-                worktree.cwd().display(),
-                worktree.branch()
+                " The worker handle is {{\"workerId\":\"{}\"}}.",
+                worktree.id()
             )
         })
         .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{workspace} Inspect and await its exact typed result through your actor tools.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} Use collect_worker for a nonblocking, replayable typed result; this notification carries correlation only.",
         descriptor.label(),
         actor,
         terminal.summary
@@ -921,13 +1126,16 @@ async fn publish_owner_notification(notification: OwnerNotification) -> Result<(
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
+    bindings: &Arc<Mutex<BindingTable>>,
+    binding_terminal: BindingTerminal,
 ) -> Result<(), InteractiveApplicationError> {
     if let Some(shutdown) = deployment.delivery_shutdown.take() {
         let _ = shutdown.send(());
     }
-    tmux.kill_pane(&deployment.pane).await.map_err(|error| {
-        application_error(deployment.actor, InteractiveOperation::StopProcess, error)
-    })?;
+    let stop_error =
+        tmux.kill_pane(&deployment.pane).await.err().map(|error| {
+            application_error(deployment.actor, InteractiveOperation::StopProcess, error)
+        });
     tokio::join!(
         stop_retired_mcp_service(
             deployment.actor,
@@ -941,7 +1149,26 @@ async fn retire_interactive_application(
         ),
     );
     let _ = std::fs::remove_dir_all(&deployment.socket_root);
-    Ok(())
+    let binding_error = if let Some(binding) = deployment.worktree_binding.take() {
+        let result = match binding_terminal {
+            BindingTerminal::Completed => binding.complete(&mut bindings.lock()),
+            BindingTerminal::Released => binding.release(&mut bindings.lock()),
+        };
+        result.err().map(|error| {
+            application_error(deployment.actor, InteractiveOperation::BindWorktree, error)
+        })
+    } else {
+        None
+    };
+    match (stop_error, binding_error) {
+        (Some(mut stop), Some(binding)) => {
+            stop.detail
+                .push_str(&format!("; binding settlement failed: {binding}"));
+            Err(stop)
+        }
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (None, None) => Ok(()),
+    }
 }
 
 /// Settle actor-local tasks after the actor has already reached a terminal
@@ -1108,6 +1335,7 @@ mod tests {
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };
     use tidepool_testing::eval_harness;
+    use tidepool_worktree::WorktreeSpec;
 
     struct ScriptedPush {
         fail: std::sync::atomic::AtomicBool,
@@ -1209,7 +1437,8 @@ mod tests {
             .commit_file("README.md", "source\n", "seed")
             .unwrap();
         let storage = tempfile::tempdir().unwrap();
-        let manager = actor_worktree_manager_at(storage.path(), repository.path()).unwrap();
+        let (manager, _bindings) =
+            actor_worktree_resources_at(storage.path(), repository.path()).unwrap();
         let first = manager
             .create(&WorktreeSpec::from_current_repository("first-worker"))
             .unwrap();
@@ -1230,14 +1459,16 @@ mod tests {
     #[tokio::test]
     async fn bundled_devswarm_policy_installs_the_root_tool_surface() {
         eval_harness::require_extract();
-        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace root")
-            .to_path_buf();
+        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "source\n", "seed")
+            .unwrap();
+        let workspace = repository.path().to_path_buf();
         let runtime = tempfile::tempdir().unwrap();
         let config = ActorHostConfig {
             policy_root: crate::haskell_sources::ensure_actor_policy().unwrap(),
-            workspace,
+            workspace: workspace.clone(),
             run_root: runtime.path().join("run"),
             root_binding_path: runtime.path().join("root-binding.json"),
             proxy_program: "unused-in-compile-test".into(),
@@ -1249,9 +1480,18 @@ mod tests {
             pane_environment: std::collections::BTreeMap::new(),
         };
         let session_root = tempfile::tempdir().expect("session root");
+        let (worktrees, bindings) =
+            actor_worktree_resources_at(&runtime.path().join("worktrees"), &workspace)
+                .expect("worktree resources");
+        let bindings = Arc::new(Mutex::new(bindings));
+        let authority = ActorWorktreeAuthority::new(
+            runtime_namespace(session_root.path()),
+            Arc::clone(&bindings),
+        );
         let registry = ActorRegistry::new();
         let (source, root) =
-            compile_root(&config, session_root.path()).expect("compile root policy");
+            compile_root(&config, session_root.path(), worktrees, authority.clone())
+                .expect("compile root policy");
         let mut host = ResidentActorHost::new(
             registry,
             source,
@@ -1262,6 +1502,7 @@ mod tests {
         .expect("construct host");
         let mut deployments = host.take_deployments().expect("take deployment stream");
         let actor = host.launch_root(root).await.expect("launch root");
+        authority.install_root(actor.into());
         let report = host.run_until_idle().await.expect("install policy");
         assert!(report.failures.is_empty());
         assert_eq!(report.parked[&ResidentHostParkedKind::McpPolicy], 1);
@@ -1283,7 +1524,8 @@ mod tests {
                 "actor_status",
                 "spawn_worker",
                 "list_workers",
-                "await_worker"
+                "collect_worker",
+                "ack_worker"
             ]
         );
         assert!(policy
@@ -1294,13 +1536,14 @@ mod tests {
             policy
                 .declarations()
                 .iter()
-                .find(|declaration| declaration.name == "await_worker")
-                .expect("await worker declaration")
+                .find(|declaration| declaration.name == "collect_worker")
+                .expect("collect worker declaration")
                 .kind,
             tidepool_agent::ToolKind::Update
         );
 
         let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
+        let control = host.control();
         let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
         let hosted = tokio::spawn(host.run_until_shutdown(async move {
             let _ = shutdown_requested.await;
@@ -1321,10 +1564,41 @@ mod tests {
             let report = hosted.await.expect("host task").expect("shutdown host");
             panic!("{result:?}; host failures: {:?}", report.run.failures);
         }
+        let started = result.structured_content.expect("typed worker acceptance");
+        assert_eq!(started["tag"], "WorkerAccepted", "{started}");
+        assert_eq!(started["workKey"], "review-1");
+        let worker_handle = started["worker"].clone();
+        let retry = server
+            .dispatch_tool(
+                "spawn_worker",
+                serde_json::json!({
+                    "workKey": "review-1",
+                    "assignment": "inspect one focused boundary"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("retry identical spawn");
+        assert_eq!(retry.structured_content, Some(started.clone()));
+        let conflict = server
+            .dispatch_tool(
+                "spawn_worker",
+                serde_json::json!({
+                    "workKey": "review-1",
+                    "assignment": "a changed assignment must not attach"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("conflicting spawn");
         assert_eq!(
-            result.structured_content,
+            conflict.structured_content,
             Some(serde_json::json!({
-                "tag": "WorkerStarted",
+                "tag": "WorkerKeyConflict",
                 "workKey": "review-1"
             }))
         );
@@ -1335,7 +1609,18 @@ mod tests {
         let ResidentActorDeployment::PolicyInstalled(worker) = worker else {
             panic!("worker policy retired before installation");
         };
+        assert_eq!(worker.launch_worktrees.len(), 1);
         assert_ne!(worker.actor, actor);
+        let worker_tree = WorktreeId::from_raw(worker.launch_worktrees[0].clone());
+        let worker_principal = WorktreePrincipal::exact_actor(
+            &runtime_namespace(session_root.path()),
+            worker.actor.id.0,
+            worker.actor.incarnation.0,
+        );
+        let worker_binding = bindings
+            .lock()
+            .bind(&worker_tree, &worker_principal, current_time_ms())
+            .expect("bind exact worker before it observes submission");
         let worker_names = worker
             .policy
             .declarations()
@@ -1359,6 +1644,23 @@ mod tests {
         let worker_actor = worker.actor;
         let worker_server =
             DynamicMcpServer::from_resident_policy(worker.policy).expect("worker MCP server");
+        let pending_collect = server
+            .dispatch_tool(
+                "collect_worker",
+                serde_json::json!({"worker": worker_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("nonblocking pending collection");
+        assert_eq!(
+            pending_collect.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerPending",
+                "worker": worker_handle.clone()
+            }))
+        );
         let assignment = worker_server
             .dispatch_tool("current_assignment", serde_json::Map::new())
             .await
@@ -1393,28 +1695,41 @@ mod tests {
             ResidentActorDeployment::Retired { actor, terminal }
                 if actor == worker_actor && terminal.kind == ActorExitKind::Completed
         ));
+        worker_binding
+            .complete(&mut bindings.lock())
+            .expect("settle worker binding");
 
-        let collect = serde_json::json!({"workKey": "review-1"})
+        let collect = serde_json::json!({"worker": worker_handle.clone()})
             .as_object()
             .expect("collect arguments")
             .clone();
         let collected = server
-            .dispatch_tool("await_worker", collect)
+            .dispatch_tool("collect_worker", collect)
             .await
             .expect("collect worker");
+        let collected = collected.structured_content.expect("typed collection");
+        assert_eq!(collected["tag"], "WorkerCollected");
+        assert_eq!(collected["outcome"]["tag"], "WorkCompleted");
         assert_eq!(
-            collected.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerCollected",
-                "workKey": "review-1",
-                "outcome": {
-                    "tag": "WorkCompleted",
-                    "result": {
-                        "summary": "boundary is clean",
-                        "evidence": ["focused test"]
-                    }
-                }
-            }))
+            collected["outcome"]["receipt"]["authoredReport"]["summary"],
+            "boundary is clean"
+        );
+        let replayed = server
+            .dispatch_tool(
+                "collect_worker",
+                serde_json::json!({"worker": worker_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("replay collection")
+            .structured_content
+            .expect("typed replay");
+        assert_eq!(replayed, collected);
+        assert_eq!(
+            collected["outcome"]["receipt"]["repository"]["workingState"]["changes"]["staged"],
+            serde_json::json!([])
         );
         let pending = server
             .dispatch_tool("list_workers", serde_json::Map::new())
@@ -1422,8 +1737,140 @@ mod tests {
             .expect("list workers");
         assert_eq!(
             pending.structured_content,
-            Some(serde_json::json!({"workKeys": []}))
+            Some(serde_json::json!({
+                "workers": [{
+                    "workKey": "review-1",
+                    "worker": worker_handle,
+                    "phase": "WorkerCollectedPhase"
+                }]
+            }))
         );
+        let acknowledged = server
+            .dispatch_tool(
+                "ack_worker",
+                serde_json::json!({"worker": worker_handle.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("acknowledge collection");
+        assert_eq!(
+            acknowledged.structured_content,
+            Some(serde_json::json!({
+                "tag": "WorkerAcknowledged",
+                "worker": worker_handle.clone()
+            }))
+        );
+        let after_ack = server
+            .dispatch_tool(
+                "collect_worker",
+                serde_json::json!({"worker": worker_handle})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("collect after acknowledgement");
+        assert_eq!(
+            after_ack.structured_content.unwrap()["tag"],
+            "WorkerCollectionAcknowledged"
+        );
+        let acknowledged_retry = server
+            .dispatch_tool(
+                "spawn_worker",
+                serde_json::json!({
+                    "workKey": "review-1",
+                    "assignment": "inspect one focused boundary"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("retry acknowledged spawn")
+            .structured_content
+            .expect("typed acknowledged retry");
+        assert_eq!(acknowledged_retry["tag"], "WorkerAlreadyAcknowledged");
+
+        let failed_start = server
+            .dispatch_tool(
+                "spawn_worker",
+                serde_json::json!({
+                    "workKey": "launch-failure",
+                    "assignment": "this application will fail before launch"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("accept failure probe")
+            .structured_content
+            .expect("typed failure probe acceptance");
+        let failed_handle = failed_start["worker"].clone();
+        let failed_installation = deployments
+            .recv()
+            .await
+            .expect("failure probe installation");
+        let ResidentActorDeployment::PolicyInstalled(failed_installation) = failed_installation
+        else {
+            panic!("failure probe retired before installation");
+        };
+        assert_eq!(
+            control
+                .fail_external_application(
+                    failed_installation.actor,
+                    ExternalApplicationFailure {
+                        class: ExternalApplicationFailureClass::ProcessLaunch,
+                        detail: "scripted launch refusal".into(),
+                    },
+                )
+                .await
+                .expect("report exact application failure"),
+            tidepool_actor::ExternalFailureDisposition::Applied
+        );
+        let failed_retirement = deployments.recv().await.expect("failed child retirement");
+        assert!(matches!(
+            failed_retirement,
+            ResidentActorDeployment::Retired { actor, terminal }
+                if actor == failed_installation.actor && terminal.kind == ActorExitKind::Failed
+        ));
+        let failed_collection = server
+            .dispatch_tool(
+                "collect_worker",
+                serde_json::json!({"worker": failed_handle})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .expect("collect application failure")
+            .structured_content
+            .expect("typed application failure");
+        assert_eq!(failed_collection["outcome"]["tag"], "WorkFailed");
+
+        let recovery = server
+            .dispatch_tool(
+                "spawn_worker",
+                serde_json::json!({
+                    "workKey": "after-failure",
+                    "assignment": "prove the root remains operational"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("root starts another child after failure");
+        assert_eq!(
+            recovery.structured_content.unwrap()["tag"],
+            "WorkerAccepted"
+        );
+        assert!(matches!(
+            deployments.recv().await,
+            Some(ResidentActorDeployment::PolicyInstalled(_))
+        ));
         request_shutdown.send(()).expect("request shutdown");
         hosted.await.expect("host task").expect("shutdown host");
     }

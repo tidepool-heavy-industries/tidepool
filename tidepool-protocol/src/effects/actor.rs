@@ -105,6 +105,11 @@ pub fn actor() -> Effect {
                         rust: RustBinding::Derived,
                     },
                     Arg {
+                        name: "launchWorktrees",
+                        ty: HsType::List(Box::new(HsType::Text)),
+                        rust: RustBinding::Derived,
+                    },
+                    Arg {
                         name: "exports",
                         ty: HsType::List(Box::new(HsType::Text)),
                         rust: RustBinding::Derived,
@@ -124,6 +129,19 @@ pub fn actor() -> Effect {
                     rust: RustBinding::Path("(i64, i64)"),
                 }],
                 ret: HsType::Named("ActorTerminalStatus"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorPollWith",
+                method: "actor_poll_with",
+                args: vec![Arg {
+                    name: "actor",
+                    ty: address_type(),
+                    rust: RustBinding::Path("(i64, i64)"),
+                }],
+                ret: HsType::maybe(HsType::Named("ActorTerminalStatus")),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

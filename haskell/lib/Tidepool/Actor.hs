@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -19,7 +20,14 @@
 -- waiter is a runtime failure and does not fabricate an 'ActorExit'.
 module Tidepool.Actor
   ( ActorRef
-  , ActorDefinition (..)
+  , ActorDefinition
+  , pattern ActorDefinition
+  , label
+  , effectProfile
+  , initialization
+  , behavior
+  , visibleToChild
+  , onShutdown
   , EffectProfile (..)
   , ReadOnlyEffects
   , ReadWriteEffects
@@ -34,6 +42,7 @@ module Tidepool.Actor
   , ActorFailure (..)
   , CancelReason (..)
   , awaitExit
+  , pollExit
   ) where
 
 import Control.Monad.Freer (Eff, Member, raise, send)
@@ -41,7 +50,15 @@ import Data.Text (Text)
 import Prelude
 
 import Tidepool.Actor.Internal
-  ( ActorDefinition (..)
+  ( ActorDefinition
+  , pattern ActorDefinition
+  , label
+  , effectProfile
+  , initialization
+  , behavior
+  , visibleToChild
+  , onShutdown
+  , actorLaunchWorktrees
   , ActorRef (..)
   , EffectProfile (..)
   , ReadOnlyEffects
@@ -90,7 +107,7 @@ startActor
   => ActorDefinition startup api exit
   -> startup
   -> Eff effs (ActorRef api exit)
-startActor ActorDefinition
+startActor definition@ActorDefinition
   { label = actorLabel
   , effectProfile = profile
   , initialization = startupAction
@@ -108,7 +125,8 @@ startActor ActorDefinition
         result <- raiseKernel (install startup initial)
         case fillExitCell cell result of
           () -> pure ()
-  (actorId, incarnation) <- send (ActorStartWith actorLabel entry (profileCode profile) exports)
+  (actorId, incarnation) <- send
+    (ActorStartWith actorLabel entry (profileCode profile) (actorLaunchWorktrees definition) exports)
   pure (ActorRef actorId incarnation cell)
 
 profileCode :: EffectProfile protocol effs -> Int
@@ -224,3 +242,19 @@ awaitExit (ActorRef actorId incarnation cell) = do
         Nothing -> error "Tidepool.Actor.awaitExit: completed actor has an empty exit cell"
     ActorFailedStatus summary -> pure (Failed (ActorFailure summary))
     ActorCancelledStatus summary -> pure (Cancelled (CancelReason summary))
+
+-- | Observe an exact actor without parking the caller. Completion reads the
+-- same shared exit cell as 'awaitExit'; repeated polls therefore return the
+-- same typed result and never consume custody.
+pollExit :: Member Actor effs => ActorRef api exit -> Eff effs (Maybe (ActorExit exit))
+pollExit (ActorRef actorId incarnation cell) = do
+  terminal <- send (ActorPollWith (actorId, incarnation))
+  pure (terminal >>= decodeTerminal cell)
+  where
+    decodeTerminal retained status = case status of
+      ActorCompletedStatus ->
+        case readExitCell status retained of
+          Just value -> Just (Completed value)
+          Nothing -> error "Tidepool.Actor.pollExit: completed actor has an empty exit cell"
+      ActorFailedStatus summary -> Just (Failed (ActorFailure summary))
+      ActorCancelledStatus summary -> Just (Cancelled (CancelReason summary))

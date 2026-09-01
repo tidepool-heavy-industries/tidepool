@@ -1,38 +1,11 @@
-//! The Worktree effect — the first effect with a real record vocabulary.
+//! Canonical schema for the Worktree effect.
 //!
-//! Lanes 1 and 2 (Exec, Journal) migrated effects whose `type_defs` were EMPTY.
-//! Worktree carries thirteen supporting declarations, seven `ToJSON` instances,
-//! an eleven-variant error ADT, and thirteen matching Rust wire structs that are
-//! hand-written in `tidepool-bridge-effects` today with a comment asserting that
-//! the two lists agree positionally. This module is where that comment goes to
-//! die: one ordered [`crate::types::RecordField`] list produces both sides.
-//!
-//! **Flipped:** `worktree_effect_def!` is deleted, the
-//! hand-written `Wt*` block is deleted, and with it the comment asserting that
-//! the two field lists agree positionally — there is only one list now.
-//!
-//! **Helper representability.** Fourteen helpers lived in the hand-written
-//! registry, all fourteen using the `raw` escape hatch. FOUR are described here:
-//! three thin wrappers over one verb, plus `worktreeId`, the one pure projection
-//! ([`crate::schema::HelperBody::Projection`]). The other ten are NOT smuggled
-//! in as strings — they are DEFINITIONS in `haskell/lib/Tidepool/Worktree.hs`,
-//! reachable from an eval through this effect's `extra_imports` row. That gap
-//! is a real finding, not a shortfall of effort: the alternative was embedding a Haskell
-//! expression language in the schema, which is the hatch under a different name.
-//!
-//! Two of the ten could not simply move: a helper emitted into the generated
-//! `Tidepool.Effects` is in scope for every OTHER effect's helpers there, and
-//! that module cannot import the library layer. `worktreeId` was made
-//! representable; `renderWorktreeError`'s CALLER moved instead. Before
-//! relocating any helper, grep every `*_effect_def!` for its name.
-//!
-//! **A fifth verb landed later, outside the fourteen-item census above.**
-//! `WorktreeMergeInto`/`mergeBranchInto` exposes `tidepool_worktree::merge::
-//! merge_branch_into` (one deliberate git-workflow exception — see
-//! `tidepool-worktree/src/merge.rs`) as a typed verb, replacing two
-//! authored Haskell reimplementations that had drifted from the canonical
-//! conflict/failure classification (`harness-dogfooding/dev-tree` and
-//! `/recursive-companion`'s own `mergeChild`/`mergeChildInto`).
+//! One ordered declaration produces the Haskell vocabulary, Rust wire types,
+//! request decoder, and handler dispatch. Pure helpers that the schema can
+//! represent live here; richer authored helpers live in
+//! `haskell/lib/Tidepool/Worktree.hs` and are imported through `extra_imports`.
+//! `WorktreeMergeInto` is the deliberately narrow workflow exception; other
+//! Git workflow and conflict resolution remain native-agent work.
 
 use crate::hs::HsType;
 use crate::schema::{
@@ -113,30 +86,15 @@ pub fn worktree() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        // Eleven of the fourteen authored names are not schema-representable
-        // (see the module doc) and are DEFINED in
-        // `haskell/lib/Tidepool/Worktree.hs`. This row is what makes that
-        // relocation invisible to an eval author: a row carrying Worktree
-        // imports that module, so all fourteen names resolve exactly as they
-        // did when the generated `Tidepool.Effects` defined them. The three
-        // helpers below are re-exported by the same module, so they resolve to
-        // one Name and cannot be an ambiguous occurrence.
+        // Rich authored helpers are defined in the library module. A row
+        // carrying Worktree imports that module, while generated helpers are
+        // re-exported from the same place so each name has one public origin.
         extra_imports: &["import Tidepool.Worktree"],
         type_defs: type_defs(),
         foreign_types: &[],
-        // Typed per-verb failure (#335): a dirty source, a lost tree, or a busy
-        // worktree is DATA an author cases on, not an eval abort. These are
-        // `WorktreeError`'s core variants plus two required but not spelled
-        // out in the original illustrative ADT, plus three the storage-error
-        // lane added — see `tidepool-worktree/src/error.rs` for why each
-        // stands alone rather than folding into a neighbour.
-        //
-        // `error_to_wire` (the ten-arm domain→wire map in
-        // `handlers/worktree.rs`) stays HAND-WRITTEN: it maps between two error
-        // vocabularies whose variants differ in arity, and several arms carry a
-        // decision about which domain failure becomes which wire failure. There
-        // is no `DomainMap` slot on `ErrorAdt` because generating that map is
-        // not attempted.
+        // Worktree failures are authored data, not eval aborts. The
+        // domain-to-wire map remains hand-written because several variants
+        // differ in representation and therefore carry mapping decisions.
         errors: Some(errors()),
         verbs: verbs(),
         helpers: helpers(),
@@ -145,11 +103,7 @@ pub fn worktree() -> Effect {
     }
 }
 
-/// The thirteen supporting declarations, in the order they are emitted.
-///
-/// This order is the wire contract's outer layer and it reproduces
-/// `worktree_effect_def!`'s `type_defs` list exactly — every `data` decl in this
-/// order, then every `ToJSON` instance in this order.
+/// Supporting declarations in their canonical wire-emission order.
 fn type_defs() -> Vec<TypeDef> {
     vec![
         identity(
@@ -825,17 +779,20 @@ fn errors() -> ErrorAdt {
                 doc: "the checkout kept changing during bounded submission observation",
             },
             ErrorVariant {
+                ctor: "WorktreeUnauthorized",
+                fields: vec![field("unauthorizedId", "WorktreeId", "WtWorktreeId")],
+                doc: "the executing principal has no active binding for this managed worktree",
+            },
+            ErrorVariant {
+                ctor: "WorktreeAuthorityDenied",
+                fields: vec![text_field("authorityDetail")],
+                doc: "the executing principal's actor role does not permit this Worktree operation",
+            },
+            ErrorVariant {
                 ctor: "GitFailure",
                 fields: vec![field("receipt", "GitFailureReceipt", "WtGitFailureReceipt")],
                 doc: "git itself failed; the receipt carries the invocation and its output",
             },
-            // The storage-error lane added these three after the block was
-            // first written. Each names a failure an author would act on
-            // DIFFERENTLY, so each gets its own variant rather than folding
-            // into a neighbour: `InvalidRegistryRoot` and `StorageFailure` in
-            // particular are not `GitFailure` — no git process runs in either,
-            // and spelling them as one would send an operator reading a git
-            // receipt that does not exist.
             ErrorVariant {
                 ctor: "WorktreeNotRegistered",
                 fields: vec![field("notRegisteredId", "WorktreeId", "WtWorktreeId")],
@@ -959,19 +916,9 @@ fn tree_id_arg() -> Arg {
     }
 }
 
-/// The FIVE representable helpers: four thin one-verb wrappers (three from
-/// the original census plus `mergeBranchInto`, added later), plus the one
-/// pure projection.
-///
-/// Ten more live in `haskell/lib/Tidepool/Worktree.hs` as DEFINITIONS. They are
-/// excluded rather than smuggled in as strings, and the `extra_imports` row
-/// above is what keeps them on the eval surface.
-///
-/// `worktreeId` is the one relocation candidate that could not
-/// go, and the reason is structural: the RepoEvent helpers `commit` and
-/// `headChanged` CALL it from inside the same generated `Tidepool.Effects`
-/// module, which cannot import `Tidepool.Worktree` (that module imports IT).
-/// See [`HelperBody::Projection`], where the whole argument lives.
+/// Helpers representable as thin verb wrappers or pure projections. Richer
+/// authored helpers live in `Tidepool.Worktree`; `extra_imports` keeps the
+/// combined surface transparent to callers.
 fn helpers() -> Vec<Helper> {
     vec![
         Helper {

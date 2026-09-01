@@ -47,9 +47,9 @@ configuration records.
 
 This is the canonical status inventory for the plan.
 
-The next delivery order is Stage 7B, then Stage 7C. Do not expand the
-self-hosting surface before candidate custody, worktree authority, and exact
-child application failure pass those stages' focused acceptance tests.
+Stages 7B and 7C are landed. Keep the self-hosting surface narrow until live
+Shoal exercises confirm candidate custody, worktree authority, and exact child
+application failure under real provider/process races.
 
 ### Landed
 
@@ -973,17 +973,18 @@ Implement this boundary in order:
    retained worker exit remains the Haskell policy's pull-based result; native
    lifecycle delivery is informational and cannot duplicate that custody.
 
-   Worker deployment now allocates one retained managed worktree per actor and
-   launches its interactive process there, eliminating concurrent mutation of
-   the source checkout. This automatic post-spawn allocation is transitional
-   and must be replaced, not wrapped, by Stage 7B's owner-selected launch
-   grant. Policy reload, native-tool sandbox projection, and broader
-   commit/evidence folding remain later work. `ReadWrite`/`ReadOnly` therefore remain explicitly
+   Root policy now allocates one retained managed worktree per accepted worker,
+   closes the handle into its definition, and launches the external process
+   only after exact-incarnation binding. Candidate submission combines an
+   authored report with one trusted Worktree observation; collection is
+   replayable until explicit acknowledgment. Policy reload, native-tool
+   sandbox projection, and broader commit/evidence folding remain later work.
+   `ReadWrite`/`ReadOnly` therefore remain explicitly
    experimental resident-effect classifications rather than process-security
    claims; the initial production machine intentionally handles no ambient
    filesystem effect.
 
-   Four implementation seams remain deliberately visible instead of being
+   Three implementation seams remain deliberately visible instead of being
    papered over by Shoal-local machinery:
 
    - the root is still compiled and installed by the composition root rather
@@ -996,12 +997,7 @@ Implement this boundary in order:
    - registry facts, resident continuation custody, and external deployment
      resources still live in three owners. Preserve those distinct resource
      responsibilities while removing duplicated lifecycle transition state;
-     do not introduce another scheduler facade in the meantime;
-   - an unexpected external application exit currently fails the Shoal run.
-     Add one typed host-control path that turns a child deployment failure
-     into that exact actor's retained failed exit before claiming process-level
-     crash isolation; do not mutate the registry behind
-     `ResidentActorHost`'s continuation custody.
+     do not introduce another scheduler facade in the meantime.
 
    Port only the following Exomonad mechanisms into their Tidepool owners:
    stock-TUI command construction, rollout discovery and versioned binding,
@@ -1015,11 +1011,11 @@ The gate should be extensible by adding typed operation classes and profile
 decisions, not by turning the two initial profiles into a generic dynamic
 capability framework.
 
-### Stage 7B — capability-bound, replayable candidate submission
+### Stage 7B — capability-bound, replayable candidate submission [landed]
 
-This is the next implementation slice. It replaces Shoal's transitional
-automatic worktree allocation and the destructive `awaitWorker` projection;
-it does not add a second candidate registry or a Rust-special-cased MCP tool.
+This slice replaced Shoal's automatic worktree allocation and destructive
+worker collection without adding a second candidate registry or a
+Rust-special-cased MCP tool.
 
 1. Add one owning Worktree submission-observation operation.
    - Return durable worktree ID, recorded base commit, `OnBranch branch oid` or
@@ -1043,10 +1039,11 @@ it does not add a second candidate registry or a Rust-special-cased MCP tool.
    - The Worktree capability module decorates the worker definition with an
      opaque recipe for that exact handle; no public generic grant record or
      recursive startup-value scan is introduced.
-   - Redeem under the caller and unpublished child principals before
-     readiness, using the existing resource/binding owner. Roll back every
-     derived grant and unpublished actor resource if redemption fails; retain
-     the worktree itself under the existing retain-first policy.
+   - The resident child may reach internal policy readiness with only a recipe;
+     the capability is absent during initialization. Shoal validates and binds
+     that recipe to the exact child before launching its external application.
+     Binding or launch failure fails the child and rolls back the active lease;
+     the worktree itself remains under the retain-first policy.
    - Replace `tidepool-worktree::AgentRef` string ownership with or narrow it
      behind exact actor-principal binding rather than adding another map.
    - Shoal resolves the redeemed binding for the child cwd and deletes its
@@ -1130,7 +1127,7 @@ Stage 7B acceptance:
 Land this slice as one coherent capability/submission commit or a small series
 whose intermediate states compile but are not presented as self-hosting-ready.
 
-### Stage 7C — exact external-application failure routing
+### Stage 7C — exact external-application failure routing [landed]
 
 Land this as a separate lifecycle commit because it changes race precedence
 and fleet shutdown behavior.

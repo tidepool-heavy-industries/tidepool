@@ -365,7 +365,9 @@ fn journal_malformed_middle_row_fails_loudly_rather_than_being_skipped() {
         branch: None,
         observed_at_ms: 1,
     });
-    journal.append(&[ev.clone()], EventId(1)).expect("append 1");
+    journal
+        .append(std::slice::from_ref(&ev), EventId(1))
+        .expect("append 1");
     journal.append(&[ev], EventId(2)).expect("append 2");
     drop(journal);
 

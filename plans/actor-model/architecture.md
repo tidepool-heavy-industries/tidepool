@@ -208,10 +208,13 @@ candidate revision.
 
 The first self-hosting worker has one fresh managed worktree selected by its
 owner. The owner attaches a capability-specific launch recipe to the worker's
-definition; `startActor` redeems that recipe under the exact unpublished child
-principal. Shoal resolves the resulting binding when it launches the external
-agent application. This replaces automatic post-spawn worktree allocation:
-there is one worktree owner, one binding, and one authority path.
+definition. The resident start path carries the recipe without treating it as
+authority. After the exact child installs its policy, Shoal validates the
+recipe and creates an exact-incarnation binding before launching the external
+agent application. Child initialization therefore cannot use the recipe-bound
+resource; initialization that needs resource authority will require a future
+generic startup-admission seam. This replaces automatic post-spawn worktree
+allocation: there is one worktree owner, one binding, and one authority path.
 
 The external model submits only an authored report. While its `finish_work`
 tool call is waiting, trusted Haskell asks the Rust-owned Worktree interpreter
@@ -602,13 +605,15 @@ principal, derives the new incarnation's grants, and refuses use by an
 unauthorized caller. Copying a definition therefore does not grant the right
 to instantiate it.
 
-Per-resource authority is explicit launch metadata, not a recursive scan of
+Per-resource placement is explicit launch metadata, not a recursive scan of
 the startup value. An `ActorDefinition` may be immutably decorated with opaque
-grant recipes created by the resource-owning capability module. After allocating the
-unpublished child identity, Rust validates and redeems those recipes atomically
-under the caller's principal and the child interpreter. Program image, named
-effect profile, and launch grants remain separate responsibilities even
-when one Haskell definition value carries them to `startActor`.
+recipes created by the resource-owning capability module. Recipes convey no
+authority themselves: the resource interpreter checks exact principal and
+active binding on every use. V0 activates its concrete worktree recipe during
+external deployment, after internal policy readiness and before process
+launch. Program image, named effect profile, and resource binding remain
+separate responsibilities even when one definition carries their correlation
+data to `startActor`.
 
 The trusted entry wrapper parks on a kernel-private readiness request that is
 absent from `ActorLocal` and from every model-facing profile. That suspension is

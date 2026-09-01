@@ -30,6 +30,14 @@ impl AgentRef {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Exact actor-incarnation principal spelling used by the actor host.
+    /// Legacy callers may still provide their own opaque identity through
+    /// `from_raw`; new actor bindings must use this constructor so a later
+    /// incarnation cannot inherit the old one's resource authority.
+    pub fn exact_actor(runtime: &str, identity: u64, incarnation: u64) -> Self {
+        Self(format!("actor:{runtime}:{identity}:{incarnation}"))
+    }
 }
 
 impl std::fmt::Display for AgentRef {

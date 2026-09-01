@@ -66,6 +66,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorTerminalStatus",
             "ActorStartWith",
             "ActorWaitWith",
+            "ActorPollWith",
             "ActorCallWith",
             "ActorCastWith",
         ],

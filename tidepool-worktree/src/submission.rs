@@ -83,19 +83,65 @@ pub(crate) fn observe(
         return Err(WorktreeError::WorktreeLost(handle.id().clone()));
     }
 
-    let mut previous = sample(git, handle.cwd())?;
+    let stable = stable_sample(handle.id(), || sample(git, handle.cwd()))?;
+    Ok(SubmissionObservation {
+        worktree_id: handle.id().clone(),
+        base_head: handle.source_head().clone(),
+        submitted_head: stable.submitted_head,
+        working_state: stable.working_state,
+    })
+}
+
+fn stable_sample(
+    worktree: &WorktreeId,
+    mut next: impl FnMut() -> Result<RepositorySample, WorktreeError>,
+) -> Result<RepositorySample, WorktreeError> {
+    let mut previous = next()?;
     for _ in 0..MAX_STABILITY_ATTEMPTS {
-        let current = sample(git, handle.cwd())?;
+        let current = next()?;
         if current == previous {
-            return Ok(SubmissionObservation {
-                worktree_id: handle.id().clone(),
-                base_head: handle.source_head().clone(),
-                submitted_head: current.submitted_head,
-                working_state: current.working_state,
-            });
+            return Ok(current);
         }
         previous = current;
     }
+    Err(WorktreeError::SubmissionUnstable(worktree.clone()))
+}
 
-    Err(WorktreeError::SubmissionUnstable(handle.id().clone()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_at(oid: &str) -> RepositorySample {
+        RepositorySample {
+            submitted_head: HeadState::Detached {
+                oid: GitOid::from_raw(oid),
+            },
+            working_state: WorkingState {
+                changes: DirtySummary::default(),
+                operation: None,
+            },
+        }
+    }
+
+    #[test]
+    fn bounded_sampling_refuses_a_checkout_that_never_stabilizes() {
+        let worktree = WorktreeId::from_raw("moving");
+        let mut generation = 0;
+        let result = stable_sample(&worktree, || {
+            generation += 1;
+            Ok(sample_at(&format!("oid-{generation}")))
+        });
+        assert_eq!(result, Err(WorktreeError::SubmissionUnstable(worktree)));
+        assert_eq!(generation, MAX_STABILITY_ATTEMPTS + 1);
+    }
+
+    #[test]
+    fn bounded_sampling_returns_the_first_consecutive_complete_match() {
+        let worktree = WorktreeId::from_raw("settling");
+        let mut samples = [sample_at("a"), sample_at("b"), sample_at("b")].into_iter();
+        assert_eq!(
+            stable_sample(&worktree, || Ok(samples.next().unwrap())),
+            Ok(sample_at("b"))
+        );
+    }
 }

@@ -638,9 +638,11 @@ async fn public_start_uses_one_exact_resident_path() {
             "ActorKernel",
             "FsWrite",
             "ActorLocal",
+            "ActorMcp",
             "Actor",
             "Deliberate",
-            "FsRead"
+            "FsRead",
+            "Worktree"
         ]
     );
     assert_eq!(provider.requests.lock().len(), 2);

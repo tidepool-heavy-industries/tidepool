@@ -130,6 +130,7 @@ pub(crate) enum ResidentActorBoundary {
     Start(crate::ResidentActorStart),
     Outbound(ResidentOutbound),
     Wait(ResidentWaitRequest),
+    Poll(crate::wait::ResidentPollRequest),
     Receive(InstalledReceiver),
     McpAwait(crate::resident_mcp::ResidentMcpAwait),
     McpReply(crate::resident_mcp::ResidentMcpReply),
@@ -159,6 +160,7 @@ impl ResidentActorBoundary {
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
             Self::Wait(_) => "awaitExit",
+            Self::Poll(_) => "pollExit",
             Self::Receive(_) => "receive",
             Self::McpAwait(_) => "actor MCP await",
             Self::McpReply(_) => "actor MCP reply",
@@ -227,6 +229,7 @@ impl ResidentRequest {
         match self {
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
             Self::Actor(crate::generated::actor::ActorReq::ActorWaitWith(..)) => "awaitExit",
+            Self::Actor(crate::generated::actor::ActorReq::ActorPollWith(..)) => "pollExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
             Self::Actor(crate::generated::actor::ActorReq::ActorCastWith(..)) => "cast",
             Self::ActorKernel(
@@ -582,6 +585,18 @@ where
                             target,
                             continuation: hole,
                         }))
+                    }
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorPollWith(
+                        ..,
+                    )) => {
+                        let target =
+                            crate::wait::decode_poll_target(&request, session.data_con_table())?;
+                        Ok(ResidentActorBoundary::Poll(
+                            crate::wait::ResidentPollRequest {
+                                target,
+                                continuation: hole,
+                            },
+                        ))
                     }
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
@@ -1013,6 +1028,38 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = crate::actor_terminal_value(&terminal, session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_optional_terminal(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        terminal: Option<crate::ActorTerminal>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let answer = match terminal {
+                    Some(terminal) => {
+                        let just =
+                            tidepool_bridge::get_resilient(table, "Just", 1).ok_or_else(|| {
+                                tidepool_bridge::BridgeError::UnknownDataConName("Just".into())
+                            })?;
+                        Value::Con(just, vec![crate::actor_terminal_value(&terminal, table)?])
+                    }
+                    None => {
+                        let nothing = tidepool_bridge::get_resilient(table, "Nothing", 0)
+                            .ok_or_else(|| {
+                                tidepool_bridge::BridgeError::UnknownDataConName("Nothing".into())
+                            })?;
+                        Value::Con(nothing, Vec::new())
+                    }
+                };
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

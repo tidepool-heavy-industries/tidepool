@@ -97,6 +97,17 @@ pub enum WorktreeError {
     #[error("managed worktree {0} kept changing while its submission was observed")]
     SubmissionUnstable(WorktreeId),
 
+    /// The executing principal has no active binding for this managed tree.
+    /// This is interpreter authority, distinct from registration or disk
+    /// presence.
+    #[error("the executing principal is not authorized for worktree {0}")]
+    WorktreeUnauthorized(WorktreeId),
+
+    /// The principal's actor role does not permit this Worktree operation at
+    /// all (for example, allocation from a worker profile).
+    #[error("worktree authority denied: {0}")]
+    WorktreeAuthorityDenied(String),
+
     /// git itself failed. The receipt carries the invocation and its output so
     /// the failure is diagnosable without re-running anything.
     #[error("git failed: {0}")]

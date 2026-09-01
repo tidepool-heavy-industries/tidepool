@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 
 use tidepool_bridge_effects::{
     WireError, WtBranchName, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtHeadState,
@@ -15,6 +18,7 @@ use tidepool_worktree::merge::{merge_branch_into, MergeOutcome};
 #[cfg(test)]
 use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
 use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
+use tidepool_worktree::{AgentRef as WorktreePrincipal, BindingTable};
 use tidepool_worktree::{HeadState, SubmissionObservation, WorkingState};
 
 // ============================================================================
@@ -35,6 +39,14 @@ pub struct WorktreeHandler {
 }
 
 impl WorktreeHandler {
+    /// Compose an already-owned manager into an effect stack. This is the
+    /// production actor-host path: deployment and the Haskell interpreter
+    /// must share one registry/manager rather than opening parallel owners.
+    #[must_use]
+    pub fn from_manager(manager: WorktreeManager) -> Self {
+        Self { manager }
+    }
+
     /// `registry_root` and `worktree_root` must live OUTSIDE `source_repository`
     /// — see `tidepool-worktree/CLAUDE.md`'s "never dirty the source" rule.
     /// Fallible because opening the durable registry is (`WorktreeRegistry::open`).
@@ -64,6 +76,111 @@ impl WorktreeHandler {
                 source_repository,
             ),
         })
+    }
+}
+
+/// Concrete-resource authority shared by the actor composition root and its
+/// Worktree interpreter. Root identity is installed after unpublished-root
+/// allocation; child authorization is derived from the existing durable
+/// binding table and exact run/id/incarnation principal.
+#[derive(Clone)]
+pub struct ActorWorktreeAuthority {
+    runtime: Arc<str>,
+    bindings: Arc<Mutex<BindingTable>>,
+    root: Arc<RwLock<Option<tidepool_repr::PrincipalId>>>,
+}
+
+impl ActorWorktreeAuthority {
+    #[must_use]
+    pub fn new(runtime: impl Into<Arc<str>>, bindings: Arc<Mutex<BindingTable>>) -> Self {
+        Self {
+            runtime: runtime.into(),
+            bindings,
+            root: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn install_root(&self, principal: tidepool_repr::PrincipalId) {
+        *self.root.write() = Some(principal);
+    }
+
+    fn is_root(&self, principal: tidepool_repr::PrincipalId) -> bool {
+        // The bootstrap expression is evaluated before its unpublished root
+        // receives an ActorRef, so its already-suspended continuation carries
+        // the kernel's explicit SYSTEM principal. Later actor-authored turns
+        // carry the installed exact root principal.
+        principal == tidepool_repr::PrincipalId::SYSTEM
+            || self.root.read().as_ref() == Some(&principal)
+    }
+
+    fn owns(&self, principal: tidepool_repr::PrincipalId, tree: &WorktreeId) -> bool {
+        let expected = WorktreePrincipal::exact_actor(
+            &self.runtime,
+            principal.identity,
+            principal.incarnation,
+        );
+        self.bindings
+            .lock()
+            .current(tree)
+            .is_some_and(|binding| binding.agent() == &expected)
+    }
+}
+
+/// Worktree interpreter used by an actor machine. It preserves one generated
+/// Worktree request decoder/implementation while adding the concrete-resource
+/// membrane the general-purpose handler deliberately does not own.
+#[derive(Clone)]
+pub struct ActorWorktreeHandler {
+    inner: WorktreeHandler,
+    authority: ActorWorktreeAuthority,
+}
+
+impl ActorWorktreeHandler {
+    #[must_use]
+    pub fn new(inner: WorktreeHandler, authority: ActorWorktreeAuthority) -> Self {
+        Self { inner, authority }
+    }
+}
+
+impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
+    for ActorWorktreeHandler
+{
+    type Request = WorktreeReq;
+
+    fn handle(
+        &mut self,
+        req: WorktreeReq,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        let principal = cx.principal();
+        if self.authority.is_root(principal) {
+            return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
+        }
+
+        let permitted_tree = match &req {
+            WorktreeReq::WorktreeLookup(id)
+            | WorktreeReq::WorktreeBranchOf(id)
+            | WorktreeReq::WorktreeHeadOf(id)
+            | WorktreeReq::WorktreeObserveSubmission(id) => Some(id),
+            WorktreeReq::WorktreeCreate(_)
+            | WorktreeReq::WorktreeList
+            | WorktreeReq::WorktreeMergeInto(..) => None,
+        };
+        if let Some(wire_id) = permitted_tree {
+            let id = match worktree_id_from_wire(wire_id) {
+                Ok(id) => id,
+                Err(error) => return cx.respond(Err::<(), _>(error)),
+            };
+            if self.authority.owns(principal, &id) {
+                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
+            }
+            return cx.respond(Err::<(), _>(WorktreeError::WorktreeUnauthorized(
+                wire_id.clone(),
+            )));
+        }
+        cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
+            "this actor may inspect its bound worktree but may not allocate, enumerate, or merge managed worktrees".into(),
+        )))
     }
 }
 
@@ -299,6 +416,12 @@ pub(crate) fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
         DomainWorktreeError::SubmissionUnstable(id) => {
             WorktreeError::SubmissionUnstable(worktree_id_to_wire(&id))
         }
+        DomainWorktreeError::WorktreeUnauthorized(id) => {
+            WorktreeError::WorktreeUnauthorized(worktree_id_to_wire(&id))
+        }
+        DomainWorktreeError::WorktreeAuthorityDenied(detail) => {
+            WorktreeError::WorktreeAuthorityDenied(detail)
+        }
         DomainWorktreeError::GitFailure(r) => {
             WorktreeError::GitFailure(git_failure_receipt_to_wire(r))
         }
@@ -457,6 +580,30 @@ mod tests {
     use tidepool_worktree::create::DirtyPolicy;
     use tidepool_worktree::error::InProgressKind;
     use tidepool_worktree::id::{GitOid, GitRef};
+
+    #[test]
+    fn actor_worktree_authority_is_exact_to_resource_and_incarnation() {
+        let storage = tempfile::tempdir().unwrap();
+        let bindings = Arc::new(Mutex::new(BindingTable::open(storage.path()).unwrap()));
+        let authority = ActorWorktreeAuthority::new("run-1", Arc::clone(&bindings));
+        let root = tidepool_repr::PrincipalId::new(1, 1);
+        let worker = tidepool_repr::PrincipalId::new(2, 3);
+        let tree = WorktreeId::from_raw("worker-tree");
+        authority.install_root(root);
+
+        let worker_principal = WorktreePrincipal::exact_actor("run-1", 2, 3);
+        let binding = bindings.lock().bind(&tree, &worker_principal, 1).unwrap();
+
+        assert!(authority.is_root(root));
+        assert!(authority.is_root(tidepool_repr::PrincipalId::SYSTEM));
+        assert!(authority.owns(worker, &tree));
+        assert!(!authority.owns(tidepool_repr::PrincipalId::new(2, 4), &tree));
+        assert!(!authority.owns(tidepool_repr::PrincipalId::new(3, 3), &tree));
+        assert!(!authority.owns(worker, &WorktreeId::from_raw("another-tree")));
+
+        binding.release(&mut bindings.lock()).unwrap();
+        assert!(!authority.owns(worker, &tree));
+    }
 
     /// `cwd` on every receipt this handler returns is `worktree_root.join(id)`
     /// and crosses to Haskell as `Text` (`receipt_to_wire`) — a non-UTF-8
@@ -694,6 +841,25 @@ mod tests {
                     },
                     "agent-7".to_string(),
                 ),
+            ),
+            (
+                "submission_unstable",
+                DomainWorktreeError::SubmissionUnstable(WorktreeId::from_raw("wt-moving")),
+                WorktreeError::SubmissionUnstable(WtWorktreeId {
+                    raw: "wt-moving".to_string(),
+                }),
+            ),
+            (
+                "worktree_unauthorized",
+                DomainWorktreeError::WorktreeUnauthorized(WorktreeId::from_raw("wt-private")),
+                WorktreeError::WorktreeUnauthorized(WtWorktreeId {
+                    raw: "wt-private".to_string(),
+                }),
+            ),
+            (
+                "worktree_authority_denied",
+                DomainWorktreeError::WorktreeAuthorityDenied("allocation is owner-only".into()),
+                WorktreeError::WorktreeAuthorityDenied("allocation is owner-only".into()),
             ),
             (
                 "git_failure",

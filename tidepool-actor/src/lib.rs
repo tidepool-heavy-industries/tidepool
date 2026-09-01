@@ -43,7 +43,9 @@ pub use executor::{
     run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
 };
 pub use host::{
-    ResidentActorDeployment, ResidentActorHost, ResidentActorHostError, ResidentActorRoot,
+    ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
+    ResidentActorDeployment, ResidentActorHost, ResidentActorHostControl,
+    ResidentActorHostControlError, ResidentActorHostError, ResidentActorRoot,
     ResidentHostParkedKind, ResidentHostRunReport, ResidentHostShutdownReport,
     ResidentHostTaskError, ResidentMcpInstallation,
 };

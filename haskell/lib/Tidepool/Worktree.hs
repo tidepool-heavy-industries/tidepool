@@ -103,11 +103,13 @@ module Tidepool.Worktree
   , BranchName
   , mkBranchName
   , GitRef
+  , InProgressKind (..)
   , GitOid
   , worktreeId
   , worktreeBranch
   , worktreeHead
   , observeSubmission
+  , withWorktree
 
     -- * Merging (the one narrow, deliberate workflow primitive)
   , MergeOutcome (..)
@@ -128,7 +130,12 @@ module Tidepool.Worktree
   ) where
 
 import Control.Monad.Freer (send)
+import Data.Proxy (Proxy (..))
 import qualified Tidepool.Data.Text as T
+import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
+import Tidepool.Aeson (ToJSON (..), object, (.=))
+import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
+import Tidepool.Aeson.Value (Value (..))
 import Tidepool.Effects
   ( BranchName (..)
   , DirtyPolicy (..)
@@ -136,6 +143,7 @@ import Tidepool.Effects
   , GitFailureReceipt (..)
   , GitOid (..)
   , GitRef
+  , InProgressKind (..)
   , M
   , MergeOutcome (..)
   , HeadState (..)
@@ -161,54 +169,94 @@ import Tidepool.Prelude hiding (error)
 
 default (Int, Double, Text)
 
--- The ten definitions below are LIBRARY code, not contract. Each is
--- constructor application, a record update, an argument-adapting send, or an
--- identity unwrap: none is a thin wrapper over one verb, so the effect
--- contract in `tidepool-protocol` cannot describe them without becoming a raw
--- Haskell hatch with extra steps. They live here, where library code belongs,
--- and the Worktree contract carries `import Tidepool.Worktree` as an
--- `extra_imports` row so an eval whose row includes Worktree still sees all
--- fourteen names with nothing authored differently.
---
--- FOUR names are re-exported from the generated "Tidepool.Effects" above
--- rather than defined here, and it is worth knowing WHY before anyone tries to
--- move them:
---
---   * 'createWorktree', 'lookupWorktree', 'listWorktrees' are thin wrappers
---     over one verb, so the contract represents them.
---   * 'worktreeId' is a pure field projection, which the contract represents
---     as one shape — but the reason it HAD to be represented rather than
---     relocated is that "Tidepool.Event"'s @commit@ and @headChanged@ helpers
---     CALL it, and a helper spliced into the generated "Tidepool.Effects" may
---     not reference a name that lives out here. That module cannot import this
---     one — this module imports IT — and defining a name in both places would
---     make it an ambiguous occurrence in any eval.
---
--- The pragma block at the top of this file is the generated
--- "Tidepool.Effects" module's own pragma set, verbatim: these bodies used to
--- be spliced INTO that module, so anything less is a scope this code did not
--- have to compile against before.
---
--- 'mkBranchName' is an ADDITION beyond that original fourteen — a smart
--- constructor so a harness whose domain model carries a branch as plain
--- 'Text' (the recursive companion's fold) can still call 'mergeBranchInto'.
--- 'mergeBranchInto' itself is representable and lives in the generated
--- "Tidepool.Effects" (like 'createWorktree'), re-exported here for the same
--- reason those three are.
---
--- @gitIn@\/@renderExecError@ (the two dogfood harnesses' byte-identical
--- helpers) do NOT move here, even though they are exactly the kind of
--- duplication this module otherwise absorbs: 'Tidepool.Shell.runInTry' (the
--- shared home they DO get, see that module) needs `Exec` genuinely in the
--- compiling row, and this module is compiled under rows that omit it — the
--- recursive companion's own delegate-wrapped branch-node row
--- (`selfharness::driver::answerer_decls_with_delegate`) is `[Subagent,
--- Worktree, AskUser, Fork, ReadState, Green, Finalize]`, no `Exec` at all.
--- Importing `Tidepool.Shell` from here would make EVERY row carrying
--- `Worktree` require `Exec` too, silently widening a boundary this module's
--- own header doc says the opposite of. `gitIn` stays a 3-line wrapper over
--- `runInTry` defined LOCALLY in each harness, which already controls (and
--- guarantees) its own row includes both.
+-- Generated Worktree values predate the model-facing output-schema layer.
+-- These instances keep CandidateReceipt on the canonical Worktree vocabulary
+-- instead of introducing a parallel JSON-shaped repository model.
+instance JsonSchema WorktreeId where
+  jsonSchema _ = object [("type", String "string")]
+
+instance JsonSchema BranchName where
+  jsonSchema _ = object [("type", String "string")]
+
+instance JsonSchema GitOid where
+  jsonSchema _ = object [("type", String "string")]
+
+instance JsonSchema InProgressKind where
+  jsonSchema _ = object
+    [ ("type", String "string")
+    , ("enum", Array (map (String . show) [InProgressMerge, InProgressRebase, InProgressCherryPick, InProgressRevert, InProgressBisect]))
+    ]
+
+instance JsonSchema DirtySummary where
+  jsonSchema _ = objectSchema Nothing
+    [ ("staged", jsonSchema (Proxy @[Text]), True)
+    , ("unstaged", jsonSchema (Proxy @[Text]), True)
+    , ("untracked", jsonSchema (Proxy @[Text]), True)
+    , ("ignoredExcluded", jsonSchema (Proxy @Int), True)
+    ]
+
+instance ToJSON HeadState where
+  toJSON (OnBranch branch oid) = object
+    [ "tag" .= ("OnBranch" :: Text)
+    , "contents" .= [toJSON branch, toJSON oid]
+    ]
+  toJSON (Detached oid) = object
+    [ "tag" .= ("Detached" :: Text)
+    , "contents" .= oid
+    ]
+
+instance JsonSchema HeadState where
+  jsonSchema _ = object
+    [ ("oneOf", Array
+        [ objectSchema (Just "OnBranch")
+            [("contents", tupleSchema [jsonSchema (Proxy @BranchName), jsonSchema (Proxy @GitOid)], True)]
+        , objectSchema (Just "Detached")
+            [("contents", jsonSchema (Proxy @GitOid), True)]
+        ])
+    ]
+
+instance ToJSON WorkingState where
+  toJSON state = object
+    (["changes" .= state.changes] <>
+      case state.operation of
+        Nothing -> []
+        Just operation -> ["operation" .= operation])
+
+instance JsonSchema WorkingState where
+  jsonSchema _ = objectSchema Nothing
+    [ ("changes", jsonSchema (Proxy @DirtySummary), True)
+    , ("operation", jsonSchema (Proxy @InProgressKind), False)
+    ]
+
+instance ToJSON SubmissionObservation where
+  toJSON observation = object
+    [ "observedWorktreeId" .= observation.observedWorktreeId
+    , "baseHead" .= observation.baseHead
+    , "submittedHead" .= observation.submittedHead
+    , "workingState" .= observation.workingState
+    ]
+
+instance JsonSchema SubmissionObservation where
+  jsonSchema _ = objectSchema Nothing
+    [ ("observedWorktreeId", jsonSchema (Proxy @WorktreeId), True)
+    , ("baseHead", jsonSchema (Proxy @GitOid), True)
+    , ("submittedHead", jsonSchema (Proxy @HeadState), True)
+    , ("workingState", jsonSchema (Proxy @WorkingState), True)
+    ]
+
+tupleSchema :: [Value] -> Value
+tupleSchema fields = object
+  [ ("type", String "array")
+  , ("prefixItems", Array fields)
+  , ("minItems", Number (fromIntegral (length fields)))
+  , ("maxItems", Number (fromIntegral (length fields)))
+  ]
+
+-- Rich construction, adaptation, and rendering helpers are ordinary library
+-- code here. Thin verb wrappers and the shared 'worktreeId' projection are
+-- generated from the protocol schema and re-exported above. Keeping shell/Git
+-- workflow helpers out of this module avoids making every Worktree row depend
+-- on Exec.
 
 -- | Seed a managed worktree from the repository Tidepool is running
 -- against. Clean-by-default: a dirty source is REFUSED unless the spec
@@ -259,6 +307,16 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 worktreeHead :: WorktreeHandle -> M GitOid
 worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
 
+-- | Attach this exact managed worktree to an actor definition. The public
+-- definition remains free of generic grant fields; the Actor runtime carries
+-- this capability-specific recipe to deployment and binds it to the exact
+-- child incarnation before an external application may use it.
+withWorktree
+  :: WorktreeHandle
+  -> ActorDefinition startup protocol exit
+  -> ActorDefinition startup protocol exit
+withWorktree tree = withLaunchWorktree (renderWorktreeId (worktreeId tree))
+
 -- | Build a 'BranchName' from a plain rendered branch name — for the case
 -- (the recursive companion's fold, in particular) where a node's own domain
 -- model only carries branch identity as 'Text' and needs it back as the typed
@@ -288,6 +346,8 @@ renderWorktreeError (DirtySubmoduleUnsupported p) = "dirty submodule is unsuppor
 renderWorktreeError (SourceOperationInProgress k) = "source repository has an operation in progress: " <> show k
 renderWorktreeError (WorktreeBusy i holder) = "worktree " <> renderWorktreeId i <> " is already bound to agent " <> holder
 renderWorktreeError (SubmissionUnstable i) = "worktree " <> renderWorktreeId i <> " kept changing while its submission was observed"
+renderWorktreeError (WorktreeUnauthorized i) = "the executing actor is not authorized for worktree " <> renderWorktreeId i
+renderWorktreeError (WorktreeAuthorityDenied detail) = "worktree authority denied: " <> detail
 renderWorktreeError (GitFailure r) = "git " <> T.intercalate " " r.gitArgs <> " failed: " <> T.strip r.gitStderr
 renderWorktreeError (WorktreeNotRegistered i) = "no managed worktree registered with id " <> renderWorktreeId i
 renderWorktreeError (InvalidRegistryRoot root inside) = "registry root " <> root <> " resolves inside the git working tree at " <> inside <> " — the registry must live outside every source repository"

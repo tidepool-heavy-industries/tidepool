@@ -21,14 +21,9 @@ fn worktree_schema_is_valid() {
     }
 }
 
-/// The 20 `type_defs` literals from the macro (13 `data` decls, then 7
-/// `instance ToJSON` lines), in exactly the macro's order, plus a 21st entry:
-/// the `WorktreeError` ADT as `error_decl_text!` / `error_variant_text!` /
-/// `error_variant_json_arm!` expand it for the macro's 11 variants, plus a
-/// 14th `data` decl added AFTER the flip: `MergeOutcome`, the typed result of
-/// the `WorktreeMergeInto` verb (no `ToJSON` instance — `json: JsonInstance::
-/// None`, same as `WorktreeReceipt`/`WorktreeHandle`/`WorktreeSummary` — so it
-/// sits among the `data` decls, before the `ToJSON` block, not at the end).
+/// Pin every model-visible Worktree declaration in schema order. These
+/// literals intentionally make an API change reviewable without narrating the
+/// sequence of historical additions that produced the current vocabulary.
 #[test]
 fn worktree_type_def_texts_are_pinned() {
     let wt = worktree();
@@ -36,7 +31,7 @@ fn worktree_type_def_texts_are_pinned() {
     assert_eq!(
         wt.type_def_texts(),
         vec![
-            // -- 13 `data` decls, macro order --------------------------------
+            // -- data declarations, schema order -----------------------------
             "data WorktreeId = WorktreeId Text deriving (Show, Eq)",
             "data GitOid = GitOid Text deriving (Show, Eq)",
             "data GitRef = GitRef Text deriving (Show, Eq)",
@@ -53,9 +48,8 @@ fn worktree_type_def_texts_are_pinned() {
             "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
             "data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)",
-            // -- 14th `data` decl, added after the flip: `MergeOutcome` -------
             "data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)",
-            // -- 7 `instance ToJSON` lines, macro order -----------------------
+            // -- JSON instances, schema order --------------------------------
             "instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t",
             "instance ToJSON GitOid where toJSON (GitOid t) = toJSON t",
             "instance ToJSON GitRef where toJSON (GitRef t) = toJSON t",
@@ -63,14 +57,9 @@ fn worktree_type_def_texts_are_pinned() {
             "instance ToJSON InProgressKind where toJSON k = toJSON (show k)",
             "instance ToJSON DirtySummary where toJSON d = object [\"staged\" .= d.staged, \"unstaged\" .= d.unstaged, \"untracked\" .= d.untracked, \"ignoredExcluded\" .= d.ignoredExcluded]",
             "instance ToJSON GitFailureReceipt where toJSON r = object [\"args\" .= r.gitArgs, \"cwd\" .= r.gitCwd, \"exitCode\" .= r.gitExitCode, \"stdout\" .= r.gitStdout, \"stderr\" .= r.gitStderr]",
-            // -- 21st entry: the rendered `WorktreeError` ADT -----------------
-            // `error_decl_text!` peels the first `errors` variant so `|`
-            // separators land BETWEEN constructors, then hand-templates a
-            // `ToJSON` instance (`error_variant_json_arm!`) because the
-            // vendored `ToJSON`'s generic default only covers
-            // single-constructor records.
+            // -- rendered `WorktreeError` ADT ---------------------------------
             concat!(
-                "data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | SubmissionUnstable WorktreeId | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)\n",
+                "data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | SubmissionUnstable WorktreeId | WorktreeUnauthorized WorktreeId | WorktreeAuthorityDenied Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)\n",
                 "instance ToJSON WorktreeError where\n",
                 "  toJSON e = case e of\n",
                 "    SourceDirty dirty -> object [\"tag\" .= (\"SourceDirty\" :: Text), \"dirty\" .= dirty]\n",
@@ -80,6 +69,8 @@ fn worktree_type_def_texts_are_pinned() {
                 "    SourceOperationInProgress inProgress -> object [\"tag\" .= (\"SourceOperationInProgress\" :: Text), \"inProgress\" .= inProgress]\n",
                 "    WorktreeBusy busyId holder -> object [\"tag\" .= (\"WorktreeBusy\" :: Text), \"busyId\" .= busyId, \"holder\" .= holder]\n",
                 "    SubmissionUnstable unstableId -> object [\"tag\" .= (\"SubmissionUnstable\" :: Text), \"unstableId\" .= unstableId]\n",
+                "    WorktreeUnauthorized unauthorizedId -> object [\"tag\" .= (\"WorktreeUnauthorized\" :: Text), \"unauthorizedId\" .= unauthorizedId]\n",
+                "    WorktreeAuthorityDenied authorityDetail -> object [\"tag\" .= (\"WorktreeAuthorityDenied\" :: Text), \"authorityDetail\" .= authorityDetail]\n",
                 "    GitFailure receipt -> object [\"tag\" .= (\"GitFailure\" :: Text), \"receipt\" .= receipt]\n",
                 "    WorktreeNotRegistered notRegisteredId -> object [\"tag\" .= (\"WorktreeNotRegistered\" :: Text), \"notRegisteredId\" .= notRegisteredId]\n",
                 "    InvalidRegistryRoot root inside -> object [\"tag\" .= (\"InvalidRegistryRoot\" :: Text), \"root\" .= root, \"inside\" .= inside]\n",
@@ -89,10 +80,7 @@ fn worktree_type_def_texts_are_pinned() {
     );
 }
 
-/// The 5 constructor signatures from the macro, worked out from `ctor_sig!`'s
-/// errors-tagged arm (`<Ctor> :: <args> -> Worktree (Either WorktreeError
-/// <ret>)`) applied to the macro's `verbs` rows, in the macro's verb order,
-/// plus a 6th added after the flip: `WorktreeMergeInto`.
+/// Constructor signatures stay pinned in schema order.
 #[test]
 fn worktree_constructor_signatures_are_pinned() {
     let wt = worktree();
@@ -111,11 +99,7 @@ fn worktree_constructor_signatures_are_pinned() {
     );
 }
 
-/// The four representable helpers — the three thin wrappers over one verb
-/// (`createWorktree`, `lookupWorktree`, `listWorktrees`) plus the one pure
-/// projection (`worktreeId`) — copied verbatim from the macro's `raw` lines,
-/// newline-joined exactly as `helper_text!` joins them; plus a fifth, added
-/// after the flip: `mergeBranchInto`, the thin wrapper over `WorktreeMergeInto`.
+/// Pin generated thin wrappers and projections verbatim.
 #[test]
 fn worktree_helper_texts_are_pinned() {
     let wt = worktree();
@@ -172,36 +156,9 @@ fn worktree_helper_texts_are_pinned() {
     );
 }
 
-/// The honest record of the gap: ten of the macro's fourteen helpers are NOT
-/// representable, so they are not in the schema at all — excluded rather than
-/// smuggled in as raw strings. They are
-/// DEFINITIONS in `haskell/lib/Tidepool/Worktree.hs`, reached from an eval
-/// through this effect's `extra_imports` row. This is a SEPARATE test from the
-/// pinned four above because it asserts an absence, not a rendering.
-///
-/// Why each of the ten is unrepresentable:
-/// - `fromCurrentRepository`, `fromRef`, `fromWorktree`, `allowDirtySnapshot`
-///   — four build (or update) a `WorktreeSpec` purely; three of those
-///   construct one from scratch and the fourth (`allowDirtySnapshot`) is a
-///   record update, none of which is a call to `send`.
-/// - `worktreeBranch`, `worktreeHead` — each adapts its argument through
-///   `worktreeId h` before sending, so the wrapper is not thin over the verb's
-///   own argument.
-/// - `renderWorktreeId`, `renderGitOid`, `renderBranchName` — each unwraps an
-///   identity newtype; no `send` involved.
-/// - `renderWorktreeError` — a ten-arm string-formatting program over
-///   `WorktreeError`'s variants, the largest of the ten.
-///
-/// `worktreeId` is NOT here, and its absence from this list is worth noting:
-/// it is a field-projection chain rather than a verb call, so it was
-/// originally counted among the relocations — but the generated module's own
-/// RepoEvent helpers call it, and that module cannot import
-/// `Tidepool.Worktree`. It is represented as
-/// `HelperBody::Projection` instead, which is why the count here is ten.
-///
-/// 4 representable + 10 unrepresentable = 14, the macro's total helper count
-/// — plus `mergeBranchInto`, a 5th representable helper added after the flip
-/// (not one of the macro's original fourteen), for 15 total.
+/// Rich library helpers must remain absent from the protocol schema rather
+/// than entering it as raw Haskell strings. They are imported from
+/// `Tidepool.Worktree`; generated code owns only thin wrappers and projections.
 #[test]
 fn worktree_ten_helpers_are_not_schema_representable() {
     const NOT_REPRESENTABLE: &[&str] = &[

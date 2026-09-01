@@ -18,6 +18,11 @@ pub struct ActorWait {
     ticket: WaitTicket,
 }
 
+pub(crate) struct ResidentPollRequest {
+    pub(crate) target: ActorRef,
+    pub(crate) continuation: tidepool_runtime::session::ResidentHole,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ActorWaitError {
     #[error("invalid actor routing identity ({actor_id}, {incarnation})")]
@@ -89,6 +94,32 @@ impl ActorWait {
             crate::ExitObservation::Exited(terminal) => Ok(Some(terminal)),
         }
     }
+}
+
+pub(crate) fn decode_poll_target(
+    request: &Value,
+    table: &DataConTable,
+) -> Result<ActorRef, ActorWaitError> {
+    let ActorReq::ActorPollWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
+    else {
+        return Err(ActorWaitError::UnexpectedRequest);
+    };
+    decode_address(actor_id, incarnation)
+}
+
+fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef, ActorWaitError> {
+    let (Ok(actor_id_u64), Ok(incarnation_u64)) =
+        (u64::try_from(actor_id), u64::try_from(incarnation))
+    else {
+        return Err(ActorWaitError::InvalidIdentity {
+            actor_id,
+            incarnation,
+        });
+    };
+    Ok(ActorRef {
+        id: ActorId(actor_id_u64),
+        incarnation: Incarnation(incarnation_u64),
+    })
 }
 
 /// Encode Rust's immutable terminal metadata as the actor effect's internal

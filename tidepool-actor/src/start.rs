@@ -35,6 +35,7 @@ pub struct ResidentActorStart {
     descriptor: ActorDescriptor,
     parent_hole: ResidentHole,
     entry: RootCustody,
+    launch_worktrees: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -81,8 +82,13 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let ActorReq::ActorStartWith(label, _entry_projection, profile, explicit_exports) =
-            ActorReq::from_value(request, table)?
+        let ActorReq::ActorStartWith(
+            label,
+            _entry_projection,
+            profile,
+            launch_worktrees,
+            explicit_exports,
+        ) = ActorReq::from_value(request, table)?
         else {
             return Err(ActorStartCaptureError::UnexpectedRequest);
         };
@@ -112,12 +118,18 @@ impl ResidentActorStart {
             descriptor,
             parent_hole,
             entry,
+            launch_worktrees,
         })
     }
 
     /// Consume the capture into the exact parent obligation and child entry.
-    pub fn into_parts(self) -> (ActorDescriptor, ResidentHole, RootCustody) {
-        (self.descriptor, self.parent_hole, self.entry)
+    pub fn into_parts(self) -> (ActorDescriptor, ResidentHole, RootCustody, Vec<String>) {
+        (
+            self.descriptor,
+            self.parent_hole,
+            self.entry,
+            self.launch_worktrees,
+        )
     }
 }
 
@@ -251,7 +263,10 @@ pub enum ResidentActorStartError {
 
 pub(crate) enum ResidentStartedActorState {
     IdleReceiver,
-    McpPolicy(crate::resident_mcp::ResidentMcpAwait),
+    McpPolicy {
+        awaiting: crate::resident_mcp::ResidentMcpAwait,
+        launch_worktrees: Vec<String>,
+    },
     Exited,
 }
 
@@ -363,7 +378,7 @@ where
         let (turn, actor, outcome, state) = self
             .start_until_cancelled(parent_turn, provider, start, sink, std::future::pending())
             .await?;
-        if matches!(state, ResidentStartedActorState::McpPolicy(_)) {
+        if matches!(state, ResidentStartedActorState::McpPolicy { .. }) {
             let _ = self
                 .lifecycle
                 .force_terminate(
@@ -403,7 +418,7 @@ where
     {
         let owner = parent_turn.actor();
         let parent_context = parent_turn.session_context();
-        let (descriptor, parent_hole, entry) = start.into_parts();
+        let (descriptor, parent_hole, entry, launch_worktrees) = start.into_parts();
         let unpublished = UnpublishedResidentActor::begin(
             &self.registry,
             Some(owner),
@@ -478,7 +493,10 @@ where
                         ResidentStartedActorState::IdleReceiver
                     }
                     crate::resident_workbench::ResidentActorBoundary::McpAwait(awaiting) => {
-                        ResidentStartedActorState::McpPolicy(awaiting)
+                        ResidentStartedActorState::McpPolicy {
+                            awaiting,
+                            launch_worktrees,
+                        }
                     }
                     other => {
                         return Err(ResidentActorStartError::Workbench(

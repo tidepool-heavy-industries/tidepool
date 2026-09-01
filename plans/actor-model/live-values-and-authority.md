@@ -143,56 +143,51 @@ continuation.
 
 `call` remains single-result; fork never changes reply cardinality implicitly.
 
-## 6. Launch grants
+## 6. Launch recipes and resource binding
 
 Fresh spawn needs one explicit way to authorize a child for a particular
 resource. The runtime must not recursively inspect the startup value for
 capability leaves, and static interpreter policy cannot name per-instance
 resources such as one worktree.
 
-The initial membrane is an opaque launch-grant recipe attached immutably to an
-actor definition:
+Capability modules expose narrow definition decorators rather than a generic
+grant bag. The first concrete surface is:
 
 ```haskell
-data LaunchGrant
-
-withLaunchGrant
-  :: LaunchGrant
+withWorktree
+  :: WorktreeHandle
   -> ActorDefinition startup protocol exit
   -> ActorDefinition startup protocol exit
 ```
 
-Capability-owning modules create these recipes through their own small
-vocabulary—for example, a worktree module may expose a function that requests
-its registered child policy for one handle. The model does not choose an
-arbitrary `Share`/`Rebind` enum, forge a registry identifier, or edit a generic
-grant record.
+The model does not choose an arbitrary `Share`/`Rebind` enum or edit a generic
+grant record. The recipe carried by the definition is correlation data; only
+the Worktree registry and exact actor binding confer authority.
 
 The first concrete recipe binds one owner-selected managed worktree to a fresh
-DevSwarm worker. The owner creates the worktree, retains its handle, closes that
+DevSwarm worker. The owner creates the worktree, retains its handle, closes the
 same value into the worker definition, and decorates the definition through
-the Worktree module's narrow grant helper. Shoal resolves the redeemed binding
-to choose the external application cwd; it must delete its current automatic
-post-spawn allocation rather than retain two placement paths.
+`withWorktree`. After the child installs its MCP policy, Shoal validates
+exactly one recipe, binds it to that exact actor incarnation, and uses the
+registered checkout as the external application cwd. Failure before launch
+releases the active binding and fails the child; the retain-first worktree
+remains.
 
-At `startActor`, Rust checks the current principal and the resource's
-registered policy under the child interpreter. It then redeems every
-recipe atomically for the newly allocated child before startup. Any refusal
-rolls back the unpublished child and all grants already derived for it.
-Copying a recipe or decorated definition transfers no authority: every
-redemption is checked again, and the resource owner decides whether a recipe
-is reusable, rebinds a fresh resource, or has expired.
+Copying a recipe or decorated definition transfers no authority: the
+interpreter permits a child only while the binding table names its exact
+run/id/incarnation principal. V0 does not expose recipe-bound resources during
+Haskell initialization. If a later capability must be present before internal
+readiness, add one generic startup-admission hook rather than moving resource
+policy into `startActor`.
 
 This is launch metadata, not part of the program image. General post-start
 `delegate`/`revoke` operations are deferred until a real protocol needs them.
-Actor retirement still revokes grants it owns, and revocation is always
-checked at use by already-copied handles and closures.
 
 The worktree's durable ID may seed a V0 model-facing `WorkerHandle`, but that
 handle is correlation only. It neither reconstructs an `ActorRef` nor grants
 worktree access. Exact Haskell state maps it to the current actor reference and
 request; the worktree interpreter separately checks the actor principal and
-redeemed grant. V0 allocates one fresh worktree per worker and forbids rebind,
+active binding. V0 allocates one fresh worktree per worker and forbids rebind,
 so a later reusable-worktree design must add an explicit binding generation
 rather than silently changing what an old worker handle denotes.
 

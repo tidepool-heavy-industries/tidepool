@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tidepool_actor::{
-    ActorDescriptor, ActorPlacement, ActorRegistry, ActorWorkbenchSource, ResidentActorDeployment,
-    ResidentActorHost, ResidentActorRoot, ResidentHostParkedKind, ResidentLifecyclePolicy,
+    ActorDescriptor, ActorPlacement, ActorRegistry, ActorWorkbenchSource,
+    ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
+    ResidentActorDeployment, ResidentActorHost, ResidentActorRoot, ResidentHostParkedKind,
+    ResidentLifecyclePolicy,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -85,12 +87,12 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         "{preamble}\
          type ActorEffects = '[ActorMcp, Actor]\n\
          data EchoInput = EchoInput {{ value :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
-         data EchoOutput = EchoOutput {{ doubled :: Int }} deriving (Generic, ToJSON)\n\
+         data EchoOutput = EchoOutput {{ doubled :: Int }} deriving (Generic, ToJSON, JsonSchema)\n\
          data SpawnInput = SpawnInput {{ seed :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
-         data SpawnOutput = SpawnOutput {{ started :: Bool }} deriving (Generic, ToJSON)\n\
+         data SpawnOutput = SpawnOutput {{ started :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
          data StateInput = StateInput {{ next :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data StateQuery = StateQuery deriving (Generic, FromJSON, JsonSchema)\n\
-         data StateOutput = StateOutput {{ current :: Int }} deriving (Generic, ToJSON)\n\
+         data StateOutput = StateOutput {{ current :: Int }} deriving (Generic, ToJSON, JsonSchema)\n\
          data ResidentTools mode = ResidentTools {{ doubleValue :: mode :- Call EchoInput EchoOutput, spawnChild :: mode :- Call SpawnInput SpawnOutput, currentValue :: mode :- Call StateQuery StateOutput, setValue :: mode :- Update StateInput StateOutput, finishValue :: mode :- Finish StateQuery StateOutput }} deriving (Generic)\n"
     );
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
@@ -181,6 +183,7 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
     let policy = installation.policy;
     let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(policy)
         .expect("project resident policy into MCP");
+    let control = host.control();
     assert_eq!(server.declarations()[0].name, "double_value");
     let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
     let hosted = tokio::spawn(host.run_until_shutdown(async move {
@@ -275,6 +278,19 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
     };
     assert_eq!(retired, actor);
     assert_eq!(terminal.kind, tidepool_actor::ActorExitKind::Completed);
+    assert_eq!(
+        control
+            .fail_external_application(
+                actor,
+                ExternalApplicationFailure {
+                    class: ExternalApplicationFailureClass::UnexpectedExit,
+                    detail: "proxy closed after typed completion".into(),
+                },
+            )
+            .await
+            .expect("classify post-terminal application exit"),
+        ExternalFailureDisposition::AlreadyTerminal
+    );
 
     request_shutdown.send(()).expect("request host shutdown");
     let shutdown = hosted

@@ -3837,6 +3837,7 @@ dependencies = [
  "clap",
  "frunk",
  "glob",
+ "parking_lot",
  "rmcp",
  "serde",
  "serde_json",

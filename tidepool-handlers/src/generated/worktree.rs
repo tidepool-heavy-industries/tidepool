@@ -23,6 +23,10 @@ pub enum WorktreeError {
     WorktreeBusy(tidepool_bridge_effects::WtWorktreeId, String),
     /// the checkout kept changing during bounded submission observation
     SubmissionUnstable(tidepool_bridge_effects::WtWorktreeId),
+    /// the executing principal has no active binding for this managed worktree
+    WorktreeUnauthorized(tidepool_bridge_effects::WtWorktreeId),
+    /// the executing principal's actor role does not permit this Worktree operation
+    WorktreeAuthorityDenied(String),
     /// git itself failed; the receipt carries the invocation and its output
     GitFailure(tidepool_bridge_effects::WtGitFailureReceipt),
     /// no worktree registered under this id — a typo or a stale id, DISTINCT from WorktreeLost's data loss

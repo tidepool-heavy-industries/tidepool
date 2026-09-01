@@ -61,6 +61,7 @@ frunk.workspace = true
 uuid.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
+parking_lot.workspace = true
 
 
 [dev-dependencies]

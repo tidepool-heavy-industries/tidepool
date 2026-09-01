@@ -77,6 +77,7 @@ module Tidepool.Aeson.Schema
   , GTaggedSchemas (..)
   , GNullaryNames (..)
   , GSchemaRecord (..)
+  , objectSchema
   ) where
 
 import Prelude

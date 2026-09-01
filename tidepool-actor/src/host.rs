@@ -140,6 +140,10 @@ pub struct ResidentHostShutdownReport {
 pub struct ResidentMcpInstallation {
     pub actor: ActorRef,
     pub policy: Arc<crate::ResidentMcpPolicy>,
+    /// Capability-specific worktree recipes captured from the actor
+    /// definition. Deployment must bind these to `actor` before launching an
+    /// external application; they are correlation data, not authority alone.
+    pub launch_worktrees: Vec<String>,
 }
 
 /// Ordered deployment lifecycle for actors hosted by this runtime.
@@ -154,6 +158,75 @@ pub enum ResidentActorDeployment {
         actor: ActorRef,
         terminal: ActorTerminal,
     },
+}
+
+/// Structured classification of a native application failure observed by a
+/// deployment owner. Diagnostics are payload; this enum, never rendered
+/// string inspection, drives lifecycle policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalApplicationFailureClass {
+    WorktreeBinding,
+    CommandConstruction,
+    ProcessLaunch,
+    ProxyStartup,
+    UnexpectedExit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalApplicationFailure {
+    pub class: ExternalApplicationFailureClass,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalFailureDisposition {
+    Applied,
+    AlreadyTerminal,
+    UnknownOrStale,
+}
+
+struct ExternalFailureRequest {
+    actor: ActorRef,
+    failure: ExternalApplicationFailure,
+    response: oneshot::Sender<Result<ExternalFailureDisposition, ResidentActorHostControlError>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResidentActorHostControlError {
+    #[error("resident actor host control is closed")]
+    Closed,
+    #[error("resident actor host dropped a control response")]
+    ResponseDropped,
+    #[error("resident actor host could not transition {actor:?}: {detail}")]
+    Transition { actor: ActorRef, detail: String },
+}
+
+/// Cloneable, exact-incarnation control capability for deployment
+/// supervision. It requests transitions from the host; it cannot mutate the
+/// registry or continuation custody directly.
+#[derive(Clone)]
+pub struct ResidentActorHostControl {
+    sender: mpsc::UnboundedSender<ExternalFailureRequest>,
+}
+
+impl ResidentActorHostControl {
+    pub async fn fail_external_application(
+        &self,
+        actor: ActorRef,
+        failure: ExternalApplicationFailure,
+    ) -> Result<ExternalFailureDisposition, ResidentActorHostControlError> {
+        let (response, result) = oneshot::channel();
+        self.sender
+            .send(ExternalFailureRequest {
+                actor,
+                failure,
+                response,
+            })
+            .map_err(|_| ResidentActorHostControlError::Closed)?;
+        result
+            .await
+            .map_err(|_| ResidentActorHostControlError::ResponseDropped)?
+    }
 }
 
 struct ResidentHostRuntime<H, O> {
@@ -290,6 +363,8 @@ pub struct ResidentActorHost<H, O> {
     mcp_awaits: HashMap<ActorRef, crate::resident_mcp::ResidentMcpAwait>,
     mcp_requests: mpsc::UnboundedSender<crate::resident_mcp::ResidentMcpInvocation>,
     mcp_request_rx: mpsc::UnboundedReceiver<crate::resident_mcp::ResidentMcpInvocation>,
+    control: ResidentActorHostControl,
+    control_rx: mpsc::UnboundedReceiver<ExternalFailureRequest>,
     deployments: mpsc::UnboundedSender<ResidentActorDeployment>,
     deployment_rx: Option<mpsc::UnboundedReceiver<ResidentActorDeployment>>,
     roots: BTreeSet<ActorRef>,
@@ -325,6 +400,11 @@ where
             .ok_or(ResidentActorHostError::DeploymentsTaken)
     }
 
+    #[must_use]
+    pub fn control(&self) -> ResidentActorHostControl {
+        self.control.clone()
+    }
+
     pub fn new(
         registry: ActorRegistry,
         source: ActorWorkbenchSource,
@@ -345,6 +425,7 @@ where
         let mailbox = ResidentActorMailbox::new(Arc::clone(&lifecycle));
         let (mcp_requests, mcp_request_rx) = mpsc::unbounded_channel();
         let (deployments, deployment_rx) = mpsc::unbounded_channel();
+        let (control_sender, control_rx) = mpsc::unbounded_channel();
         Ok(Self {
             runtime: Arc::new(ResidentHostRuntime {
                 registry,
@@ -366,6 +447,10 @@ where
             mcp_awaits: HashMap::new(),
             mcp_requests,
             mcp_request_rx,
+            control: ResidentActorHostControl {
+                sender: control_sender,
+            },
+            control_rx,
             deployments,
             deployment_rx: Some(deployment_rx),
             roots: BTreeSet::new(),
@@ -442,6 +527,7 @@ where
     ) -> Result<ResidentHostRunReport, ResidentActorHostError> {
         let mut wakes_open = true;
         loop {
+            self.drain_control_requests().await;
             self.drain_mcp_requests()?;
             self.wakes.drain_available();
             self.service_wakes()?;
@@ -530,6 +616,11 @@ where
                 request = self.mcp_request_rx.recv() => {
                     if let Some(request) = request {
                         self.service_mcp_request(request)?;
+                    }
+                }
+                request = self.control_rx.recv() => {
+                    if let Some(request) = request {
+                        self.service_external_failure(request).await;
                     }
                 }
                 open = self.wakes.wait(), if wakes_open => {
@@ -721,7 +812,7 @@ where
                 children,
             } => {
                 self.register_children(children);
-                self.install_mcp_policy(actor, awaiting);
+                self.install_mcp_policy(actor, awaiting, Vec::new());
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::McpPolicy;
                 }
@@ -854,6 +945,56 @@ where
         Ok(())
     }
 
+    async fn drain_control_requests(&mut self) {
+        while let Ok(request) = self.control_rx.try_recv() {
+            self.service_external_failure(request).await;
+        }
+    }
+
+    async fn service_external_failure(&mut self, request: ExternalFailureRequest) {
+        let result = match self.runtime.registry.observe_exit(request.actor) {
+            Ok(ExitObservation::Exited(_)) => Ok(ExternalFailureDisposition::AlreadyTerminal),
+            Err(ActorRegistryError::Unknown(_) | ActorRegistryError::Stale { .. }) => {
+                Ok(ExternalFailureDisposition::UnknownOrStale)
+            }
+            Err(error) => Err(ResidentActorHostControlError::Transition {
+                actor: request.actor,
+                detail: error.to_string(),
+            }),
+            Ok(ExitObservation::Pending) => {
+                if let Some(hosted) = self.actors.get_mut(&request.actor) {
+                    hosted.cancel.send_replace(true);
+                }
+                let summary = format!(
+                    "external application {:?} failure: {}",
+                    request.failure.class, request.failure.detail
+                );
+                match self
+                    .runtime
+                    .lifecycle
+                    .force_terminate(
+                        request.actor,
+                        ActorTerminal {
+                            kind: ActorExitKind::Failed,
+                            summary,
+                        },
+                    )
+                    .await
+                {
+                    Ok(()) => Ok(ExternalFailureDisposition::Applied),
+                    Err(ResidentLifecycleError::Registry(ActorRegistryError::Exited(_))) => {
+                        Ok(ExternalFailureDisposition::AlreadyTerminal)
+                    }
+                    Err(error) => Err(ResidentActorHostControlError::Transition {
+                        actor: request.actor,
+                        detail: error.to_string(),
+                    }),
+                }
+            }
+        };
+        let _ = request.response.send(result);
+    }
+
     fn service_mcp_request(
         &mut self,
         request: crate::resident_mcp::ResidentMcpInvocation,
@@ -912,8 +1053,11 @@ where
                     exited.push(actor);
                     HostedActorState::Exited
                 }
-                crate::start::ResidentStartedActorState::McpPolicy(awaiting) => {
-                    self.install_mcp_policy(actor, awaiting);
+                crate::start::ResidentStartedActorState::McpPolicy {
+                    awaiting,
+                    launch_worktrees,
+                } => {
+                    self.install_mcp_policy(actor, awaiting, launch_worktrees);
                     HostedActorState::McpPolicy
                 }
             };
@@ -935,6 +1079,7 @@ where
         &mut self,
         actor: ActorRef,
         awaiting: crate::resident_mcp::ResidentMcpAwait,
+        launch_worktrees: Vec<String>,
     ) {
         if !self.mcp_policies.contains_key(&actor) {
             let policy = Arc::new(crate::resident_mcp::install_resident_mcp(
@@ -946,7 +1091,11 @@ where
             let _ = self
                 .deployments
                 .send(ResidentActorDeployment::PolicyInstalled(
-                    ResidentMcpInstallation { actor, policy },
+                    ResidentMcpInstallation {
+                        actor,
+                        policy,
+                        launch_worktrees,
+                    },
                 ));
         }
         self.mcp_awaits.insert(actor, awaiting);
@@ -1178,6 +1327,16 @@ where
                     pending: HostWait { pending, mcp },
                     children,
                 });
+            }
+            ResidentActorBoundary::Poll(poll) => {
+                let terminal = match runtime.registry.observe_exit(poll.target)? {
+                    crate::ExitObservation::Pending => None,
+                    crate::ExitObservation::Exited(terminal) => Some(terminal),
+                };
+                outcome = runtime
+                    .runner
+                    .resume_optional_terminal(turn.session_context(), poll.continuation, terminal)
+                    .await?;
             }
             ResidentActorBoundary::Receive(receiver) => {
                 runtime.registry.install_resident_receiver(turn, receiver)?;

@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TypeOperators #-}
 
 -- | Engine-private representation of typed actor references.
@@ -15,7 +16,16 @@ module Tidepool.Actor.Internal
   , ReadOnlyEffects
   , ReadWriteEffects
   , ShutdownReason (..)
-  , ActorDefinition (..)
+  , ActorDefinition
+  , pattern ActorDefinition
+  , label
+  , effectProfile
+  , initialization
+  , behavior
+  , visibleToChild
+  , onShutdown
+  , actorLaunchWorktrees
+  , withLaunchWorktree
   ) where
 
 import Control.Monad.Freer (Eff)
@@ -23,7 +33,7 @@ import Data.Kind (Type)
 import Data.Text (Text)
 import Prelude
 
-import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, Deliberate, FsRead, FsWrite)
+import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, Deliberate, FsRead, FsWrite, Worktree)
 import Tidepool.Internal.ExitCell (ExitCell)
 
 data ActorRef (protocol :: Type -> Type) exit where
@@ -43,6 +53,7 @@ type ReadOnlyEffects protocol =
    , Actor
    , Deliberate
    , FsRead
+   , Worktree
    ]
 
 type ReadWriteEffects protocol = FsWrite ': ReadOnlyEffects protocol
@@ -57,12 +68,53 @@ data ShutdownReason
   deriving (Show, Eq)
 
 data ActorDefinition startup (protocol :: Type -> Type) exit where
-  ActorDefinition
-    :: { label :: Text
-       , effectProfile :: EffectProfile protocol actorEffs
-       , initialization :: startup -> Eff actorEffs initial
-       , behavior :: startup -> initial -> Eff actorEffs exit
-       , visibleToChild :: [Text]
-       , onShutdown :: ShutdownReason -> Eff actorEffs ()
+  ActorDefinitionInternal
+    :: { internalLabel :: Text
+       , internalEffectProfile :: EffectProfile protocol actorEffs
+       , internalInitialization :: startup -> Eff actorEffs initial
+       , internalBehavior :: startup -> initial -> Eff actorEffs exit
+       , internalVisibleToChild :: [Text]
+       , internalOnShutdown :: ShutdownReason -> Eff actorEffs ()
+       , internalLaunchWorktrees :: [Text]
        }
     -> ActorDefinition startup protocol exit
+
+-- | Public full-record construction. Runtime launch recipes are deliberately
+-- absent from this pattern: capability modules attach their own opaque recipe
+-- without turning 'ActorDefinition' into a generic grant bag.
+pattern ActorDefinition
+  :: Text
+  -> EffectProfile protocol actorEffs
+  -> (startup -> Eff actorEffs initial)
+  -> (startup -> initial -> Eff actorEffs exit)
+  -> [Text]
+  -> (ShutdownReason -> Eff actorEffs ())
+  -> ActorDefinition startup protocol exit
+pattern ActorDefinition
+  { label
+  , effectProfile
+  , initialization
+  , behavior
+  , visibleToChild
+  , onShutdown
+  } <- ActorDefinitionInternal
+    label effectProfile initialization behavior visibleToChild onShutdown _
+  where
+    ActorDefinition label effectProfile initialization behavior visibleToChild onShutdown =
+      ActorDefinitionInternal
+        label effectProfile initialization behavior visibleToChild onShutdown []
+
+{-# COMPLETE ActorDefinition #-}
+
+actorLaunchWorktrees :: ActorDefinition startup protocol exit -> [Text]
+actorLaunchWorktrees
+  (ActorDefinitionInternal _ _ _ _ _ _ worktrees) = worktrees
+
+withLaunchWorktree
+  :: Text
+  -> ActorDefinition startup protocol exit
+  -> ActorDefinition startup protocol exit
+withLaunchWorktree treeId
+  (ActorDefinitionInternal l p initialize install exports shutdown worktrees) =
+    ActorDefinitionInternal
+      l p initialize install exports shutdown (worktrees <> [treeId])

@@ -1,15 +1,51 @@
 //! Real-git acceptance tests for the owning submission observation.
 
 use std::path::Path;
+use std::path::PathBuf;
 
 use tidepool_worktree::testing::TestRepo;
 use tidepool_worktree::{
-    GitCli, HeadState, WorktreeError, WorktreeManager, WorktreeRegistry, WorktreeSpec,
+    GitCli, HeadState, InProgressKind, WorktreeError, WorktreeManager, WorktreeRegistry,
+    WorktreeSpec,
 };
 
 fn manager_over(repo: &TestRepo, base: &Path) -> WorktreeManager {
     let registry = WorktreeRegistry::open(base.join("registry")).expect("open registry");
     WorktreeManager::new(GitCli::new(), registry, base.join("worktrees"), repo.path())
+}
+
+#[test]
+fn in_progress_operation_is_part_of_the_same_observation() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("base.txt", "base", "base")
+        .expect("base commit");
+    let storage = tempfile::TempDir::new().expect("storage");
+    let manager = manager_over(&repo, storage.path());
+    let handle = manager
+        .create(&WorktreeSpec::from_current_repository("worker"))
+        .expect("create worktree");
+    let git = GitCli::new();
+    let git_dir_output = git
+        .try_run(handle.cwd(), &["rev-parse", "--git-dir"])
+        .expect("resolve git dir");
+    let rendered = PathBuf::from(git_dir_output.trimmed());
+    let git_dir = if rendered.is_absolute() {
+        rendered
+    } else {
+        handle.cwd().join(rendered)
+    };
+    std::fs::write(git_dir.join("MERGE_HEAD"), handle.source_head().as_str())
+        .expect("write merge marker");
+
+    let observed = manager
+        .observe_submission(&handle)
+        .expect("observe submission");
+
+    assert_eq!(
+        observed.working_state.operation,
+        Some(InProgressKind::Merge)
+    );
 }
 
 #[test]
@@ -44,6 +80,8 @@ fn clean_branch_observation_carries_base_and_fresh_submitted_head() {
     );
     assert!(observed.working_state.changes.is_clean());
     assert_eq!(observed.working_state.operation, None);
+    assert_eq!(repo.writer().head().expect("source head"), base);
+    assert!(!repo.path().join("answer.txt").exists());
 }
 
 #[test]
