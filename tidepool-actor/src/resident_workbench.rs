@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tidepool_bridge::{FromCore, ToCore};
+use tidepool_bridge::{BridgeError, FromCore, ToCore};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::{request_constructor, DispatchEffect};
 use tidepool_eval::Value;
@@ -121,34 +121,86 @@ pub(crate) enum ResidentActorStartupStep {
     Ready(ResidentActorReadiness),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ResidentRequestKind {
-    InstallShutdown,
-    Deliberate,
-    Ready,
-    Complete,
-    Other(String),
+#[derive(tidepool_bridge_derive::FromCore)]
+#[allow(dead_code)]
+enum CompleteReq {
+    #[core(module = "Tidepool.Deliberation")]
+    CompleteWith(i64, Value),
 }
 
-impl ResidentRequestKind {
-    fn classify(request: &Value, table: &DataConTable) -> Self {
-        let constructor = request_constructor(request, table);
-        match constructor.rsplit('.').next() {
-            Some("ActorInstallShutdownWith") => Self::InstallShutdown,
-            Some("DeliberateWith") => Self::Deliberate,
-            Some("ActorReadyWith") => Self::Ready,
-            Some("CompleteWith") => Self::Complete,
-            _ => Self::Other(constructor),
+/// The one nominal roster for requests interpreted at actor execution
+/// boundaries. Generated request enums own constructor recognition and field
+/// shape; this sum owns orchestration routing.
+enum ResidentRequest {
+    Actor(crate::generated::actor::ActorReq),
+    ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
+    ActorLocal(crate::generated::actor_local::ActorLocalReq),
+    Deliberate(crate::generated::deliberate::DeliberateReq),
+    Complete(CompleteReq),
+}
+
+impl ResidentRequest {
+    fn decode(request: &Value, table: &DataConTable) -> Result<Self, ResidentActorWorkbenchError> {
+        macro_rules! try_member {
+            ($variant:path, $request:ty) => {
+                match <$request as FromCore>::from_value(request, table) {
+                    Ok(decoded) => return Ok($variant(decoded)),
+                    Err(BridgeError::UnknownDataCon(_)) => {}
+                    Err(source) => {
+                        return Err(ResidentActorWorkbenchError::RequestDecode {
+                            constructor: request_constructor(request, table),
+                            source,
+                        });
+                    }
+                }
+            };
         }
+
+        try_member!(Self::Actor, crate::generated::actor::ActorReq);
+        try_member!(
+            Self::ActorKernel,
+            crate::generated::actor_kernel::ActorKernelReq
+        );
+        try_member!(
+            Self::ActorLocal,
+            crate::generated::actor_local::ActorLocalReq
+        );
+        try_member!(
+            Self::Deliberate,
+            crate::generated::deliberate::DeliberateReq
+        );
+        try_member!(Self::Complete, CompleteReq);
+
+        Err(ResidentActorWorkbenchError::UnsupportedRequest {
+            constructor: request_constructor(request, table),
+        })
     }
 
-    fn constructor(&self) -> &str {
+    fn operation(&self) -> &'static str {
         match self {
-            Self::InstallShutdown => "ActorInstallShutdownWith",
-            Self::Deliberate => "DeliberateWith",
-            Self::Ready => "ActorReadyWith",
-            Self::Complete => "CompleteWith",
-            Self::Other(constructor) => constructor,
+            Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
+            Self::Actor(crate::generated::actor::ActorReq::ActorWaitWith(..)) => "awaitExit",
+            Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
+            Self::Actor(crate::generated::actor::ActorReq::ActorCastWith(..)) => "cast",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(..),
+            ) => "installShutdown",
+            Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith) => {
+                "ready"
+            }
+            Self::ActorKernel(crate::generated::actor_kernel::ActorKernelReq::ActorReplyWith(
+                ..,
+            )) => "reply",
+            Self::ActorKernel(
+                crate::generated::actor_kernel::ActorKernelReq::ActorContinueWith(..),
+            ) => "continue",
+            Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
+                ..,
+            )) => "receive",
+            Self::Deliberate(crate::generated::deliberate::DeliberateReq::DeliberateWith(..)) => {
+                "deliberate"
+            }
+            Self::Complete(CompleteReq::CompleteWith(..)) => "complete",
         }
     }
 }
@@ -198,6 +250,13 @@ pub enum ResidentActorWorkbenchError {
     InputMount(String),
     #[error("actor protocol violation: {0}")]
     ActorProtocol(String),
+    #[error("unsupported resident actor request `{constructor}`")]
+    UnsupportedRequest { constructor: String },
+    #[error("could not decode resident actor request `{constructor}`: {source}")]
+    RequestDecode {
+        constructor: String,
+        source: BridgeError,
+    },
     #[error("could not bridge an actor protocol value: {0}")]
     Bridge(#[from] tidepool_bridge::BridgeError),
     #[error(transparent)]
@@ -482,11 +541,13 @@ where
         };
         self.access
             .with_machine(context, move |session, _, _| {
-                let kind = ResidentRequestKind::classify(&request, session.data_con_table());
-                match kind {
-                    ResidentRequestKind::InstallShutdown
-                        if session.parked_realm(&hole) == Some(actor_realm) =>
-                    {
+                let request_kind = ResidentRequest::decode(&request, session.data_con_table())?;
+                match request_kind {
+                    ResidentRequest::ActorKernel(
+                        crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
+                            ..,
+                        ),
+                    ) if session.parked_realm(&hole) == Some(actor_realm) => {
                         let hook = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                             .ok_or_else(|| {
@@ -501,7 +562,9 @@ where
                             },
                         ))
                     }
-                    ResidentRequestKind::Deliberate => {
+                    ResidentRequest::Deliberate(
+                        crate::generated::deliberate::DeliberateReq::DeliberateWith(..),
+                    ) => {
                         let table = session.data_con_table().clone();
                         let completion = crate::ResidentCompletion::capture(
                             session,
@@ -512,16 +575,16 @@ where
                         )?;
                         Ok(ResidentActorStartupStep::Deliberate(completion))
                     }
-                    ResidentRequestKind::Ready
-                        if session.parked_realm(&hole) == Some(actor_realm) =>
-                    {
+                    ResidentRequest::ActorKernel(
+                        crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith,
+                    ) if session.parked_realm(&hole) == Some(actor_realm) => {
                         Ok(ResidentActorStartupStep::Ready(ResidentActorReadiness {
                             hole,
                         }))
                     }
                     unsupported => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                         "actor initialization suspended on unsupported `{}` in {actor_realm:?}",
-                        unsupported.constructor()
+                        unsupported.operation()
                     ))),
                 }
             })
@@ -556,11 +619,10 @@ where
                 {
                     ResidentOutcome::Completed { .. } => Ok(()),
                     ResidentOutcome::Suspended { request, .. } => {
-                        let kind =
-                            ResidentRequestKind::classify(&request, session.data_con_table());
+                        let request = ResidentRequest::decode(&request, session.data_con_table())?;
                         Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                             "shutdown suspended on disallowed `{}`",
-                            kind.constructor()
+                            request.operation()
                         )))
                     }
                 }
@@ -1161,8 +1223,8 @@ where
             hole,
             request,
         } => {
-            let kind = ResidentRequestKind::classify(&request, table);
-            if kind == ResidentRequestKind::Complete {
+            let request_kind = ResidentRequest::decode(&request, table);
+            if matches!(&request_kind, Ok(ResidentRequest::Complete(_))) {
                 let completion = session
                     .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
                     .ok_or(ResidentActorWorkbenchError::MissingCompletionPayload)?;
@@ -1175,10 +1237,96 @@ where
             } else {
                 format!("\n\nOutput before suspension:\n{}", output.join("\n"))
             };
+            let operation = match request_kind {
+                Ok(request) => request.operation().to_string(),
+                Err(error) => error.to_string(),
+            };
             Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(format!(
                 "fragment suspended on `{}`, which the current actor interpreter could not settle{output}",
-                kind.constructor()
+                operation
             ))))
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use tidepool_repr::{DataCon, DataConId, Literal};
+
+    #[test]
+    fn resident_roster_decodes_complete_nominally() {
+        let mut table = DataConTable::new();
+        table.insert(data_con(
+            1,
+            "CompleteWith",
+            "Tidepool.Deliberation.CompleteWith",
+            2,
+        ));
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(42)),
+            ],
+        );
+
+        let decoded = ResidentRequest::decode(&request, &table).expect("decode CompleteWith");
+        assert_eq!(decoded.operation(), "complete");
+    }
+
+    #[test]
+    fn same_spelled_complete_from_another_module_is_not_completion() {
+        let mut table = DataConTable::new();
+        table.insert(data_con(1, "CompleteWith", "User.CompleteWith", 2));
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(Literal::LitInt(0)),
+                Value::Lit(Literal::LitInt(42)),
+            ],
+        );
+
+        assert!(matches!(
+            ResidentRequest::decode(&request, &table),
+            Err(ResidentActorWorkbenchError::UnsupportedRequest { constructor })
+                if constructor == "User.CompleteWith"
+        ));
+    }
+
+    #[test]
+    fn malformed_known_request_is_a_decode_error_not_an_unknown_operation() {
+        let mut table = DataConTable::new();
+        table.insert(data_con(
+            1,
+            "CompleteWith",
+            "Tidepool.Deliberation.CompleteWith",
+            2,
+        ));
+        let request = Value::Con(
+            DataConId(1),
+            vec![
+                Value::Lit(Literal::LitString(b"not an Int".to_vec())),
+                Value::Lit(Literal::LitInt(42)),
+            ],
+        );
+
+        assert!(matches!(
+            ResidentRequest::decode(&request, &table),
+            Err(ResidentActorWorkbenchError::RequestDecode { constructor, .. })
+                if constructor == "Tidepool.Deliberation.CompleteWith"
+        ));
+    }
+
+    fn data_con(id: u64, name: &str, qualified_name: &str, rep_arity: u32) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            name: name.to_string(),
+            tag: 1,
+            rep_arity,
+            field_bangs: Vec::new(),
+            qualified_name: Some(qualified_name.to_string()),
+            type_name: "Request".to_string(),
         }
     }
 }
