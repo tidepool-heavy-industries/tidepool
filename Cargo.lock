@@ -3900,11 +3900,14 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tidepool-actor",
  "tidepool-atomic-write",
  "tidepool-extract-cmd",
+ "tidepool-node",
  "tidepool-repr",
  "tidepool-worktree",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

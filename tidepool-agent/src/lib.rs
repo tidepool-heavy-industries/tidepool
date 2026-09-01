@@ -34,3 +34,12 @@ pub use spawn::{
     SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep, SpawnSubstrate, SpawnWorkspace, WorkerRun,
     MAX_TOOL_ROUNDS,
 };
+
+/// Run the installed interactive-agent MCP sidecar.
+///
+/// Backend vocabulary remains contained in its adapter; the small binary calls
+/// this neutral entry point and therefore does not learn the concrete backend.
+pub async fn run_interactive_node() -> Result<(), Box<dyn std::error::Error>> {
+    backend::codex::node::run_sidecar_from_env().await?;
+    Ok(())
+}

@@ -15,6 +15,77 @@ use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentProcess,
     InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, ReasoningEffort,
 };
+use tidepool_actor::{ActorId, ActorRef, Incarnation};
+use tidepool_node::{NodeCredential, NodeHandshake};
+
+pub const ENV_NODE_ENDPOINT: &str = "TIDEPOOL_NODE_ENDPOINT";
+pub const ENV_NODE_ACTOR_ID: &str = "TIDEPOOL_NODE_ACTOR_ID";
+pub const ENV_NODE_INCARNATION: &str = "TIDEPOOL_NODE_INCARNATION";
+pub const ENV_NODE_CREDENTIAL: &str = "TIDEPOOL_NODE_CREDENTIAL";
+pub const ENV_NODE_BINDING_PATH: &str = "TIDEPOOL_NODE_BINDING_PATH";
+pub const ENV_NODE_WORKSPACE: &str = "TIDEPOOL_NODE_WORKSPACE";
+
+/// Run the concrete stdio sidecar configured by the daemon-owned launch.
+///
+/// Rollout discovery is a background task: the TUI may require MCP
+/// initialization before it creates its session file, so binding discovery
+/// must never delay or deadlock the MCP handshake.
+pub async fn run_sidecar_from_env() -> Result<(), AgentBackendError> {
+    let endpoint = required_path(ENV_NODE_ENDPOINT)?;
+    let binding_path = required_path(ENV_NODE_BINDING_PATH)?;
+    let workspace = required_path(ENV_NODE_WORKSPACE)?;
+    let actor = ActorRef {
+        id: ActorId(required_u64(ENV_NODE_ACTOR_ID)?),
+        incarnation: Incarnation(required_u64(ENV_NODE_INCARNATION)?),
+    };
+    let credential = NodeCredential(required_env(ENV_NODE_CREDENTIAL)?);
+    let handshake = NodeHandshake::current(actor, credential);
+
+    let discovery = tokio::spawn(discover_and_bind(
+        std::process::id(),
+        workspace,
+        binding_path,
+    ));
+    let proxy = tidepool_node::proxy_stdio(&endpoint, &handshake)
+        .await
+        .map_err(|error| AgentBackendError::BackendUnavailable {
+            detail: error.to_string(),
+        });
+    discovery.abort();
+    proxy
+}
+
+async fn discover_and_bind(parent_pid: u32, cwd: PathBuf, binding_path: PathBuf) {
+    loop {
+        match discover_parent_rollout(parent_pid, &cwd) {
+            Ok(thread) => match write_binding(&binding_path, thread).await {
+                Ok(()) => return,
+                Err(error) => tracing::debug!(%error, "rollout binding write not ready"),
+            },
+            Err(error) => tracing::debug!(%error, "interactive rollout not discoverable yet"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+fn required_env(name: &'static str) -> Result<String, AgentBackendError> {
+    std::env::var(name).map_err(|_| AgentBackendError::ProtocolRejected {
+        detail: format!("interactive node launch is missing {name}"),
+    })
+}
+
+fn required_path(name: &'static str) -> Result<PathBuf, AgentBackendError> {
+    required_env(name).map(PathBuf::from)
+}
+
+fn required_u64(name: &'static str) -> Result<u64, AgentBackendError> {
+    let value = required_env(name)?;
+    value
+        .parse()
+        .map_err(|_| AgentBackendError::ProtocolRejected {
+            detail: format!("interactive node launch has invalid {name}={value:?}"),
+        })
+}
 
 /// Adapter for an ordinary interactive TUI and its public push commands.
 #[derive(Debug, Default, Clone, Copy)]
