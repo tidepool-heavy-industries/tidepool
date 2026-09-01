@@ -41,7 +41,7 @@ pub use executor::{
 };
 pub use host::{
     ResidentActorHost, ResidentActorHostError, ResidentActorRoot, ResidentHostParkedKind,
-    ResidentHostRunReport, ResidentHostTaskError,
+    ResidentHostRunReport, ResidentHostShutdownReport, ResidentHostTaskError,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use mailbox::{

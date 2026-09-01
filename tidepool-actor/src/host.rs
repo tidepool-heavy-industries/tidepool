@@ -4,7 +4,7 @@
 //! machine checkout remain the two execution gates; this layer owns runnable
 //! work, cancellation, and boundary custody without adding another scheduler.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -21,11 +21,12 @@ use crate::start::UnpublishedResidentActor;
 use crate::{
     ActorAgentSession, ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef,
     ActorRegistry, ActorRegistryError, ActorRuntimeWake, ActorRuntimeWakes, ActorTerminal,
-    ActorTurnKind, ActorWorkbenchSource, CallId, OutboundSettlement, ResidentActorLifecycle,
-    ResidentActorMailbox, ResidentActorRunner, ResidentActorStartError, ResidentActorStarter,
-    ResidentActorWorkbenchError, ResidentCall, ResidentCallPoll, ResidentCompletionError,
-    ResidentCompletionExecutor, ResidentLifecycleError, ResidentLifecyclePolicy,
-    ResidentMailboxError, ResidentWait, ResidentWaitPoll, StartInitiator, TurnLease, WaitId,
+    ActorTurnKind, ActorWorkbenchSource, CallId, ExitObservation, OutboundSettlement,
+    ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRunner, ResidentActorStartError,
+    ResidentActorStarter, ResidentActorWorkbenchError, ResidentCall, ResidentCallPoll,
+    ResidentCompletionError, ResidentCompletionExecutor, ResidentLifecycleError,
+    ResidentLifecyclePolicy, ResidentMailboxError, ResidentWait, ResidentWaitPoll, StartInitiator,
+    TurnLease, WaitId,
 };
 
 /// A compiled root at the point where Rust transfers its machine and first
@@ -65,6 +66,15 @@ pub enum ResidentActorHostError {
     Lifecycle(#[from] ResidentLifecycleError),
     #[error(transparent)]
     Start(#[from] ResidentActorStartError),
+    #[error(
+        "actor host did not quiesce: {tasks} tasks, {calls} calls, {waits} waits, {live_actors} live actors"
+    )]
+    NotQuiescent {
+        tasks: usize,
+        calls: usize,
+        waits: usize,
+        live_actors: usize,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +93,17 @@ pub enum ResidentHostTaskError {
     Mailbox(#[from] ResidentMailboxError),
     #[error("actor task panicked")]
     Panicked,
+    #[error("actor task was cancelled")]
+    Cancelled,
+}
+
+impl ResidentHostTaskError {
+    fn is_shutdown_cancellation(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled | Self::Start(ResidentActorStartError::Cancelled)
+        )
+    }
 }
 
 #[derive(Debug, Default)]
@@ -99,6 +120,13 @@ pub struct ResidentHostRunReport {
 pub enum ResidentHostParkedKind {
     Call,
     Wait,
+}
+
+#[derive(Debug)]
+pub struct ResidentHostShutdownReport {
+    pub run: ResidentHostRunReport,
+    pub terminal_roots: Vec<(ActorRef, ActorTerminal)>,
+    pub removed_sessions: usize,
 }
 
 struct ResidentHostRuntime<H, O> {
@@ -160,6 +188,12 @@ enum HostWork {
     Mailbox,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostLifecycle {
+    Open,
+    Closing,
+}
+
 /// The sole owner of resident actor scheduling state for one runtime.
 pub struct ResidentActorHost<H, O> {
     runtime: Arc<ResidentHostRuntime<H, O>>,
@@ -174,7 +208,7 @@ pub struct ResidentActorHost<H, O> {
     roots: BTreeSet<ActorRef>,
     failures: Vec<(ActorRef, ResidentHostTaskError)>,
     cleanup_failures: Vec<(ActorRef, ResidentLifecycleError)>,
-    closing: bool,
+    lifecycle: HostLifecycle,
 }
 
 impl<H, O> ResidentActorHost<H, O>
@@ -220,7 +254,7 @@ where
             roots: BTreeSet::new(),
             failures: Vec::new(),
             cleanup_failures: Vec::new(),
-            closing: false,
+            lifecycle: HostLifecycle::Open,
         })
     }
 
@@ -228,7 +262,7 @@ where
         &mut self,
         root: ResidentActorRoot<H, O>,
     ) -> Result<ActorRef, ResidentActorHostError> {
-        if self.closing {
+        if self.lifecycle == HostLifecycle::Closing {
             return Err(ResidentActorHostError::Closing);
         }
         let session = root.descriptor.placement().session;
@@ -341,6 +375,123 @@ where
         })
     }
 
+    /// Cooperatively terminate every owned root and keep polling task
+    /// epilogues until no actor work or live-value obligation remains.
+    pub async fn shutdown(mut self) -> Result<ResidentHostShutdownReport, ResidentActorHostError> {
+        self.finish_shutdown().await
+    }
+
+    /// Run until an external shutdown signal resolves, then cooperatively
+    /// terminate and drain the host. The signal participates in the host event
+    /// loop, so it can interrupt provider, machine, or mailbox waits without
+    /// aborting their owning actor task.
+    pub async fn run_until_shutdown<F>(
+        mut self,
+        requested: F,
+    ) -> Result<ResidentHostShutdownReport, ResidentActorHostError>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        tokio::pin!(requested);
+        let mut wakes_open = true;
+        loop {
+            self.wakes.drain_available();
+            self.service_wakes()?;
+            tokio::select! {
+                biased;
+                () = &mut requested => break,
+                result = self.tasks.next(), if !self.tasks.is_empty() => {
+                    if let Some(result) = result {
+                        self.install_task_result(result);
+                    }
+                }
+                open = self.wakes.wait(), if wakes_open => {
+                    wakes_open = open;
+                }
+            }
+        }
+        self.finish_shutdown().await
+    }
+
+    async fn finish_shutdown(
+        &mut self,
+    ) -> Result<ResidentHostShutdownReport, ResidentActorHostError> {
+        self.lifecycle = HostLifecycle::Closing;
+        for hosted in self.actors.values_mut() {
+            hosted.cancel.send_replace(true);
+        }
+
+        let roots: Vec<_> = self.roots.iter().copied().collect();
+        let sessions: HashSet<_> = roots
+            .iter()
+            .filter_map(|root| {
+                self.runtime
+                    .registry
+                    .session_context(*root)
+                    .ok()
+                    .map(|context| context.placement.session)
+            })
+            .collect();
+        let mut shutdown_cleanup_failures = Vec::new();
+        for root in &roots {
+            match self
+                .runtime
+                .lifecycle
+                .force_terminate(
+                    *root,
+                    ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: "actor host shutdown".into(),
+                    },
+                )
+                .await
+            {
+                Ok(()) | Err(ResidentLifecycleError::Registry(ActorRegistryError::Exited(_))) => {}
+                Err(error) => shutdown_cleanup_failures.push((*root, error)),
+            }
+        }
+
+        let mut run = self.run_until_idle().await?;
+        run.cleanup_failures.extend(shutdown_cleanup_failures);
+        self.wakes.discard_all();
+
+        let live_actors = self
+            .actors
+            .values()
+            .filter(|hosted| !matches!(hosted.state, HostedActorState::Exited))
+            .count();
+        if !self.tasks.is_empty()
+            || !self.calls.is_empty()
+            || !self.waits.is_empty()
+            || live_actors != 0
+            || !self.wakes.is_empty()
+        {
+            return Err(ResidentActorHostError::NotQuiescent {
+                tasks: self.tasks.len(),
+                calls: self.calls.len(),
+                waits: self.waits.len(),
+                live_actors,
+            });
+        }
+
+        let terminal_roots = roots
+            .into_iter()
+            .filter_map(|root| match self.runtime.registry.observe_exit(root) {
+                Ok(ExitObservation::Exited(terminal)) => Some((root, terminal)),
+                Ok(ExitObservation::Pending) | Err(_) => None,
+            })
+            .collect();
+        let removed_sessions = sessions
+            .into_iter()
+            .filter(|session| self.machines.remove(*session).is_some())
+            .count();
+        Ok(ResidentHostShutdownReport {
+            run,
+            terminal_roots,
+            removed_sessions,
+        })
+    }
+
     fn schedule(&mut self, actor: ActorRef, work: HostWork) -> Result<(), ResidentActorHostError> {
         let receiver = match self.actors.entry(actor) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -364,9 +515,17 @@ where
         let sink = self.sink.clone();
         self.tasks.push(
             async move {
+                let cancelled = receiver.clone();
                 let task = drive_actor(Arc::clone(&runtime), provider, sink, actor, work, receiver);
                 match AssertUnwindSafe(task).catch_unwind().await {
                     Ok(Ok(result)) => result,
+                    Ok(Err(error)) if *cancelled.borrow() || error.is_shutdown_cancellation() => {
+                        HostTaskResult::Exited {
+                            actor,
+                            children: Vec::new(),
+                            cleanup_failure: None,
+                        }
+                    }
                     Ok(Err(error)) => {
                         let cleanup_failure =
                             terminate_failed_actor(&runtime.lifecycle, actor, error.to_string())
@@ -564,28 +723,40 @@ where
     let mut children = Vec::new();
     let (mut turn, mut outcome) = match work {
         HostWork::Outcome { turn, outcome } => (turn, *outcome),
-        HostWork::Call(pending) => match runtime.mailbox.poll_call(pending).await? {
-            ResidentCallPoll::Pending(pending) => {
-                return Ok(HostTaskResult::ParkedCall {
-                    actor,
-                    pending,
-                    children,
-                });
+        HostWork::Call(pending) => {
+            match await_host_operation(cancel.clone(), runtime.mailbox.poll_call(pending))
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??
+            {
+                ResidentCallPoll::Pending(pending) => {
+                    return Ok(HostTaskResult::ParkedCall {
+                        actor,
+                        pending,
+                        children,
+                    });
+                }
+                ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome),
             }
-            ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome),
-        },
-        HostWork::Wait(pending) => match runtime.mailbox.poll_wait(pending).await? {
-            ResidentWaitPoll::Pending(pending) => {
-                return Ok(HostTaskResult::ParkedWait {
-                    actor,
-                    pending,
-                    children,
-                });
+        }
+        HostWork::Wait(pending) => {
+            match await_host_operation(cancel.clone(), runtime.mailbox.poll_wait(pending))
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??
+            {
+                ResidentWaitPoll::Pending(pending) => {
+                    return Ok(HostTaskResult::ParkedWait {
+                        actor,
+                        pending,
+                        children,
+                    });
+                }
+                ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome),
             }
-            ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome),
-        },
+        }
         HostWork::Mailbox => {
-            runtime.mailbox.dispatch_one(actor).await?;
+            await_host_operation(cancel.clone(), runtime.mailbox.dispatch_one(actor))
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??;
             return Ok(
                 if runtime.registry.lifecycle(actor) == Ok(crate::ActorLifecycle::Exited) {
                     HostTaskResult::Exited {
@@ -601,10 +772,16 @@ where
     };
     loop {
         let context = turn.session_context();
-        let boundary = runtime
-            .runner
-            .capture_boundary(context.clone(), outcome, context.placement.resource_scope)
-            .await?;
+        let boundary = await_host_operation(
+            cancel.clone(),
+            runtime.runner.capture_boundary(
+                context.clone(),
+                outcome,
+                context.placement.resource_scope,
+            ),
+        )
+        .await
+        .ok_or(ResidentHostTaskError::Cancelled)??;
         match boundary {
             ResidentActorBoundary::Completed => {
                 drop(turn);
@@ -627,10 +804,18 @@ where
             }
             ResidentActorBoundary::Deliberate(completion) => {
                 let agent = ActorAgentSession::attach(runtime.registry.clone(), actor)?;
-                (turn, outcome) = runtime
-                    .completions
-                    .resolve(&agent, turn, provider.as_ref(), completion, sink.clone())
-                    .await?;
+                (turn, outcome) = await_host_operation(
+                    cancel.clone(),
+                    runtime.completions.resolve(
+                        &agent,
+                        turn,
+                        provider.as_ref(),
+                        completion,
+                        sink.clone(),
+                    ),
+                )
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??;
             }
             ResidentActorBoundary::Start(start) => {
                 let cancellation = Box::pin(cancellation_requested(cancel.clone()));
@@ -649,10 +834,12 @@ where
                 outcome = next_outcome;
             }
             ResidentActorBoundary::Outbound(outbound) => {
-                match runtime
-                    .mailbox
-                    .submit_captured_outbound(turn, outbound)
-                    .await?
+                match await_host_operation(
+                    cancel.clone(),
+                    runtime.mailbox.submit_captured_outbound(turn, outbound),
+                )
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??
                 {
                     OutboundSettlement::Continued {
                         turn: next_turn,
@@ -671,7 +858,12 @@ where
                 }
             }
             ResidentActorBoundary::Wait(wait) => {
-                let pending = runtime.mailbox.submit_captured_wait(turn, wait).await?;
+                let pending = await_host_operation(
+                    cancel.clone(),
+                    runtime.mailbox.submit_captured_wait(turn, wait),
+                )
+                .await
+                .ok_or(ResidentHostTaskError::Cancelled)??;
                 return Ok(HostTaskResult::ParkedWait {
                     actor,
                     pending,
@@ -694,6 +886,17 @@ async fn cancellation_requested(mut receiver: watch::Receiver<bool>) {
         if *receiver.borrow() {
             return;
         }
+    }
+}
+
+async fn await_host_operation<T>(
+    cancel: watch::Receiver<bool>,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = cancellation_requested(cancel) => None,
+        result = operation => Some(result),
     }
 }
 

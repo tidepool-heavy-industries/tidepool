@@ -30,6 +30,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_testing::eval_harness;
+use tokio::sync::Notify;
 
 mod support;
 
@@ -90,6 +91,38 @@ impl ModelProvider for AuthorsActorAndApprovesStartup {
             reasoning: None,
             reasoning_items: Vec::new(),
         })
+    }
+}
+
+struct BlocksDuringChildStartup {
+    requests: Mutex<usize>,
+    child_startup_entered: Notify,
+}
+
+impl ModelProvider for BlocksDuringChildStartup {
+    async fn complete(
+        &self,
+        _request: TurnRequest,
+        _sink: Option<StreamSink>,
+    ) -> Result<TurnResponse, ProviderError> {
+        let ordinal = {
+            let mut requests = self.requests.lock();
+            let ordinal = *requests;
+            *requests += 1;
+            ordinal
+        };
+        if ordinal == 0 {
+            return Ok(TurnResponse {
+                text: include_str!("start_surface/child_startup_response.hs")
+                    .trim_end()
+                    .into(),
+                usage: Usage::default(),
+                reasoning: None,
+                reasoning_items: Vec::new(),
+            });
+        }
+        self.child_startup_entered.notify_waiters();
+        std::future::pending().await
     }
 }
 
@@ -195,13 +228,14 @@ async fn host_owns_the_complete_resident_actor_vertical() {
         ResidentLifecyclePolicy::new(Duration::ZERO),
     )
     .expect("construct actor host");
-    host.launch_root(ResidentActorRoot::new(
-        prepared.descriptor,
-        prepared.machine,
-        prepared.outcome,
-    ))
-    .await
-    .expect("launch prepared root");
+    let root = host
+        .launch_root(ResidentActorRoot::new(
+            prepared.descriptor,
+            prepared.machine,
+            prepared.outcome,
+        ))
+        .await
+        .expect("launch prepared root");
 
     let report = host.run_until_idle().await.expect("drive actor host");
     assert_eq!(report.roots, 1);
@@ -211,6 +245,51 @@ async fn host_owns_the_complete_resident_actor_vertical() {
     assert!(report.failures.is_empty(), "{:#?}", report.failures);
     assert_eq!(report.cleanup_failures.len(), 1);
     assert_eq!(provider.requests.lock().len(), 4);
+
+    let shutdown = host.shutdown().await.expect("quiesce actor host");
+    assert_eq!(shutdown.removed_sessions, 1);
+    assert_eq!(shutdown.terminal_roots.len(), 1);
+    assert_eq!(shutdown.terminal_roots[0].0, root);
+    assert_eq!(shutdown.terminal_roots[0].1.kind, ActorExitKind::Completed);
+}
+
+#[tokio::test]
+async fn host_shutdown_cancels_provider_backed_child_startup_and_quiesces() {
+    let prepared = prepare_parent(95);
+    let provider = Arc::new(BlocksDuringChildStartup {
+        requests: Mutex::new(0),
+        child_startup_entered: Notify::new(),
+    });
+    let requested = provider.child_startup_entered.notified();
+    let mut host = ResidentActorHost::new(
+        prepared.source,
+        provider.clone(),
+        None,
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    )
+    .expect("construct actor host");
+    let root = host
+        .launch_root(ResidentActorRoot::new(
+            prepared.descriptor,
+            prepared.machine,
+            prepared.outcome,
+        ))
+        .await
+        .expect("launch prepared root");
+
+    let shutdown = host
+        .run_until_shutdown(requested)
+        .await
+        .expect("cancel and quiesce actor host");
+    assert_eq!(shutdown.removed_sessions, 1);
+    assert_eq!(shutdown.terminal_roots.len(), 1);
+    assert_eq!(shutdown.terminal_roots[0].0, root);
+    assert_eq!(shutdown.terminal_roots[0].1.kind, ActorExitKind::Cancelled);
+    assert!(
+        shutdown.run.failures.is_empty(),
+        "{:#?}",
+        shutdown.run.failures
+    );
 }
 
 #[tokio::test]

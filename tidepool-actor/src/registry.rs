@@ -194,6 +194,13 @@ impl ActorRuntimeWakes {
         self.ready.is_empty() && self.receiver.is_empty()
     }
 
+    /// Discard residual identity-only triggers after their owning host has
+    /// reached terminal quiescence. No lifecycle or value custody lives here.
+    pub(crate) fn discard_all(&mut self) {
+        self.drain_available();
+        self.ready.clear();
+    }
+
     fn record(&mut self, wake: ActorRuntimeWake) {
         self.ready.insert(wake);
     }
