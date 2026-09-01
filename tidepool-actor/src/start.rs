@@ -6,6 +6,7 @@
 //! primitive used by green threads.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use tidepool_bridge::{BridgeError, FromCore};
 use tidepool_codegen::suspension::RealmId;
@@ -244,17 +245,17 @@ pub struct ResidentActorStarter<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
     completions: ResidentCompletionExecutor<H, O>,
-    lifecycle: crate::ResidentActorLifecycle<H, O>,
+    lifecycle: Arc<crate::ResidentActorLifecycle<H, O>>,
 }
 
 impl<H, O> ResidentActorStarter<H, O> {
     #[must_use]
     pub fn new(
-        registry: ActorRegistry,
-        runner: ResidentActorRunner<H, O>,
+        lifecycle: Arc<crate::ResidentActorLifecycle<H, O>>,
         completions: ResidentCompletionExecutor<H, O>,
     ) -> Self {
-        let lifecycle = crate::ResidentActorLifecycle::new(registry.clone(), runner.clone());
+        let registry = lifecycle.registry();
+        let runner = lifecycle.runner();
         Self {
             registry,
             runner,

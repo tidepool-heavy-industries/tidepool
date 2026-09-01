@@ -78,6 +78,14 @@ impl<H, O> ResidentActorLifecycle<H, O> {
             policy,
         }
     }
+
+    pub(crate) fn registry(&self) -> ActorRegistry {
+        self.registry.clone()
+    }
+
+    pub(crate) fn runner(&self) -> ResidentActorRunner<H, O> {
+        self.runner.clone()
+    }
 }
 
 impl<H, O> ResidentActorLifecycle<H, O>

@@ -5,6 +5,8 @@
 //! rank-N handler and parks/resumes exact wait obligations. It owns neither a
 //! second mailbox nor a second exit-value store.
 
+use std::sync::Arc;
+
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{OutputSink, ResidentOutcome};
@@ -77,13 +79,14 @@ pub enum ResidentWaitPoll {
 pub struct ResidentActorMailbox<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
-    lifecycle: crate::ResidentActorLifecycle<H, O>,
+    lifecycle: Arc<crate::ResidentActorLifecycle<H, O>>,
 }
 
 impl<H, O> ResidentActorMailbox<H, O> {
     #[must_use]
-    pub fn new(registry: ActorRegistry, runner: ResidentActorRunner<H, O>) -> Self {
-        let lifecycle = crate::ResidentActorLifecycle::new(registry.clone(), runner.clone());
+    pub fn new(lifecycle: Arc<crate::ResidentActorLifecycle<H, O>>) -> Self {
+        let registry = lifecycle.registry();
+        let runner = lifecycle.runner();
         Self {
             registry,
             runner,

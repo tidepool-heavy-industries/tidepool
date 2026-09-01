@@ -200,9 +200,13 @@ async fn public_start_uses_one_exact_resident_path() {
         .capture_start(parent_turn.session_context(), parent_outcome)
         .await
         .expect("seal the model-authored definition");
-    let starter = ResidentActorStarter::new(
+    let lifecycle = Arc::new(ResidentActorLifecycle::with_policy(
         registry.clone(),
-        runner,
+        runner.clone(),
+        ResidentLifecyclePolicy::new(Duration::ZERO),
+    ));
+    let starter = ResidentActorStarter::new(
+        Arc::clone(&lifecycle),
         ResidentCompletionExecutor::new(Arc::clone(&machines), workbench_source.clone()),
     );
 
@@ -220,10 +224,7 @@ async fn public_start_uses_one_exact_resident_path() {
     assert_eq!(registry.lifecycle(dynamic_child), Ok(ActorLifecycle::Ready));
     assert_eq!(provider.requests.lock().len(), 2);
 
-    let mailbox = ResidentActorMailbox::new(
-        registry.clone(),
-        ResidentActorRunner::new(Arc::clone(&machines), workbench_source.clone()),
-    );
+    let mailbox = ResidentActorMailbox::new(Arc::clone(&lifecycle));
     let pending = match mailbox
         .submit_outbound(parent_turn, parent_outcome)
         .await
@@ -421,11 +422,6 @@ async fn public_start_uses_one_exact_resident_path() {
         machines.peek(session_id, |machine| machine.parked_holes().len()),
         Some(1),
         "the live server owns the sole remaining parked continuation"
-    );
-    let lifecycle = ResidentActorLifecycle::with_policy(
-        registry.clone(),
-        ResidentActorRunner::new(Arc::clone(&machines), workbench_source),
-        ResidentLifecyclePolicy::new(Duration::ZERO),
     );
     let checkout = machines
         .checkout_run(session_id)
