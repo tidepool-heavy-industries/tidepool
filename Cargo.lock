@@ -4116,6 +4116,7 @@ dependencies = [
  "tidepool-mcp",
  "tidepool-model",
  "tidepool-model-output",
+ "tidepool-node",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
@@ -4187,6 +4188,18 @@ dependencies = [
 [[package]]
 name = "tidepool-model-output"
 version = "0.1.0"
+
+[[package]]
+name = "tidepool-node"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tidepool-atomic-write",
+ "tidepool-repr",
+]
 
 [[package]]
 name = "tidepool-optimize"

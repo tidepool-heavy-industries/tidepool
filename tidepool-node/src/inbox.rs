@@ -1,0 +1,242 @@
+//! One durable single-consumer append-and-ack queue.
+//!
+//! Payload rows use [`tidepool_repr::jsonl`], cursor replacement uses
+//! [`tidepool_atomic_write`], and this module owns the sequencing contract that
+//! composes them: append first, deliver, then monotonically acknowledge.
+
+use std::marker::PhantomData;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use tidepool_repr::jsonl::{self, SyncPolicy, TailPolicy};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DurableEnvelope<T> {
+    pub sequence: u64,
+    pub payload: T,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InboxError {
+    #[error("durable inbox io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("durable inbox is corrupt: {0}")]
+    Corrupt(String),
+    #[error("cannot acknowledge sequence {requested}; current cursor is {current}")]
+    AckRegression { current: u64, requested: u64 },
+    #[error("cannot acknowledge unpublished sequence {requested}; last published is {last}")]
+    AckBeyondEnd { last: u64, requested: u64 },
+}
+
+struct InboxState {
+    next_sequence: u64,
+    cursor: u64,
+}
+
+/// Durable ordered delivery for one logical consumer.
+///
+/// All reads, appends, tail repair, and cursor writes share one lock. That is
+/// load-bearing: repairing a torn tail concurrently with an append can
+/// otherwise truncate a newly committed row.
+pub struct DurableInbox<T> {
+    rows_path: PathBuf,
+    cursor_path: PathBuf,
+    state: Mutex<InboxState>,
+    payload: PhantomData<fn() -> T>,
+}
+
+impl<T> DurableInbox<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    pub fn open(rows_path: PathBuf, cursor_path: PathBuf) -> Result<Self, InboxError> {
+        create_parent(&rows_path)?;
+        create_parent(&cursor_path)?;
+        let rows = read_rows::<T>(&rows_path)?;
+        let last = rows.last().map(|row| row.sequence).unwrap_or(0);
+        for pair in rows.windows(2) {
+            if pair[1].sequence != pair[0].sequence + 1 {
+                return Err(InboxError::Corrupt(format!(
+                    "sequence {} follows {}",
+                    pair[1].sequence, pair[0].sequence
+                )));
+            }
+        }
+        if let Some(first) = rows.first() {
+            if first.sequence != 1 {
+                return Err(InboxError::Corrupt(format!(
+                    "first sequence is {}, expected 1",
+                    first.sequence
+                )));
+            }
+        }
+        let cursor = read_cursor(&cursor_path)?;
+        if cursor > last {
+            return Err(InboxError::Corrupt(format!(
+                "cursor {cursor} is beyond last published sequence {last}"
+            )));
+        }
+        Ok(Self {
+            rows_path,
+            cursor_path,
+            state: Mutex::new(InboxState {
+                next_sequence: last + 1,
+                cursor,
+            }),
+            payload: PhantomData,
+        })
+    }
+
+    pub fn publish(&self, payload: T) -> Result<DurableEnvelope<T>, InboxError> {
+        let mut state = lock(&self.state);
+        let envelope = DurableEnvelope {
+            sequence: state.next_sequence,
+            payload,
+        };
+        let line = serde_json::to_string(&envelope)
+            .map_err(|error| InboxError::Corrupt(error.to_string()))?;
+        jsonl::append_new_line(&self.rows_path, &line, SyncPolicy::All)?;
+        state.next_sequence += 1;
+        Ok(envelope)
+    }
+
+    pub fn pending(&self) -> Result<Vec<DurableEnvelope<T>>, InboxError> {
+        let state = lock(&self.state);
+        Ok(read_rows(&self.rows_path)?
+            .into_iter()
+            .filter(|row| row.sequence > state.cursor)
+            .collect())
+    }
+
+    pub fn cursor(&self) -> u64 {
+        lock(&self.state).cursor
+    }
+
+    /// Monotonically acknowledge delivery through `sequence`.
+    ///
+    /// Repeating the current ack is idempotent. Skipping intermediate rows is
+    /// allowed only when the consumer has delivered the whole prefix and is
+    /// acknowledging it as a batch.
+    pub fn acknowledge(&self, sequence: u64) -> Result<(), InboxError> {
+        let mut state = lock(&self.state);
+        if sequence < state.cursor {
+            return Err(InboxError::AckRegression {
+                current: state.cursor,
+                requested: sequence,
+            });
+        }
+        let last = state.next_sequence - 1;
+        if sequence > last {
+            return Err(InboxError::AckBeyondEnd {
+                last,
+                requested: sequence,
+            });
+        }
+        if sequence == state.cursor {
+            return Ok(());
+        }
+        tidepool_atomic_write::write_durable(&self.cursor_path, sequence.to_string().as_bytes())
+            .map_err(|error| InboxError::Corrupt(error.to_string()))?;
+        state.cursor = sequence;
+        Ok(())
+    }
+}
+
+fn create_parent(path: &std::path::Path) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn read_cursor(path: &std::path::Path) -> Result<u64, InboxError> {
+    match std::fs::read_to_string(path) {
+        Ok(value) => value
+            .trim()
+            .parse()
+            .map_err(|error| InboxError::Corrupt(format!("invalid cursor: {error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_rows<T: DeserializeOwned>(
+    path: &std::path::Path,
+) -> Result<Vec<DurableEnvelope<T>>, InboxError> {
+    let (rows, _torn) = jsonl::read_tail(
+        path,
+        |line| serde_json::from_str(line).map_err(|error| error.to_string()),
+        TailPolicy::Repair,
+    )
+    .map_err(|error| InboxError::Corrupt(error.to_string()))?;
+    Ok(rows)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inbox() -> (tempfile::TempDir, PathBuf, PathBuf, DurableInbox<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = dir.path().join("inbox/rows.jsonl");
+        let cursor = dir.path().join("inbox/cursor");
+        let inbox = DurableInbox::open(rows.clone(), cursor.clone()).unwrap();
+        (dir, rows, cursor, inbox)
+    }
+
+    #[test]
+    fn unacknowledged_rows_survive_reopen_and_sequences_continue() {
+        let (_dir, rows, cursor, inbox) = inbox();
+        assert_eq!(inbox.publish("one".into()).unwrap().sequence, 1);
+        assert_eq!(inbox.publish("two".into()).unwrap().sequence, 2);
+        inbox.acknowledge(1).unwrap();
+        drop(inbox);
+
+        let reopened = DurableInbox::open(rows, cursor).unwrap();
+        assert_eq!(reopened.cursor(), 1);
+        assert_eq!(
+            reopened.pending().unwrap(),
+            vec![DurableEnvelope {
+                sequence: 2,
+                payload: "two".to_string()
+            }]
+        );
+        assert_eq!(reopened.publish("three".into()).unwrap().sequence, 3);
+    }
+
+    #[test]
+    fn acknowledgement_is_monotonic_and_bounded_by_published_data() {
+        let (_dir, _rows, _cursor, inbox) = inbox();
+        inbox.publish("one".into()).unwrap();
+        inbox.acknowledge(1).unwrap();
+        inbox.acknowledge(1).unwrap();
+        assert!(matches!(
+            inbox.acknowledge(0),
+            Err(InboxError::AckRegression { .. })
+        ));
+        assert!(matches!(
+            inbox.acknowledge(2),
+            Err(InboxError::AckBeyondEnd { .. })
+        ));
+    }
+
+    #[test]
+    fn a_cursor_beyond_the_log_is_corruption_not_silent_message_loss() {
+        let (_dir, rows, cursor, inbox) = inbox();
+        inbox.publish("one".into()).unwrap();
+        drop(inbox);
+        std::fs::write(&cursor, "2").unwrap();
+        assert!(matches!(
+            DurableInbox::<String>::open(rows, cursor),
+            Err(InboxError::Corrupt(_))
+        ));
+    }
+}
