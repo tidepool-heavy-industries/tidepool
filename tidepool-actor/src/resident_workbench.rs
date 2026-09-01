@@ -121,6 +121,47 @@ pub(crate) enum ResidentActorStartupStep {
     Ready(ResidentActorReadiness),
 }
 
+/// One fully captured boundary reached by an installed actor program.
+/// Variants own every linear runtime value needed to service that boundary;
+/// downstream orchestration never re-decodes the suspended request.
+pub(crate) enum ResidentActorBoundary {
+    Completed,
+    Deliberate(crate::ResidentCompletion),
+    Start(crate::ResidentActorStart),
+    Outbound(ResidentOutbound),
+    Wait(ResidentWaitRequest),
+    Receive(InstalledReceiver),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResidentKernelBoundary {
+    Reply,
+    Continue,
+}
+
+impl ResidentKernelBoundary {
+    fn operation(self) -> &'static str {
+        match self {
+            Self::Reply => "reply",
+            Self::Continue => "continue",
+        }
+    }
+}
+
+impl ResidentActorBoundary {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Completed => "program completion",
+            Self::Deliberate(_) => "deliberate",
+            Self::Start(_) => "startActor",
+            Self::Outbound(ResidentOutbound::Call { .. }) => "call",
+            Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
+            Self::Wait(_) => "awaitExit",
+            Self::Receive(_) => "receive",
+        }
+    }
+}
+
 #[derive(tidepool_bridge_derive::FromCore)]
 #[allow(dead_code)]
 enum CompleteReq {
@@ -450,20 +491,17 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    /// Claim and seal the live child entry carried by one public `startActor`
-    /// suspension. The same checked-out operation derives its exact source
-    /// facade, mints an isolated lexical scope, and rehomes the entry into the
-    /// unpublished child's fresh resource realm.
-    pub async fn capture_start(
+    pub(crate) async fn capture_boundary(
         &self,
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
-    ) -> Result<crate::ResidentActorStart, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "actor start completed without suspending".into(),
-            ));
+        actor_realm: RealmId,
+    ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
+        let (hole, request) = match outcome {
+            ResidentOutcome::Completed { .. } => return Ok(ResidentActorBoundary::Completed),
+            ResidentOutcome::Suspended { hole, request, .. } => (hole, request),
         };
+
         self.access
             .with_machine(context, move |session, context, _| {
                 session
@@ -473,17 +511,95 @@ where
                         context.live_payload,
                     )
                     .map_err(ResidentActorWorkbenchError::Resident)?;
-                let table = session.data_con_table().clone();
-                crate::ResidentActorStart::capture(
-                    session,
-                    hole,
-                    &request,
-                    &table,
-                    context.placement.session,
-                )
-                .map_err(ResidentActorWorkbenchError::StartCapture)
+                let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
+                match decoded {
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorStartWith(
+                        ..,
+                    )) => {
+                        let table = session.data_con_table().clone();
+                        crate::ResidentActorStart::capture(
+                            session,
+                            hole,
+                            &request,
+                            &table,
+                            context.placement.session,
+                        )
+                        .map(ResidentActorBoundary::Start)
+                        .map_err(ResidentActorWorkbenchError::StartCapture)
+                    }
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorCallWith(
+                        target,
+                        _,
+                    )) => capture_outbound_boundary(
+                        session,
+                        context,
+                        hole,
+                        target,
+                        OutboundKind::Call,
+                        actor_realm,
+                    ),
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorCastWith(
+                        target,
+                        _,
+                    )) => capture_outbound_boundary(
+                        session,
+                        context,
+                        hole,
+                        target,
+                        OutboundKind::Cast,
+                        actor_realm,
+                    ),
+                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorWaitWith(
+                        ..,
+                    )) => {
+                        let target =
+                            crate::ActorWait::decode_target(&request, session.data_con_table())?;
+                        Ok(ResidentActorBoundary::Wait(ResidentWaitRequest {
+                            target,
+                            continuation: hole,
+                        }))
+                    }
+                    ResidentRequest::ActorLocal(
+                        crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
+                    ) => capture_receiver_boundary(session, hole, site, actor_realm),
+                    ResidentRequest::Deliberate(
+                        crate::generated::deliberate::DeliberateReq::DeliberateWith(..),
+                    ) => {
+                        let table = session.data_con_table().clone();
+                        crate::ResidentCompletion::capture(
+                            session,
+                            hole,
+                            &request,
+                            &table,
+                            actor_realm,
+                        )
+                        .map(ResidentActorBoundary::Deliberate)
+                        .map_err(ResidentActorWorkbenchError::CompletionCapture)
+                    }
+                    invalid => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "installed actor program suspended on phase-invalid `{}`",
+                        invalid.operation()
+                    ))),
+                }
             })
             .await
+    }
+
+    /// Claim and seal the live child entry carried by one public `startActor`
+    /// suspension. The same checked-out operation derives its exact source
+    /// facade, mints an isolated lexical scope, and rehomes the entry into the
+    /// unpublished child's fresh resource realm.
+    pub async fn capture_start(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: ResidentOutcome,
+    ) -> Result<crate::ResidentActorStart, ResidentActorWorkbenchError> {
+        let actor_realm = context.placement.resource_scope;
+        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
+        match boundary {
+            ResidentActorBoundary::Start(start) => Ok(start),
+            other => Err(unexpected_boundary("startActor", &other)),
+        }
     }
 
     pub async fn run_rooted_entry(
@@ -514,18 +630,11 @@ where
         outcome: ResidentOutcome,
         actor_realm: RealmId,
     ) -> Result<crate::ResidentCompletion, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "actor startup completed before its required deliberation".into(),
-            ));
-        };
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let table = session.data_con_table().clone();
-                crate::ResidentCompletion::capture(session, hole, &request, &table, actor_realm)
-                    .map_err(ResidentActorWorkbenchError::CompletionCapture)
-            })
-            .await
+        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
+        match boundary {
+            ResidentActorBoundary::Deliberate(completion) => Ok(completion),
+            other => Err(unexpected_boundary("deliberate", &other)),
+        }
     }
 
     pub(crate) async fn capture_startup_step(
@@ -651,42 +760,11 @@ where
         outcome: ResidentOutcome,
         actor_realm: RealmId,
     ) -> Result<InstalledReceiver, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "completed actor has no mailbox receiver".into(),
-            ));
-        };
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _) =
-                    crate::generated::actor_local::ActorLocalReq::from_value(
-                        &request,
-                        session.data_con_table(),
-                    )?;
-                let site = u64::try_from(site).map_err(|_| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "actor receive carried invalid site id {site}"
-                    ))
-                })?;
-                if session.parked_realm(&hole) != Some(actor_realm) {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "actor receive escaped its owning realm {actor_realm:?}"
-                    )));
-                }
-                let handler = session
-                    .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
-                    .ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "actor receive suspended without its handler".into(),
-                        )
-                    })?;
-                Ok(InstalledReceiver {
-                    site,
-                    continuation: hole,
-                    handler,
-                })
-            })
-            .await
+        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
+        match boundary {
+            ResidentActorBoundary::Receive(receiver) => Ok(receiver),
+            other => Err(unexpected_boundary("receive", &other)),
+        }
     }
 
     pub(crate) async fn run_mailbox_handler(
@@ -723,64 +801,12 @@ where
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
     ) -> Result<ResidentOutbound, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "actor outbound operation completed without suspending".into(),
-            ));
-        };
-        self.access
-            .with_machine(context, move |session, context, _| {
-                let decoded = crate::generated::actor::ActorReq::from_value(
-                    &request,
-                    session.data_con_table(),
-                )?;
-                let (target, call) = match decoded {
-                    crate::generated::actor::ActorReq::ActorCallWith(target, _) => (target, true),
-                    crate::generated::actor::ActorReq::ActorCastWith(target, _) => (target, false),
-                    _ => {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "expected actor call or cast suspension".into(),
-                        ));
-                    }
-                };
-                let (id, incarnation) = target;
-                let id = u64::try_from(id).map_err(|_| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "actor request carried invalid actor id {id}"
-                    ))
-                })?;
-                let incarnation = u64::try_from(incarnation).map_err(|_| {
-                    ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "actor request carried invalid incarnation {incarnation}"
-                    ))
-                })?;
-                let target = crate::ActorRef {
-                    id: crate::ActorId(id),
-                    incarnation: crate::Incarnation(incarnation),
-                };
-                let custody = session
-                    .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
-                    .ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "actor call or cast suspended without its request".into(),
-                        )
-                    })?;
-                let request = crate::MailboxValue::new(context.placement.session, custody);
-                Ok(if call {
-                    ResidentOutbound::Call {
-                        target,
-                        continuation: hole,
-                        request,
-                    }
-                } else {
-                    ResidentOutbound::Cast {
-                        target,
-                        continuation: hole,
-                        request,
-                    }
-                })
-            })
-            .await
+        let actor_realm = context.placement.resource_scope;
+        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
+        match boundary {
+            ResidentActorBoundary::Outbound(outbound) => Ok(outbound),
+            other => Err(unexpected_boundary("call or cast", &other)),
+        }
     }
 
     pub(crate) async fn capture_wait(
@@ -788,77 +814,82 @@ where
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
     ) -> Result<ResidentWaitRequest, ResidentActorWorkbenchError> {
-        let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "actor wait completed without suspending".into(),
-            ));
-        };
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let target = crate::ActorWait::decode_target(&request, session.data_con_table())?;
-                Ok(ResidentWaitRequest {
-                    target,
-                    continuation: hole,
-                })
-            })
-            .await
+        let actor_realm = context.placement.resource_scope;
+        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
+        match boundary {
+            ResidentActorBoundary::Wait(wait) => Ok(wait),
+            other => Err(unexpected_boundary("awaitExit", &other)),
+        }
     }
 
     pub(crate) async fn capture_kernel_value(
         &self,
         context: crate::ActorSessionContext,
         outcome: ResidentOutcome,
-        expected_constructor: &'static str,
+        expected: ResidentKernelBoundary,
         expected_site: u64,
         handler_realm: RealmId,
         actor_realm: RealmId,
     ) -> Result<KernelValue, ResidentActorWorkbenchError> {
         let ResidentOutcome::Suspended { hole, request, .. } = outcome else {
             return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                "mailbox handler completed before `{expected_constructor}`"
+                "mailbox handler completed before `{}`",
+                expected.operation()
             )));
         };
         self.access
             .with_machine(context, move |session, _, _| {
                 if session.parked_realm(&hole) != Some(handler_realm) {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "`{expected_constructor}` escaped mailbox handler realm {handler_realm:?}"
+                        "`{}` escaped mailbox handler realm {handler_realm:?}",
+                        expected.operation()
                     )));
                 }
                 let decoded = crate::generated::actor_kernel::ActorKernelReq::from_value(
                     &request,
                     session.data_con_table(),
                 )?;
-                let (constructor, site) = match decoded {
+                let (actual, site) = match decoded {
                     crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
-                        site,
-                        _,
-                    ) => ("ActorInstallShutdownWith", site),
+                        ..,
+                    ) => {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "expected `{}`, got `installShutdown`",
+                            expected.operation()
+                        )));
+                    }
                     crate::generated::actor_kernel::ActorKernelReq::ActorReplyWith(site, _) => {
-                        ("ActorReplyWith", site)
+                        (ResidentKernelBoundary::Reply, site)
                     }
                     crate::generated::actor_kernel::ActorKernelReq::ActorContinueWith(site, _) => {
-                        ("ActorContinueWith", site)
+                        (ResidentKernelBoundary::Continue, site)
                     }
                     crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith => {
-                        ("ActorReadyWith", -1)
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "expected `{}`, got `ready`",
+                            expected.operation()
+                        )));
                     }
                 };
                 let site = u64::try_from(site).map_err(|_| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "`{constructor}` carried invalid site id {site}"
+                        "`{}` carried invalid site id {site}",
+                        actual.operation()
                     ))
                 })?;
-                if constructor != expected_constructor || site != expected_site {
+                if actual != expected || site != expected_site {
                     return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                        "expected `{expected_constructor}` at site {expected_site}, got `{constructor}` at site {site}"
+                        "expected `{}` at site {expected_site}, got `{}` at site {site}",
+                        expected.operation(),
+                        actual.operation()
                     )));
                 }
                 let value = session
                     .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
                     .ok_or_else(|| {
                         ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "`{constructor}` suspended without its live value"
+                            "`{}` suspended without its live value",
+                            actual.operation()
                         ))
                     })?;
                 Ok(KernelValue {
@@ -962,6 +993,105 @@ where
             })
             .await
     }
+}
+
+#[derive(Clone, Copy)]
+enum OutboundKind {
+    Call,
+    Cast,
+}
+
+fn capture_outbound_boundary<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    hole: ResidentHole,
+    target: (i64, i64),
+    kind: OutboundKind,
+    actor_realm: RealmId,
+) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let (id, incarnation) = target;
+    let id = u64::try_from(id).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(format!(
+            "actor request carried invalid actor id {id}"
+        ))
+    })?;
+    let incarnation = u64::try_from(incarnation).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(format!(
+            "actor request carried invalid incarnation {incarnation}"
+        ))
+    })?;
+    let target = crate::ActorRef {
+        id: crate::ActorId(id),
+        incarnation: crate::Incarnation(incarnation),
+    };
+    let custody = session
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "actor call or cast suspended without its request".into(),
+            )
+        })?;
+    let request = crate::MailboxValue::new(context.placement.session, custody);
+    Ok(ResidentActorBoundary::Outbound(match kind {
+        OutboundKind::Call => ResidentOutbound::Call {
+            target,
+            continuation: hole,
+            request,
+        },
+        OutboundKind::Cast => ResidentOutbound::Cast {
+            target,
+            continuation: hole,
+            request,
+        },
+    }))
+}
+
+fn capture_receiver_boundary<H, O>(
+    session: &mut ResidentSession<H, O>,
+    hole: ResidentHole,
+    site: i64,
+    actor_realm: RealmId,
+) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let site = u64::try_from(site).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(format!(
+            "actor receive carried invalid site id {site}"
+        ))
+    })?;
+    if session.parked_realm(&hole) != Some(actor_realm) {
+        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+            "actor receive escaped its owning realm {actor_realm:?}"
+        )));
+    }
+    let handler = session
+        .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "actor receive suspended without its handler".into(),
+            )
+        })?;
+    Ok(ResidentActorBoundary::Receive(InstalledReceiver {
+        site,
+        continuation: hole,
+        handler,
+    }))
+}
+
+fn unexpected_boundary(
+    expected: &str,
+    actual: &ResidentActorBoundary,
+) -> ResidentActorWorkbenchError {
+    ResidentActorWorkbenchError::ActorProtocol(format!(
+        "expected `{expected}`, reached `{}`",
+        actual.operation()
+    ))
 }
 
 impl<H, O> AgentWorkbench for ResidentActorWorkbench<H, O>

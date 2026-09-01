@@ -616,14 +616,15 @@ typed wakeup for each runnable source, and quiescent host shutdown.
 Implement these in order. Each item should land as a stable, tested boundary;
 do not create an empty host facade and fill it in later.
 
-1. [ ] **Centralize installed-program boundary classification.**
+1. [x] **Centralize installed-program boundary classification.**
 
    - Add one closed actor-boundary sum for the next installed-program boundary:
      completion, `Deliberate`, `Start`, `Call`, `Cast`, `Wait`, or stable
      mailbox receive. Each variant owns only its exact payload.
-   - Those payloads own the turn lease, continuation, and live custody needed
-     by that boundary. The host must not recover them from event text or
-     inspect raw `ResidentOutcome` requests in several branches.
+   - Those payloads own every continuation and live-custody token needed by
+     that boundary. The host's admitted-work item owns the exact turn lease
+     alongside the boundary; neither layer recovers linear state from event
+     text or inspects raw `ResidentOutcome` requests in several branches.
    - Replace the existing rendered-constructor-name classifier rather than
      adding a second parser. Decode model-visible operations through generated
      nominal request enums; give `Complete` an equally typed decoder instead

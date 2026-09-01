@@ -315,7 +315,7 @@ where
             .capture_kernel_value(
                 context.clone(),
                 outcome,
-                "ActorReplyWith",
+                crate::resident_workbench::ResidentKernelBoundary::Reply,
                 receiver.site,
                 handler_realm,
                 actor_realm,
@@ -350,7 +350,7 @@ where
             .capture_kernel_value(
                 context.clone(),
                 outcome,
-                "ActorContinueWith",
+                crate::resident_workbench::ResidentKernelBoundary::Continue,
                 receiver.site,
                 handler_realm,
                 actor_realm,
