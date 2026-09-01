@@ -7,7 +7,9 @@ and next delivery stage are in
 ## Thesis
 
 Tidepool should be an actor runtime whose actors are typed Haskell programs
-with a resident model context and a resident GHCi-style environment.
+paired with one serial agent context and a resident GHCi-style environment.
+The agent context may be Tidepool-resident or a supervised interactive agent
+application; the Haskell program remains the actor's policy in either form.
 
 Rust owns execution mechanics. Haskell owns behavior. The Haskell program may
 open a result-bearing agent session with `deliberate`; within an agent session,
@@ -25,12 +27,12 @@ The useful slogan is:
 
 > Each actor is a Haskell program that can extend itself.
 
-“Extend itself” does not mean rewriting source files. The primary interaction
-surface is deliberately fenced Haskell in ordinary assistant responses: each
-fenced block is compiled into the actor's persistent Haskell environment, and
-may produce typed values—often closures or actor
-definitions—which the fixed program can test, install, invoke, send, or
-retain for rollback.
+“Extend itself” may mean persistent declarations in a resident session or
+editing and reloading an agent-backed actor's Haskell policy. For resident
+actors, the primary interaction surface is deliberately fenced Haskell in
+ordinary assistant responses. For an interactive agent application, the
+resident program compiles an actor-scoped MCP tools record; Rust supplies no
+parallel administrative control surface.
 
 At the system level, those actors form an adaptive unfold/execute/fold loop
 over worktrees. The organization may begin as a detailed plan, a partial
@@ -41,10 +43,10 @@ then unfold again from what integration revealed. The canonical contract is
 
 ## Accepted direction
 
-- An actor combines one accumulating model conversation, one persistent
-  Haskell environment, one serial control flow, and one effect stack fixed for
-  that incarnation under Rust-owned authority. Effect algebras remain an
-  extensible Haskell design vocabulary, not a global ABI enum.
+- An actor combines one persistent Haskell environment, one serial control
+  flow, one agent context, and one effect stack fixed for that incarnation
+  under Rust-owned authority. Resident and interactive contexts are execution
+  forms under the same identity and lifecycle, not separate actor systems.
 - Initial effect profiles are named `ReadWrite` and `ReadOnly`. A `ReadWrite`
   actor may start either profile; a `ReadOnly` actor may start only `ReadOnly`.
   Profiles limit expressible intent, while grants and opaque handles authorize
@@ -93,7 +95,8 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 
 | Term | Meaning |
 |---|---|
-| actor | One actor identity, mailbox, Haskell program, persistent Haskell environment, and accumulating model context |
+| actor | One exact identity, mailbox, Haskell program, persistent Haskell environment, and serial resident or interactive agent context |
+| agent-backed actor | An actor whose conversation is owned by a supervised interactive agent application and whose actor capabilities are a resident Haskell-authored MCP policy |
 | actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |

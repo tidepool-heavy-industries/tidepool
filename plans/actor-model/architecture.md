@@ -2,13 +2,14 @@
 
 ## 1. The unit of execution
 
-An actor is not a Haskell process wrapped around an occasional model call, and
-it is not an unconstrained model driving GHCi. It combines four things:
+An actor is not a process identity, a Haskell machine, or a model conversation
+considered alone. Every actor combines:
 
 1. a fixed typed Haskell program;
 2. a persistent Haskell declaration and binding environment;
-3. one accumulating model conversation;
-4. Rust-owned lifecycle and execution context.
+3. one serial agent context, either Tidepool-resident or owned by an
+   interactive agent backend; and
+4. Rust-owned identity, lifecycle, execution context, and authority.
 
 ```text
                      Rust actor runtime
@@ -22,7 +23,7 @@ it is not an unconstrained model driving GHCi. It combines four things:
        deliberate :: Member Deliberate effs => Text -> input -> Eff effs output
                               │
                               ▼
-          resident model + fenced-Haskell interaction
+       resident fenced-Haskell or actor-scoped MCP policy
            define · inspect · evaluate · spawn · complete
                               │
                          live value a
@@ -31,11 +32,25 @@ it is not an unconstrained model driving GHCi. It combines four things:
               validate · install · invoke · retain
 ```
 
-Haskell controls when to open a result-bearing agent session and fixes its
-result type. Rust may initiate a serialized advisory session for an abnormal
-lifecycle fact not already observed by Haskell. The model may use several
-rounds and many Haskell evaluations before completing or acknowledging the
-session; the owner then returns to normal scheduling.
+The first two execution forms share the same actor kernel:
+
+- a **resident actor** lets Tidepool own the provider conversation and uses
+  fenced Haskell as its primary workbench; and
+- an **agent-backed actor** wraps a long-lived interactive agent application.
+  Its resident Haskell program defines the actor-scoped MCP capability surface,
+  while the backend owns its conversation and native user interaction.
+
+Execution form is not identity or authority. Both forms use the same exact
+`ActorRef`, ownership tree, lifecycle registry, execution principal, profiles,
+mailbox, terminal records, and event stream. A single incarnation may not
+silently change form; recreation is a new incarnation.
+
+For a resident actor, Haskell controls when to open a result-bearing agent
+session and fixes its result type. Rust may initiate a serialized advisory
+session for an abnormal lifecycle fact not already observed by Haskell. An
+agent-backed actor instead receives pushed runtime facts through its durable
+node inbox and invokes Haskell-authored operations through its actor-scoped MCP
+server. Rust does not create a second administrative API beside that program.
 
 ## 2. Actor components
 
@@ -48,7 +63,8 @@ inventory, not a required Rust struct layout.
 | mailbox | Queued calls, casts, replies, and system events |
 | actor program continuation | The currently running or parked installed `Eff` computation |
 | program snapshot | Current persistent declarations, bindings, and installed behavior roots |
-| model context | Canonical conversation, compaction state, backend connection state, and usage |
+| agent context | Resident canonical conversation or an opaque interactive-backend thread binding, plus compaction and usage facts the backend exposes |
+| execution form | Immutable resident or agent-backed driver selection for this incarnation; descriptive, never an authority check by itself |
 | actor interpreter | Rust nominal handlers, grants, and lifecycle restrictions for this actor |
 | execution principal | Identity installed while this actor's Haskell runs |
 | capability grants | Owned, launch-derived, inherited, revoked, and fork-policy metadata |
@@ -58,9 +74,10 @@ inventory, not a required Rust struct layout.
 
 The mailbox and Haskell program are sequential for one actor. Concurrency is
 expressed by several actors and asynchronous actor operations between them.
-It never re-enters one actor's Haskell session. This preserves the
-single-writer machine-session constraint and the one-conversation ordering a
-provider context requires.
+It never re-enters one actor's Haskell session. Resident provider calls are
+serialized by actor admission. An interactive backend serializes its own
+native conversation; every callback into resident Haskell still passes through
+the same actor admission and execution-principal boundary.
 
 The initial topology keeps cooperating actors on one shared machine session.
 That is what makes structural sharing and arbitrary live-value delivery
@@ -100,8 +117,8 @@ lock or call `begin_turn` from inside an already-admitted turn.
 - actor and incarnation identifiers;
 - actor registry and mailbox lifetime;
 - scheduling and admission to a shared machine session;
-- model-provider threads, exact context snapshots, compaction, and cache
-  accounting;
+- model-provider threads or supervised interactive-agent processes, exact
+  context/thread bindings, compaction, push delivery, and cache accounting;
 - one Rust effect interpreter per actor, routing nominal request constructors
   under that actor's policy and execution principal;
 - Haskell compilation routing and machine-session checkout;
@@ -109,7 +126,8 @@ lock or call `begin_turn` from inside an already-admitted turn.
 - capability registration, launch-grant derivation, revocation, and caller
   checks;
 - timeout, cancellation, shutdown, and supervision propagation;
-- network mounts and provider transport;
+- network mounts, provider transport, node inboxes, and actor-scoped MCP
+  transport;
 - durable namespace allocation and external resource cleanup;
 - authoritative structured actor events and resource-growth accounting.
 
@@ -128,8 +146,10 @@ lock or call `begin_turn` from inside an already-admitted turn.
 
 ### The model owns no runtime mechanism
 
-The model writes Haskell within the interface exposed by its actor. It does not
-parse process arguments, choose filesystem layouts, maintain actor registries,
+The model writes Haskell within the interface exposed by its actor. A resident
+actor does so through fenced Haskell; an agent-backed actor edits or invokes
+its Haskell-authored MCP policy through the native agent application. It does
+not parse process arguments, choose filesystem layouts, maintain actor registries,
 construct provider envelopes, assign identifiers, serialize internal values,
 or implement scheduling loops.
 
@@ -793,8 +813,11 @@ ultimate owner of every external resource.
 
 ## 10. Required invariants
 
-1. One actor has at most one active turn of any kind: authored Haskell,
-   resident fenced-Haskell evaluation, provider inference, or mailbox handling.
+1. One actor has at most one active resident turn of any kind: authored
+   Haskell, fenced-Haskell evaluation, MCP-policy execution, provider
+   inference owned by Tidepool, or mailbox handling. An interactive backend
+   independently guarantees one native conversation turn; every callback into
+   Tidepool remains serialized by actor admission.
 2. Every Haskell fragment runs with an explicit execution principal.
 3. A copied closure never grants authority merely because it captured an
    opaque capability.

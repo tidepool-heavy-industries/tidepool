@@ -856,11 +856,25 @@ vertical establishes the runtime ownership boundary.
 
 ## 10. Stage 7 — first production actor and DevSwarm vertical
 
-Establish the production composition root before moving provider packages or
-inventing a generic capability framework:
+The first production root is agent-backed rather than a one-shot resident
+provider loop. Tidepool owns the daemon and actor tree; the root conversation
+is an ordinary stock Codex TUI using the proven Exomonad node shape: persistent
+thread binding, durable pushed messages, and a node-local MCP server. Its MCP
+tools are compiled from Haskell and executed under the exact actor principal.
+
+This does not retire the resident form or make Codex an actor identity. It
+establishes the common lifecycle boundary before worktree grants and recursive
+DevSwarm behavior:
 
 - define the initial production effect profiles and their handler composition;
-- use the existing provider-neutral conversation seam with one real provider;
+- add a long-lived backend-neutral interactive-agent seam, with stock Codex as
+  its first adapter;
+- retain the actor registry and live Haskell machines in one daemon, using a
+  thin per-agent stdio MCP proxy only for rollout discovery and transport;
+- compile the actor-scoped MCP declarations and live dispatch closure from one
+  Haskell tools record;
+- deliver runtime facts through a durable actor inbox and the backend's native
+  push channel;
 - attach the first capability-specific launch recipe to an opaque worktree
   handle;
 - check the actor principal when the recipe is redeemed;
@@ -908,9 +922,24 @@ Implement this boundary in order:
    `ReadOnly` write is refused by Rust even if a malformed or stale program
    manages to issue the nominal request. The compile-failure fixture remains a
    model-surface hygiene test, not the authorization proof.
-6. [ ] Only after that vertical, add the production provider/root launch recipe.
-   Reuse `ResidentActorHost`; do not create a harness-local actor scheduler or
-   a second profile registry.
+6. [ ] Build the first production agent-backed root without routing it through
+   `ResidentActorHost`. Reuse the same registry, resident machine-access seam,
+   profile authorization, root custody, and event stream. The composition root
+   launches no bootstrap task and makes no OAuth request: it publishes a ready,
+   idle stock-Codex root only after its Haskell MCP policy, private proxy
+   endpoint, interactive process, and validated rollout binding are live.
+
+   The initial vertical exposes one Haskell-authored `actorStatus` control tool
+   and proves one durable pushed message. It deliberately defers child spawn,
+   worktree grants, policy reload, and the full DevSwarm tool record.
+
+   Port only the following Exomonad mechanisms into their Tidepool owners:
+   stock-TUI command construction, rollout discovery and versioned binding,
+   `codex queue`, confirmed teardown, durable inbox/cursor delivery, and the
+   transparent stdio MCP proxy. Do not copy Exomonad roles, review policy, Git
+   orchestration, or worktree tools; those become Haskell policy. Record any
+   generally useful extraction seams as an upstream proposal rather than
+   coupling the repositories at runtime.
 
 The gate should be extensible by adding typed operation classes and profile
 decisions, not by turning the two initial profiles into a generic dynamic
