@@ -166,7 +166,7 @@ pub fn load_secrets_logged() {
 ///
 /// This is the ONE place the deploy-coupling invariant (extract + servers +
 /// stdlib move together via `scripts/redeploy.sh`) is checked at runtime rather
-/// than by script discipline. Cost is one memoized binary content hash plus a
+/// than by script discipline. Cost is one compiler endpoint preflight plus a
 /// walk of ~40 small `.hs` files, paid once at startup — never per eval.
 ///
 /// A missing extract is NOT fatal here: the server starts and the first eval
@@ -180,14 +180,14 @@ pub fn load_secrets_logged() {
 pub fn handshake_logged(stdlib: &Path) -> Result<(), tidepool_runtime::toolchain::ToolchainError> {
     use tidepool_runtime::toolchain::{self, HandshakeOutcome};
 
-    let extract = match toolchain::locate_extract() {
-        Ok(loc) => loc,
+    let (endpoint, extract) = match toolchain::bind_extract_endpoint() {
+        Ok(bound) => bound,
         Err(e) => {
             tracing::warn!("toolchain handshake skipped: {e}");
             return Ok(());
         }
     };
-    match toolchain::enforce_handshake(&extract.path, stdlib)? {
+    match toolchain::enforce_handshake(&endpoint, &extract.path, stdlib)? {
         HandshakeOutcome::Match => {
             tracing::info!(
                 extract = %extract.path.display(),

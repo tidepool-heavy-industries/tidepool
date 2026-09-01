@@ -380,33 +380,6 @@ pub fn compile_invocation(
     );
     let multi = inv.targets.len() > 1;
 
-    // The eval key needs no built argv (unlike invocation keying, it never
-    // looks at what gets spawned), so it is computed and checked up front —
-    // the same ordering `compile_haskell` always used, and it is reused
-    // below for the cache-store call after a real compile.
-    let eval_key = match &inv.cache {
-        CacheStrategy::Eval { salt } => {
-            let key = cache::eval_cache_key(inv.source, inv.targets[0], inv.include, *salt);
-            if let Some(key) = &key {
-                if let Some((expr_bytes, meta_bytes, asks_bytes)) = cache::cache_load(key) {
-                    // Attempt to deserialize cached data. If this fails, treat it as
-                    // a cache miss and fall through to recompilation instead of
-                    // propagating the error.
-                    let raw = vec![RawTargetOutput {
-                        target: inv.targets[0].to_string(),
-                        expr_bytes,
-                        asks_bytes,
-                    }];
-                    if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
-                        return Ok(artifacts);
-                    }
-                }
-            }
-            key
-        }
-        _ => None,
-    };
-
     let temp_dir = TempDir::new()?;
     // GHC derives the module name from the filename (capitalize(basename));
     // see `CompileInvocation::fallback_module_name`'s doc for why this
@@ -449,14 +422,14 @@ pub fn compile_invocation(
     // see `tidepool-runtime/tests/build_products_dir_differential.rs`, the
     // byte-identical-cold-vs-warm acceptance gate for this mechanism.
     //
-    // `crate::paths::build_products_dir` is keyed by the resolved extract
-    // binary's own content fingerprint, so a rebuilt/updated extract gets a
-    // FRESH directory — a stale dir from an older (pre-fix, or otherwise
-    // different) extract binary can never poison a compile; staleness is
+    // `crate::paths::build_products_dir` is keyed by the same bound endpoint
+    // identity used for execution, so a changed frontend, worker, GHC
+    // selection, or daemon boot gets a FRESH directory — a stale dir from an
+    // older producer can never poison a compile; staleness is
     // structurally impossible rather than mtime-validated. Known,
     // accepted characteristic (not newly introduced by this default-on
     // flip): the directory is SHARED across every concurrent spawn using the
-    // same extract binary, so two truly concurrent compiles of DIFFERENT
+    // same endpoint identity, so two truly concurrent compiles of DIFFERENT
     // source under the same module name (e.g. the turn lane's fixed
     // `Expr`/eval lane's fixed `Input`) race on the same `.hi`/`.o` path;
     // GHC's own interface content-hash check means the losing race forces a
@@ -472,41 +445,76 @@ pub fn compile_invocation(
     // — the same helper `session/turn.rs`'s `extract_cmd()` and
     // `session/mod.rs`'s `validate_candidate` call for their OWN spawn sites,
     // so this is on by default everywhere in this crate, not just here.
-    crate::paths::apply_build_products_dir(&mut cmd);
-
     let names = artifact_names(inv.targets, multi);
     let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let base_cmd = cmd;
+    let attempt = retry_bounded(
+        || {
+            let mut cmd = base_cmd.clone();
+            let endpoint = cmd.bind()?;
+            crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
 
-    // Keyed on the invocation that is about to run — the built argv itself,
-    // so a flag this site grows cannot ride along unkeyed (the allowlist
-    // walk in `invocation_key` makes an unclassified flag uncacheable rather
-    // than silently unkeyed). `None` means "compile cold", never "compile
-    // wrong".
-    let inv_key = if matches!(inv.cache, CacheStrategy::Invocation) {
-        let argv = cmd.argv();
-        let bin_path: PathBuf = match inv.bin {
-            Some(b) => b.as_path().to_path_buf(),
-            None => PathBuf::from(tidepool_extract_cmd::DEFAULT_BIN),
-        };
-        let key = cache::invocation_key(&cache::Invocation {
-            source: inv.source,
-            argv: &argv,
-            input_path: &input_path,
-            include: inv.include,
-            bin: &bin_path,
-            stable_val: inv.stable_val.as_ref().map(|sv| sv.module),
-        });
-        if let Some(key) = &key {
-            let load_start = Instant::now();
-            if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, inv.targets) {
-                let bytes = total_bytes(&meta_bytes, &raw);
-                on_stage(timing::STAGE_CBOR_READ, load_start.elapsed(), bytes);
-                return assemble(&meta_bytes, &raw, on_stage);
-            }
-        }
-        key
-    } else {
-        None
+            let eval_key = match &inv.cache {
+                CacheStrategy::Eval { salt } => {
+                    let key = cache::eval_cache_key(
+                        inv.source,
+                        inv.targets[0],
+                        inv.include,
+                        *salt,
+                        endpoint.identity().as_bytes(),
+                    );
+                    if let Some(key) = &key {
+                        if let Some((expr_bytes, meta_bytes, asks_bytes)) = cache::cache_load(key) {
+                            let raw = vec![RawTargetOutput {
+                                target: inv.targets[0].to_string(),
+                                expr_bytes,
+                                asks_bytes,
+                            }];
+                            if let Ok(artifacts) = assemble(&meta_bytes, &raw, &mut on_stage) {
+                                return Ok(Ok(CompileAttempt::Cached(artifacts)));
+                            }
+                        }
+                    }
+                    key
+                }
+                _ => None,
+            };
+
+            let inv_key = if matches!(inv.cache, CacheStrategy::Invocation) {
+                let argv = cmd.argv();
+                let key = cache::invocation_key(&cache::Invocation {
+                    source: inv.source,
+                    argv: &argv,
+                    input_path: &input_path,
+                    include: inv.include,
+                    endpoint_identity: endpoint.identity().as_bytes(),
+                    stable_val: inv.stable_val.as_ref().map(|sv| sv.module),
+                });
+                if let Some(key) = &key {
+                    let load_start = Instant::now();
+                    if let Some((meta_bytes, raw)) = load_memo(key, &name_refs, inv.targets) {
+                        let bytes = total_bytes(&meta_bytes, &raw);
+                        on_stage(timing::STAGE_CBOR_READ, load_start.elapsed(), bytes);
+                        return Ok(
+                            assemble(&meta_bytes, &raw, &mut on_stage).map(CompileAttempt::Cached)
+                        );
+                    }
+                }
+                key
+            } else {
+                None
+            };
+
+            endpoint
+                .execute(&cmd)
+                .map(|run| Ok(CompileAttempt::Executed((cmd, run, eval_key, inv_key))))
+        },
+        |error| error.permits_rebind(),
+    )
+    .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))??;
+    let (cmd, run, eval_key, inv_key) = match attempt {
+        CompileAttempt::Cached(artifacts) => return Ok(artifacts),
+        CompileAttempt::Executed(executed) => executed,
     };
 
     // The full spawn argv, rendered once: DEBUG on every spawn, and attached
@@ -529,7 +537,7 @@ pub fn compile_invocation(
 
     let is_invocation_lane = matches!(inv.cache, CacheStrategy::Invocation);
     let (meta_bytes, raw) = extract_and_read(
-        &cmd,
+        run,
         temp_dir.path(),
         inv.targets,
         multi,
@@ -563,6 +571,24 @@ pub fn compile_invocation(
         store_memo(key, &name_refs, &meta_bytes, &raw);
     }
     Ok(artifacts)
+}
+
+enum CompileAttempt<T> {
+    Cached(CompiledArtifacts),
+    Executed(T),
+}
+
+fn retry_bounded<T, E>(
+    mut attempt: impl FnMut() -> Result<T, E>,
+    permits_retry: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    let mut rebinds = 0;
+    loop {
+        match attempt() {
+            Err(error) if permits_retry(&error) && rebinds < 2 => rebinds += 1,
+            result => return result,
+        }
+    }
 }
 
 /// Compile `source` against MULTIPLE named targets — the harness turn lane's
@@ -674,16 +700,13 @@ pub(crate) struct RawTargetOutput {
 /// GHC-detectable failure here reports real spans, not an opaque stdout/stderr
 /// dump.
 pub(crate) fn extract_and_read(
-    cmd: &ExtractCmd,
+    run: tidepool_extract_cmd::ExtractRun,
     temp_dir: &Path,
     targets: &[&str],
     multi: bool,
     mut on_stage: impl FnMut(&str, Duration, u64),
     log_stderr: impl FnOnce(&str, bool),
 ) -> Result<(Vec<u8>, Vec<RawTargetOutput>), CompileError> {
-    let run = cmd
-        .run()
-        .map_err(|e| CompileError::Io(extract_spawn_error(e.source)))?;
     on_stage(timing::STAGE_EXTRACT_SPAWN, run.elapsed, 0);
 
     let stderr = run.stderr_lossy();
@@ -945,5 +968,63 @@ mod typed_site_tests {
         assert_eq!(collision.site, 7);
         assert_eq!(collision.first.ty, "Int");
         assert_eq!(collision.second.ty, "Bool");
+    }
+
+    #[test]
+    fn safe_refusal_rederives_cache_and_build_products_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temporary endpoint root");
+        let endpoints = [root.path().join("refused"), root.path().join("rebound")];
+        for (path, identity_byte) in endpoints.iter().zip([b'a', b'b']) {
+            let identity = String::from_utf8(vec![identity_byte; 32]).unwrap();
+            std::fs::write(
+                path,
+                format!("#!/bin/sh\nprintf 'TPCID001{identity}'\ncat >/dev/null\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut attempt_index = 0;
+        let mut selections = Vec::new();
+        let selected = retry_bounded(
+            || {
+                let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+                    &endpoints[attempt_index],
+                ));
+                cmd.input("Input.hs").target("result");
+                let endpoint = cmd.bind().expect("fake endpoint must bind");
+                attempt_index += 1;
+                crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+                let argv = cmd.argv();
+                let key = cache::invocation_key(&cache::Invocation {
+                    source: "result = 1",
+                    argv: &argv,
+                    input_path: Path::new("Input.hs"),
+                    include: &[],
+                    endpoint_identity: endpoint.identity().as_bytes(),
+                    stable_val: None,
+                })
+                .expect("test invocation is cacheable");
+                let products = argv
+                    .windows(2)
+                    .find(|pair| pair[0] == "--build-products-dir")
+                    .map(|pair| PathBuf::from(&pair[1]))
+                    .expect("bound attempt must select build products");
+                selections.push((key, products));
+                if attempt_index == 1 {
+                    Err(true)
+                } else {
+                    Ok(attempt_index - 1)
+                }
+            },
+            |known_unsubmitted| *known_unsubmitted,
+        )
+        .expect("known-unsubmitted refusal must rebind");
+
+        assert_eq!(selected, 1);
+        assert_eq!(selections.len(), 2);
+        assert_ne!(selections[0].0, selections[1].0);
+        assert_ne!(selections[0].1, selections[1].1);
     }
 }

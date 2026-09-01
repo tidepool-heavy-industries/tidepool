@@ -1,6 +1,4 @@
-//! Client transport for the resident compile daemon. Owns the wire codec,
-//! connect step, and `Output` synthesis. Narrow `pub(crate)` surface —
-//! `ExtractCmd::run`/`run_with` are the only callers.
+//! Versioned transport for bound resident compiler endpoints.
 //!
 //! External wire: little-endian, length-prefixed frames over a Unix domain
 //! socket, one request/response per connection. This module owns both ends of
@@ -8,15 +6,17 @@
 //!
 //! ```text
 //! frame     ::= u32-LE length, then that many raw bytes (UTF-8 text)
-//! request   ::= frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
+//! preflight ::= "TPDPF001"
+//! identity  ::= "TPDPI001" producer[32] boot_epoch[32]
+//! request   ::= "TPDRQ001" expected_epoch[32]
+//!               frame(cwd) u32-LE(argc) frame(argv[0]) .. frame(argv[n-1])
+//! decision  ::= accepted:u8 | rejected:u8 frame(reason)
 //! response  ::= i32-LE(exit_code) frame(stdout) frame(stderr)
 //! ```
 //!
-//! EOF (a short read) at any point is the daemon-crashed-mid-request signal
-//! both sides rely on — this module turns it into [`DaemonError::Crashed`].
-//! Only connect failure permits direct fallback: after connection, the daemon
-//! may have accepted or even completed the logical request, so retrying it on
-//! another transport would duplicate compiler work.
+//! Connect failure or an explicit rejection proves the request was not
+//! accepted and permits rebinding. Once the accepted marker is observed, EOF
+//! or any other response failure is indeterminate and must never be replayed.
 
 use std::ffi::OsString;
 use std::fs;
@@ -25,10 +25,10 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
+use std::time::Duration;
 
-use crate::frontend::{DaemonConfig, FrontendError};
+use crate::frontend::{DaemonConfig, FrontendError, PreparedWorker};
 use crate::ExtractRequest;
 
 /// Bound on the daemon round-trip's I/O (connect itself is local and
@@ -44,10 +44,20 @@ use crate::ExtractRequest;
 const IO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_REQUEST_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_REQUEST_ARGS: u32 = 4096;
+const PREFLIGHT: &[u8; 8] = b"TPDPF001";
+const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
+const REQUEST: &[u8; 8] = b"TPDRQ001";
+const ACCEPTED: u8 = 1;
+const REJECTED: u8 = 0;
+
+pub(crate) struct DaemonBinding {
+    pub(crate) producer: [u8; 32],
+    pub(crate) epoch: [u8; 32],
+}
 
 /// Failure while attempting one daemon request. The point of failure carries
-/// settlement information: [`DaemonError::Connect`] is known-unsubmitted;
-/// all later failures are indeterminate and must not be retried elsewhere.
+/// settlement information. Connect, setup, write, and explicit rejection are
+/// known-unsubmitted; failures after the acceptance marker are never retried.
 #[derive(Debug)]
 pub(crate) enum DaemonError {
     /// The socket does not exist, or nothing is listening — the ordinary,
@@ -61,14 +71,21 @@ pub(crate) enum DaemonError {
     /// unambiguous: a clean response is always a complete, self-describing
     /// byte sequence, so any short read here can only mean the peer is gone.
     Crashed,
+    /// The daemon rejected the bound epoch or deployment before acknowledging
+    /// acceptance. It guarantees this request will not execute.
+    NotAccepted(String),
+    /// The daemon acknowledged acceptance before the enclosed response error.
+    AfterAcceptance(Box<DaemonError>),
+    Protocol(String),
 }
 
 impl DaemonError {
-    /// Only a failed connect proves that no request reached the daemon.
-    /// Anything after connection may have been accepted or completed even if
-    /// its response was lost, so retrying directly would duplicate work.
-    pub(crate) fn permits_direct_fallback(&self) -> bool {
-        matches!(self, Self::Connect(_))
+    pub(crate) fn is_not_accepted(&self) -> bool {
+        matches!(self, Self::Connect(_) | Self::NotAccepted(_))
+    }
+
+    pub(crate) fn was_accepted(&self) -> bool {
+        matches!(self, Self::AfterAcceptance(_))
     }
 }
 
@@ -78,6 +95,13 @@ impl std::fmt::Display for DaemonError {
             DaemonError::Connect(e) => write!(f, "daemon connect failed: {e}"),
             DaemonError::Io(e) => write!(f, "daemon I/O error: {e}"),
             DaemonError::Crashed => write!(f, "daemon crashed mid-request"),
+            DaemonError::NotAccepted(message) => {
+                write!(f, "daemon did not accept request: {message}")
+            }
+            DaemonError::AfterAcceptance(error) => {
+                write!(f, "daemon response failed after acceptance: {error}")
+            }
+            DaemonError::Protocol(message) => write!(f, "daemon protocol error: {message}"),
         }
     }
 }
@@ -88,12 +112,53 @@ impl std::error::Error for DaemonError {}
 /// return the synthesized [`Output`] the daemon's response describes. The
 /// worker argv includes the versioned typed request payload used by a direct
 /// spawn, so both transports reach the same Haskell dispatch path.
-pub(crate) fn run_over_daemon(
+pub(crate) fn execute(
     socket_path: &Path,
+    epoch: &[u8; 32],
     cwd: &Path,
     argv: &[OsString],
-) -> Result<(Output, Duration), DaemonError> {
-    let start = Instant::now();
+) -> Result<Output, DaemonError> {
+    let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
+
+    let mut req = Vec::new();
+    req.extend_from_slice(REQUEST);
+    req.extend_from_slice(epoch);
+    req.extend_from_slice(&encode_request(cwd, argv));
+    stream
+        .write_all(&req)
+        .map_err(|error| DaemonError::NotAccepted(error.to_string()))?;
+    // The canonical server flushes the marker before beginning work. An
+    // orderly EOF without a preceding marker therefore proves no acceptance;
+    // timeouts/resets stay conservative because they can race delivery.
+    let state = match read_exact_or_crash(&mut stream, 1) {
+        Ok(state) => state[0],
+        Err(DaemonError::Crashed) => {
+            return Err(DaemonError::NotAccepted(
+                "daemon closed before acceptance".to_owned(),
+            ))
+        }
+        Err(error) => return Err(error),
+    };
+    match state {
+        ACCEPTED => decode_output(&mut stream)
+            .map_err(|error| DaemonError::AfterAcceptance(Box::new(error))),
+        REJECTED => {
+            let message = String::from_utf8_lossy(&read_frame(&mut stream)?).into_owned();
+            Err(DaemonError::NotAccepted(message))
+        }
+        other => Err(DaemonError::Protocol(format!(
+            "unknown acceptance marker {other}"
+        ))),
+    }
+}
+
+pub(crate) fn preflight(socket_path: &Path) -> Result<DaemonBinding, DaemonError> {
     let mut stream = UnixStream::connect(socket_path).map_err(DaemonError::Connect)?;
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
@@ -101,13 +166,20 @@ pub(crate) fn run_over_daemon(
     stream
         .set_write_timeout(Some(IO_TIMEOUT))
         .map_err(DaemonError::Io)?;
-
-    let req = encode_request(cwd, argv);
-    stream.write_all(&req).map_err(DaemonError::Io)?;
-
-    let (code, stdout, stderr) = decode_response(&mut stream)?;
-    let elapsed = start.elapsed();
-    Ok((synthesize_output(code, stdout, stderr), elapsed))
+    stream.write_all(PREFLIGHT).map_err(DaemonError::Io)?;
+    let magic = read_exact_or_crash(&mut stream, PREFLIGHT_RESPONSE.len())?;
+    if magic != PREFLIGHT_RESPONSE {
+        return Err(DaemonError::Protocol(
+            "invalid preflight response".to_owned(),
+        ));
+    }
+    let producer: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+        .try_into()
+        .map_err(|_| DaemonError::Crashed)?;
+    let epoch: [u8; 32] = read_exact_or_crash(&mut stream, 32)?
+        .try_into()
+        .map_err(|_| DaemonError::Crashed)?;
+    Ok(DaemonBinding { producer, epoch })
 }
 
 fn push_frame(buf: &mut Vec<u8>, bytes: &[u8]) {
@@ -177,11 +249,15 @@ fn synthesize_output(code: i32, stdout: Vec<u8>, stderr: Vec<u8>) -> Output {
     }
 }
 
-pub(crate) fn serve(
-    config: DaemonConfig,
-    worker_bin: std::path::PathBuf,
-) -> Result<u8, FrontendError> {
-    let mut worker = Worker::spawn(&worker_bin)?;
+pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
+    let (code, stdout, stderr) = decode_response(r)?;
+    Ok(synthesize_output(code, stdout, stderr))
+}
+
+pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
+    let producer = prepared.producer_identity()?;
+    let mut worker = Worker::spawn(prepared)?;
+    let epoch = boot_epoch()?;
     if let Some(parent) = config.socket.parent() {
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
     }
@@ -199,49 +275,78 @@ pub(crate) fn serve(
 
     let result = (|| {
         let mut served = 0;
-        let mut draining = false;
         loop {
-            let (mut connection, _) = match listener.accept() {
-                Ok(accepted) => accepted,
-                Err(error) if draining && error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(FrontendError::Io(error)),
-            };
+            let (mut connection, _) = listener.accept().map_err(FrontendError::Io)?;
             if connection
                 .set_read_timeout(Some(Duration::from_secs(30)))
                 .is_err()
             {
                 continue;
             }
-            let (cwd, argv) = match read_daemon_request(&mut connection) {
-                Ok(request) => request,
+            let mut kind = [0u8; 8];
+            if connection.read_exact(&mut kind).is_err() {
+                continue;
+            }
+            if stamp_changed(&config, &boot_stamp)? {
+                if &kind == REQUEST {
+                    let _ = write_rejected(&mut connection, "watched deployment changed");
+                }
+                remove_socket(&config.socket)?;
+                break;
+            }
+            if &kind == PREFLIGHT {
+                let mut response = Vec::with_capacity(72);
+                response.extend_from_slice(PREFLIGHT_RESPONSE);
+                response.extend_from_slice(&producer);
+                response.extend_from_slice(&epoch);
+                let _ = connection.write_all(&response);
+                continue;
+            }
+            if &kind != REQUEST {
+                continue;
+            }
+            let expected_epoch = match read_exact_or_crash(&mut connection, 32) {
+                Ok(bytes) => bytes,
                 Err(_) => continue,
+            };
+            if expected_epoch != epoch {
+                let _ = write_rejected(&mut connection, "daemon boot epoch changed");
+                continue;
+            }
+            let (cwd, argv) = match read_request(&mut connection) {
+                Ok(request) => request,
+                Err(_) => {
+                    let _ = write_rejected(&mut connection, "invalid compiler request");
+                    continue;
+                }
             };
             let worker_argv = match normalize_worker_argv(argv) {
                 Ok(argv) => argv,
-                Err(_) => continue,
+                Err(_) => {
+                    let _ = write_rejected(&mut connection, "invalid V3 worker request");
+                    continue;
+                }
             };
+            // The second stamp check is the acceptance fence. If it passes,
+            // the acknowledgement is flushed before work begins; every later
+            // transport failure is therefore indeterminate and never replayed.
+            if stamp_changed(&config, &boot_stamp)? {
+                let _ = write_rejected(&mut connection, "watched deployment changed");
+                remove_socket(&config.socket)?;
+                break;
+            }
+            if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
+                continue;
+            }
             let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
             served += 1;
-            let _ = write_daemon_response(&mut connection, code, &stdout, &stderr);
+            let _ = write_response(&mut connection, code, &stdout, &stderr);
 
-            let stamp_changed = match (&config.watch_stamp, &boot_stamp) {
-                (Some(path), Some(at_boot)) => {
-                    read_optional(path).map_err(FrontendError::Io)? != *at_boot
-                }
-                _ => false,
-            };
-            if !draining
-                && (served >= rotate_after
-                    || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
-                    || stamp_changed)
+            if served >= rotate_after
+                || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
             {
-                // Stop publication before draining. New clients now fail to
-                // connect and may safely use Direct; clients already queued
-                // on this listener remain accepted below and receive their
-                // one authoritative response before worker shutdown.
                 remove_socket(&config.socket)?;
-                listener.set_nonblocking(true).map_err(FrontendError::Io)?;
-                draining = true;
+                break;
             }
         }
         Ok(0)
@@ -253,6 +358,26 @@ pub(crate) fn serve(
     result
 }
 
+fn stamp_changed(
+    config: &DaemonConfig,
+    boot_stamp: &Option<Option<Vec<u8>>>,
+) -> Result<bool, FrontendError> {
+    match (&config.watch_stamp, boot_stamp) {
+        (Some(path), Some(at_boot)) => {
+            Ok(read_optional(path).map_err(FrontendError::Io)? != *at_boot)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn boot_epoch() -> Result<[u8; 32], FrontendError> {
+    let mut epoch = [0u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut epoch))
+        .map_err(FrontendError::Io)?;
+    Ok(epoch)
+}
+
 fn remove_socket(path: &Path) -> Result<(), FrontendError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -261,7 +386,7 @@ fn remove_socket(path: &Path) -> Result<(), FrontendError> {
     }
 }
 
-fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
+pub(crate) fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendError> {
     if matches!(argv.as_slice(), [flag, _] if flag == crate::request::WORKER_REQUEST_FLAG) {
         ExtractRequest::decode_worker_argv(&argv)?;
         return Ok(argv);
@@ -277,8 +402,8 @@ fn normalize_worker_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, FrontendE
     Ok(ExtractRequest::from_cli(&argv)?.worker_argv())
 }
 
-fn read_daemon_request(
-    stream: &mut UnixStream,
+pub(crate) fn read_request(
+    stream: &mut impl Read,
 ) -> Result<(std::path::PathBuf, Vec<OsString>), FrontendError> {
     let cwd = OsString::from_vec(read_request_frame(stream)?).into();
     let count = read_u32(stream).map_err(daemon_frontend_error)?;
@@ -294,7 +419,7 @@ fn read_daemon_request(
     Ok((cwd, argv))
 }
 
-fn read_request_frame(stream: &mut UnixStream) -> Result<Vec<u8>, FrontendError> {
+fn read_request_frame(stream: &mut impl Read) -> Result<Vec<u8>, FrontendError> {
     let length = read_u32(stream).map_err(daemon_frontend_error)?;
     if length > MAX_REQUEST_FRAME_BYTES {
         return Err(FrontendError::Daemon(format!(
@@ -304,8 +429,8 @@ fn read_request_frame(stream: &mut UnixStream) -> Result<Vec<u8>, FrontendError>
     read_exact_or_crash(stream, length as usize).map_err(daemon_frontend_error)
 }
 
-fn write_daemon_response(
-    stream: &mut UnixStream,
+pub(crate) fn write_response(
+    mut stream: impl Write,
     code: i32,
     stdout: &[u8],
     stderr: &[u8],
@@ -314,6 +439,13 @@ fn write_daemon_response(
     push_frame(&mut response, stdout);
     push_frame(&mut response, stderr);
     stream.write_all(&response).map_err(FrontendError::Io)
+}
+
+fn write_rejected(stream: &mut impl Write, message: &str) -> Result<(), FrontendError> {
+    let mut response = vec![REJECTED];
+    push_frame(&mut response, message.as_bytes());
+    stream.write_all(&response).map_err(FrontendError::Io)?;
+    stream.flush().map_err(FrontendError::Io)
 }
 
 fn daemon_frontend_error(error: DaemonError) -> FrontendError {
@@ -343,15 +475,15 @@ fn worker_rss_mb(pid: u32) -> io::Result<u64> {
         / 1024)
 }
 
-struct Worker {
+pub(crate) struct Worker {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: ChildStdout,
 }
 
 impl Worker {
-    fn spawn(bin: &Path) -> Result<Self, FrontendError> {
-        let mut command = Command::new(bin);
+    pub(crate) fn spawn(prepared: PreparedWorker) -> Result<Self, FrontendError> {
+        let mut command = prepared.command();
         command
             .arg("--worker-loop-v1")
             .stdin(Stdio::piped())
@@ -374,7 +506,7 @@ impl Worker {
         })
     }
 
-    fn request(
+    pub(crate) fn request(
         &mut self,
         cwd: &Path,
         argv: &[OsString],
@@ -389,7 +521,7 @@ impl Worker {
         decode_response(&mut self.stdout).map_err(daemon_frontend_error)
     }
 
-    fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         drop(self.stdin.take());
         if self.child.wait().is_err() {
             let _ = self.child.kill();
@@ -412,6 +544,10 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
+
+    fn test_socket(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("tp-daemon-wire-{name}-{}.sock", std::process::id()))
+    }
 
     #[test]
     fn encode_request_matches_the_documented_wire_shape() {
@@ -581,5 +717,81 @@ mod tests {
         // invent a different truncation.
         let status = ExitStatus::from_raw(encode_wait_status(-1));
         assert_eq!(status.code(), Some(255));
+    }
+
+    #[test]
+    fn preflight_returns_immutable_identity_material() {
+        use std::os::unix::net::UnixListener;
+
+        let socket = test_socket("preflight");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8];
+            connection.read_exact(&mut request).unwrap();
+            assert_eq!(&request, PREFLIGHT);
+            connection.write_all(PREFLIGHT_RESPONSE).unwrap();
+            connection.write_all(&[7; 32]).unwrap();
+            connection.write_all(&[9; 32]).unwrap();
+        });
+        let binding = preflight(&socket).unwrap();
+        server.join().unwrap();
+        assert_eq!(binding.producer, [7; 32]);
+        assert_eq!(binding.epoch, [9; 32]);
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn epoch_rejection_is_known_not_accepted() {
+        use std::os::unix::net::UnixListener;
+
+        let socket = test_socket("reject");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut header = [0u8; 40];
+            connection.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..8], REQUEST);
+            write_rejected(&mut connection, "epoch changed").unwrap();
+        });
+        let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        server.join().unwrap();
+        assert!(error.is_not_accepted());
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn lost_response_after_acceptance_is_indeterminate() {
+        use std::os::unix::net::UnixListener;
+
+        let socket = test_socket("accepted-close");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut header = [0u8; 40];
+            connection.read_exact(&mut header).unwrap();
+            read_request(&mut connection).unwrap();
+            connection.write_all(&[ACCEPTED]).unwrap();
+        });
+        let error = execute(&socket, &[1; 32], Path::new("/tmp"), &["request".into()]).unwrap_err();
+        server.join().unwrap();
+        assert!(!error.is_not_accepted());
+        assert!(error.was_accepted());
+        assert!(matches!(
+            error,
+            DaemonError::AfterAcceptance(inner) if matches!(*inner, DaemonError::Crashed)
+        ));
+        std::fs::remove_file(socket).ok();
+    }
+
+    #[test]
+    fn daemon_boot_epoch_contributes_to_endpoint_identity() {
+        let a = crate::CompilerIdentity::daemon([3; 32], [4; 32]);
+        let b = crate::CompilerIdentity::daemon([3; 32], [5; 32]);
+        assert_eq!(a.producer_bytes(), b.producer_bytes());
+        assert_ne!(a.as_bytes(), b.as_bytes());
     }
 }

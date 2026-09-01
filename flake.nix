@@ -195,8 +195,8 @@
                     export TIDEPOOL_EXTRACT_WORKER="$PWD/dist/build/tidepool-extract-bin/tidepool-extract-bin"
                   '';
                 });
-            # This crate has an independent zero-dependency lockfile so Nix
-            # vendors its actual graph rather than the whole workspace graph.
+            # This crate has an independent minimal lockfile so Nix vendors
+            # its actual graph rather than the whole workspace graph.
             frontend = pkgs.rustPlatform.buildRustPackage {
               pname = "tidepool-extract-frontend";
               version = "0.1.0";

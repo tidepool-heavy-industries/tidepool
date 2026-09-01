@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// Returns the cache directory for Tidepool's compiled-artifact memos.
 /// Delegates to the canonical resolver ([`crate::paths::compile_cache_dir`]),
 /// which is [`crate::paths::cache_dir`] unless `$TIDEPOOL_COMPILE_CACHE_DIR`
-/// redirects the memo (and the `binfp-*` sidecars) somewhere shared; wrapped
+/// redirects the memo somewhere shared; wrapped
 /// in `Some` since every call site uses `?`/`Option` combinators.
 fn cache_dir() -> Option<PathBuf> {
     Some(crate::paths::compile_cache_dir())
@@ -30,14 +30,16 @@ impl std::fmt::Display for CacheKey {
 #[cfg(test)]
 pub(crate) fn cache_key(source: &str, target: &str, include: &[&Path]) -> CacheKey {
     let include: Vec<PathBuf> = include.iter().map(|path| path.to_path_buf()).collect();
-    eval_cache_key(source, target, &include, None).expect("test fixture must be cacheable")
+    eval_cache_key(source, target, &include, None, b"test-endpoint")
+        .expect("test fixture must be cacheable")
 }
 
 /// Test-only salted convenience for cacheable requests.
 #[cfg(test)]
 fn cache_key_salted(source: &str, target: &str, include: &[&Path], salt: Option<&str>) -> CacheKey {
     let include: Vec<PathBuf> = include.iter().map(|path| path.to_path_buf()).collect();
-    eval_cache_key(source, target, &include, salt).expect("test fixture must be cacheable")
+    eval_cache_key(source, target, &include, salt, b"test-endpoint")
+        .expect("test fixture must be cacheable")
 }
 
 /// The single production eval-cache decision. Returns `None` when the target
@@ -52,16 +54,29 @@ pub(crate) fn eval_cache_key(
     target: &str,
     include: &[PathBuf],
     salt: Option<&str>,
+    endpoint_identity: &[u8],
 ) -> Option<CacheKey> {
     if has_untracked_cpp_inputs(source, include) {
         return None;
     }
-    Some(cache_key_raw(source, target, include, salt))
+    Some(cache_key_raw(
+        source,
+        target,
+        include,
+        salt,
+        endpoint_identity,
+    ))
 }
 
 /// Digest builder beneath [`eval_cache_key`]. Kept private so production code
 /// cannot mint a key without first applying the cacheability policy.
-fn cache_key_raw(source: &str, target: &str, include: &[PathBuf], salt: Option<&str>) -> CacheKey {
+fn cache_key_raw(
+    source: &str,
+    target: &str,
+    include: &[PathBuf],
+    salt: Option<&str>,
+    endpoint_identity: &[u8],
+) -> CacheKey {
     let mut hasher = blake3::Hasher::new();
     // Length-prefixed framing: NUL separators alone let a NUL embedded in one
     // field shift bytes across the boundary (key("a\0b","c") == key("a","b\0c")),
@@ -85,7 +100,7 @@ fn cache_key_raw(source: &str, target: &str, include: &[PathBuf], salt: Option<&
         fingerprint_dir(root, &mut hasher);
     }
 
-    extract_binary_fingerprint(&mut hasher);
+    frame(&mut hasher, endpoint_identity);
 
     CacheKey(hasher.finalize().to_hex().to_string())
 }
@@ -94,217 +109,6 @@ fn cache_key_raw(source: &str, target: &str, include: &[PathBuf], salt: Option<&
 fn frame(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
-}
-
-/// Fingerprints the compiler binary to ensure cache invalidation on upgrades.
-/// If the resolved path is a shell wrapper script (e.g. ~/.cargo/bin/tidepool-extract),
-/// also fingerprints the target binary it delegates to (e.g. ~/.local/bin/tidepool-extract-bin).
-///
-/// The binary is located by [`crate::toolchain::locate_extract`] — which
-/// delegates to `tidepool-extract-cmd`, the crate that also SPAWNS it — so the
-/// cache key, the spawn, and the startup handshake all fingerprint the SAME
-/// file. A misconfigured toolchain contributes nothing here and fails loudly at
-/// spawn/startup instead.
-fn extract_binary_fingerprint(hasher: &mut blake3::Hasher) {
-    if let Ok(loc) = crate::toolchain::locate_extract() {
-        let path = loc.path;
-        fingerprint_single_binary(hasher, &path);
-        for target in wrapper_targets(&path) {
-            fingerprint_single_binary(hasher, &target);
-        }
-    }
-}
-
-/// If `path` is a short shell wrapper script, the absolute binaries it `exec`s.
-/// Empty for a real binary. An unfollowed wrapper target means delegate binary
-/// upgrades silently serve stale Core — see [`extract_exec_target`] for the
-/// known gap in what a text scanner can resolve.
-pub(crate) fn wrapper_targets(path: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(contents) = fs::read_to_string(path) else {
-        return out;
-    };
-    if contents.len() >= 4096 || !(contents.starts_with("#!") || contents.contains("exec ")) {
-        return out;
-    }
-    for line in contents.lines() {
-        if let Some(target) = extract_exec_target(line.trim()) {
-            let target_path = PathBuf::from(target);
-            if target_path.exists() {
-                if let Ok(resolved) = fs::canonicalize(&target_path) {
-                    out.push(resolved);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Fingerprints a single binary by path and CONTENT hash: the path is framed
-/// into `hasher` (so the same content at two paths is two cache keys), then the
-/// memoized [`binary_content_hash`].
-fn fingerprint_single_binary(hasher: &mut blake3::Hasher, path: &Path) {
-    frame(hasher, path.as_os_str().as_encoded_bytes());
-    hasher.update(&binary_content_hash(path));
-}
-
-/// Memoized blake3 of a binary's CONTENT — no path mixed in, so callers that
-/// must compare the same binary across install locations (the toolchain
-/// handshake) get a stable value.
-///
-/// (size, mtime) alone is blind to same-size content swaps, and the nix store
-/// normalizes ALL mtimes to epoch+1, so for nix-deployed toolchains only
-/// content distinguishes versions. Content is blake3-hashed, memoized per
-/// (path, size, dev, ino, ctime) so each binary is read once per change per
-/// process (~100ms for a GHC-sized binary, amortized to zero), and once per
-/// change per MACHINE via the sidecar below.
-///
-/// An unreadable path hashes to all-zeroes: a missing binary is a distinct,
-/// stable value rather than a panic or a silently-skipped input.
-pub(crate) fn binary_content_hash(path: &Path) -> [u8; 32] {
-    use std::collections::HashMap;
-    use std::sync::OnceLock;
-
-    use parking_lot::Mutex;
-
-    tidepool_codegen::debug::init_logging();
-
-    // Memo key includes (dev, ino, ctime): mtime/size are user-settable and
-    // preserved by adversarial in-place swaps, but ANY write bumps ctime and
-    // no userspace tool can reset it — the tamper-evident field. A same-size
-    // same-mtime in-place content swap therefore still re-hashes.
-    type MemoKey = (PathBuf, u64, u64, u64, i64, i64);
-    static MEMO: OnceLock<Mutex<HashMap<MemoKey, [u8; 32]>>> = OnceLock::new();
-
-    let Ok(meta) = fs::metadata(path) else {
-        return [0u8; 32];
-    };
-    let key: MemoKey = {
-        use std::os::unix::fs::MetadataExt;
-        (
-            path.to_path_buf(),
-            meta.len(),
-            meta.dev(),
-            meta.ino(),
-            meta.ctime(),
-            meta.ctime_nsec(),
-        )
-    };
-    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    let cached = memo.lock().get(&key).copied();
-    log::debug!(
-        target: "tidepool::fp",
-        "path={} key=({},{},{},{},{}) memo_hit={}",
-        path.display(),
-        key.1,
-        key.2,
-        key.3,
-        key.4,
-        key.5,
-        cached.is_some()
-    );
-    let content_hash = match cached {
-        Some(h) => h,
-        None => {
-            // Cross-PROCESS memo: subprocess-per-case test suites spawn
-            // hundreds of short-lived processes, and re-hashing a ~79MB
-            // GHC-linked binary per process is ~30-50ms each. Persist the
-            // content hash in a sidecar keyed by the stat identity (the same
-            // tamper-evident (dev, ino, ctime) key as the in-process memo),
-            // so the whole machine hashes each binary version exactly once.
-            let stat_tag = {
-                let mut kh = blake3::Hasher::new();
-                kh.update(path.as_os_str().as_encoded_bytes());
-                kh.update(&meta.len().to_le_bytes());
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    kh.update(&meta.dev().to_le_bytes());
-                    kh.update(&meta.ino().to_le_bytes());
-                    kh.update(&meta.ctime().to_le_bytes());
-                    kh.update(&meta.ctime_nsec().to_le_bytes());
-                }
-                kh.finalize().to_hex().to_string()
-            };
-            let sidecar = cache_dir().map(|d| d.join(format!("binfp-{stat_tag}")));
-            let from_disk = sidecar.as_ref().and_then(|p| {
-                let bytes = fs::read(p).ok()?;
-                <[u8; 32]>::try_from(bytes.as_slice()).ok()
-            });
-            log::debug!(
-                target: "tidepool::fp",
-                "stat_tag={} sidecar_hit={}",
-                stat_tag,
-                from_disk.is_some()
-            );
-            let h: [u8; 32] = match from_disk {
-                Some(h) => h,
-                None => {
-                    let h: [u8; 32] = match fs::read(path) {
-                        Ok(bytes) => *blake3::hash(&bytes).as_bytes(),
-                        // Unreadable: degrade to the metadata-only fingerprint
-                        // rather than poisoning the key entirely.
-                        Err(_) => {
-                            let mut mh = blake3::Hasher::new();
-                            mh.update(&meta.len().to_le_bytes());
-                            if let Ok(mtime) = meta.modified() {
-                                if let Ok(dur) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                                    mh.update(&dur.as_nanos().to_le_bytes());
-                                }
-                            }
-                            *mh.finalize().as_bytes()
-                        }
-                    };
-                    if let Some(p) = &sidecar {
-                        if let Some(parent) = p.parent() {
-                            let _ = fs::create_dir_all(parent);
-                        }
-                        let _ = fs::write(p, h);
-                    }
-                    h
-                }
-            };
-            memo.lock().insert(key, h);
-            h
-        }
-    };
-    content_hash
-}
-
-/// Extracts an absolute path from a shell exec line.
-/// Handles `exec /path/to/bin "$@"`, bare `/path/to/bin "$@"`, and QUOTED
-/// targets — `exec "/path/to/bin" "$@"` (the shellcheck-recommended form): an
-/// unfollowed wrapper target means delegate binary upgrades silently serve
-/// stale Core.
-///
-/// KNOWN GAP: a target spelled via a shell variable or relative path
-/// (`exec "$DIR/bin"`, `exec ./bin`) is NOT resolved — only a literal
-/// absolute path is followed. Fixing this in general requires interpreting
-/// shell variable assignment, which is unbounded — a small text scanner
-/// cannot soundly evaluate arbitrary shell. Direct-path wrappers (the common
-/// case for nix/cargo-installed binaries) ARE followed; only the
-/// variable/relative-path spelling silently misses a delegate-only upgrade.
-fn extract_exec_target(line: &str) -> Option<&str> {
-    let line = line.strip_prefix("exec ").unwrap_or(line);
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let token = line.split_whitespace().next()?;
-    // Strip one layer of matching quotes.
-    let token = token
-        .strip_prefix('"')
-        .and_then(|t| t.strip_suffix('"'))
-        .or_else(|| token.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
-        .unwrap_or(token);
-    // Reject env-var assignments (FOO=bar cmd) but not quoted paths that
-    // happen to contain '=' AFTER unquoting was already handled above.
-    if token.contains('=') {
-        return None;
-    }
-    if token.starts_with('/') {
-        Some(token)
-    } else {
-        None
-    }
 }
 
 /// Recursively walks a directory to fingerprint its Haskell dependency
@@ -566,10 +370,8 @@ pub struct Invocation<'a> {
     /// paths RELATIVE to each root — the absolute location is deliberately not
     /// keyed.
     pub include: &'a [PathBuf],
-    /// The binary this invocation will spawn. Fingerprinted by content
-    /// (following wrapper `exec` targets); resolved through `$PATH` first if
-    /// it is a bare name.
-    pub bin: &'a Path,
+    /// Identity reported by the bound endpoint that will execute a miss.
+    pub endpoint_identity: &'a [u8],
     /// A single session `Val` module permitted as a CACHEABLE `--inject-val`
     /// target, despite `--session-root`/`--inject-val` otherwise making an
     /// invocation uncacheable (see [`invocation_key`]'s doc). This is the
@@ -609,7 +411,7 @@ pub struct Invocation<'a> {
 ///   directory whose CONTENT never changes what the extract PRODUCES, only
 ///   how much frontend work it redoes to produce it (spike-verified: a
 ///   cold-dir and a warm-dir
-///   compile of the same source/argv/include/binary are asserted
+///   compile of the same source/argv/include/endpoint are asserted
 ///   byte-identical by `build_products_dir_is_deterministic` below). Its
 ///   mutable CONTENTS are therefore never hashed into the key either — doing
 ///   so would cost a walk of the whole warm dir for a property this
@@ -629,9 +431,8 @@ pub struct Invocation<'a> {
 /// MUTABLE directories nothing here fingerprints) are excluded: not by a
 /// comment, but because those flags are not on the list.
 ///
-/// An unresolvable binary is likewise uncacheable rather than keyed with an
-/// empty fingerprint — a key that cannot see the compiler would survive an
-/// extract rebuild and serve stale Core.
+/// The caller must supply the identity of an already-bound compiler endpoint;
+/// there is no empty or guessed compiler fingerprint state.
 ///
 /// A caller carrying [`Invocation::stable_val`] additionally accepts
 /// `--session-root <dir>` (dropped, like `--output-dir`) and one matching
@@ -678,8 +479,6 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
         return None;
     }
 
-    let bin = resolve_for_fingerprint(inv.bin)?;
-
     let mut hasher = blake3::Hasher::new();
     frame(&mut hasher, INVOCATION_NAMESPACE);
     frame(&mut hasher, inv.source.as_bytes());
@@ -702,7 +501,7 @@ pub fn invocation_key(inv: &Invocation<'_>) -> Option<InvocationKey> {
         fingerprint_stable_val_iface(&hi_path, &mut hasher);
     }
 
-    fingerprint_binary_content(&bin, &mut hasher);
+    frame(&mut hasher, inv.endpoint_identity);
 
     Some(InvocationKey(hasher.finalize().to_hex().to_string()))
 }
@@ -718,31 +517,6 @@ fn fingerprint_stable_val_iface(hi_path: &Path, hasher: &mut blake3::Hasher) {
             frame(hasher, blake3::hash(&bytes).as_bytes());
         }
         Err(_) => frame(hasher, &[0u8]),
-    }
-}
-
-/// The binary that will actually be spawned, as an absolute readable file.
-/// A bare name (`$TIDEPOOL_EXTRACT` unset, so `ExtractCmd` spawns through
-/// `PATH`) is resolved the same way the OS will resolve it, so the key
-/// fingerprints the binary the spawn reaches. `None` when nothing resolves.
-fn resolve_for_fingerprint(bin: &Path) -> Option<PathBuf> {
-    if bin.is_file() {
-        return Some(bin.to_path_buf());
-    }
-    which::which(bin).ok()
-}
-
-/// Fingerprint the compiler by CONTENT only — no path, deliberately. The same
-/// binary bytes at two install locations IS the same compiler, and pinning the
-/// path would defeat sharing one memo across processes that resolved the
-/// extract differently. Wrapper `exec` targets are followed, so a delegate-only
-/// upgrade still forces a miss ([`wrapper_targets`]).
-fn fingerprint_binary_content(bin: &Path, hasher: &mut blake3::Hasher) {
-    frame(hasher, &binary_content_hash(bin));
-    let targets = wrapper_targets(bin);
-    frame(hasher, &(targets.len() as u64).to_le_bytes());
-    for target in &targets {
-        frame(hasher, &binary_content_hash(target));
     }
 }
 
@@ -849,6 +623,8 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use tempfile::TempDir;
+
+    const TEST_ENDPOINT: &[u8] = b"test-compiler-endpoint";
 
     /// RAII guard to safely set and restore environment variables in tests.
     struct EnvGuard {
@@ -984,8 +760,6 @@ mod tests {
     #[serial]
     fn imported_literate_module_changes_both_cache_keys() {
         let temp = TempDir::new().unwrap();
-        let bin = fake_bin(temp.path(), b"#!/bin/sh\nexit 0\n");
-        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin);
         let include = temp.path().join("include");
         fs::create_dir_all(&include).unwrap();
         let literate = include.join("Lit.lhs");
@@ -1005,7 +779,7 @@ mod tests {
             argv: &argv,
             input_path: &input,
             include: &include_owned,
-            bin: &bin,
+            endpoint_identity: TEST_ENDPOINT,
             stable_val: None,
         })
         .unwrap();
@@ -1020,7 +794,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: &include_owned,
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: None,
             })
             .unwrap()
@@ -1076,99 +850,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial]
-    fn test_cache_key_binary_fingerprint_mtime() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = TempDir::new().unwrap();
-        let bin_path = temp_dir.path().join("fake-extract");
-        fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
-        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-        // Point directly to the binary to avoid PATH mutation
-        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin_path);
-
-        let k1 = cache_key("source", "target", &[]);
-
-        // mtime-only change: the fingerprint is content-defined (blake3 of
-        // the bytes — nix normalizes all store mtimes to epoch+1, so mtime
-        // can't distinguish versions). Key must NOT change.
-        let past = filetime::FileTime::from_unix_time(100, 0);
-        filetime::set_file_mtime(&bin_path, past).unwrap();
-
-        let k2 = cache_key("source", "target", &[]);
-        assert_eq!(
-            k1, k2,
-            "mtime-only change must not change the cache key (content-defined fingerprint)"
-        );
-
-        // Same-size content swap ((size, mtime) alone is blind to this):
-        // ctime bumps on write, forcing a re-hash that sees the new content.
-        // Sleep first: kernel ctime is coarse-grained (tick granularity, ~ms);
-        // a swap within the same tick as the create gets an IDENTICAL ctime
-        // and the memo legitimately serves the old hash. Real binary swaps
-        // are never sub-tick; the test must not be either.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        fs::write(&bin_path, b"#!/bin/SH\n").unwrap();
-        filetime::set_file_mtime(&bin_path, past).unwrap();
-
-        let k3 = cache_key("source", "target", &[]);
-        assert_ne!(
-            k1, k3,
-            "Cache key should change on a same-size, same-mtime content swap"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn test_cache_key_wrapper_script_fingerprints_target() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create the "real" binary.
-        let real_bin = temp_dir.path().join("tidepool-extract-bin");
-        fs::write(&real_bin, b"real-binary-v1").unwrap();
-        fs::set_permissions(&real_bin, fs::Permissions::from_mode(0o755)).unwrap();
-
-        // Create a wrapper script that execs the real binary.
-        let wrapper = temp_dir.path().join("tidepool-extract");
-        fs::write(
-            &wrapper,
-            format!("#!/bin/sh\nexec {} \"$@\"\n", real_bin.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &wrapper);
-
-        let k1 = cache_key("source", "target", &[]);
-
-        // Change the real binary (wrapper unchanged) — key must change.
-        fs::write(&real_bin, b"real-binary-v2-longer").unwrap();
-        let k2 = cache_key("source", "target", &[]);
-
-        assert_ne!(
-            k1, k2,
-            "Cache key should change when the target binary behind a wrapper changes"
-        );
-    }
-
-    #[test]
-    fn test_extract_exec_target() {
-        assert_eq!(
-            extract_exec_target("exec /usr/local/bin/foo \"$@\""),
-            Some("/usr/local/bin/foo")
-        );
-        assert_eq!(
-            extract_exec_target("/usr/local/bin/foo \"$@\""),
-            Some("/usr/local/bin/foo")
-        );
-        assert_eq!(extract_exec_target("#!/bin/sh"), None);
-        assert_eq!(extract_exec_target("FOO=bar"), None);
-        assert_eq!(extract_exec_target(""), None);
-        assert_eq!(extract_exec_target("relative-path arg"), None);
+    fn eval_key_changes_with_bound_endpoint_identity() {
+        let a = eval_cache_key("source", "target", &[], None, b"endpoint-a").unwrap();
+        let b = eval_cache_key("source", "target", &[], None, b"endpoint-b").unwrap();
+        assert_ne!(a, b);
     }
 
     // -----------------------------------------------------------------------
@@ -1181,16 +866,6 @@ mod tests {
     // the key (absolute include path — the property that makes the memo
     // shareable across processes).
     // -----------------------------------------------------------------------
-
-    /// A dummy extract binary, so the key's compiler fingerprint resolves.
-    #[cfg(unix)]
-    fn fake_bin(dir: &Path, contents: &[u8]) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("fake-extract");
-        fs::write(&path, contents).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
 
     /// The argv `crate::artifacts::compile_targets` builds.
     fn turn_argv(input: &Path, out: &Path, targets: &str, includes: &[&Path]) -> Vec<OsString> {
@@ -1226,7 +901,6 @@ mod tests {
     #[serial]
     fn invocation_key_misses_on_every_input_dimension() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
         let out = tmp.path().join("out");
@@ -1241,7 +915,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: &include,
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: None,
             })
             .expect("this invocation is cacheable")
@@ -1282,38 +956,25 @@ mod tests {
         );
     }
 
-    /// The compiler itself is keyed by CONTENT: an extract rebuild must miss
-    /// even when the path, size and mtime are unchanged.
-    #[cfg(unix)]
+    /// A producer or daemon-epoch change must move the invocation key.
     #[test]
-    #[serial]
-    fn invocation_key_misses_on_extract_binary_content() {
+    fn invocation_key_misses_on_endpoint_identity() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
         let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-        let key = || {
+        let key = |identity: &[u8]| {
             invocation_key(&Invocation {
                 source: "main = pure ()",
                 argv: &argv,
                 input_path: &input,
                 include: &[],
-                bin: &bin,
+                endpoint_identity: identity,
                 stable_val: None,
             })
             .unwrap()
         };
-
-        let before = key();
-        // Sleep first: ctime granularity is a kernel tick, and the content-hash
-        // memo is keyed on (dev, ino, ctime). A real rebuild is never sub-tick.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let past = filetime::FileTime::from_unix_time(100, 0);
-        filetime::set_file_mtime(&bin, past).unwrap();
-        fs::write(&bin, b"#!/bin/sh\nexit 1\n").unwrap(); // same size
-        filetime::set_file_mtime(&bin, past).unwrap();
-        assert_ne!(before, key(), "an extract rebuild must invalidate");
+        assert_ne!(key(b"endpoint-a"), key(b"endpoint-b"));
     }
 
     /// The property the shared test memo rests on: identical CONTENT at
@@ -1324,8 +985,6 @@ mod tests {
     #[test]
     #[serial]
     fn invocation_key_is_independent_of_absolute_paths() {
-        let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let body = "module Lib where\nx = 1";
 
         let key_at = |root: &Path| {
@@ -1338,7 +997,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: std::slice::from_ref(&inc),
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: None,
             })
             .unwrap()
@@ -1363,7 +1022,6 @@ mod tests {
     #[serial]
     fn invocation_key_drops_build_products_dir() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
 
@@ -1378,7 +1036,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: &[],
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: None,
             })
         };
@@ -1400,7 +1058,6 @@ mod tests {
     #[serial]
     fn invocation_key_refuses_unclassified_and_session_scoped_flags() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
 
@@ -1412,7 +1069,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: &[],
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: None,
             })
         };
@@ -1433,18 +1090,6 @@ mod tests {
         }
         // A dangling flag (no value) is likewise uncacheable, not a panic.
         assert!(key(&["--target"]).is_none());
-        // An unresolvable binary is uncacheable — a key blind to the compiler
-        // would survive an extract rebuild.
-        let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
-        assert!(invocation_key(&Invocation {
-            source: "main = pure ()",
-            argv: &argv,
-            input_path: &input,
-            include: &[],
-            bin: &tmp.path().join("no-such-extract"),
-            stable_val: None,
-        })
-        .is_none());
     }
 
     /// `LANGUAGE CPP` is accepted by GHC, but `#include` may name a file
@@ -1455,7 +1100,6 @@ mod tests {
     #[serial]
     fn cpp_include_invocation_is_uncacheable() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         let include = tmp.path().join("include");
         fs::create_dir_all(&include).unwrap();
@@ -1471,13 +1115,13 @@ mod tests {
         let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
 
         assert!(has_untracked_cpp_inputs(source, &include_owned));
-        assert!(eval_cache_key(source, "result", &include_owned, None).is_none());
+        assert!(eval_cache_key(source, "result", &include_owned, None, TEST_ENDPOINT).is_none());
         assert!(invocation_key(&Invocation {
             source,
             argv: &argv,
             input_path: &input,
             include: &include_owned,
-            bin: &bin,
+            endpoint_identity: TEST_ENDPOINT,
             stable_val: None,
         })
         .is_none());
@@ -1496,7 +1140,6 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         let include = tmp.path().join("include");
         fs::create_dir_all(&include).unwrap();
@@ -1506,13 +1149,13 @@ mod tests {
         let include_owned = [include.clone()];
         let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[&include]);
 
-        assert!(eval_cache_key(source, "result", &include_owned, None).is_none());
+        assert!(eval_cache_key(source, "result", &include_owned, None, TEST_ENDPOINT).is_none());
         assert!(invocation_key(&Invocation {
             source,
             argv: &argv,
             input_path: &input,
             include: &include_owned,
-            bin: &bin,
+            endpoint_identity: TEST_ENDPOINT,
             stable_val: None,
         })
         .is_none());
@@ -1530,7 +1173,6 @@ mod tests {
     #[serial]
     fn invocation_key_accepts_matching_stable_val_inject() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
         let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(0));
@@ -1549,7 +1191,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: &[],
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: Some(module),
             })
         };
@@ -1590,7 +1232,7 @@ mod tests {
                 argv: &argv,
                 input_path: &input,
                 include: &[],
-                bin: &bin,
+                endpoint_identity: TEST_ENDPOINT,
                 stable_val: Some(module),
             })
             .is_none(),
@@ -1608,7 +1250,6 @@ mod tests {
     #[serial]
     fn invocation_key_stable_val_without_matching_argv_is_uncacheable() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
         let module = tidepool_repr::SessionModule::val(tidepool_repr::Generation(0));
@@ -1623,7 +1264,7 @@ mod tests {
             argv: &argv_no_root,
             input_path: &input,
             include: &[],
-            bin: &bin,
+            endpoint_identity: TEST_ENDPOINT,
             stable_val: Some(module),
         })
         .is_none());
@@ -1636,8 +1277,6 @@ mod tests {
     #[serial]
     fn invocation_key_is_namespaced_away_from_eval_keys() {
         let tmp = TempDir::new().unwrap();
-        let bin = fake_bin(tmp.path(), b"#!/bin/sh\nexit 0\n");
-        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin);
         let input = tmp.path().join("Expr.hs");
         fs::write(&input, "module Expr where").unwrap();
         let argv = turn_argv(&input, &tmp.path().join("out"), "result", &[]);
@@ -1646,7 +1285,7 @@ mod tests {
             argv: &argv,
             input_path: &input,
             include: &[],
-            bin: &bin,
+            endpoint_identity: TEST_ENDPOINT,
             stable_val: None,
         })
         .unwrap();
@@ -1718,31 +1357,5 @@ mod tests {
         // A truncated/foreign manifest is a miss, never a panic.
         fs::write(dir.join(format!("{key}.ok")), b"not-a-manifest").unwrap();
         assert!(artifacts_load(&key, &names).is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[serial]
-    fn test_cache_key_binary_fingerprint_size() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp_dir = TempDir::new().unwrap();
-        let bin_path = temp_dir.path().join("fake-extract-size");
-        fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
-        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-        // Point directly to the binary to avoid PATH mutation
-        let _guard = EnvGuard::new("TIDEPOOL_EXTRACT", &bin_path);
-
-        let k1 = cache_key("source", "target", &[]);
-
-        // Change size
-        let mut file = fs::OpenOptions::new().append(true).open(&bin_path).unwrap();
-        file.write_all(b"extra").unwrap();
-        drop(file);
-
-        let k2 = cache_key("source", "target", &[]);
-        assert_ne!(k1, k2, "Cache key should change when binary size changes");
     }
 }

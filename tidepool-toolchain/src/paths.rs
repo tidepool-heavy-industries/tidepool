@@ -34,8 +34,8 @@ pub fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("tidepool")
 }
 
-/// Where the content-addressed compiled-artifact memo (and the `binfp-*`
-/// binary-fingerprint sidecars) live: `$TIDEPOOL_COMPILE_CACHE_DIR` if set,
+/// Where the content-addressed compiled-artifact memo lives:
+/// `$TIDEPOOL_COMPILE_CACHE_DIR` if set,
 /// else [`cache_dir`]. **The default layout is unchanged** — nobody's existing
 /// cache moves.
 ///
@@ -113,9 +113,8 @@ pub fn eval_failure_log_path() -> PathBuf {
 /// override); else content-addressed under [`compile_cache_dir`] — so a test
 /// suite that already shares the compile memo via
 /// `$TIDEPOOL_COMPILE_CACHE_DIR` shares this dir too, with no extra wiring —
-/// keyed by `toolchain_fingerprint` (the resolved extract binary's own
-/// content fingerprint, see `toolchain::extract_fingerprint`) so a rebuilt
-/// extract binary gets a FRESH directory: staleness is structurally
+/// keyed by the bound compiler endpoint identity, so a frontend or worker
+/// rebuild and a daemon boot epoch get a FRESH directory: staleness is structurally
 /// impossible, never validate it by mtime. A stdlib-only edit does NOT need
 /// its own fresh directory — GHC's per-module interface hash already detects
 /// that (spike-verified: an edited module is selectively recompiled while
@@ -145,9 +144,11 @@ pub fn build_products_dir(toolchain_fingerprint: &str) -> PathBuf {
 /// everywhere a `tidepool-extract` gets spawned is what makes "on by
 /// default" actually mean every real caller, not just the one with the
 /// fanciest doc comment. A no-op if the directory can't be created.
-pub fn apply_build_products_dir(cmd: &mut tidepool_extract_cmd::ExtractCmd) {
-    let fingerprint = crate::toolchain::extract_fingerprint(Path::new(cmd.launcher().program()));
-    let bp_dir = build_products_dir(&fingerprint);
+pub fn apply_build_products_dir(
+    cmd: &mut tidepool_extract_cmd::ExtractCmd,
+    endpoint: &tidepool_extract_cmd::CompilerEndpoint,
+) {
+    let bp_dir = build_products_dir(&endpoint.identity().to_hex());
     if std::fs::create_dir_all(&bp_dir).is_ok() {
         cmd.build_products_dir(&bp_dir);
     }

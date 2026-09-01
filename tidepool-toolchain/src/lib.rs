@@ -2,8 +2,8 @@
 //! `tidepool-extract` binary + the Haskell stdlib it pairs with) and its
 //! compile outputs.
 //!
-//! Sits between `tidepool-extract-cmd` (the zero-dep invocation builder this
-//! crate spawns through) and `tidepool-runtime` (the high-level compile/run
+//! Sits between `tidepool-extract-cmd` (the bound compiler endpoint and
+//! invocation boundary this crate executes through) and `tidepool-runtime` (the high-level compile/run
 //! API and session substrate, which depends on this crate and re-exports
 //! what its own downstream callers still reach through `tidepool_runtime::`
 //! paths).

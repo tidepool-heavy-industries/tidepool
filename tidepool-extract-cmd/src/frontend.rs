@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, Read, Seek, Write};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 use crate::request::WORKER_REQUEST_FLAG;
 use crate::{daemon, ExtractRequest};
@@ -15,7 +17,13 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         return Err(FrontendError::Usage(USAGE.to_owned()));
     }
     if args.first().is_some_and(|arg| arg == "--daemon") {
-        return daemon::serve(parse_daemon(&args[1..])?, worker_bin()?);
+        return daemon::serve(parse_daemon(&args[1..])?, prepare_worker()?);
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crate::endpoint::BOUND_ENDPOINT_FLAG)
+    {
+        return serve_bound_endpoint();
     }
     if args.first().is_some_and(|arg| arg == "--connect") {
         return connect(&args[1..]);
@@ -28,7 +36,8 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
             request.worker_argv()
         }
     };
-    let mut command = Command::new(worker_bin()?);
+    let worker = prepare_worker()?;
+    let mut command = worker.command();
     command.args(worker_args);
     crate::process::child_dies_with_parent(&mut command);
     let status = command.status().map_err(FrontendError::Io)?;
@@ -43,12 +52,11 @@ fn connect(args: &[OsString]) -> Result<u8, FrontendError> {
     };
     let request = ExtractRequest::from_cli(request_args)?;
     let cwd = std::env::current_dir().map_err(FrontendError::Io)?;
-    let (output, _) = daemon::run_over_daemon(
-        PathBuf::from(socket).as_path(),
-        &cwd,
-        &request.worker_argv(),
-    )
-    .map_err(|error| FrontendError::Daemon(error.to_string()))?;
+    let socket = PathBuf::from(socket);
+    let binding =
+        daemon::preflight(&socket).map_err(|error| FrontendError::Daemon(error.to_string()))?;
+    let output = daemon::execute(&socket, &binding.epoch, &cwd, &request.worker_argv())
+        .map_err(|error| FrontendError::Daemon(error.to_string()))?;
     io::stdout()
         .write_all(&output.stdout)
         .map_err(FrontendError::Io)?;
@@ -82,6 +90,97 @@ fn worker_bin() -> Result<PathBuf, FrontendError> {
     }
     let current = std::env::current_exe().map_err(FrontendError::Io)?;
     Ok(current.with_file_name("tidepool-extract-bin"))
+}
+
+pub(crate) struct PreparedWorker {
+    file: File,
+    selection: PathBuf,
+    bytes: Vec<u8>,
+    ghc_libdir: OsString,
+}
+
+impl PreparedWorker {
+    pub(crate) fn prepare() -> Result<Self, FrontendError> {
+        let selection = worker_bin()?;
+        let mut file = File::open(&selection).map_err(FrontendError::Io)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(FrontendError::Io)?;
+        file.rewind().map_err(FrontendError::Io)?;
+        let ghc_libdir = resolve_ghc_libdir()?;
+        Ok(Self {
+            file,
+            selection,
+            bytes,
+            ghc_libdir,
+        })
+    }
+
+    pub(crate) fn producer_identity(&self) -> Result<[u8; 32], FrontendError> {
+        let frontend = std::fs::read("/proc/self/exe").map_err(FrontendError::Io)?;
+        Ok(crate::endpoint::producer_identity(
+            &frontend,
+            self.selection.as_os_str(),
+            &self.bytes,
+            &self.ghc_libdir,
+        ))
+    }
+
+    pub(crate) fn command(&self) -> Command {
+        // The opened descriptor pins the selected inode. `execve` resolves
+        // this path before applying close-on-exec, so an atomic replacement of
+        // the worker path cannot change which bytes execute.
+        let executable = format!("/proc/self/fd/{}", self.file.as_raw_fd());
+        let mut command = Command::new(executable);
+        command.env("TIDEPOOL_GHC_LIBDIR", &self.ghc_libdir);
+        command
+    }
+}
+
+fn prepare_worker() -> Result<PreparedWorker, FrontendError> {
+    PreparedWorker::prepare()
+}
+
+fn resolve_ghc_libdir() -> Result<OsString, FrontendError> {
+    if let Some(value) = std::env::var_os("TIDEPOOL_GHC_LIBDIR") {
+        return Ok(value);
+    }
+    let output = Command::new("ghc")
+        .arg("--print-libdir")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(FrontendError::Io)?;
+    if !output.status.success() {
+        return Err(FrontendError::Io(io::Error::other(format!(
+            "ghc --print-libdir exited with {}",
+            output.status
+        ))));
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|error| FrontendError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))?;
+    let libdir = text.trim();
+    if libdir.is_empty() {
+        return Err(FrontendError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ghc --print-libdir returned an empty path",
+        )));
+    }
+    Ok(OsString::from(libdir))
+}
+
+fn serve_bound_endpoint() -> Result<u8, FrontendError> {
+    let prepared = prepare_worker()?;
+    let identity = prepared.producer_identity()?;
+    crate::endpoint::write_identity(io::stdout().lock(), &identity).map_err(FrontendError::Io)?;
+    let mut stdin = io::stdin().lock();
+    let (cwd, argv) = daemon::read_request(&mut stdin)?;
+    let worker_argv = daemon::normalize_worker_argv(argv)?;
+    let mut worker = daemon::Worker::spawn(prepared)?;
+    let result = worker.request(&cwd, &worker_argv);
+    if let Ok((code, stdout, stderr)) = &result {
+        daemon::write_response(io::stdout().lock(), *code, stdout, stderr)?;
+    }
+    worker.shutdown();
+    result.map(|_| 0)
 }
 
 pub(crate) struct DaemonConfig {
@@ -179,6 +278,9 @@ impl std::error::Error for FrontendError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn no_arguments_are_the_exact_usage_error() {
@@ -196,5 +298,70 @@ mod tests {
             error,
             FrontendError::WorkerProtocol(crate::request::ProtocolError::RetiredFieldTag(9))
         ));
+    }
+
+    #[test]
+    fn prepared_worker_identity_and_execution_survive_path_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = ENV.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("tidepool-prepared-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let worker = dir.join("worker");
+        let replacement = dir.join("replacement");
+        std::fs::copy(std::env::current_exe().unwrap(), &worker).unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var(WORKER_ENV, &worker);
+        std::env::set_var("TIDEPOOL_GHC_LIBDIR", "/ghc/lib-a");
+
+        let prepared = PreparedWorker::prepare().unwrap();
+        let old_identity = prepared.producer_identity().unwrap();
+
+        std::fs::write(&replacement, b"#!/bin/sh\nprintf new-worker").unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&replacement, &worker).unwrap();
+        assert_eq!(
+            prepared.producer_identity().unwrap(),
+            old_identity,
+            "a boot-bound worker must retain immutable identity after path replacement"
+        );
+
+        let output = prepared
+            .command()
+            .args([
+                "--exact",
+                "frontend::tests::prepared_worker_child",
+                "--nocapture",
+            ])
+            .env("TIDEPOOL_PREPARED_WORKER_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("old-worker"));
+
+        let new_identity = PreparedWorker::prepare()
+            .unwrap()
+            .producer_identity()
+            .unwrap();
+        assert_ne!(old_identity, new_identity);
+
+        std::env::set_var("TIDEPOOL_GHC_LIBDIR", "/ghc/lib-b");
+        let ghc_identity = PreparedWorker::prepare()
+            .unwrap()
+            .producer_identity()
+            .unwrap();
+        assert_ne!(new_identity, ghc_identity);
+
+        std::env::remove_var(WORKER_ENV);
+        std::env::remove_var("TIDEPOOL_GHC_LIBDIR");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn prepared_worker_child() {
+        if std::env::var_os("TIDEPOOL_PREPARED_WORKER_CHILD").is_some() {
+            print!("old-worker");
+        }
     }
 }

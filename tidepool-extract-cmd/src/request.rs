@@ -151,7 +151,7 @@ impl ExtractRequest {
 
     /// Decode the complete argv accepted by the compiler worker.
     ///
-    /// This is the inspection counterpart to the launcher's private argv
+    /// This is the inspection counterpart to the endpoint's private argv
     /// renderer. Wrappers and tests can assert on typed request fields without
     /// depending on the payload's hexadecimal transport representation.
     pub fn decode_worker_argv(args: &[OsString]) -> Result<Self, ProtocolError> {

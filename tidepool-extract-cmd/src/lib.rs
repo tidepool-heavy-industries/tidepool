@@ -7,24 +7,29 @@
 //!   `$TIDEPOOL_EXTRACT` is a hard error, never a silent fall-through to
 //!   `PATH`; an UNSET one falls back to the bare `tidepool-extract` name.
 //! - [`ExtractCmd`] — construction and encoding of typed compiler requests.
+//! - [`CompilerEndpoint`] — an opaque identity bound to the exact producer
+//!   that will execute one request.
 //! - CLI/daemon infrastructure and the process-global [`extract_spawn_count`].
 //!
-//! This is a std-only leaf because proc-macro crates depend on it. Parsing JSON
-//! diagnostics and CBOR output belongs to callers; the content-addressed
-//! compile cache belongs to `tidepool-toolchain` and keys over [`ExtractCmd::argv`].
+//! This is a small process-boundary leaf because proc-macro crates depend on
+//! it. Its only non-std mechanism is BLAKE3, used to report strong immutable
+//! producer identity. Parsing JSON diagnostics and CBOR output belongs to
+//! callers; the content-addressed compile cache belongs to `tidepool-toolchain`.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod daemon;
+mod endpoint;
 pub mod exec_check;
 pub mod frontend;
 mod process;
 mod request;
+pub use endpoint::{CompilerEndpoint, CompilerIdentity};
 use exec_check::is_readable_executable_file;
 pub use request::{ExtractRequest, ProtocolError};
 
@@ -32,11 +37,11 @@ pub use request::{ExtractRequest, ProtocolError};
 /// through `PATH` by the OS at spawn time).
 pub const DEFAULT_BIN: &str = "tidepool-extract";
 
-/// Process-global count of `tidepool-extract` spawns paid through
-/// [`ExtractCmd::run`]. Tests asserting on it require process isolation.
+/// Process-global count of compiler invocations submitted through a bound
+/// endpoint. Tests asserting on it require process isolation.
 static EXTRACT_SPAWNS: AtomicU64 = AtomicU64::new(0);
 
-/// Number of `tidepool-extract` spawns this process has paid so far.
+/// Number of compiler invocations this process has submitted so far.
 /// `Ordering::SeqCst` so a reader on another thread (the acceptance test's
 /// snapshot, taken from inside a model-provider callback running on a
 /// different thread than the compiling turn) is guaranteed to see every
@@ -63,8 +68,8 @@ pub enum BinSource {
     Env,
     /// `$TIDEPOOL_EXTRACT` was unset — the bare [`DEFAULT_BIN`] name, to be
     /// resolved through `PATH` by the OS. This is the ONLY source for which a
-    /// caller may legitimately fall back to some other launcher on a
-    /// not-found spawn error (see [`Launcher`]).
+    /// caller may bind the explicit Nix fallback when direct endpoint binding
+    /// reports not-found.
     PathLookup,
     /// The caller supplied the binary itself ([`ExtractCmd::with_bin`]) —
     /// it resolved the env once at construction and holds the result.
@@ -151,10 +156,7 @@ impl AsRef<OsStr> for ResolvedExtractBin {
     }
 }
 
-/// Renders as the path's display form — the same text
-/// `resolve_bin().path.to_string_lossy()` produced before this type existed,
-/// so a call site that stringifies for a fingerprint or log line keeps a
-/// byte-identical rendering.
+/// Renders as the selected frontend path for diagnostics.
 impl std::fmt::Display for ResolvedExtractBin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.display())
@@ -202,9 +204,8 @@ impl From<BinError> for std::io::Error {
 /// stale installed one. A SET-but-unreadable `$TIDEPOOL_EXTRACT` is a hard
 /// error, not a silent fall-through to `PATH`: falling through would run a
 /// DIFFERENT binary than the caller believes it is running (in
-/// `tidepool-macro`'s case, a different one than `extract_identity()` hashed
-/// into its content key — a producer/key divergence). An UNSET env falls back
-/// to the bare [`DEFAULT_BIN`] name.
+/// `tidepool-macro`'s case, a different endpoint than the content key names).
+/// An UNSET env falls back to the bare [`DEFAULT_BIN`] name.
 pub fn resolve_bin() -> Result<ResolvedBin, BinError> {
     match std::env::var_os("TIDEPOOL_EXTRACT") {
         Some(v) => {
@@ -225,83 +226,22 @@ pub fn resolve_bin() -> Result<ResolvedBin, BinError> {
 }
 
 // ---------------------------------------------------------------------------
-// Launcher
-// ---------------------------------------------------------------------------
-
-/// How the built argv is actually launched.
-///
-/// Almost every site runs the resolved binary directly. `tidepool-macro`'s
-/// `run_tidepool_extract` additionally has a `nix run <flake>#tidepool-extract
-/// --` fallback for the case where the bare name isn't on `PATH` — a property
-/// of THAT call site, not of the arguments. Expressing it as a second
-/// launcher over the SAME [`ExtractCmd`] means the argument construction is
-/// shared even though the fallback is not.
-#[derive(Clone, Debug)]
-pub enum Launcher {
-    /// Spawn the extract binary directly.
-    Direct(OsString),
-    /// Spawn `program`, passing `prefix` before the extract argv.
-    Wrapped {
-        program: OsString,
-        prefix: Vec<OsString>,
-    },
-    /// Serve this invocation over a resident compile daemon's Unix socket.
-    /// This is not `Command`-shaped and is handled by [`ExtractCmd::run_with`].
-    Daemon(PathBuf),
-}
-
-impl Launcher {
-    /// `nix run <flake_root>#tidepool-extract -- <argv>`.
-    pub fn nix_run(flake_root: &Path) -> Self {
-        Launcher::Wrapped {
-            program: OsString::from("nix"),
-            prefix: vec![
-                OsString::from("run"),
-                OsString::from(format!("{}#{DEFAULT_BIN}", flake_root.display())),
-                OsString::from("--"),
-            ],
-        }
-    }
-
-    /// The program this launcher spawns (`nix`, or the extract binary
-    /// itself), or — for [`Launcher::Daemon`], which spawns no process at
-    /// all — the socket path, for use in a [`SpawnError`]'s `bin` field so
-    /// an error message still names what was being talked to.
-    pub fn program(&self) -> &OsStr {
-        match self {
-            Launcher::Direct(bin) => bin,
-            Launcher::Wrapped { program, .. } => program,
-            Launcher::Daemon(path) => path.as_os_str(),
-        }
-    }
-
-    fn command(&self) -> Command {
-        match self {
-            Launcher::Direct(bin) => Command::new(bin),
-            Launcher::Wrapped { program, prefix } => {
-                let mut cmd = Command::new(program);
-                cmd.args(prefix);
-                cmd
-            }
-            Launcher::Daemon(_) => {
-                unreachable!("Launcher::Daemon has no Command — see ExtractCmd::run_with")
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Spawn result / error
 // ---------------------------------------------------------------------------
 
-/// The spawn itself failed — the process never ran, so it never paid a real
-/// `tidepool-extract` cost and is NOT counted by [`extract_spawn_count`].
+/// Binding or executing a compiler endpoint failed.
 #[derive(Debug)]
 pub struct SpawnError {
-    /// The program that failed to launch (the extract binary, or `nix` for a
-    /// wrapped [`Launcher`]).
+    /// The frontend, Nix launcher, or daemon socket involved.
     pub bin: OsString,
     pub source: std::io::Error,
+    settlement: Settlement,
+}
+
+#[derive(Debug)]
+enum Settlement {
+    NotSubmitted,
+    Submitted,
 }
 
 impl SpawnError {
@@ -309,6 +249,27 @@ impl SpawnError {
     /// keys on this (and only when the bin came from [`BinSource::PathLookup`]).
     pub fn is_not_found(&self) -> bool {
         self.source.kind() == std::io::ErrorKind::NotFound
+    }
+
+    /// True only when the endpoint proved the request was not accepted.
+    pub fn permits_rebind(&self) -> bool {
+        matches!(self.settlement, Settlement::NotSubmitted)
+    }
+
+    fn not_submitted(bin: impl AsRef<OsStr>, source: std::io::Error) -> Self {
+        Self {
+            bin: bin.as_ref().to_owned(),
+            source,
+            settlement: Settlement::NotSubmitted,
+        }
+    }
+
+    fn indeterminate(bin: impl AsRef<OsStr>, source: std::io::Error) -> Self {
+        Self {
+            bin: bin.as_ref().to_owned(),
+            source,
+            settlement: Settlement::Submitted,
+        }
     }
 }
 
@@ -359,18 +320,15 @@ impl ExtractRun {
 // The builder
 // ---------------------------------------------------------------------------
 
-/// A typed compiler-worker request and a [`Launcher`].
+/// A typed compiler-worker request and its frontend selection.
 ///
 /// Request fields retain their types through [`ExtractRequest::encode`]. A
-/// legacy argv rendering remains available for cache compatibility and is
-/// included in direct launches so temporary wrapper scripts can still inspect
-/// invocations; the Haskell worker consumes the versioned request payload.
-///
-/// Reusable: [`run`](ExtractCmd::run) borrows, so the same built argv can be
-/// launched twice (that is exactly what `tidepool-macro`'s nix fallback does).
+/// CLI argv rendering remains available for cache key classification and
+/// diagnostics; normal execution binds a [`CompilerEndpoint`] first and the
+/// Haskell worker consumes only the versioned request payload.
 #[derive(Clone, Debug)]
 pub struct ExtractCmd {
-    launcher: Launcher,
+    program: OsString,
     bin_source: BinSource,
     request: ExtractRequest,
 }
@@ -380,7 +338,7 @@ impl ExtractCmd {
     pub fn new() -> Result<Self, BinError> {
         let resolved = resolve_bin()?;
         Ok(ExtractCmd {
-            launcher: Launcher::Direct(resolved.path.into_os_string()),
+            program: resolved.path.into_os_string(),
             bin_source: resolved.source,
             request: ExtractRequest::default(),
         })
@@ -396,7 +354,7 @@ impl ExtractCmd {
     /// call or the named escape hatch — never a guessed fallback name.
     pub fn with_bin(bin: ResolvedExtractBin) -> Self {
         ExtractCmd {
-            launcher: Launcher::Direct(bin.into_os_string()),
+            program: bin.into_os_string(),
             bin_source: BinSource::Explicit,
             request: ExtractRequest::default(),
         }
@@ -407,9 +365,18 @@ impl ExtractCmd {
         self.bin_source
     }
 
-    /// The launcher this command spawns by default.
-    pub fn launcher(&self) -> &Launcher {
-        &self.launcher
+    /// Resolve and bind the exact producer that will execute this request.
+    /// Daemon discovery, direct frontend loading, worker selection, and GHC
+    /// libdir capture all happen here, before callers derive cache or build
+    /// product identity.
+    pub fn bind(&self) -> Result<CompilerEndpoint, SpawnError> {
+        CompilerEndpoint::bind(self)
+    }
+
+    /// Bind the macro's explicit `nix run <flake>#tidepool-extract` fallback.
+    /// The returned endpoint reports the producer loaded by Nix itself.
+    pub fn bind_nix_fallback(&self, flake_root: &Path) -> Result<CompilerEndpoint, SpawnError> {
+        CompilerEndpoint::bind_nix(flake_root)
     }
 
     /// A positional input file. Repeatable; order is preserved (the classify
@@ -554,94 +521,13 @@ impl ExtractCmd {
     }
 
     /// Exact argv consumed by the compiler worker: the version marker and
-    /// encoded typed request. Most callers should use [`Self::run`]; this is
-    /// for wrappers and tests that must add process-level instrumentation
-    /// such as fault-injection environment variables without reconstructing
-    /// the transport encoding.
+    /// encoded typed request. Most callers should bind and execute an endpoint;
+    /// this is for endpoint infrastructure and tests that inspect the
+    /// transport encoding.
     pub fn worker_argv(&self) -> Vec<OsString> {
         self.request.worker_argv()
     }
-
-    /// Spawn, wait, and classify — through this command's own [`Launcher`].
-    ///
-    /// If `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` names a working daemon, send the
-    /// current directory and worker request over it. A failed connect falls
-    /// back to the configured launcher; failures after submission are
-    /// returned because replay could duplicate the compile. The spawn counter
-    /// increments once for either successful route.
-    pub fn run(&self) -> Result<ExtractRun, SpawnError> {
-        if let Some(socket) = std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET") {
-            let socket_path = PathBuf::from(socket);
-            match self.run_via_daemon(&socket_path) {
-                Ok(run) => return Ok(run),
-                Err(error) if error.permits_direct_fallback() => {}
-                Err(error) => {
-                    return Err(SpawnError {
-                        bin: socket_path.into_os_string(),
-                        source: std::io::Error::other(error.to_string()),
-                    });
-                }
-            }
-            // Connect failure proves the request was never submitted, so one
-            // direct attempt is safe. Post-connect failures return above:
-            // the daemon may still be compiling that logical request.
-        }
-        self.run_with(&self.launcher)
-    }
-
-    /// As [`run`](ExtractCmd::run), but through a caller-supplied
-    /// [`Launcher`] over the same request — `tidepool-macro`'s nix fallback, and
-    /// (internally) [`run`](ExtractCmd::run)'s own Direct fallback.
-    /// [`Launcher::Daemon`] is handled here too, for a caller that
-    /// deliberately wants to target a specific daemon socket rather than
-    /// going through `run`'s own env-gated discovery — unlike `run`, a
-    /// daemon failure here is reported as this call's own [`SpawnError`]
-    /// rather than silently retried through Direct (an explicit launcher is
-    /// an explicit request: do that, and report honestly if it fails).
-    pub fn run_with(&self, launcher: &Launcher) -> Result<ExtractRun, SpawnError> {
-        if let Launcher::Daemon(socket_path) = launcher {
-            return self.run_via_daemon(socket_path).map_err(|e| SpawnError {
-                bin: socket_path.as_os_str().to_os_string(),
-                source: std::io::Error::other(e.to_string()),
-            });
-        }
-
-        let mut cmd = launcher.command();
-        cmd.args(self.request.worker_argv());
-        process::child_dies_with_parent(&mut cmd);
-
-        let start = Instant::now();
-        let output = cmd.output().map_err(|source| SpawnError {
-            bin: launcher.program().to_os_string(),
-            source,
-        })?;
-        let elapsed = start.elapsed();
-        // Counted on a successful spawn (the process actually launched and ran to
-        // exit) — a `SpawnError` above (bad path, `Command::output` I/O failure)
-        // never paid a real `tidepool-extract` cost and must not count as one.
-        EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
-
-        Ok(ExtractRun { output, elapsed })
-    }
-
-    /// Connect to `socket_path` and serve this command's versioned worker
-    /// request over the daemon transport (see the `daemon` module). The current working
-    /// directory is forwarded exactly as a spawned process would have
-    /// inherited it (`std::env::current_dir`) — the daemon's single worker
-    /// `setCurrentDirectory`s to it before compiling (safe: one worker,
-    /// serialized), so relative-path semantics match a
-    /// spawned process exactly.
-    fn run_via_daemon(&self, socket_path: &Path) -> Result<ExtractRun, daemon::DaemonError> {
-        let cwd = std::env::current_dir().map_err(daemon::DaemonError::Io)?;
-        let (output, elapsed) =
-            daemon::run_over_daemon(socket_path, &cwd, &self.request.worker_argv())?;
-        // Counts "a tidepool-extract invocation was served" — true whether
-        // the transport was a process or a socket.
-        EXTRACT_SPAWNS.fetch_add(1, Ordering::Relaxed);
-        Ok(ExtractRun { output, elapsed })
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,26 +641,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nix_run_launcher_prefixes_the_same_argv() {
-        let l = Launcher::nix_run(Path::new("/repo"));
-        match l {
-            Launcher::Wrapped { program, prefix } => {
-                assert_eq!(program, OsString::from("nix"));
-                assert_eq!(strs(&prefix), vec!["run", "/repo#tidepool-extract", "--"]);
-            }
-            Launcher::Direct(_) | Launcher::Daemon(_) => {
-                panic!("nix_run must be a wrapped launcher")
-            }
-        }
-    }
-
     /// One test owns `$TIDEPOOL_EXTRACT` for this binary (all cases in
     /// sequence) so no two tests race on the same process-global env var.
     #[test]
     fn bin_resolution_is_strict() {
         let _state = PROCESS_STATE.lock().unwrap();
         use std::os::unix::fs::PermissionsExt;
+        let old_extract = std::env::var_os("TIDEPOOL_EXTRACT");
         let dir = std::env::temp_dir().join(format!(
             "tidepool-extract-cmd-resolve-{}",
             std::process::id()
@@ -836,6 +709,38 @@ mod tests {
         assert_eq!(resolved.path, PathBuf::from(DEFAULT_BIN));
         assert_eq!(resolved.source, BinSource::PathLookup);
 
+        // Endpoint binding preserves that interpretation: the bare name is
+        // resolved by the actual launch through PATH, and the identity comes
+        // from that launched producer rather than a separate path scan.
+        std::fs::write(
+            &real,
+            b"#!/bin/sh\nprintf TPCID001\nhead -c 32 /dev/zero\ncat >/dev/null\n",
+        )
+        .unwrap();
+        let old_path = std::env::var_os("PATH");
+        let mut paths = vec![dir.clone()];
+        if let Some(path) = &old_path {
+            paths.extend(std::env::split_paths(path));
+        }
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        let old_socket = std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let endpoint = ExtractCmd::new().unwrap().bind().unwrap();
+        assert_eq!(endpoint.identity().producer_bytes(), &[0; 32]);
+        drop(endpoint);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        match old_socket {
+            Some(socket) => std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", socket),
+            None => std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET"),
+        }
+        match old_extract {
+            Some(extract) => std::env::set_var("TIDEPOOL_EXTRACT", extract),
+            None => std::env::remove_var("TIDEPOOL_EXTRACT"),
+        }
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -851,13 +756,17 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("fake-extract");
-        std::fs::write(&fake, b"#!/bin/sh\nexit 3\n").unwrap();
+        std::fs::write(
+            &fake,
+            b"#!/bin/sh\nprintf TPCID001\nhead -c 32 /dev/zero\ncat >/dev/null\nprintf '\\003\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000'\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         reset_extract_spawn_count();
 
         // This test is about the DIRECT-SPAWN counter: under an inherited
-        // live daemon socket run() would
+        // live daemon socket execution would
         // route to the daemon and return Ok(diagnostics) instead of the
         // NotFound this asserts. The shared test lock prevents another test
         // from observing the temporary removal.
@@ -867,95 +776,20 @@ mod tests {
         let mut missing = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
             dir.join("does-not-exist"),
         ));
-        let err = missing.input("x.hs").run().unwrap_err();
+        missing.input("x.hs");
+        let err = missing.bind().unwrap_err();
         assert!(err.is_not_found(), "expected NotFound, got {err}");
         assert_eq!(extract_spawn_count(), 0);
 
         // Ran and failed: still counted.
         let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&fake));
-        let run = cmd.input("x.hs").run().unwrap();
+        cmd.input("x.hs");
+        let endpoint = cmd.bind().unwrap();
+        let run = endpoint.execute(&cmd).unwrap();
         assert!(!run.success());
         assert_eq!(extract_spawn_count(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // -----------------------------------------------------------------
-    // Fake-daemon response synthesis and direct-fallback tests. The shared
-    // lock gives each test exclusive ownership of process-global environment
-    // and counters for its duration.
-    // -----------------------------------------------------------------
-
-    fn read_u32(s: &mut std::os::unix::net::UnixStream) -> u32 {
-        use std::io::Read;
-        let mut b = [0u8; 4];
-        s.read_exact(&mut b).unwrap();
-        u32::from_le_bytes(b)
-    }
-
-    fn read_frame(s: &mut std::os::unix::net::UnixStream) -> Vec<u8> {
-        use std::io::Read;
-        let n = read_u32(s) as usize;
-        let mut buf = vec![0u8; n];
-        s.read_exact(&mut buf).unwrap();
-        buf
-    }
-
-    /// Consume one request off the wire without inspecting it — a fake
-    /// daemon only needs to know where the request ENDS before it can write
-    /// its own canned response on the same connection.
-    fn drain_request(s: &mut std::os::unix::net::UnixStream) {
-        let _cwd = read_frame(s);
-        let argc = read_u32(s);
-        for _ in 0..argc {
-            let _ = read_frame(s);
-        }
-    }
-
-    fn write_frame(s: &mut std::os::unix::net::UnixStream, bytes: &[u8]) {
-        use std::io::Write;
-        s.write_all(&(bytes.len() as u32).to_le_bytes()).unwrap();
-        s.write_all(bytes).unwrap();
-    }
-
-    fn scratch_socket_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("tp-ecmd-{name}-{}.sock", std::process::id()))
-    }
-
-    #[test]
-    fn fake_daemon_serves_run_and_synthesizes_output() {
-        let _state = PROCESS_STATE.lock().unwrap();
-        use std::io::Write;
-        use std::os::unix::net::UnixListener;
-
-        let sock_path = scratch_socket_path("fake-serve");
-        let _ = std::fs::remove_file(&sock_path);
-        let listener = UnixListener::bind(&sock_path).unwrap();
-
-        let server = std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            drain_request(&mut conn);
-            conn.write_all(&2i32.to_le_bytes()).unwrap();
-            write_frame(&mut conn, b"fake stdout");
-            write_frame(&mut conn, b"fake stderr");
-        });
-
-        std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", &sock_path);
-        reset_extract_spawn_count();
-        let mut cmd =
-            ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("unused-in-daemon-mode"));
-        cmd.input("Expr.hs").target("result");
-        let run = cmd.run().unwrap();
-        std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        server.join().unwrap();
-
-        assert_eq!(run.output.status.code(), Some(2));
-        assert!(!run.success());
-        assert_eq!(run.output.stdout, b"fake stdout");
-        assert_eq!(run.stderr_lossy(), "fake stderr");
-        assert_eq!(extract_spawn_count(), 1);
-
-        std::fs::remove_file(&sock_path).ok();
     }
 
     #[test]
@@ -968,18 +802,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let fake_bin = dir.join("fake-extract");
-        std::fs::write(&fake_bin, b"#!/bin/sh\necho fallback-ran\nexit 0\n").unwrap();
+        std::fs::write(
+            &fake_bin,
+            b"#!/bin/sh\nprintf TPCID001\nhead -c 32 /dev/zero\ncat >/dev/null\nprintf '\\000\\000\\000\\000\\015\\000\\000\\000fallback-ran\\012\\000\\000\\000\\000'\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         // Never bound by anything — connecting must fail with NotFound.
-        let dead_sock = scratch_socket_path("dead");
+        let dead_sock = dir.join("dead.sock");
         let _ = std::fs::remove_file(&dead_sock);
 
         std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", &dead_sock);
         reset_extract_spawn_count();
         let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&fake_bin));
         cmd.input("Expr.hs");
-        let run = cmd.run().unwrap();
+        let endpoint = cmd.bind().unwrap();
+        let run = endpoint.execute(&cmd).unwrap();
         std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
 
         assert!(run.success());
@@ -991,56 +830,6 @@ mod tests {
         // daemon attempt plus a real spawn.
         assert_eq!(extract_spawn_count(), 1);
 
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn submitted_daemon_request_is_not_replayed_directly() {
-        let _state = PROCESS_STATE.lock().unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        use std::os::unix::net::UnixListener;
-
-        let dir = std::env::temp_dir().join(format!(
-            "tidepool-extract-cmd-no-replay-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let marker = dir.join("direct-ran");
-        let fake_bin = dir.join("fake-extract");
-        std::fs::write(
-            &fake_bin,
-            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let sock_path = scratch_socket_path("submitted-close");
-        let _ = std::fs::remove_file(&sock_path);
-        let listener = UnixListener::bind(&sock_path).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut connection, _) = listener.accept().unwrap();
-            drain_request(&mut connection);
-            // Losing the connection here leaves settlement indeterminate: the
-            // daemon accepted the whole request but returned no response.
-        });
-
-        std::env::set_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET", &sock_path);
-        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(&fake_bin));
-        cmd.input("Expr.hs");
-        let error = cmd.run().unwrap_err();
-        std::env::remove_var("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        server.join().unwrap();
-
-        assert!(
-            error.to_string().contains("daemon crashed mid-request"),
-            "unexpected error: {error}"
-        );
-        assert!(
-            !marker.exists(),
-            "an accepted daemon request must never be replayed directly"
-        );
-
-        std::fs::remove_file(&sock_path).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 }

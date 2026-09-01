@@ -5,8 +5,8 @@ stdlib it pairs with (`toolchain.rs`), the extract/stdlib deploy handshake
 (also `toolchain.rs`), on-disk path resolution (`paths.rs`), the
 compiled-artifact cache (`cache.rs`), the ONE policy-bearing compile front
 door (`artifacts.rs`), and the structured extract-diagnostics contract
-(`diag.rs`, `timing.rs`). Sits between `tidepool-extract-cmd` (the zero-dep
-invocation builder this crate spawns through) and `tidepool-runtime` (the
+(`diag.rs`, `timing.rs`). Sits between `tidepool-extract-cmd` (the endpoint
+and invocation boundary this crate executes through) and `tidepool-runtime` (the
 high-level compile/run API and session substrate, which depends on this
 crate and re-exports what its own downstream callers still reach through
 `tidepool_runtime::` paths — `paths`, `toolchain`, `cache`, `artifacts`,
@@ -36,7 +36,9 @@ filenames. `compile_turns` (`tidepool-harness`'s fixed-source boot/answerer/
 render compiles, identical across ~200 test processes) is the invocation
 layer's consumer; see the doc comments on `invocation_key` for the
 allowlisted-argv keying discipline (default-deny — an unrecognized flag makes
-the invocation uncacheable rather than silently unkeyed) and on
+the invocation uncacheable rather than silently unkeyed). Every key also
+frames the identity reported by the already-bound compiler endpoint, so the
+producer named by the key is necessarily the producer that executes. See
 `fingerprint_dir_relative` for why include-dir fingerprints are
 path-independent (module identity comes from the path relative to the search
 root, since Cast/Tick/Type erasure strips source spans before Core reaches
@@ -50,18 +52,14 @@ either layer explicitly uncacheable: `#include` can name files outside every
 GHC import root, so an import-directory walk cannot honestly enumerate those
 side inputs.
 
-The key builder deliberately lives here and not in `tidepool-extract-cmd`
-(the crate that actually builds/spawns `ExtractCmd`): that crate is a
-zero-dependency std-only leaf so `tidepool-macro` can depend on it without
-dragging Cranelift and blake3 into every crate that expands
-`haskell_eval!`/`haskell_inline!`. The key is nonetheless computed FROM
-`ExtractCmd::argv()`, so the builder stays invocation-shaped and can move
-down a crate later without a redesign if `tidepool-extract-cmd` ever grows
-deps. This crate itself sits one layer above `tidepool-extract-cmd` for the
-because it needs Cranelift-adjacent dependencies
-(`tidepool-codegen`, for `binary_content_hash`'s memo and
-`register_var_names`/`register_poisoned_externals`) that the invocation
-builder must stay free of.
+The key builder deliberately lives here and not in `tidepool-extract-cmd`:
+that crate owns binding and execution, while this crate owns cache policy.
+The key is computed from `ExtractCmd::argv()` plus the opaque
+`CompilerIdentity` returned by binding, so it stays invocation-shaped without
+reimplementing wrapper, PATH, Nix, daemon, worker, or GHC identity policy.
+This crate sits one layer above `tidepool-extract-cmd` because it also needs
+Cranelift-adjacent dependencies (`tidepool-codegen`, for
+`register_var_names`/`register_poisoned_externals`).
 
 Session-scope compiles (`--inject-val`/`--session-root`,
 which read per-session mutable directories) are excluded from the invocation

@@ -816,7 +816,6 @@ impl SessionLib {
         // doc) — this validation spawn does a real full typecheck of the
         // candidate's stdlib closure, so it benefits from the same
         // module-granular recompilation avoidance every other spawn gets.
-        crate::paths::apply_build_products_dir(&mut cmd);
         cmd.input(&wrapper_path)
             .output_dir(temp.path())
             .target("result")
@@ -838,7 +837,13 @@ impl SessionLib {
 
         // Spawn failure is an environment problem (`CompileError::Io` →
         // Infra), never a declaration diagnostic.
-        let run = cmd.run().map_err(|e| {
+        let endpoint = cmd.bind().map_err(|e| {
+            SessionError::Compile(crate::CompileError::Io(crate::extract_spawn_error(
+                e.source,
+            )))
+        })?;
+        crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+        let run = endpoint.execute(&cmd).map_err(|e| {
             SessionError::Compile(crate::CompileError::Io(crate::extract_spawn_error(
                 e.source,
             )))

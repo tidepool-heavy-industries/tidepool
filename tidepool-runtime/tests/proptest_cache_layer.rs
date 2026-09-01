@@ -27,7 +27,9 @@
 use proptest::prelude::*;
 use serial_test::serial;
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
@@ -105,8 +107,7 @@ impl Harness {
     }
 
     /// Build a harness whose stub extractor emits `expr_bytes` as the compiled
-    /// artifact. A secondary fixture `b.cbor` (Lit 43) is also written so
-    /// tests can simulate a "toolchain upgrade" by retargeting the stub.
+    /// artifact.
     fn with_fixture_bytes(expr_bytes: Vec<u8>) -> Self {
         let root = TempDir::new().unwrap();
         let r = root.path();
@@ -115,17 +116,29 @@ impl Harness {
         fs::create_dir_all(r.join("bin")).unwrap();
 
         fs::write(r.join("fx/a.cbor"), &expr_bytes).unwrap();
-        fs::write(r.join("fx/b.cbor"), write_cbor(&lit_expr(43)).unwrap()).unwrap();
         fs::write(r.join("fx/meta.cbor"), empty_meta_bytes()).unwrap();
 
-        // The wrapper preserves an executable file for the cache key while
-        // delegating worker behavior back to this integration-test binary.
-        // That helper decodes the real typed request; no deleted CLI layout is
-        // duplicated here.
+        // Implement the bound endpoint protocol, then delegate worker behavior
+        // back to this integration-test binary. The helper decodes the real
+        // request frame and typed request rather than duplicating a CLI.
         let stub = r.join("bin/extract-stub");
         let test_binary = std::env::current_exe().unwrap();
         let script = format!(
-            "#!/bin/sh\necho run >> '{count}'\nTIDEPOOL_FAKE_EXTRACT_REQUEST=\"$2\" \\\n             TIDEPOOL_FAKE_EXTRACT_EXPR='{fx}/a.cbor' \\\n             TIDEPOOL_FAKE_EXTRACT_META='{fx}/meta.cbor' \\\n             exec '{test_binary}' --exact fake_extract_worker --nocapture\n",
+            r#"#!/bin/sh
+test "$1" = --compiler-endpoint-v1 || exit 2
+printf TPCID001
+dd if=/dev/zero bs=32 count=1 2>/dev/null
+request='{request}'
+cat > "$request"
+echo run >> '{count}'
+TIDEPOOL_FAKE_EXTRACT_REQUEST_FILE="$request" \
+TIDEPOOL_FAKE_EXTRACT_EXPR='{fx}/a.cbor' \
+TIDEPOOL_FAKE_EXTRACT_META='{fx}/meta.cbor' \
+'{test_binary}' --exact fake_extract_worker --nocapture >/dev/null 2>/dev/null || exit $?
+report='{{"version":2,"outcome":"success","diagnostics":[]}}'
+printf '\000\000\000\000\062\000\000\000%s\000\000\000\000' "$report"
+"#,
+            request = r.join("request.bin").display(),
             count = r.join("count").display(),
             fx = r.join("fx").display(),
             test_binary = test_binary.display(),
@@ -149,10 +162,6 @@ impl Harness {
         self.root.path()
     }
 
-    fn stub(&self) -> PathBuf {
-        self.path().join("bin/extract-stub")
-    }
-
     /// How many times the stub extractor has run (the HIT/MISS oracle).
     fn runs(&self) -> usize {
         fs::read_to_string(self.path().join("count"))
@@ -167,6 +176,11 @@ impl Harness {
         include: &[&Path],
     ) -> Result<CompileResult, tidepool_runtime::CompileError> {
         compile_haskell(src, target, include)
+    }
+
+    fn use_daemon(&mut self, socket: &Path) {
+        self._guards
+            .push(EnvGuard::new("TIDEPOOL_EXTRACT_DAEMON_SOCKET", socket));
     }
 
     /// Swap the primary fixture (what a "recompile" would now produce).
@@ -210,33 +224,20 @@ impl Harness {
             d.join(format!("{}.ok", keys[0])),
         )
     }
-
-    /// Replace TIDEPOOL_EXTRACT with a wrapper script that delegates to the
-    /// stub, either with a quoted or unquoted exec target path.
-    fn install_wrapper(&mut self, quoted: bool) {
-        let wrapper = self.path().join("bin/wrapper");
-        let stub = self.stub();
-        let line = if quoted {
-            format!("exec \"{}\" \"$@\"\n", stub.display())
-        } else {
-            format!("exec {} \"$@\"\n", stub.display())
-        };
-        fs::write(&wrapper, format!("#!/bin/sh\n{}", line)).unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        self._guards
-            .push(EnvGuard::new("TIDEPOOL_EXTRACT", &wrapper));
-    }
 }
 
 /// Child-process entry point used by [`Harness`]. A normal test invocation has
-/// no request environment and returns immediately; the wrapper above invokes
-/// this exact test with the typed payload in the environment.
+/// no request environment and returns immediately; the endpoint stub above
+/// invokes this exact test with the framed request in a temporary file.
 #[test]
 fn fake_extract_worker() {
-    let Some(payload) = std::env::var_os("TIDEPOOL_FAKE_EXTRACT_REQUEST") else {
+    let Some(request_file) = std::env::var_os("TIDEPOOL_FAKE_EXTRACT_REQUEST_FILE") else {
         return;
     };
-    let bytes = decode_hex(payload.to_str().expect("typed request is ASCII hex"));
+    let request_frame = fs::read(request_file).unwrap();
+    let argv = decode_endpoint_request(&request_frame);
+    assert_eq!(argv.len(), 2, "typed worker request argv");
+    let bytes = decode_hex(argv[1].to_str().expect("typed request is ASCII hex"));
     let request = tidepool_extract_cmd::ExtractRequest::decode(&bytes).unwrap();
     let output_dir = PathBuf::from(request.output_directory().unwrap());
     let expr = PathBuf::from(std::env::var_os("TIDEPOOL_FAKE_EXTRACT_EXPR").unwrap());
@@ -246,6 +247,29 @@ fn fake_extract_worker() {
     }
     fs::copy(meta, output_dir.join("meta.cbor")).unwrap();
     fs::write(output_dir.join("asks.json"), b"[]").unwrap();
+}
+
+fn decode_endpoint_request(bytes: &[u8]) -> Vec<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStringExt;
+
+    fn take_frame<'a>(bytes: &mut &'a [u8]) -> &'a [u8] {
+        let (size, rest) = bytes.split_at(4);
+        let size = u32::from_le_bytes(size.try_into().unwrap()) as usize;
+        let (frame, rest) = rest.split_at(size);
+        *bytes = rest;
+        frame
+    }
+
+    let mut remaining = bytes;
+    let _cwd = take_frame(&mut remaining);
+    let (argc, rest) = remaining.split_at(4);
+    remaining = rest;
+    let argc = u32::from_le_bytes(argc.try_into().unwrap()) as usize;
+    let argv = (0..argc)
+        .map(|_| std::ffi::OsString::from_vec(take_frame(&mut remaining).to_vec()))
+        .collect();
+    assert!(remaining.is_empty(), "trailing endpoint request bytes");
+    argv
 }
 
 fn decode_hex(hex: &str) -> Vec<u8> {
@@ -261,6 +285,52 @@ fn decode_hex(hex: &str) -> Vec<u8> {
             digit(pair[0]) << 4 | digit(pair[1])
         })
         .collect()
+}
+
+fn rejecting_daemon(socket: &Path) -> std::thread::JoinHandle<()> {
+    let _ = fs::remove_file(socket);
+    let listener = UnixListener::bind(socket).unwrap();
+    let socket = socket.to_path_buf();
+    std::thread::spawn(move || {
+        let (mut preflight, _) = listener.accept().unwrap();
+        let mut magic = [0u8; 8];
+        preflight.read_exact(&mut magic).unwrap();
+        assert_eq!(&magic, b"TPDPF001");
+        preflight.write_all(b"TPDPI001").unwrap();
+        preflight.write_all(&[1; 32]).unwrap();
+        preflight.write_all(&[2; 32]).unwrap();
+        drop(preflight);
+
+        let (mut request, _) = listener.accept().unwrap();
+        let mut header = [0u8; 40];
+        request.read_exact(&mut header).unwrap();
+        assert_eq!(&header[..8], b"TPDRQ001");
+        assert_eq!(&header[8..], &[2; 32]);
+        let _cwd = read_endpoint_frame(&mut request);
+        let argc = read_endpoint_u32(&mut request);
+        for _ in 0..argc {
+            let _arg = read_endpoint_frame(&mut request);
+        }
+
+        // Remove the listening name before rejecting. The caller can safely
+        // rebind immediately, and that bind must select the direct endpoint.
+        fs::remove_file(&socket).unwrap();
+        request.write_all(&[0]).unwrap();
+        request.write_all(&8u32.to_le_bytes()).unwrap();
+        request.write_all(b"rejected").unwrap();
+    })
+}
+
+fn read_endpoint_u32(reader: &mut impl Read) -> u32 {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes).unwrap();
+    u32::from_le_bytes(bytes)
+}
+
+fn read_endpoint_frame(reader: &mut impl Read) -> Vec<u8> {
+    let mut bytes = vec![0; read_endpoint_u32(reader) as usize];
+    reader.read_exact(&mut bytes).unwrap();
+    bytes
 }
 
 /// Rewrite a file with `new_bytes` and restore its original mtime, simulating
@@ -406,6 +476,33 @@ fn load_after_store_identity_huge_payload() {
     assert_eq!(second.expr, expected);
 }
 
+#[test]
+#[serial]
+fn daemon_rejection_rebinds_and_rekeys_before_direct_execution() {
+    let mut h = Harness::new();
+    let socket = h.path().join("reject.sock");
+    h.use_daemon(&socket);
+    let src = unique_src("daemon-rekey");
+
+    let first_daemon = rejecting_daemon(&socket);
+    assert!(h.compile(&src, "t", &[]).is_ok());
+    first_daemon.join().unwrap();
+    assert_eq!(h.runs(), 1, "the rejected request must execute direct once");
+
+    // Recreate the same daemon identity. If the first result was incorrectly
+    // stored under that rejected endpoint, this compile would hit before the
+    // daemon saw a request and the server thread would remain blocked. It must
+    // instead reject again, rebind direct, then hit the direct endpoint's key.
+    let second_daemon = rejecting_daemon(&socket);
+    assert!(h.compile(&src, "t", &[]).is_ok());
+    second_daemon.join().unwrap();
+    assert_eq!(
+        h.runs(),
+        1,
+        "the rebound direct identity must hit without another execution"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // F1: key non-injectivity — NUL separator injection
 // ---------------------------------------------------------------------------
@@ -415,7 +512,8 @@ fn load_after_store_identity_huge_payload() {
 fn key_should_separate_source_from_target() {
     let h = Harness::new();
     let pfx = unique_src("nul-collide-fix");
-    assert!(h.compile(&format!("{pfx}a\0b"), "c", &[]).is_ok());
+    let first = h.compile(&format!("{pfx}a\0b"), "c", &[]);
+    assert!(first.is_ok(), "first compile failed: {first:?}");
     // Distinct keys ⇒ cache MISS ⇒ the extractor is actually invoked — and a
     // NUL target cannot be exec'd, so the compile must ERROR. (The pre-fix
     // collision returned Ok served from the first entry's artifact; runs()
@@ -519,48 +617,8 @@ fn key_sensitivity_include_membership_matrix() {
 }
 
 // ---------------------------------------------------------------------------
-// F3: fingerprints are (path, size, mtime) — content swaps are invisible
+// F3: include source contents are fingerprinted
 // ---------------------------------------------------------------------------
-
-/// Sanity (covered case, passes): the extractor binary IS fingerprinted into
-/// the key — a size change invalidates the cache. This is the fix for the
-/// historical "stale cache after toolchain upgrade" (#313-class) footgun.
-#[test]
-#[serial]
-fn staleness_binary_size_change_invalidates() {
-    let h = Harness::new();
-    let src = unique_src("bin-size");
-
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    // "Upgrade" the toolchain: append to the stub (size + mtime change).
-    let mut script = fs::read_to_string(h.stub()).unwrap();
-    script.push_str("# upgraded\n");
-    fs::write(h.stub(), script).unwrap();
-    fs::set_permissions(h.stub(), fs::Permissions::from_mode(0o755)).unwrap();
-
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(
-        h.runs(),
-        2,
-        "binary size/mtime change must MISS (toolchain fingerprint works)"
-    );
-}
-
-#[test]
-#[serial]
-fn key_should_change_when_binary_content_changes() {
-    let h = Harness::new();
-    let src = unique_src("bin-swap-fix");
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    let script = fs::read_to_string(h.stub()).unwrap();
-    let swapped = script.replace("/fx/a.cbor", "/fx/b.cbor");
-    swap_content_preserving_mtime(&h.stub(), swapped.as_bytes());
-    fs::set_permissions(h.stub(), fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(h.runs(), 2, "binary content change must MISS");
-}
 
 #[test]
 #[serial]
@@ -597,56 +655,6 @@ fn key_should_change_when_symlinked_hs_target_changes() {
     fs::write(&real, "v2 with a much longer body\n").unwrap();
     assert!(h.compile(&src, "t", &[&inc]).is_ok());
     assert_eq!(h.runs(), 2, "symlink target edit must MISS");
-}
-
-// ---------------------------------------------------------------------------
-// F5: wrapper-script exec parser misses quoted targets
-// ---------------------------------------------------------------------------
-
-/// Sanity (covered case, passes): an UNQUOTED absolute exec target in a
-/// wrapper script is followed and fingerprinted — this matches the real
-/// `~/.cargo/bin/tidepool-extract` wrapper today.
-#[test]
-#[serial]
-fn staleness_unquoted_wrapper_target_followed() {
-    let mut h = Harness::new();
-    h.install_wrapper(false);
-    let src = unique_src("wrapper-unquoted");
-
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(h.runs(), 1);
-
-    // Upgrade the delegate binary (size + mtime change), wrapper untouched.
-    let mut script = fs::read_to_string(h.stub()).unwrap();
-    script.push_str("# upgraded\n");
-    fs::write(h.stub(), script).unwrap();
-    fs::set_permissions(h.stub(), fs::Permissions::from_mode(0o755)).unwrap();
-
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(
-        h.runs(),
-        2,
-        "delegate change behind unquoted wrapper must MISS"
-    );
-}
-
-#[test]
-#[serial]
-fn key_should_follow_quoted_wrapper_targets() {
-    let mut h = Harness::new();
-    h.install_wrapper(true);
-    let src = unique_src("wrapper-quoted-fix");
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    let mut script = fs::read_to_string(h.stub()).unwrap();
-    script.push_str("# upgraded\n");
-    fs::write(h.stub(), script).unwrap();
-    fs::set_permissions(h.stub(), fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(h.compile(&src, "t", &[]).is_ok());
-    assert_eq!(
-        h.runs(),
-        2,
-        "delegate change must MISS regardless of quoting"
-    );
 }
 
 // ---------------------------------------------------------------------------

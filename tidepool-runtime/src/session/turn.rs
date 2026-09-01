@@ -526,9 +526,7 @@ fn missing_template_error(selector: TemplateSelector) -> CompileError {
 /// concern, and this crate's OTHER (turn/eval) spawns get it too — this is
 /// what makes it on-by-default here rather than only through that one lane.
 fn extract_cmd() -> Result<ExtractCmd, CompileError> {
-    let mut cmd = ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))?;
-    crate::paths::apply_build_products_dir(&mut cmd);
-    Ok(cmd)
+    ExtractCmd::new().map_err(|e| CompileError::Io(e.into()))
 }
 
 fn map_notfound(e: SpawnError) -> CompileError {
@@ -623,7 +621,9 @@ pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
         cmd.turn_verdict(arg);
     }
 
-    let run = cmd.run().map_err(map_notfound)?;
+    let endpoint = cmd.bind().map_err(map_notfound)?;
+    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -1024,7 +1024,9 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     }
     cmd.classify().classify_out(&out_path);
 
-    let run = cmd.run().map_err(map_notfound)?;
+    let endpoint = cmd.bind().map_err(map_notfound)?;
+    crate::paths::apply_build_products_dir(&mut cmd, &endpoint);
+    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
     let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
     // its extract phases the same as a successful one, before the early

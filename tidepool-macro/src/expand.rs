@@ -6,7 +6,7 @@ use syn::{LitStr, Token};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use tidepool_extract_cmd::{resolve_bin, BinSource, ExtractCmd, Launcher, ResolvedBin};
+use tidepool_extract_cmd::{BinSource, CompilerEndpoint, ExtractCmd};
 
 const EXTRACT_COMPLETE_FILE: &str = ".tidepool-extract-complete";
 /// A resolved local `.hs` input: its canonicalized path and content.
@@ -159,23 +159,29 @@ fn resolve_hs_path(
     // local module transitively reachable from its `import`s (heuristic
     // textual resolution, not GHC's own module graph — see
     // `resolve_transitive_hs_deps`), the target binding, and the producer
-    // identity (see `extract_identity`). `run_tidepool_extract` validates the
+    // identity reported by the bound endpoint. `run_tidepool_extract` validates the
     // complete artifact set before publishing the dir with an atomic rename.
-    let key = content_key(&src_bytes, binding_name.as_deref(), &deps);
-    let dep_paths: Vec<PathBuf> = deps.into_iter().map(|(p, _)| p).collect();
-    let output_dir = Path::new(&manifest_dir)
-        .join("target")
-        .join("tidepool-cbor")
-        .join(format!("{basename}-{key}"));
-
-    if let Err(msg) = run_tidepool_extract(
-        &abs_hs_path,
-        &output_dir,
-        binding_name.as_deref(),
-        Path::new(&manifest_dir),
+    let dep_paths: Vec<PathBuf> = deps.iter().map(|(p, _)| p.clone()).collect();
+    let output_dir = match retry_safe_refusals(
+        || bind_compiler_endpoint(Path::new(&manifest_dir)),
+        |compiler| {
+            let key = content_key(
+                &src_bytes,
+                binding_name.as_deref(),
+                &deps,
+                compiler.endpoint.identity().as_bytes(),
+            );
+            let output_dir = Path::new(&manifest_dir)
+                .join("target")
+                .join("tidepool-cbor")
+                .join(format!("{basename}-{key}"));
+            run_tidepool_extract(&abs_hs_path, &output_dir, binding_name.as_deref(), compiler)?;
+            Ok(output_dir)
+        },
     ) {
-        return Err(syn::Error::new(path_lit.span(), msg).to_compile_error());
-    }
+        Ok(output_dir) => output_dir,
+        Err(message) => return Err(syn::Error::new(path_lit.span(), message).to_compile_error()),
+    };
 
     // Find the target .cbor file
     let cbor_path = match binding_name {
@@ -449,45 +455,44 @@ pub fn expand_inline(input: TokenStream) -> TokenStream {
     // key covers `full_source` (which already embeds every spliced include
     // file's bytes) plus any transitively-resolved import left outside the
     // splice, the target, and the producer identity.
-    let key = content_key(full_source.as_bytes(), Some(&parsed.target), &extra_deps);
-    let extra_dep_paths: Vec<PathBuf> = extra_deps.into_iter().map(|(p, _)| p).collect();
-    let inline_dir = Path::new(&manifest_dir)
-        .join("target")
-        .join("tidepool-inline")
-        .join(&key);
-    if let Err(e) = std::fs::create_dir_all(&inline_dir) {
-        return syn::Error::new(
-            parsed.source.span(),
-            format!("Failed to create {}: {}", inline_dir.display(), e),
-        )
-        .to_compile_error();
-    }
-    let hs_file = inline_dir.join(format!("{}.hs", module_name));
-    let hs_tmp = inline_dir.join(format!("{}.hs.tmp-{}", module_name, std::process::id()));
-    if let Err(e) =
-        std::fs::write(&hs_tmp, &full_source).and_then(|()| std::fs::rename(&hs_tmp, &hs_file))
-    {
-        return syn::Error::new(
-            parsed.source.span(),
-            format!("Failed to write {}: {}", hs_file.display(), e),
-        )
-        .to_compile_error();
-    }
-
-    // Output dir for CBOR
-    let output_dir = Path::new(&manifest_dir)
-        .join("target")
-        .join("tidepool-cbor")
-        .join(format!("{module_name}-{key}"));
-
-    if let Err(msg) = run_tidepool_extract(
-        &hs_file,
-        &output_dir,
-        Some(&parsed.target),
-        Path::new(&manifest_dir),
+    let extra_dep_paths: Vec<PathBuf> = extra_deps.iter().map(|(p, _)| p.clone()).collect();
+    let (hs_file, output_dir) = match retry_safe_refusals(
+        || bind_compiler_endpoint(Path::new(&manifest_dir)),
+        |compiler| {
+            let key = content_key(
+                full_source.as_bytes(),
+                Some(&parsed.target),
+                &extra_deps,
+                compiler.endpoint.identity().as_bytes(),
+            );
+            let inline_dir = Path::new(&manifest_dir)
+                .join("target")
+                .join("tidepool-inline")
+                .join(&key);
+            std::fs::create_dir_all(&inline_dir).map_err(|error| {
+                RetryError::Fatal(format!(
+                    "Failed to create {}: {error}",
+                    inline_dir.display()
+                ))
+            })?;
+            let hs_file = inline_dir.join(format!("{}.hs", module_name));
+            let hs_tmp = inline_dir.join(format!("{}.hs.tmp-{}", module_name, std::process::id()));
+            std::fs::write(&hs_tmp, &full_source)
+                .and_then(|()| std::fs::rename(&hs_tmp, &hs_file))
+                .map_err(|error| {
+                    RetryError::Fatal(format!("Failed to write {}: {error}", hs_file.display()))
+                })?;
+            let output_dir = Path::new(&manifest_dir)
+                .join("target")
+                .join("tidepool-cbor")
+                .join(format!("{module_name}-{key}"));
+            run_tidepool_extract(&hs_file, &output_dir, Some(&parsed.target), compiler)?;
+            Ok((hs_file, output_dir))
+        },
     ) {
-        return syn::Error::new(parsed.source.span(), msg).to_compile_error();
-    }
+        Ok(paths) => paths,
+        Err(message) => return syn::Error::new(parsed.source.span(), message).to_compile_error(),
+    };
 
     // Find CBOR output
     let cbor_path = output_dir.join(format!("{}.cbor", parsed.target));
@@ -641,16 +646,16 @@ fn run_tidepool_extract(
     hs_path: &Path,
     output_dir: &Path,
     target: Option<&str>,
-    manifest_dir: &Path,
-) -> Result<(), String> {
+    compiler: BoundCompiler,
+) -> Result<(), RetryError> {
     // The output dir name already encodes the resolved input set (entry file
     // plus every transitively resolved local import — see
     // `resolve_transitive_hs_deps`), the target, and the producer identity
-    // (see `extract_identity`). A hit must additionally carry a valid
+    // reported by the bound endpoint. A hit must additionally carry a valid
     // completion manifest for every required, decodable artifact. The publish
     // rename below is atomic, so a partially-written dir is never visible under
     // the final name. Concurrent expansions converge on one validated dir.
-    let Some(tmp_path) = scratch_for_extract(output_dir, target)? else {
+    let Some(tmp_path) = scratch_for_extract(output_dir, target).map_err(RetryError::Fatal)? else {
         return Ok(());
     };
     let tmp_dir = ScratchDir(tmp_path);
@@ -659,65 +664,85 @@ fn run_tidepool_extract(
     // PATH — a repo with a freshly built extract must never be trumped by a
     // stale installed one. A SET-but-unreadable $TIDEPOOL_EXTRACT is a hard
     // error, not a silent fall-through to PATH/nix: falling through would run
-    // a DIFFERENT binary than `extract_identity()` hashed into the content
-    // key, a producer/key divergence. An UNSET env still falls back to PATH
+    // a DIFFERENT endpoint than the content key names. An UNSET env still falls back to PATH
     // then nix below, same as always. That policy is now `ExtractCmd`'s
     // DEFAULT (`tidepool-extract-cmd`) rather than this function's local rule.
-    let mut cmd = ExtractCmd::new().map_err(|e| e.to_string())?;
-    // The argument list is built ONCE and launched by whichever launcher wins
-    // — the nix fallback below re-runs this same argv through
-    // `Launcher::nix_run` instead of spelling every flag a second time.
+    let BoundCompiler { mut cmd, endpoint } = compiler;
+    // The argument list is built once and executed by the endpoint whose
+    // identity selected the output directory.
     cmd.input(hs_path).output_dir(tmp_dir.path());
     if let Some(name) = target {
         cmd.target(name);
     }
 
-    match cmd.run() {
+    match endpoint.execute(&cmd) {
         Ok(run) if run.success() => {
-            prepare_extract_dir(tmp_dir.path(), target)?;
-            return publish_extract_dir(tmp_dir.path(), output_dir, target);
+            prepare_extract_dir(tmp_dir.path(), target).map_err(RetryError::Fatal)?;
+            publish_extract_dir(tmp_dir.path(), output_dir, target).map_err(RetryError::Fatal)
         }
         Ok(run) => {
             // The binary ran and failed — this IS the diagnostic (a GHC type
             // error, a missing binding, ...). Surface it verbatim; falling
             // back to nix here would only re-run the SAME failing compile.
-            return Err(format!(
+            Err(RetryError::Fatal(format!(
                 "tidepool-extract failed (exit {}):\n{}",
                 run.output.status,
                 extract_failure_text(&run.output.stdout, &run.output.stderr)
-            ));
+            )))
         }
-        Err(e) if e.is_not_found() && cmd.bin_source() == BinSource::PathLookup => {
-            // Bare "tidepool-extract" not on PATH, and $TIDEPOOL_EXTRACT was
-            // never set — fall back to nix run below.
-        }
+        Err(e) if e.permits_rebind() => Err(RetryError::SafeRefusal),
         Err(e) => {
-            // Either a genuine spawn failure, or $TIDEPOOL_EXTRACT was set
-            // (and passed the readable-file check above, so this is a race —
-            // e.g. removed between check and spawn). Either way: fail loud,
-            // never silently fall back to a different binary.
-            return Err(e.to_string());
+            // The endpoint may have accepted the request, so its outcome is
+            // indeterminate. Fail loud and never replay it elsewhere.
+            Err(RetryError::Fatal(e.to_string()))
         }
     }
+}
 
-    let flake_root = find_flake_root(manifest_dir).ok_or_else(|| {
-        "tidepool-extract not found on PATH and no flake.nix in any parent directory".to_string()
-    })?;
+enum RetryError {
+    SafeRefusal,
+    Fatal(String),
+}
 
-    match cmd.run_with(&Launcher::nix_run(&flake_root)) {
-        Ok(run) if run.success() => {
-            prepare_extract_dir(tmp_dir.path(), target)?;
-            publish_extract_dir(tmp_dir.path(), output_dir, target)
+fn retry_safe_refusals<B, T>(
+    mut bind: impl FnMut() -> Result<B, String>,
+    mut attempt: impl FnMut(B) -> Result<T, RetryError>,
+) -> Result<T, String> {
+    let mut rebinds = 0;
+    loop {
+        match attempt(bind()?) {
+            Err(RetryError::SafeRefusal) if rebinds < 2 => rebinds += 1,
+            Err(RetryError::SafeRefusal) => {
+                return Err(
+                    "compiler endpoint repeatedly refused the request before acceptance".into(),
+                );
+            }
+            Err(RetryError::Fatal(message)) => return Err(message),
+            Ok(value) => return Ok(value),
         }
-        Ok(run) => Err(format!(
-            "nix run tidepool-extract failed (exit {}):\n{}",
-            run.output.status,
-            extract_failure_text(&run.output.stdout, &run.output.stderr)
-        )),
-        Err(e) => Err(format!(
-            "Failed to run nix: {}. Is nix installed?",
-            e.source
-        )),
+    }
+}
+
+struct BoundCompiler {
+    cmd: ExtractCmd,
+    endpoint: CompilerEndpoint,
+}
+
+fn bind_compiler_endpoint(manifest_dir: &Path) -> Result<BoundCompiler, String> {
+    let cmd = ExtractCmd::new().map_err(|error| error.to_string())?;
+    match cmd.bind() {
+        Ok(endpoint) => Ok(BoundCompiler { cmd, endpoint }),
+        Err(error) if error.is_not_found() && cmd.bin_source() == BinSource::PathLookup => {
+            let flake_root = find_flake_root(manifest_dir).ok_or_else(|| {
+                "tidepool-extract not found on PATH and no flake.nix in any parent directory"
+                    .to_owned()
+            })?;
+            let endpoint = cmd.bind_nix_fallback(&flake_root).map_err(|error| {
+                format!("Failed to run nix: {}. Is nix installed?", error.source)
+            })?;
+            Ok(BoundCompiler { cmd, endpoint })
+        }
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -734,7 +759,12 @@ fn frame_field(h: &mut blake3::Hasher, bytes: &[u8]) {
 /// cache, matching the codebase's `blake3_hex` truncation convention).
 /// `deps` must already be sorted by path (callers own the sort so the same
 /// input set always hashes to the same key regardless of resolution order).
-fn content_key(bytes: &[u8], target: Option<&str>, deps: &[HsDep]) -> String {
+fn content_key(
+    bytes: &[u8],
+    target: Option<&str>,
+    deps: &[HsDep],
+    endpoint_identity: &[u8],
+) -> String {
     let mut h = blake3::Hasher::new();
     frame_field(&mut h, bytes);
     for (path, content) in deps {
@@ -745,7 +775,7 @@ fn content_key(bytes: &[u8], target: Option<&str>, deps: &[HsDep]) -> String {
     // between the two, so the presence flag rides as its own byte.
     h.update(&[target.is_some() as u8]);
     frame_field(&mut h, target.unwrap_or("").as_bytes());
-    frame_field(&mut h, &extract_identity().to_le_bytes());
+    frame_field(&mut h, endpoint_identity);
     h.finalize().to_hex()[..32].to_string()
 }
 
@@ -786,8 +816,8 @@ fn resolve_module_file(name: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 /// uses (see the callers' comments for what `roots` is in each case). A
 /// module not found under any root is a package/external import, resolved
 /// by the extractor's package database rather than a local file, and
-/// contributes no entry here — its identity is covered by
-/// `extract_identity`, not this hash. `already_seen` is both the entry
+/// contributes no entry here; the bound endpoint identity covers that
+/// compiler environment. `already_seen` is both the entry
 /// point's own canonicalized path (pre-seeded by the caller so the entry
 /// file is never re-hashed as its own dependency) and the growing
 /// walked-set; passing it in lets independent calls within one expansion
@@ -817,165 +847,6 @@ fn resolve_transitive_hs_deps(
         out.push((canon, bytes));
     }
     Ok(out)
-}
-
-/// Recursively collects every file under `dir` for which `pred` holds,
-/// sorted for determinism. An unreadable directory anywhere in the tree is a
-/// hard error naming the offending path — never a silent partial scan.
-fn collect_files_recursive(
-    dir: &Path,
-    pred: &dyn Fn(&Path) -> bool,
-) -> Result<Vec<PathBuf>, PathReadError> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let entries = std::fs::read_dir(&d).map_err(|e| (d.clone(), e))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| (d.clone(), e))?;
-            let p = entry.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if pred(&p) {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Identity of the Haskell→Core extractor this process will invoke — hashed
-/// once per process. Folded into every content key: the address must
-/// include the PRODUCER, not just the inputs, or an extractor upgrade (e.g.
-/// a wire-format major bump) silently serves output in the old format from
-/// an existing cache dir.
-///
-/// A SET-but-unreadable `$TIDEPOOL_EXTRACT` panics here rather than falling
-/// back to a PATH-resolved binary: this function runs FIRST (via
-/// `content_key`, before `run_tidepool_extract`'s own check), and its result
-/// picks the content-addressed `output_dir`. If that dir already exists
-/// (published by a past, correctly-configured run), `run_tidepool_extract`
-/// short-circuits on the existence check and never reaches its own
-/// fail-loud path — so silently keying against the wrong binary here would
-/// let a misconfigured `$TIDEPOOL_EXTRACT` silently serve a stale/foreign
-/// cache hit instead of erroring.
-///
-/// When neither `$TIDEPOOL_EXTRACT` nor a PATH binary resolves,
-/// `run_tidepool_extract` falls back to `nix run <flake>#tidepool-extract`
-/// — that IS a different producer, so the key must track it too. Actually
-/// resolving the nix derivation would mean invoking nix from every macro
-/// expansion just to compute a cache key, so this hashes `flake.lock` +
-/// `flake.nix` + the extractor's own source inputs
-/// (`haskell/{app,src}/**/*.hs`, `haskell/*.cabal`, `haskell/cabal.project*`)
-/// instead — anything that changes what `nix run` would build. If even that
-/// can't be resolved (no flake.nix found, or a source file can't be read),
-/// this panics rather than returning a placeholder: an unresolved producer
-/// identity must never be able to select — or worse, silently reuse — a
-/// cache directory. Panicking inside a proc macro surfaces as a loud compile
-/// error, same as any other `expect`/`panic!` in this crate.
-fn extract_identity() -> u64 {
-    use std::hash::{Hash, Hasher};
-    use std::sync::OnceLock;
-    static ID: OnceLock<u64> = OnceLock::new();
-    *ID.get_or_init(|| {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        // Same resolution order as `run_tidepool_extract` — literally the same
-        // policy function (`tidepool_extract_cmd::resolve_bin`), so the key
-        // hashes the binary that will actually run. Beyond it: `resolve_bin`
-        // hands back the BARE name for an unset env (the OS resolves it at
-        // spawn time), but a key has to hash file BYTES, so this walks PATH
-        // itself for the file to hash.
-        let resolved = match resolve_bin() {
-            Err(e) => panic!("{e}"),
-            Ok(ResolvedBin {
-                path,
-                source: BinSource::Env,
-            }) => Some(path),
-            Ok(_) => std::env::var_os("PATH").and_then(|paths| {
-                std::env::split_paths(&paths)
-                    .map(|d| d.join(tidepool_extract_cmd::DEFAULT_BIN))
-                    .find(|p| p.is_file())
-            }),
-        };
-        match resolved {
-            Some(path) => {
-                let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                    panic!("failed to read extractor binary {}: {e}", path.display())
-                });
-                bytes.hash(&mut h);
-            }
-            None => {
-                #[allow(clippy::expect_used, reason = "CARGO_MANIFEST_DIR not set")]
-                let manifest_dir =
-                    std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-                let flake_root = find_flake_root(Path::new(&manifest_dir)).unwrap_or_else(|| {
-                    panic!(
-                        "tidepool-extract not found on PATH/$TIDEPOOL_EXTRACT and no flake.nix \
-                         found in any parent of {manifest_dir} to resolve a nix producer identity \
-                         — refusing to key the cache on an unresolved producer"
-                    )
-                });
-                hash_nix_extractor_identity(&flake_root, &mut h);
-            }
-        }
-        h.finish()
-    })
-}
-
-/// Hashes the nix-fallback producer's identity into `h`: `flake.lock` (pins
-/// nixpkgs/rust-overlay/flake-utils), `flake.nix` (the derivation
-/// definition), and the extractor's own source inputs under `haskell/`. See
-/// `extract_identity` for why this exists instead of resolving the actual
-/// derivation. Panics (naming the path) rather than silently hashing a
-/// partial or placeholder identity.
-fn hash_nix_extractor_identity(flake_root: &Path, h: &mut impl std::hash::Hasher) {
-    use std::hash::Hash;
-    for name in ["flake.lock", "flake.nix"] {
-        let p = flake_root.join(name);
-        let bytes = std::fs::read(&p).unwrap_or_else(|e| {
-            panic!(
-                "failed to read {} to resolve the nix producer identity: {e}",
-                p.display()
-            )
-        });
-        bytes.hash(h);
-    }
-    let is_hs = |p: &Path| p.extension().is_some_and(|e| e == "hs");
-    let mut sources = Vec::new();
-    for sub in ["app", "src"] {
-        let dir = flake_root.join("haskell").join(sub);
-        if dir.is_dir() {
-            let files = collect_files_recursive(&dir, &is_hs).unwrap_or_else(|(p, e)| {
-                panic!(
-                    "failed to enumerate extractor sources under {}: {e} (at {})",
-                    dir.display(),
-                    p.display()
-                )
-            });
-            sources.extend(files);
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(flake_root.join("haskell")) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            let is_project_file = p.extension().is_some_and(|e| e == "cabal")
-                || p.file_name().and_then(|n| n.to_str()) == Some("cabal.project");
-            if is_project_file {
-                sources.push(p);
-            }
-        }
-    }
-    sources.sort();
-    for p in sources {
-        p.hash(h);
-        let bytes = std::fs::read(&p).unwrap_or_else(|e| {
-            panic!(
-                "failed to read {} to resolve the nix producer identity: {e}",
-                p.display()
-            )
-        });
-        bytes.hash(h);
-    }
 }
 
 /// One validated `include = "…"` directory: its absolute path, the span of
@@ -1529,7 +1400,7 @@ mod tests {
                 1,
                 "Dep.hs must resolve as a local transitive input"
             );
-            content_key(entry_src.as_bytes(), None, &deps)
+            content_key(entry_src.as_bytes(), None, &deps, b"test-endpoint")
         };
 
         let key_before = compute_key();
@@ -1546,61 +1417,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Pins finding 2's core property: the nix-fallback producer identity
-    /// tracks the extractor's actual source inputs — it is never a constant
-    /// that two different producers could collide on.
     #[test]
-    fn nix_identity_changes_with_extractor_source() {
-        let dir_a = temp_dir("nix-identity-a");
-        let dir_b = temp_dir("nix-identity-b");
-        for dir in [&dir_a, &dir_b] {
-            std::fs::write(dir.join("flake.lock"), "{}").unwrap();
-            std::fs::write(dir.join("flake.nix"), "{ }").unwrap();
-            std::fs::create_dir_all(dir.join("haskell/app")).unwrap();
-        }
-        std::fs::write(dir_a.join("haskell/app/Main.hs"), "main = putStrLn \"a\"\n").unwrap();
-        std::fs::write(dir_b.join("haskell/app/Main.hs"), "main = putStrLn \"b\"\n").unwrap();
-
-        let hash_of = |root: &Path| {
-            use std::hash::Hasher;
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            hash_nix_extractor_identity(root, &mut h);
-            h.finish()
-        };
-
-        assert_ne!(
-            hash_of(&dir_a),
-            hash_of(&dir_b),
-            "the nix-fallback producer identity must change when the extractor's own \
-             source changes"
-        );
-
-        std::fs::remove_dir_all(&dir_a).ok();
-        std::fs::remove_dir_all(&dir_b).ok();
+    fn content_key_tracks_bound_endpoint_identity() {
+        let a = content_key(b"source", Some("result"), &[], b"endpoint-a");
+        let b = content_key(b"source", Some("result"), &[], b"endpoint-b");
+        assert_ne!(a, b);
     }
 
-    /// The other half of finding 2: when identity genuinely can't be
-    /// resolved (no flake.lock here), that must panic — never fall back to
-    /// hashing a constant that a differently-configured producer could
-    /// silently share.
     #[test]
-    fn nix_identity_panics_rather_than_hashing_a_placeholder_when_unresolved() {
-        let dir = temp_dir("nix-identity-missing");
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic's stderr noise
-        let result = std::panic::catch_unwind(|| {
-            use std::hash::Hasher;
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            hash_nix_extractor_identity(&dir, &mut h);
-            h.finish()
-        });
-        std::panic::set_hook(prev_hook);
-        assert!(
-            result.is_err(),
-            "an unresolvable nix producer identity must panic rather than silently \
-             returning a placeholder hash"
-        );
-        std::fs::remove_dir_all(&dir).ok();
+    fn safe_refusal_rebinds_before_selecting_the_cache_directory() {
+        let identities = [b"refused".as_slice(), b"rebound".as_slice()];
+        let mut next = 0;
+        let mut selected = Vec::new();
+        let output = retry_safe_refusals(
+            || {
+                let identity = identities[next];
+                next += 1;
+                Ok(identity)
+            },
+            |identity| {
+                let key = content_key(b"source", Some("result"), &[], identity);
+                let dir = PathBuf::from("target/tidepool-cbor").join(key);
+                selected.push(dir.clone());
+                if selected.len() == 1 {
+                    Err(RetryError::SafeRefusal)
+                } else {
+                    Ok(dir)
+                }
+            },
+        )
+        .expect("known-unsubmitted refusal must rebind");
+
+        assert_eq!(selected.len(), 2);
+        assert_ne!(selected[0], selected[1]);
+        assert_eq!(output, selected[1]);
     }
 
     /// Pins finding 3: a misspelled/missing `include = "…"` directory is a

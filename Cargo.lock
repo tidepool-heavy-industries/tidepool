@@ -4016,6 +4016,9 @@ dependencies = [
 [[package]]
 name = "tidepool-extract-cmd"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+]
 
 [[package]]
 name = "tidepool-extract-report"
@@ -4333,8 +4336,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "filetime",
- "log",
- "parking_lot",
  "serde",
  "serde_json",
  "serial_test",

@@ -21,9 +21,10 @@
 //! | 1 | `$TIDEPOOL_EXTRACT` | Explicit override, and STRICT: set-but-unreadable is a hard error, never a silent fall-through to `$PATH` — falling through would run a different binary than the caller believes it is running. |
 //! | 2 | `tidepool-extract` on `$PATH` | Normally `~/.nix-profile/bin/tidepool-extract`, a wrapper that prepends the with-packages GHC and `exec`s the store binary. |
 //!
-//! [`extract_command_name`] returns what to spawn; [`locate_extract`] resolves
-//! it to an ABSOLUTE path (the handshake must fingerprint a real file) and
-//! fails typed when there is none. Both honor row 1's STRICT clause — a
+//! [`extract_command_name`] returns the frontend selection;
+//! [`bind_extract_endpoint`] binds the exact producer and its reported
+//! identity, while [`locate_extract`] supplies an informational absolute path.
+//! All honor row 1's STRICT clause — a
 //! set-but-unreadable `$TIDEPOOL_EXTRACT` is a hard error out of either, never
 //! a silent fall-through to row 2.
 //!
@@ -48,10 +49,10 @@
 //! (`scripts/redeploy.sh`) — is checked at startup:
 //!
 //! - `scripts/redeploy.sh` finishes by running `tidepool --write-toolchain-stamp`,
-//!   which records the **content** fingerprints of the extract binary and the
+//!   which records the bound producer identity and the content fingerprint of the
 //!   stdlib tree it just deployed into [`stamp_path`].
-//! - Each server calls [`enforce_handshake`] once at startup. It fingerprints
-//!   the extract and stdlib it just resolved and compares them to the stamp.
+//! - Each server calls [`enforce_handshake`] once at startup. It binds the
+//!   actual producer, fingerprints the resolved stdlib, and compares them to the stamp.
 //!   A mismatch means one side moved without the other → loud, actionable
 //!   failure naming `scripts/redeploy.sh`.
 //!
@@ -60,9 +61,8 @@
 //! the materialized bundle at a completely different path. Identical content
 //! must compare equal.
 //!
-//! Cost: one memoized binary content hash (shared with the compile-cache key,
-//! so a running server pays it at most once per extract version per machine)
-//! plus one walk of ~40 small `.hs` files. Never per-eval.
+//! Cost: one endpoint preflight plus one walk of ~40 small `.hs` files. Never
+//! per-eval.
 
 use std::path::{Path, PathBuf};
 
@@ -177,11 +177,10 @@ fn render_tried(tried: &[(&'static str, PathBuf)]) -> String {
 /// The resolved extract binary, typed so a caller cannot substitute a
 /// guessed name for a real resolution.
 ///
-/// Deliberately spelled without naming the std spawn constructor: this module
-/// resolves and fingerprints, it never spawns, and
-/// `tidepool-extract-cmd`'s `no_open_coded_extract_spawns` guard is a source
-/// scan that (correctly) cannot tell prose from code. Spawning goes through
-/// `ExtractCmd`, which is what makes the spawn counter complete.
+/// Deliberately spelled without naming the std spawn constructor: this helper
+/// resolves selection, while endpoint binding and execution remain in
+/// `tidepool-extract-cmd`. The `no_open_coded_extract_spawns` guard is a source
+/// scan that (correctly) cannot tell prose from code.
 ///
 /// Thin delegation to [`tidepool_extract_cmd::resolve_bin`], which owns the
 /// extract-binary precedence (see the table in this module's docs). Kept as a
@@ -218,7 +217,7 @@ pub fn extract_command_name() -> Result<tidepool_extract_cmd::ResolvedExtractBin
 pub struct ExtractLocation {
     /// Absolute path to the binary (or wrapper script) — resolved through
     /// `PATH` when `$TIDEPOOL_EXTRACT` is unset, so it is always a real file
-    /// that can be fingerprinted.
+    /// used for diagnostics and stdlib sibling discovery.
     pub path: PathBuf,
 }
 
@@ -244,6 +243,23 @@ pub fn locate_extract() -> Result<ExtractLocation, ToolchainError> {
         .map_err(|_| ToolchainError::ExtractNotFound {
             tried: format!("{} on $PATH", resolved.path.display()),
         })
+}
+
+/// Bind the producer selected by the canonical extract resolution policy.
+/// The returned endpoint is the authority for deploy and cache identity; the
+/// location is informational only.
+pub fn bind_extract_endpoint(
+) -> Result<(tidepool_extract_cmd::CompilerEndpoint, ExtractLocation), ToolchainError> {
+    let location = locate_extract()?;
+    let cmd = tidepool_extract_cmd::ExtractCmd::with_bin(
+        tidepool_extract_cmd::ResolvedExtractBin::assume_resolved(&location.path),
+    );
+    let endpoint = cmd
+        .bind()
+        .map_err(|error| ToolchainError::ExtractNotFound {
+            tried: error.to_string(),
+        })?;
+    Ok((endpoint, location))
 }
 
 // ---------------------------------------------------------------------------
@@ -360,27 +376,6 @@ fn extract_sibling_lib() -> Option<PathBuf> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fingerprints
-// ---------------------------------------------------------------------------
-
-/// Content fingerprint of the extract binary at `path`, following a one-line
-/// wrapper script to its target (the nix-profile wrapper `exec`s the store
-/// binary; fingerprinting only the wrapper would miss every upgrade).
-///
-/// Shares the memoized content hasher with the compile-cache key
-/// ([`crate::cache`]), so the ~100ms read of a GHC-linked binary is paid at
-/// most once per version per machine.
-#[must_use]
-pub fn extract_fingerprint(path: &Path) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&crate::cache::binary_content_hash(path));
-    for target in crate::cache::wrapper_targets(path) {
-        hasher.update(&crate::cache::binary_content_hash(&target));
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
 /// Content fingerprint of a stdlib tree rooted at `dir`.
 ///
 /// Hashes `(path relative to `dir`, blake3(contents))` for every `.hs` file,
@@ -446,14 +441,14 @@ fn collect_stdlib_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)
 /// Wire-format version of the stamp. Bump when the compared fields change; a
 /// stamp with a different schema is treated as absent (warn, don't fail — an
 /// old stamp must not brick a newer server).
-pub const STAMP_SCHEMA: u32 = 1;
+pub const STAMP_SCHEMA: u32 = 2;
 
 /// The (extract, stdlib) pair that was last deployed together.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolchainStamp {
     /// [`STAMP_SCHEMA`] at write time.
     pub schema: u32,
-    /// [`extract_fingerprint`] of the deployed extract.
+    /// Producer identity reported by the bound compiler endpoint.
     pub extract: String,
     /// [`stdlib_fingerprint`] of the deployed stdlib tree.
     pub stdlib: String,
@@ -509,7 +504,7 @@ pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError>
     }
 }
 
-/// Fingerprint `extract` + `stdlib` and write the stamp to [`stamp_path`].
+/// Record the bound producer identity plus `stdlib` fingerprint in [`stamp_path`].
 /// Called by `scripts/redeploy.sh` via `tidepool --write-toolchain-stamp`, so
 /// the writer and the checker share one implementation and cannot drift.
 ///
@@ -523,12 +518,24 @@ pub fn read_stamp(path: &Path) -> Result<Option<ToolchainStamp>, ToolchainError>
 ///
 /// # Errors
 /// [`ToolchainError::Stamp`] if the stamp cannot be created or written.
-pub fn write_stamp(extract: &Path, stdlib: &Path) -> Result<ToolchainStamp, ToolchainError> {
+pub fn write_stamp(
+    endpoint: &tidepool_extract_cmd::CompilerEndpoint,
+    extract_path: &Path,
+    stdlib: &Path,
+) -> Result<ToolchainStamp, ToolchainError> {
+    write_stamp_identity(endpoint.identity().producer_hex(), extract_path, stdlib)
+}
+
+fn write_stamp_identity(
+    producer_identity: String,
+    extract_path: &Path,
+    stdlib: &Path,
+) -> Result<ToolchainStamp, ToolchainError> {
     let stamp = ToolchainStamp {
         schema: STAMP_SCHEMA,
-        extract: extract_fingerprint(extract),
+        extract: producer_identity,
         stdlib: stdlib_fingerprint(stdlib),
-        extract_path: extract.display().to_string(),
+        extract_path: extract_path.display().to_string(),
         stdlib_path: stdlib.display().to_string(),
         written_by: format!("tidepool {}", env!("CARGO_PKG_VERSION")),
     };
@@ -640,13 +647,24 @@ pub enum HandshakeOutcome {
 /// # Errors
 /// [`ToolchainError::Stamp`] when the stamp file exists but its content is
 /// corrupt ([`read_stamp`] fails closed rather than treating it as absent).
-pub fn check_handshake(extract: &Path, stdlib: &Path) -> Result<HandshakeOutcome, ToolchainError> {
+pub fn check_handshake(
+    endpoint: &tidepool_extract_cmd::CompilerEndpoint,
+    extract_path: &Path,
+    stdlib: &Path,
+) -> Result<HandshakeOutcome, ToolchainError> {
+    check_handshake_identity(endpoint.identity().producer_hex(), extract_path, stdlib)
+}
+
+fn check_handshake_identity(
+    extract_now: String,
+    extract_path: &Path,
+    stdlib: &Path,
+) -> Result<HandshakeOutcome, ToolchainError> {
     let path = stamp_path();
     let Some(stamp) = read_stamp(&path)? else {
         return Ok(HandshakeOutcome::NoStamp { path });
     };
 
-    let extract_now = extract_fingerprint(extract);
     let stdlib_now = stdlib_fingerprint(stdlib);
     let mut sides = Vec::new();
     if extract_now != stamp.extract {
@@ -660,7 +678,7 @@ pub fn check_handshake(extract: &Path, stdlib: &Path) -> Result<HandshakeOutcome
     }
     Ok(HandshakeOutcome::Skew(Box::new(SkewReport {
         sides,
-        extract_path: extract.to_path_buf(),
+        extract_path: extract_path.to_path_buf(),
         stdlib_path: stdlib.to_path_buf(),
         stamp,
         extract_now,
@@ -710,14 +728,23 @@ impl HandshakeSeverity {
 /// corrupt (fails to parse) and severity is [`HandshakeSeverity::Error`] —
 /// fail closed rather than silently treat corruption as no stamp.
 pub fn enforce_handshake(
-    extract: &Path,
+    endpoint: &tidepool_extract_cmd::CompilerEndpoint,
+    extract_path: &Path,
+    stdlib: &Path,
+) -> Result<HandshakeOutcome, ToolchainError> {
+    enforce_handshake_identity(endpoint.identity().producer_hex(), extract_path, stdlib)
+}
+
+fn enforce_handshake_identity(
+    producer_identity: String,
+    extract_path: &Path,
     stdlib: &Path,
 ) -> Result<HandshakeOutcome, ToolchainError> {
     let severity = HandshakeSeverity::from_env();
     if severity == HandshakeSeverity::Off {
         return Ok(HandshakeOutcome::NoStamp { path: stamp_path() });
     }
-    let outcome = match check_handshake(extract, stdlib) {
+    let outcome = match check_handshake_identity(producer_identity, extract_path, stdlib) {
         Ok(outcome) => outcome,
         // The only error `check_handshake` can produce is a corrupt stamp
         // (`read_stamp` fails closed on a parse failure). `Error` severity
@@ -742,6 +769,30 @@ pub fn enforce_handshake(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    fn test_producer_identity(path: &Path) -> String {
+        blake3::hash(&std::fs::read(path).unwrap())
+            .to_hex()
+            .to_string()
+    }
+
+    fn write_stamp_test(extract: &Path, stdlib: &Path) -> Result<ToolchainStamp, ToolchainError> {
+        write_stamp_identity(test_producer_identity(extract), extract, stdlib)
+    }
+
+    fn check_handshake_test(
+        extract: &Path,
+        stdlib: &Path,
+    ) -> Result<HandshakeOutcome, ToolchainError> {
+        check_handshake_identity(test_producer_identity(extract), extract, stdlib)
+    }
+
+    fn enforce_handshake_test(
+        extract: &Path,
+        stdlib: &Path,
+    ) -> Result<HandshakeOutcome, ToolchainError> {
+        enforce_handshake_identity(test_producer_identity(extract), extract, stdlib)
+    }
 
     /// A set-but-nonexistent `$TIDEPOOL_EXTRACT` must be a hard error out of
     /// [`extract_command_name`], naming the offending path — the exact
@@ -887,10 +938,10 @@ mod tests {
         std::fs::write(&extract, b"deployed extract v1").unwrap();
 
         // Deploy: both sides blessed together.
-        write_stamp(&extract, &stdlib).unwrap();
+        write_stamp_test(&extract, &stdlib).unwrap();
         assert!(
             matches!(
-                check_handshake(&extract, &stdlib).unwrap(),
+                check_handshake_test(&extract, &stdlib).unwrap(),
                 HandshakeOutcome::Match
             ),
             "the pair that was just stamped must match"
@@ -899,7 +950,7 @@ mod tests {
         // A `nix profile upgrade tidepool-extract` without a full redeploy.
         std::fs::write(&extract, b"upgraded extract v2 -- larger").unwrap();
 
-        let outcome = check_handshake(&extract, &stdlib).unwrap();
+        let outcome = check_handshake_test(&extract, &stdlib).unwrap();
         let HandshakeOutcome::Skew(report) = outcome else {
             panic!("expected skew, got {outcome:?}");
         };
@@ -907,7 +958,7 @@ mod tests {
 
         // Default severity aborts startup, and the message is actionable.
         std::env::remove_var(ENV_HANDSHAKE);
-        let err = enforce_handshake(&extract, &stdlib).unwrap_err();
+        let err = enforce_handshake_test(&extract, &stdlib).unwrap_err();
         let msg = err.to_string();
         assert!(matches!(err, ToolchainError::Skew(_)), "got {err:?}");
         assert!(msg.contains(REDEPLOY), "message must name the fix: {msg}");
@@ -920,7 +971,7 @@ mod tests {
         std::env::set_var(ENV_HANDSHAKE, "warn");
         assert!(
             matches!(
-                enforce_handshake(&extract, &stdlib).unwrap(),
+                enforce_handshake_test(&extract, &stdlib).unwrap(),
                 HandshakeOutcome::Skew(_)
             ),
             "warn severity reports the skew but does not fail"
@@ -940,7 +991,7 @@ mod tests {
         write_stdlib(&stdlib, "module Tidepool.Prelude where\n");
         let extract = tmp.path().join("tidepool-extract");
         std::fs::write(&extract, b"deployed extract v1").unwrap();
-        write_stamp(&extract, &stdlib).unwrap();
+        write_stamp_test(&extract, &stdlib).unwrap();
 
         std::fs::write(
             stdlib.join("Tidepool").join("Prelude.hs"),
@@ -948,7 +999,8 @@ mod tests {
         )
         .unwrap();
 
-        let HandshakeOutcome::Skew(report) = check_handshake(&extract, &stdlib).unwrap() else {
+        let HandshakeOutcome::Skew(report) = check_handshake_test(&extract, &stdlib).unwrap()
+        else {
             panic!("a stdlib edit must skew");
         };
         assert_eq!(report.sides, vec![SkewSide::Stdlib]);
@@ -969,7 +1021,7 @@ mod tests {
         std::env::remove_var(ENV_HANDSHAKE);
 
         assert!(matches!(
-            enforce_handshake(&extract, &stdlib).unwrap(),
+            enforce_handshake_test(&extract, &stdlib).unwrap(),
             HandshakeOutcome::NoStamp { .. }
         ));
     }
@@ -1011,7 +1063,7 @@ mod tests {
         let extract = tmp.path().join("tidepool-extract");
         std::fs::write(&extract, b"deployed extract v1").unwrap();
 
-        let deployed = write_stamp(&extract, &stdlib).unwrap();
+        let deployed = write_stamp_test(&extract, &stdlib).unwrap();
 
         let path = stamp_path();
         let leftover = path.parent().unwrap().join(".toolchain-stamp.tmp-leftover");
@@ -1023,7 +1075,7 @@ mod tests {
 
         // A fresh write is unaffected by the stray leftover and still lands
         // cleanly.
-        write_stamp(&extract, &stdlib).unwrap();
+        write_stamp_test(&extract, &stdlib).unwrap();
         assert!(
             read_stamp(&path).unwrap().is_some(),
             "a later write must still succeed with a leftover temp file present"
@@ -1059,7 +1111,7 @@ mod tests {
         // Default severity fails closed rather than proceeding as if
         // nothing were deployed.
         std::env::remove_var(ENV_HANDSHAKE);
-        let err = enforce_handshake(&extract, &stdlib).unwrap_err();
+        let err = enforce_handshake_test(&extract, &stdlib).unwrap_err();
         assert!(matches!(err, ToolchainError::Stamp { .. }), "got {err:?}");
 
         // `warn` degrades gracefully (logs and continues) instead of
@@ -1068,7 +1120,7 @@ mod tests {
         // no-stamp-detected outcome `check_handshake` would report for an
         // absent file).
         std::env::set_var(ENV_HANDSHAKE, "warn");
-        let outcome = enforce_handshake(&extract, &stdlib).unwrap();
+        let outcome = enforce_handshake_test(&extract, &stdlib).unwrap();
         assert!(
             matches!(outcome, HandshakeOutcome::NoStamp { .. }),
             "got {outcome:?}"

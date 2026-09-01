@@ -58,8 +58,8 @@ struct Args {
     #[arg(long, env = "TIDEPOOL_LLM_MODEL")]
     llm: Option<String>,
 
-    /// Record the deploy stamp — the content fingerprints of the extract
-    /// binary and the stdlib tree this binary resolves — then exit. Run by
+    /// Record the deploy stamp — the bound compiler producer identity and the
+    /// stdlib content fingerprint this binary resolves — then exit. Run by
     /// `scripts/redeploy.sh` as its final step, so that every later server
     /// startup can detect an extract/stdlib pair that did NOT move together.
     /// Writer and checker share one implementation
@@ -96,12 +96,12 @@ fn install_panic_hook() {
     }));
 }
 
-/// Body of `--write-toolchain-stamp`. Prints the recorded fingerprints so the
+/// Body of `--write-toolchain-stamp`. Prints the recorded identities so the
 /// deploy log carries which pair was blessed.
 fn write_toolchain_stamp(prelude_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     use tidepool_runtime::toolchain;
-    let extract = toolchain::locate_extract()?;
-    let stamp = toolchain::write_stamp(&extract.path, prelude_dir)?;
+    let (endpoint, extract) = toolchain::bind_extract_endpoint()?;
+    let stamp = toolchain::write_stamp(&endpoint, &extract.path, prelude_dir)?;
     println!(
         "toolchain stamp written to {}\n  extract {} ({})\n  stdlib  {} ({})",
         toolchain::stamp_path().display(),

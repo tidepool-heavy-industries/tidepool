@@ -4,8 +4,8 @@
 //! `$TIDEPOOL_EXTRACT` override) and by `tidepool-agent`'s Codex binary
 //! locator (`$TIDEPOOL_CODEX_BIN`), which independently authored a
 //! byte-for-byte copy of the Unix implementation. Consolidated here rather
-//! than into a new crate: this crate is the workspace's std-only,
-//! zero-dependency leaf (see the crate doc's D-A note) — the natural home
+//! than into a new crate: this crate is the workspace's small process-boundary
+//! leaf (see the crate docs) — the natural home
 //! for a helper anything can depend on without pulling in a real dependency
 //! graph. A caller's own platform policy (e.g. `tidepool-agent` is Linux-only
 //! and applies this unconditionally, with no non-Unix fallback path of its
@@ -23,7 +23,7 @@ use std::path::Path;
 /// `File::open` is the real read-access check (it honors the same
 /// permission/ACL evaluation a later spawn's read of the binary would hit);
 /// the execute-bit check on `mode()` is the accessible without-`libc`
-/// approximation of "executable" a std-only crate can perform — the same
+/// approximation of "executable" a portable boundary crate can perform — the same
 /// thing a later spawn ultimately depends on to succeed.
 #[cfg(unix)]
 pub fn is_readable_executable_file(path: &Path) -> bool {
@@ -36,7 +36,7 @@ pub fn is_readable_executable_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Off Unix, there is no portable, dependency-free access check a std-only
+/// Off Unix, there is no portable, dependency-free access check this crate
 /// crate can perform; `is_file` is what this precedence step has always
 /// checked here, and a genuinely unusable binary still fails loudly at spawn
 /// time.

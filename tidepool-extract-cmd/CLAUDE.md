@@ -20,16 +20,12 @@ and toolchain validation belong to `tidepool-toolchain`.
 
 ## Execution contract
 
-`ExtractCmd::run()` uses the resident daemon when
-`$TIDEPOOL_EXTRACT_DAEMON_SOCKET` is set and falls back to a direct worker
-spawn only when connection failure proves the request was never submitted.
-After connection, a lost or late response is indeterminate: the daemon may
-still be compiling, so the error is returned instead of duplicating the
-request through a direct worker.
-
-`run_with(&Launcher::Daemon(path))` is different by design: the caller chose a
-specific transport, so daemon failure is returned rather than hidden behind a
-fallback.
+`ExtractCmd::bind()` resolves one opaque compiler endpoint before callers use
+its identity. A daemon is preflighted and epoch-bound; an unavailable daemon
+before submission binds direct. `CompilerEndpoint::execute()` is the sole
+library execution route. An epoch/stamp rejection is known unsubmitted and may
+be rebound and re-keyed; after acceptance, a lost response is indeterminate
+and is never replayed.
 
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
@@ -41,9 +37,11 @@ worker descendants; process-tree ownership is not delegated to test scripts.
 
 ## Wire boundary
 
-The crate is a std-only leaf because proc-macro crates depend on it. Its wire
-formats are small, versioned, and implemented in-repo. Keep framing and field
-validation here; keep compiler interpretation in the Haskell worker.
+The crate remains a dependency leaf for proc macros and uses only `blake3` in
+addition to std. The reviewed digest is required to return immutable boot-time
+identity rather than mutable producer paths. Its wire formats are small,
+versioned, and implemented in-repo. Keep framing and field validation here;
+keep compiler interpretation in the Haskell worker.
 
 When adding a request field:
 

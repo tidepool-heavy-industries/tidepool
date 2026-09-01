@@ -13,8 +13,9 @@ description = "The one builder for `tidepool-extract` invocations: binary resolu
 name = "tidepool-extract"
 path = "src/main.rs"
 
-# ZERO dependencies, deliberately (`plans/post-restart/extract-manifest.md`, D-A):
-# `tidepool-macro` is a proc-macro crate that must be able to depend on this
-# without dragging Cranelift and the rest of the runtime graph into every
-# downstream crate's BUILD graph. std only. Keep it that way.
+# Endpoint identity is captured beside the process boundary.  A strong digest
+# is required because returning mutable producer paths would recreate the
+# identity/execution race this crate owns.  `blake3` is already in the proc
+# macro's build graph; keeping the digest here avoids any runtime dependency.
 [dependencies]
+blake3 = "=1.8.6"

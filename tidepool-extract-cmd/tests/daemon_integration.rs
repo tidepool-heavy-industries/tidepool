@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use tidepool_extract_cmd::{resolve_bin, ExtractCmd, Launcher, ResolvedExtractBin};
+use tidepool_extract_cmd::{resolve_bin, ExtractCmd, ResolvedExtractBin};
 
 /// The stdlib root every fixture's `--include` points at — this crate's own
 /// workspace-relative path, not the general-purpose 5-tier locator
@@ -215,7 +215,7 @@ fn env_socket(socket: &Path) -> (&'static str, OsString) {
     ("TIDEPOOL_EXTRACT_DAEMON_SOCKET", socket.as_os_str().into())
 }
 
-/// One `ExtractCmd::run()` with `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` set for the
+/// One bound endpoint execution with `$TIDEPOOL_EXTRACT_DAEMON_SOCKET` set for the
 /// duration of the call, restored (removed) afterward — env vars are
 /// process-global, so every daemon-routed call in this file goes through
 /// here rather than leaving the var set across unrelated calls.
@@ -225,15 +225,19 @@ fn run_via_env_socket(cmd: &ExtractCmd, socket: &Path) -> std::process::Output {
     // concurrent test in this same process to race against — every call in
     // this file is sequential, so mutating the process env here is safe.
     std::env::set_var(k, &v);
-    let result = cmd.run();
+    let result = cmd.bind().and_then(|endpoint| endpoint.execute(cmd));
     std::env::remove_var(k);
     result
-        .expect("daemon-routed run() should complete (or safely fall back before submission)")
+        .expect("daemon-routed execution should complete (or safely fall back before submission)")
         .output
 }
 
 fn run_direct(cmd: &ExtractCmd) -> std::process::Output {
-    cmd.run().expect("direct run() failed").output
+    let endpoint = cmd.bind().expect("direct bind failed");
+    endpoint
+        .execute(cmd)
+        .expect("direct execution failed")
+        .output
 }
 
 fn cmd_for(bin: &Path, dir: &Path, out_dir: &str, target_file: &str, lib: &Path) -> ExtractCmd {
@@ -804,8 +808,8 @@ fn check_g_shim_dependent_module_warm_second_request(
     );
 }
 
-/// (e) rotation unpublishes the socket, drains already-connected clients, and
-/// lets the next known-unsubmitted call fall back to a real spawn.
+/// (e) rotation unpublishes the socket after its accepted request and lets the
+/// next known-unsubmitted binding choose a direct endpoint.
 fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
     let dir = unique_scratch_dir("rotate");
     let socket = unique_socket_path("rotate");
@@ -820,27 +824,10 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
         return;
     };
 
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
-    let mut requests = Vec::new();
-    for i in 0..4 {
-        let command = cmd_for(bin, &dir, &format!("out-e-{i}"), "Expr.hs", lib);
-        let socket = socket.clone();
-        let barrier = barrier.clone();
-        requests.push(std::thread::spawn(move || {
-            barrier.wait();
-            command.run_with(&Launcher::Daemon(socket))
-        }));
-    }
-    barrier.wait();
-    for (i, request) in requests.into_iter().enumerate() {
-        let run = request
-            .join()
-            .unwrap_or_else(|_| panic!("rotation request {i} panicked"))
-            .unwrap_or_else(|error| panic!("rotation request {i} failed: {error}"));
-        assert!(run.success(), "rotation request {i} should succeed");
-    }
+    let first = run_via_env_socket(&cmd_for(bin, &dir, "out-e-first", "Expr.hs", lib), &socket);
+    assert!(first.status.success(), "rotation request should succeed");
 
-    // The daemon should exit on its own shortly after serving request 2 —
+    // The daemon should exit on its own shortly after serving the request —
     // wait for the process to actually terminate (bounded) rather than
     // asserting on the socket file alone (removed by the OS close, but the
     // process might still be mid-teardown).
