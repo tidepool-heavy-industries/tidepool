@@ -8,7 +8,7 @@
 -- a panic thunk to save memory, so loadSysInterface can't be used here.
 module Tidepool.FatIface (FatIfaceCache, newFatIfaceCache, lookupFatIface) where
 
-import GHC.Core (CoreBind, CoreExpr, Bind(..))
+import GHC.Core (CoreBind, Bind(..))
 import GHC.Driver.Env (HscEnv)
 import GHC.Types.Name (Name, nameModule_maybe)
 import GHC.Types.Var (varName)
@@ -25,7 +25,6 @@ import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
-import Data.Foldable (foldl')
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import qualified Data.Map.Strict as Map
 import System.IO (hPutStrLn, stderr)
