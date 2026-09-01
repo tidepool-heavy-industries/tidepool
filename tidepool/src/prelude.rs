@@ -54,7 +54,7 @@ fn materialize_bundle() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// whose module docs carry the table. This binary contributes step 4 (the
 /// stdlib embedded at build time, materialized above); it needs no step 5,
 /// since the bundle always ships with it.
-pub(crate) fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub fn ensure_prelude() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let fallbacks = tidepool_runtime::toolchain::StdlibFallbacks {
         bundle: Some(materialize_bundle()?),
         build_tree: None,

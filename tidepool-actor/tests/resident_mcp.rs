@@ -154,6 +154,10 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         ResidentLifecyclePolicy::new(Duration::ZERO),
     )
     .expect("construct actor host");
+    let mut installations = host
+        .take_mcp_installations()
+        .expect("take deployment handoff stream");
+    assert!(host.take_mcp_installations().is_err());
     let actor = host
         .launch_root(ResidentActorRoot::new(descriptor, machine, outcome))
         .await
@@ -164,7 +168,11 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         .expect("install resident policy");
     assert_eq!(report.parked[&ResidentHostParkedKind::McpPolicy], 1);
 
-    let policy = host.mcp_policy(actor).expect("installed actor policy");
+    let installation = installations
+        .try_recv()
+        .expect("root policy is handed to deployment");
+    assert_eq!(installation.actor, actor);
+    let policy = installation.policy;
     let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(policy)
         .expect("project resident policy into MCP");
     assert_eq!(server.declarations()[0].name, "double_value");

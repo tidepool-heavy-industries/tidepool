@@ -11,22 +11,17 @@ use std::process::Stdio;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use crate::interactive::{
+    ENV_NODE_ACTOR_ID, ENV_NODE_BINDING_PATH, ENV_NODE_CREDENTIAL, ENV_NODE_DEVELOPER_INSTRUCTIONS,
+    ENV_NODE_ENDPOINT, ENV_NODE_INCARNATION, ENV_NODE_MODEL, ENV_NODE_REASONING_EFFORT,
+    ENV_NODE_WORKSPACE,
+};
 use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentProcess,
     InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, ReasoningEffort,
 };
 use tidepool_actor::{ActorId, ActorRef, Incarnation};
 use tidepool_node::{NodeCredential, NodeHandshake};
-
-pub const ENV_NODE_ENDPOINT: &str = "TIDEPOOL_NODE_ENDPOINT";
-pub const ENV_NODE_ACTOR_ID: &str = "TIDEPOOL_NODE_ACTOR_ID";
-pub const ENV_NODE_INCARNATION: &str = "TIDEPOOL_NODE_INCARNATION";
-pub const ENV_NODE_CREDENTIAL: &str = "TIDEPOOL_NODE_CREDENTIAL";
-pub const ENV_NODE_BINDING_PATH: &str = "TIDEPOOL_NODE_BINDING_PATH";
-pub const ENV_NODE_WORKSPACE: &str = "TIDEPOOL_NODE_WORKSPACE";
-pub const ENV_NODE_MODEL: &str = "TIDEPOOL_NODE_MODEL";
-pub const ENV_NODE_REASONING_EFFORT: &str = "TIDEPOOL_NODE_REASONING_EFFORT";
-pub const ENV_NODE_DEVELOPER_INSTRUCTIONS: &str = "TIDEPOOL_NODE_DEVELOPER_INSTRUCTIONS";
 
 /// Run either the pane-owning host or its stdio MCP child.
 pub async fn run_from_env() -> Result<(), AgentBackendError> {

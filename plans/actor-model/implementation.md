@@ -922,16 +922,34 @@ Implement this boundary in order:
    `ReadOnly` write is refused by Rust even if a malformed or stale program
    manages to issue the nominal request. The compile-failure fixture remains a
    model-surface hygiene test, not the authorization proof.
-6. [ ] Build the first production agent-backed root without routing it through
-   `ResidentActorHost`. Reuse the same registry, resident machine-access seam,
-   profile authorization, root custody, and event stream. The composition root
-   launches no bootstrap task and makes no OAuth request: it publishes a ready,
-   idle stock-Codex root only after its Haskell MCP policy, private proxy
-   endpoint, interactive process, and validated rollout binding are live.
+6. [ ] Finish the first production agent-backed root through
+   `ResidentActorHost`, which remains the sole scheduler for every callback
+   into resident Haskell. Reuse the same registry, machine-access seam, profile
+   authorization, root custody, and event stream. The composition root makes
+   no OAuth request: the interactive backend owns its conversation, while the
+   resident provider is unavailable unless a later policy explicitly installs
+   one.
 
-   The initial vertical exposes one Haskell-authored `actorStatus` control tool
-   and proves one durable pushed message. It deliberately defers child spawn,
-   worktree grants, policy reload, and the full DevSwarm tool record.
+   The checked-in `Tidepool.Actors.DevSwarm` policy and
+   `tidepool-actor-host` composition are landed. The root exposes typed
+   `actorStatus` and `spawnWorker` tools; a spawned worker stabilizes at its own
+   `serveTools` policy, is handed to deployment through the host's
+   single-consumer live-policy stream, and exposes its typed startup assignment.
+   A focused GHC/JIT test proves root installation, MCP-routed `startActor`, and
+   child-policy installation without opening an interactive process.
+
+   The deployment path is also landed: bind an authenticated private proxy,
+   launch one `tidepool-agent-node host` per exact incarnation in tmux, validate
+   the rollout binding discovered by the MCP child, then deliver and acknowledge
+   one durable startup message through the backend's native push operation.
+   Successful MCP settlement is linearized only after the Haskell policy parks
+   for its next invocation.
+
+   Remaining acceptance is one bounded live stock-TUI run proving the root and
+   child panes, real binding discovery, queued startup delivery, and confirmed
+   teardown. Filesystem profile handlers, worktree grants, policy reload, and
+   the full DevSwarm fold remain later work; the initial production machine
+   intentionally handles no ambient filesystem effect.
 
    Port only the following Exomonad mechanisms into their Tidepool owners:
    stock-TUI command construction, rollout discovery and versioned binding,

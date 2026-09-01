@@ -22,7 +22,7 @@ pub mod spawn;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
     InteractiveAgentBackend, InteractiveAgentProcess, InteractiveAgentSpec, InteractiveFuture,
-    InteractiveLaunchMode, InteractiveMcpServer,
+    InteractiveLaunchMode, InteractiveMcpServer, InteractiveNodeLaunch,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -34,6 +34,23 @@ pub use spawn::{
     SpawnReceipt, SpawnRequest, SpawnStage, SpawnStep, SpawnSubstrate, SpawnWorkspace, WorkerRun,
     MAX_TOOL_ROUNDS,
 };
+
+/// Construct the installed native interactive-agent adapter behind its
+/// backend-neutral seam.
+#[must_use]
+pub fn native_interactive_backend() -> std::sync::Arc<dyn InteractiveAgentBackend> {
+    std::sync::Arc::new(backend::codex::CodexInteractiveBackend)
+}
+
+/// Read and validate the opaque conversation binding established by the
+/// interactive node's MCP child.
+pub async fn read_interactive_binding(
+    path: &std::path::Path,
+) -> Result<BackendThreadId, AgentBackendError> {
+    backend::codex::node::read_binding(path)
+        .await
+        .map(|binding| binding.thread)
+}
 
 /// Run the installed interactive-agent MCP sidecar.
 ///

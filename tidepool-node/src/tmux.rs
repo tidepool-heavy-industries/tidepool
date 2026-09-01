@@ -80,6 +80,55 @@ impl TmuxSession {
         }
     }
 
+    /// Ensure the named tmux session exists before actor windows are added.
+    pub async fn ensure(&self) -> Result<(), TmuxNodeError> {
+        let status = self
+            .command()
+            .args(["has-session", "-t", &self.name])
+            .status()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "has-session",
+                source,
+            })?;
+        if status.success() {
+            return Ok(());
+        }
+        let output = self
+            .command()
+            .args(["new-session", "-d", "-s", &self.name])
+            .output()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "new-session",
+                source,
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            // Another creator may have won the race between `has-session`
+            // and `new-session`; recheck before reporting failure.
+            let raced = self
+                .command()
+                .args(["has-session", "-t", &self.name])
+                .status()
+                .await
+                .map_err(|source| TmuxNodeError::Io {
+                    operation: "has-session",
+                    source,
+                })?;
+            if raced.success() {
+                Ok(())
+            } else {
+                Err(TmuxNodeError::Command {
+                    operation: "new-session",
+                    status: output.status,
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                })
+            }
+        }
+    }
+
     pub async fn spawn_window(&self, launch: &TmuxLaunch) -> Result<TmuxPaneId, TmuxNodeError> {
         validate_launch(launch)?;
         let output = self
@@ -113,11 +162,17 @@ impl TmuxSession {
         if output.status.success() {
             Ok(())
         } else {
-            Err(TmuxNodeError::Command {
-                operation: "kill-pane",
-                status: output.status,
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            })
+            // Exact-pane teardown is idempotent: a process that already
+            // exited may have removed its pane before the owner reaps it.
+            if !self.list_panes().await?.contains(pane) {
+                Ok(())
+            } else {
+                Err(TmuxNodeError::Command {
+                    operation: "kill-pane",
+                    status: output.status,
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                })
+            }
         }
     }
 

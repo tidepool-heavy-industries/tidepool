@@ -9,8 +9,82 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
+use tidepool_actor::ActorRef;
+use tidepool_node::NodeCredential;
+
+pub(crate) const ENV_NODE_ENDPOINT: &str = "TIDEPOOL_NODE_ENDPOINT";
+pub(crate) const ENV_NODE_ACTOR_ID: &str = "TIDEPOOL_NODE_ACTOR_ID";
+pub(crate) const ENV_NODE_INCARNATION: &str = "TIDEPOOL_NODE_INCARNATION";
+pub(crate) const ENV_NODE_CREDENTIAL: &str = "TIDEPOOL_NODE_CREDENTIAL";
+pub(crate) const ENV_NODE_BINDING_PATH: &str = "TIDEPOOL_NODE_BINDING_PATH";
+pub(crate) const ENV_NODE_WORKSPACE: &str = "TIDEPOOL_NODE_WORKSPACE";
+pub(crate) const ENV_NODE_MODEL: &str = "TIDEPOOL_NODE_MODEL";
+pub(crate) const ENV_NODE_REASONING_EFFORT: &str = "TIDEPOOL_NODE_REASONING_EFFORT";
+pub(crate) const ENV_NODE_DEVELOPER_INSTRUCTIONS: &str = "TIDEPOOL_NODE_DEVELOPER_INSTRUCTIONS";
+
+/// Deployment inputs for one pane-owned interactive agent incarnation.
+///
+/// This is the one typed boundary that knows the private environment protocol
+/// consumed by `tidepool-agent-node`; composition roots never spell or parse
+/// those variable names.
+pub struct InteractiveNodeLaunch {
+    pub actor: ActorRef,
+    pub endpoint: PathBuf,
+    pub credential: NodeCredential,
+    pub binding_path: PathBuf,
+    pub workspace: PathBuf,
+    pub model: Option<String>,
+    pub effort: Option<ReasoningEffort>,
+    pub developer_instructions: String,
+}
+
+impl InteractiveNodeLaunch {
+    #[must_use]
+    pub fn environment(&self) -> BTreeMap<String, String> {
+        let mut environment = BTreeMap::from([
+            (
+                ENV_NODE_ENDPOINT.into(),
+                self.endpoint.display().to_string(),
+            ),
+            (ENV_NODE_ACTOR_ID.into(), self.actor.id.0.to_string()),
+            (
+                ENV_NODE_INCARNATION.into(),
+                self.actor.incarnation.0.to_string(),
+            ),
+            (ENV_NODE_CREDENTIAL.into(), self.credential.0.clone()),
+            (
+                ENV_NODE_BINDING_PATH.into(),
+                self.binding_path.display().to_string(),
+            ),
+            (
+                ENV_NODE_WORKSPACE.into(),
+                self.workspace.display().to_string(),
+            ),
+            (
+                ENV_NODE_DEVELOPER_INSTRUCTIONS.into(),
+                self.developer_instructions.clone(),
+            ),
+        ]);
+        if let Some(model) = &self.model {
+            environment.insert(ENV_NODE_MODEL.into(), model.clone());
+        }
+        if let Some(effort) = self.effort {
+            environment.insert(
+                ENV_NODE_REASONING_EFFORT.into(),
+                match effort {
+                    ReasoningEffort::Low => "low",
+                    ReasoningEffort::Medium => "medium",
+                    ReasoningEffort::High => "high",
+                }
+                .into(),
+            );
+        }
+        environment
+    }
+}
 
 /// A boxed asynchronous operation at the backend-neutral boundary.
 pub type InteractiveFuture<'a, T> =
@@ -84,4 +158,34 @@ pub trait InteractiveAgentBackend: Send + Sync {
         cwd: &'a str,
         thread: &'a BackendThreadId,
     ) -> InteractiveFuture<'a, ()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_actor::{ActorId, ActorRef};
+
+    #[test]
+    fn node_launch_is_the_only_environment_protocol_encoder() {
+        let launch = InteractiveNodeLaunch {
+            actor: ActorRef::first(ActorId(7)),
+            endpoint: "/tmp/actor.sock".into(),
+            credential: NodeCredential("secret".into()),
+            binding_path: "/tmp/binding.json".into(),
+            workspace: "/tmp/work".into(),
+            model: Some("model-name".into()),
+            effort: Some(ReasoningEffort::Medium),
+            developer_instructions: "typed tools first".into(),
+        };
+        let environment = launch.environment();
+        assert_eq!(environment[ENV_NODE_ACTOR_ID], "7");
+        assert_eq!(environment[ENV_NODE_INCARNATION], "1");
+        assert_eq!(environment[ENV_NODE_CREDENTIAL], "secret");
+        assert_eq!(environment[ENV_NODE_MODEL], "model-name");
+        assert_eq!(environment[ENV_NODE_REASONING_EFFORT], "medium");
+        assert_eq!(
+            environment[ENV_NODE_DEVELOPER_INSTRUCTIONS],
+            "typed tools first"
+        );
+    }
 }

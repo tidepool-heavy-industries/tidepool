@@ -60,6 +60,8 @@ pub enum ResidentActorHostError {
     DuplicateSession(tidepool_repr::SessionId),
     #[error("actor {0:?} already has owned host work")]
     DuplicateTask(ActorRef),
+    #[error("the resident MCP installation stream was already taken")]
+    McpInstallationsTaken,
     #[error(transparent)]
     Registry(#[from] ActorRegistryError),
     #[error(transparent)]
@@ -130,6 +132,16 @@ pub struct ResidentHostShutdownReport {
     pub removed_sessions: usize,
 }
 
+/// One live policy handle handed from actor scheduling to node deployment.
+///
+/// Lifecycle facts remain in `ActorEvent`; this stream transfers the
+/// process-local capability needed to attach an MCP transport exactly once.
+#[derive(Clone)]
+pub struct ResidentMcpInstallation {
+    pub actor: ActorRef,
+    pub policy: Arc<crate::ResidentMcpPolicy>,
+}
+
 struct ResidentHostRuntime<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
@@ -153,30 +165,35 @@ struct HostedActor {
     state: HostedActorState,
 }
 
+struct StartedChild {
+    actor: ActorRef,
+    state: crate::start::ResidentStartedActorState,
+}
+
 enum HostTaskResult {
     Idle {
         actor: ActorRef,
-        children: Vec<ActorRef>,
+        children: Vec<StartedChild>,
     },
     ParkedCall {
         actor: ActorRef,
         pending: HostCall,
-        children: Vec<ActorRef>,
+        children: Vec<StartedChild>,
     },
     ParkedWait {
         actor: ActorRef,
         pending: HostWait,
-        children: Vec<ActorRef>,
+        children: Vec<StartedChild>,
     },
     McpPolicy {
         actor: ActorRef,
         awaiting: crate::resident_mcp::ResidentMcpAwait,
         settlement: Option<McpSettlement>,
-        children: Vec<ActorRef>,
+        children: Vec<StartedChild>,
     },
     Exited {
         actor: ActorRef,
-        children: Vec<ActorRef>,
+        children: Vec<StartedChild>,
         cleanup_failure: Option<ResidentLifecycleError>,
     },
     Failed {
@@ -258,6 +275,8 @@ pub struct ResidentActorHost<H, O> {
     mcp_awaits: HashMap<ActorRef, crate::resident_mcp::ResidentMcpAwait>,
     mcp_requests: mpsc::UnboundedSender<crate::resident_mcp::ResidentMcpInvocation>,
     mcp_request_rx: mpsc::UnboundedReceiver<crate::resident_mcp::ResidentMcpInvocation>,
+    mcp_installations: mpsc::UnboundedSender<ResidentMcpInstallation>,
+    mcp_installation_rx: Option<mpsc::UnboundedReceiver<ResidentMcpInstallation>>,
     roots: BTreeSet<ActorRef>,
     failures: Vec<(ActorRef, ResidentHostTaskError)>,
     cleanup_failures: Vec<(ActorRef, ResidentLifecycleError)>,
@@ -274,6 +293,15 @@ where
     #[must_use]
     pub fn mcp_policy(&self, actor: ActorRef) -> Option<Arc<crate::ResidentMcpPolicy>> {
         self.mcp_policies.get(&actor).cloned()
+    }
+
+    /// Take the sole live-policy handoff stream before starting the host loop.
+    pub fn take_mcp_installations(
+        &mut self,
+    ) -> Result<mpsc::UnboundedReceiver<ResidentMcpInstallation>, ResidentActorHostError> {
+        self.mcp_installation_rx
+            .take()
+            .ok_or(ResidentActorHostError::McpInstallationsTaken)
     }
 
     pub fn new(
@@ -295,6 +323,7 @@ where
         let starter = ResidentActorStarter::new(Arc::clone(&lifecycle), completions.clone());
         let mailbox = ResidentActorMailbox::new(Arc::clone(&lifecycle));
         let (mcp_requests, mcp_request_rx) = mpsc::unbounded_channel();
+        let (mcp_installations, mcp_installation_rx) = mpsc::unbounded_channel();
         Ok(Self {
             runtime: Arc::new(ResidentHostRuntime {
                 registry,
@@ -316,6 +345,8 @@ where
             mcp_awaits: HashMap::new(),
             mcp_requests,
             mcp_request_rx,
+            mcp_installations,
+            mcp_installation_rx: Some(mcp_installation_rx),
             roots: BTreeSet::new(),
             failures: Vec::new(),
             cleanup_failures: Vec::new(),
@@ -668,15 +699,7 @@ where
                 children,
             } => {
                 self.register_children(children);
-                if !self.mcp_policies.contains_key(&actor) {
-                    let policy = Arc::new(crate::resident_mcp::install_resident_mcp(
-                        actor,
-                        self.mcp_requests.clone(),
-                        &awaiting,
-                    ));
-                    self.mcp_policies.insert(actor, policy);
-                }
-                self.mcp_awaits.insert(actor, awaiting);
+                self.install_mcp_policy(actor, awaiting);
                 if let Some(hosted) = self.actors.get_mut(&actor) {
                     hosted.state = HostedActorState::McpPolicy;
                 }
@@ -856,20 +879,41 @@ where
         )
     }
 
-    fn register_children(&mut self, children: Vec<ActorRef>) {
+    fn register_children(&mut self, children: Vec<StartedChild>) {
         for child in children {
-            self.actors.entry(child).or_insert_with(|| {
+            let actor = child.actor;
+            let state = match child.state {
+                crate::start::ResidentStartedActorState::IdleReceiver => HostedActorState::Idle,
+                crate::start::ResidentStartedActorState::Exited => HostedActorState::Exited,
+                crate::start::ResidentStartedActorState::McpPolicy(awaiting) => {
+                    self.install_mcp_policy(actor, awaiting);
+                    HostedActorState::McpPolicy
+                }
+            };
+            self.actors.entry(actor).or_insert_with(|| {
                 let (cancel, _) = watch::channel(false);
-                let state = if self.runtime.registry.lifecycle(child)
-                    == Ok(crate::ActorLifecycle::Exited)
-                {
-                    HostedActorState::Exited
-                } else {
-                    HostedActorState::Idle
-                };
                 HostedActor { cancel, state }
             });
         }
+    }
+
+    fn install_mcp_policy(
+        &mut self,
+        actor: ActorRef,
+        awaiting: crate::resident_mcp::ResidentMcpAwait,
+    ) {
+        if !self.mcp_policies.contains_key(&actor) {
+            let policy = Arc::new(crate::resident_mcp::install_resident_mcp(
+                actor,
+                self.mcp_requests.clone(),
+                &awaiting,
+            ));
+            self.mcp_policies.insert(actor, Arc::clone(&policy));
+            let _ = self
+                .mcp_installations
+                .send(ResidentMcpInstallation { actor, policy });
+        }
+        self.mcp_awaits.insert(actor, awaiting);
     }
 }
 
@@ -1007,7 +1051,7 @@ where
             }
             ResidentActorBoundary::Start(start) => {
                 let cancellation = Box::pin(cancellation_requested(cancel.clone()));
-                let (next_turn, child, next_outcome) = runtime
+                let (next_turn, child, next_outcome, child_state) = runtime
                     .starter
                     .start_until_cancelled(
                         turn,
@@ -1017,7 +1061,10 @@ where
                         cancellation,
                     )
                     .await?;
-                children.push(child);
+                children.push(StartedChild {
+                    actor: child,
+                    state: child_state,
+                });
                 turn = next_turn;
                 outcome = next_outcome;
             }

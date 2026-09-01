@@ -237,6 +237,8 @@ pub enum ResidentActorStartError {
     InitializationPanicked,
     #[error("actor startup panicked while resuming its parent")]
     ParentResumePanicked,
+    #[error("an MCP-backed child must be started through ResidentActorHost")]
+    McpPolicyRequiresHost,
     #[error(transparent)]
     Registry(#[from] ActorRegistryError),
     #[error(transparent)]
@@ -245,6 +247,12 @@ pub enum ResidentActorStartError {
     Completion(#[from] ResidentCompletionError),
     #[error(transparent)]
     Lifecycle(#[from] ResidentLifecycleError),
+}
+
+pub(crate) enum ResidentStartedActorState {
+    IdleReceiver,
+    McpPolicy(crate::resident_mcp::ResidentMcpAwait),
+    Exited,
 }
 
 /// Runtime-owned prompted startup. This is orchestration over the permanent
@@ -352,8 +360,23 @@ where
         start: ResidentActorStart,
         sink: Option<StreamSink>,
     ) -> Result<(TurnLease, crate::ActorRef, ResidentOutcome), ResidentActorStartError> {
-        self.start_until_cancelled(parent_turn, provider, start, sink, std::future::pending())
-            .await
+        let (turn, actor, outcome, state) = self
+            .start_until_cancelled(parent_turn, provider, start, sink, std::future::pending())
+            .await?;
+        if matches!(state, ResidentStartedActorState::McpPolicy(_)) {
+            let _ = self
+                .lifecycle
+                .force_terminate(
+                    actor,
+                    ActorTerminal {
+                        kind: ActorExitKind::Failed,
+                        summary: ResidentActorStartError::McpPolicyRequiresHost.to_string(),
+                    },
+                )
+                .await;
+            return Err(ResidentActorStartError::McpPolicyRequiresHost);
+        }
+        Ok((turn, actor, outcome))
     }
 
     /// Run startup under a cooperative cancellation signal. The signal may
@@ -366,7 +389,15 @@ where
         start: ResidentActorStart,
         sink: Option<StreamSink>,
         mut cancelled: C,
-    ) -> Result<(TurnLease, crate::ActorRef, ResidentOutcome), ResidentActorStartError>
+    ) -> Result<
+        (
+            TurnLease,
+            crate::ActorRef,
+            ResidentOutcome,
+            ResidentStartedActorState,
+        ),
+        ResidentActorStartError,
+    >
     where
         C: Future<Output = ()> + Unpin,
     {
@@ -429,23 +460,43 @@ where
                     .runner
                     .resume_readiness(unpublished.context.clone(), readiness)
                     .await?;
-                let completed = matches!(child, ResidentOutcome::Completed { .. });
-                if !completed {
-                    let receiver = self
-                        .runner
-                        .capture_receiver(unpublished.context.clone(), child, unpublished.realm)
-                        .await?;
-                    self.registry
-                        .install_starting_receiver(&unpublished.starting, receiver)?;
-                }
-                Ok::<_, ResidentActorStartError>(completed)
+                let state = match self
+                    .runner
+                    .capture_boundary(
+                        unpublished.context.clone(),
+                        child,
+                        unpublished.realm,
+                    )
+                    .await?
+                {
+                    crate::resident_workbench::ResidentActorBoundary::Completed => {
+                        ResidentStartedActorState::Exited
+                    }
+                    crate::resident_workbench::ResidentActorBoundary::Receive(receiver) => {
+                        self.registry
+                            .install_starting_receiver(&unpublished.starting, receiver)?;
+                        ResidentStartedActorState::IdleReceiver
+                    }
+                    crate::resident_workbench::ResidentActorBoundary::McpAwait(awaiting) => {
+                        ResidentStartedActorState::McpPolicy(awaiting)
+                    }
+                    other => {
+                        return Err(ResidentActorStartError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "actor behavior reached `{}` before installing a stable receive or MCP policy",
+                                other.operation()
+                            )),
+                        ));
+                    }
+                };
+                Ok::<_, ResidentActorStartError>(state)
             })
             .catch_unwind(),
         )
         .await;
 
-        let completed = match startup_result {
-            StartupPhaseOutcome::Completed(Ok(completed)) => completed,
+        let state = match startup_result {
+            StartupPhaseOutcome::Completed(Ok(state)) => state,
             StartupPhaseOutcome::Completed(Err(error)) => {
                 self.abort_starting(
                     unpublished,
@@ -472,7 +523,7 @@ where
             }
         };
         let actor = unpublished.publish(&self.registry, &self.lifecycle).await?;
-        if completed {
+        if matches!(state, ResidentStartedActorState::Exited) {
             let cleanup = self
                 .lifecycle
                 .force_terminate(
@@ -533,7 +584,7 @@ where
                 return Err(ResidentActorStartError::Cancelled);
             }
         };
-        Ok((parent_turn, actor, parent))
+        Ok((parent_turn, actor, parent, state))
     }
 }
 

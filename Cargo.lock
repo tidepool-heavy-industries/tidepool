@@ -3834,11 +3834,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "frunk",
  "glob",
  "rmcp",
  "serde",
  "serde_json",
  "tempfile",
+ "tidepool-actor",
  "tidepool-agent",
  "tidepool-bridge",
  "tidepool-bridge-derive",
@@ -3850,6 +3852,8 @@ dependencies = [
  "tidepool-heap",
  "tidepool-macro",
  "tidepool-mcp",
+ "tidepool-model",
+ "tidepool-node",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-testing",
@@ -3859,6 +3863,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

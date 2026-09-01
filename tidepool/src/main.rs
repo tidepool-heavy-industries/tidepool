@@ -6,7 +6,6 @@ use tidepool_mcp::server_common;
 
 mod config;
 mod listen_client;
-mod prelude;
 mod setup;
 mod stack;
 
@@ -134,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // file in, restart, done). Must run before any handler reads the env.
     server_common::load_secrets_logged();
 
-    let prelude_dir = prelude::ensure_prelude()?;
+    let prelude_dir = tidepool::prelude::ensure_prelude()?;
 
     // `--write-toolchain-stamp`: record the pair and exit, before any server
     // machinery starts. Deliberately runs AFTER `ensure_prelude` so the stamp
