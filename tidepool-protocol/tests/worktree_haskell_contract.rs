@@ -1,14 +1,8 @@
-//! The pre-flip BYTE proof for the Worktree effect.
+//! Contract-level rendering checks for the generated Worktree effect.
 //!
 //! `tidepool-protocol/src/effects/worktree.rs` describes the Worktree effect
-//! completely, but it is deliberately NOT in [`tidepool_protocol::effects::all`]
-//! — flipping it would write generated modules into `tidepool-mcp` and
-//! `tidepool-handlers` whose mod-index collides with the still-live
-//! `worktree_effect_def!` macro in `tidepool-mcp/src/effect_defs.rs`. This test
-//! proves the schema renders IDENTICAL Haskell to that macro before the flip
-//! happens, the same way `generated_files_are_current.rs`'s
-//! `exec_contract_text_is_pinned` / `journal_contract_text_is_pinned` pin Exec
-//! and Journal.
+//! completely and generates both its Haskell declaration text and Rust wire
+//! modules. These literal expectations make model-visible API drift explicit.
 //!
 //! Every expectation below is a LITERAL string transcribed BY HAND out of
 //! `worktree_effect_def!` — not read from a golden file and not derived from
@@ -52,6 +46,9 @@ fn worktree_type_def_texts_are_pinned() {
             "data WorktreeSpec = WorktreeSpec { specSource :: WorktreeSource, specLabel :: Text, specDirtyPolicy :: DirtyPolicy } deriving (Show, Eq)",
             "data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick | InProgressRevert | InProgressBisect deriving (Show, Eq)",
             "data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)",
+            "data HeadState = OnBranch BranchName GitOid | Detached GitOid deriving (Show, Eq)",
+            "data WorkingState = WorkingState { changes :: DirtySummary, operation :: Maybe InProgressKind } deriving (Show, Eq)",
+            "data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)",
             "data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)",
             "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",
@@ -73,7 +70,7 @@ fn worktree_type_def_texts_are_pinned() {
             // vendored `ToJSON`'s generic default only covers
             // single-constructor records.
             concat!(
-                "data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)\n",
+                "data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | SubmissionUnstable WorktreeId | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)\n",
                 "instance ToJSON WorktreeError where\n",
                 "  toJSON e = case e of\n",
                 "    SourceDirty dirty -> object [\"tag\" .= (\"SourceDirty\" :: Text), \"dirty\" .= dirty]\n",
@@ -82,6 +79,7 @@ fn worktree_type_def_texts_are_pinned() {
                 "    DirtySubmoduleUnsupported submodule -> object [\"tag\" .= (\"DirtySubmoduleUnsupported\" :: Text), \"submodule\" .= submodule]\n",
                 "    SourceOperationInProgress inProgress -> object [\"tag\" .= (\"SourceOperationInProgress\" :: Text), \"inProgress\" .= inProgress]\n",
                 "    WorktreeBusy busyId holder -> object [\"tag\" .= (\"WorktreeBusy\" :: Text), \"busyId\" .= busyId, \"holder\" .= holder]\n",
+                "    SubmissionUnstable unstableId -> object [\"tag\" .= (\"SubmissionUnstable\" :: Text), \"unstableId\" .= unstableId]\n",
                 "    GitFailure receipt -> object [\"tag\" .= (\"GitFailure\" :: Text), \"receipt\" .= receipt]\n",
                 "    WorktreeNotRegistered notRegisteredId -> object [\"tag\" .= (\"WorktreeNotRegistered\" :: Text), \"notRegisteredId\" .= notRegisteredId]\n",
                 "    InvalidRegistryRoot root inside -> object [\"tag\" .= (\"InvalidRegistryRoot\" :: Text), \"root\" .= root, \"inside\" .= inside]\n",
@@ -107,6 +105,7 @@ fn worktree_constructor_signatures_are_pinned() {
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",
             "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)",
+            "WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)",
             "WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)",
         ]
     );
@@ -162,6 +161,13 @@ fn worktree_helper_texts_are_pinned() {
                 "mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)\n",
                 "mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)",
             ),
+            concat!(
+                "-- | Observe a candidate checkout through one bounded Worktree operation.\n",
+                "-- This reports submitted HEAD, dirty state, and in-progress operation\n",
+                "-- together; it does not seal or mutate the checkout.\n",
+                "observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)\n",
+                "observeSubmission = send . WorktreeObserveSubmission",
+            ),
         ]
     );
 }
@@ -211,7 +217,7 @@ fn worktree_ten_helpers_are_not_schema_representable() {
         "renderWorktreeError",
     ];
     assert_eq!(NOT_REPRESENTABLE.len(), 10);
-    assert_eq!(NOT_REPRESENTABLE.len() + worktree().helpers.len(), 15);
+    assert_eq!(NOT_REPRESENTABLE.len() + worktree().helpers.len(), 16);
 
     let wt = worktree();
     for name in NOT_REPRESENTABLE {

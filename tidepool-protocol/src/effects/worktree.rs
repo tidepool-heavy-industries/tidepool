@@ -427,6 +427,113 @@ fn type_defs() -> Vec<TypeDef> {
             ],
         },
         TypeDef {
+            name: "HeadState",
+            wire_rust: Some("WtHeadState"),
+            shape: TypeShape::Sum {
+                variants: vec![
+                    SumVariant {
+                        ctor: "OnBranch",
+                        fields: vec![
+                            HsType::Named("BranchName"),
+                            HsType::Named("GitOid"),
+                        ],
+                        doc: &["The checkout is attached to this branch at this commit."],
+                    },
+                    SumVariant {
+                        ctor: "Detached",
+                        fields: vec![HsType::Named("GitOid")],
+                        doc: &["The checkout has a detached HEAD at this commit."],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: Some(DomainMap {
+                domain_path: "tidepool_worktree::HeadState",
+                into_wire: Some(AdapterKind::HandWritten(
+                    "both variants wrap domain identity values into generated wire identities",
+                )),
+                from_wire: None,
+            }),
+            doc: &["The checked-out identity at submission-observation time."],
+        },
+        TypeDef {
+            name: "WorkingState",
+            wire_rust: Some("WtWorkingState"),
+            shape: TypeShape::Record {
+                fields: vec![
+                    RecordField {
+                        hs_name: "changes",
+                        rust_name: "changes",
+                        ty: HsType::Named("DirtySummary"),
+                        doc: &[],
+                    },
+                    RecordField {
+                        hs_name: "operation",
+                        rust_name: "operation",
+                        ty: HsType::maybe(HsType::Named("InProgressKind")),
+                        doc: &[],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: Some(DomainMap {
+                domain_path: "tidepool_worktree::WorkingState",
+                into_wire: Some(AdapterKind::HandWritten(
+                    "composes DirtySummary and optional InProgressKind conversions",
+                )),
+                from_wire: None,
+            }),
+            doc: &["Mutable repository state observed with a submitted HEAD."],
+        },
+        TypeDef {
+            name: "SubmissionObservation",
+            wire_rust: Some("WtSubmissionObservation"),
+            shape: TypeShape::Record {
+                fields: vec![
+                    RecordField {
+                        hs_name: "observedWorktreeId",
+                        rust_name: "observed_worktree_id",
+                        ty: HsType::Named("WorktreeId"),
+                        doc: &[],
+                    },
+                    RecordField {
+                        hs_name: "baseHead",
+                        rust_name: "base_head",
+                        ty: HsType::Named("GitOid"),
+                        doc: &[],
+                    },
+                    RecordField {
+                        hs_name: "submittedHead",
+                        rust_name: "submitted_head",
+                        ty: HsType::Named("HeadState"),
+                        doc: &[],
+                    },
+                    RecordField {
+                        hs_name: "workingState",
+                        rust_name: "working_state",
+                        ty: HsType::Named("WorkingState"),
+                        doc: &[],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: Some(DomainMap {
+                domain_path: "tidepool_worktree::SubmissionObservation",
+                into_wire: Some(AdapterKind::HandWritten(
+                    "composes the generated identity, head-state, and working-state conversions",
+                )),
+                from_wire: None,
+            }),
+            doc: &[
+                "One bounded, internally stable observation of a candidate checkout.",
+                "This is not a seal: dirty state is evidence, while a clean commit OID is",
+                "the immutable integration artifact.",
+            ],
+        },
+        TypeDef {
             name: "GitFailureReceipt",
             wire_rust: Some("WtGitFailureReceipt"),
             shape: TypeShape::Record {
@@ -713,6 +820,11 @@ fn errors() -> ErrorAdt {
                 doc: "one worktree, one agent — binding a second fails explicitly",
             },
             ErrorVariant {
+                ctor: "SubmissionUnstable",
+                fields: vec![field("unstableId", "WorktreeId", "WtWorktreeId")],
+                doc: "the checkout kept changing during bounded submission observation",
+            },
+            ErrorVariant {
                 ctor: "GitFailure",
                 fields: vec![field("receipt", "GitFailureReceipt", "WtGitFailureReceipt")],
                 doc: "git itself failed; the receipt carries the invocation and its output",
@@ -795,6 +907,15 @@ fn verbs() -> Vec<Verb> {
             method: "worktree_head_of",
             args: vec![tree_id_arg()],
             ret: HsType::Named("GitOid"),
+            errors: Some("WorktreeError"),
+            handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
+            extract: None,
+        },
+        Verb {
+            ctor: "WorktreeObserveSubmission",
+            method: "worktree_observe_submission",
+            args: vec![tree_id_arg()],
+            ret: HsType::Named("SubmissionObservation"),
             errors: Some("WorktreeError"),
             handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
             extract: None,
@@ -918,6 +1039,17 @@ fn helpers() -> Vec<Helper> {
                 "and conflicted.",
             ],
             body: HelperBody::Applied(&["treeId", "branch", "message"]),
+        },
+        Helper {
+            name: "observeSubmission",
+            ctor: Some("WorktreeObserveSubmission"),
+            substrate: false,
+            doc: &[
+                "Observe a candidate checkout through one bounded Worktree operation.",
+                "This reports submitted HEAD, dirty state, and in-progress operation",
+                "together; it does not seal or mutate the checkout.",
+            ],
+            body: HelperBody::Pointfree,
         },
     ]
 }

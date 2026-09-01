@@ -360,6 +360,15 @@ impl WorktreeManager {
         let out = self.git.try_run(handle.cwd(), &["rev-parse", "HEAD"])?;
         Ok(GitOid::from_raw(out.trimmed()))
     }
+
+    /// Observe the current submitted repository state as one bounded,
+    /// internally consistent operation. This does not seal the worktree.
+    pub fn observe_submission(
+        &self,
+        handle: &WorktreeHandle,
+    ) -> Result<crate::SubmissionObservation, WorktreeError> {
+        crate::submission::observe(&self.git, handle)
+    }
 }
 
 /// What a new worktree should be rooted at, and in which repository the

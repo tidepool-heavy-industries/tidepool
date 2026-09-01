@@ -97,6 +97,35 @@ pub struct WtDirtySummary {
     pub ignored_excluded: i64,
 }
 
+/// The checked-out identity at submission-observation time.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+pub enum WtHeadState {
+    /// The checkout is attached to this branch at this commit.
+    OnBranch(WtBranchName, WtGitOid),
+    /// The checkout has a detached HEAD at this commit.
+    Detached(WtGitOid),
+}
+
+/// Mutable repository state observed with a submitted HEAD.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "WorkingState")]
+pub struct WtWorkingState {
+    pub changes: WtDirtySummary,
+    pub operation: Option<WtInProgressKind>,
+}
+
+/// One bounded, internally stable observation of a candidate checkout.
+/// This is not a seal: dirty state is evidence, while a clean commit OID is
+/// the immutable integration artifact.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "SubmissionObservation")]
+pub struct WtSubmissionObservation {
+    pub observed_worktree_id: WtWorktreeId,
+    pub base_head: WtGitOid,
+    pub submitted_head: WtHeadState,
+    pub working_state: WtWorkingState,
+}
+
 /// Haskell `GitFailureReceipt` — a failed git invocation, recorded verbatim so
 /// the failure is diagnosable without re-running anything. Keeps stdout AND
 /// stderr, never just the status.

@@ -33,6 +33,7 @@ pub mod monitor;
 pub mod registry;
 pub mod snapshot;
 pub mod storage;
+pub mod submission;
 pub mod testing;
 
 pub use binding::{ActiveBinding, AgentRef, Binding, BindingState, BindingTable, BindingTerminal};
@@ -54,3 +55,4 @@ pub use registry::{
     WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus, WorktreeRegistry, WorktreeSummary,
 };
 pub use snapshot::SnapshotReceipt;
+pub use submission::{HeadState, SubmissionObservation, WorkingState};

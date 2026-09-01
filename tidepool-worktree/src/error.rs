@@ -89,6 +89,14 @@ pub enum WorktreeError {
         holder: String,
     },
 
+    /// The worktree changed while Tidepool was assembling a submission
+    /// observation. The operation retries a bounded number of times; this
+    /// variant means no two consecutive complete samples agreed. Returning a
+    /// typed refusal is preferable to publishing a receipt whose HEAD and
+    /// working-tree state were observed at different repository moments.
+    #[error("managed worktree {0} kept changing while its submission was observed")]
+    SubmissionUnstable(WorktreeId),
+
     /// git itself failed. The receipt carries the invocation and its output so
     /// the failure is diagnosable without re-running anything.
     #[error("git failed: {0}")]

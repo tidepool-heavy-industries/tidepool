@@ -54,13 +54,8 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
 }
 
 /// Effects with an explicitly curated authored vocabulary.
-pub(crate) const CURATED_EFFECTS: &[&str] = &[
-    "Deliberate",
-    "Actor",
-    "ActorKernel",
-    "ActorLocal",
-    "ActorMcp",
-];
+pub(crate) const CURATED_EFFECTS: &[&str] =
+    &["Deliberate", "Actor", "ActorKernel", "ActorLocal", "ActorMcp"];
 
 /// Hidden names grouped by their owning effect.
 pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
@@ -77,13 +72,11 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     ),
     (
         "ActorKernel",
-        &[
-            "ActorInstallShutdownWith",
-            "ActorReadyWith",
-            "ActorReplyWith",
-            "ActorContinueWith",
-        ],
+        &["ActorInstallShutdownWith", "ActorReadyWith", "ActorReplyWith", "ActorContinueWith"],
     ),
     ("ActorLocal", &["ActorReceiveWith"]),
-    ("ActorMcp", &["ActorMcpAwaitWith", "ActorMcpReplyWith"]),
+    (
+        "ActorMcp",
+        &["ActorMcpAwaitWith", "ActorMcpReplyWith"],
+    ),
 ];

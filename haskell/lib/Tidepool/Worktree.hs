@@ -107,6 +107,7 @@ module Tidepool.Worktree
   , worktreeId
   , worktreeBranch
   , worktreeHead
+  , observeSubmission
 
     -- * Merging (the one narrow, deliberate workflow primitive)
   , MergeOutcome (..)
@@ -117,6 +118,9 @@ module Tidepool.Worktree
   , WorktreeSummary (..)
   , WorktreeError (..)
   , DirtySummary (..)
+  , HeadState (..)
+  , WorkingState (..)
+  , SubmissionObservation (..)
   , renderWorktreeError
   , renderWorktreeId
   , renderBranchName
@@ -134,6 +138,9 @@ import Tidepool.Effects
   , GitRef
   , M
   , MergeOutcome (..)
+  , HeadState (..)
+  , WorkingState (..)
+  , SubmissionObservation (..)
   , Worktree (WorktreeBranchOf, WorktreeHeadOf)
   , WorktreeError (..)
   , WorktreeHandle
@@ -147,6 +154,7 @@ import Tidepool.Effects
   , listWorktrees
   , lookupWorktree
   , mergeBranchInto
+  , observeSubmission
   , worktreeId
   )
 import Tidepool.Prelude hiding (error)
@@ -279,6 +287,7 @@ renderWorktreeError (WorktreeLost i) = "managed worktree " <> renderWorktreeId i
 renderWorktreeError (DirtySubmoduleUnsupported p) = "dirty submodule is unsupported in v1: " <> p
 renderWorktreeError (SourceOperationInProgress k) = "source repository has an operation in progress: " <> show k
 renderWorktreeError (WorktreeBusy i holder) = "worktree " <> renderWorktreeId i <> " is already bound to agent " <> holder
+renderWorktreeError (SubmissionUnstable i) = "worktree " <> renderWorktreeId i <> " kept changing while its submission was observed"
 renderWorktreeError (GitFailure r) = "git " <> T.intercalate " " r.gitArgs <> " failed: " <> T.strip r.gitStderr
 renderWorktreeError (WorktreeNotRegistered i) = "no managed worktree registered with id " <> renderWorktreeId i
 renderWorktreeError (InvalidRegistryRoot root inside) = "registry root " <> root <> " resolves inside the git working tree at " <> inside <> " — the registry must live outside every source repository"

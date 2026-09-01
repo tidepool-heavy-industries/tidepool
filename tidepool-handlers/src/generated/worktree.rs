@@ -21,6 +21,8 @@ pub enum WorktreeError {
     SourceOperationInProgress(tidepool_bridge_effects::WtInProgressKind),
     /// one worktree, one agent — binding a second fails explicitly
     WorktreeBusy(tidepool_bridge_effects::WtWorktreeId, String),
+    /// the checkout kept changing during bounded submission observation
+    SubmissionUnstable(tidepool_bridge_effects::WtWorktreeId),
     /// git itself failed; the receipt carries the invocation and its output
     GitFailure(tidepool_bridge_effects::WtGitFailureReceipt),
     /// no worktree registered under this id — a typo or a stale id, DISTINCT from WorktreeLost's data loss
@@ -39,6 +41,7 @@ pub enum WorktreeReq {
     WorktreeList,
     WorktreeBranchOf(tidepool_bridge_effects::WtWorktreeId),
     WorktreeHeadOf(tidepool_bridge_effects::WtWorktreeId),
+    WorktreeObserveSubmission(tidepool_bridge_effects::WtWorktreeId),
     WorktreeMergeInto(
         tidepool_bridge_effects::WtWorktreeId,
         tidepool_bridge_effects::WtBranchName,
@@ -66,6 +69,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             WorktreeReq::WorktreeList => cx.respond(self.worktree_list()),
             WorktreeReq::WorktreeBranchOf(tree_id) => cx.respond(self.worktree_branch_of(tree_id)),
             WorktreeReq::WorktreeHeadOf(tree_id) => cx.respond(self.worktree_head_of(tree_id)),
+            WorktreeReq::WorktreeObserveSubmission(tree_id) => {
+                cx.respond(self.worktree_observe_submission(tree_id))
+            }
             WorktreeReq::WorktreeMergeInto(tree_id, branch, message) => {
                 cx.respond(self.worktree_merge_into(tree_id, branch, message))
             }

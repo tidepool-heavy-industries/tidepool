@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use tidepool_bridge_effects::{
-    WireError, WtBranchName, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtMergeOutcome,
-    WtWorktreeHandle, WtWorktreeId, WtWorktreeReceipt, WtWorktreeSource, WtWorktreeSpec,
-    WtWorktreeSummary,
+    WireError, WtBranchName, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtHeadState,
+    WtMergeOutcome, WtSubmissionObservation, WtWorkingState, WtWorktreeHandle, WtWorktreeId,
+    WtWorktreeReceipt, WtWorktreeSource, WtWorktreeSpec, WtWorktreeSummary,
 };
 use tidepool_worktree::create::{WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec};
 use tidepool_worktree::error::{
@@ -15,6 +15,7 @@ use tidepool_worktree::merge::{merge_branch_into, MergeOutcome};
 #[cfg(test)]
 use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
 use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
+use tidepool_worktree::{HeadState, SubmissionObservation, WorkingState};
 
 // ============================================================================
 // Tag: Worktree (managed git worktrees, deliberately NOT in the
@@ -122,6 +123,31 @@ fn dirty_summary_to_wire(d: &DirtySummary) -> WtDirtySummary {
         unstaged: d.unstaged.clone(),
         untracked: d.untracked.clone(),
         ignored_excluded: d.ignored_excluded as i64,
+    }
+}
+
+fn head_state_to_wire(head: &HeadState) -> WtHeadState {
+    match head {
+        HeadState::OnBranch { branch, oid } => {
+            WtHeadState::OnBranch(branch_name_to_wire(branch), git_oid_to_wire(oid))
+        }
+        HeadState::Detached { oid } => WtHeadState::Detached(git_oid_to_wire(oid)),
+    }
+}
+
+fn working_state_to_wire(state: &WorkingState) -> WtWorkingState {
+    WtWorkingState {
+        changes: dirty_summary_to_wire(&state.changes),
+        operation: state.operation.map(in_progress_kind_to_wire),
+    }
+}
+
+fn submission_observation_to_wire(observation: &SubmissionObservation) -> WtSubmissionObservation {
+    WtSubmissionObservation {
+        observed_worktree_id: worktree_id_to_wire(&observation.worktree_id),
+        base_head: git_oid_to_wire(&observation.base_head),
+        submitted_head: head_state_to_wire(&observation.submitted_head),
+        working_state: working_state_to_wire(&observation.working_state),
     }
 }
 
@@ -270,6 +296,9 @@ pub(crate) fn error_to_wire(e: DomainWorktreeError) -> WorktreeError {
         DomainWorktreeError::WorktreeBusy { worktree, holder } => {
             WorktreeError::WorktreeBusy(worktree_id_to_wire(&worktree), holder)
         }
+        DomainWorktreeError::SubmissionUnstable(id) => {
+            WorktreeError::SubmissionUnstable(worktree_id_to_wire(&id))
+        }
         DomainWorktreeError::GitFailure(r) => {
             WorktreeError::GitFailure(git_failure_receipt_to_wire(r))
         }
@@ -373,6 +402,23 @@ impl WorktreeHandler {
             .ok_or_else(|| never_registered(&tree_id))?;
         let head = self.manager.worktree_head(&handle).map_err(error_to_wire)?;
         Ok(git_oid_to_wire(&head))
+    }
+
+    pub(crate) fn worktree_observe_submission(
+        &mut self,
+        tree_id: WtWorktreeId,
+    ) -> Result<WtSubmissionObservation, WorktreeError> {
+        let id = worktree_id_from_wire(&tree_id)?;
+        let handle = self
+            .manager
+            .lookup(&id)
+            .map_err(error_to_wire)?
+            .ok_or_else(|| never_registered(&tree_id))?;
+        let observation = self
+            .manager
+            .observe_submission(&handle)
+            .map_err(error_to_wire)?;
+        Ok(submission_observation_to_wire(&observation))
     }
 
     /// The one narrow, deliberate workflow primitive (see
