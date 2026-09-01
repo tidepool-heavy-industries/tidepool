@@ -40,7 +40,7 @@ fn type_definition_name(definition: &str) -> Option<&str> {
 
 /// The canonical model-visible constructor slice for one effect.
 #[must_use]
-pub fn authored_constructors<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
+pub fn authored_constructors(decl: &EffectDecl) -> Vec<&str> {
     decl.constructors
         .iter()
         .copied()
@@ -53,7 +53,7 @@ pub fn authored_constructors<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
 
 /// The canonical model-visible supporting-type slice for one effect.
 #[must_use]
-pub fn authored_type_definitions<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
+pub fn authored_type_definitions(decl: &EffectDecl) -> Vec<&str> {
     decl.type_defs
         .iter()
         .copied()
@@ -66,7 +66,7 @@ pub fn authored_type_definitions<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
 
 /// The canonical model-visible helper-source slice for one effect.
 #[must_use]
-pub fn authored_helpers<'a>(decl: &'a EffectDecl) -> Vec<&'a str> {
+pub fn authored_helpers(decl: &EffectDecl) -> Vec<&str> {
     decl.helpers
         .iter()
         .copied()
@@ -116,7 +116,7 @@ pub fn helper_sig(helper: &str) -> Option<String> {
         if t.contains("::") {
             return Some(t.to_string());
         }
-        fallback.get_or_insert_with(|| t.to_string());
+        fallback.get_or_insert(t.to_string());
     }
     fallback
 }
@@ -176,7 +176,7 @@ pub fn describe_effect(decl: &EffectDecl) -> String {
     let verbs: Vec<String> = authored_helpers(decl)
         .into_iter()
         .filter(|h| !helper_is_substrate(h))
-        .filter_map(|h| helper_name(h))
+        .filter_map(helper_name)
         .collect();
     let mut s = format!("  {}: {}", decl.type_name, first_sentence(decl.description));
     if !verbs.is_empty() {
