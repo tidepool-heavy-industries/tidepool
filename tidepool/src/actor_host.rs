@@ -45,6 +45,7 @@ const POLICY_MODULE: &str = "Tidepool.Actors.DevSwarm";
 const POLICY_ENTRY: &str = "rootPolicy";
 const POLICY_EFFECTS: &str = "RootEffects";
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -111,8 +112,6 @@ enum InteractiveOperation {
     LaunchProcess,
     DiscoverBinding,
     StopProcess,
-    StopMcp,
-    StopDelivery,
 }
 
 impl fmt::Display for InteractiveOperation {
@@ -128,8 +127,6 @@ impl fmt::Display for InteractiveOperation {
             Self::LaunchProcess => "launch agent process",
             Self::DiscoverBinding => "discover conversation binding",
             Self::StopProcess => "stop agent process",
-            Self::StopMcp => "stop MCP service",
-            Self::StopDelivery => "stop inbox delivery",
         };
         formatter.write_str(name)
     }
@@ -931,38 +928,63 @@ async fn retire_interactive_application(
     tmux.kill_pane(&deployment.pane).await.map_err(|error| {
         application_error(deployment.actor, InteractiveOperation::StopProcess, error)
     })?;
-    match tokio::time::timeout(Duration::from_secs(5), &mut deployment.service).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => return Err(error),
-        Ok(Err(error)) => {
-            return Err(application_error(
-                deployment.actor,
-                InteractiveOperation::StopMcp,
-                error,
-            ))
-        }
-        Err(_) => {
-            deployment.service.abort();
-            return Err(application_error(
-                deployment.actor,
-                InteractiveOperation::StopMcp,
-                "service did not stop within 5s after retirement",
-            ));
-        }
-    }
-    if tokio::time::timeout(Duration::from_secs(5), &mut deployment.delivery)
-        .await
-        .is_err()
-    {
-        deployment.delivery.abort();
-        return Err(application_error(
+    tokio::join!(
+        stop_retired_mcp_service(
             deployment.actor,
-            InteractiveOperation::StopDelivery,
-            "delivery task did not stop within 5s after retirement",
-        ));
-    }
+            &mut deployment.service,
+            APPLICATION_TASK_GRACE_TIMEOUT,
+        ),
+        stop_retired_delivery(
+            deployment.actor,
+            &mut deployment.delivery,
+            APPLICATION_TASK_GRACE_TIMEOUT,
+        ),
+    );
     let _ = std::fs::remove_dir_all(&deployment.socket_root);
     Ok(())
+}
+
+/// Settle actor-local tasks after the actor has already reached a terminal
+/// state. A client that keeps its MCP transport open cannot invalidate the
+/// retained actor result or fail unrelated actors; after the grace period the
+/// host owns forced cancellation.
+async fn stop_retired_mcp_service(
+    actor: ActorRef,
+    service: &mut tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
+    grace: Duration,
+) {
+    match tokio::time::timeout(grace, &mut *service).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            tracing::warn!(actor = ?actor, %error, "retired actor MCP service stopped with an error");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(actor = ?actor, %error, "retired actor MCP service task failed");
+        }
+        Err(_) => {
+            tracing::debug!(actor = ?actor, "forcing retired actor MCP service to stop");
+            service.abort();
+            let _ = service.await;
+        }
+    }
+}
+
+async fn stop_retired_delivery(
+    actor: ActorRef,
+    delivery: &mut tokio::task::JoinHandle<()>,
+    grace: Duration,
+) {
+    match tokio::time::timeout(grace, &mut *delivery).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(actor = ?actor, %error, "retired actor inbox task failed");
+        }
+        Err(_) => {
+            tracing::debug!(actor = ?actor, "forcing retired actor inbox task to stop");
+            delivery.abort();
+            let _ = delivery.await;
+        }
+    }
 }
 
 async fn abandon_interactive_application(
@@ -1159,6 +1181,24 @@ mod tests {
             *backend.messages.lock().unwrap(),
             ["child completed", "child completed"]
         );
+    }
+
+    #[tokio::test]
+    async fn retired_actor_tasks_are_forced_closed_without_becoming_actor_failures() {
+        let actor = ActorRef::first(tidepool_actor::ActorId(7));
+        let mut service = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok::<(), InteractiveApplicationError>(())
+        });
+        let mut delivery = tokio::spawn(std::future::pending::<()>());
+
+        tokio::join!(
+            stop_retired_mcp_service(actor, &mut service, Duration::ZERO),
+            stop_retired_delivery(actor, &mut delivery, Duration::ZERO),
+        );
+
+        assert!(service.is_finished());
+        assert!(delivery.is_finished());
     }
 
     #[test]
