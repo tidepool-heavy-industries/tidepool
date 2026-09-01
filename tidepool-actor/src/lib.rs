@@ -1,9 +1,9 @@
 //! Rust-owned substrate for self-writing Haskell actors.
 //!
-//! The first landed boundary is deliberately small: exact-incarnation
-//! identity and the neutral event vocabulary consumed by journals, timelines,
-//! and compatibility adapters. Machine execution remains in
-//! `tidepool-runtime`; provider transport remains behind its existing seams.
+//! Owns exact actor identity and lifecycle, typed live-value mailboxes,
+//! resident agent sessions, Haskell actor startup, supervision, and the
+//! neutral event stream. Machine execution remains in `tidepool-runtime`;
+//! provider transport remains behind `tidepool-model`'s seams.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
