@@ -227,12 +227,31 @@ where
     where
         ResultValue: Send + 'static,
     {
+        self.with_machine_wait(context, MACHINE_WAIT, operation)
+            .await
+    }
+
+    async fn with_machine_wait<ResultValue>(
+        &self,
+        context: crate::ActorSessionContext,
+        max_wait: Duration,
+        operation: impl FnOnce(
+                &mut ResidentSession<H, O>,
+                &crate::ActorSessionContext,
+                &ActorWorkbenchSource,
+            ) -> Result<ResultValue, ResidentActorWorkbenchError>
+            + Send
+            + 'static,
+    ) -> Result<ResultValue, ResidentActorWorkbenchError>
+    where
+        ResultValue: Send + 'static,
+    {
         let checkout = self
             .machines
             .checkout_wait(
                 context.placement.session,
                 tidepool_runtime::session::registry::CheckoutRequest::Run,
-                MACHINE_WAIT,
+                max_wait,
             )
             .await
             .map_err(ResidentActorWorkbenchError::Checkout)?;
@@ -515,6 +534,7 @@ where
         hook: RootCustody,
         realm: RealmId,
         reason: crate::ActorExitKind,
+        admission_timeout: Duration,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let argument = match reason {
             crate::ActorExitKind::Completed => 0,
@@ -522,7 +542,7 @@ where
             crate::ActorExitKind::Cancelled => 2,
         };
         self.access
-            .with_machine(context, move |session, context, _| {
+            .with_machine_wait(context, admission_timeout, move |session, context, _| {
                 session
                     .set_actor_execution(
                         context.run_context(),

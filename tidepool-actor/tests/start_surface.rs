@@ -3,7 +3,10 @@
 //! startup then runs one typed model/Haskell deliberation, publishes readiness,
 //! and resumes the parent with the exact actor incarnation.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tidepool_actor::{
@@ -11,7 +14,7 @@ use tidepool_actor::{
     ActorMachineRegistry, ActorPlacement, ActorRegistry, ActorTerminal, ActorTurnKind,
     ActorWorkbenchSource, OutboundSettlement, ResidentActorLifecycle, ResidentActorMailbox,
     ResidentActorRunner, ResidentActorStarter, ResidentCallPoll, ResidentCompletionExecutor,
-    ResidentWaitPoll, StartInitiator,
+    ResidentLifecyclePolicy, ResidentWaitPoll, StartInitiator,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -419,24 +422,46 @@ async fn public_start_uses_one_exact_resident_path() {
         Some(1),
         "the live server owns the sole remaining parked continuation"
     );
-    let lifecycle = ResidentActorLifecycle::new(
+    let lifecycle = ResidentActorLifecycle::with_policy(
         registry.clone(),
         ResidentActorRunner::new(Arc::clone(&machines), workbench_source),
+        ResidentLifecyclePolicy::new(Duration::ZERO),
     );
-    let shutdown_error = lifecycle
-        .force_terminate(
-            parent,
-            ActorTerminal {
-                kind: ActorExitKind::Completed,
-                summary: "parent completed".into(),
-            },
-        )
+    let checkout = machines
+        .checkout_run(session_id)
+        .expect("hold machine across shutdown-hook admission");
+    let (machine, receipt) = checkout.into_parts();
+    let holes = machine
+        .parked_holes()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let mut terminating = Box::pin(lifecycle.force_terminate(
+        parent,
+        ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "parent completed".into(),
+        },
+    ));
+    loop {
+        std::future::poll_fn(|context| {
+            assert!(matches!(terminating.as_mut().poll(context), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        if registry.events().into_iter().any(|record| {
+            record.actor == server && matches!(record.event, ActorEvent::ShutdownHookFailed { .. })
+        }) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    machines.settle_suspended(receipt, machine, holes);
+    let shutdown_error = terminating
         .await
-        .expect_err("disallowed shutdown deliberation must be reported");
+        .expect_err("shutdown admission timeout must be reported");
     assert!(
-        shutdown_error
-            .to_string()
-            .contains("shutdown suspended on disallowed `DeliberateWith`"),
+        shutdown_error.to_string().contains("timed out"),
         "unexpected shutdown error: {shutdown_error}"
     );
     assert_eq!(
@@ -451,6 +476,6 @@ async fn public_start_uses_one_exact_resident_path() {
             .filter(|record| matches!(record.event, ActorEvent::ShutdownHookFailed { .. }))
             .count(),
         2,
-        "both forbidden shutdown sessions remain visible in the neutral event stream"
+        "the earlier forbidden hook and bounded server hook remain visible in the neutral event stream"
     );
 }

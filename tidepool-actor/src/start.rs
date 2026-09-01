@@ -174,7 +174,9 @@ where
                 modules: modules.into_iter().collect(),
             });
         }
-        let expected = modules.into_iter().next().expect("one rooted module");
+        let Some(expected) = modules.into_iter().next() else {
+            unreachable!("the rooted module count was validated above");
+        };
         let Some(generation) = visible.get(&head) else {
             continue;
         };

@@ -4,6 +4,8 @@
 //! runs each captured cooperative shutdown hook, then authoritatively closes
 //! every machine realm even if a hook or earlier cleanup attempt fails.
 
+use std::time::Duration;
+
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::OutputSink;
 
@@ -11,6 +13,28 @@ use crate::{
     ActorRef, ActorRegistry, ActorRegistryError, ActorTerminal, ResidentActorRunner,
     ResidentActorWorkbenchError,
 };
+
+const DEFAULT_SHUTDOWN_ADMISSION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentLifecyclePolicy {
+    shutdown_admission_timeout: Duration,
+}
+
+impl ResidentLifecyclePolicy {
+    #[must_use]
+    pub fn new(shutdown_admission_timeout: Duration) -> Self {
+        Self {
+            shutdown_admission_timeout,
+        }
+    }
+}
+
+impl Default for ResidentLifecyclePolicy {
+    fn default() -> Self {
+        Self::new(DEFAULT_SHUTDOWN_ADMISSION_TIMEOUT)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentLifecycleError {
@@ -33,12 +57,26 @@ pub enum ResidentLifecycleError {
 pub struct ResidentActorLifecycle<H, O> {
     registry: ActorRegistry,
     runner: ResidentActorRunner<H, O>,
+    policy: ResidentLifecyclePolicy,
 }
 
 impl<H, O> ResidentActorLifecycle<H, O> {
     #[must_use]
     pub fn new(registry: ActorRegistry, runner: ResidentActorRunner<H, O>) -> Self {
-        Self { registry, runner }
+        Self::with_policy(registry, runner, ResidentLifecyclePolicy::default())
+    }
+
+    #[must_use]
+    pub fn with_policy(
+        registry: ActorRegistry,
+        runner: ResidentActorRunner<H, O>,
+        policy: ResidentLifecyclePolicy,
+    ) -> Self {
+        Self {
+            registry,
+            runner,
+            policy,
+        }
     }
 }
 
@@ -91,6 +129,7 @@ where
                         shutdown,
                         realm,
                         cleanup.terminal.kind,
+                        self.policy.shutdown_admission_timeout,
                     )
                     .await
                 {

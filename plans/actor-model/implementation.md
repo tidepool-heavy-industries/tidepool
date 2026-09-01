@@ -137,6 +137,10 @@ This is the canonical status inventory for the plan.
   for every captured terminal path and still closes every realm if a hook
   fails or suspends on a disallowed operation. Hook failures enter the neutral
   actor event stream and do not replace the retained terminal result.
+- Cooperative shutdown now bounds machine-admission wait through one
+  lifecycle-owned deployment policy. Admission timeout is reported through
+  the neutral shutdown-hook event and does not prevent Rust-owned realm
+  closure from being attempted.
 - Resident mailbox custody now follows the canonical ownership protocol:
   accepted requests are rehomed to the target realm, replies are rehomed to
   the caller realm before atomic publication, and a completed callee can close
@@ -167,9 +171,11 @@ This is the canonical status inventory for the plan.
 
 ### Not landed
 
-- cancellation-safe cleanup when an asynchronous startup future is dropped,
-  and a watchdog that prevents cooperative shutdown from waiting forever for
-  machine admission;
+- cancellation-safe cleanup when an asynchronous startup future is dropped;
+  this must land with the Stage 6 host whose structured task ownership can
+  retain the cleanup future to completion. A standalone borrowed guard cannot
+  make dropping itself or its consuming cancellation future safe without a
+  forbidden detached task or cleanup queue;
 - one production actor-system host that owns actor tasks and routes runnable
   start/session/mailbox/call/wait work without polling;
 - the first production provider/profile composition and capability-specific
@@ -499,10 +505,9 @@ reply published before target exit remains observable. Normal resident
 completion now transfers one typed cleanup batch for the entire recursively
 terminated subtree; it cannot publish child exits while stranding their realms
 or shutdown hooks. Remaining acceptance covers cancellation while the startup
-future itself is being dropped and shutdown that cannot obtain Haskell
-execution before a watchdog. The first real request/reply child vertical is
-landed; advisory inference is not a gate for proving application-message
-semantics.
+future itself is being dropped. The lifecycle-owned shutdown admission
+watchdog is landed. The first real request/reply child vertical is landed;
+advisory inference is not a gate for proving application-message semantics.
 
 ## 8. Stage 5 — dynamic sealing and caller-checked authority
 
