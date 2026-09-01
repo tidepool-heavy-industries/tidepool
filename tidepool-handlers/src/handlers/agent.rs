@@ -1194,13 +1194,25 @@ fn tool_declarations_from_wire(
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| drive_failure(format!("declaration {i} has no {name} string")))
             };
-            Ok(ToolDeclaration {
-                name: field("name")?.to_string(),
-                description: field("description")?.to_string(),
-                input_schema: item
-                    .get("inputSchema")
+            let name = field("name")?.to_string();
+            let description = field("description")?.to_string();
+            let input_schema = item
+                .get("inputSchema")
+                .cloned()
+                .ok_or_else(|| drive_failure(format!("declaration {i} has no inputSchema")))?;
+            let output_schema = item.get("outputSchema").cloned();
+            let kind = serde_json::from_value(
+                item.get("kind")
                     .cloned()
-                    .ok_or_else(|| drive_failure(format!("declaration {i} has no inputSchema")))?,
+                    .ok_or_else(|| drive_failure(format!("declaration {i} has no kind")))?,
+            )
+            .map_err(|error| drive_failure(format!("declaration {i} has invalid kind: {error}")))?;
+            Ok(ToolDeclaration {
+                name,
+                description,
+                input_schema,
+                output_schema,
+                kind,
             })
         })
         .collect()
@@ -2344,6 +2356,8 @@ mod tests {
             "name": "ask_parent",
             "description": "ask the parent a question",
             "inputSchema": { "type": "object", "properties": { "q": { "type": "string" } } },
+            "outputSchema": { "type": "object" },
+            "kind": "call",
         }])
     }
 
@@ -2353,6 +2367,11 @@ mod tests {
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].name, "ask_parent");
         assert_eq!(decls[0].description, "ask the parent a question");
+        assert_eq!(decls[0].kind, tidepool_agent::ToolKind::Call);
+        assert_eq!(
+            decls[0].output_schema,
+            Some(serde_json::json!({"type": "object"}))
+        );
         assert_eq!(
             decls[0].input_schema,
             serde_json::json!({ "type": "object", "properties": { "q": { "type": "string" } } }),
@@ -2384,6 +2403,10 @@ mod tests {
             (
                 serde_json::json!([{ "description": "d", "inputSchema": {} }]),
                 "tools: declaration 0 has no name string",
+            ),
+            (
+                serde_json::json!([{ "name": "ask_parent", "description": "d", "inputSchema": {} }]),
+                "tools: declaration 0 has no kind",
             ),
             (
                 serde_json::json!({ "ask_parent": {} }),

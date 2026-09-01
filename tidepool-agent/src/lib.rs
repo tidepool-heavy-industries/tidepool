@@ -27,7 +27,7 @@ pub use interactive::{
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
     ModelPolicy, ReasoningEffort, ThreadSpec, TokenUsage, ToolCall, ToolCallId, ToolDeclaration,
-    ToolOutcome, ToolReply, TurnEvent, TurnId,
+    ToolKind, ToolOutcome, ToolReply, TurnEvent, TurnId,
 };
 pub use spawn::{
     AnswerFailure, CoupledSpawner, CycleProgress, CycleSaga, OneCycleRun, ParkedCycle, SpawnError,
@@ -50,6 +50,15 @@ pub async fn read_interactive_binding(
     backend::codex::node::read_binding(path)
         .await
         .map(|binding| binding.thread)
+}
+
+/// Durably retain the exact conversation binding selected by a composition
+/// root after the newly launched interactive process has proved readiness.
+pub async fn persist_interactive_binding(
+    path: &std::path::Path,
+    thread: BackendThreadId,
+) -> Result<(), AgentBackendError> {
+    backend::codex::node::write_binding(path, thread).await
 }
 
 /// Run the installed interactive-agent MCP proxy from its typed environment

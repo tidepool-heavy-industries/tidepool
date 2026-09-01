@@ -52,10 +52,11 @@ is deployment topology, not a second actor identity or scheduler.
   flow, one agent context, and one effect stack fixed for that incarnation
   under Rust-owned authority. Resident and interactive contexts are execution
   forms under the same identity and lifecycle, not separate actor systems.
-- Initial effect profiles are named `ReadWrite` and `ReadOnly`. A `ReadWrite`
+- Experimental resident-Haskell effect profiles are named `ReadWrite` and `ReadOnly`. A `ReadWrite`
   actor may start either profile; a `ReadOnly` actor may start only `ReadOnly`.
-  Profiles limit expressible intent, while grants and opaque handles authorize
-  concrete resources.
+  They test row selection and nominal interpreter policy; they are not Codex
+  or operating-system sandboxes. Grants, worktrees, process policy, and opaque
+  handles govern concrete runtime resources independently.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
   carry live typed values; JSON is only a durable or external boundary.
 - Fresh spawn deploys an explicit program into a fresh context. Structural
@@ -108,7 +109,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |
 | agent session | One serialized, possibly multi-round execution of the resident model and fenced-Haskell workbench with a typed `Complete output` expectation |
-| effect profile | A named model-facing effect row and matching interpreter policy; initially `ReadWrite` or `ReadOnly` |
+| effect profile | An experimental named resident-Haskell row and nominal interpreter policy; initially `ReadWrite` or `ReadOnly`, and not a native-tool sandbox |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
 | program image | The exact declarations, interface metadata, and live roots captured while `startActor` seals a definition |
 | program snapshot | An immutable point in an actor's Haskell environment, suitable for structural sharing |

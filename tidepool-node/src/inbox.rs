@@ -4,7 +4,7 @@
 //! [`tidepool_atomic_write`], and this module owns the sequencing contract that
 //! composes them: append first, deliver, then monotonically acknowledge.
 
-use std::marker::PhantomData;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -30,9 +30,13 @@ pub enum InboxError {
     AckBeyondEnd { last: u64, requested: u64 },
 }
 
-struct InboxState {
+const COMPACT_ACKNOWLEDGED_ROWS: u64 = 64;
+
+struct InboxState<T> {
     next_sequence: u64,
     cursor: u64,
+    compacted_through: u64,
+    pending: VecDeque<DurableEnvelope<T>>,
 }
 
 /// Durable ordered delivery for one logical consumer.
@@ -43,19 +47,20 @@ struct InboxState {
 pub struct DurableInbox<T> {
     rows_path: PathBuf,
     cursor_path: PathBuf,
-    state: Mutex<InboxState>,
-    payload: PhantomData<fn() -> T>,
+    state: Mutex<InboxState<T>>,
 }
 
 impl<T> DurableInbox<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: Clone + Serialize + DeserializeOwned,
 {
     pub fn open(rows_path: PathBuf, cursor_path: PathBuf) -> Result<Self, InboxError> {
         create_parent(&rows_path)?;
         create_parent(&cursor_path)?;
         let rows = read_rows::<T>(&rows_path)?;
-        let last = rows.last().map(|row| row.sequence).unwrap_or(0);
+        let cursor = read_cursor(&cursor_path)?;
+        let first = rows.first().map(|row| row.sequence);
+        let last = rows.last().map(|row| row.sequence).unwrap_or(cursor);
         for pair in rows.windows(2) {
             if pair[1].sequence != pair[0].sequence + 1 {
                 return Err(InboxError::Corrupt(format!(
@@ -64,15 +69,13 @@ where
                 )));
             }
         }
-        if let Some(first) = rows.first() {
-            if first.sequence != 1 {
+        if let Some(first) = first {
+            if first > cursor.saturating_add(1) {
                 return Err(InboxError::Corrupt(format!(
-                    "first sequence is {}, expected 1",
-                    first.sequence
+                    "first retained sequence is {first}, beyond cursor {cursor}"
                 )));
             }
         }
-        let cursor = read_cursor(&cursor_path)?;
         if cursor > last {
             return Err(InboxError::Corrupt(format!(
                 "cursor {cursor} is beyond last published sequence {last}"
@@ -84,8 +87,12 @@ where
             state: Mutex::new(InboxState {
                 next_sequence: last + 1,
                 cursor,
+                compacted_through: first.map_or(cursor, |sequence| sequence.saturating_sub(1)),
+                pending: rows
+                    .into_iter()
+                    .filter(|row| row.sequence > cursor)
+                    .collect(),
             }),
-            payload: PhantomData,
         })
     }
 
@@ -99,15 +106,13 @@ where
             .map_err(|error| InboxError::Corrupt(error.to_string()))?;
         jsonl::append_new_line(&self.rows_path, &line, SyncPolicy::All)?;
         state.next_sequence += 1;
+        state.pending.push_back(envelope.clone());
         Ok(envelope)
     }
 
     pub fn pending(&self) -> Result<Vec<DurableEnvelope<T>>, InboxError> {
         let state = lock(&self.state);
-        Ok(read_rows(&self.rows_path)?
-            .into_iter()
-            .filter(|row| row.sequence > state.cursor)
-            .collect())
+        Ok(state.pending.iter().cloned().collect())
     }
 
     pub fn cursor(&self) -> u64 {
@@ -140,8 +145,34 @@ where
         tidepool_atomic_write::write_durable(&self.cursor_path, sequence.to_string().as_bytes())
             .map_err(|error| InboxError::Corrupt(error.to_string()))?;
         state.cursor = sequence;
+        while state
+            .pending
+            .front()
+            .is_some_and(|row| row.sequence <= sequence)
+        {
+            state.pending.pop_front();
+        }
+        if state.cursor.saturating_sub(state.compacted_through) >= COMPACT_ACKNOWLEDGED_ROWS
+            && rewrite_pending(&self.rows_path, &state.pending).is_ok()
+        {
+            state.compacted_through = state.cursor;
+        }
         Ok(())
     }
+}
+
+fn rewrite_pending<T: Serialize>(
+    path: &std::path::Path,
+    pending: &VecDeque<DurableEnvelope<T>>,
+) -> Result<(), InboxError> {
+    let mut bytes = Vec::new();
+    for envelope in pending {
+        serde_json::to_writer(&mut bytes, envelope)
+            .map_err(|error| InboxError::Corrupt(error.to_string()))?;
+        bytes.push(b'\n');
+    }
+    tidepool_atomic_write::write_durable(path, &bytes)
+        .map_err(|error| InboxError::Corrupt(error.to_string()))
 }
 
 fn create_parent(path: &std::path::Path) -> Result<(), std::io::Error> {
@@ -200,7 +231,7 @@ mod tests {
         inbox.acknowledge(1).unwrap();
         drop(inbox);
 
-        let reopened = DurableInbox::open(rows, cursor).unwrap();
+        let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
         assert_eq!(reopened.cursor(), 1);
         assert_eq!(
             reopened.pending().unwrap(),
@@ -238,5 +269,23 @@ mod tests {
             DurableInbox::<String>::open(rows, cursor),
             Err(InboxError::Corrupt(_))
         ));
+    }
+
+    #[test]
+    fn acknowledged_prefixes_compact_without_resetting_sequence_identity() {
+        let (_dir, rows, cursor, inbox) = inbox();
+        for sequence in 1..=COMPACT_ACKNOWLEDGED_ROWS {
+            let envelope = inbox.publish(format!("message-{sequence}")).unwrap();
+            inbox.acknowledge(envelope.sequence).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&rows).unwrap(), "");
+        drop(inbox);
+
+        let reopened = DurableInbox::<String>::open(rows, cursor).unwrap();
+        assert_eq!(reopened.cursor(), COMPACT_ACKNOWLEDGED_ROWS);
+        assert_eq!(
+            reopened.publish("next".into()).unwrap().sequence,
+            COMPACT_ACKNOWLEDGED_ROWS + 1
+        );
     }
 }

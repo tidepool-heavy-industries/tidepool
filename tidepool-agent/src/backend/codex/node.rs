@@ -424,11 +424,14 @@ async fn run_cli<'a>(
     operation: &'static str,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), AgentBackendError> {
-    let output = Command::new("codex")
-        .args(args)
-        .current_dir(cwd)
-        .output()
+    const CLI_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+    let mut command = Command::new("codex");
+    command.args(args).current_dir(cwd).kill_on_drop(true);
+    let output = tokio::time::timeout(CLI_DEADLINE, command.output())
         .await
+        .map_err(|_| AgentBackendError::BackendUnavailable {
+            detail: format!("interactive {operation} exceeded {CLI_DEADLINE:?}"),
+        })?
         .map_err(|error| unavailable(operation, error))?;
     if output.status.success() {
         return Ok(());

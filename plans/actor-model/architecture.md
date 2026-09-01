@@ -487,11 +487,14 @@ ReadWrite -> ReadWrite | ReadOnly
 ReadOnly  -> ReadOnly
 ```
 
-Each name denotes a concrete model-facing effect row and matching interpreter
-policy. Rust validates the spawn edge, and GHC checks the definition against
-the selected child row. Profile identity is launch metadata, separate from the
-program image and from per-resource grants. A profile name or definition grants
-no authority by itself. `ReadOnly` excludes ambient write effects but still
+Each name currently denotes an experimental resident-Haskell effect row and
+nominal interpreter policy. Rust validates the spawn edge, and GHC checks the
+definition against the selected child row. It does not constrain native tools
+of an attached coding-agent process and is not an operating-system sandbox.
+Profile identity is launch metadata, separate from the program image, process
+policy, worktree placement, and per-resource grants. A profile name or
+definition grants no authority by itself. Within the resident effect machine,
+`ReadOnly` excludes ambient write effects but still
 includes actor creation and messaging; it may call an explicitly supplied
 writer actor, which is delegation rather than ambient write authority. Changes
 to its own Haskell environment and model conversation remain ordinary local

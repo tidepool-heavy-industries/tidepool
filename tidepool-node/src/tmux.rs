@@ -305,6 +305,7 @@ impl TmuxSession {
 
     fn command(&self) -> Command {
         let mut command = Command::new("tmux");
+        command.kill_on_drop(true);
         if let Some(socket) = &self.socket {
             command.arg("-L").arg(socket);
         }

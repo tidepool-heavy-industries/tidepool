@@ -23,10 +23,10 @@
 -- adds resident state transitions and typed actor completion. Both traverse
 -- the same record entries, so declarations and dispatch cannot drift.
 --
--- A tool input's @input_schema@ is 'Tidepool.Aeson.Schema.JsonSchema' — the
--- schema of the SAME generic encoding 'Tidepool.Aeson.FromJSON.FromJSON'
--- decodes the dispatched argument with, re-exported here so an authored tools
--- record needs one import.
+-- Tool input and output schemas use 'Tidepool.Aeson.Schema.JsonSchema' over
+-- the same generic encodings dispatch decodes and replies encode. Endpoint
+-- kind and both schemas come from the same field traversal as dispatch, so
+-- declaration and execution cannot drift.
 module Tidepool.Agent.Contract
   ( -- * Endpoint algebra and server interpretation
     Call
@@ -56,6 +56,7 @@ module Tidepool.Agent.Contract
   , declarationsToJson
   , CompiledTools (..)
   , ToolDeclaration (..)
+  , ToolKind (..)
   , ToolCompileError (..)
   , renderToolCompileError
   , ToolName
@@ -130,19 +131,27 @@ infixr 0 :-
 -- — so a description can be assembled with resident state (@fmt@) at agent
 -- creation. A resident state transition rebuilds handler closures while Rust
 -- requires the declared tool surface itself to remain stable.
+data ToolKind
+  = CallKind
+  | NotifyKind
+  | UpdateKind
+  | FinishKind
+  deriving (Eq, Show)
+
 data Tool m input output = Tool
-  { description :: Text
+  { toolKind :: ToolKind
+  , description :: Text
   , handler :: input -> m output
   }
 
 -- | Build a request\/response 'Tool'. An alias for 'Tool' — kept distinct
 -- from 'notify' so authored code reads its intent at the call site.
 tool :: Text -> (input -> m output) -> Tool m input output
-tool = Tool
+tool = Tool CallKind
 
 -- | Build a fire-and-forget 'Tool' (@output ~ ()@).
 notify :: Text -> (input -> m ()) -> Tool m input ()
-notify = Tool
+notify = Tool NotifyKind
 
 data UpdateTool m state input output = UpdateTool
   { updateDescription :: Text
@@ -175,13 +184,16 @@ type ToolName = Text
 type StructuralValue = Value
 
 -- | One dynamic tool as declared to a backend at agent creation. Field order
--- and names line up with @tidepool_node::ToolDeclaration@
--- (@{name, description, input_schema}@); this type does not depend on that
+-- and names line up with @tidepool_tool::ToolDeclaration@
+-- (@{name, description, input_schema, output_schema, kind}@); this type does
+-- not depend on that
 -- crate, it just doesn't invent a gratuitously different shape.
 data ToolDeclaration = ToolDeclaration
   { dtdName :: Text
   , dtdDescription :: Text
   , dtdInputSchema :: Value
+  , dtdOutputSchema :: Value
+  , dtdKind :: ToolKind
   }
   deriving (Eq, Show)
 
@@ -260,6 +272,8 @@ data ToolEntry m result = ToolEntry
   , entryWireName :: Text
   , entryDescription :: Text
   , entryInputSchema :: Value
+  , entryOutputSchema :: Value
+  , entryKind :: ToolKind
   , entryRun :: StructuralValue -> m result
   }
 
@@ -300,16 +314,18 @@ instance
 -- | Every record leaf is exactly @Tool m input output@; unit-output tools use
 -- the same instance as request/response tools.
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
   GCompileTools (M1 S s (K1 R (Tool m input output))) m StructuralValue
   where
-  gCompileEntries (M1 (K1 (Tool desc h))) =
+  gCompileEntries (M1 (K1 (Tool kind desc h))) =
     [ ToolEntry
         { entryRecordName = T.empty
         , entrySelector = fieldName
         , entryWireName = fieldName
         , entryDescription = desc
         , entryInputSchema = jsonSchema (Proxy :: Proxy input)
+        , entryOutputSchema = jsonSchema (Proxy :: Proxy output)
+        , entryKind = kind
         , entryRun = \sv -> case fromJSON sv of
             Success input' -> toJSON <$> h input'
             Error msg -> error (T.unpack fieldName ++ ": compileTools dispatch could not decode tool input: " ++ msg)
@@ -324,42 +340,42 @@ data ActorToolStep state exit
   | ActorToolFinish StructuralValue exit
 
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
   GCompileTools
     (M1 S s (K1 R (Tool m input output)))
     m
     (ActorToolStep state exit)
   where
-  gCompileEntries (M1 (K1 (Tool desc h))) =
-    [ actorEntry fieldName desc $ \input ->
+  gCompileEntries (M1 (K1 (Tool kind desc h))) =
+    [ actorEntry fieldName kind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         ActorToolStay . toJSON <$> h input
     ]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
   GCompileTools
     (M1 S s (K1 R (UpdateTool m state input output)))
     m
     (ActorToolStep state exit)
   where
   gCompileEntries (M1 (K1 (UpdateTool desc h))) =
-    [ actorEntry fieldName desc $ \input ->
+    [ actorEntry fieldName UpdateKind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         (\(output, state) -> ActorToolUpdate (toJSON output) state) <$> h input
     ]
     where
       fieldName = T.pack (selName (M1 Proxy :: M1 S s Proxy ()))
 
 instance
-  (Selector s, FromJSON input, JsonSchema input, ToJSON output, Functor m) =>
+  (Selector s, FromJSON input, JsonSchema input, ToJSON output, JsonSchema output, Functor m) =>
   GCompileTools
     (M1 S s (K1 R (FinishTool m exit input output)))
     m
     (ActorToolStep state exit)
   where
   gCompileEntries (M1 (K1 (FinishTool desc h))) =
-    [ actorEntry fieldName desc $ \input ->
+    [ actorEntry fieldName FinishKind desc (jsonSchema (Proxy :: Proxy output)) $ \input ->
         (\(output, exit) -> ActorToolFinish (toJSON output) exit) <$> h input
     ]
     where
@@ -369,16 +385,20 @@ actorEntry
   :: forall input m result
    . (FromJSON input, JsonSchema input)
   => Text
+  -> ToolKind
   -> Text
+  -> Value
   -> (input -> m result)
   -> ToolEntry m result
-actorEntry fieldName desc run =
+actorEntry fieldName kind desc outputSchema run =
   ToolEntry
     { entryRecordName = T.empty
     , entrySelector = fieldName
     , entryWireName = fieldName
     , entryDescription = desc
     , entryInputSchema = jsonSchema (Proxy :: Proxy input)
+    , entryOutputSchema = outputSchema
+    , entryKind = kind
     , entryRun = \sv -> case fromJSON sv of
         Success input' -> run input'
         Error msg -> error (T.unpack fieldName ++ ": tool dispatch could not decode input: " ++ msg)
@@ -437,7 +457,7 @@ compileEntrySet raw =
                 Nothing -> error (T.unpack (T.pack "compileTools: dispatch called with unknown tool \"" <> n <> T.pack "\""))
            in Right
                 CompiledEntrySet
-                  { entryDeclarations = [ToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) | e <- named]
+                  { entryDeclarations = [ToolDeclaration (entryWireName e) (entryDescription e) (entryInputSchema e) (entryOutputSchema e) (entryKind e) | e <- named]
                   , entryDispatch = dispatchFn
                   , entrySynopsis = T.intercalate (T.pack "\n") [entryWireName e <> T.pack ": " <> entryDescription e | e <- named]
                   }
@@ -458,9 +478,18 @@ declarationsToJson decls =
         [ "name" .= dtdName d
         , "description" .= dtdDescription d
         , "inputSchema" .= dtdInputSchema d
+        , "outputSchema" .= dtdOutputSchema d
+        , "kind" .= toolKindText (dtdKind d)
         ]
     | d <- decls
     ]
+
+toolKindText :: ToolKind -> Text
+toolKindText kind = case kind of
+  CallKind -> "call"
+  NotifyKind -> "notify"
+  UpdateKind -> "update"
+  FinishKind -> "finish"
 
 -- | Install an immutable tools record as this actor's resident MCP policy.
 -- Rust resumes this loop only with names from the declarations published by

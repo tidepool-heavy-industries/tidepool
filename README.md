@@ -123,8 +123,12 @@ shoal init
 
 Shoal creates a `shoal-<project>` tmux session. One host process owns every
 resident Haskell actor; each interactive actor is an ordinary Codex TUI in its
-own pane. Detach with `Ctrl-b d`. Recreate the actor runtime while resuming the
-root Codex conversation with `shoal init --recreate`.
+own pane. Worker actors receive retained managed worktrees; the root remains in
+the source checkout and is instructed to orchestrate rather than implement.
+Detach with `Ctrl-b d`. `shoal init --recreate` starts a new actor incarnation
+while retaining the root Codex conversation. It fails if the retained binding
+is unavailable and tells the resumed model explicitly that prior handles,
+workers, inbox rows, exits, and resident state were not restored.
 
 Use `--no-attach` for headless startup; it prints the exact attach, host-log,
 status-file, and teardown commands.

@@ -26,29 +26,27 @@
 use serde_json::json;
 use tidepool_testing::eval_harness::{require_extract, EvalHarness};
 
-/// Shared header for the standalone (no-effects) diagnostics fixtures: just
-/// enough to bring `Tidepool.Agent.Contract` and the shared `Question`/
-/// `Decision` endpoint types into scope. Mirrors the `HEADER` pattern in
-/// `generic_deriving_337.rs`/`nullary_sum_generic_deriving.rs`.
+/// Shared header for the diagnostics fixtures. `Tidepool.Agent.Contract`
+/// includes the actor-serving interpretation, so even tests which exercise
+/// only `compileTools` need the generated core module on their include path.
 const HEADER: &str = "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings, DeriveGeneric, DeriveAnyClass, DataKinds, TypeOperators, FlexibleContexts #-}\n\
      module Expr where\n\
      import Tidepool.Prelude hiding (error)\n\
      import Tidepool.Agent.Contract\n";
 
 /// `Question`/`Decision` are the shared `Call` input/output pair used by
-/// every fixture below. `compileTools`'s leaf constraint only needs
-/// `(FromJSON input, JsonSchema input, ToJSON output)` — `Question` doesn't
-/// need `ToJSON` for that — but several fixtures ALSO call `toJSON` on a
-/// `Question` directly (to build a dispatch argument from Rust-side test
-/// code, outside any generated `Tool` handler), so it derives `ToJSON` too.
+/// every fixture below. Tool declarations publish both sides of the wire
+/// contract, so both types derive `JsonSchema`; several fixtures also encode
+/// `Question` directly while constructing a dispatch argument.
 const SHARED_TYPES: &str =
     "data Question = Question { questionText :: Text } deriving (Generic, FromJSON, ToJSON, JsonSchema)\n\
-     data Decision = Decision { approved :: Bool } deriving (Generic, ToJSON)\n";
+     data Decision = Decision { approved :: Bool } deriving (Generic, ToJSON, JsonSchema)\n";
 
 fn run_pure(source: &str, target: &str) -> serde_json::Value {
     require_extract();
     EvalHarness::new()
         .with_stdlib()
+        .with_effects_module()
         .run_pure(source, target)
         .expect("compile_and_run_pure failed")
         .to_json()
@@ -115,9 +113,11 @@ fn dynamic_dispatch_executes_on_real_jit() {
          \x20 Left _ -> pure (toJSON (\"compile-error\" :: Text))\n\
          \x20 Right compiled -> dispatch compiled \"ask_parent\" (toJSON (Question \"should we ship this quarter?\"))\n",
     );
-    let out = EvalHarness::new()
-        .with_stdlib()
-        .run(&src, "result", console_stack());
+    let out =
+        EvalHarness::new()
+            .with_stdlib()
+            .with_effects_module()
+            .run(&src, "result", console_stack());
     assert!(
         out.is_ok(),
         "dispatch must run on the real JIT: {:?}",
@@ -141,9 +141,11 @@ fn notify_endpoint_dispatches_through_the_same_path() {
          \x20 Left _ -> pure (toJSON (\"compile-error\" :: Text))\n\
          \x20 Right compiled -> dispatch compiled \"report_progress\" (toJSON (\"halfway done\" :: Text))\n",
     );
-    let out = EvalHarness::new()
-        .with_stdlib()
-        .run(&src, "result", console_stack());
+    let out =
+        EvalHarness::new()
+            .with_stdlib()
+            .with_effects_module()
+            .run(&src, "result", console_stack());
     assert!(
         out.is_ok(),
         "notify dispatch must run on the real JIT: {:?}",
@@ -199,7 +201,11 @@ fn compile_fail_tools_record_missing_generic() {
          \x20 Left _ -> 0\n\
          \x20 Right _ -> 1\n"
     );
-    match EvalHarness::new().with_stdlib().compile(&src, "result") {
+    match EvalHarness::new()
+        .with_stdlib()
+        .with_effects_module()
+        .compile(&src, "result")
+    {
         Ok(_) => panic!("a tools record without `deriving (Generic)` must not compile"),
         Err(e) => {
             let msg = tidepool_runtime::classify_compile(&e).message;
@@ -242,7 +248,11 @@ fn compile_fail_unsupported_endpoint_type() {
          \x20 Left _ -> 0\n\
          \x20 Right _ -> 1\n"
     );
-    match EvalHarness::new().with_stdlib().compile(&src, "result") {
+    match EvalHarness::new()
+        .with_stdlib()
+        .with_effects_module()
+        .compile(&src, "result")
+    {
         Ok(_) => panic!("an unsupported mode endpoint must not compile"),
         Err(e) => {
             let msg = tidepool_runtime::classify_compile(&e).message;
@@ -251,8 +261,11 @@ fn compile_fail_unsupported_endpoint_type() {
                 "expected the authored endpoint diagnostic, got:\n{msg}"
             );
             assert!(
-                msg.contains("Call input output") && msg.contains("Notify input"),
-                "expected the diagnostic to name both valid endpoint forms, got:\n{msg}"
+                msg.contains("Call")
+                    && msg.contains("Notify")
+                    && msg.contains("Update")
+                    && msg.contains("Finish"),
+                "expected the diagnostic to name every valid endpoint form, got:\n{msg}"
             );
         }
     }
@@ -533,7 +546,11 @@ fn compile_fail_payload_field_named_tag() {
          \x20 deriving (Generic, FromJSON, JsonSchema)\n",
         "Verdict",
     );
-    match EvalHarness::new().with_stdlib().compile(&src, "result") {
+    match EvalHarness::new()
+        .with_stdlib()
+        .with_effects_module()
+        .compile(&src, "result")
+    {
         Ok(_) => panic!("a payload field named `tag` must not compile"),
         Err(e) => {
             let msg = tidepool_runtime::classify_compile(&e).message;

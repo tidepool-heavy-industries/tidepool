@@ -123,11 +123,13 @@ checks this actor's policy, grants, and caller identity. Forks create a new
 interpreter instance under the child's principal. Different actor rows may
 share one machine because union position has no Rust dispatch meaning.
 
-V0 provides two named profiles: `ReadWrite` and `ReadOnly`. Each selects a
-concrete model-facing row and matching interpreter policy. A `ReadWrite` actor
+V0 provides two experimental resident-Haskell profiles: `ReadWrite` and
+`ReadOnly`. Each selects a concrete row and nominal interpreter policy. A `ReadWrite` actor
 may start either profile; a `ReadOnly` actor may start only `ReadOnly`. Rust
 validates this attenuation edge, while GHC checks the actor definition against
-the selected row. `ReadOnly` excludes ambient write effects, but may still call
+the selected row. The profile does not constrain native coding-agent tools or
+provide process isolation. Within the resident effect machine, `ReadOnly`
+excludes ambient write effects, but may still call
 an explicitly supplied writer `ActorRef`. Actor-local declarations, bindings,
 conversation growth, and behavior replacement are not ambient resource writes,
 so a `ReadOnly` actor remains self-extending.

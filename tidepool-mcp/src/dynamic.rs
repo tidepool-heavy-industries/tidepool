@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
-use tidepool_tool::ToolDeclaration;
+use tidepool_tool::{ToolDeclaration, ToolKind};
 
 pub type ToolDispatchFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolDispatchError>> + Send + 'static>>;
@@ -31,6 +31,8 @@ pub enum DynamicMcpError {
     InvalidName(String),
     #[error("MCP tool {name:?} has a non-object input schema")]
     InvalidInputSchema { name: String },
+    #[error("MCP tool {name:?} has a non-object output schema")]
+    InvalidOutputSchema { name: String },
 }
 
 type Dispatcher = dyn Fn(String, serde_json::Value) -> ToolDispatchFuture + Send + Sync + 'static;
@@ -115,7 +117,43 @@ impl DynamicMcpServer {
                     serde_json::Value::Object(schema) => Arc::new(schema.clone()),
                     _ => unreachable!("validated by DynamicMcpServer::new"),
                 };
-                crate::server_common::make_tool(&declaration.name, &declaration.description, schema)
+                let description = match declaration.kind {
+                    ToolKind::Call => declaration.description.clone(),
+                    ToolKind::Notify => format!(
+                        "{} This notification does not return a domain result.",
+                        declaration.description
+                    ),
+                    ToolKind::Update => format!(
+                        "{} A successful call replaces this actor's resident policy state.",
+                        declaration.description
+                    ),
+                    ToolKind::Finish => format!(
+                        "{} A successful call replies and then completes this actor.",
+                        declaration.description
+                    ),
+                };
+                let mut tool =
+                    crate::server_common::make_tool(&declaration.name, &description, schema);
+                let title = match declaration.kind {
+                    ToolKind::Call => "Call",
+                    ToolKind::Notify => "Notify",
+                    ToolKind::Update => "Update actor state",
+                    ToolKind::Finish => "Finish actor",
+                };
+                tool.title = Some(title.into());
+                tool.annotations = match declaration.kind {
+                    // A Call handler may still perform effects, so its
+                    // environmental mutability is deliberately unknown.
+                    ToolKind::Call => None,
+                    ToolKind::Notify | ToolKind::Update | ToolKind::Finish => {
+                        Some(ToolAnnotations::with_title(title).read_only(false))
+                    }
+                };
+                tool.output_schema = declaration
+                    .output_schema
+                    .as_ref()
+                    .and_then(|schema| schema.as_object().map(|object| Arc::new(object.clone())));
+                tool
             })
             .collect()
     }
@@ -166,6 +204,15 @@ fn validate_declarations(declarations: &[ToolDeclaration]) -> Result<(), Dynamic
                 name: declaration.name.clone(),
             });
         }
+        if declaration
+            .output_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.is_object())
+        {
+            return Err(DynamicMcpError::InvalidOutputSchema {
+                name: declaration.name.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -187,6 +234,8 @@ mod tests {
             name: name.to_string(),
             description: format!("Run {name}"),
             input_schema: serde_json::json!({"type": "object"}),
+            output_schema: Some(serde_json::json!({"type": "object"})),
+            kind: ToolKind::Call,
         }
     }
 
@@ -217,6 +266,17 @@ mod tests {
             Some(serde_json::json!({"tool": "actor_status", "arguments": {}}))
         );
         assert_eq!(server.projected_tools()[0].name, "actor_status");
+        assert!(
+            server.projected_tools()[0].annotations.is_none(),
+            "a request/response endpoint is not necessarily read-only"
+        );
+        assert_eq!(
+            server.projected_tools()[0].output_schema.as_deref(),
+            Some(&serde_json::Map::from_iter([(
+                "type".into(),
+                serde_json::json!("object")
+            )]))
+        );
     }
 
     #[tokio::test]
@@ -230,6 +290,26 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn stateful_endpoint_kind_projects_a_truthful_mutability_hint() {
+        let mut finish = declaration("finish_work");
+        finish.kind = ToolKind::Finish;
+        let server = DynamicMcpServer::new(vec![finish], None, |_, _| unreachable!()).unwrap();
+        let tool = &server.projected_tools()[0];
+
+        assert_eq!(tool.title.as_deref(), Some("Finish actor"));
+        assert_eq!(
+            tool.annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint),
+            Some(false)
+        );
+        assert!(tool
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("completes this actor")));
     }
 
     #[test]

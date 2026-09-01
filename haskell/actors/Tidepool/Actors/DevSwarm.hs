@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -36,7 +37,7 @@ data ActorStatus = ActorStatus
   { role :: Text
   , detail :: Text
   }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
 
 data SpawnWorker = SpawnWorker
   { workKey :: Text
@@ -47,7 +48,7 @@ data SpawnWorker = SpawnWorker
 data WorkerStart
   = WorkerStarted { workKey :: Text }
   | WorkerKeyInUse { workKey :: Text }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
 
 data ListWorkers = ListWorkers
   deriving (Generic, FromJSON, JsonSchema)
@@ -55,9 +56,9 @@ data ListWorkers = ListWorkers
 data PendingWorkers = PendingWorkers
   { workKeys :: [Text]
   }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
 
-data CollectWorker = CollectWorker
+data AwaitWorker = AwaitWorker
   { workKey :: Text
   }
   deriving (Generic, FromJSON, JsonSchema)
@@ -72,7 +73,7 @@ data WorkerOutcome
   = WorkCompleted { result :: WorkerResult }
   | WorkFailed { summary :: Text }
   | WorkCancelled { summary :: Text }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
 
 data WorkerCollection
   = WorkerCollected
@@ -80,7 +81,7 @@ data WorkerCollection
       , outcome :: WorkerOutcome
       }
   | WorkerNotFound { workKey :: Text }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
 
 data AssignmentInput = AssignmentInput
   deriving (Generic, FromJSON, JsonSchema)
@@ -88,18 +89,23 @@ data AssignmentInput = AssignmentInput
 data WorkerAssignment = WorkerAssignment
   { assignment :: Text
   }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
 
 data FinishAccepted = FinishAccepted
   { accepted :: Bool
   }
-  deriving (Generic, ToJSON)
+  deriving (Generic, JsonSchema, ToJSON)
+
+-- | This first worker is controlled through its MCP policy and terminal exit;
+-- it has no actor-mailbox request protocol. An explicit empty protocol keeps
+-- that contract in the type instead of borrowing 'Maybe' as a placeholder.
+data WorkerProtocol result
 
 data RootTools mode = RootTools
   { actorStatus :: mode :- Call StatusInput ActorStatus
   , spawnWorker :: mode :- Update SpawnWorker WorkerStart
   , listWorkers :: mode :- Call ListWorkers PendingWorkers
-  , collectWorker :: mode :- Update CollectWorker WorkerCollection
+  , awaitWorker :: mode :- Update AwaitWorker WorkerCollection
   }
   deriving (Generic)
 
@@ -110,7 +116,7 @@ data WorkerTools mode = WorkerTools
   }
   deriving (Generic)
 
-workerDefinition :: Text -> ActorDefinition Text Maybe WorkerResult
+workerDefinition :: Text -> ActorDefinition Text WorkerProtocol WorkerResult
 workerDefinition key =
   ActorDefinition
     { label = "devswarm-worker/" <> key
@@ -154,8 +160,8 @@ rootPolicy = serveToolsWith [] tools
         , listWorkers =
             tool "List work keys whose exact actor exits have not been collected." $ \_ ->
               pure (PendingWorkers [key | RunningWorker key _ <- workers])
-        , collectWorker =
-            updateTool "Collect one worker's retained exact typed exit." $ \request ->
+        , awaitWorker =
+            updateTool "Wait until one worker exits, return its retained exact typed result, and remove it from the pending set. This call blocks the root actor's sole policy turn while the worker is running." $ \request ->
               case takeWorker request.workKey workers of
                 Nothing -> pure (WorkerNotFound request.workKey, workers)
                 Just (ref, remaining) -> do
@@ -166,7 +172,7 @@ rootPolicy = serveToolsWith [] tools
                     )
         }
 
-data RunningWorker = RunningWorker Text (ActorRef Maybe WorkerResult)
+data RunningWorker = RunningWorker Text (ActorRef WorkerProtocol WorkerResult)
 
 hasWorker :: Text -> [RunningWorker] -> Bool
 hasWorker key = any (\(RunningWorker candidate _) -> candidate == key)
@@ -174,7 +180,7 @@ hasWorker key = any (\(RunningWorker candidate _) -> candidate == key)
 takeWorker
   :: Text
   -> [RunningWorker]
-  -> Maybe (ActorRef Maybe WorkerResult, [RunningWorker])
+  -> Maybe (ActorRef WorkerProtocol WorkerResult, [RunningWorker])
 takeWorker _ [] = Nothing
 takeWorker key (worker@(RunningWorker candidate ref) : rest)
   | key == candidate = Just (ref, rest)

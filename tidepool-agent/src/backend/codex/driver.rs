@@ -990,6 +990,8 @@ mod tests {
                 name: "ask_parent".to_string(),
                 description: "Ask the parent.".to_string(),
                 input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                kind: tidepool_tool::ToolKind::Call,
             }],
         });
         let value = serde_json::to_value(&params).unwrap();

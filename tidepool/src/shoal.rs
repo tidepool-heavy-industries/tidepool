@@ -10,7 +10,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tidepool_actor::ActorRef;
 use tidepool_agent::{
-    read_interactive_binding, BackendThreadId, InteractiveLaunchMode, ReasoningEffort,
+    persist_interactive_binding, read_interactive_binding, BackendThreadId, InteractiveLaunchMode,
+    ReasoningEffort,
 };
 use tidepool_node::{TmuxLaunch, TmuxSession};
 use tokio::sync::oneshot;
@@ -75,8 +76,18 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             "tmux session {session_name:?} already exists; attach with `tmux attach -t {session_name}` or replace it with `shoal init --recreate`"
         )));
     }
+    let session_root = workspace
+        .join(".tidepool")
+        .join("shoal")
+        .join(&session_name);
+    std::fs::create_dir_all(&session_root)?;
+    let root_binding_path = session_root.join("root-binding.json");
     preflight().await?;
     if options.recreate {
+        // Validate continuity before stopping a currently healthy session.
+        // The host repeats this check at launch so a later disappearance also
+        // fails closed.
+        resolve_root_launch_mode(true, &root_binding_path).await?;
         tmux.kill().await?;
     }
 
@@ -87,12 +98,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join(&run_id);
     std::fs::create_dir_all(&run_root)?;
     let status_path = run_root.join("status.json");
-    let session_root = workspace
-        .join(".tidepool")
-        .join("shoal")
-        .join(&session_name);
-    std::fs::create_dir_all(&session_root)?;
-    let root_binding_path = session_root.join("root-binding.json");
     write_status(
         &status_path,
         &RunStatus::new(&run_id, &workspace, &session_name, RunPhase::Starting),
@@ -194,22 +199,8 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
         std::fs::create_dir_all(parent)?;
     }
 
-    let root_launch_mode = if options.resume_root {
-        match read_interactive_binding(&options.root_binding_path).await {
-            Ok(thread) => InteractiveLaunchMode::Resume(thread),
-            Err(error) => {
-                eprintln!("shoal host: retained root binding unavailable; starting fresh: {error}");
-                InteractiveLaunchMode::Fresh
-            }
-        }
-    } else {
-        InteractiveLaunchMode::Fresh
-    };
-    match tokio::fs::remove_file(&options.root_binding_path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
+    let root_launch_mode =
+        resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
 
     let policy_root = crate::haskell_sources::ensure_actor_policy()?;
     let (readiness_tx, readiness_rx) = oneshot::channel();
@@ -218,7 +209,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             workspace: options.workspace.clone(),
             policy_root,
             run_root: options.run_root.clone(),
-            root_binding_path: options.root_binding_path.clone(),
+            root_binding_path: options.run_root.join("root-binding.json"),
             proxy_program: current_executable()?,
             proxy_args: vec!["proxy".into()],
             tmux_session: options.session.clone(),
@@ -238,6 +229,11 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                 Ok(ready) => ready,
                 Err(_) => return run.await,
             };
+            persist_interactive_binding(
+                &options.root_binding_path,
+                ready.thread.clone(),
+            )
+            .await?;
             let status = RunStatus::new(
                 &options.run_id,
                 &options.workspace,
@@ -253,6 +249,24 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     }
 
     run.await
+}
+
+async fn resolve_root_launch_mode(
+    resume: bool,
+    binding_path: &Path,
+) -> Result<InteractiveLaunchMode, Box<dyn std::error::Error>> {
+    if !resume {
+        return Ok(InteractiveLaunchMode::Fresh);
+    }
+    read_interactive_binding(binding_path)
+        .await
+        .map(InteractiveLaunchMode::Resume)
+        .map_err(|error| {
+            runtime_error(format!(
+                "cannot resume the requested root conversation from {}: {error}",
+                binding_path.display()
+            ))
+        })
 }
 
 fn settle_host_result(
@@ -495,6 +509,22 @@ mod tests {
             RunPhase::Failed {
                 error: "compile exploded".into()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn requested_resume_fails_closed_without_a_valid_retained_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing-binding.json");
+        let error = resolve_root_launch_mode(true, &missing)
+            .await
+            .expect_err("resume must not silently become fresh");
+        assert!(error
+            .to_string()
+            .contains("cannot resume the requested root conversation"));
+        assert_eq!(
+            resolve_root_launch_mode(false, &missing).await.unwrap(),
+            InteractiveLaunchMode::Fresh
         );
     }
 }

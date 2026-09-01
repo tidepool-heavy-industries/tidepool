@@ -59,6 +59,8 @@ rmcp.workspace = true
 glob.workspace = true
 frunk.workspace = true
 uuid.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
 
 
 [dev-dependencies]

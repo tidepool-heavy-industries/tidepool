@@ -29,9 +29,10 @@ import Tidepool.Internal.ExitCell (ExitCell)
 data ActorRef (protocol :: Type -> Type) exit where
   ActorRef :: Int -> Int -> ExitCell pending exit -> ActorRef protocol exit
 
--- | Named, statically known actor capability profiles. The witness fixes the
--- child row; Rust independently validates that the spawn edge attenuates the
--- parent's profile.
+-- | Experimental named profiles for resident Haskell effect rows. The witness
+-- fixes the child row; Rust independently validates spawn attenuation and
+-- installed interpreters authorize nominal requests. These profiles do not
+-- sandbox native tools belonging to an attached coding-agent process.
 data EffectProfile (protocol :: Type -> Type) effs where
   ReadOnly :: EffectProfile protocol (ReadOnlyEffects protocol)
   ReadWrite :: EffectProfile protocol (ReadWriteEffects protocol)

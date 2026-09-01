@@ -3833,6 +3833,7 @@ name = "tidepool"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "blake3",
  "clap",
  "frunk",
  "glob",
@@ -3840,6 +3841,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tidepool-actor",
  "tidepool-agent",
  "tidepool-atomic-write",

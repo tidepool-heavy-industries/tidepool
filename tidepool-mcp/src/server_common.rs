@@ -110,9 +110,9 @@ pub fn schema_to_map(
     }
 }
 
-/// Build an `rmcp::Tool` with the common boilerplate fields defaulted
-/// (`title`/`output_schema`/`annotations`/`icons`/`meta`/`execution` are all
-/// `None` on every tool either server advertises).
+/// Build an `rmcp::Tool` with the common optional fields unset. Callers may
+/// enrich the result when their source contract actually carries those facts;
+/// this helper does not guess annotations from a tool name or description.
 pub fn make_tool(
     name: &str,
     description: &str,

@@ -927,13 +927,21 @@ Implement this boundary in order:
 
    The bundled `Tidepool.Actors.DevSwarm` policy and `shoal host` composition
    are landed. The root exposes typed
-   stateful `actorStatus`, `spawnWorker`, `listWorkers`, and `collectWorker`
+   stateful `actorStatus`, `spawnWorker`, `listWorkers`, and blocking `awaitWorker`
    tools. A spawned worker stabilizes at its own `serveTools` policy, is handed
    to deployment through the host's single-consumer lifecycle stream, exposes
    its typed startup assignment, and completes through `finishWork` with a
    retained `WorkerResult`. A focused GHC/JIT test proves root installation,
    MCP-routed `startActor`, child-policy installation, terminal MCP settlement,
    and exact typed collection without opening an interactive process.
+
+   Tool declarations retain input and output schemas plus the Haskell endpoint
+   kind (`Call`, `Notify`, `Update`, or `Finish`) through MCP projection. The
+   kind describes resident policy control flow. MCP projection marks the
+   intrinsically stateful kinds as not read-only while leaving ordinary
+   `Call` mutability unspecified; it does not guess destructiveness,
+   idempotence, or open-world behavior. `awaitWorker` states explicitly that
+   it blocks the root actor's sole policy turn until the selected worker exits.
 
    The deployment path binds an authenticated private proxy and launches Codex
    directly in one tmux pane per interactive incarnation. Codex starts
@@ -945,19 +953,49 @@ Implement this boundary in order:
    another invocation await or typed actor completion. Ordered deployment
    retirement then notifies the owner through the same durable native push and
    reaps the exact child pane. Temporary push failure retains the unacknowledged
-   row for retry.
+   row for retry. Launch, delivery, and retirement run in independently joined
+   tasks with bounded queue operations and bounded fleet shutdown; the central
+   lifecycle loop does not await external Codex I/O.
 
    `shoal init` owns the exact tmux session lifecycle and publishes typed
    `Starting`, `Ready`, `Failed`, or `Exited` run status. `--recreate` creates a
-   new actor incarnation while resuming a valid retained root conversation;
-   child conversations remain fresh. Killing the tmux session tears down the
+   new actor incarnation while resuming a valid retained root conversation.
+   Resume fails closed when the retained binding is invalid, and the new
+   incarnation receives explicit reconciliation context stating that old
+   handles, workers, exits, inbox rows, and resident state were not restored.
+   Child conversations remain fresh. Killing the tmux session tears down the
    host, Codex panes, and proxy children as one operational unit. The exact
    retained worker exit remains the Haskell policy's pull-based result; native
    lifecycle delivery is informational and cannot duplicate that custody.
 
-   Filesystem profile handlers, worktree grants, policy reload, and
-   commit/evidence folding remain later work; the initial production machine
-   intentionally handles no ambient filesystem effect.
+   Worker deployment now allocates one retained managed worktree per actor and
+   launches its interactive process there, eliminating concurrent mutation of
+   the source checkout. Capability-bearing Haskell worktree grants, policy
+   reload, native-tool sandbox projection, and authoritative commit/evidence
+   folding remain later work. `ReadWrite`/`ReadOnly` therefore remain explicitly
+   experimental resident-effect classifications rather than process-security
+   claims; the initial production machine intentionally handles no ambient
+   filesystem effect.
+
+   Three implementation seams remain deliberately visible instead of being
+   papered over by Shoal-local machinery:
+
+   - the root is still compiled and installed by the composition root rather
+     than entering through the public `ActorDefinition` startup path; converge
+     these once the ownerless-root case has a real definition-level contract;
+   - `ActorRegistry` retains an in-memory, unbounded observability journal and
+     external conversation events are not yet folded into it; long-running
+     self-hosting needs one cursor/sink retention policy, not a Shoal-only
+     second event log;
+   - registry facts, resident continuation custody, and external deployment
+     resources still live in three owners. Preserve those distinct resource
+     responsibilities while removing duplicated lifecycle transition state;
+     do not introduce another scheduler facade in the meantime;
+   - an unexpected external application exit currently fails the Shoal run.
+     Add one typed host-control path that turns a child deployment failure
+     into that exact actor's retained failed exit before claiming process-level
+     crash isolation; do not mutate the registry behind
+     `ResidentActorHost`'s continuation custody.
 
    Port only the following Exomonad mechanisms into their Tidepool owners:
    stock-TUI command construction, rollout discovery and versioned binding,

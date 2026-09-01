@@ -4,6 +4,8 @@
 //! stock interactive agent is attached to each installed Haskell MCP policy;
 //! tmux is process ownership and observability, never message transport.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,13 +36,18 @@ use tidepool_runtime::session::{
     SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
+use tidepool_worktree::{GitCli, WorktreeHandle, WorktreeManager, WorktreeRegistry, WorktreeSpec};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinSet;
 
 const POLICY_MODULE: &str = "Tidepool.Actors.DevSwarm";
 const POLICY_ENTRY: &str = "rootPolicy";
 const POLICY_EFFECTS: &str = "RootEffects";
+const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Clone)]
 pub struct ActorHostConfig {
     pub workspace: PathBuf,
     pub policy_root: PathBuf,
@@ -79,10 +86,73 @@ struct InteractiveDeployment {
     actor: ActorRef,
     pane: TmuxPaneId,
     thread: BackendThreadId,
-    inbox: DurableInbox<String>,
-    last_delivery_error: Option<String>,
-    service: tokio::task::JoinHandle<Result<(), String>>,
+    inbox: Arc<DurableInbox<String>>,
+    delivery_shutdown: Option<oneshot::Sender<()>>,
+    delivery: tokio::task::JoinHandle<()>,
+    service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: PathBuf,
+    worktree: Option<WorktreeHandle>,
+}
+
+struct OwnerNotification {
+    inbox: Arc<DurableInbox<String>>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InteractiveOperation {
+    CreateWorktree,
+    PrepareRuntime,
+    BindProxy,
+    BuildCommand,
+    BuildPolicy,
+    AcceptProxy,
+    ServeMcp,
+    LaunchProcess,
+    DiscoverBinding,
+    StopProcess,
+    StopMcp,
+    StopDelivery,
+}
+
+impl fmt::Display for InteractiveOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::CreateWorktree => "create worktree",
+            Self::PrepareRuntime => "prepare runtime",
+            Self::BindProxy => "bind proxy",
+            Self::BuildCommand => "build agent command",
+            Self::BuildPolicy => "build MCP policy",
+            Self::AcceptProxy => "accept proxy",
+            Self::ServeMcp => "serve MCP",
+            Self::LaunchProcess => "launch agent process",
+            Self::DiscoverBinding => "discover conversation binding",
+            Self::StopProcess => "stop agent process",
+            Self::StopMcp => "stop MCP service",
+            Self::StopDelivery => "stop inbox delivery",
+        };
+        formatter.write_str(name)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("actor {actor:?} failed to {operation}: {detail}")]
+struct InteractiveApplicationError {
+    actor: ActorRef,
+    operation: InteractiveOperation,
+    detail: String,
+}
+
+fn application_error(
+    actor: ActorRef,
+    operation: InteractiveOperation,
+    error: impl fmt::Display,
+) -> InteractiveApplicationError {
+    InteractiveApplicationError {
+        actor,
+        operation,
+        detail: error.to_string(),
+    }
 }
 
 struct InteractiveFleet {
@@ -92,7 +162,18 @@ struct InteractiveFleet {
     run_root: PathBuf,
     tmux: TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
+    worktrees: WorktreeManager,
     readiness: oneshot::Sender<ActorHostReady>,
+}
+
+#[derive(Clone)]
+struct InteractiveLaunchContext {
+    root: ActorRef,
+    config: ActorHostConfig,
+    run_root: PathBuf,
+    tmux: TmuxSession,
+    backend: Arc<dyn InteractiveAgentBackend>,
+    worktrees: WorktreeManager,
 }
 
 pub async fn run(
@@ -122,6 +203,7 @@ pub async fn run(
         )));
     }
     let backend = native_interactive_backend();
+    let worktrees = actor_worktree_manager(&config.workspace)?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     let mut host_task =
         tokio::spawn(host.run_until_shutdown(wait_for_shutdown(shutdown_rx.clone())));
@@ -134,6 +216,7 @@ pub async fn run(
             run_root,
             tmux,
             backend,
+            worktrees,
             readiness,
         },
         shutdown_rx,
@@ -162,17 +245,11 @@ pub async fn run(
     match first {
         FirstStop::Signal => {
             host_task.await.map_err(join_error)??;
-            applications_task
-                .await
-                .map_err(join_error)?
-                .map_err(runtime_error)?;
+            await_applications(&mut applications_task).await?;
         }
         FirstStop::Host(result) => {
             result?;
-            applications_task
-                .await
-                .map_err(join_error)?
-                .map_err(runtime_error)?;
+            await_applications(&mut applications_task).await?;
         }
         FirstStop::Applications(result) => {
             result.map_err(runtime_error)?;
@@ -180,6 +257,46 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+async fn await_applications(
+    task: &mut tokio::task::JoinHandle<Result<(), String>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, &mut *task).await {
+        Ok(result) => result.map_err(join_error)?.map_err(runtime_error),
+        Err(_) => {
+            task.abort();
+            Err(runtime_error(format!(
+                "interactive fleet did not stop within {APPLICATION_SHUTDOWN_TIMEOUT:?}"
+            )))
+        }
+    }
+}
+
+fn actor_worktree_manager(
+    workspace: &Path,
+) -> Result<WorktreeManager, tidepool_worktree::WorktreeError> {
+    let project = blake3::hash(workspace.as_os_str().as_encoded_bytes())
+        .to_hex()
+        .to_string();
+    let root = tidepool_runtime::paths::cache_dir()
+        .join("shoal")
+        .join("actor-worktrees")
+        .join(project);
+    actor_worktree_manager_at(&root, workspace)
+}
+
+fn actor_worktree_manager_at(
+    root: &Path,
+    workspace: &Path,
+) -> Result<WorktreeManager, tidepool_worktree::WorktreeError> {
+    let registry = WorktreeRegistry::open(root.join("registry"))?;
+    Ok(WorktreeManager::new(
+        GitCli::new(),
+        registry,
+        root.join("checkouts"),
+        workspace,
+    ))
 }
 
 fn compile_root(
@@ -261,7 +378,10 @@ fn compile_root(
             lexical_scope: ScopeId::ROOT,
         },
     )
-    .with_profile(ActorEffectProfile::ReadWrite);
+    // The bootstrap root currently uses a strict subset of the experimental
+    // ReadOnly row and starts only ReadOnly children. Its profile is the spawn
+    // ceiling, not a claim about native Codex process authority.
+    .with_profile(ActorEffectProfile::ReadOnly);
     Ok((
         ActorWorkbenchSource::new(preamble, include),
         ResidentActorRoot::new(descriptor, machine, outcome),
@@ -280,10 +400,23 @@ async fn run_interactive_applications(
         run_root,
         tmux,
         backend,
+        worktrees,
         readiness,
     } = fleet;
+    let launch_context = InteractiveLaunchContext {
+        root,
+        config,
+        run_root,
+        tmux: tmux.clone(),
+        backend,
+        worktrees,
+    };
     let mut readiness = Some(readiness);
     let mut deployments = Vec::new();
+    let mut launches = JoinSet::new();
+    let mut pending_launches = HashMap::new();
+    let mut retirements = JoinSet::new();
+    let mut notifications = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
     let failure = loop {
         tokio::select! {
@@ -292,96 +425,158 @@ async fn run_interactive_applications(
             _ = health.tick() => {
                 if let Some(deployment) = deployments
                     .iter()
-                    .find(|deployment: &&InteractiveDeployment| deployment.service.is_finished())
+                    .find(|deployment: &&InteractiveDeployment| {
+                        deployment.service.is_finished() || deployment.delivery.is_finished()
+                    })
                 {
                     break Some(format!(
                         "interactive application for actor {:?} exited before host shutdown",
                         deployment.actor
                     ));
                 }
-                for deployment in &mut deployments {
-                    let result =
-                        flush_inbox(deployment, backend.as_ref(), &config.workspace).await;
-                    record_delivery_result(deployment, result);
-                }
             }
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
                     ResidentActorDeployment::PolicyInstalled(installation) => {
-                        match launch_interactive_application(
-                            installation,
-                            root,
-                            &config,
-                            &run_root,
-                            &tmux,
-                            Arc::clone(&backend),
-                        ).await {
-                            Ok(deployment) => {
-                                if deployment.actor == root {
-                                    if let Some(sender) = readiness.take() {
-                                        let _ = sender.send(ActorHostReady {
-                                            root,
-                                            thread: deployment.thread.clone(),
-                                        });
-                                    }
-                                }
-                                deployments.push(deployment);
-                            }
-                            Err(error) => break Some(error),
-                        }
+                        let context = launch_context.clone();
+                        let actor = installation.actor;
+                        let (cancel, cancelled) = oneshot::channel();
+                        let previous = pending_launches.insert(actor, cancel);
+                        debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
+                        launches.spawn(async move {
+                            let result = launch_interactive_application(
+                                installation,
+                                context,
+                                cancelled,
+                            ).await;
+                            (actor, result)
+                        });
                     }
                     ResidentActorDeployment::Retired { actor, terminal } => {
-                        if let Err(error) = notify_owner(
+                        if let Some(cancel) = pending_launches.remove(&actor) {
+                            let _ = cancel.send(());
+                        }
+                        match prepare_owner_notification(
                             actor,
                             &terminal,
                             &registry,
-                            &mut deployments,
-                            backend.as_ref(),
-                            &config.workspace,
-                        ).await {
-                            break Some(error);
+                            &deployments,
+                        ) {
+                            Ok(Some(notification)) => {
+                                notifications.spawn(publish_owner_notification(notification));
+                            }
+                            Ok(None) => {}
+                            Err(error) => break Some(error),
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
-                            if let Err(error) = retire_interactive_application(deployment, &tmux).await {
-                                break Some(error);
-                            }
+                            let tmux = tmux.clone();
+                            retirements.spawn(async move {
+                                retire_interactive_application(deployment, &tmux).await
+                            });
                         }
                     }
+                }
+            }
+            launched = launches.join_next(), if !launches.is_empty() => {
+                match launched {
+                    Some(Ok((actor, Ok(Some(deployment))))) => {
+                        pending_launches.remove(&actor);
+                        if deployment.actor == root {
+                            if let Some(sender) = readiness.take() {
+                                let _ = sender.send(ActorHostReady {
+                                    root,
+                                    thread: deployment.thread.clone(),
+                                });
+                            }
+                        }
+                        deployments.push(deployment);
+                    }
+                    Some(Ok((actor, Ok(None)))) => {
+                        pending_launches.remove(&actor);
+                    }
+                    Some(Ok((actor, Err(error)))) => {
+                        pending_launches.remove(&actor);
+                        break Some(error.to_string());
+                    }
+                    Some(Err(error)) => break Some(format!("interactive launch task: {error}")),
+                    None => {}
+                }
+            }
+            retired = retirements.join_next(), if !retirements.is_empty() => {
+                match retired {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(error))) => break Some(error.to_string()),
+                    Some(Err(error)) => break Some(format!("interactive retirement task: {error}")),
+                    None => {}
+                }
+            }
+            notified = notifications.join_next(), if !notifications.is_empty() => {
+                match notified {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(error))) => break Some(error),
+                    Some(Err(error)) => break Some(format!("owner notification task: {error}")),
+                    None => {}
                 }
             }
         }
     };
 
-    let mut cleanup_failure = None;
-    for deployment in &deployments {
-        if let Err(error) = tmux.kill_pane(&deployment.pane).await {
-            cleanup_failure
-                .get_or_insert_with(|| format!("stop actor {:?}: {error}", deployment.actor));
-        }
+    for (_, cancel) in pending_launches.drain() {
+        let _ = cancel.send(());
     }
-    for mut deployment in deployments {
-        match tokio::time::timeout(Duration::from_secs(5), &mut deployment.service).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(error))) => {
-                cleanup_failure.get_or_insert(error);
-            }
-            Ok(Err(error)) => {
-                cleanup_failure.get_or_insert_with(|| format!("actor MCP service task: {error}"));
-            }
-            Err(_) => {
-                deployment.service.abort();
-                cleanup_failure.get_or_insert_with(|| {
-                    format!(
-                        "actor {:?} MCP service did not stop after its pane exited",
-                        deployment.actor
-                    )
-                });
+    let launch_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
+        let mut completed = Vec::new();
+        while let Some(result) = launches.join_next().await {
+            if let Ok((_actor, Ok(Some(deployment)))) = result {
+                completed.push(deployment);
             }
         }
-        let _ = std::fs::remove_dir_all(&deployment.socket_root);
+        completed
+    })
+    .await;
+    match launch_cleanup {
+        Ok(completed) => deployments.extend(completed),
+        Err(_) => launches.abort_all(),
     }
+    for deployment in deployments {
+        let tmux = tmux.clone();
+        retirements.spawn(async move { retire_interactive_application(deployment, &tmux).await });
+    }
+    let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
+        let mut failure = None;
+        while let Some(result) = notifications.join_next().await {
+            let result = result
+                .map_err(|error| format!("owner notification task: {error}"))
+                .and_then(|result| result);
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure
+    })
+    .await
+    .unwrap_or_else(|_| Some("owner notification cleanup timed out".into()));
+    let cleanup_failure = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
+        let mut failure = None;
+        while let Some(result) = retirements.join_next().await {
+            let result = result
+                .map_err(|error| format!("interactive retirement task: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure
+    })
+    .await
+    .unwrap_or_else(|_| Some("interactive application cleanup timed out".into()));
+    let cleanup_failure = match (notification_cleanup, cleanup_failure) {
+        (Some(notification), Some(retirement)) => Some(format!("{notification}; {retirement}")),
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (None, None) => None,
+    };
     match (failure, cleanup_failure) {
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
         (Some(error), None) | (None, Some(error)) => Err(error),
@@ -391,15 +586,43 @@ async fn run_interactive_applications(
 
 async fn launch_interactive_application(
     installation: ResidentMcpInstallation,
-    root: ActorRef,
-    config: &ActorHostConfig,
-    run_root: &Path,
-    tmux: &TmuxSession,
-    backend: Arc<dyn InteractiveAgentBackend>,
-) -> Result<InteractiveDeployment, String> {
+    context: InteractiveLaunchContext,
+    mut cancelled: oneshot::Receiver<()>,
+) -> Result<Option<InteractiveDeployment>, InteractiveApplicationError> {
+    let InteractiveLaunchContext {
+        root,
+        config,
+        run_root,
+        tmux,
+        backend,
+        worktrees,
+    } = context;
     let actor = installation.actor;
+    let worktree = if actor == root {
+        None
+    } else {
+        let label = format!("shoal-{}-{}", actor.id.0, actor.incarnation.0);
+        Some(
+            tokio::task::spawn_blocking(move || {
+                worktrees.create(&WorktreeSpec::from_current_repository(label))
+            })
+            .await
+            .map_err(|error| application_error(actor, InteractiveOperation::CreateWorktree, error))?
+            .map_err(|error| {
+                application_error(actor, InteractiveOperation::CreateWorktree, error)
+            })?,
+        )
+    };
+    let workspace = worktree.as_ref().map_or_else(
+        || config.workspace.clone(),
+        |handle| handle.cwd().to_path_buf(),
+    );
+    if cancelled.try_recv().is_ok() {
+        return Ok(None);
+    }
     let actor_root = run_root.join(format!("{}-{}", actor.id.0, actor.incarnation.0));
-    std::fs::create_dir_all(&actor_root).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&actor_root)
+        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
     let run_socket_id = run_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -410,53 +633,68 @@ async fn launch_interactive_application(
         actor.id.0,
         actor.incarnation.0
     ));
-    std::fs::create_dir_all(&socket_root).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&socket_root)
+        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
     let endpoint = socket_root.join("mcp.sock");
-    let listener = UnixListener::bind(&endpoint).map_err(|error| error.to_string())?;
+    let listener = UnixListener::bind(&endpoint)
+        .map_err(|error| application_error(actor, InteractiveOperation::BindProxy, error))?;
     let credential = NodeCredential(uuid::Uuid::new_v4().to_string());
     let binding_path = if actor == root {
         config.root_binding_path.clone()
     } else {
         actor_root.join("binding.json")
     };
-    let inbox = DurableInbox::<String>::open(
-        actor_root.join("inbox.jsonl"),
-        actor_root.join("inbox.cursor"),
-    )
-    .map_err(|error| error.to_string())?;
+    let inbox = Arc::new(
+        DurableInbox::<String>::open(
+            actor_root.join("inbox.jsonl"),
+            actor_root.join("inbox.cursor"),
+        )
+        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?,
+    );
     let binding = InteractiveProxyBinding {
         actor,
         endpoint,
         credential: credential.clone(),
         binding_path: binding_path.clone(),
-        workspace: config.workspace.clone(),
+        workspace: workspace.clone(),
     };
     let launch_mode = if actor == root {
         config.root_launch_mode.clone()
     } else {
         InteractiveLaunchMode::Fresh
     };
+    let expected_resume = match &launch_mode {
+        InteractiveLaunchMode::Resume(thread) => Some(thread.clone()),
+        InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
+    };
+    let developer_instructions = developer_instructions(actor == root, &launch_mode);
+    let initial_prompt = initial_prompt(actor == root, &launch_mode);
     let proxy_environment = binding.environment();
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: config.model.clone(),
         effort: config.effort,
-        developer_instructions: developer_instructions(actor == root),
-        initial_prompt: Some(initial_prompt(actor == root)),
+        developer_instructions,
+        initial_prompt: Some(initial_prompt),
         mcp: InteractiveMcpServer {
             name: "tidepool_actor".into(),
             command: config.proxy_program.clone(),
             args: config.proxy_args.clone(),
-            cwd: config.workspace.to_string_lossy().into_owned(),
+            cwd: workspace.to_string_lossy().into_owned(),
             forward_env: proxy_environment.keys().cloned().collect(),
             required: true,
         },
     };
-    let command = backend.render(&spec).map_err(|error| error.to_string())?;
+    let command = backend
+        .render(&spec)
+        .map_err(|error| application_error(actor, InteractiveOperation::BuildCommand, error))?;
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| application_error(actor, InteractiveOperation::BuildPolicy, error))?;
     let service = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
         let (_handshake, stream) = accept_proxy(stream, |candidate| {
             if candidate.actor != actor {
                 return Err("actor identity does not match this endpoint".into());
@@ -467,21 +705,28 @@ async fn launch_interactive_application(
             Ok(())
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
         let (read, write) = stream.into_split();
         server
             .serve((read, write))
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?
             .waiting()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?;
         Ok(())
     });
-    let pane = match tmux
-        .spawn_window(&TmuxLaunch {
+    if cancelled.try_recv().is_ok() {
+        service.abort();
+        let _ = service.await;
+        let _ = std::fs::remove_dir_all(&socket_root);
+        return Ok(None);
+    }
+    let pane = match tokio::time::timeout(
+        PROCESS_OPERATION_TIMEOUT,
+        tmux.spawn_window(&TmuxLaunch {
             window_name: format!("actor-{}-{}", actor.id.0, actor.incarnation.0),
-            cwd: config.workspace.clone(),
+            cwd: workspace.clone(),
             program: command.program,
             args: command.args,
             environment: {
@@ -489,92 +734,152 @@ async fn launch_interactive_application(
                 environment.extend(proxy_environment);
                 environment
             },
-        })
-        .await
+        }),
+    )
+    .await
     {
-        Ok(pane) => pane,
-        Err(error) => {
+        Ok(Ok(pane)) => pane,
+        Ok(Err(error)) => {
             service.abort();
             let _ = service.await;
             let _ = std::fs::remove_dir_all(&socket_root);
-            return Err(error.to_string());
+            return Err(application_error(
+                actor,
+                InteractiveOperation::LaunchProcess,
+                error,
+            ));
+        }
+        Err(_) => {
+            service.abort();
+            let _ = service.await;
+            let _ = std::fs::remove_dir_all(&socket_root);
+            return Err(application_error(
+                actor,
+                InteractiveOperation::LaunchProcess,
+                format!("tmux launch exceeded {PROCESS_OPERATION_TIMEOUT:?}"),
+            ));
         }
     };
 
-    let thread = match wait_for_binding(&binding_path, &service).await {
-        Ok(thread) => thread,
-        Err(error) => {
-            abandon_interactive_application(tmux, &pane, service, &socket_root).await;
-            return Err(error);
+    let thread = tokio::select! {
+        biased;
+        _ = &mut cancelled => {
+            abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
+            return Ok(None);
+        }
+        result = wait_for_binding(actor, &binding_path, &service) => match result {
+            Ok(thread) => thread,
+            Err(error) => {
+                abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
+                return Err(error);
+            }
         }
     };
-    Ok(InteractiveDeployment {
+    if let Some(expected) = expected_resume {
+        if expected != thread {
+            abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
+            return Err(application_error(
+                actor,
+                InteractiveOperation::DiscoverBinding,
+                format!(
+                    "resume published thread {} instead of retained thread {}",
+                    thread.0, expected.0
+                ),
+            ));
+        }
+    }
+    let (delivery_shutdown, stop_delivery) = oneshot::channel();
+    let delivery = tokio::spawn(run_delivery_pump(
+        actor,
+        Arc::clone(&inbox),
+        thread.clone(),
+        backend,
+        workspace,
+        stop_delivery,
+    ));
+    Ok(Some(InteractiveDeployment {
         actor,
         pane,
         thread,
         inbox,
-        last_delivery_error: None,
+        delivery_shutdown: Some(delivery_shutdown),
+        delivery,
         service,
         socket_root,
-    })
+        worktree,
+    }))
 }
 
 async fn deliver_pending(
-    inbox: &DurableInbox<String>,
+    inbox: &Arc<DurableInbox<String>>,
     thread: &BackendThreadId,
     backend: &dyn InteractiveAgentBackend,
     workspace: &Path,
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
-    for message in inbox.pending().map_err(|error| error.to_string())? {
+    let pending_inbox = Arc::clone(inbox);
+    let pending = tokio::task::spawn_blocking(move || pending_inbox.pending())
+        .await
+        .map_err(|error| format!("inbox reader task: {error}"))?
+        .map_err(|error| error.to_string())?;
+    for message in pending {
         backend
             .push(&cwd, thread, &message.payload)
             .await
             .map_err(|error| error.to_string())?;
-        inbox
-            .acknowledge(message.sequence)
+        let ack_inbox = Arc::clone(inbox);
+        tokio::task::spawn_blocking(move || ack_inbox.acknowledge(message.sequence))
+            .await
+            .map_err(|error| format!("inbox acknowledgement task: {error}"))?
             .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
 
-async fn flush_inbox(
-    deployment: &InteractiveDeployment,
-    backend: &dyn InteractiveAgentBackend,
-    workspace: &Path,
-) -> Result<(), String> {
-    deliver_pending(&deployment.inbox, &deployment.thread, backend, workspace).await
-}
-
-fn record_delivery_result(deployment: &mut InteractiveDeployment, result: Result<(), String>) {
-    match result {
-        Ok(()) => {
-            if deployment.last_delivery_error.take().is_some() {
-                tracing::info!(actor = ?deployment.actor, "actor inbox delivery recovered");
+async fn run_delivery_pump(
+    actor: ActorRef,
+    inbox: Arc<DurableInbox<String>>,
+    thread: BackendThreadId,
+    backend: Arc<dyn InteractiveAgentBackend>,
+    workspace: PathBuf,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let mut health = tokio::time::interval(Duration::from_secs(1));
+    let mut last_error = None;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = health.tick() => {
+                let result = deliver_pending(&inbox, &thread, backend.as_ref(), &workspace).await;
+                match result {
+                    Ok(()) => {
+                        if last_error.take().is_some() {
+                            tracing::info!(actor = ?actor, "actor inbox delivery recovered");
+                        }
+                    }
+                    Err(error) => {
+                        if last_error.as_deref() != Some(error.as_str()) {
+                            tracing::warn!(actor = ?actor, %error, "actor inbox delivery is pending retry");
+                        }
+                        last_error = Some(error);
+                    }
+                }
             }
-        }
-        Err(error) => {
-            if deployment.last_delivery_error.as_deref() != Some(error.as_str()) {
-                tracing::warn!(actor = ?deployment.actor, %error, "actor inbox delivery is pending retry");
-            }
-            deployment.last_delivery_error = Some(error);
         }
     }
 }
 
-async fn notify_owner(
+fn prepare_owner_notification(
     actor: ActorRef,
     terminal: &ActorTerminal,
     registry: &ActorRegistry,
-    deployments: &mut [InteractiveDeployment],
-    backend: &dyn InteractiveAgentBackend,
-    workspace: &Path,
-) -> Result<(), String> {
+    deployments: &[InteractiveDeployment],
+) -> Result<Option<OwnerNotification>, String> {
     let Some(owner) = registry.owner(actor).map_err(|error| error.to_string())? else {
-        return Ok(());
+        return Ok(None);
     };
-    let Some(owner_application) = deployments.iter_mut().find(|app| app.actor == owner) else {
-        return Ok(());
+    let Some(owner_application) = deployments.iter().find(|app| app.actor == owner) else {
+        return Ok(None);
     };
     let descriptor = registry
         .descriptor(actor)
@@ -584,38 +889,77 @@ async fn notify_owner(
         ActorExitKind::Failed => "failed",
         ActorExitKind::Cancelled => "was cancelled",
     };
+    let workspace = deployments
+        .iter()
+        .find(|application| application.actor == actor)
+        .and_then(|application| application.worktree.as_ref())
+        .map(|worktree| {
+            format!(
+                " Its retained worktree is {} on branch {}.",
+                worktree.cwd().display(),
+                worktree.branch()
+            )
+        })
+        .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}. Inspect and collect its exact typed result through your actor tools.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{workspace} Inspect and await its exact typed result through your actor tools.",
         descriptor.label(),
         actor,
         terminal.summary
     );
-    owner_application
-        .inbox
-        .publish(message)
+    Ok(Some(OwnerNotification {
+        inbox: Arc::clone(&owner_application.inbox),
+        message,
+    }))
+}
+
+async fn publish_owner_notification(notification: OwnerNotification) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || notification.inbox.publish(notification.message))
+        .await
+        .map_err(|error| format!("owner inbox publisher task: {error}"))?
         .map_err(|error| error.to_string())?;
-    let result = flush_inbox(owner_application, backend, workspace).await;
-    record_delivery_result(owner_application, result);
     Ok(())
 }
 
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
-) -> Result<(), String> {
-    tmux.kill_pane(&deployment.pane)
-        .await
-        .map_err(|error| format!("stop actor {:?}: {error}", deployment.actor))?;
+) -> Result<(), InteractiveApplicationError> {
+    if let Some(shutdown) = deployment.delivery_shutdown.take() {
+        let _ = shutdown.send(());
+    }
+    tmux.kill_pane(&deployment.pane).await.map_err(|error| {
+        application_error(deployment.actor, InteractiveOperation::StopProcess, error)
+    })?;
     match tokio::time::timeout(Duration::from_secs(5), &mut deployment.service).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => return Err(format!("actor MCP service task: {error}")),
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => return Err(error),
+        Ok(Err(error)) => {
+            return Err(application_error(
+                deployment.actor,
+                InteractiveOperation::StopMcp,
+                error,
+            ))
+        }
         Err(_) => {
             deployment.service.abort();
-            return Err(format!(
-                "actor {:?} MCP service did not stop after retirement",
-                deployment.actor
+            return Err(application_error(
+                deployment.actor,
+                InteractiveOperation::StopMcp,
+                "service did not stop within 5s after retirement",
             ));
         }
+    }
+    if tokio::time::timeout(Duration::from_secs(5), &mut deployment.delivery)
+        .await
+        .is_err()
+    {
+        deployment.delivery.abort();
+        return Err(application_error(
+            deployment.actor,
+            InteractiveOperation::StopDelivery,
+            "delivery task did not stop within 5s after retirement",
+        ));
     }
     let _ = std::fs::remove_dir_all(&deployment.socket_root);
     Ok(())
@@ -624,7 +968,7 @@ async fn retire_interactive_application(
 async fn abandon_interactive_application(
     tmux: &TmuxSession,
     pane: &TmuxPaneId,
-    service: tokio::task::JoinHandle<Result<(), String>>,
+    service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: &Path,
 ) {
     let _ = tmux.kill_pane(pane).await;
@@ -634,13 +978,18 @@ async fn abandon_interactive_application(
 }
 
 async fn wait_for_binding(
+    actor: ActorRef,
     path: &Path,
-    service: &tokio::task::JoinHandle<Result<(), String>>,
-) -> Result<tidepool_agent::BackendThreadId, String> {
+    service: &tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
+) -> Result<tidepool_agent::BackendThreadId, InteractiveApplicationError> {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             if service.is_finished() {
-                return Err("actor MCP service stopped before rollout binding".into());
+                return Err(application_error(
+                    actor,
+                    InteractiveOperation::DiscoverBinding,
+                    "MCP service stopped before rollout binding",
+                ));
             }
             if let Ok(thread) = read_interactive_binding(path).await {
                 return Ok(thread);
@@ -650,9 +999,10 @@ async fn wait_for_binding(
     })
     .await
     .map_err(|_| {
-        format!(
-            "interactive rollout binding timed out at {}",
-            path.display()
+        application_error(
+            actor,
+            InteractiveOperation::DiscoverBinding,
+            format!("rollout binding timed out at {}", path.display()),
         )
     })?
 }
@@ -687,18 +1037,26 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
     }
 }
 
-fn developer_instructions(root: bool) -> String {
+fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
     if root {
-        "You are a Tidepool root actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Use them to start and collect supervised workers; Rust owns process and actor lifecycle. A child-exit wake is informational: collect the exact typed result through collect_worker."
+        let continuity = if matches!(mode, InteractiveLaunchMode::Resume(_)) {
+            " This is a new actor incarnation attached to a retained conversation. Previous actor handles, workers, pending exits, inbox messages, and resident Haskell state were not restored; reconcile through the current actor tools before acting on transcript references."
+        } else {
+            ""
+        };
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Use the actor tools to start and await workers. Rust owns process and actor lifecycle. A child-exit wake is informational: retrieve the exact typed result through await_worker.{continuity}")
     } else {
-        "You are a Tidepool worker actor. Your actor-scoped MCP tools are the authoritative typed interaction surface. Retrieve your assignment, do the work, then call finish_work exactly once with its typed result; Rust owns process and actor lifecycle."
+        "You are a Tidepool worker actor. Your process working directory is an owned retained git worktree; never edit the parent checkout. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
     }
-    .into()
 }
 
-fn initial_prompt(root: bool) -> String {
+fn initial_prompt(root: bool, mode: &InteractiveLaunchMode) -> String {
     if root {
-        "Initialize your Tidepool root actor through its typed tools, report its status, and end this turn."
+        if matches!(mode, InteractiveLaunchMode::Resume(_)) {
+            "A fresh Tidepool actor incarnation is now attached to this retained conversation. Reconcile with its current typed tools, report its status, and do not rely on actor-runtime facts from the previous incarnation."
+        } else {
+            "Initialize your Tidepool root actor through its typed tools, report its status, and end this turn."
+        }
     } else {
         "Initialize this Tidepool worker through its typed tools. Retrieve the typed startup assignment, complete it, and submit the result with finish_work."
     }
@@ -774,8 +1132,10 @@ mod tests {
     #[tokio::test]
     async fn native_push_acknowledges_only_after_acceptance_and_retries_the_same_row() {
         let root = tempfile::tempdir().expect("inbox root");
-        let inbox = DurableInbox::open(root.path().join("rows"), root.path().join("cursor"))
-            .expect("open inbox");
+        let inbox = Arc::new(
+            DurableInbox::open(root.path().join("rows"), root.path().join("cursor"))
+                .expect("open inbox"),
+        );
         inbox.publish("child completed".into()).expect("publish");
         let backend = ScriptedPush {
             fail: std::sync::atomic::AtomicBool::new(true),
@@ -798,6 +1158,32 @@ mod tests {
         assert_eq!(
             *backend.messages.lock().unwrap(),
             ["child completed", "child completed"]
+        );
+    }
+
+    #[test]
+    fn worker_workspaces_are_distinct_managed_worktrees_outside_the_source_checkout() {
+        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "source\n", "seed")
+            .unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let manager = actor_worktree_manager_at(storage.path(), repository.path()).unwrap();
+        let first = manager
+            .create(&WorktreeSpec::from_current_repository("first-worker"))
+            .unwrap();
+        let second = manager
+            .create(&WorktreeSpec::from_current_repository("second-worker"))
+            .unwrap();
+
+        assert_ne!(first.id(), second.id());
+        assert_ne!(first.cwd(), second.cwd());
+        assert!(!first.cwd().starts_with(repository.path()));
+        assert!(!second.cwd().starts_with(repository.path()));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md")).unwrap(),
+            "source\n"
         );
     }
 
@@ -857,8 +1243,21 @@ mod tests {
                 "actor_status",
                 "spawn_worker",
                 "list_workers",
-                "collect_worker"
+                "await_worker"
             ]
+        );
+        assert!(policy
+            .declarations()
+            .iter()
+            .all(|declaration| declaration.output_schema.is_some()));
+        assert_eq!(
+            policy
+                .declarations()
+                .iter()
+                .find(|declaration| declaration.name == "await_worker")
+                .expect("await worker declaration")
+                .kind,
+            tidepool_agent::ToolKind::Update
         );
 
         let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
@@ -907,6 +1306,16 @@ mod tests {
             worker_names,
             ["actor_status", "current_assignment", "finish_work"]
         );
+        assert_eq!(
+            worker
+                .policy
+                .declarations()
+                .iter()
+                .find(|declaration| declaration.name == "finish_work")
+                .expect("finish declaration")
+                .kind,
+            tidepool_agent::ToolKind::Finish
+        );
         let worker_actor = worker.actor;
         let worker_server =
             DynamicMcpServer::from_resident_policy(worker.policy).expect("worker MCP server");
@@ -950,7 +1359,7 @@ mod tests {
             .expect("collect arguments")
             .clone();
         let collected = server
-            .dispatch_tool("collect_worker", collect)
+            .dispatch_tool("await_worker", collect)
             .await
             .expect("collect worker");
         assert_eq!(
