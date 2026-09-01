@@ -17,7 +17,7 @@ thiserror.workspace = true
 tidepool-actor.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "net"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "process"] }
 
 [dev-dependencies]
 tempfile.workspace = true

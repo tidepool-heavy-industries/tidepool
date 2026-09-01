@@ -24,6 +24,62 @@ pub const ENV_NODE_INCARNATION: &str = "TIDEPOOL_NODE_INCARNATION";
 pub const ENV_NODE_CREDENTIAL: &str = "TIDEPOOL_NODE_CREDENTIAL";
 pub const ENV_NODE_BINDING_PATH: &str = "TIDEPOOL_NODE_BINDING_PATH";
 pub const ENV_NODE_WORKSPACE: &str = "TIDEPOOL_NODE_WORKSPACE";
+pub const ENV_NODE_MODEL: &str = "TIDEPOOL_NODE_MODEL";
+pub const ENV_NODE_REASONING_EFFORT: &str = "TIDEPOOL_NODE_REASONING_EFFORT";
+pub const ENV_NODE_DEVELOPER_INSTRUCTIONS: &str = "TIDEPOOL_NODE_DEVELOPER_INSTRUCTIONS";
+
+/// Run either the pane-owning host or its stdio MCP child.
+pub async fn run_from_env() -> Result<(), AgentBackendError> {
+    match std::env::args().nth(1).as_deref() {
+        Some("host") => run_host_from_env().await,
+        Some("proxy") => run_sidecar_from_env().await,
+        Some(mode) => Err(AgentBackendError::ProtocolRejected {
+            detail: format!("unknown interactive node mode {mode:?}; expected `host` or `proxy`"),
+        }),
+        None => Err(AgentBackendError::ProtocolRejected {
+            detail: "interactive node mode is required (`host` or `proxy`)".into(),
+        }),
+    }
+}
+
+/// Own one stock Codex TUI for the lifetime of the surrounding tmux pane.
+async fn run_host_from_env() -> Result<(), AgentBackendError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| unavailable("resolve interactive node executable", error))?;
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| AgentBackendError::ProtocolRejected {
+            detail: "interactive node executable path is not UTF-8".into(),
+        })?
+        .to_string();
+    let workspace = required_env(ENV_NODE_WORKSPACE)?;
+    let effort = optional_effort()?;
+    let spec = InteractiveAgentSpec {
+        mode: InteractiveLaunchMode::Fresh,
+        cwd: workspace.clone(),
+        model: optional_env(ENV_NODE_MODEL),
+        effort,
+        developer_instructions: required_env(ENV_NODE_DEVELOPER_INSTRUCTIONS)?,
+        mcp: crate::InteractiveMcpServer {
+            name: "tidepool_actor".into(),
+            command: executable,
+            args: vec!["proxy".into()],
+            cwd: workspace,
+            forward_env: vec![
+                ENV_NODE_ENDPOINT.into(),
+                ENV_NODE_ACTOR_ID.into(),
+                ENV_NODE_INCARNATION.into(),
+                ENV_NODE_CREDENTIAL.into(),
+                ENV_NODE_BINDING_PATH.into(),
+                ENV_NODE_WORKSPACE.into(),
+            ],
+            required: true,
+        },
+    };
+    let backend = CodexInteractiveBackend;
+    let mut process = backend.launch(spec).await?;
+    process.wait().await
+}
 
 /// Run the concrete stdio sidecar configured by the daemon-owned launch.
 ///
@@ -72,6 +128,26 @@ fn required_env(name: &'static str) -> Result<String, AgentBackendError> {
     std::env::var(name).map_err(|_| AgentBackendError::ProtocolRejected {
         detail: format!("interactive node launch is missing {name}"),
     })
+}
+
+fn optional_env(name: &'static str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn optional_effort() -> Result<Option<ReasoningEffort>, AgentBackendError> {
+    let Some(value) = optional_env(ENV_NODE_REASONING_EFFORT) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "low" => Ok(Some(ReasoningEffort::Low)),
+        "medium" => Ok(Some(ReasoningEffort::Medium)),
+        "high" => Ok(Some(ReasoningEffort::High)),
+        _ => Err(AgentBackendError::ProtocolRejected {
+            detail: format!(
+                "interactive node has invalid {ENV_NODE_REASONING_EFFORT}={value:?}; expected low, medium, or high"
+            ),
+        }),
+    }
 }
 
 fn required_path(name: &'static str) -> Result<PathBuf, AgentBackendError> {
@@ -173,6 +249,11 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<Command, AgentBackendError
             command.arg("fork").arg(&thread.0);
         }
     }
+    command
+        .arg("--ask-for-approval")
+        .arg("never")
+        .arg("--sandbox")
+        .arg("danger-full-access");
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
@@ -204,11 +285,18 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<Command, AgentBackendError
         &format!("{prefix}.args"),
         serde_json::to_string(&spec.mcp.args).map_err(config_encode_error)?,
     );
+    // Override a same-named project/global server completely. Values arrive
+    // only through the explicit inherited-name membrane below.
+    push_config_value(&mut command, &format!("{prefix}.env"), "{}".into());
     push_config_string(&mut command, &format!("{prefix}.cwd"), &spec.mcp.cwd)?;
+    let mut forward_env = spec.mcp.forward_env.clone();
+    forward_env.extend(["TMUX".to_string(), "TMUX_PANE".to_string()]);
+    forward_env.sort();
+    forward_env.dedup();
     push_config_value(
         &mut command,
         &format!("{prefix}.env_vars"),
-        serde_json::to_string(&spec.mcp.forward_env).map_err(config_encode_error)?,
+        serde_json::to_string(&forward_env).map_err(config_encode_error)?,
     );
     push_config_value(
         &mut command,
@@ -269,7 +357,10 @@ pub struct RolloutBinding {
 }
 
 impl RolloutBinding {
-    pub const VERSION: u32 = 1;
+    /// V1 trusted Codex MCP `_meta.threadId`, which may identify the hosted
+    /// conversation rather than this local resumable TUI rollout. V2 is
+    /// discovered from the owning process ancestry and open session file.
+    pub const VERSION: u32 = 2;
 
     pub fn new(thread: BackendThreadId) -> Result<Self, AgentBackendError> {
         validate_thread(&thread)?;
@@ -541,6 +632,12 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "resume" || arg == "fork"));
         assert!(!args.iter().any(|arg| arg.contains("initial task")));
         assert!(args
+            .windows(2)
+            .any(|args| args == ["--ask-for-approval", "never"]));
+        assert!(args
+            .windows(2)
+            .any(|args| args == ["--sandbox", "danger-full-access"]));
+        assert!(args
             .iter()
             .any(|arg| arg.contains("mcp_servers.tidepool_actor.command")));
         assert!(args
@@ -549,6 +646,15 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "mcp_servers.tidepool_actor.required=true"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "mcp_servers.tidepool_actor.env={}"));
+        let inherited = args
+            .iter()
+            .find(|arg| arg.starts_with("mcp_servers.tidepool_actor.env_vars="))
+            .expect("scoped MCP inherited environment");
+        assert!(inherited.contains("TMUX"));
+        assert!(inherited.contains("TMUX_PANE"));
     }
 
     #[test]
