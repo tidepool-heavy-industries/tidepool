@@ -1,8 +1,11 @@
 //! Canonical sequential Ractor wrapper for Tidepool actor behavior.
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::time::Duration;
 
-use ractor::{Actor, ActorProcessingErr, ActorRef as RactorRef};
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use ractor::{Actor, ActorProcessingErr, ActorRef as RactorRef, SupervisionEvent};
 
 use crate::{
     ActorExitKind, ActorRef, ActorTerminal, ExternalApplicationFailure, ExternalFailureDisposition,
@@ -17,6 +20,55 @@ pub struct KernelBehaviorError {
     pub detail: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChildExitNotice {
+    pub child: LocalActorRef,
+    pub terminal: ActorTerminal,
+}
+
+#[derive(Clone)]
+pub struct KernelContext {
+    identity: ActorRef,
+    myself: RactorRef<KernelMessage>,
+    children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
+}
+
+impl KernelContext {
+    #[must_use]
+    pub fn identity(&self) -> ActorRef {
+        self.identity
+    }
+
+    /// Start a linked child and return its exact handle only after startup.
+    pub async fn spawn_child<C>(
+        &self,
+        name: Option<String>,
+        behavior: C,
+    ) -> Result<LocalActorRef, ractor::SpawnErr>
+    where
+        C: KernelBehavior,
+    {
+        let terminal = RetainedActorExit::new();
+        let (address, task) = self
+            .myself
+            .spawn_linked(
+                name,
+                LocalActor::<C>(PhantomData),
+                LocalActorArguments {
+                    behavior,
+                    terminal: terminal.clone(),
+                },
+            )
+            .await?;
+        drop(task);
+        let child = LocalActorRef::new(address, terminal);
+        self.children
+            .lock()
+            .insert(child.address().get_id(), child.clone());
+        Ok(child)
+    }
+}
+
 /// Resident execution owned by one sequential local actor.
 ///
 /// The wrapper owns lifecycle, publication, and reply settlement. A behavior
@@ -25,17 +77,19 @@ pub struct KernelBehaviorError {
 pub trait KernelBehavior: Send + 'static {
     fn start(
         &mut self,
-        actor: ActorRef,
+        context: &KernelContext,
     ) -> impl std::future::Future<Output = Result<(), KernelBehaviorError>> + Send;
 
     fn cast(
         &mut self,
+        context: &KernelContext,
         sender: ActorRef,
         request: MailboxValue,
     ) -> impl std::future::Future<Output = Result<(), KernelBehaviorError>> + Send;
 
     fn call(
         &mut self,
+        context: &KernelContext,
         caller: ActorRef,
         ancestry: crate::CallAncestry,
         request: MailboxValue,
@@ -43,24 +97,33 @@ pub trait KernelBehavior: Send + 'static {
 
     fn mcp(
         &mut self,
+        context: &KernelContext,
         name: String,
         arguments: serde_json::Value,
     ) -> impl std::future::Future<Output = Result<serde_json::Value, KernelInvocationFailure>> + Send;
 
     fn workbench(
         &mut self,
+        context: &KernelContext,
         request: WorkbenchRequest,
     ) -> impl std::future::Future<Output = Result<WorkbenchResponse, KernelInvocationFailure>> + Send;
 
     fn external_application_failed(
         &mut self,
+        context: &KernelContext,
         failure: ExternalApplicationFailure,
     ) -> impl std::future::Future<Output = ExternalFailureDisposition> + Send;
 
     fn shutdown(
         &mut self,
+        context: &KernelContext,
         terminal: &ActorTerminal,
     ) -> impl std::future::Future<Output = Result<(), KernelBehaviorError>> + Send;
+
+    fn child_exited(
+        &mut self,
+        notice: ChildExitNotice,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 pub struct LocalActor<B>(PhantomData<fn() -> B>);
@@ -71,7 +134,7 @@ pub struct LocalActorArguments<B> {
 }
 
 pub struct LocalActorState<B> {
-    identity: ActorRef,
+    context: KernelContext,
     behavior: B,
     terminal: RetainedActorExit,
 }
@@ -90,12 +153,17 @@ where
         arguments: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let identity = ActorRef::first(crate::ActorId(myself.get_id().pid()));
-        let mut state = LocalActorState {
+        let context = KernelContext {
             identity,
+            myself,
+            children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        };
+        let mut state = LocalActorState {
+            context,
             behavior: arguments.behavior,
             terminal: arguments.terminal,
         };
-        if let Err(error) = state.behavior.start(identity).await {
+        if let Err(error) = state.behavior.start(&state.context).await {
             let terminal = failed_terminal(format!("actor startup failed: {error}"));
             let _ = state.terminal.publish(terminal);
             return Err(Box::new(error));
@@ -111,7 +179,7 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             KernelMessage::Cast { sender, request } => {
-                if let Err(error) = state.behavior.cast(sender, request).await {
+                if let Err(error) = state.behavior.cast(&state.context, sender, request).await {
                     fail_actor(&myself, state, format!("actor cast failed: {error}"));
                 }
             }
@@ -120,18 +188,22 @@ where
                 ancestry,
                 request,
                 reply,
-            } => match ancestry.enter(state.identity) {
+            } => match ancestry.enter(state.context.identity) {
                 Err(error) => {
                     let _ = reply.send(Err(error));
                 }
-                Ok(ancestry) => match state.behavior.call(caller, ancestry, request).await {
+                Ok(ancestry) => match state
+                    .behavior
+                    .call(&state.context, caller, ancestry, request)
+                    .await
+                {
                     Ok(value) => {
                         let _ = reply.send(Ok(value));
                     }
                     Err(error) => {
                         let detail = error.to_string();
                         let _ = reply.send(Err(KernelCallFailure::Handler {
-                            actor: state.identity,
+                            actor: state.context.identity,
                             detail: detail.clone(),
                         }));
                         fail_actor(&myself, state, format!("actor call failed: {detail}"));
@@ -143,21 +215,25 @@ where
                 arguments,
                 reply,
             } => {
-                let _ = reply.send(state.behavior.mcp(name, arguments).await);
+                let _ = reply.send(state.behavior.mcp(&state.context, name, arguments).await);
             }
             KernelMessage::Workbench { request, reply } => {
-                let _ = reply.send(state.behavior.workbench(request).await);
+                let _ = reply.send(state.behavior.workbench(&state.context, request).await);
             }
             KernelMessage::ExternalApplicationFailed { failure, reply } => {
                 let detail = format!("native actor application failed: {}", failure.detail);
-                let disposition = state.behavior.external_application_failed(failure).await;
+                let disposition = state
+                    .behavior
+                    .external_application_failed(&state.context, failure)
+                    .await;
                 let _ = reply.send(disposition);
                 if disposition == ExternalFailureDisposition::Applied {
                     fail_actor(&myself, state, detail);
                 }
             }
             KernelMessage::Shutdown { terminal, reply } => {
-                let terminal = match state.behavior.shutdown(&terminal).await {
+                shutdown_children(&state.context, Duration::from_secs(15)).await;
+                let terminal = match state.behavior.shutdown(&state.context, &terminal).await {
                     Ok(()) => terminal,
                     Err(error) => failed_terminal(format!("actor shutdown failed: {error}")),
                 };
@@ -166,6 +242,45 @@ where
                 myself.stop(Some(terminal.summary.clone()));
             }
         }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: RactorRef<Self::Msg>,
+        event: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let (cell, observed) = match event {
+            SupervisionEvent::ActorStarted(_) | SupervisionEvent::ProcessGroupChanged(_) => {
+                return Ok(())
+            }
+            SupervisionEvent::ActorTerminated(cell, _, reason) => {
+                let summary = reason.unwrap_or_else(|| {
+                    "linked child stopped without publishing a terminal result".into()
+                });
+                (cell, failed_terminal(summary))
+            }
+            SupervisionEvent::ActorFailed(cell, error) => (
+                cell,
+                failed_terminal(format!("linked child actor failed: {error}")),
+            ),
+        };
+        let child = state.context.children.lock().get(&cell.get_id()).cloned();
+        let Some(child) = child else {
+            tracing::warn!(child = %cell.get_id(), "received lifecycle event for an unregistered linked child");
+            return Ok(());
+        };
+        if child.terminal().get().is_none() {
+            publish_terminal(child.terminal(), &observed);
+        }
+        let Some(terminal) = child.terminal().get() else {
+            unreachable!("supervision publishes or observes the child terminal result");
+        };
+        state
+            .behavior
+            .child_exited(ChildExitNotice { child, terminal })
+            .await;
         Ok(())
     }
 }
@@ -210,6 +325,39 @@ fn failed_terminal(summary: String) -> ActorTerminal {
     }
 }
 
+async fn shutdown_children(context: &KernelContext, timeout: Duration) {
+    let children: Vec<_> = context.children.lock().values().cloned().collect();
+    let mut shutdowns = FuturesUnordered::new();
+    for child in children {
+        shutdowns.push(async move {
+            if child.terminal().get().is_some() {
+                return;
+            }
+            let requested = ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "owner actor stopped".into(),
+            };
+            let result = child
+                .address()
+                .call(
+                    |reply| KernelMessage::Shutdown {
+                        terminal: requested.clone(),
+                        reply,
+                    },
+                    Some(timeout),
+                )
+                .await;
+            if !matches!(result, Ok(ractor::rpc::CallResult::Success(_))) {
+                if child.terminal().get().is_none() {
+                    publish_terminal(child.terminal(), &requested);
+                }
+                child.address().kill();
+            }
+        });
+    }
+    while shutdowns.next().await.is_some() {}
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -226,15 +374,18 @@ mod tests {
         calls: Arc<Mutex<Vec<&'static str>>>,
         release_first: Arc<Notify>,
         fail_cast: bool,
+        spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
+        child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
     }
 
     impl KernelBehavior for ProbeBehavior {
-        async fn start(&mut self, _actor: ActorRef) -> Result<(), KernelBehaviorError> {
+        async fn start(&mut self, _context: &KernelContext) -> Result<(), KernelBehaviorError> {
             Ok(())
         }
 
         async fn cast(
             &mut self,
+            _context: &KernelContext,
             _sender: ActorRef,
             _request: MailboxValue,
         ) -> Result<(), KernelBehaviorError> {
@@ -249,6 +400,7 @@ mod tests {
 
         async fn call(
             &mut self,
+            _context: &KernelContext,
             _caller: ActorRef,
             _ancestry: crate::CallAncestry,
             request: MailboxValue,
@@ -258,10 +410,20 @@ mod tests {
 
         async fn mcp(
             &mut self,
+            context: &KernelContext,
             name: String,
             _arguments: serde_json::Value,
         ) -> Result<serde_json::Value, KernelInvocationFailure> {
-            if name == "first" {
+            if name == "spawn" {
+                let child = context
+                    .spawn_child(None, FailingChild)
+                    .await
+                    .map_err(|error| KernelInvocationFailure::Failed {
+                        actor: context.identity(),
+                        detail: error.to_string(),
+                    })?;
+                *self.spawned_child.lock() = Some(child);
+            } else if name == "first" {
                 self.calls.lock().push("first-start");
                 self.release_first.notified().await;
                 self.calls.lock().push("first-end");
@@ -273,6 +435,7 @@ mod tests {
 
         async fn workbench(
             &mut self,
+            _context: &KernelContext,
             _request: WorkbenchRequest,
         ) -> Result<WorkbenchResponse, KernelInvocationFailure> {
             Ok(WorkbenchResponse {
@@ -285,33 +448,126 @@ mod tests {
 
         async fn external_application_failed(
             &mut self,
+            _context: &KernelContext,
             _failure: ExternalApplicationFailure,
         ) -> ExternalFailureDisposition {
             ExternalFailureDisposition::Applied
         }
 
-        async fn shutdown(&mut self, _terminal: &ActorTerminal) -> Result<(), KernelBehaviorError> {
+        async fn shutdown(
+            &mut self,
+            _context: &KernelContext,
+            _terminal: &ActorTerminal,
+        ) -> Result<(), KernelBehaviorError> {
             Ok(())
+        }
+
+        async fn child_exited(&mut self, notice: ChildExitNotice) {
+            self.child_exits.lock().push(notice.terminal);
         }
     }
 
-    fn behavior(fail_cast: bool) -> (ProbeBehavior, Arc<Mutex<Vec<&'static str>>>, Arc<Notify>) {
+    struct FailingChild;
+
+    impl KernelBehavior for FailingChild {
+        async fn start(&mut self, _context: &KernelContext) -> Result<(), KernelBehaviorError> {
+            Ok(())
+        }
+
+        async fn cast(
+            &mut self,
+            _context: &KernelContext,
+            _sender: ActorRef,
+            _request: MailboxValue,
+        ) -> Result<(), KernelBehaviorError> {
+            Err(KernelBehaviorError {
+                detail: "child failed".into(),
+            })
+        }
+
+        async fn call(
+            &mut self,
+            _context: &KernelContext,
+            _caller: ActorRef,
+            _ancestry: crate::CallAncestry,
+            request: MailboxValue,
+        ) -> Result<MailboxValue, KernelBehaviorError> {
+            Ok(request)
+        }
+
+        async fn mcp(
+            &mut self,
+            context: &KernelContext,
+            _name: String,
+            _arguments: serde_json::Value,
+        ) -> Result<serde_json::Value, KernelInvocationFailure> {
+            Err(KernelInvocationFailure::Rejected {
+                actor: context.identity(),
+                detail: "child has no MCP policy".into(),
+            })
+        }
+
+        async fn workbench(
+            &mut self,
+            context: &KernelContext,
+            _request: WorkbenchRequest,
+        ) -> Result<WorkbenchResponse, KernelInvocationFailure> {
+            Err(KernelInvocationFailure::Rejected {
+                actor: context.identity(),
+                detail: "child has no workbench".into(),
+            })
+        }
+
+        async fn external_application_failed(
+            &mut self,
+            _context: &KernelContext,
+            _failure: ExternalApplicationFailure,
+        ) -> ExternalFailureDisposition {
+            ExternalFailureDisposition::Applied
+        }
+
+        async fn shutdown(
+            &mut self,
+            _context: &KernelContext,
+            _terminal: &ActorTerminal,
+        ) -> Result<(), KernelBehaviorError> {
+            Ok(())
+        }
+
+        async fn child_exited(&mut self, _notice: ChildExitNotice) {}
+    }
+
+    fn behavior(
+        fail_cast: bool,
+    ) -> (
+        ProbeBehavior,
+        Arc<Mutex<Vec<&'static str>>>,
+        Arc<Notify>,
+        Arc<Mutex<Option<LocalActorRef>>>,
+        Arc<Mutex<Vec<ActorTerminal>>>,
+    ) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
+        let spawned_child = Arc::new(Mutex::new(None));
+        let child_exits = Arc::new(Mutex::new(Vec::new()));
         (
             ProbeBehavior {
                 calls: Arc::clone(&calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
+                spawned_child: Arc::clone(&spawned_child),
+                child_exits: Arc::clone(&child_exits),
             },
             calls,
             release,
+            spawned_child,
+            child_exits,
         )
     }
 
     #[tokio::test]
     async fn one_actor_never_reenters_while_an_operation_is_pending() {
-        let (behavior, calls, release) = behavior(false);
+        let (behavior, calls, release, _, _) = behavior(false);
         let (actor, task) = spawn_local_actor(None, behavior).await.expect("spawn");
         let (first_tx, first_rx) = oneshot::channel();
         let (second_tx, second_rx) = oneshot::channel();
@@ -358,7 +614,7 @@ mod tests {
 
     #[tokio::test]
     async fn behavior_failure_publishes_once_and_releases_message_custody() {
-        let (behavior, _, _) = behavior(true);
+        let (behavior, _, _, _, _) = behavior(true);
         let (actor, task) = spawn_local_actor(None, behavior).await.expect("spawn");
         let dropped = Arc::new(AtomicUsize::new(0));
         actor
@@ -374,5 +630,65 @@ mod tests {
         assert_eq!(terminal.kind, ActorExitKind::Failed);
         assert!(terminal.summary.contains("cast probe"));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn child_failure_is_retained_and_notifies_without_killing_owner() {
+        let (behavior, _, _, child_slot, child_exits) = behavior(false);
+        let (owner, owner_task) = spawn_local_actor(None, behavior)
+            .await
+            .expect("spawn owner");
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        owner
+            .address()
+            .send_message(KernelMessage::Mcp {
+                name: "spawn".into(),
+                arguments: serde_json::Value::Null,
+                reply: spawn_tx.into(),
+            })
+            .expect("request child");
+        spawn_rx.await.expect("spawn reply").expect("spawn result");
+        let child = child_slot.lock().clone().expect("child handle");
+        child
+            .address()
+            .send_message(KernelMessage::Cast {
+                sender: owner.identity(),
+                request: MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0))),
+            })
+            .expect("fail child");
+
+        assert_eq!(child.terminal().wait().await.kind, ActorExitKind::Failed);
+        for _ in 0..20 {
+            if !child_exits.lock().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(child_exits.lock().len(), 1);
+
+        let (ping_tx, ping_rx) = oneshot::channel();
+        owner
+            .address()
+            .send_message(KernelMessage::Mcp {
+                name: "second".into(),
+                arguments: serde_json::Value::Null,
+                reply: ping_tx.into(),
+            })
+            .expect("owner remains callable");
+        assert_eq!(ping_rx.await.expect("owner reply").unwrap(), "second");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        owner
+            .address()
+            .send_message(KernelMessage::Shutdown {
+                terminal: ActorTerminal {
+                    kind: ActorExitKind::Completed,
+                    summary: "owner done".into(),
+                },
+                reply: shutdown_tx.into(),
+            })
+            .expect("shutdown owner");
+        shutdown_rx.await.expect("shutdown reply");
+        owner_task.await.expect("owner task");
     }
 }
