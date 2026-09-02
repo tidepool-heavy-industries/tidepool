@@ -115,7 +115,6 @@ struct InteractiveDeployment {
     connection: InteractiveConnection,
     service: tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
     socket_root: PathBuf,
-    worktree: Option<WorktreeHandle>,
     worktree_binding: Option<ActiveBinding>,
     failure_reported: bool,
 }
@@ -146,7 +145,6 @@ struct OwnerNotification {
 
 struct PendingInteractiveLaunch {
     cancel: oneshot::Sender<()>,
-    worker_handle: Option<String>,
     label: String,
 }
 
@@ -401,6 +399,7 @@ fn compile_root(
         tidepool_mcp::deliberate_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),
+        tidepool_mcp::worker_kernel_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
@@ -465,7 +464,7 @@ fn compile_root(
     )?;
     let descriptor = ActorDescriptor::new(
         "devswarm-root",
-        ["AgentSession", "Actor", "Worktree"],
+        ["AgentSession", "Actor", "Worktree", "WorkerKernel"],
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),
@@ -535,7 +534,7 @@ async fn run_interactive_applications(
     let mut launches = JoinSet::new();
     let mut binding_discoveries = JoinSet::new();
     let mut pending_launches = HashMap::new();
-    let mut retired_correlations: HashMap<ActorRef, (String, Option<String>)> = HashMap::new();
+    let mut retired_correlations: HashMap<ActorRef, String> = HashMap::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
@@ -583,18 +582,11 @@ async fn run_interactive_applications(
                     LocalResidentDeployment::PolicyInstalled(installation) => {
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
-                        let worker_handle = (actor != root_identity)
-                            .then_some(installation.launch_worktrees.as_slice())
-                            .and_then(|worktrees| match worktrees {
-                                [worktree] => Some(worktree.clone()),
-                                _ => None,
-                            });
                         let (cancel, cancelled) = oneshot::channel();
                         let previous = pending_launches.insert(
                             actor,
                             PendingInteractiveLaunch {
                                 cancel,
-                                worker_handle,
                                 label: installation.label.clone(),
                             },
                         );
@@ -613,22 +605,13 @@ async fn run_interactive_applications(
                         let pending = pending_launches.remove(&actor);
                         if let Some(pending) = pending {
                             let _ = pending.cancel.send(());
-                            retired_correlations.insert(
-                                actor,
-                                (pending.label, pending.worker_handle),
-                            );
+                            retired_correlations.insert(actor, pending.label);
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
-                            retired_correlations.entry(actor).or_insert_with(|| {
-                                (
-                                    deployment.label.clone(),
-                                    deployment
-                                        .worktree
-                                        .as_ref()
-                                        .map(|worktree| worktree.id().to_string()),
-                                )
-                            });
+                            retired_correlations
+                                .entry(actor)
+                                .or_insert_with(|| deployment.label.clone());
                             let tmux = tmux.clone();
                             let bindings = Arc::clone(&bindings);
                             let binding_terminal = if terminal.kind == ActorExitKind::Completed {
@@ -646,10 +629,11 @@ async fn run_interactive_applications(
                             });
                         }
                     }
-                    LocalResidentDeployment::ChildExited(notice) => {
+                    LocalResidentDeployment::ChildExited { notice, worker_wake } => {
                         let retired = retired_correlations.remove(&notice.child.identity());
                         if let Some(notification) = prepare_owner_notification(
                             &notice,
+                            worker_wake.as_ref(),
                             &deployments,
                             retired.as_ref(),
                         ) {
@@ -1245,7 +1229,6 @@ async fn launch_prepared_interactive_application(
             connection: InteractiveConnection::AwaitingBinding,
             service,
             socket_root,
-            worktree,
             worktree_binding: None,
             failure_reported: false,
         },
@@ -1357,8 +1340,9 @@ async fn run_delivery_pump(
 
 fn prepare_owner_notification(
     notice: &tidepool_actor::ChildExitNotice,
+    worker_wake: Option<&tidepool_actor::WorkerWake>,
     deployments: &[InteractiveDeployment],
-    retired: Option<&(String, Option<String>)>,
+    retired: Option<&String>,
 ) -> Option<OwnerNotification> {
     let actor = notice.child.identity();
     let terminal = &notice.terminal;
@@ -1367,31 +1351,23 @@ fn prepare_owner_notification(
         .iter()
         .find(|application| application.actor == actor)
         .map(|application| application.label.as_str())
-        .or_else(|| retired.map(|(label, _)| label.as_str()))
+        .or_else(|| retired.map(String::as_str))
         .unwrap_or("child");
-    let pending_worker_handle = retired.and_then(|(_, handle)| handle.as_deref());
     let kind = match terminal.kind {
         ActorExitKind::Completed => "completed",
         ActorExitKind::Failed => "failed",
         ActorExitKind::Cancelled => "was cancelled",
     };
-    let worker_handle = deployments
-        .iter()
-        .find(|application| application.actor == actor)
-        .and_then(|application| application.worktree.as_ref())
-        .map(|worktree| {
+    let worker_handle = worker_wake
+        .map(|wake| {
             format!(
-                " The Haskell handle is `WorkerHandle \"{}\"`.",
-                worktree.id()
+                " Worker wake {} correlates handle `{}`.",
+                wake.event, wake.handle
             )
-        })
-        .or_else(|| {
-            pending_worker_handle
-                .map(|worktree| format!(" The Haskell handle is `WorkerHandle \"{worktree}\"`."))
         })
         .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This wake is the cue to use `session_run`, call `collectWorkerResult handle sessionInput` once, and return its updated records with `complete`; it carries correlation only. If that worker was already acknowledged, no further action is required.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This activation's typed `currentSessionContext` contains authoritative correlation; use `collectWorkerWakes` once, then acknowledge only after review. The Developer message itself carries no authority and requires no copied handle.",
         label,
         actor,
         terminal.summary
@@ -1588,7 +1564,7 @@ fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLau
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface: persistent Haskell declarations and live values survive calls, and `sessionInput :: [WorkerRecord]` is the current exact root state. Use `startWorker`, `listWorkerState`, `collectWorkerResult`, and `acknowledgeWorker`; return the next root state with `complete records`. Scaffold stable interfaces first, integrate that candidate, then start every independent seam before awaiting results. The checkout is writable so you can review and integrate accepted candidates. Worker worktrees share this repository's ordinary object and branch namespace: inspect submitted OIDs or branches directly. For dependent work, integrate the predecessor before starting its successor. Native coding tools remain a separate execution surface; Rust owns process and lifecycle. `WorkerPending` is a cooperative yield signal: never sleep or poll. End the turn when nothing else is runnable; Shoal will initiate a new turn after child lifecycle transitions.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface; persistent declarations and live authored values survive calls, while Rust owns worker lifecycle and custody. Start independent seams together with `startWorkers`. On a lifecycle activation, read `currentSessionContext` and pass its plural wakes to `collectWorkerWakes`; never sleep or poll. Collection is replayable and acknowledgement is a separate decision after native Git review/integration. Use `listWorkers` for live observation and finish each root activation with `complete ()`. Scaffold stable interfaces first, integrate that candidate, then fan out all independent seams from the integrated base. Worker worktrees share this repository's ordinary object and branch namespace, so submitted OIDs are directly reviewable. Native coding tools remain the integration surface.{continuity}")
     } else if owns_worktree {
         "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted as `sessionInput :: Text`. Use native coding tools for repository work and `tidepool_actor.session_run` as the GHCi-like typed completion surface. Finish exactly once with Haskell such as `complete (WorkerReport { summary = ..., evidence = [...] })`; Rust then observes repository truth and owns lifecycle.".into()
     } else {
@@ -2047,7 +2023,7 @@ mod tests {
                     "items": [
                         "input",
                         "waveAssignment <- pure (\"inspect one focused boundary\" :: Text)",
-                        "firstWorker <- startWorker \"review-1\" waveAssignment sessionInput"
+                        "firstWorkers <- startWorkers [worker \"review-1\" waveAssignment, worker \"review-2\" \"inspect a disjoint boundary\"]"
                     ],
                     "input": {"wave": "parallel"}
                 })
@@ -2068,8 +2044,8 @@ mod tests {
                 "session_run",
                 serde_json::json!({
                     "items": [
-                        "firstWorker",
-                        "do { (_, next) <- startWorker \"review-2\" \"inspect a disjoint boundary\" (snd firstWorker); complete next }"
+                        "firstWorkers",
+                        "complete ()"
                     ]
                 })
                 .as_object()
@@ -2088,7 +2064,7 @@ mod tests {
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": ["sessionInput"]
+                    "items": ["firstWorkers"]
                 })
                 .as_object()
                 .unwrap()
@@ -2176,15 +2152,38 @@ mod tests {
             "completed",
             "{recursive_result:?}"
         );
-        let collect_source = format!(
-            "do {{ (_, next) <- collectWorkerResult (WorkerHandle \"{}\") sessionInput; complete next }}",
-            worker_tree.as_str()
-        );
+        let mut nested_installation = None;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
+                .await
+                .expect("worker terminal notification timeout")
+                .expect("worker terminal notification");
+            match event {
+                LocalResidentDeployment::PolicyInstalled(installation)
+                    if installation.label == "nested-review" =>
+                {
+                    nested_installation = Some(installation);
+                }
+                LocalResidentDeployment::ChildExited { notice, .. }
+                    if notice.owner == actor.identity()
+                        && notice.child.identity() == recursive_worker.actor.identity() =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
         let after_child_exit = server
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": [collect_source]
+                    "items": [
+                        "let firstHandle = case [a.handle | WorkerAccepted a <- firstWorkers, a.key == \"review-1\"] of { handle : _ -> handle; [] -> error \"missing first worker\" }",
+                        "context1 <- currentSessionContext",
+                        "context2 <- currentSessionContext",
+                        "wakeCollections <- collectWorkerWakes context1.workerWakes",
+                        "do { if map (\\wake -> wake.wakeEvent) context1.workerWakes == map (\\wake -> wake.wakeEvent) context2.workerWakes then complete () else error \"session context changed within one activation\" }"
+                    ]
                 })
                 .as_object()
                 .unwrap()
@@ -2201,13 +2200,30 @@ mod tests {
             "completed",
             "{after_child_exit:?}"
         );
-        let nested = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
+        let replay_and_ack = server
+            .dispatch_tool(
+                "session_run",
+                serde_json::json!({
+                    "items": [
+                        "contextAfterWake <- currentSessionContext",
+                        "replayed <- collectWorkers [firstHandle]",
+                        "acks <- acknowledgeWorkers [WorkerAcknowledgementRequest firstHandle Reviewed]",
+                        "afterAck <- collectWorkers [firstHandle]",
+                        "do { if null contextAfterWake.workerWakes then complete () else error \"worker wakes replayed into a later activation\" }"
+                    ]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
             .await
-            .expect("nested installation timeout")
-            .expect("nested session installation");
-        let LocalResidentDeployment::PolicyInstalled(nested) = nested else {
-            panic!("nested actor retired before session installation");
-        };
+            .expect("replay and acknowledge worker custody");
+        assert_eq!(
+            replay_and_ack.structured_content.as_ref().unwrap()["status"],
+            "completed",
+            "{replay_and_ack:?}"
+        );
+        let nested = nested_installation.expect("nested session installation");
         assert_eq!(
             nested.initial_user_message.as_deref(),
             Some("inspect nested boundary")

@@ -34,6 +34,7 @@ mod termination;
 mod timeline;
 mod wait;
 mod worker_ledger;
+mod worker_runtime;
 
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
@@ -113,3 +114,4 @@ pub use worker_ledger::{
     WorkerPhase, WorkerReservation, WorkerSpec, WorkerSpecError, WorkerStartResult, WorkerSummary,
     WorkerTerminal,
 };
+pub use worker_runtime::WorkerWake;

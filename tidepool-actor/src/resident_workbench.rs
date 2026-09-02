@@ -158,6 +158,7 @@ pub(crate) enum ResidentActorBoundary {
     McpAwait(crate::resident_mcp::ResidentMcpAwait),
     McpReply(crate::resident_mcp::ResidentMcpReply),
     AgentSession(crate::ResidentInteractiveSession),
+    Worker(crate::worker_runtime::ResidentWorkerRequest),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -189,6 +190,7 @@ impl ResidentActorBoundary {
             Self::McpAwait(_) => "actor MCP await",
             Self::McpReply(_) => "actor MCP reply",
             Self::AgentSession(_) => "agent session",
+            Self::Worker(_) => "worker ledger",
         }
     }
 }
@@ -210,6 +212,7 @@ enum ResidentRequest {
     ActorMcp(crate::generated::actor_mcp::ActorMcpReq),
     AgentSession(crate::generated::agent_session::AgentSessionReq),
     Deliberate(crate::generated::deliberate::DeliberateReq),
+    WorkerKernel(crate::generated::worker_kernel::WorkerKernelReq),
     Complete(CompleteReq),
 }
 
@@ -247,6 +250,10 @@ impl ResidentRequest {
         try_member!(
             Self::Deliberate,
             crate::generated::deliberate::DeliberateReq
+        );
+        try_member!(
+            Self::WorkerKernel,
+            crate::generated::worker_kernel::WorkerKernelReq
         );
         try_member!(Self::Complete, CompleteReq);
 
@@ -289,6 +296,7 @@ impl ResidentRequest {
             Self::Deliberate(crate::generated::deliberate::DeliberateReq::DeliberateWith(..)) => {
                 "deliberate"
             }
+            Self::WorkerKernel(_) => "worker ledger",
             Self::Complete(CompleteReq::CompleteWith(..)) => "complete",
         }
     }
@@ -934,6 +942,53 @@ where
                         .map(ResidentActorBoundary::Deliberate)
                         .map_err(ResidentActorWorkbenchError::CompletionCapture)
                     }
+                    ResidentRequest::WorkerKernel(request) => {
+                        use crate::generated::worker_kernel::WorkerKernelReq as Request;
+                        use crate::worker_runtime::ResidentWorkerRequest as Captured;
+
+                        let json = |value: &Value| {
+                            tidepool_runtime::value_to_json(value, session.data_con_table(), 0)
+                        };
+                        let request = match request {
+                            Request::WorkerReserveBatchWith(specs) => Captured::ReserveBatch {
+                                specs: json(&specs),
+                                continuation: hole,
+                            },
+                            Request::WorkerAttachWith(handle, (id, incarnation), worktree) => {
+                                Captured::Attach {
+                                    handle,
+                                    actor: crate::wait::decode_address(id, incarnation)?,
+                                    worktree,
+                                    continuation: hole,
+                                }
+                            }
+                            Request::WorkerFailStartWith(handle, detail) => Captured::FailStart {
+                                handle,
+                                detail,
+                                continuation: hole,
+                            },
+                            Request::WorkerSubmitWith(handle, receipt) => Captured::Submit {
+                                handle,
+                                receipt: json(&receipt),
+                                continuation: hole,
+                            },
+                            Request::WorkerListWith => Captured::List { continuation: hole },
+                            Request::WorkerCollectWith(handles) => Captured::Collect {
+                                handles: json(&handles),
+                                continuation: hole,
+                            },
+                            Request::WorkerAcknowledgeWith(acknowledgements) => {
+                                Captured::Acknowledge {
+                                    acknowledgements: json(&acknowledgements),
+                                    continuation: hole,
+                                }
+                            }
+                            Request::WorkerSessionContextWith => {
+                                Captured::SessionContext { continuation: hole }
+                            }
+                        };
+                        Ok(ResidentActorBoundary::Worker(request))
+                    }
                     invalid => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                         "installed actor program suspended on phase-invalid `{}`",
                         invalid.operation()
@@ -1247,6 +1302,22 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = ().to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_json(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        value: serde_json::Value,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = value.to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_model::{DynModelProvider, StreamSink};
@@ -42,7 +43,10 @@ pub struct LocalResidentInstallation {
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
     PolicyInstalled(LocalResidentInstallation),
-    ChildExited(ChildExitNotice),
+    ChildExited {
+        notice: ChildExitNotice,
+        worker_wake: Option<crate::WorkerWake>,
+    },
     Retired {
         actor: ActorRef,
         terminal: ActorTerminal,
@@ -55,6 +59,9 @@ struct ResidentEnvironment<H, O> {
     provider: Arc<dyn DynModelProvider>,
     sink: Option<StreamSink>,
     deployments: mpsc::UnboundedSender<LocalResidentDeployment>,
+    workers: Arc<crate::worker_runtime::WorkerRuntime>,
+    pending_worker_installations:
+        Arc<Mutex<std::collections::HashMap<ActorRef, LocalResidentInstallation>>>,
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -65,6 +72,8 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             provider: Arc::clone(&self.provider),
             sink: self.sink.clone(),
             deployments: self.deployments.clone(),
+            workers: Arc::clone(&self.workers),
+            pending_worker_installations: Arc::clone(&self.pending_worker_installations),
         }
     }
 }
@@ -93,6 +102,7 @@ pub struct ResidentKernelBehavior<H, O> {
     shutdown_hook: Option<RootCustody>,
     launch_worktrees: Vec<String>,
     policy_installed: bool,
+    activation_wakes: Option<Vec<crate::WorkerWake>>,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -110,6 +120,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             shutdown_hook: None,
             launch_worktrees: Vec::new(),
             policy_installed: false,
+            activation_wakes: None,
         }
     }
 
@@ -128,6 +139,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             shutdown_hook: None,
             launch_worktrees,
             policy_installed: false,
+            activation_wakes: None,
         }
     }
 
@@ -148,6 +160,24 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         KernelInvocationFailure::Failed {
             actor,
             detail: error.to_string(),
+        }
+    }
+
+    /// Publish ordinary actor applications immediately, but hold worker
+    /// applications until the owning root has attached the exact child to its
+    /// reserved ledger entry. This makes external launch failure impossible
+    /// to race ahead of typed worker correlation.
+    fn publish_installation(&self, installation: LocalResidentInstallation) {
+        if installation.launch_worktrees.is_empty() {
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::PolicyInstalled(installation));
+        } else {
+            self.environment
+                .pending_worker_installations
+                .lock()
+                .insert(installation.actor.identity(), installation);
         }
     }
 }
@@ -400,10 +430,160 @@ where
                     .resume_optional_terminal(context.clone(), poll.continuation, terminal)
                     .await
             }
+            ResidentActorBoundary::Worker(request) => {
+                self.resolve_worker(kernel, context, request).await
+            }
             other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                 "`{}` is not an active actor effect",
                 other.operation()
             ))),
+        }
+    }
+
+    async fn resolve_worker(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        request: crate::worker_runtime::ResidentWorkerRequest,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        use crate::worker_runtime::ResidentWorkerRequest as Request;
+
+        let protocol = |detail: String| ResidentActorWorkbenchError::ActorProtocol(detail);
+        let (continuation, answer) = match request {
+            Request::ReserveBatch {
+                specs,
+                continuation,
+            } => (
+                continuation,
+                Some(
+                    self.environment
+                        .workers
+                        .reserve_batch(context.actor, specs)
+                        .map_err(protocol)?,
+                ),
+            ),
+            Request::Attach {
+                handle,
+                actor,
+                worktree,
+                continuation,
+            } => {
+                if !kernel.owns_child(actor) {
+                    return Err(protocol(format!(
+                        "worker attachment target {actor:?} is not a direct child of {:?}",
+                        context.actor
+                    )));
+                }
+                let child = kernel.resolve(actor).ok_or_else(|| {
+                    protocol(format!("worker attachment target {actor:?} is unavailable"))
+                })?;
+                let result = self
+                    .environment
+                    .workers
+                    .attach(context.actor, handle, child, worktree)
+                    .map_err(protocol)?;
+                if let Some(installation) = self
+                    .environment
+                    .pending_worker_installations
+                    .lock()
+                    .remove(&actor)
+                {
+                    let _ = self
+                        .environment
+                        .deployments
+                        .send(LocalResidentDeployment::PolicyInstalled(installation));
+                }
+                (continuation, Some(result))
+            }
+            Request::FailStart {
+                handle,
+                detail,
+                continuation,
+            } => (
+                continuation,
+                Some(
+                    self.environment
+                        .workers
+                        .fail_start(context.actor, handle, detail)
+                        .map_err(protocol)?,
+                ),
+            ),
+            Request::Submit {
+                handle,
+                receipt,
+                continuation,
+            } => {
+                self.environment
+                    .workers
+                    .submit(context.actor, handle, receipt)
+                    .map_err(protocol)?;
+                (continuation, None)
+            }
+            Request::List { continuation } => (
+                continuation,
+                Some(
+                    self.environment
+                        .workers
+                        .list(context.actor)
+                        .map_err(protocol)?,
+                ),
+            ),
+            Request::Collect {
+                handles,
+                continuation,
+            } => (
+                continuation,
+                Some(
+                    self.environment
+                        .workers
+                        .collect(context.actor, handles)
+                        .map_err(protocol)?,
+                ),
+            ),
+            Request::Acknowledge {
+                acknowledgements,
+                continuation,
+            } => (
+                continuation,
+                Some(
+                    self.environment
+                        .workers
+                        .acknowledge(context.actor, acknowledgements)
+                        .map_err(protocol)?,
+                ),
+            ),
+            Request::SessionContext { continuation } => {
+                if self.activation_wakes.is_none() {
+                    self.activation_wakes = Some(
+                        self.environment
+                            .workers
+                            .take_wakes(context.actor)
+                            .map_err(protocol)?,
+                    );
+                }
+                let wakes = self.activation_wakes.as_deref().unwrap_or_default();
+                let value = serde_json::json!({
+                    "workerWakes": wakes.iter().map(|wake| serde_json::json!({
+                        "wakeEvent": wake.event,
+                        "wakeHandle": { "workerId": wake.handle.as_str() },
+                    })).collect::<Vec<_>>()
+                });
+                (continuation, Some(value))
+            }
+        };
+        match answer {
+            Some(answer) => {
+                self.environment
+                    .runner
+                    .resume_json(context.clone(), continuation, answer)
+                    .await
+            }
+            None => {
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }
         }
     }
 
@@ -451,10 +631,7 @@ where
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                         };
-                        let _ = self
-                            .environment
-                            .deployments
-                            .send(LocalResidentDeployment::PolicyInstalled(installation));
+                        self.publish_installation(installation);
                         self.policy_installed = true;
                     }
                     self.standing = ResidentStanding::Mcp(awaiting);
@@ -489,10 +666,7 @@ where
                             initial_user_message: request.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                         };
-                        let _ = self
-                            .environment
-                            .deployments
-                            .send(LocalResidentDeployment::PolicyInstalled(installation));
+                        self.publish_installation(installation);
                         self.policy_installed = true;
                     }
                     self.standing = ResidentStanding::Interactive(
@@ -776,6 +950,7 @@ where
                     )));
                 }
                 ResidentWorkbenchStep::Completed(answer) => {
+                    self.activation_wakes = None;
                     let outcome = workbench
                         .resume_completion(context.clone(), awaiting.hole, answer)
                         .await?;
@@ -1054,10 +1229,17 @@ where
 
     fn child_exited(&mut self, notice: ChildExitNotice) -> futures_util::future::BoxFuture<'_, ()> {
         Box::pin(async move {
+            let worker_wake = self
+                .environment
+                .workers
+                .child_exited(notice.child.identity(), &notice.terminal);
             let _ = self
                 .environment
                 .deployments
-                .send(LocalResidentDeployment::ChildExited(notice));
+                .send(LocalResidentDeployment::ChildExited {
+                    notice,
+                    worker_wake,
+                });
         })
     }
 }
@@ -1086,16 +1268,20 @@ where
     let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
     let completions = ResidentCompletionExecutor::new(machines, source);
     let (deployments, receiver) = mpsc::unbounded_channel();
+    let workers = Arc::new(crate::worker_runtime::WorkerRuntime::default());
     let environment = ResidentEnvironment {
         runner,
         completions,
         provider,
         sink,
         deployments,
+        workers: Arc::clone(&workers),
+        pending_worker_installations: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
     let name = Some(descriptor.label().to_owned());
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
     let (actor, task) = crate::spawn_local_actor(name, behavior).await?;
+    workers.install_root(actor.identity());
     Ok((actor, task, receiver))
 }
 

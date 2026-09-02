@@ -187,6 +187,7 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
         )
         .await
         .expect("spawn and await child");
+    assert!(!spawned.is_error.unwrap_or(false), "{spawned:?}");
     assert_eq!(
         spawned.structured_content,
         Some(serde_json::json!({"started": true}))
@@ -199,7 +200,7 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     ));
     assert!(matches!(
         deployments.recv().await,
-        Some(LocalResidentDeployment::ChildExited(ref notice))
+        Some(LocalResidentDeployment::ChildExited { ref notice, .. })
             if notice.terminal.kind == tidepool_actor::ActorExitKind::Completed
     ));
 

@@ -17,6 +17,11 @@ impl WorkerHandle {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[must_use]
+    pub fn from_raw(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,13 +220,26 @@ impl std::fmt::Display for WorkerHandle {
     }
 }
 
-#[derive(Default)]
 pub struct WorkerLedger<R, A = LocalActorRef> {
     by_key: HashMap<String, WorkerHandle>,
     entries: HashMap<WorkerHandle, WorkerEntry<R, A>>,
 }
 
+impl<R, A> Default for WorkerLedger<R, A> {
+    fn default() -> Self {
+        Self {
+            by_key: HashMap::new(),
+            entries: HashMap::new(),
+        }
+    }
+}
+
 impl<R, A> WorkerLedger<R, A> {
+    #[must_use]
+    pub fn accepted(&self, handle: &WorkerHandle) -> Option<&AcceptedWorker> {
+        self.entries.get(handle).map(|entry| &entry.accepted)
+    }
+
     #[must_use]
     pub fn reserve_batch(&mut self, specs: Vec<WorkerSpec>) -> Vec<ReservedWorker> {
         specs.into_iter().map(|spec| self.reserve(spec)).collect()
@@ -297,6 +315,21 @@ impl<R, A> WorkerLedger<R, A> {
         Ok(())
     }
 
+    pub fn commit_started_handle(
+        &mut self,
+        handle: &WorkerHandle,
+        actor: A,
+    ) -> Result<(), WorkerLedgerError> {
+        let Some(entry) = self.entries.get_mut(handle) else {
+            return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
+        };
+        if !matches!(entry.state, EntryState::Reserved) {
+            return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
+        }
+        entry.state = EntryState::Running(actor);
+        Ok(())
+    }
+
     pub fn fail_start(
         &mut self,
         reservation: WorkerReservation,
@@ -308,6 +341,24 @@ impl<R, A> WorkerLedger<R, A> {
         };
         if !matches!(entry.state, EntryState::Reserved) {
             return Err(WorkerLedgerError::InvalidReservation(handle));
+        }
+        entry.state = EntryState::StartFailed {
+            detail: detail.into(),
+            collected: false,
+        };
+        Ok(())
+    }
+
+    pub fn fail_start_handle(
+        &mut self,
+        handle: &WorkerHandle,
+        detail: impl Into<String>,
+    ) -> Result<(), WorkerLedgerError> {
+        let Some(entry) = self.entries.get_mut(handle) else {
+            return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
+        };
+        if !matches!(entry.state, EntryState::Reserved) {
+            return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
         }
         entry.state = EntryState::StartFailed {
             detail: detail.into(),

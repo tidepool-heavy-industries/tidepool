@@ -15,6 +15,7 @@ pub mod journal;
 pub mod read_state;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
+pub mod worker_kernel;
 pub mod worktree;
 
 pub use actor::*;
@@ -32,6 +33,7 @@ pub use journal::*;
 pub use read_state::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
+pub use worker_kernel::*;
 pub use worktree::*;
 
 /// Every schema-owned Haskell effect declaration.
@@ -53,6 +55,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_local_decl(),
         actor_mcp_decl(),
         agent_session_decl(),
+        worker_kernel_decl(),
     ]
 }
 
@@ -64,6 +67,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "ActorLocal",
     "ActorMcp",
     "AgentSession",
+    "WorkerKernel",
 ];
 
 /// Hidden names grouped by their owning effect.
@@ -92,4 +96,17 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     ("ActorLocal", &["ActorReceiveWith"]),
     ("ActorMcp", &["ActorMcpAwaitWith", "ActorMcpReplyWith"]),
     ("AgentSession", &["AgentSessionWith"]),
+    (
+        "WorkerKernel",
+        &[
+            "WorkerReserveBatchWith",
+            "WorkerAttachWith",
+            "WorkerFailStartWith",
+            "WorkerSubmitWith",
+            "WorkerListWith",
+            "WorkerCollectWith",
+            "WorkerAcknowledgeWith",
+            "WorkerSessionContextWith",
+        ],
+    ),
 ];

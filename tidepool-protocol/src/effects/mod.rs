@@ -24,6 +24,7 @@ pub mod journal;
 pub mod read_state;
 pub mod run_llm_turn;
 pub mod subagent;
+pub mod worker_kernel;
 pub mod worktree;
 
 use crate::schema::Effect;
@@ -60,6 +61,7 @@ pub fn all() -> Vec<Effect> {
         actor_local::actor_local(),
         actor_mcp::actor_mcp(),
         agent_session::agent_session(),
+        worker_kernel::worker_kernel(),
     ]
 }
 

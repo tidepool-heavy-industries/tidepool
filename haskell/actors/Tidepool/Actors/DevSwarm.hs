@@ -5,91 +5,126 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
 
--- | The first self-hosting actor policy.
+-- | Typed orchestration policy for Shoal.
 --
--- Rust owns panes, processes, scheduling, worktree truth, and delivery. This
--- module owns worker intent, idempotency, typed candidate composition, and
--- result custody. Collection observes an exact exit and never consumes it;
--- only explicit acknowledgement releases the root's reference.
+-- Rust owns the mutable worker ledger, exact actor correlation, lifecycle
+-- history, and receipt custody. Haskell describes worker programs and invokes
+-- typed operations; no copied registry value is threaded through model turns.
 module Tidepool.Actors.DevSwarm
   ( RootEffects
   , ActorEffects
   , rootPolicy
-  , WorkerRecord
+  , WorkerSpec (..)
   , WorkerHandle (..)
-  , WorkerStart (..)
+  , AcceptedWorker (..)
+  , WorkerStartResult (..)
   , WorkerPhase (..)
   , WorkerSummary (..)
+  , WorkerWake (..)
+  , SessionContext (..)
   , WorkerCollection (..)
+  , AcknowledgementDisposition (..)
+  , WorkerAcknowledgementRequest (..)
   , WorkerAcknowledgement (..)
   , WorkerReport (..)
   , WorkerOutcome (..)
   , CandidateReceipt (..)
+  , worker
   , startWorker
-  , listWorkerState
-  , collectWorkerResult
-  , acknowledgeWorker
+  , startWorkers
+  , currentSessionContext
+  , listWorkers
+  , collectWorkers
+  , collectWorkerWakes
+  , acknowledgeWorkers
   ) where
 
-import Control.Monad.Freer (Eff, Member)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Prelude
 
 import Tidepool.Actor
+import Tidepool.Actor.Internal (ActorRef (..))
 import Tidepool.Agent.Session (agentSession)
-import Tidepool.Aeson (FromJSON, ToJSON)
+import Tidepool.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
 import qualified Tidepool.Data.Text as T
-import Tidepool.Effects.Core (Actor, AgentSession, Worktree)
+import Tidepool.Effects.Core (Actor, AgentSession, WorkerKernel (..), Worktree)
 import Tidepool.Worktree
 
-type RootEffects = '[AgentSession, Actor, Worktree]
+type RootEffects = '[AgentSession, Actor, Worktree, WorkerKernel]
 
 -- | Canonical workbench alias for the root's actor-local compilation view.
--- Child facades provide the same name for their attenuated row.
 type ActorEffects = RootEffects
 
--- | Stable model-visible correlation for one worker in this root
--- incarnation. The constructor carries no authority; the root retains the
--- exact 'ActorRef' privately.
+data WorkerSpec = WorkerSpec
+  { key :: Text
+  , assignment :: Text
+  }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
+worker :: Text -> Text -> WorkerSpec
+worker = WorkerSpec
+
 newtype WorkerHandle = WorkerHandle { workerId :: Text }
   deriving stock (Eq, Generic)
   deriving anyclass (FromJSON, JsonSchema, ToJSON)
 
-data WorkerStart
-  = WorkerAccepted
-      { workKey :: Text
-      , worker :: WorkerHandle
-      }
-  | WorkerKeyConflict { workKey :: Text }
-  | WorkerAlreadyAcknowledged
-      { workKey :: Text
-      , worker :: WorkerHandle
+data AcceptedWorker = AcceptedWorker
+  { key :: Text
+  , handle :: WorkerHandle
+  , fingerprint :: Text
+  }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
+data WorkerStartResult
+  = WorkerAccepted { accepted :: AcceptedWorker }
+  | WorkerAlreadyRunning { accepted :: AcceptedWorker }
+  | WorkerStartConflict
+      { key :: Text
+      , existingFingerprint :: Text
+      , requestedFingerprint :: Text
       }
   | WorkerStartFailed
-      { workKey :: Text
-      , summary :: Text
+      { accepted :: AcceptedWorker
+      , detail :: Text
       }
-  deriving (Generic, JsonSchema, ToJSON)
+  | WorkerTombstoned { accepted :: AcceptedWorker }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
 data WorkerPhase
-  = WorkerPendingPhase
+  = WorkerProvisioning
+  | WorkerRunning
+  | WorkerTerminal
   | WorkerCollectedPhase
   | WorkerAcknowledgedPhase
-  deriving (Generic, JsonSchema, ToJSON)
+  | WorkerStartFailedPhase
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
 data WorkerSummary = WorkerSummary
-  { workKey :: Text
-  , worker :: WorkerHandle
+  { accepted :: AcceptedWorker
   , phase :: WorkerPhase
   }
-  deriving (Generic, JsonSchema, ToJSON)
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
+data WorkerWake = WorkerWake
+  { wakeEvent :: Int
+  , wakeHandle :: WorkerHandle
+  }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
+newtype SessionContext = SessionContext
+  { workerWakes :: [WorkerWake]
+  }
+  deriving stock (Generic)
+  deriving anyclass (FromJSON, JsonSchema, ToJSON)
 
 data WorkerReport = WorkerReport
   { summary :: Text
@@ -101,13 +136,13 @@ data CandidateReceipt = CandidateReceipt
   { authoredReport :: WorkerReport
   , repository :: SubmissionObservation
   }
-  deriving (Generic, JsonSchema, ToJSON)
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
 data WorkerOutcome
   = WorkCompleted { receipt :: CandidateReceipt }
-  | WorkFailed { summary :: Text }
-  | WorkCancelled { summary :: Text }
-  deriving (Generic, JsonSchema, ToJSON)
+  | WorkFailed { detail :: Text }
+  | WorkCancelled { detail :: Text }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
 data WorkerCollection
   = WorkerPending { worker :: WorkerHandle }
@@ -115,23 +150,47 @@ data WorkerCollection
       { worker :: WorkerHandle
       , outcome :: WorkerOutcome
       }
-  | WorkerCollectionAcknowledged { worker :: WorkerHandle }
+  | WorkerCollectionAcknowledged
+      { worker :: WorkerHandle
+      , outcome :: WorkerOutcome
+      }
   | WorkerNotFound { worker :: WorkerHandle }
-  deriving (Generic, JsonSchema, ToJSON)
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
+data AcknowledgementDisposition
+  = IntegratedAs { oid :: Text }
+  | Reviewed
+  | Rejected { reason :: Text }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
+data WorkerAcknowledgementRequest = WorkerAcknowledgementRequest
+  { worker :: WorkerHandle
+  , disposition :: AcknowledgementDisposition
+  }
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
 data WorkerAcknowledgement
   = WorkerAcknowledged { worker :: WorkerHandle }
+  | WorkerAlreadyAcknowledged { worker :: WorkerHandle }
   | WorkerNotCollected { worker :: WorkerHandle }
   | WorkerAcknowledgementUnknown { worker :: WorkerHandle }
-  deriving (Generic, JsonSchema, ToJSON)
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
 data WorkerProtocol result
 
+rootPolicy :: Eff RootEffects a
+rootPolicy = loop
+  where
+    loop = do
+      _ <- (agentSession Nothing () :: Eff RootEffects ())
+      loop
+
 workerDefinition
-  :: WorktreeHandle
+  :: WorkerHandle
+  -> WorktreeHandle
   -> Text
   -> ActorDefinition Text WorkerProtocol CandidateReceipt
-workerDefinition tree key =
+workerDefinition workerHandle tree key =
   withWorktree tree
     ActorDefinition
       { label = "devswarm-worker/" <> key
@@ -143,164 +202,97 @@ workerDefinition tree key =
                 :: Eff (ReadOnlyEffects WorkerProtocol) WorkerReport
             )
           observed <- observeSubmission (worktreeId tree)
-          case observed of
+          repository <- case observed of
             Left failure -> error (T.unpack (renderWorktreeError failure))
-            Right repository -> pure (CandidateReceipt report repository)
+            Right value -> pure value
+          let receipt = CandidateReceipt report repository
+          submitWorker workerHandle receipt
+          pure receipt
       , visibleToChild = []
       , onShutdown = const (pure ())
       }
 
--- | The fixed root policy owns only the durable-in-incarnation state loop.
--- The attached agent evolves orchestration policy inside each typed session
--- and returns the next exact state with 'complete'.
-rootPolicy :: Eff RootEffects a
-rootPolicy = loop []
-  where
-    loop :: [WorkerRecord] -> Eff RootEffects a
-    loop records = do
-      next <-
-        ( agentSession Nothing records
-            :: Eff RootEffects [WorkerRecord]
-        )
-      loop next
-
 startWorker
-  :: (Member Actor effs, Member Worktree effs)
+  :: (Member Actor effs, Member Worktree effs, Member WorkerKernel effs)
   => Text
   -> Text
-  -> [WorkerRecord]
-  -> Eff effs (WorkerStart, [WorkerRecord])
-startWorker key assignmentText records =
-  case findByKey key records of
-    Just record
-      | recordAssignment record == assignmentText ->
-          pure (existingStart record, records)
-      | otherwise -> pure (WorkerKeyConflict key, records)
-    Nothing -> do
-      created <- createWorktree (fromCurrentRepository ("shoal/" <> key))
+  -> Eff effs WorkerStartResult
+startWorker key assignment = do
+  results <- startWorkers [worker key assignment]
+  case results of
+    [result] -> pure result
+    _ -> error "worker kernel violated singleton start cardinality"
+
+startWorkers
+  :: (Member Actor effs, Member Worktree effs, Member WorkerKernel effs)
+  => [WorkerSpec]
+  -> Eff effs [WorkerStartResult]
+startWorkers specs = do
+  reserved <- kernel (WorkerReserveBatchWith (toJSON specs))
+  mapM provision reserved
+  where
+    provision result@WorkerAccepted { accepted = acceptedWorker } = do
+      created <- createWorktree (fromCurrentRepository ("shoal/" <> acceptedWorker.key))
       case created of
         Left failure ->
-          pure (WorkerStartFailed key (renderWorktreeError failure), records)
-        Right tree -> do
-          let handle = WorkerHandle (renderWorktreeId (worktreeId tree))
-          ref <- startActor (workerDefinition tree key) assignmentText
-          pure
-            ( WorkerAccepted key handle
-            , RunningWorker key assignmentText handle ref : records
+          kernel
+            ( WorkerFailStartWith
+                acceptedWorker.handle.workerId
+                (renderWorktreeError failure)
             )
+        Right tree -> do
+          ref <- startActor
+            (workerDefinition acceptedWorker.handle tree acceptedWorker.key)
+            (assignmentFor acceptedWorker.key specs)
+          let ActorRef actorId incarnation _ = ref
+          kernel
+            ( WorkerAttachWith
+                acceptedWorker.handle.workerId
+                (actorId, incarnation)
+                (renderWorktreeId (worktreeId tree))
+            )
+    provision result = pure result
 
-listWorkerState :: [WorkerRecord] -> [WorkerSummary]
-listWorkerState = map summarize
+assignmentFor :: Text -> [WorkerSpec] -> Text
+assignmentFor wanted specs = case [spec.assignment | spec <- specs, spec.key == wanted] of
+  assignment : _ -> assignment
+  [] -> error "worker kernel accepted a key absent from its request batch"
 
-collectWorkerResult
-  :: Member Actor effs
+currentSessionContext :: Member WorkerKernel effs => Eff effs SessionContext
+currentSessionContext = kernel WorkerSessionContextWith
+
+listWorkers :: Member WorkerKernel effs => Eff effs [WorkerSummary]
+listWorkers = kernel WorkerListWith
+
+collectWorkers
+  :: Member WorkerKernel effs
+  => [WorkerHandle]
+  -> Eff effs [WorkerCollection]
+collectWorkers handles = kernel (WorkerCollectWith (toJSON handles))
+
+collectWorkerWakes
+  :: Member WorkerKernel effs
+  => [WorkerWake]
+  -> Eff effs [WorkerCollection]
+collectWorkerWakes = collectWorkers . map (\wake -> wake.wakeHandle)
+
+acknowledgeWorkers
+  :: Member WorkerKernel effs
+  => [WorkerAcknowledgementRequest]
+  -> Eff effs [WorkerAcknowledgement]
+acknowledgeWorkers requests = kernel (WorkerAcknowledgeWith (toJSON requests))
+
+submitWorker
+  :: Member WorkerKernel effs
   => WorkerHandle
-  -> [WorkerRecord]
-  -> Eff effs (WorkerCollection, [WorkerRecord])
-collectWorkerResult handle records =
-  case findByHandle handle records of
-    Nothing -> pure (WorkerNotFound handle, records)
-    Just record -> collectRecord record records
+  -> CandidateReceipt
+  -> Eff effs ()
+submitWorker handle receipt =
+  send (WorkerSubmitWith handle.workerId (toJSON receipt))
 
-acknowledgeWorker
-  :: WorkerHandle
-  -> [WorkerRecord]
-  -> (WorkerAcknowledgement, [WorkerRecord])
-acknowledgeWorker handle records = case acknowledge handle records of
-  AckUnknown -> (WorkerAcknowledgementUnknown handle, records)
-  AckPending -> (WorkerNotCollected handle, records)
-  AckDone updated -> (WorkerAcknowledged handle, updated)
-
-data WorkerRecord
-  = RunningWorker Text Text WorkerHandle (ActorRef WorkerProtocol CandidateReceipt)
-  | CollectedWorker Text Text WorkerHandle WorkerOutcome
-  | AcknowledgedWorker Text Text WorkerHandle
-
-recordKey :: WorkerRecord -> Text
-recordKey record = case record of
-  RunningWorker key _ _ _ -> key
-  CollectedWorker key _ _ _ -> key
-  AcknowledgedWorker key _ _ -> key
-
-recordAssignment :: WorkerRecord -> Text
-recordAssignment record = case record of
-  RunningWorker _ assignment _ _ -> assignment
-  CollectedWorker _ assignment _ _ -> assignment
-  AcknowledgedWorker _ assignment _ -> assignment
-
-recordHandle :: WorkerRecord -> WorkerHandle
-recordHandle record = case record of
-  RunningWorker _ _ handle _ -> handle
-  CollectedWorker _ _ handle _ -> handle
-  AcknowledgedWorker _ _ handle -> handle
-
-findByKey :: Text -> [WorkerRecord] -> Maybe WorkerRecord
-findByKey key = findRecord ((== key) . recordKey)
-
-findByHandle :: WorkerHandle -> [WorkerRecord] -> Maybe WorkerRecord
-findByHandle handle = findRecord ((== handle) . recordHandle)
-
-findRecord :: (WorkerRecord -> Bool) -> [WorkerRecord] -> Maybe WorkerRecord
-findRecord _ [] = Nothing
-findRecord predicate (record : rest)
-  | predicate record = Just record
-  | otherwise = findRecord predicate rest
-
-existingStart :: WorkerRecord -> WorkerStart
-existingStart record = case record of
-  AcknowledgedWorker key _ handle -> WorkerAlreadyAcknowledged key handle
-  _ -> WorkerAccepted (recordKey record) (recordHandle record)
-
-summarize :: WorkerRecord -> WorkerSummary
-summarize record = WorkerSummary
-  { workKey = recordKey record
-  , worker = recordHandle record
-  , phase = case record of
-      RunningWorker {} -> WorkerPendingPhase
-      CollectedWorker {} -> WorkerCollectedPhase
-      AcknowledgedWorker {} -> WorkerAcknowledgedPhase
-  }
-
-collectRecord
-  :: Member Actor effs
-  => WorkerRecord
-  -> [WorkerRecord]
-  -> Eff effs (WorkerCollection, [WorkerRecord])
-collectRecord record records = case record of
-  RunningWorker key assignment handle ref -> do
-    terminal <- pollExit ref
-    case terminal of
-      Nothing -> pure (WorkerPending handle, records)
-      Just exit ->
-        let outcome = workerOutcome exit
-            updated = replaceRecord handle (CollectedWorker key assignment handle outcome) records
-         in pure (WorkerCollected handle outcome, updated)
-  CollectedWorker _ _ handle outcome ->
-    pure (WorkerCollected handle outcome, records)
-  AcknowledgedWorker _ _ handle ->
-    pure (WorkerCollectionAcknowledged handle, records)
-
-data AckResult
-  = AckUnknown
-  | AckPending
-  | AckDone [WorkerRecord]
-
-acknowledge :: WorkerHandle -> [WorkerRecord] -> AckResult
-acknowledge handle records = case findByHandle handle records of
-  Nothing -> AckUnknown
-  Just (RunningWorker {}) -> AckPending
-  Just (CollectedWorker key assignment _ _) ->
-    AckDone (replaceRecord handle (AcknowledgedWorker key assignment handle) records)
-  Just (AcknowledgedWorker {}) -> AckDone records
-
-replaceRecord :: WorkerHandle -> WorkerRecord -> [WorkerRecord] -> [WorkerRecord]
-replaceRecord _ _ [] = []
-replaceRecord handle replacement (record : rest)
-  | recordHandle record == handle = replacement : rest
-  | otherwise = record : replaceRecord handle replacement rest
-
-workerOutcome :: ActorExit CandidateReceipt -> WorkerOutcome
-workerOutcome terminal = case terminal of
-  Completed receipt -> WorkCompleted receipt
-  Failed (ActorFailure summary) -> WorkFailed summary
-  Cancelled (CancelReason summary) -> WorkCancelled summary
+kernel :: (Member WorkerKernel effs, FromJSON a) => WorkerKernel Value -> Eff effs a
+kernel request = do
+  encoded <- send request
+  case fromJSON encoded of
+    Success value -> pure value
+    Error detail -> error ("worker kernel returned an invalid typed value: " <> detail)

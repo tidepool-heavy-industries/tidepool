@@ -107,7 +107,7 @@ pub(crate) fn decode_poll_target(
     decode_address(actor_id, incarnation)
 }
 
-fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef, ActorWaitError> {
+pub(crate) fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef, ActorWaitError> {
     let (Ok(actor_id_u64), Ok(incarnation_u64)) =
         (u64::try_from(actor_id), u64::try_from(incarnation))
     else {

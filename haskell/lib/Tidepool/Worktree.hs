@@ -133,7 +133,7 @@ import Control.Monad.Freer (send)
 import Data.Proxy (Proxy (..))
 import qualified Tidepool.Data.Text as T
 import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
-import Tidepool.Aeson (ToJSON (..), object, (.=))
+import Tidepool.Aeson (FromJSON (..), Result (..), ToJSON (..), object, withObject, withText, (.:), (.:?), (.=))
 import Tidepool.Aeson.Schema (JsonSchema (..), objectSchema)
 import Tidepool.Aeson.Value (Value (..))
 import Tidepool.Effects
@@ -175,17 +175,42 @@ default (Int, Double, Text)
 instance JsonSchema WorktreeId where
   jsonSchema _ = object [("type", String "string")]
 
+instance FromJSON WorktreeId where
+  parseJSON value = WorktreeId <$> parseJSON value
+
 instance JsonSchema BranchName where
   jsonSchema _ = object [("type", String "string")]
 
+instance FromJSON BranchName where
+  parseJSON value = BranchName <$> parseJSON value
+
 instance JsonSchema GitOid where
   jsonSchema _ = object [("type", String "string")]
+
+instance FromJSON GitOid where
+  parseJSON value = GitOid <$> parseJSON value
 
 instance JsonSchema InProgressKind where
   jsonSchema _ = object
     [ ("type", String "string")
     , ("enum", Array (map (String . show) [InProgressMerge, InProgressRebase, InProgressCherryPick, InProgressRevert, InProgressBisect]))
     ]
+
+instance FromJSON InProgressKind where
+  parseJSON = withText "InProgressKind" $ \value -> case value of
+    "InProgressMerge" -> pure InProgressMerge
+    "InProgressRebase" -> pure InProgressRebase
+    "InProgressCherryPick" -> pure InProgressCherryPick
+    "InProgressRevert" -> pure InProgressRevert
+    "InProgressBisect" -> pure InProgressBisect
+    _ -> Error "unknown InProgressKind"
+
+instance FromJSON DirtySummary where
+  parseJSON = withObject "DirtySummary" $ \value -> DirtySummary
+    <$> value .: "staged"
+    <*> value .: "unstaged"
+    <*> value .: "untracked"
+    <*> value .: "ignoredExcluded"
 
 instance JsonSchema DirtySummary where
   jsonSchema _ = objectSchema Nothing
@@ -205,6 +230,16 @@ instance ToJSON HeadState where
     , "contents" .= oid
     ]
 
+instance FromJSON HeadState where
+  parseJSON = withObject "HeadState" $ \value -> do
+    tag <- value .: "tag"
+    case tag :: Text of
+      "OnBranch" -> do
+        (branch, oid) <- value .: "contents"
+        pure (OnBranch branch oid)
+      "Detached" -> Detached <$> value .: "contents"
+      _ -> Error "unknown HeadState"
+
 instance JsonSchema HeadState where
   jsonSchema _ = object
     [ ("oneOf", Array
@@ -222,6 +257,11 @@ instance ToJSON WorkingState where
         Nothing -> []
         Just operation -> ["operation" .= operation])
 
+instance FromJSON WorkingState where
+  parseJSON = withObject "WorkingState" $ \value -> WorkingState
+    <$> value .: "changes"
+    <*> value .:? "operation"
+
 instance JsonSchema WorkingState where
   jsonSchema _ = objectSchema Nothing
     [ ("changes", jsonSchema (Proxy @DirtySummary), True)
@@ -235,6 +275,13 @@ instance ToJSON SubmissionObservation where
     , "submittedHead" .= observation.submittedHead
     , "workingState" .= observation.workingState
     ]
+
+instance FromJSON SubmissionObservation where
+  parseJSON = withObject "SubmissionObservation" $ \value -> SubmissionObservation
+    <$> value .: "observedWorktreeId"
+    <*> value .: "baseHead"
+    <*> value .: "submittedHead"
+    <*> value .: "workingState"
 
 instance JsonSchema SubmissionObservation where
   jsonSchema _ = objectSchema Nothing

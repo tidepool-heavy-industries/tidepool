@@ -1487,6 +1487,13 @@ where
         .await
         .ok_or(ResidentHostTaskError::Cancelled)??;
         match boundary {
+            ResidentActorBoundary::Worker(_) => {
+                return Err(ResidentHostTaskError::Workbench(
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "worker ledger requests require the canonical local actor runtime".into(),
+                    ),
+                ));
+            }
             ResidentActorBoundary::Completed => {
                 if let Some(state) = invocation.take() {
                     let (mut response, mut result) = match state {

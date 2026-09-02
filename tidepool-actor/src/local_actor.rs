@@ -62,7 +62,9 @@ pub struct KernelContext {
 /// This is deliberately not a scheduler or lifecycle state machine. Ractor
 /// owns runnable actors and mailboxes; each actor owns its terminal cell. The
 /// directory only resolves the identity carried by a live Haskell `ActorRef`
-/// to that pair of owners.
+/// to that pair of owners. Entries intentionally live for the root ownership
+/// tree's lifetime: an exited exact reference must remain resolvable so any
+/// number of late `wait` operations can observe its retained result.
 #[derive(Clone, Default)]
 pub struct LocalActorDirectory {
     actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, LocalActorRef>>>,
@@ -82,11 +84,6 @@ impl LocalActorDirectory {
 
     fn insert(&self, actor: LocalActorRef) {
         self.actors.write().insert(actor.identity(), actor);
-    }
-
-    fn remove(&self, actor: ActorRef) {
-        self.actors.write().remove(&actor);
-        self.sessions.write().remove(&actor);
     }
 }
 
@@ -123,6 +120,14 @@ impl KernelContext {
     #[must_use]
     pub fn session_context(&self, actor: ActorRef) -> Option<crate::ActorSessionContext> {
         self.directory.session_context(actor)
+    }
+
+    #[must_use]
+    pub fn owns_child(&self, actor: ActorRef) -> bool {
+        self.children
+            .lock()
+            .values()
+            .any(|child| child.identity() == actor)
     }
 
     /// Start a linked child and return its exact handle only after startup.
@@ -477,7 +482,6 @@ where
     };
     publish_terminal(&state.terminal, &terminal);
     state.behavior.stopped(&state.context, &terminal).await;
-    state.context.directory.remove(state.context.identity);
     myself.stop(Some(terminal.summary.clone()));
     terminal
 }
@@ -755,21 +759,21 @@ mod tests {
         }
     }
 
-    fn behavior(
-        fail_cast: bool,
-    ) -> (
-        ProbeBehavior,
-        Arc<Mutex<Vec<&'static str>>>,
-        Arc<Notify>,
-        Arc<Mutex<Option<LocalActorRef>>>,
-        Arc<Mutex<Vec<ActorTerminal>>>,
-    ) {
+    struct ProbeFixture {
+        behavior: ProbeBehavior,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        release: Arc<Notify>,
+        spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
+        child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
+    }
+
+    fn behavior(fail_cast: bool) -> ProbeFixture {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(Notify::new());
         let spawned_child = Arc::new(Mutex::new(None));
         let child_exits = Arc::new(Mutex::new(Vec::new()));
-        (
-            ProbeBehavior {
+        ProbeFixture {
+            behavior: ProbeBehavior {
                 calls: Arc::clone(&calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
@@ -780,13 +784,15 @@ mod tests {
             release,
             spawned_child,
             child_exits,
-        )
+        }
     }
 
     #[tokio::test]
     async fn one_actor_never_reenters_while_an_operation_is_pending() {
-        let (behavior, calls, release, _, _) = behavior(false);
-        let (actor, task) = spawn_local_actor(None, behavior).await.expect("spawn");
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
         let (first_tx, first_rx) = oneshot::channel();
         let (second_tx, second_rx) = oneshot::channel();
         actor
@@ -807,11 +813,14 @@ mod tests {
             .expect("queue second");
 
         tokio::task::yield_now().await;
-        assert_eq!(&*calls.lock(), &["first-start"]);
-        release.notify_one();
+        assert_eq!(&*fixture.calls.lock(), &["first-start"]);
+        fixture.release.notify_one();
         assert_eq!(first_rx.await.expect("first reply").unwrap(), "first");
         assert_eq!(second_rx.await.expect("second reply").unwrap(), "second");
-        assert_eq!(&*calls.lock(), &["first-start", "first-end", "second"]);
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["first-start", "first-end", "second"]
+        );
 
         let terminal = ActorTerminal {
             kind: ActorExitKind::Completed,
@@ -832,8 +841,10 @@ mod tests {
 
     #[tokio::test]
     async fn behavior_failure_publishes_once_and_releases_message_custody() {
-        let (behavior, _, _, _, _) = behavior(true);
-        let (actor, task) = spawn_local_actor(None, behavior).await.expect("spawn");
+        let fixture = behavior(true);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
         let dropped = Arc::new(AtomicUsize::new(0));
         actor
             .address()
@@ -852,8 +863,10 @@ mod tests {
 
     #[tokio::test]
     async fn successful_operation_can_reply_and_publish_terminal_in_one_step() {
-        let (behavior, calls, _, _, _) = behavior(false);
-        let (actor, task) = spawn_local_actor(None, behavior).await.expect("spawn");
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
         let reply = actor
             .address()
             .call(
@@ -877,13 +890,13 @@ mod tests {
                 summary: "finished through MCP".into(),
             })
         );
-        assert_eq!(&*calls.lock(), &["shutdown"]);
+        assert_eq!(&*fixture.calls.lock(), &["shutdown"]);
     }
 
     #[tokio::test]
     async fn child_failure_is_retained_and_notifies_without_killing_owner() {
-        let (behavior, _, _, child_slot, child_exits) = behavior(false);
-        let (owner, owner_task) = spawn_local_actor(None, behavior)
+        let fixture = behavior(false);
+        let (owner, owner_task) = spawn_local_actor(None, fixture.behavior)
             .await
             .expect("spawn owner");
         let (spawn_tx, spawn_rx) = oneshot::channel();
@@ -896,7 +909,7 @@ mod tests {
             })
             .expect("request child");
         spawn_rx.await.expect("spawn reply").expect("spawn result");
-        let child = child_slot.lock().clone().expect("child handle");
+        let child = fixture.spawned_child.lock().clone().expect("child handle");
         child
             .address()
             .send_message(KernelMessage::Cast {
@@ -907,12 +920,12 @@ mod tests {
 
         assert_eq!(child.terminal().wait().await.kind, ActorExitKind::Failed);
         for _ in 0..20 {
-            if !child_exits.lock().is_empty() {
+            if !fixture.child_exits.lock().is_empty() {
                 break;
             }
             tokio::task::yield_now().await;
         }
-        assert_eq!(child_exits.lock().len(), 1);
+        assert_eq!(fixture.child_exits.lock().len(), 1);
 
         let (ping_tx, ping_rx) = oneshot::channel();
         owner
