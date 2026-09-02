@@ -345,7 +345,9 @@ async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .arg(workspace)
         .args(["--chdir"])
         .arg(workspace)
-        .args(["--", "/bin/true"])
+        // Resolve through the dev/runtime PATH. NixOS deliberately does not
+        // provide the FHS `/bin/true` path.
+        .args(["--", "true"])
         .output()
         .await
         .map_err(|source| {
