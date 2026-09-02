@@ -26,6 +26,7 @@ mod resident_mailbox;
 mod resident_mcp;
 mod resident_workbench;
 mod start;
+mod termination;
 mod timeline;
 mod wait;
 
@@ -66,8 +67,8 @@ pub use mount::{
 pub use profile::ActorEffectProfile;
 pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorRuntimeWake,
-    ActorRuntimeWakes, ActorTerminal, ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery,
-    StartingActor, TurnLease,
+    ActorRuntimeWakes, ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor,
+    TurnLease,
 };
 pub use resident_interactive::ResidentInteractivePolicy;
 pub use resident_lifecycle::{
@@ -85,5 +86,6 @@ pub use resident_workbench::{
 pub use start::{
     ActorStartCaptureError, ResidentActorStart, ResidentActorStartError, ResidentActorStarter,
 };
+pub use termination::{ActorExitAlreadyPublished, ActorTerminal, RetainedActorExit};
 pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
 pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};

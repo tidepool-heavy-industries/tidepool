@@ -13,9 +13,9 @@ use crate::mailbox::{InstalledActorState, InstalledReceiver};
 use crate::{
     ActorAgentSession, ActorEffectProfile, ActorEvent, ActorEventRecord, ActorExitKind, ActorId,
     ActorOperationClass, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports,
-    CallDisposition, CallFailure, CallId, CallStatus, CallTicket, EventCausality, ExitObservation,
-    MailboxFailure, MailboxMessageKind, MailboxValue, MessageId, ParkedObligation, StartInitiator,
-    WaitDisposition, WaitError, WaitId, WaitTicket,
+    ActorTerminal, CallDisposition, CallFailure, CallId, CallStatus, CallTicket, EventCausality,
+    ExitObservation, MailboxFailure, MailboxMessageKind, MailboxValue, MessageId, ParkedObligation,
+    StartInitiator, WaitDisposition, WaitError, WaitId, WaitTicket,
 };
 
 /// Immutable attributes selected before an actor begins initialization.
@@ -128,12 +128,6 @@ pub enum ActorLifecycle {
     Initializing,
     Ready,
     Exited,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActorTerminal {
-    pub kind: ActorExitKind,
-    pub summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
