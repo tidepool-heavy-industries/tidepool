@@ -182,10 +182,13 @@ application failure under real provider/process races.
 
 ### Not landed
 
-- Ractor does not yet own production actor scheduling. Before cutover, a
-  focused spike must prove startup publication, linked supervision, subtree
-  shutdown, panic/kill cleanup, dropped RPC replies, and direct movement of
-  Tidepool live-value custody through local `Send + 'static` messages. No
+- Ractor does not yet own production actor scheduling. The focused substrate
+  spike is landed: it proves startup publication, linked supervision with
+  Tidepool's crash-isolating override, explicit subtree shutdown, panic/kill
+  custody cleanup, abandoned RPC cleanup, and direct movement of Tidepool live
+  values through local `Send + 'static` messages. It also proves two contracts
+  the cutover must encode rather than assume: Ractor kill does not run
+  `post_stop`, and killing a parent does not recursively kill its children. No
   cluster or serialization feature is part of this work;
 - the production Haskell root still exposes `[WorkerRecord]` as copied
   lifecycle state. Replace it with Rust-owned `WorkerLedger` interpreter state,
@@ -302,6 +305,46 @@ Deliver this tranche before structural fork or broader workflow vocabulary:
 11. Cut production over and delete the old wake receiver, registry mailbox and
     parked-obligation scheduler, host actor/task mirrors, special root path,
     and fleet-wide deployment coordinator.
+
+The worker-facing result and cleanup vocabulary in this tranche is structured,
+not prose-shaped:
+
+- acknowledgement records why custody was released (`IntegratedAs`,
+  `Reviewed`, or `Rejected`) without pretending Haskell performed integration;
+- its result distinguishes logical acknowledgement from custody release,
+  worktree deletion, ref retention, log retention, and deferred cleanup;
+- cleanup failure schedules retry and remains observable, but cannot resurrect
+  an acknowledged obligation or replace its retained receipt;
+- `WorkerReport` grows typed findings, severity, source locations, checks,
+  candidate identity, and residual risks. Free-form evidence remains available
+  without being the only representation of routine facts;
+- default rendering is concise, with explicit verbose inspection. Every sum
+  uses one constructor encoding rather than frontend-specific `_con` and
+  `constructor` variants.
+
+Operational support follows the same ownership boundaries:
+
+- each actor repository receives a private mutable build-output directory;
+  dependency caches may be shared only where their writers are safe to share;
+- provisioning exposes coarse typed phases (`Accepted`, `Queued`,
+  `ProvisioningRepository`, `StartingActor`) rather than a second streaming
+  job protocol;
+- tracing correlates MCP execution, compilation, actor effect, worktree,
+  external agent, lifecycle event, and root activation. `McpExecutionPending`
+  and `WorkerPending` remain distinctly named because they are unrelated
+  lifecycles;
+- completion returns a compact host receipt (outstanding worker count and wake
+  subscription state), not merely an uninformative success sentinel;
+- generated API guidance owns stable signatures, examples, partial-item commit
+  semantics, and pending-state explanations. Developer messages carry current
+  activation facts and constitutional policy, not a duplicated API manual;
+- worktree retention and garbage collection are explicit runtime policies.
+  Read-only work may later use lighter custody, and internal refs may later
+  reduce namespace clutter, but neither optimization complicates V0.
+
+The V0 trust claim remains deliberately modest: managed worktrees provide
+cooperative change custody and ordinary Git ergonomics, not security isolation.
+Any future untrusted-execution boundary is a separate sandbox design.
 
 The deletion gate is behavioral, not file-shaped. The Ractor path must first
 prove exact readiness, repeatable typed exits, non-reentrant calls, cycle
