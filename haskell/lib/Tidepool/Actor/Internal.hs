@@ -33,7 +33,7 @@ import Data.Kind (Type)
 import Data.Text (Text)
 import Prelude
 
-import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, Deliberate, FsRead, FsWrite, Worktree)
+import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, AgentSession, Deliberate, FsRead, FsWrite, Worktree)
 import Tidepool.Internal.ExitCell (ExitCell)
 
 data ActorRef (protocol :: Type -> Type) exit where
@@ -50,6 +50,7 @@ data EffectProfile (protocol :: Type -> Type) effs where
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol
    , ActorMcp
+   , AgentSession
    , Actor
    , Deliberate
    , FsRead

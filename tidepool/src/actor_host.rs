@@ -37,8 +37,8 @@ use tidepool_node::{
 };
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, ResidentSession,
-    SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, ResidentSession, SessionLib,
+    TurnRequest as HaskellTurnRequest, TurnResult,
 };
 use tidepool_runtime::DEFAULT_NURSERY_SIZE;
 use tidepool_worktree::{
@@ -397,6 +397,7 @@ fn compile_root(
     worktree_authority: ActorWorktreeAuthority,
 ) -> Result<(ActorWorkbenchSource, ShoalRoot), Box<dyn std::error::Error>> {
     let declarations = [
+        tidepool_mcp::agent_session_decl(),
         tidepool_mcp::actor_mcp_decl(),
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
@@ -438,8 +439,12 @@ fn compile_root(
     };
 
     let session = fresh_session_id();
-    let library = SessionLib::open(session, &session_root, ModuleEnv::standalone_default())?
-        .with_validation_include(include.clone());
+    let library = SessionLib::open(
+        session,
+        &session_root,
+        tidepool_mcp::session_decl_module_env(&declarations, false),
+    )?
+    .with_validation_include(include.clone());
     let mut machine = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
@@ -464,7 +469,7 @@ fn compile_root(
     )?;
     let descriptor = ActorDescriptor::new(
         "devswarm-root",
-        ["ActorMcp", "Actor", "Worktree"],
+        ["AgentSession", "Actor", "Worktree"],
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),
@@ -585,7 +590,7 @@ async fn run_interactive_applications(
                         let context = launch_context.clone();
                         let actor = installation.actor;
                         let worker_handle = (actor != root)
-                            .then(|| installation.launch_worktrees.as_slice())
+                            .then_some(installation.launch_worktrees.as_slice())
                             .and_then(|worktrees| match worktrees {
                                 [worktree] => Some(worktree.clone()),
                                 _ => None,
@@ -889,26 +894,14 @@ fn prepare_actor_worktree(
     context: &InteractiveLaunchContext,
 ) -> Result<Option<(WorktreeHandle, ActiveBinding)>, InteractiveApplicationError> {
     let actor = installation.actor;
-    if actor == context.root {
-        if installation.launch_worktrees.is_empty() {
-            return Ok(None);
-        }
-        return Err(application_error(
-            actor,
-            InteractiveOperation::BindWorktree,
-            "the root application may not carry a child worktree recipe",
-        ));
-    }
-    let [raw_id] = installation.launch_worktrees.as_slice() else {
-        return Err(application_error(
-            actor,
-            InteractiveOperation::BindWorktree,
-            format!(
-                "an interactive worker requires exactly one worktree recipe, received {}",
-                installation.launch_worktrees.len()
-            ),
-        ));
-    };
+    let raw_id =
+        match actor_workspace_request(actor == context.root, &installation.launch_worktrees)
+            .map_err(|detail| {
+                application_error(actor, InteractiveOperation::BindWorktree, detail)
+            })? {
+            ActorWorkspaceRequest::SourceCheckout => return Ok(None),
+            ActorWorkspaceRequest::Worktree(raw_id) => raw_id,
+        };
     if !WorktreeId::is_path_safe(raw_id) {
         return Err(application_error(
             actor,
@@ -916,7 +909,7 @@ fn prepare_actor_worktree(
             "the worktree recipe carried an invalid durable id",
         ));
     }
-    let id = WorktreeId::from_raw(raw_id.clone());
+    let id = WorktreeId::from_raw(raw_id);
     let handle = context
         .worktrees
         .lookup(&id)
@@ -939,6 +932,31 @@ fn prepare_actor_worktree(
         .bind(handle.id(), &principal, current_time_ms())
         .map_err(|error| application_error(actor, InteractiveOperation::BindWorktree, error))?;
     Ok(Some((handle, binding)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorWorkspaceRequest<'a> {
+    /// The actor may inspect the source checkout. Only the root receives write
+    /// authority for it; an ordinary actor without a worktree remains a useful
+    /// orchestration or review actor rather than acquiring ambient code-write
+    /// authority by accident.
+    SourceCheckout,
+    Worktree(&'a str),
+}
+
+fn actor_workspace_request<'a>(
+    root: bool,
+    launch_worktrees: &'a [String],
+) -> Result<ActorWorkspaceRequest<'a>, String> {
+    match (root, launch_worktrees) {
+        (_, []) => Ok(ActorWorkspaceRequest::SourceCheckout),
+        (false, [worktree]) => Ok(ActorWorkspaceRequest::Worktree(worktree)),
+        (true, _) => Err("the root application may not carry a child worktree recipe".into()),
+        (false, worktrees) => Err(format!(
+            "an interactive actor may carry at most one worktree recipe, received {}",
+            worktrees.len()
+        )),
+    }
 }
 
 fn release_worktree_binding(
@@ -1048,7 +1066,8 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Resume(thread) => Some(thread.clone()),
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
     };
-    let developer_instructions = developer_instructions(actor == root, &launch_mode);
+    let developer_instructions =
+        developer_instructions(actor == root, worktree.is_some(), &launch_mode);
     let proxy_environment = binding.environment();
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
@@ -1311,17 +1330,17 @@ fn prepare_owner_notification(
         .and_then(|application| application.worktree.as_ref())
         .map(|worktree| {
             format!(
-                " The worker handle is {{\"workerId\":\"{}\"}}.",
+                " The Haskell handle is `WorkerHandle \"{}\"`.",
                 worktree.id()
             )
         })
         .or_else(|| {
             pending_worker_handle
-                .map(|worktree| format!(" The worker handle is {{\"workerId\":\"{worktree}\"}}."))
+                .map(|worktree| format!(" The Haskell handle is `WorkerHandle \"{worktree}\"`."))
         })
         .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This wake is the cue to call collect_worker once for its nonblocking, replayable typed result; it carries correlation only. If that worker was already acknowledged, no further action is required.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This wake is the cue to use `session_run`, call `collectWorkerResult handle sessionInput` once, and return its updated records with `complete`; it carries correlation only. If that worker was already acknowledged, no further action is required.",
         descriptor.label(),
         actor,
         terminal.summary
@@ -1525,16 +1544,18 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
     }
 }
 
-fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
+fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLaunchMode) -> String {
     if root {
         let continuity = if matches!(mode, InteractiveLaunchMode::Resume(_)) {
-            " This is a new actor incarnation attached to a retained conversation. Previous actor handles, workers, pending exits, inbox messages, and resident Haskell state were not restored; reconcile through the current actor tools before acting on transcript references."
+            " This is a new actor incarnation attached to a retained conversation. Previous actor handles, workers, pending exits, inbox messages, and resident Haskell state were not restored; old Haskell bindings are dead. Reconcile through the current session before acting on transcript references."
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. The checkout is writable so you can review and integrate accepted candidates. Worker worktrees share this repository's ordinary object and branch namespace: inspect a receipt's submitted OID or branch directly, without fetching from Tidepool cache paths. For dependent work, integrate the predecessor before spawning its successor so the new worker starts from the advanced HEAD. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface: persistent Haskell declarations and live values survive calls, and `sessionInput :: [WorkerRecord]` is the current exact root state. Use `startWorker`, `listWorkerState`, `collectWorkerResult`, and `acknowledgeWorker`; return the next root state with `complete records`. Scaffold stable interfaces first, integrate that candidate, then start every independent seam before awaiting results. The checkout is writable so you can review and integrate accepted candidates. Worker worktrees share this repository's ordinary object and branch namespace: inspect submitted OIDs or branches directly. For dependent work, integrate the predecessor before starting its successor. Native coding tools remain a separate execution surface; Rust owns process and lifecycle. `WorkerPending` is a cooperative yield signal: never sleep or poll. End the turn when nothing else is runnable; Shoal will initiate a new turn after child lifecycle transitions.{continuity}")
+    } else if owns_worktree {
+        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted as `sessionInput :: Text`. Use native coding tools for repository work and `tidepool_actor.session_run` as the GHCi-like typed completion surface. Finish exactly once with Haskell such as `complete (WorkerReport { summary = ..., evidence = [...] })`; Rust then observes repository truth and owns lifecycle.".into()
     } else {
-        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment; your actor-scoped MCP tools define its completion protocol. Native coding tools remain a separate execution surface. Complete the assignment, commit coherent changes when it calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
+        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.session_run` as your primary GHCi-like actor surface. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return the session's expected value with `complete`; do not claim or attempt source-checkout mutation authority.".into()
     }
 }
 
@@ -1639,13 +1660,41 @@ mod tests {
     fn root_instructions_preserve_idle_and_resume_contracts() {
         let resumed = developer_instructions(
             true,
+            false,
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
         assert!(resumed.contains("Previous actor handles"));
         assert!(resumed.contains("were not restored"));
-        assert!(resumed.contains("WorkerPending is a cooperative yield signal"));
-        assert!(resumed.contains("never sleep or repeatedly call collect_worker"));
-        assert!(resumed.contains("without fetching from Tidepool cache paths"));
+        assert!(resumed.contains("`WorkerPending` is a cooperative yield signal"));
+        assert!(resumed.contains("never sleep or poll"));
+        assert!(resumed.contains("inspect submitted OIDs or branches directly"));
+        assert!(resumed.contains("start every independent seam before awaiting results"));
+    }
+
+    #[test]
+    fn actor_workspace_recipes_distinguish_orchestrators_from_coding_workers() {
+        let none = Vec::new();
+        let one = vec!["worker-one".to_string()];
+        let two = vec!["worker-one".to_string(), "worker-two".to_string()];
+
+        assert_eq!(
+            actor_workspace_request(true, &none),
+            Ok(ActorWorkspaceRequest::SourceCheckout)
+        );
+        assert_eq!(
+            actor_workspace_request(false, &none),
+            Ok(ActorWorkspaceRequest::SourceCheckout)
+        );
+        assert_eq!(
+            actor_workspace_request(false, &one),
+            Ok(ActorWorkspaceRequest::Worktree("worker-one"))
+        );
+        assert!(actor_workspace_request(true, &one).is_err());
+        assert!(actor_workspace_request(false, &two).is_err());
+
+        let instructions = developer_instructions(false, false, &InteractiveLaunchMode::Fresh);
+        assert!(instructions.contains("read-only access to the shared source checkout"));
+        assert!(instructions.contains("orchestrate children"));
     }
 
     #[test]
@@ -1850,7 +1899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundled_devswarm_policy_installs_the_root_tool_surface() {
+    async fn bundled_devswarm_exposes_haskell_session_and_recursive_actor_fanout() {
         eval_harness::require_extract();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
@@ -1897,8 +1946,11 @@ mod tests {
         let actor = host.launch_root(root).await.expect("launch root");
         authority.install_root(actor.into());
         let report = host.run_until_idle().await.expect("install policy");
-        assert!(report.failures.is_empty());
-        assert_eq!(report.parked[&ResidentHostParkedKind::McpPolicy], 1);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(
+            report.parked[&ResidentHostParkedKind::InteractiveSession],
+            1
+        );
         let ResidentActorDeployment::PolicyInstalled(root_installation) =
             deployments.try_recv().expect("root policy installation")
         else {
@@ -1912,418 +1964,134 @@ mod tests {
             .iter()
             .map(|declaration| declaration.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "actor_status",
-                "spawn_worker",
-                "list_workers",
-                "collect_worker",
-                "ack_worker"
-            ]
-        );
+        assert_eq!(names, ["session_run"]);
         assert!(policy
             .declarations()
             .iter()
             .all(|declaration| declaration.output_schema.is_some()));
-        let collect_worker = policy
-            .declarations()
-            .iter()
-            .find(|declaration| declaration.name == "collect_worker")
-            .expect("collect worker declaration");
-        assert_eq!(collect_worker.kind, tidepool_agent::ToolKind::Update);
-        assert!(collect_worker.description.contains("do not sleep or poll"));
-        assert!(collect_worker
-            .description
-            .contains("Shoal will wake the root"));
+        let session_run = &policy.declarations()[0];
+        assert_eq!(session_run.kind, tidepool_agent::ToolKind::Call);
+        assert!(session_run.description.contains("GHCi-style"));
 
         let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
-        let control = host.control();
         let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
         let hosted = tokio::spawn(host.run_until_shutdown(async move {
             let _ = shutdown_requested.await;
         }));
-        let arguments = serde_json::json!({
-            "workKey": "review-1",
-            "assignment": "inspect one focused boundary"
-        })
-        .as_object()
-        .expect("object arguments")
-        .clone();
         let result = server
-            .dispatch_tool("spawn_worker", arguments)
+            .dispatch_tool(
+                "session_run",
+                serde_json::json!({
+                    "items": [
+                        "input",
+                        "waveAssignment <- pure (\"inspect one focused boundary\" :: Text)",
+                        "do { (_, afterOne) <- startWorker \"review-1\" waveAssignment sessionInput; (_, next) <- startWorker \"review-2\" \"inspect a disjoint boundary\" afterOne; complete next }"
+                    ],
+                    "input": {"wave": "parallel"}
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
             .await
-            .expect("spawn tool transport");
-        if result.is_error.unwrap_or(false) {
-            request_shutdown.send(()).expect("request shutdown");
-            let report = hosted.await.expect("host task").expect("shutdown host");
-            panic!("{result:?}; host failures: {:?}", report.run.failures);
+            .expect("run root Haskell session");
+        assert!(!result.is_error.unwrap_or(false), "{result:?}");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["status"],
+            "completed",
+            "{result:?}"
+        );
+        let mut worker_prompts = Vec::new();
+        let mut recursive_worker = None;
+        for _ in 0..2 {
+            let worker = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
+                .await
+                .expect("worker installation timeout")
+                .expect("worker session installation");
+            let ResidentActorDeployment::PolicyInstalled(worker) = worker else {
+                panic!("worker retired before session installation");
+            };
+            assert_eq!(worker.launch_worktrees.len(), 1);
+            worker_prompts.push(worker.initial_user_message.clone().unwrap());
+            assert_eq!(
+                worker
+                    .policy
+                    .declarations()
+                    .iter()
+                    .map(|declaration| declaration.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["session_run"]
+            );
+            if recursive_worker.is_none() {
+                recursive_worker = Some(worker);
+            }
         }
-        let started = result.structured_content.expect("typed worker acceptance");
-        assert_eq!(started["tag"], "WorkerAccepted", "{started}");
-        assert_eq!(started["workKey"], "review-1");
-        let worker_handle = started["worker"].clone();
-        let retry = server
-            .dispatch_tool(
-                "spawn_worker",
-                serde_json::json!({
-                    "workKey": "review-1",
-                    "assignment": "inspect one focused boundary"
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("retry identical spawn");
-        assert_eq!(retry.structured_content, Some(started.clone()));
-        let conflict = server
-            .dispatch_tool(
-                "spawn_worker",
-                serde_json::json!({
-                    "workKey": "review-1",
-                    "assignment": "a changed assignment must not attach"
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("conflicting spawn");
+        worker_prompts.sort();
         assert_eq!(
-            conflict.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerKeyConflict",
-                "workKey": "review-1"
-            }))
+            worker_prompts,
+            [
+                "inspect a disjoint boundary",
+                "inspect one focused boundary"
+            ]
         );
-        let worker = tokio::time::timeout(Duration::from_secs(1), deployments.recv())
-            .await
-            .expect("worker installation timeout")
-            .expect("worker policy installation");
-        let ResidentActorDeployment::PolicyInstalled(worker) = worker else {
-            panic!("worker policy retired before installation");
-        };
-        assert_eq!(worker.launch_worktrees.len(), 1);
-        assert_ne!(worker.actor, actor);
-        assert_eq!(
-            worker.initial_user_message.as_deref(),
-            Some("inspect one focused boundary")
-        );
-        let worker_tree = WorktreeId::from_raw(worker.launch_worktrees[0].clone());
+        let recursive_worker = recursive_worker.expect("one recursive worker");
+        let worker_tree = WorktreeId::from_raw(recursive_worker.launch_worktrees[0].clone());
         let worker_principal = WorktreePrincipal::exact_actor(
             &runtime_namespace(session_root.path()),
-            worker.actor.id.0,
-            worker.actor.incarnation.0,
+            recursive_worker.actor.id.0,
+            recursive_worker.actor.incarnation.0,
         );
         let worker_binding = bindings
             .lock()
             .bind(&worker_tree, &worker_principal, current_time_ms())
             .expect("bind exact worker before it observes submission");
-        let worker_names = worker
-            .policy
-            .declarations()
-            .iter()
-            .map(|declaration| declaration.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(worker_names, ["actor_status", "finish_work"]);
-        assert_eq!(
-            worker
-                .policy
-                .declarations()
-                .iter()
-                .find(|declaration| declaration.name == "finish_work")
-                .expect("finish declaration")
-                .kind,
-            tidepool_agent::ToolKind::Finish
-        );
-        let worker_actor = worker.actor;
-        let worker_server =
-            DynamicMcpServer::from_resident_policy(worker.policy).expect("worker MCP server");
-        let pending_collect = server
+        let recursive_server = DynamicMcpServer::from_resident_policy(recursive_worker.policy)
+            .expect("recursive worker MCP server");
+        let recursive_result = recursive_server
             .dispatch_tool(
-                "collect_worker",
-                serde_json::json!({"worker": worker_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("nonblocking pending collection");
-        assert_eq!(
-            pending_collect.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerPending",
-                "worker": worker_handle.clone()
-            }))
-        );
-        let premature_acknowledgement = server
-            .dispatch_tool(
-                "ack_worker",
-                serde_json::json!({"worker": worker_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("refuse acknowledgement before collection");
-        assert_eq!(
-            premature_acknowledgement.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerNotCollected",
-                "worker": worker_handle.clone()
-            }))
-        );
-        let unknown_handle = serde_json::json!({"workerId": "forged-worker-handle"});
-        let unknown_collection = server
-            .dispatch_tool(
-                "collect_worker",
-                serde_json::json!({"worker": unknown_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("collect unknown worker");
-        assert_eq!(
-            unknown_collection.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerNotFound",
-                "worker": unknown_handle.clone()
-            }))
-        );
-        let unknown_acknowledgement = server
-            .dispatch_tool(
-                "ack_worker",
-                serde_json::json!({"worker": unknown_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("acknowledge unknown worker");
-        assert_eq!(
-            unknown_acknowledgement.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerAcknowledgementUnknown",
-                "worker": unknown_handle
-            }))
-        );
-        let finish = serde_json::json!({
-            "summary": "boundary is clean",
-            "evidence": ["focused test"]
-        })
-        .as_object()
-        .expect("finish arguments")
-        .clone();
-        let finished = worker_server
-            .dispatch_tool("finish_work", finish)
-            .await
-            .expect("finish worker");
-        assert_eq!(
-            finished.structured_content,
-            Some(serde_json::json!({"accepted": true}))
-        );
-        let retired = tokio::time::timeout(Duration::from_secs(1), deployments.recv())
-            .await
-            .expect("worker retirement timeout")
-            .expect("worker retirement");
-        assert!(matches!(
-            retired,
-            ResidentActorDeployment::Retired { actor, terminal }
-                if actor == worker_actor && terminal.kind == ActorExitKind::Completed
-        ));
-        worker_binding
-            .complete(&mut bindings.lock())
-            .expect("settle worker binding");
-
-        let collect = serde_json::json!({"worker": worker_handle.clone()})
-            .as_object()
-            .expect("collect arguments")
-            .clone();
-        let collected = server
-            .dispatch_tool("collect_worker", collect)
-            .await
-            .expect("collect worker");
-        let collected = collected.structured_content.expect("typed collection");
-        assert_eq!(collected["tag"], "WorkerCollected");
-        assert_eq!(collected["outcome"]["tag"], "WorkCompleted");
-        assert_eq!(
-            collected["outcome"]["receipt"]["authoredReport"]["summary"],
-            "boundary is clean"
-        );
-        let replayed = server
-            .dispatch_tool(
-                "collect_worker",
-                serde_json::json!({"worker": worker_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("replay collection")
-            .structured_content
-            .expect("typed replay");
-        assert_eq!(replayed, collected);
-        assert_eq!(
-            collected["outcome"]["receipt"]["repository"]["workingState"]["changes"]["staged"],
-            serde_json::json!([])
-        );
-        let pending = server
-            .dispatch_tool("list_workers", serde_json::Map::new())
-            .await
-            .expect("list workers");
-        assert_eq!(
-            pending.structured_content,
-            Some(serde_json::json!({
-                "workers": [{
-                    "workKey": "review-1",
-                    "worker": worker_handle,
-                    "phase": "WorkerCollectedPhase"
-                }]
-            }))
-        );
-        let acknowledged = server
-            .dispatch_tool(
-                "ack_worker",
-                serde_json::json!({"worker": worker_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("acknowledge collection");
-        assert_eq!(
-            acknowledged.structured_content,
-            Some(serde_json::json!({
-                "tag": "WorkerAcknowledged",
-                "worker": worker_handle.clone()
-            }))
-        );
-        let replayed_acknowledgement = server
-            .dispatch_tool(
-                "ack_worker",
-                serde_json::json!({"worker": worker_handle.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("replay acknowledgement");
-        assert_eq!(
-            replayed_acknowledgement.structured_content,
-            acknowledged.structured_content
-        );
-        let after_ack = server
-            .dispatch_tool(
-                "collect_worker",
-                serde_json::json!({"worker": worker_handle})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("collect after acknowledgement");
-        assert_eq!(
-            after_ack.structured_content.unwrap()["tag"],
-            "WorkerCollectionAcknowledged"
-        );
-        let acknowledged_retry = server
-            .dispatch_tool(
-                "spawn_worker",
+                "session_run",
                 serde_json::json!({
-                    "workKey": "review-1",
-                    "assignment": "inspect one focused boundary"
+                    "items": [
+                        "data NestedProtocol result",
+                        "nestedDefinition :: ActorDefinition () NestedProtocol ()\nnestedDefinition = ActorDefinition { label = \"nested-review\", effectProfile = ReadOnly, initialization = pure, behavior = \\_ _ -> agentSession (Just \"inspect nested boundary\") (), visibleToChild = [], onShutdown = const (pure ()) }",
+                        "do { _ <- startActor nestedDefinition (); complete (WorkerReport { summary = \"spawned nested actor\", evidence = [] }) }"
+                    ]
                 })
                 .as_object()
                 .unwrap()
                 .clone(),
             )
             .await
-            .expect("retry acknowledged spawn")
-            .structured_content
-            .expect("typed acknowledged retry");
-        assert_eq!(acknowledged_retry["tag"], "WorkerAlreadyAcknowledged");
-
-        let failed_start = server
-            .dispatch_tool(
-                "spawn_worker",
-                serde_json::json!({
-                    "workKey": "launch-failure",
-                    "assignment": "this application will fail before launch"
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
+            .expect("run recursive worker session");
+        assert!(
+            !recursive_result.is_error.unwrap_or(false),
+            "{recursive_result:?}"
+        );
+        assert_eq!(
+            recursive_result.structured_content.as_ref().unwrap()["status"],
+            "completed",
+            "{recursive_result:?}"
+        );
+        let nested = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
             .await
-            .expect("accept failure probe")
-            .structured_content
-            .expect("typed failure probe acceptance");
-        let failed_handle = failed_start["worker"].clone();
-        let failed_installation = deployments
-            .recv()
-            .await
-            .expect("failure probe installation");
-        let ResidentActorDeployment::PolicyInstalled(failed_installation) = failed_installation
-        else {
-            panic!("failure probe retired before installation");
+            .expect("nested installation timeout")
+            .expect("nested session installation");
+        let ResidentActorDeployment::PolicyInstalled(nested) = nested else {
+            panic!("nested actor retired before session installation");
         };
         assert_eq!(
-            control
-                .fail_external_application(
-                    failed_installation.actor,
-                    ExternalApplicationFailure {
-                        class: ExternalApplicationFailureClass::ProcessLaunch,
-                        detail: "scripted launch refusal".into(),
-                    },
-                )
-                .await
-                .expect("report exact application failure"),
-            tidepool_actor::ExternalFailureDisposition::Applied
+            nested.initial_user_message.as_deref(),
+            Some("inspect nested boundary")
         );
-        let failed_retirement = deployments.recv().await.expect("failed child retirement");
-        assert!(matches!(
-            failed_retirement,
-            ResidentActorDeployment::Retired { actor, terminal }
-                if actor == failed_installation.actor && terminal.kind == ActorExitKind::Failed
-        ));
-        let failed_collection = server
-            .dispatch_tool(
-                "collect_worker",
-                serde_json::json!({"worker": failed_handle})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .expect("collect application failure")
-            .structured_content
-            .expect("typed application failure");
-        assert_eq!(failed_collection["outcome"]["tag"], "WorkFailed");
-
-        let recovery = server
-            .dispatch_tool(
-                "spawn_worker",
-                serde_json::json!({
-                    "workKey": "after-failure",
-                    "assignment": "prove the root remains operational"
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("root starts another child after failure");
-        assert_eq!(
-            recovery.structured_content.unwrap()["tag"],
-            "WorkerAccepted"
-        );
-        assert!(matches!(
-            deployments.recv().await,
-            Some(ResidentActorDeployment::PolicyInstalled(_))
-        ));
+        worker_binding
+            .release(&mut bindings.lock())
+            .expect("release worker binding");
         request_shutdown.send(()).expect("request shutdown");
-        hosted.await.expect("host task").expect("shutdown host");
+        let shutdown = hosted.await.expect("host task").expect("shutdown host");
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "{result:?}; host failures: {:?}",
+            shutdown.run.failures
+        );
     }
 }

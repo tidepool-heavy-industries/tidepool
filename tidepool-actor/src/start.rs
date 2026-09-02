@@ -267,6 +267,10 @@ pub(crate) enum ResidentStartedActorState {
         awaiting: crate::resident_mcp::ResidentMcpAwait,
         launch_worktrees: Vec<String>,
     },
+    InteractiveSession {
+        awaiting: crate::interactive_session::ResidentInteractiveAwait,
+        launch_worktrees: Vec<String>,
+    },
     Exited,
 }
 
@@ -378,7 +382,11 @@ where
         let (turn, actor, outcome, state) = self
             .start_until_cancelled(parent_turn, provider, start, sink, std::future::pending())
             .await?;
-        if matches!(state, ResidentStartedActorState::McpPolicy { .. }) {
+        if matches!(
+            state,
+            ResidentStartedActorState::McpPolicy { .. }
+                | ResidentStartedActorState::InteractiveSession { .. }
+        ) {
             let _ = self
                 .lifecycle
                 .force_terminate(
@@ -495,6 +503,28 @@ where
                     crate::resident_workbench::ResidentActorBoundary::McpAwait(awaiting) => {
                         ResidentStartedActorState::McpPolicy {
                             awaiting,
+                            launch_worktrees,
+                        }
+                    }
+                    crate::resident_workbench::ResidentActorBoundary::AgentSession(session) => {
+                        let (request, hole, input) = session.into_parts();
+                        let workbench = self.runner.workbench(
+                            request.output_type.clone(),
+                            request.output_modules.clone(),
+                        );
+                        workbench
+                            .mount_named_input(
+                                unpublished.context.clone(),
+                                "sessionInput",
+                                request.input_type.clone(),
+                                input,
+                            )
+                            .await?;
+                        ResidentStartedActorState::InteractiveSession {
+                            awaiting: crate::interactive_session::ResidentInteractiveAwait {
+                                request,
+                                hole,
+                            },
                             launch_worktrees,
                         }
                     }

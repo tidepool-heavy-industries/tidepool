@@ -1648,6 +1648,9 @@ pub enum HandlingClass {
     Actor,
     /// Runs one typed model/Haskell deliberation inside the current actor.
     Deliberate,
+    /// Publishes an actor-local persistent Haskell interaction session and
+    /// resumes only with its statically declared completion type.
+    AgentSession,
 }
 
 /// Which driver-owned handler an [`HandlingClass::OuterDispatch`] verb reaches.

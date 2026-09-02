@@ -73,6 +73,26 @@ pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
     expected_type: String,
     type_modules: Arc<[String]>,
+    json_input: Option<serde_json::Value>,
+}
+
+/// Live execution state for one workbench item that suspended on an actor
+/// effect. The continuation and any value it binds remain owned by the
+/// actor's resource scope; this value only carries the item-local rendering
+/// state needed while the host settles nominal effects.
+pub(crate) struct ResidentWorkbenchFragment {
+    bound_name: Option<String>,
+    output: Vec<String>,
+}
+
+pub(crate) enum ResidentWorkbenchStep {
+    Committed(String),
+    Rejected(String),
+    Running {
+        fragment: ResidentWorkbenchFragment,
+        outcome: Box<ResidentOutcome>,
+    },
+    Completed(RootCustody),
 }
 
 /// The one machine-entry component for installed actor program segments.
@@ -134,6 +154,7 @@ pub(crate) enum ResidentActorBoundary {
     Receive(InstalledReceiver),
     McpAwait(crate::resident_mcp::ResidentMcpAwait),
     McpReply(crate::resident_mcp::ResidentMcpReply),
+    AgentSession(crate::ResidentInteractiveSession),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,6 +185,7 @@ impl ResidentActorBoundary {
             Self::Receive(_) => "receive",
             Self::McpAwait(_) => "actor MCP await",
             Self::McpReply(_) => "actor MCP reply",
+            Self::AgentSession(_) => "agent session",
         }
     }
 }
@@ -183,6 +205,7 @@ enum ResidentRequest {
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
     ActorMcp(crate::generated::actor_mcp::ActorMcpReq),
+    AgentSession(crate::generated::agent_session::AgentSessionReq),
     Deliberate(crate::generated::deliberate::DeliberateReq),
     Complete(CompleteReq),
 }
@@ -214,6 +237,10 @@ impl ResidentRequest {
             crate::generated::actor_local::ActorLocalReq
         );
         try_member!(Self::ActorMcp, crate::generated::actor_mcp::ActorMcpReq);
+        try_member!(
+            Self::AgentSession,
+            crate::generated::agent_session::AgentSessionReq
+        );
         try_member!(
             Self::Deliberate,
             crate::generated::deliberate::DeliberateReq
@@ -253,6 +280,9 @@ impl ResidentRequest {
             Self::ActorMcp(crate::generated::actor_mcp::ActorMcpReq::ActorMcpReplyWith(..)) => {
                 "actor MCP reply"
             }
+            Self::AgentSession(
+                crate::generated::agent_session::AgentSessionReq::AgentSessionWith(..),
+            ) => "agent session",
             Self::Deliberate(crate::generated::deliberate::DeliberateReq::DeliberateWith(..)) => {
                 "deliberate"
             }
@@ -268,6 +298,19 @@ impl<H, O> ResidentActorRunner<H, O> {
             access: ResidentMachineAccess::new(machines, source),
         }
     }
+
+    pub(crate) fn workbench(
+        &self,
+        expected_type: impl Into<String>,
+        type_modules: Vec<String>,
+    ) -> ResidentActorWorkbench<H, O> {
+        ResidentActorWorkbench::new(
+            Arc::clone(&self.access.machines),
+            self.access.source.clone(),
+            expected_type,
+            type_modules,
+        )
+    }
 }
 
 impl<H, O> ResidentActorWorkbench<H, O> {
@@ -282,7 +325,14 @@ impl<H, O> ResidentActorWorkbench<H, O> {
             access: ResidentMachineAccess::new(machines, source),
             expected_type: expected_type.into(),
             type_modules: type_modules.into(),
+            json_input: None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_json_input(mut self, input: Option<serde_json::Value>) -> Self {
+        self.json_input = input;
+        self
     }
 }
 
@@ -317,6 +367,8 @@ pub enum ResidentActorWorkbenchError {
     Bridge(#[from] tidepool_bridge::BridgeError),
     #[error(transparent)]
     CompletionCapture(#[from] crate::CompletionCaptureError),
+    #[error(transparent)]
+    InteractiveSessionCapture(#[from] crate::InteractiveSessionCaptureError),
     #[error(transparent)]
     StartCapture(#[from] crate::ActorStartCaptureError),
     #[error(transparent)]
@@ -426,67 +478,75 @@ where
         input_type: impl Into<String>,
         input: RootCustody,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        self.mount_named_input(admitted.session_context(), "goalInput", input_type, input)
+            .await
+    }
+
+    pub(crate) async fn mount_named_input(
+        &self,
+        context: crate::ActorSessionContext,
+        name: &'static str,
+        input_type: impl Into<String>,
+        input: RootCustody,
+    ) -> Result<(), ResidentActorWorkbenchError> {
         let input_type = input_type.into();
         let type_modules = Arc::clone(&self.type_modules);
         self.access
-            .with_machine(
-                admitted.session_context(),
-                move |session, context, source| {
-                    session
-                        .set_actor_execution(
-                            context.run_context(),
-                            context.effect_policy,
-                            context.live_payload,
-                        )
-                        .map_err(ResidentActorWorkbenchError::Resident)?;
-                    let block = ParsedBlock {
-                        ordinal: 1,
-                        total: 1,
-                        source: format!("goalInput <- pure (undefined :: ({input_type}))"),
-                    };
-                    let compiled = match compile_block(
-                        session,
-                        context,
-                        source,
-                        "ActorEffects",
-                        &type_modules,
-                        &block,
-                    )? {
-                        CompiledBlock::Ready(compiled) => compiled,
-                        CompiledBlock::Rejected(diagnostic) => {
-                            return Err(ResidentActorWorkbenchError::InputMount(diagnostic));
-                        }
-                    };
-                    let ReadyBlock {
-                        result, generation, ..
-                    } = *compiled;
-                    let TurnResult::Bind {
-                        bound,
-                        compiled: expression,
-                        ..
-                    } = result
-                    else {
-                        return Err(ResidentActorWorkbenchError::InputMount(
-                            "the internal goal-input source was not classified as a binding".into(),
-                        ));
-                    };
-                    let [binder] = bound.as_slice() else {
-                        return Err(ResidentActorWorkbenchError::InputMount(format!(
-                            "the internal goal-input binding produced {} binders",
-                            bound.len()
-                        )));
-                    };
-                    session
-                        .mount_compiled_binding_in(
-                            context.placement.lexical_scope,
-                            binder,
-                            generation,
-                            &expression.table,
-                            input,
-                        )
-                        .map_err(ResidentActorWorkbenchError::Resident)
-                },
-            )
+            .with_machine(context, move |session, context, source| {
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let block = ParsedBlock {
+                    ordinal: 1,
+                    total: 1,
+                    source: format!("{name} <- pure (undefined :: ({input_type}))"),
+                };
+                let compiled = match compile_block(
+                    session,
+                    context,
+                    source,
+                    "ActorEffects",
+                    &type_modules,
+                    &block,
+                )? {
+                    CompiledBlock::Ready(compiled) => compiled,
+                    CompiledBlock::Rejected(diagnostic) => {
+                        return Err(ResidentActorWorkbenchError::InputMount(diagnostic));
+                    }
+                };
+                let ReadyBlock {
+                    result, generation, ..
+                } = *compiled;
+                let TurnResult::Bind {
+                    bound,
+                    compiled: expression,
+                    ..
+                } = result
+                else {
+                    return Err(ResidentActorWorkbenchError::InputMount(
+                        "the internal goal-input source was not classified as a binding".into(),
+                    ));
+                };
+                let [binder] = bound.as_slice() else {
+                    return Err(ResidentActorWorkbenchError::InputMount(format!(
+                        "the internal goal-input binding produced {} binders",
+                        bound.len()
+                    )));
+                };
+                session
+                    .mount_compiled_binding_in(
+                        context.placement.lexical_scope,
+                        binder,
+                        generation,
+                        &expression.table,
+                        input,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
             .await
     }
 
@@ -510,6 +570,230 @@ where
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
+    }
+
+    /// Compile and begin one actor-local workbench item. Declarations commit
+    /// immediately; executable items retain their fragment realm so the host
+    /// can route any actor effects through the ordinary actor driver.
+    pub(crate) async fn begin_item(
+        &self,
+        context: crate::ActorSessionContext,
+        block: ParsedBlock,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        let expected_type = self.expected_type.clone();
+        let type_modules = Arc::clone(&self.type_modules);
+        let mut turn_source = self.access.source.clone();
+        turn_source.preamble = format!(
+            "{}{}",
+            turn_source.preamble,
+            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
+        )
+        .into();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                begin_fragment(
+                    session,
+                    context,
+                    &turn_source,
+                    &expected_type,
+                    &type_modules,
+                    block,
+                )
+            })
+            .await
+    }
+
+    /// Settle a resumed fragment outcome. Non-completion suspensions retain
+    /// the same realm and return to the host for nominal actor dispatch.
+    pub(crate) async fn settle_item(
+        &self,
+        context: crate::ActorSessionContext,
+        fragment: ResidentWorkbenchFragment,
+        outcome: ResidentOutcome,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                settle_fragment(session, context, fragment, outcome)
+            })
+            .await
+    }
+}
+
+fn begin_fragment<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    expected_type: &str,
+    type_modules: &[String],
+    block: ParsedBlock,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    if block.source.trim_start().starts_with(':') {
+        return Ok(ResidentWorkbenchStep::Rejected(
+            "meta commands are not part of the actor-local workbench; submit Haskell declarations or expressions".into(),
+        ));
+    }
+    let actor_context = context.run_context();
+    session
+        .set_actor_execution(actor_context, context.effect_policy, context.live_payload)
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+    let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
+    let compiled = match compile_block(
+        session,
+        context,
+        source,
+        &effect_stack,
+        type_modules,
+        &block,
+    )? {
+        CompiledBlock::Ready(compiled) => compiled,
+        CompiledBlock::Rejected(diagnostic) => {
+            return Ok(ResidentWorkbenchStep::Rejected(diagnostic));
+        }
+    };
+    let ReadyBlock {
+        result,
+        generation,
+        declaration_source,
+    } = *compiled;
+    match result {
+        TurnResult::Decl(receipt) => {
+            let result = match session
+                .define_scoped_in(context.placement.lexical_scope, &[&declaration_source])
+            {
+                Ok(generation) => ResidentWorkbenchStep::Committed(format!(
+                    "defined {} at generation {}",
+                    if receipt.binders.is_empty() {
+                        "declaration".to_string()
+                    } else {
+                        receipt.binders.join(", ")
+                    },
+                    generation.0
+                )),
+                Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
+                    ResidentWorkbenchStep::Rejected(classify_session(&error).message)
+                }
+                Err(error) => {
+                    return Err(ResidentActorWorkbenchError::Resident(
+                        ResidentError::Session(error),
+                    ))
+                }
+            };
+            Ok(result)
+        }
+        TurnResult::Bind {
+            bound, compiled, ..
+        } => {
+            if bound.len() != 1 {
+                return Ok(ResidentWorkbenchStep::Rejected(
+                    "bind one name per workbench item, or split the binding into separate items"
+                        .into(),
+                ));
+            }
+            let name = bound[0].name.clone();
+            let outcome = session.run_bind_with_sites(
+                "actor_interactive_bind",
+                &compiled.expr,
+                &compiled.table,
+                &bound[0],
+                generation,
+                &compiled.asks,
+            );
+            start_fragment_settlement(session, context, Some(name), outcome)
+        }
+        TurnResult::Expr { compiled, .. } => {
+            let outcome = session.run_with_sites(
+                "actor_interactive_expr",
+                &compiled.expr,
+                &compiled.table,
+                &compiled.asks,
+            );
+            start_fragment_settlement(session, context, None, outcome)
+        }
+    }
+}
+
+fn start_fragment_settlement<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    bound_name: Option<String>,
+    outcome: Result<ResidentOutcome, ResidentError>,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    match outcome {
+        Ok(outcome) => settle_fragment(
+            session,
+            context,
+            ResidentWorkbenchFragment {
+                bound_name,
+                output: Vec::new(),
+            },
+            outcome,
+        ),
+        Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(error.to_string())),
+        Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
+    }
+}
+
+fn settle_fragment<H, O>(
+    session: &mut ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    mut fragment: ResidentWorkbenchFragment,
+    outcome: ResidentOutcome,
+) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    session
+        .set_actor_execution(
+            context.run_context(),
+            context.effect_policy,
+            context.live_payload,
+        )
+        .map_err(ResidentActorWorkbenchError::Resident)?;
+    match outcome {
+        ResidentOutcome::Completed { output, result } => {
+            fragment.output.extend(output);
+            let mut receipt = fragment.bound_name.as_deref().map_or_else(
+                || result.to_string_pretty(),
+                |name| format!("bound `{name}`"),
+            );
+            if !fragment.output.is_empty() {
+                receipt.push_str("\n\nOutput:\n");
+                receipt.push_str(&fragment.output.join("\n"));
+            }
+            Ok(ResidentWorkbenchStep::Committed(receipt))
+        }
+        ResidentOutcome::Suspended {
+            output,
+            hole,
+            request,
+        } => {
+            fragment.output.extend(output);
+            let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
+            if matches!(decoded, ResidentRequest::Complete(_)) {
+                let completion = session
+                    .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
+                    .ok_or(ResidentActorWorkbenchError::MissingCompletionPayload)?;
+                Ok(ResidentWorkbenchStep::Completed(completion))
+            } else {
+                Ok(ResidentWorkbenchStep::Running {
+                    fragment,
+                    outcome: Box::new(ResidentOutcome::Suspended {
+                        output: Vec::new(),
+                        hole,
+                        request,
+                    }),
+                })
+            }
+        }
     }
 }
 
@@ -636,6 +920,20 @@ where
                             ),
                         },
                     )),
+                    ResidentRequest::AgentSession(
+                        crate::generated::agent_session::AgentSessionReq::AgentSessionWith(..),
+                    ) => {
+                        let table = session.data_con_table().clone();
+                        crate::ResidentInteractiveSession::capture(
+                            session,
+                            hole,
+                            &request,
+                            &table,
+                            actor_realm,
+                        )
+                        .map(ResidentActorBoundary::AgentSession)
+                        .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
+                    }
                     ResidentRequest::Deliberate(
                         crate::generated::deliberate::DeliberateReq::DeliberateWith(..),
                     ) => {

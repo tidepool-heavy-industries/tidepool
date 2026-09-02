@@ -16,6 +16,95 @@ use super::{
     TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 
+/// Normalize the one extra JSON-string layer some MCP clients apply to a
+/// structured tool argument. Plain strings remain strings unless they parse
+/// as a complete JSON object, array, or quoted JSON string. Numeric and
+/// boolean-looking strings remain text.
+#[must_use]
+pub fn normalize_workbench_input(value: &serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::String(encoded) = value else {
+        return value.clone();
+    };
+    match serde_json::from_str::<serde_json::Value>(encoded) {
+        Ok(
+            decoded @ (serde_json::Value::Object(_)
+            | serde_json::Value::Array(_)
+            | serde_json::Value::String(_)),
+        ) => decoded,
+        _ => value.clone(),
+    }
+}
+
+/// Render the optional transport input as the canonical @input ::
+/// Aeson.Value@ source binding used by every resident workbench frontend.
+#[must_use]
+pub fn workbench_input_binding(input: Option<&serde_json::Value>) -> String {
+    input.map_or_else(String::new, |value| {
+        format!(
+            "input :: Aeson.Value\ninput = {}\n\n",
+            workbench_json_to_haskell(value)
+        )
+    })
+}
+
+pub fn escape_workbench_haskell_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\t' => output.push_str("\\t"),
+            '\r' => output.push_str("\\r"),
+            character if (character as u32) < 0x20 => {
+                output.push_str(&format!("\\x{:x};", character as u32));
+            }
+            character => output.push(character),
+        }
+    }
+    output
+}
+
+pub fn workbench_json_to_haskell(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "Aeson.Null".into(),
+        serde_json::Value::Bool(value) => {
+            format!("Aeson.Bool {}", if *value { "True" } else { "False" })
+        }
+        serde_json::Value::Number(value) => {
+            let (coefficient, exponent) =
+                tidepool_eval::shapes::parse_decimal_token(&value.to_string());
+            format!("Aeson.Number (Aeson.scientific ({coefficient}) ({exponent}))")
+        }
+        serde_json::Value::String(value) => {
+            format!(
+                "Aeson.String \"{}\"",
+                escape_workbench_haskell_string(value)
+            )
+        }
+        serde_json::Value::Array(values) => format!(
+            "toJSON [{}]",
+            values
+                .iter()
+                .map(workbench_json_to_haskell)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        serde_json::Value::Object(values) => format!(
+            "object [{}]",
+            values
+                .iter()
+                .map(|(key, value)| format!(
+                    "\"{}\" .= {}",
+                    escape_workbench_haskell_string(key),
+                    workbench_json_to_haskell(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 /// One ordered request against a persistent Haskell workbench.
 ///
 /// This is transport-neutral despite the JSON-shaped optional input: MCP,
@@ -32,6 +121,38 @@ pub struct WorkbenchRequest {
     /// Request the frontend's expanded diagnostic receipt when supported.
     #[serde(default)]
     pub verbose: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchItemStatus {
+    Committed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchItemReceipt {
+    pub index: usize,
+    pub status: WorkbenchItemStatus,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchRunStatus {
+    Committed,
+    Rejected,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchResponse {
+    pub status: WorkbenchRunStatus,
+    pub items: Vec<WorkbenchItemReceipt>,
+    pub next_index: usize,
+    pub total: usize,
 }
 
 /// One tokenized `:command`. Frontends interpret the name and arguments they
@@ -366,6 +487,48 @@ mod tests {
         assert_eq!(sequence.current(), Some(&"park"));
         assert_eq!(sequence.committed(), &[1]);
         assert_eq!(sequence.items()[sequence.position()..], ["park", "later"]);
+    }
+
+    #[test]
+    fn input_normalization_and_source_are_frontend_neutral() {
+        let encoded = serde_json::Value::String("{\"name\":\"shoal\"}".into());
+        let normalized = normalize_workbench_input(&encoded);
+        assert_eq!(normalized, serde_json::json!({"name": "shoal"}));
+        assert_eq!(
+            workbench_input_binding(Some(&normalized)),
+            "input :: Aeson.Value\ninput = object [\"name\" .= Aeson.String \"shoal\"]\n\n"
+        );
+        assert_eq!(
+            normalize_workbench_input(&serde_json::Value::String("42".into())),
+            serde_json::Value::String("42".into())
+        );
+    }
+
+    #[test]
+    fn response_statuses_are_closed_schema_backed_values() {
+        let response = WorkbenchResponse {
+            status: WorkbenchRunStatus::Completed,
+            items: vec![WorkbenchItemReceipt {
+                index: 0,
+                status: WorkbenchItemStatus::Committed,
+                output: "bound `answer`".into(),
+            }],
+            next_index: 1,
+            total: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "status": "completed",
+                "items": [{
+                    "index": 0,
+                    "status": "committed",
+                    "output": "bound `answer`"
+                }],
+                "nextIndex": 1,
+                "total": 1
+            })
+        );
     }
 
     #[tokio::test]

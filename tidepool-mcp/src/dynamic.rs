@@ -66,7 +66,7 @@ impl DynamicMcpServer {
     /// admission and continuation ownership remain inside the policy; this
     /// adapter owns only MCP declaration and result shapes.
     pub fn from_resident_policy(
-        policy: Arc<tidepool_actor::ResidentMcpPolicy>,
+        policy: Arc<dyn tidepool_actor::ResidentMcpEndpoint>,
     ) -> Result<Self, DynamicMcpError> {
         let declarations = policy.declarations().to_vec();
         let instructions = policy.instructions().map(str::to_owned);
@@ -74,7 +74,7 @@ impl DynamicMcpServer {
             let policy = Arc::clone(&policy);
             Box::pin(async move {
                 policy
-                    .dispatch(name, arguments)
+                    .dispatch_boxed(name, arguments)
                     .await
                     .map_err(|error| ToolDispatchError::Failed(error.to_string()))
             })

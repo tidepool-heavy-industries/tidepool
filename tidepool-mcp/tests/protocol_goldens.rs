@@ -64,6 +64,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "ActorKernel",
             "ActorLocal",
             "ActorMcp",
+            "AgentSession",
         ]
     );
 }

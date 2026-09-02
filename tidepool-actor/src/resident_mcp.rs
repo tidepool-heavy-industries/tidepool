@@ -5,6 +5,7 @@
 //! sole owner of actor execution.
 
 use std::sync::Arc;
+use std::{future::Future, pin::Pin};
 
 use tidepool_runtime::session::ResidentHole;
 use tokio::sync::{mpsc, oneshot};
@@ -46,25 +47,43 @@ pub enum ResidentMcpError {
 /// host retains and resumes the Haskell continuation through every actor
 /// boundary reached by the tool handler.
 pub struct ResidentMcpPolicy {
-    actor: ActorRef,
     declarations: Arc<[tidepool_tool::ToolDeclaration]>,
     instructions: Option<String>,
-    requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
-    dispatch_gate: tokio::sync::Mutex<()>,
+    client: ResidentMcpClient,
 }
 
-impl ResidentMcpPolicy {
-    #[must_use]
-    pub fn declarations(&self) -> &[tidepool_tool::ToolDeclaration] {
-        &self.declarations
+pub type ResidentMcpFuture =
+    Pin<Box<dyn Future<Output = Result<serde_json::Value, ResidentMcpError>> + Send + 'static>>;
+
+/// Transport-neutral interface projected by an actor-local MCP server.
+/// Implementations retain actor admission and execution ownership behind
+/// their dispatcher; the projection sees only declarations and structured
+/// results.
+pub trait ResidentMcpEndpoint: Send + Sync {
+    fn declarations(&self) -> &[tidepool_tool::ToolDeclaration];
+    fn instructions(&self) -> Option<&str>;
+    fn dispatch_boxed(&self, name: String, arguments: serde_json::Value) -> ResidentMcpFuture;
+}
+
+pub(crate) struct ResidentMcpClient {
+    pub(crate) actor: ActorRef,
+    pub(crate) requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
+    pub(crate) dispatch_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ResidentMcpClient {
+    pub(crate) fn new(
+        actor: ActorRef,
+        requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
+    ) -> Self {
+        Self {
+            actor,
+            requests,
+            dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
-    #[must_use]
-    pub fn instructions(&self) -> Option<&str> {
-        self.instructions.as_deref()
-    }
-
-    pub async fn dispatch(
+    pub(crate) async fn dispatch(
         &self,
         name: String,
         arguments: serde_json::Value,
@@ -92,16 +111,53 @@ impl ResidentMcpPolicy {
     }
 }
 
+impl ResidentMcpPolicy {
+    #[must_use]
+    pub fn declarations(&self) -> &[tidepool_tool::ToolDeclaration] {
+        &self.declarations
+    }
+
+    #[must_use]
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
+    }
+
+    pub async fn dispatch(
+        &self,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, ResidentMcpError> {
+        self.client.dispatch(name, arguments).await
+    }
+}
+
+impl ResidentMcpEndpoint for ResidentMcpPolicy {
+    fn declarations(&self) -> &[tidepool_tool::ToolDeclaration] {
+        self.declarations()
+    }
+
+    fn instructions(&self) -> Option<&str> {
+        self.instructions()
+    }
+
+    fn dispatch_boxed(&self, name: String, arguments: serde_json::Value) -> ResidentMcpFuture {
+        let client = ResidentMcpClient {
+            actor: self.client.actor,
+            requests: self.client.requests.clone(),
+            dispatch_gate: Arc::clone(&self.client.dispatch_gate),
+        };
+        Box::pin(async move { client.dispatch(name, arguments).await })
+    }
+}
+
 pub(crate) fn install_resident_mcp(
     actor: ActorRef,
     requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
     awaiting: &ResidentMcpAwait,
 ) -> ResidentMcpPolicy {
     ResidentMcpPolicy {
-        actor,
         declarations: awaiting.declarations.clone().into(),
         instructions: (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone()),
-        requests,
-        dispatch_gate: tokio::sync::Mutex::new(()),
+        client: ResidentMcpClient::new(actor, requests),
     }
 }

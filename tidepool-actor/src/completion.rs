@@ -32,6 +32,14 @@ pub struct CompletionRequest {
     pub output_modules: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypedSessionSignature {
+    pub(crate) input_type: String,
+    pub(crate) input_modules: Vec<String>,
+    pub(crate) output_type: String,
+    pub(crate) output_modules: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CompletionRequestError {
     #[error(transparent)]
@@ -52,25 +60,38 @@ impl CompletionRequest {
     ) -> Result<Self, CompletionRequestError> {
         let DeliberateReq::DeliberateWith(site, _input, task) =
             DeliberateReq::from_value(request, table)?;
-        let site = u64::try_from(site).map_err(|_| CompletionRequestError::InvalidSite(site))?;
-        let metadata = sites
-            .iter()
-            .find(|metadata| metadata.site == site)
-            .ok_or(CompletionRequestError::MissingSite(site))?;
-        let [input] = metadata.inputs.as_slice() else {
-            return Err(CompletionRequestError::InputArity {
-                site,
-                actual: metadata.inputs.len(),
-            });
-        };
+        let signature = decode_typed_session_site(site, sites)?;
         Ok(Self {
             task,
-            input_type: input.ty.clone(),
-            input_modules: input.modules.clone(),
-            output_type: metadata.ty.clone(),
-            output_modules: metadata.modules.clone(),
+            input_type: signature.input_type,
+            input_modules: signature.input_modules,
+            output_type: signature.output_type,
+            output_modules: signature.output_modules,
         })
     }
+}
+
+pub(crate) fn decode_typed_session_site(
+    site: i64,
+    sites: &[YieldSite],
+) -> Result<TypedSessionSignature, CompletionRequestError> {
+    let site = u64::try_from(site).map_err(|_| CompletionRequestError::InvalidSite(site))?;
+    let metadata = sites
+        .iter()
+        .find(|metadata| metadata.site == site)
+        .ok_or(CompletionRequestError::MissingSite(site))?;
+    let [input] = metadata.inputs.as_slice() else {
+        return Err(CompletionRequestError::InputArity {
+            site,
+            actual: metadata.inputs.len(),
+        });
+    };
+    Ok(TypedSessionSignature {
+        input_type: input.ty.clone(),
+        input_modules: input.modules.clone(),
+        output_type: metadata.ty.clone(),
+        output_modules: metadata.modules.clone(),
+    })
 }
 
 /// One exact authored-Haskell continuation parked on `deliberate`, paired

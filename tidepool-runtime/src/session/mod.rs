@@ -61,9 +61,11 @@ pub use resident::{
 pub use view::{SessionCompileView, SourceImports};
 
 pub use workbench::{
-    classify_workbench_item, resident_workbench_templates, run_block_sequence, BlockExecution,
-    BlockSequenceOutcome, CommittedBlock, MetaCommandLine, ParsedBlock, WorkSequence,
-    WorkbenchItem, WorkbenchRequest,
+    classify_workbench_item, escape_workbench_haskell_string, normalize_workbench_input,
+    resident_workbench_templates, run_block_sequence, workbench_input_binding,
+    workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
+    MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchItem, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
 };
 
 pub use turn::{

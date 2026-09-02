@@ -15,10 +15,12 @@ mod executor;
 mod generated;
 mod host;
 mod identity;
+mod interactive_session;
 mod mailbox;
 mod mount;
 mod profile;
 mod registry;
+mod resident_interactive;
 mod resident_lifecycle;
 mod resident_mailbox;
 mod resident_mcp;
@@ -50,6 +52,9 @@ pub use host::{
     ResidentHostTaskError, ResidentMcpInstallation,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
+pub use interactive_session::{
+    InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentInteractiveSession,
+};
 pub use mailbox::{
     CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
     MessageId, ParkedObligation, WaitError, WaitId, WaitTicket,
@@ -64,6 +69,7 @@ pub use registry::{
     ActorRuntimeWakes, ActorTerminal, ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery,
     StartingActor, TurnLease,
 };
+pub use resident_interactive::ResidentInteractivePolicy;
 pub use resident_lifecycle::{
     ResidentActorLifecycle, ResidentLifecycleError, ResidentLifecyclePolicy,
 };
@@ -71,7 +77,7 @@ pub use resident_mailbox::{
     OutboundSettlement, ResidentActorMailbox, ResidentCall, ResidentCallPoll, ResidentMailboxError,
     ResidentWait, ResidentWaitPoll,
 };
-pub use resident_mcp::{ResidentMcpError, ResidentMcpPolicy};
+pub use resident_mcp::{ResidentMcpEndpoint, ResidentMcpError, ResidentMcpPolicy};
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError,

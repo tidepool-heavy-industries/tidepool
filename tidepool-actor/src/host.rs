@@ -13,7 +13,10 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::FutureExt;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_model::{DynModelProvider, StreamSink};
-use tidepool_runtime::session::{OutputSink, ResidentOutcome, ResidentSession};
+use tidepool_runtime::session::{
+    OutputSink, ParsedBlock, ResidentOutcome, ResidentSession, WorkbenchItemReceipt,
+    WorkbenchItemStatus, WorkbenchRequest, WorkbenchRunStatus,
+};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::resident_workbench::ResidentActorBoundary;
@@ -123,6 +126,7 @@ pub enum ResidentHostParkedKind {
     Call,
     Wait,
     McpPolicy,
+    InteractiveSession,
 }
 
 #[derive(Debug)]
@@ -139,7 +143,7 @@ pub struct ResidentHostShutdownReport {
 #[derive(Clone)]
 pub struct ResidentMcpInstallation {
     pub actor: ActorRef,
-    pub policy: Arc<crate::ResidentMcpPolicy>,
+    pub policy: Arc<dyn crate::ResidentMcpEndpoint>,
     /// Haskell-authored first User message for an attached interactive agent.
     /// The deployment owner transports it without interpreting it.
     pub initial_user_message: Option<String>,
@@ -247,6 +251,7 @@ enum HostedActorState {
     ParkedCall,
     ParkedWait,
     McpPolicy,
+    InteractiveSession,
     Exited,
 }
 
@@ -282,6 +287,12 @@ enum HostTaskResult {
         settlement: Option<McpSettlement>,
         children: Vec<StartedChild>,
     },
+    InteractiveSession {
+        actor: ActorRef,
+        session: crate::interactive_session::ResidentInteractiveAwait,
+        settlement: Option<McpSettlement>,
+        children: Vec<StartedChild>,
+    },
     Exited {
         actor: ActorRef,
         children: Vec<StartedChild>,
@@ -308,7 +319,7 @@ struct McpSettlement {
 
 struct HostCall {
     pending: ResidentCall,
-    mcp: Option<McpInvocationState>,
+    invocation: Option<InvocationState>,
 }
 
 impl HostCall {
@@ -319,7 +330,7 @@ impl HostCall {
 
 struct HostWait {
     pending: ResidentWait,
-    mcp: Option<McpInvocationState>,
+    invocation: Option<InvocationState>,
 }
 
 impl HostWait {
@@ -342,6 +353,26 @@ enum HostWork {
         arguments: serde_json::Value,
         state: McpInvocationState,
     },
+    WorkbenchInvocation {
+        awaiting: crate::interactive_session::ResidentInteractiveAwait,
+        request: WorkbenchRequest,
+        response: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+}
+
+enum InvocationState {
+    Mcp(McpInvocationState),
+    Workbench(Box<WorkbenchInvocationState>),
+}
+
+struct WorkbenchInvocationState {
+    awaiting: Option<crate::interactive_session::ResidentInteractiveAwait>,
+    request: WorkbenchRequest,
+    cursor: usize,
+    receipts: Vec<WorkbenchItemReceipt>,
+    fragment: Option<crate::resident_workbench::ResidentWorkbenchFragment>,
+    response: Option<oneshot::Sender<Result<serde_json::Value, String>>>,
+    result: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -362,8 +393,9 @@ pub struct ResidentActorHost<H, O> {
     actors: HashMap<ActorRef, HostedActor>,
     calls: HashMap<(ActorRef, CallId), HostCall>,
     waits: HashMap<(ActorRef, WaitId), HostWait>,
-    mcp_policies: HashMap<ActorRef, Arc<crate::ResidentMcpPolicy>>,
+    mcp_policies: HashMap<ActorRef, Arc<dyn crate::ResidentMcpEndpoint>>,
     mcp_awaits: HashMap<ActorRef, crate::resident_mcp::ResidentMcpAwait>,
+    interactive_sessions: HashMap<ActorRef, crate::interactive_session::ResidentInteractiveAwait>,
     mcp_requests: mpsc::UnboundedSender<crate::resident_mcp::ResidentMcpInvocation>,
     mcp_request_rx: mpsc::UnboundedReceiver<crate::resident_mcp::ResidentMcpInvocation>,
     control: ResidentActorHostControl,
@@ -384,7 +416,7 @@ where
     /// Return the installed resident MCP policy for an exact actor
     /// incarnation, once that actor has reached `serveTools`.
     #[must_use]
-    pub fn mcp_policy(&self, actor: ActorRef) -> Option<Arc<crate::ResidentMcpPolicy>> {
+    pub fn mcp_policy(&self, actor: ActorRef) -> Option<Arc<dyn crate::ResidentMcpEndpoint>> {
         self.mcp_policies.get(&actor).cloned()
     }
 
@@ -448,6 +480,7 @@ where
             waits: HashMap::new(),
             mcp_policies: HashMap::new(),
             mcp_awaits: HashMap::new(),
+            interactive_sessions: HashMap::new(),
             mcp_requests,
             mcp_request_rx,
             control: ResidentActorHostControl {
@@ -573,6 +606,11 @@ where
                 }
                 HostedActorState::McpPolicy => {
                     *parked.entry(ResidentHostParkedKind::McpPolicy).or_default() += 1;
+                }
+                HostedActorState::InteractiveSession => {
+                    *parked
+                        .entry(ResidentHostParkedKind::InteractiveSession)
+                        .or_default() += 1;
                 }
             }
         }
@@ -823,6 +861,21 @@ where
                     let _ = settlement.response.send(Ok(settlement.result));
                 }
             }
+            HostTaskResult::InteractiveSession {
+                actor,
+                session,
+                settlement,
+                children,
+            } => {
+                self.register_children(children);
+                self.install_interactive_session(actor, session, Vec::new());
+                if let Some(hosted) = self.actors.get_mut(&actor) {
+                    hosted.state = HostedActorState::InteractiveSession;
+                }
+                if let Some(settlement) = settlement {
+                    let _ = settlement.response.send(Ok(settlement.result));
+                }
+            }
             HostTaskResult::Exited {
                 actor,
                 children,
@@ -1002,11 +1055,12 @@ where
         &mut self,
         request: crate::resident_mcp::ResidentMcpInvocation,
     ) -> Result<(), ResidentActorHostError> {
+        let state = self.actors.get(&request.actor).map(|hosted| &hosted.state);
         let unavailable = if self.lifecycle == HostLifecycle::Closing {
             Some("the actor host is closing")
         } else if !matches!(
-            self.actors.get(&request.actor).map(|hosted| &hosted.state),
-            Some(HostedActorState::McpPolicy)
+            state,
+            Some(HostedActorState::McpPolicy | HostedActorState::InteractiveSession)
         ) {
             Some("the actor is not awaiting an MCP invocation")
         } else {
@@ -1015,6 +1069,38 @@ where
         if let Some(reason) = unavailable {
             let _ = request.response.send(Err(reason.into()));
             return Ok(());
+        }
+
+        if matches!(state, Some(HostedActorState::InteractiveSession)) {
+            if request.name != crate::resident_interactive::SESSION_RUN_TOOL {
+                let _ = request.response.send(Err(format!(
+                    "unknown actor workbench tool `{}`",
+                    request.name
+                )));
+                return Ok(());
+            }
+            let workbench_request =
+                match serde_json::from_value::<WorkbenchRequest>(request.arguments) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        let _ = request.response.send(Err(error.to_string()));
+                        return Ok(());
+                    }
+                };
+            let Some(awaiting) = self.interactive_sessions.remove(&request.actor) else {
+                let _ = request
+                    .response
+                    .send(Err("the actor has no installed interactive session".into()));
+                return Ok(());
+            };
+            return self.schedule(
+                request.actor,
+                HostWork::WorkbenchInvocation {
+                    awaiting,
+                    request: workbench_request,
+                    response: request.response,
+                },
+            );
         }
 
         let Some(awaiting) = self.mcp_awaits.remove(&request.actor) else {
@@ -1063,6 +1149,13 @@ where
                     self.install_mcp_policy(actor, awaiting, launch_worktrees);
                     HostedActorState::McpPolicy
                 }
+                crate::start::ResidentStartedActorState::InteractiveSession {
+                    awaiting,
+                    launch_worktrees,
+                } => {
+                    self.install_interactive_session(actor, awaiting, launch_worktrees);
+                    HostedActorState::InteractiveSession
+                }
             };
             self.actors.entry(actor).or_insert_with(|| {
                 let (cancel, _) = watch::channel(false);
@@ -1090,7 +1183,7 @@ where
                 self.mcp_requests.clone(),
                 &awaiting,
             ));
-            self.mcp_policies.insert(actor, Arc::clone(&policy));
+            self.mcp_policies.insert(actor, policy.clone());
             let _ = self
                 .deployments
                 .send(ResidentActorDeployment::PolicyInstalled(
@@ -1105,8 +1198,35 @@ where
         self.mcp_awaits.insert(actor, awaiting);
     }
 
+    fn install_interactive_session(
+        &mut self,
+        actor: ActorRef,
+        session: crate::interactive_session::ResidentInteractiveAwait,
+        launch_worktrees: Vec<String>,
+    ) {
+        if !self.mcp_policies.contains_key(&actor) {
+            let policy: Arc<dyn crate::ResidentMcpEndpoint> = Arc::new(
+                crate::ResidentInteractivePolicy::new(actor, self.mcp_requests.clone()),
+            );
+            self.mcp_policies.insert(actor, Arc::clone(&policy));
+            let initial_user_message = session.request.initial_user_message.clone();
+            let _ = self
+                .deployments
+                .send(ResidentActorDeployment::PolicyInstalled(
+                    ResidentMcpInstallation {
+                        actor,
+                        policy,
+                        initial_user_message,
+                        launch_worktrees,
+                    },
+                ));
+        }
+        self.interactive_sessions.insert(actor, session);
+    }
+
     fn retire_actor_deployment(&mut self, actor: ActorRef) {
         self.mcp_awaits.remove(&actor);
+        self.interactive_sessions.remove(&actor);
         self.mcp_policies.remove(&actor);
         let Some(hosted) = self.actors.get_mut(&actor) else {
             debug_assert!(false, "retired an actor absent from the host");
@@ -1140,10 +1260,13 @@ where
     O: OutputSink + Sync + 'static,
 {
     let mut children = Vec::new();
-    let (mut turn, mut outcome, mut mcp) = match work {
+    let (mut turn, mut outcome, mut invocation) = match work {
         HostWork::Outcome { turn, outcome } => (turn, *outcome, None),
         HostWork::Call(pending) => {
-            let HostCall { pending, mcp } = pending;
+            let HostCall {
+                pending,
+                invocation,
+            } = pending;
             match await_host_operation(cancel.clone(), runtime.mailbox.poll_call(pending))
                 .await
                 .ok_or(ResidentHostTaskError::Cancelled)??
@@ -1151,15 +1274,21 @@ where
                 ResidentCallPoll::Pending(pending) => {
                     return Ok(HostTaskResult::ParkedCall {
                         actor,
-                        pending: HostCall { pending, mcp },
+                        pending: HostCall {
+                            pending,
+                            invocation,
+                        },
                         children,
                     });
                 }
-                ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome, mcp),
+                ResidentCallPoll::Continued { turn, outcome } => (turn, *outcome, invocation),
             }
         }
         HostWork::Wait(pending) => {
-            let HostWait { pending, mcp } = pending;
+            let HostWait {
+                pending,
+                invocation,
+            } = pending;
             match await_host_operation(cancel.clone(), runtime.mailbox.poll_wait(pending))
                 .await
                 .ok_or(ResidentHostTaskError::Cancelled)??
@@ -1167,11 +1296,14 @@ where
                 ResidentWaitPoll::Pending(pending) => {
                     return Ok(HostTaskResult::ParkedWait {
                         actor,
-                        pending: HostWait { pending, mcp },
+                        pending: HostWait {
+                            pending,
+                            invocation,
+                        },
                         children,
                     });
                 }
-                ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome, mcp),
+                ResidentWaitPoll::Continued { turn, outcome } => (turn, *outcome, invocation),
             }
         }
         HostWork::Mailbox => {
@@ -1209,10 +1341,161 @@ where
             )
             .await
             .ok_or(ResidentHostTaskError::Cancelled)??;
-            (turn, outcome, Some(state))
+            (turn, outcome, Some(InvocationState::Mcp(state)))
+        }
+        HostWork::WorkbenchInvocation {
+            awaiting,
+            request,
+            response,
+        } => {
+            let turn = runtime.registry.begin_turn(actor, ActorTurnKind::Haskell)?;
+            let mut state = WorkbenchInvocationState {
+                awaiting: Some(awaiting),
+                request,
+                cursor: 0,
+                receipts: Vec::new(),
+                fragment: None,
+                response: Some(response),
+                result: None,
+            };
+            match begin_next_workbench_item(&runtime, turn.session_context(), &mut state).await? {
+                WorkbenchAdvance::Running { outcome, fragment } => {
+                    state.fragment = Some(fragment);
+                    (
+                        turn,
+                        *outcome,
+                        Some(InvocationState::Workbench(Box::new(state))),
+                    )
+                }
+                WorkbenchAdvance::Stable(result) => {
+                    let (awaiting, response) = take_workbench_transport(&mut state)?;
+                    drop(turn);
+                    return Ok(HostTaskResult::InteractiveSession {
+                        actor,
+                        session: awaiting,
+                        settlement: Some(McpSettlement { response, result }),
+                        children,
+                    });
+                }
+                WorkbenchAdvance::Completed(answer) => {
+                    let awaiting = take_workbench_await(&mut state)?;
+                    let workbench = runtime.runner.workbench(
+                        awaiting.request.output_type.clone(),
+                        awaiting.request.output_modules.clone(),
+                    );
+                    let resumed = workbench
+                        .resume_completion(turn.session_context(), awaiting.hole, answer)
+                        .await?;
+                    state.result = Some(workbench_response(&state, WorkbenchRunStatus::Completed));
+                    (
+                        turn,
+                        resumed,
+                        Some(InvocationState::Workbench(Box::new(state))),
+                    )
+                }
+            }
         }
     };
     loop {
+        if let Some(InvocationState::Workbench(state)) = invocation.as_mut() {
+            let state = state.as_mut();
+            if let Some(fragment) = state.fragment.take() {
+                let awaiting = state.awaiting.as_ref().ok_or_else(|| {
+                    ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
+                        "workbench fragment outlived its agent-session continuation".into(),
+                    ))
+                })?;
+                let workbench = runtime.runner.workbench(
+                    awaiting.request.output_type.clone(),
+                    awaiting.request.output_modules.clone(),
+                );
+                match workbench
+                    .settle_item(turn.session_context(), fragment, outcome)
+                    .await?
+                {
+                    crate::resident_workbench::ResidentWorkbenchStep::Running {
+                        fragment,
+                        outcome: next,
+                    } => {
+                        state.fragment = Some(fragment);
+                        outcome = *next;
+                    }
+                    crate::resident_workbench::ResidentWorkbenchStep::Committed(receipt) => {
+                        state.receipts.push(item_receipt(
+                            state.cursor,
+                            WorkbenchItemStatus::Committed,
+                            receipt,
+                        ));
+                        state.cursor += 1;
+                        match begin_next_workbench_item(&runtime, turn.session_context(), state)
+                            .await?
+                        {
+                            WorkbenchAdvance::Running {
+                                outcome: next,
+                                fragment,
+                            } => {
+                                state.fragment = Some(fragment);
+                                outcome = *next;
+                            }
+                            WorkbenchAdvance::Stable(result) => {
+                                let (awaiting, response) = take_workbench_transport(state)?;
+                                drop(turn);
+                                return Ok(HostTaskResult::InteractiveSession {
+                                    actor,
+                                    session: awaiting,
+                                    settlement: Some(McpSettlement { response, result }),
+                                    children,
+                                });
+                            }
+                            WorkbenchAdvance::Completed(answer) => {
+                                let awaiting = take_workbench_await(state)?;
+                                let workbench = runtime.runner.workbench(
+                                    awaiting.request.output_type.clone(),
+                                    awaiting.request.output_modules.clone(),
+                                );
+                                outcome = workbench
+                                    .resume_completion(
+                                        turn.session_context(),
+                                        awaiting.hole,
+                                        answer,
+                                    )
+                                    .await?;
+                                state.result =
+                                    Some(workbench_response(state, WorkbenchRunStatus::Completed));
+                            }
+                        }
+                    }
+                    crate::resident_workbench::ResidentWorkbenchStep::Rejected(diagnostic) => {
+                        state.receipts.push(item_receipt(
+                            state.cursor,
+                            WorkbenchItemStatus::Rejected,
+                            diagnostic,
+                        ));
+                        let result = workbench_response(state, WorkbenchRunStatus::Rejected);
+                        let (awaiting, response) = take_workbench_transport(state)?;
+                        drop(turn);
+                        return Ok(HostTaskResult::InteractiveSession {
+                            actor,
+                            session: awaiting,
+                            settlement: Some(McpSettlement { response, result }),
+                            children,
+                        });
+                    }
+                    crate::resident_workbench::ResidentWorkbenchStep::Completed(answer) => {
+                        let awaiting = take_workbench_await(state)?;
+                        let workbench = runtime.runner.workbench(
+                            awaiting.request.output_type.clone(),
+                            awaiting.request.output_modules.clone(),
+                        );
+                        outcome = workbench
+                            .resume_completion(turn.session_context(), awaiting.hole, answer)
+                            .await?;
+                        state.result =
+                            Some(workbench_response(state, WorkbenchRunStatus::Completed));
+                    }
+                }
+            }
+        }
         let context = turn.session_context();
         let boundary = await_host_operation(
             cancel.clone(),
@@ -1226,15 +1509,19 @@ where
         .ok_or(ResidentHostTaskError::Cancelled)??;
         match boundary {
             ResidentActorBoundary::Completed => {
-                if let Some(mut state) = mcp.take() {
-                    let result = state.result.take().ok_or_else(|| {
+                if let Some(state) = invocation.take() {
+                    let (mut response, mut result) = match state {
+                        InvocationState::Mcp(state) => (state.response, state.result),
+                        InvocationState::Workbench(state) => (state.response, state.result),
+                    };
+                    let result = result.take().ok_or_else(|| {
                         ResidentHostTaskError::Workbench(
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "actor completed an MCP invocation without replying".into(),
                             ),
                         )
                     })?;
-                    let response = state.response.take().ok_or_else(|| {
+                    let response = response.take().ok_or_else(|| {
                         ResidentHostTaskError::Workbench(
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "actor MCP invocation lost its response channel".into(),
@@ -1313,7 +1600,10 @@ where
                     OutboundSettlement::Pending(pending) => {
                         return Ok(HostTaskResult::ParkedCall {
                             actor,
-                            pending: HostCall { pending, mcp },
+                            pending: HostCall {
+                                pending,
+                                invocation,
+                            },
                             children,
                         });
                     }
@@ -1328,7 +1618,10 @@ where
                 .ok_or(ResidentHostTaskError::Cancelled)??;
                 return Ok(HostTaskResult::ParkedWait {
                     actor,
-                    pending: HostWait { pending, mcp },
+                    pending: HostWait {
+                        pending,
+                        invocation,
+                    },
                     children,
                 });
             }
@@ -1348,7 +1641,15 @@ where
             }
             ResidentActorBoundary::McpAwait(awaiting) => {
                 drop(turn);
-                let settlement = if let Some(mut state) = mcp {
+                let settlement = if let Some(state) = invocation {
+                    let InvocationState::Mcp(mut state) = state else {
+                        return Err(ResidentHostTaskError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "interactive workbench reached the legacy MCP await boundary"
+                                    .into(),
+                            ),
+                        ));
+                    };
                     let Some(result) = state.result.take() else {
                         return Err(ResidentHostTaskError::Workbench(
                             ResidentActorWorkbenchError::ActorProtocol(
@@ -1388,11 +1689,13 @@ where
                 });
             }
             ResidentActorBoundary::McpReply(reply) => {
-                let state = mcp.as_mut().ok_or_else(|| {
-                    ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
-                        "actor MCP reply reached the host without an invocation".into(),
-                    ))
-                })?;
+                let Some(InvocationState::Mcp(state)) = invocation.as_mut() else {
+                    return Err(ResidentHostTaskError::Workbench(
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "actor MCP reply reached the host without an MCP invocation".into(),
+                        ),
+                    ));
+                };
                 if state.result.is_some() {
                     return Err(ResidentHostTaskError::Workbench(
                         ResidentActorWorkbenchError::ActorProtocol(
@@ -1416,8 +1719,182 @@ where
                 .await
                 .ok_or(ResidentHostTaskError::Cancelled)??;
             }
+            ResidentActorBoundary::AgentSession(session) => {
+                let (request, hole, input) = session.into_parts();
+                let workbench = runtime
+                    .runner
+                    .workbench(request.output_type.clone(), request.output_modules.clone());
+                workbench
+                    .mount_named_input(
+                        turn.session_context(),
+                        "sessionInput",
+                        request.input_type.clone(),
+                        input,
+                    )
+                    .await?;
+                drop(turn);
+                let settlement = match invocation {
+                    Some(InvocationState::Workbench(mut state)) => {
+                        let result = state.result.take().ok_or_else(|| {
+                            ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
+                                "fixed actor program opened another agent session before completing the current session_run".into(),
+                            ))
+                        })?;
+                        Some(McpSettlement {
+                            response: state.response.take().ok_or_else(|| {
+                                ResidentHostTaskError::Workbench(
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "interactive workbench lost its response channel".into(),
+                                    ),
+                                )
+                            })?,
+                            result,
+                        })
+                    }
+                    Some(InvocationState::Mcp(_)) => {
+                        return Err(ResidentHostTaskError::Workbench(
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "legacy MCP invocation entered an agent session".into(),
+                            ),
+                        ));
+                    }
+                    None => None,
+                };
+                return Ok(HostTaskResult::InteractiveSession {
+                    actor,
+                    session: crate::interactive_session::ResidentInteractiveAwait { request, hole },
+                    settlement,
+                    children,
+                });
+            }
         }
     }
+}
+
+enum WorkbenchAdvance {
+    Running {
+        outcome: Box<ResidentOutcome>,
+        fragment: crate::resident_workbench::ResidentWorkbenchFragment,
+    },
+    Stable(serde_json::Value),
+    Completed(tidepool_runtime::session::RootCustody),
+}
+
+async fn begin_next_workbench_item<H, O>(
+    runtime: &ResidentHostRuntime<H, O>,
+    context: crate::ActorSessionContext,
+    state: &mut WorkbenchInvocationState,
+) -> Result<WorkbenchAdvance, ResidentHostTaskError>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
+    let awaiting = state.awaiting.as_ref().ok_or_else(|| {
+        ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
+            "workbench request lost its agent-session continuation".into(),
+        ))
+    })?;
+    let workbench = runtime
+        .runner
+        .workbench(
+            awaiting.request.output_type.clone(),
+            awaiting.request.output_modules.clone(),
+        )
+        .with_json_input(
+            state
+                .request
+                .input
+                .as_ref()
+                .map(tidepool_runtime::session::normalize_workbench_input),
+        );
+    loop {
+        let Some(source) = state.request.items.get(state.cursor).cloned() else {
+            return Ok(WorkbenchAdvance::Stable(workbench_response(
+                state,
+                WorkbenchRunStatus::Committed,
+            )));
+        };
+        let block = ParsedBlock {
+            ordinal: state.cursor + 1,
+            total: state.request.items.len(),
+            source,
+        };
+        match workbench.begin_item(context.clone(), block).await? {
+            crate::resident_workbench::ResidentWorkbenchStep::Committed(receipt) => {
+                state.receipts.push(item_receipt(
+                    state.cursor,
+                    WorkbenchItemStatus::Committed,
+                    receipt,
+                ));
+                state.cursor += 1;
+            }
+            crate::resident_workbench::ResidentWorkbenchStep::Rejected(diagnostic) => {
+                state.receipts.push(item_receipt(
+                    state.cursor,
+                    WorkbenchItemStatus::Rejected,
+                    diagnostic,
+                ));
+                return Ok(WorkbenchAdvance::Stable(workbench_response(
+                    state,
+                    WorkbenchRunStatus::Rejected,
+                )));
+            }
+            crate::resident_workbench::ResidentWorkbenchStep::Running { fragment, outcome } => {
+                return Ok(WorkbenchAdvance::Running { fragment, outcome });
+            }
+            crate::resident_workbench::ResidentWorkbenchStep::Completed(answer) => {
+                return Ok(WorkbenchAdvance::Completed(answer));
+            }
+        }
+    }
+}
+
+fn item_receipt(index: usize, status: WorkbenchItemStatus, output: String) -> WorkbenchItemReceipt {
+    WorkbenchItemReceipt {
+        index,
+        status,
+        output,
+    }
+}
+
+fn take_workbench_await(
+    state: &mut WorkbenchInvocationState,
+) -> Result<crate::interactive_session::ResidentInteractiveAwait, ResidentHostTaskError> {
+    state.awaiting.take().ok_or_else(|| {
+        ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
+            "workbench request lost its agent-session continuation".into(),
+        ))
+    })
+}
+
+fn take_workbench_transport(
+    state: &mut WorkbenchInvocationState,
+) -> Result<
+    (
+        crate::interactive_session::ResidentInteractiveAwait,
+        oneshot::Sender<Result<serde_json::Value, String>>,
+    ),
+    ResidentHostTaskError,
+> {
+    let awaiting = take_workbench_await(state)?;
+    let response = state.response.take().ok_or_else(|| {
+        ResidentHostTaskError::Workbench(ResidentActorWorkbenchError::ActorProtocol(
+            "workbench request lost its response channel".into(),
+        ))
+    })?;
+    Ok((awaiting, response))
+}
+
+fn workbench_response(
+    state: &WorkbenchInvocationState,
+    status: WorkbenchRunStatus,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "items": state.receipts,
+        "nextIndex": state.cursor,
+        "total": state.request.items.len(),
+    })
 }
 
 async fn cancellation_requested(mut receiver: watch::Receiver<bool>) {

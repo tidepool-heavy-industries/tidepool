@@ -965,19 +965,7 @@ pub fn template_haskell_show_default(
 /// the self-iterating harness's `State`/compaction splice (J2), so every
 /// code path that emits a Haskell string literal escapes it identically.
 pub fn escape_haskell_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:x};", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
+    tidepool_runtime::session::escape_workbench_haskell_string(s)
 }
 
 /// Render the `input :: Aeson.Value` top-level binding for injection into a
@@ -985,40 +973,12 @@ pub fn escape_haskell_string(s: &str) -> String {
 /// the eval template here and the `tidepool-repl` session wraps so every code
 /// path that can reference `input` injects it identically.
 pub fn input_binding_source(input: Option<&serde_json::Value>) -> String {
-    match input {
-        Some(val) => format!("input :: Aeson.Value\ninput = {}\n\n", json_to_haskell(val)),
-        None => String::new(),
-    }
+    tidepool_runtime::session::workbench_input_binding(input)
 }
 
-/// Render a serde_json::Value as a Haskell aeson literal expression.
-fn json_to_haskell(val: &serde_json::Value) -> String {
-    match val {
-        serde_json::Value::Null => "Aeson.Null".into(),
-        serde_json::Value::Bool(b) => {
-            format!("Aeson.Bool {}", if *b { "True" } else { "False" })
-        }
-        serde_json::Value::Number(n) => {
-            // Exact for ints AND floats: decompose the token into an integer
-            // coefficient × 10^exponent and build the aeson Scientific directly.
-            let (coeff, exp) = tidepool_eval::shapes::parse_decimal_token(&n.to_string());
-            format!("Aeson.Number (Aeson.scientific ({coeff}) ({exp}))")
-        }
-        serde_json::Value::String(s) => {
-            format!("Aeson.String \"{}\"", escape_haskell_string(s))
-        }
-        serde_json::Value::Array(arr) => {
-            let elems: Vec<String> = arr.iter().map(json_to_haskell).collect();
-            format!("toJSON [{}]", elems.join(", "))
-        }
-        serde_json::Value::Object(map) => {
-            let pairs: Vec<String> = map
-                .iter()
-                .map(|(k, v)| format!("\"{}\" .= {}", escape_haskell_string(k), json_to_haskell(v)))
-                .collect();
-            format!("object [{}]", pairs.join(", "))
-        }
-    }
+#[cfg(test)]
+fn json_to_haskell(value: &serde_json::Value) -> String {
+    tidepool_runtime::session::workbench_json_to_haskell(value)
 }
 
 pub(crate) fn format_error_with_source(

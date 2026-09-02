@@ -2425,3 +2425,48 @@ ActorMcpReplyWith :: Value -> ActorMcp ()
 true
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: AgentSession ===============================
+
+-- type_name (12 bytes) --
+AgentSession
+-- end type_name --
+
+-- description (191 bytes) --
+Open this actor's supervised interactive-agent session with a statically typed completion. The external application reaches the persistent Haskell workbench through its actor-local transport.
+-- end description --
+
+-- prompt_card: Some --
+-- prompt_card.0 (131 bytes) --
+`agentSession prompt input` — expose the persistent Haskell workbench to the attached agent and resume with a GHC-checked result.
+-- end prompt_card.0 --
+
+-- constructors (1 items) --
+-- constructors[0] (69 bytes) --
+AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output
+-- end constructors[0] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (29 bytes) --
+import Tidepool.Agent.Session
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (0 items) --
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+

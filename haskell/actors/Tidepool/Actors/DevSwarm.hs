@@ -1,12 +1,14 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE EmptyDataDecls #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
 
 -- | The first self-hosting actor policy.
 --
@@ -16,44 +18,49 @@
 -- only explicit acknowledgement releases the root's reference.
 module Tidepool.Actors.DevSwarm
   ( RootEffects
+  , ActorEffects
   , rootPolicy
+  , WorkerRecord
+  , WorkerHandle (..)
+  , WorkerStart (..)
+  , WorkerPhase (..)
+  , WorkerSummary (..)
+  , WorkerCollection (..)
+  , WorkerAcknowledgement (..)
+  , WorkerReport (..)
+  , WorkerOutcome (..)
+  , CandidateReceipt (..)
+  , startWorker
+  , listWorkerState
+  , collectWorkerResult
+  , acknowledgeWorker
   ) where
 
-import Control.Monad.Freer (Eff)
+import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Prelude
 
 import Tidepool.Actor
-import Tidepool.Agent.Contract
+import Tidepool.Agent.Session (agentSession)
 import Tidepool.Aeson (FromJSON, ToJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
 import qualified Tidepool.Data.Text as T
-import Tidepool.Effects.Core (Actor, ActorMcp, Worktree)
+import Tidepool.Effects.Core (Actor, AgentSession, Worktree)
 import Tidepool.Worktree
 
-type RootEffects = '[ActorMcp, Actor, Worktree]
+type RootEffects = '[AgentSession, Actor, Worktree]
 
-data StatusInput = StatusInput
-  deriving (Generic, FromJSON, JsonSchema)
-
-data ActorStatus = ActorStatus
-  { role :: Text
-  , detail :: Text
-  }
-  deriving (Generic, JsonSchema, ToJSON)
-
-data SpawnWorker = SpawnWorker
-  { workKey :: Text
-  , assignment :: Text
-  }
-  deriving (Generic, FromJSON, JsonSchema)
+-- | Canonical workbench alias for the root's actor-local compilation view.
+-- Child facades provide the same name for their attenuated row.
+type ActorEffects = RootEffects
 
 -- | Stable model-visible correlation for one worker in this root
 -- incarnation. The constructor carries no authority; the root retains the
 -- exact 'ActorRef' privately.
 newtype WorkerHandle = WorkerHandle { workerId :: Text }
-  deriving (Eq, Generic, FromJSON, JsonSchema, ToJSON)
+  deriving stock (Eq, Generic)
+  deriving anyclass (FromJSON, JsonSchema, ToJSON)
 
 data WorkerStart
   = WorkerAccepted
@@ -71,9 +78,6 @@ data WorkerStart
       }
   deriving (Generic, JsonSchema, ToJSON)
 
-data ListWorkers = ListWorkers
-  deriving (Generic, FromJSON, JsonSchema)
-
 data WorkerPhase
   = WorkerPendingPhase
   | WorkerCollectedPhase
@@ -86,12 +90,6 @@ data WorkerSummary = WorkerSummary
   , phase :: WorkerPhase
   }
   deriving (Generic, JsonSchema, ToJSON)
-
-newtype Workers = Workers { workers :: [WorkerSummary] }
-  deriving (Generic, JsonSchema, ToJSON)
-
-newtype CollectWorker = CollectWorker { worker :: WorkerHandle }
-  deriving (Generic, FromJSON, JsonSchema)
 
 data WorkerReport = WorkerReport
   { summary :: Text
@@ -121,34 +119,13 @@ data WorkerCollection
   | WorkerNotFound { worker :: WorkerHandle }
   deriving (Generic, JsonSchema, ToJSON)
 
-newtype AcknowledgeWorker = AcknowledgeWorker { worker :: WorkerHandle }
-  deriving (Generic, FromJSON, JsonSchema)
-
 data WorkerAcknowledgement
   = WorkerAcknowledged { worker :: WorkerHandle }
   | WorkerNotCollected { worker :: WorkerHandle }
   | WorkerAcknowledgementUnknown { worker :: WorkerHandle }
   deriving (Generic, JsonSchema, ToJSON)
 
-newtype FinishAccepted = FinishAccepted { accepted :: Bool }
-  deriving (Generic, JsonSchema, ToJSON)
-
 data WorkerProtocol result
-
-data RootTools mode = RootTools
-  { actorStatus :: mode :- Call StatusInput ActorStatus
-  , spawnWorker :: mode :- Update SpawnWorker WorkerStart
-  , listWorkers :: mode :- Call ListWorkers Workers
-  , collectWorker :: mode :- Update CollectWorker WorkerCollection
-  , ackWorker :: mode :- Update AcknowledgeWorker WorkerAcknowledgement
-  }
-  deriving (Generic)
-
-data WorkerTools mode = WorkerTools
-  { actorStatus :: mode :- Call StatusInput ActorStatus
-  , finishWork :: mode :- Finish WorkerReport FinishAccepted
-  }
-  deriving (Generic)
 
 workerDefinition
   :: WorktreeHandle
@@ -160,78 +137,79 @@ workerDefinition tree key =
       { label = "devswarm-worker/" <> key
       , effectProfile = ReadOnly
       , initialization = pure
-      , behavior = \_ assignmentText ->
-          serveToolsWithInitialUser assignmentText
-            WorkerTools
-              { actorStatus =
-                  tool "Describe this worker actor." $ \_ ->
-                    pure (ActorStatus "worker" "ready")
-              , finishWork =
-                  finishTool "Submit the authored report. Tidepool observes repository facts itself and exits with a trusted candidate receipt." $ \report -> do
-                    observed <- observeSubmission (worktreeId tree)
-                    case observed of
-                      Left failure -> error (T.unpack (renderWorktreeError failure))
-                      Right repository ->
-                        pure
-                          ( FinishAccepted True
-                          , CandidateReceipt report repository
-                          )
-              }
+      , behavior = \_ assignmentText -> do
+          report <-
+            ( agentSession (Just assignmentText) assignmentText
+                :: Eff (ReadOnlyEffects WorkerProtocol) WorkerReport
+            )
+          observed <- observeSubmission (worktreeId tree)
+          case observed of
+            Left failure -> error (T.unpack (renderWorktreeError failure))
+            Right repository -> pure (CandidateReceipt report repository)
       , visibleToChild = []
       , onShutdown = const (pure ())
       }
 
+-- | The fixed root policy owns only the durable-in-incarnation state loop.
+-- The attached agent evolves orchestration policy inside each typed session
+-- and returns the next exact state with 'complete'.
 rootPolicy :: Eff RootEffects a
-rootPolicy = serveToolsWith [] tools
+rootPolicy = loop []
   where
-    tools records =
-      RootTools
-        { actorStatus =
-            tool "Describe the root actor and its current role." $ \_ ->
-              pure (ActorStatus "root" "ready to unfold and fold typed workers")
-        , spawnWorker =
-            updateTool "Idempotently accept a supervised worker intent. Acceptance means the resident actor exists and external deployment is underway; it does not claim Codex is online." $ \request ->
-              case findByKey request.workKey records of
-                Just record
-                  | recordAssignment record == request.assignment ->
-                      pure (existingStart record, records)
-                  | otherwise ->
-                      pure (WorkerKeyConflict request.workKey, records)
-                Nothing -> do
-                  created <- createWorktree (fromCurrentRepository ("shoal/" <> request.workKey))
-                  case created of
-                    Left failure ->
-                      pure
-                        ( WorkerStartFailed request.workKey (renderWorktreeError failure)
-                        , records
-                        )
-                    Right tree -> do
-                      let handle = WorkerHandle (renderWorktreeId (worktreeId tree))
-                      ref <- startActor
-                        (workerDefinition tree request.workKey)
-                        request.assignment
-                      pure
-                        ( WorkerAccepted request.workKey handle
-                        , RunningWorker request.workKey request.assignment handle ref : records
-                        )
-        , listWorkers =
-            tool "List every worker key reserved in this root incarnation and its collection phase." $ \_ ->
-              pure (Workers (map summarize records))
-        , collectWorker =
-            updateTool "Nonblocking, non-consuming collection. A terminal candidate or failure is replayed identically until explicit acknowledgement. WorkerPending means yield the current agent turn: do not sleep or poll. Shoal will wake the root after a lifecycle transition." $ \request ->
-              case findByHandle request.worker records of
-                Nothing -> pure (WorkerNotFound request.worker, records)
-                Just record -> collectRecord record records
-        , ackWorker =
-            updateTool "Acknowledge an already-collected worker and release its exact actor reference. The key remains reserved for this root incarnation." $ \request ->
-              case acknowledge request.worker records of
-                AckUnknown ->
-                  pure (WorkerAcknowledgementUnknown request.worker, records)
-                AckPending ->
-                  pure (WorkerNotCollected request.worker, records)
-                AckDone updated ->
-                  pure (WorkerAcknowledged request.worker, updated)
-        }
+    loop :: [WorkerRecord] -> Eff RootEffects a
+    loop records = do
+      next <-
+        ( agentSession Nothing records
+            :: Eff RootEffects [WorkerRecord]
+        )
+      loop next
+
+startWorker
+  :: (Member Actor effs, Member Worktree effs)
+  => Text
+  -> Text
+  -> [WorkerRecord]
+  -> Eff effs (WorkerStart, [WorkerRecord])
+startWorker key assignmentText records =
+  case findByKey key records of
+    Just record
+      | recordAssignment record == assignmentText ->
+          pure (existingStart record, records)
+      | otherwise -> pure (WorkerKeyConflict key, records)
+    Nothing -> do
+      created <- createWorktree (fromCurrentRepository ("shoal/" <> key))
+      case created of
+        Left failure ->
+          pure (WorkerStartFailed key (renderWorktreeError failure), records)
+        Right tree -> do
+          let handle = WorkerHandle (renderWorktreeId (worktreeId tree))
+          ref <- startActor (workerDefinition tree key) assignmentText
+          pure
+            ( WorkerAccepted key handle
+            , RunningWorker key assignmentText handle ref : records
+            )
+
+listWorkerState :: [WorkerRecord] -> [WorkerSummary]
+listWorkerState = map summarize
+
+collectWorkerResult
+  :: Member Actor effs
+  => WorkerHandle
+  -> [WorkerRecord]
+  -> Eff effs (WorkerCollection, [WorkerRecord])
+collectWorkerResult handle records =
+  case findByHandle handle records of
+    Nothing -> pure (WorkerNotFound handle, records)
+    Just record -> collectRecord record records
+
+acknowledgeWorker
+  :: WorkerHandle
+  -> [WorkerRecord]
+  -> (WorkerAcknowledgement, [WorkerRecord])
+acknowledgeWorker handle records = case acknowledge handle records of
+  AckUnknown -> (WorkerAcknowledgementUnknown handle, records)
+  AckPending -> (WorkerNotCollected handle, records)
+  AckDone updated -> (WorkerAcknowledged handle, updated)
 
 data WorkerRecord
   = RunningWorker Text Text WorkerHandle (ActorRef WorkerProtocol CandidateReceipt)
@@ -284,9 +262,10 @@ summarize record = WorkerSummary
   }
 
 collectRecord
-  :: WorkerRecord
+  :: Member Actor effs
+  => WorkerRecord
   -> [WorkerRecord]
-  -> Eff RootEffects (WorkerCollection, [WorkerRecord])
+  -> Eff effs (WorkerCollection, [WorkerRecord])
 collectRecord record records = case record of
   RunningWorker key assignment handle ref -> do
     terminal <- pollExit ref

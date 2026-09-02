@@ -269,6 +269,9 @@ data ActorMcp a where
   ActorMcpAwaitWith :: Value -> Text -> Maybe Text -> ActorMcp (Text, Value)
   ActorMcpReplyWith :: Value -> ActorMcp ()
 
+data AgentSession a where
+  AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output
+
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
 say :: forall effs. Member Console effs => Text -> Eff effs ()

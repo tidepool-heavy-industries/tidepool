@@ -470,19 +470,7 @@ pub(crate) fn content_hash_hex(fields: &[&[u8]]) -> String {
 
 /// Unwrap double-encoded JSON strings if they contain an object or array.
 pub fn normalize_input(v: &serde_json::Value) -> serde_json::Value {
-    if let serde_json::Value::String(s) = v {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
-            // MCP clients stringify the input param. Unwrap one level for
-            // composite values AND strings (#315: a stringified bare-string
-            // payload otherwise reaches Haskell with its quotes/escapes as
-            // literal characters). Numbers/bools stay as-is: "42" is more
-            // plausibly the literal text than a stringified number.
-            if parsed.is_object() || parsed.is_array() || parsed.is_string() {
-                return parsed;
-            }
-        }
-    }
-    v.clone()
+    tidepool_runtime::session::normalize_workbench_input(v)
 }
 
 // ---------------------------------------------------------------------------
