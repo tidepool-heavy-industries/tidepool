@@ -28,11 +28,12 @@ The useful slogan is:
 > Each actor is a Haskell program that can extend itself.
 
 “Extend itself” may mean persistent declarations in a resident session or
-editing and reloading an agent-backed actor's Haskell policy. For resident
-actors, the primary interaction surface is deliberately fenced Haskell in
-ordinary assistant responses. For an interactive agent application, the
-resident program compiles an actor-scoped MCP tools record; Rust supplies no
-parallel administrative control surface.
+editing and reloading an agent-backed actor's Haskell policy. A Tidepool-owned
+provider loop reaches the persistent workbench through fenced Haskell in
+assistant responses. An externally hosted interactive agent reaches the same
+workbench through one actor-local, GHCi-shaped MCP transport because its prose
+is not an executable callback under Tidepool's control. MCP carries Haskell
+source and receipts; it is not a second domain API.
 
 At the system level, those actors form an adaptive unfold/execute/fold loop
 over worktrees. The organization may begin as a detailed plan, a partial
@@ -112,7 +113,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | Term | Meaning |
 |---|---|
 | actor | One exact identity, mailbox, Haskell program, persistent Haskell environment, and serial resident or interactive agent context |
-| agent-backed actor | An actor whose conversation is owned by a supervised interactive agent application and whose actor capabilities are a resident Haskell-authored MCP policy |
+| agent-backed actor | An actor whose conversation is owned by a supervised interactive agent application and whose actor-local MCP transport mounts the resident Haskell workbench |
 | actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |

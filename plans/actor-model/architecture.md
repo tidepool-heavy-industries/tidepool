@@ -23,7 +23,7 @@ considered alone. Every actor combines:
        deliberate :: Member Deliberate effs => Text -> input -> Eff effs output
                               │
                               ▼
-       resident fenced-Haskell or actor-scoped MCP policy
+       resident fenced Haskell or actor-local GHCi transport
            define · inspect · evaluate · spawn · complete
                               │
                          live value a
@@ -37,7 +37,7 @@ The first two execution forms share the same actor kernel:
 - a **resident actor** lets Tidepool own the provider conversation and uses
   fenced Haskell as its primary workbench; and
 - an **agent-backed actor** wraps a long-lived interactive agent application.
-  Its resident Haskell program defines the actor-scoped MCP capability surface,
+  Its actor-local MCP server transports persistent GHCi-style workbench turns,
   while the backend owns its conversation and native user interaction.
 
 Execution form is not identity or authority. Both forms use the same exact
@@ -47,8 +47,8 @@ silently change form; recreation is a new incarnation.
 
 For a resident actor, Haskell controls when to open a result-bearing agent
 session and fixes its result type. An agent-backed actor receives runtime facts
-through its durable node inbox and invokes Haskell-authored operations through
-its actor-scoped MCP server. Rust does not create a second administrative API
+through its durable node inbox and invokes the same resident workbench through
+one GHCi-shaped MCP transport. Rust does not create a second administrative API
 or lifecycle session beside that program.
 
 ## 2. Actor components
@@ -301,18 +301,20 @@ spellings of an existing operation do not.
 
 ### Primary model interaction
 
-Fenced Haskell in an assistant response is the primary execution protocol, not
-a transitional encoding. A response may contain prose and any number of
-fenced `haskell` or `hs` blocks. The blocks execute in source order against the
-actor's persistent environment; later blocks observe declarations and bindings
-committed by earlier blocks. Prose and other fence languages do not execute.
+The primary execution protocol is a persistent GHCi-style Haskell workbench,
+not a catalog of actor-control verbs. Its transport depends on who owns the
+model loop:
 
-This keeps the model's main activity in its native text channel, permits
-several GHCi-like steps in one response, and avoids wrapping Haskell source in
-JSON tool arguments. Compile diagnostics, execution receipts, suspension
-state, and completion contracts are returned as conversation context for the
-next response. External tools may still exist for genuinely separate
-operations; evaluating the actor's Haskell is not modeled as one.
+- Tidepool-owned provider loops extract fenced `haskell` or `hs` blocks from
+  assistant responses.
+- Externally hosted interactive agents invoke one actor-local `session_run`
+  MCP tool carrying an ordered list of Haskell items.
+
+Both routes use the same classifier, persistent declaration/binding scope,
+resident machine, actor principal, effect interpreter, and structured
+receipts. Neither creates another scheduler or machine session. Provider-native
+fences keep Haskell in the assistant text channel; external agents use MCP
+because Tidepool cannot safely interpret their prose as executable output.
 
 The common agent-session executor owns this response-to-block-to-resident-run
 loop. A session opened by `deliberate` carries one typed `Complete output`

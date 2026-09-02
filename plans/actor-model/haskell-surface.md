@@ -511,19 +511,22 @@ serial actor and one accumulating model context. The disposable fragment gets
 an unavailable-operation receipt; defining or returning the future closure
 remains valid.
 
-## 5. The fenced-Haskell workbench
+## 5. The persistent Haskell workbench
 
-Fenced Haskell in ordinary assistant output is the actor's primary workbench.
-It is deliberately not a provider tool call: Haskell source remains direct
-text instead of a JSON-escaped argument, and one response may naturally mix
-explanation with several executable steps.
+The persistent GHCi-style environment is the actor's primary workbench. A
+Tidepool-owned provider loop reaches it through fenced Haskell in ordinary
+assistant output. An externally hosted agent such as Codex reaches it through
+one actor-local `session_run` MCP tool, because Tidepool cannot safely treat
+that application's prose as an executable callback. MCP is only the transport
+for Haskell source and receipts; actor operations remain ordinary Haskell
+effects rather than separate JSON tools.
 
-Every fenced `haskell` or `hs` block executes, in order, against the same
-actor-bound persistent environment. The Haskell-aware runner classifies
-declarations, binds, expressions, and supported meta commands. Rust extracts
-only explicitly tagged blocks and returns compile/runtime results as
-conversation context; it does not parse Haskell argument syntax or infer
-executable intent from prose.
+Every fenced block or `session_run` item executes, in order, against the same
+actor-bound persistent environment. The shared Haskell-aware runner classifies
+declarations, binds, expressions, and supported meta commands. The provider
+adapter extracts explicitly tagged fences; the MCP adapter accepts an explicit
+item list. Neither parses Haskell argument syntax or infers executable intent
+from prose.
 
 Required behavior:
 
