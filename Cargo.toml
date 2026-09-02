@@ -93,6 +93,7 @@ parking_lot = "0.12"
 proc-macro2 = "1"
 proptest = "1"
 quote = "1"
+ractor = { version = "0.16.5", default-features = false, features = ["tokio_runtime"] }
 reqwest = { version = "0.13", features = ["json", "stream"] }
 rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
 rustc-hash = "2.1.0"

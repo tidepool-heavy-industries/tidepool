@@ -31,6 +31,7 @@ tidepool-tool.workspace = true
 
 [dev-dependencies]
 frunk.workspace = true
+ractor.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tidepool-handlers.workspace = true
