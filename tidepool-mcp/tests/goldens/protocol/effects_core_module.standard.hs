@@ -145,6 +145,9 @@ data DirtyPolicy = RequireClean | AllowDirtySnapshot deriving (Show, Eq)
 data WorktreeSpec = WorktreeSpec { specSource :: WorktreeSource, specLabel :: Text, specDirtyPolicy :: DirtyPolicy } deriving (Show, Eq)
 data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick | InProgressRevert | InProgressBisect deriving (Show, Eq)
 data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)
+data HeadState = OnBranch BranchName GitOid | Detached GitOid deriving (Show, Eq)
+data WorkingState = WorkingState { changes :: DirtySummary, operation :: Maybe InProgressKind } deriving (Show, Eq)
+data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)
 data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)
 data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)
 data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)
@@ -157,7 +160,7 @@ instance ToJSON BranchName where toJSON (BranchName t) = toJSON t
 instance ToJSON InProgressKind where toJSON k = toJSON (show k)
 instance ToJSON DirtySummary where toJSON d = object ["staged" .= d.staged, "unstaged" .= d.unstaged, "untracked" .= d.untracked, "ignoredExcluded" .= d.ignoredExcluded]
 instance ToJSON GitFailureReceipt where toJSON r = object ["args" .= r.gitArgs, "cwd" .= r.gitCwd, "exitCode" .= r.gitExitCode, "stdout" .= r.gitStdout, "stderr" .= r.gitStderr]
-data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)
+data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | SubmissionUnstable WorktreeId | WorktreeUnauthorized WorktreeId | WorktreeAuthorityDenied Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)
 instance ToJSON WorktreeError where
   toJSON e = case e of
     SourceDirty dirty -> object ["tag" .= ("SourceDirty" :: Text), "dirty" .= dirty]
@@ -166,6 +169,9 @@ instance ToJSON WorktreeError where
     DirtySubmoduleUnsupported submodule -> object ["tag" .= ("DirtySubmoduleUnsupported" :: Text), "submodule" .= submodule]
     SourceOperationInProgress inProgress -> object ["tag" .= ("SourceOperationInProgress" :: Text), "inProgress" .= inProgress]
     WorktreeBusy busyId holder -> object ["tag" .= ("WorktreeBusy" :: Text), "busyId" .= busyId, "holder" .= holder]
+    SubmissionUnstable unstableId -> object ["tag" .= ("SubmissionUnstable" :: Text), "unstableId" .= unstableId]
+    WorktreeUnauthorized unauthorizedId -> object ["tag" .= ("WorktreeUnauthorized" :: Text), "unauthorizedId" .= unauthorizedId]
+    WorktreeAuthorityDenied authorityDetail -> object ["tag" .= ("WorktreeAuthorityDenied" :: Text), "authorityDetail" .= authorityDetail]
     GitFailure receipt -> object ["tag" .= ("GitFailure" :: Text), "receipt" .= receipt]
     WorktreeNotRegistered notRegisteredId -> object ["tag" .= ("WorktreeNotRegistered" :: Text), "notRegisteredId" .= notRegisteredId]
     InvalidRegistryRoot root inside -> object ["tag" .= ("InvalidRegistryRoot" :: Text), "root" .= root, "inside" .= inside]
@@ -177,6 +183,7 @@ data Worktree a where
   WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
   WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
   WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
+  WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
   WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
 
 data EventId = EventId Int deriving (Show, Eq)
@@ -243,8 +250,9 @@ data Green a where
 
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 data Actor a where
-  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> Actor (Int, Int)
+  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> [Text] -> Actor (Int, Int)
   ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
+  ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
   ActorCallWith :: (Int, Int) -> protocol result -> Actor result
   ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
 
@@ -258,7 +266,7 @@ data ActorLocal (api :: Type -> Type) a where
   ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next
 
 data ActorMcp a where
-  ActorMcpAwaitWith :: Value -> Text -> ActorMcp (Text, Value)
+  ActorMcpAwaitWith :: Value -> Text -> Maybe Text -> ActorMcp (Text, Value)
   ActorMcpReplyWith :: Value -> ActorMcp ()
 
 -- | Emit a line of console output. Thin wrapper over the Print effect
@@ -662,6 +670,11 @@ worktreeId h = h.handleReceipt.treeId
 -- and conflicted.
 mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)
 mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)
+-- | Observe a candidate checkout through one bounded Worktree operation.
+-- This reports submitted HEAD, dirty state, and in-progress operation
+-- together; it does not seal or mutate the checkout.
+observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)
+observeSubmission = send . WorktreeObserveSubmission
 -- | Block until `sub` has queued at least one observation, or
 -- `timeoutMs` elapses (negative blocks with no deadline). An elapsed
 -- timeout is an EMPTY list — distinguishable from a real batch, never

@@ -35,21 +35,11 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
         .filter(|effect| !matches!(effect.authored_surface, crate::schema::AuthoredSurface::All))
         .map(|effect| rust_string_literal(effect.name))
         .collect();
-    let compact_values = format!("&[{}]", curated.join(", "));
-    let compact_curated =
-        format!("pub(crate) const CURATED_EFFECTS: &[&str] = {compact_values};\n");
-    if compact_curated.len() <= 100 {
-        contents.push_str(&compact_curated);
-    } else if 4 + compact_values.len() <= 100 {
-        contents.push_str("pub(crate) const CURATED_EFFECTS: &[&str] =\n");
-        contents.push_str(&format!("    {compact_values};\n"));
-    } else {
-        contents.push_str("pub(crate) const CURATED_EFFECTS: &[&str] = &[\n");
-        for name in curated {
-            contents.push_str(&format!("    {name},\n"));
-        }
-        contents.push_str("];\n");
+    contents.push_str("pub(crate) const CURATED_EFFECTS: &[&str] = &[\n");
+    for name in curated {
+        contents.push_str(&format!("    {name},\n"));
     }
+    contents.push_str("];\n");
     contents.push_str("\n/// Hidden names grouped by their owning effect.\n");
     contents.push_str("pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[\n");
     for effect in effects
@@ -72,28 +62,22 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
                 hidden.push(helper.name);
             }
         }
-        if hidden.len() <= 1 {
-            contents.push_str(&format!(
-                "    ({}, &[{}]),\n",
-                rust_string_literal(effect.name),
-                hidden
-                    .first()
-                    .map_or_else(String::new, |name| rust_string_literal(name))
-            ));
+        let hidden: Vec<_> = hidden.into_iter().map(rust_string_literal).collect();
+        let compact_entry = format!(
+            "    ({}, &[{}]),\n",
+            rust_string_literal(effect.name),
+            hidden.join(", ")
+        );
+        if compact_entry.trim_end().len() <= 100 {
+            contents.push_str(&compact_entry);
         } else {
             contents.push_str("    (\n");
             contents.push_str(&format!("        {},\n", rust_string_literal(effect.name)));
-            let hidden: Vec<_> = hidden.into_iter().map(rust_string_literal).collect();
-            let compact_hidden = format!("&[{}]", hidden.join(", "));
-            if 8 + compact_hidden.len() <= 100 {
-                contents.push_str(&format!("        {compact_hidden},\n"));
-            } else {
-                contents.push_str("        &[\n");
-                for name in hidden {
-                    contents.push_str(&format!("            {name},\n"));
-                }
-                contents.push_str("        ],\n");
+            contents.push_str("        &[\n");
+            for name in hidden {
+                contents.push_str(&format!("            {name},\n"));
             }
+            contents.push_str("        ],\n");
             contents.push_str("    ),\n");
         }
     }

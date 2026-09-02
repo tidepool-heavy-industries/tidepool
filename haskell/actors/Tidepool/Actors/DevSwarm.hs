@@ -130,12 +130,6 @@ data WorkerAcknowledgement
   | WorkerAcknowledgementUnknown { worker :: WorkerHandle }
   deriving (Generic, JsonSchema, ToJSON)
 
-data AssignmentInput = AssignmentInput
-  deriving (Generic, FromJSON, JsonSchema)
-
-newtype WorkerAssignment = WorkerAssignment { assignment :: Text }
-  deriving (Generic, JsonSchema, ToJSON)
-
 newtype FinishAccepted = FinishAccepted { accepted :: Bool }
   deriving (Generic, JsonSchema, ToJSON)
 
@@ -152,7 +146,6 @@ data RootTools mode = RootTools
 
 data WorkerTools mode = WorkerTools
   { actorStatus :: mode :- Call StatusInput ActorStatus
-  , currentAssignment :: mode :- Call AssignmentInput WorkerAssignment
   , finishWork :: mode :- Finish WorkerReport FinishAccepted
   }
   deriving (Generic)
@@ -168,14 +161,11 @@ workerDefinition tree key =
       , effectProfile = ReadOnly
       , initialization = pure
       , behavior = \_ assignmentText ->
-          serveTools
+          serveToolsWithInitialUser assignmentText
             WorkerTools
               { actorStatus =
                   tool "Describe this worker actor." $ \_ ->
                     pure (ActorStatus "worker" "ready")
-              , currentAssignment =
-                  tool "Return this worker's typed startup assignment." $ \_ ->
-                    pure (WorkerAssignment assignmentText)
               , finishWork =
                   finishTool "Submit the authored report. Tidepool observes repository facts itself and exits with a trusted candidate receipt." $ \report -> do
                     observed <- observeSubmission (worktreeId tree)

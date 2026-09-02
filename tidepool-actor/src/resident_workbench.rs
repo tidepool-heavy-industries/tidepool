@@ -605,6 +605,7 @@ where
                         crate::generated::actor_mcp::ActorMcpReq::ActorMcpAwaitWith(
                             declarations,
                             synopsis,
+                            initial_user_message,
                         ),
                     ) => {
                         let declarations = tidepool_runtime::value_to_json(
@@ -619,6 +620,7 @@ where
                                 continuation: hole,
                                 declarations,
                                 synopsis,
+                                initial_user_message,
                             },
                         ))
                     }

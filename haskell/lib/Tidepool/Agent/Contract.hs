@@ -53,6 +53,7 @@ module Tidepool.Agent.Contract
   , compileTools
   , serveTools
   , serveToolsWith
+  , serveToolsWithInitialUser
   , declarationsToJson
   , CompiledTools (..)
   , ToolDeclaration (..)
@@ -502,6 +503,19 @@ serveTools ::
   Eff effs exit
 serveTools tools = serveToolsWith () (const tools)
 
+-- | Install a tools record and use the supplied text as the attached agent
+-- session's first User message. Haskell owns the task value; Rust transports
+-- it without reconstructing it. The message is offered only on the first
+-- policy await, never repeated after a tool invocation.
+serveToolsWithInitialUser ::
+  forall tools effs exit.
+  (HasActorApi tools (Eff effs) () exit, Member ActorMcp effs) =>
+  Text ->
+  tools (AsActorT (Eff effs) () exit) ->
+  Eff effs exit
+serveToolsWithInitialUser initialUser tools =
+  serveToolsLoop (Just initialUser) () (const tools)
+
 -- | Serve one stable declaration surface with ordinary recursive Haskell
 -- state. The builder may close plain handlers over the current state; only an
 -- 'Update' endpoint can replace it, and only a 'Finish' endpoint can return.
@@ -511,9 +525,18 @@ serveToolsWith ::
   state ->
   (state -> tools (AsActorT (Eff effs) state exit)) ->
   Eff effs exit
-serveToolsWith initial build = loop initial
+serveToolsWith = serveToolsLoop Nothing
+
+serveToolsLoop ::
+  forall tools effs state exit.
+  (HasActorApi tools (Eff effs) state exit, Member ActorMcp effs) =>
+  Maybe Text ->
+  state ->
+  (state -> tools (AsActorT (Eff effs) state exit)) ->
+  Eff effs exit
+serveToolsLoop initialUser initial build = loop initialUser initial
   where
-    loop state =
+    loop startupMessage state =
       case compileActorTools (build state) of
         Left err -> error (T.unpack (renderToolCompileError err))
         Right compiled -> do
@@ -522,15 +545,16 @@ serveToolsWith initial build = loop initial
               ( ActorMcpAwaitWith
                   (declarationsToJson (entryDeclarations compiled))
                   (entrySynopsis compiled)
+                  startupMessage
               )
           step <- entryDispatch compiled name arguments
           case step of
             ActorToolStay result -> do
               send (ActorMcpReplyWith result)
-              loop state
+              loop Nothing state
             ActorToolUpdate result next -> do
               send (ActorMcpReplyWith result)
-              loop next
+              loop Nothing next
             ActorToolFinish result exit -> do
               send (ActorMcpReplyWith result)
               pure exit

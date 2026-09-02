@@ -1049,14 +1049,13 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
     };
     let developer_instructions = developer_instructions(actor == root, &launch_mode);
-    let initial_prompt = initial_prompt(actor == root);
     let proxy_environment = binding.environment();
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: config.model.clone(),
         effort: config.effort,
         developer_instructions,
-        initial_prompt,
+        initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         mcp: InteractiveMcpServer {
             name: "tidepool_actor".into(),
@@ -1535,7 +1534,7 @@ fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
         };
         format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. The checkout is writable so you can review and integrate accepted candidates. Worker worktrees share this repository's ordinary object and branch namespace: inspect a receipt's submitted OID or branch directly, without fetching from Tidepool cache paths. For dependent work, integrate the predecessor before spawning its successor so the new worker starts from the advanced HEAD. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
     } else {
-        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
+        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment; your actor-scoped MCP tools define its completion protocol. Native coding tools remain a separate execution surface. Complete the assignment, commit coherent changes when it calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
     }
 }
 
@@ -1557,17 +1556,6 @@ fn writable_repository_roots(
     // writable is what lets native Git behave normally inside every actor.
     writable.push(git_common_dir.to_path_buf());
     writable
-}
-
-fn initial_prompt(root: bool) -> Option<String> {
-    if root {
-        None
-    } else {
-        Some(
-            "Initialize this Tidepool worker through its typed tools. Retrieve the typed startup assignment, complete it, and submit the result with finish_work."
-                .into(),
-        )
-    }
 }
 
 fn fresh_session_id() -> SessionId {
@@ -1648,12 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn root_starts_idle_while_workers_receive_their_assignment_kickoff() {
-        assert_eq!(initial_prompt(true), None);
-        assert!(initial_prompt(false)
-            .expect("worker kickoff")
-            .contains("Retrieve the typed startup assignment"));
-
+    fn root_instructions_preserve_idle_and_resume_contracts() {
         let resumed = developer_instructions(
             true,
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
@@ -1922,6 +1905,7 @@ mod tests {
             panic!("root policy retired before installation");
         };
         assert_eq!(root_installation.actor, actor);
+        assert_eq!(root_installation.initial_user_message, None);
         let policy = root_installation.policy;
         let names = policy
             .declarations()
@@ -2022,6 +2006,10 @@ mod tests {
         };
         assert_eq!(worker.launch_worktrees.len(), 1);
         assert_ne!(worker.actor, actor);
+        assert_eq!(
+            worker.initial_user_message.as_deref(),
+            Some("inspect one focused boundary")
+        );
         let worker_tree = WorktreeId::from_raw(worker.launch_worktrees[0].clone());
         let worker_principal = WorktreePrincipal::exact_actor(
             &runtime_namespace(session_root.path()),
@@ -2038,10 +2026,7 @@ mod tests {
             .iter()
             .map(|declaration| declaration.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
-            worker_names,
-            ["actor_status", "current_assignment", "finish_work"]
-        );
+        assert_eq!(worker_names, ["actor_status", "finish_work"]);
         assert_eq!(
             worker
                 .policy
@@ -2122,16 +2107,6 @@ mod tests {
             Some(serde_json::json!({
                 "tag": "WorkerAcknowledgementUnknown",
                 "worker": unknown_handle
-            }))
-        );
-        let assignment = worker_server
-            .dispatch_tool("current_assignment", serde_json::Map::new())
-            .await
-            .expect("read typed assignment");
-        assert_eq!(
-            assignment.structured_content,
-            Some(serde_json::json!({
-                "assignment": "inspect one focused boundary"
             }))
         );
         let finish = serde_json::json!({

@@ -1374,7 +1374,7 @@ Managed git worktrees: create an isolated worktree from a clean source (or, expl
 
 -- prompt_card: None --
 
--- constructors (6 items) --
+-- constructors (7 items) --
 -- constructors[0] (80 bytes) --
 WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[0] --
@@ -1395,13 +1395,17 @@ WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
 WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
 -- end constructors[4] --
 
--- constructors[5] (101 bytes) --
-WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- constructors[5] (96 bytes) --
+WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
 -- end constructors[5] --
+
+-- constructors[6] (101 bytes) --
+WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- end constructors[6] --
 
 -- end constructors --
 
--- type_defs (22 items) --
+-- type_defs (25 items) --
 -- type_defs[0] (53 bytes) --
 data WorktreeId = WorktreeId Text deriving (Show, Eq)
 -- end type_defs[0] --
@@ -1438,56 +1442,68 @@ data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick 
 data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)
 -- end type_defs[8] --
 
--- type_defs[9] (164 bytes) --
-data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)
+-- type_defs[9] (81 bytes) --
+data HeadState = OnBranch BranchName GitOid | Detached GitOid deriving (Show, Eq)
 -- end type_defs[9] --
 
--- type_defs[10] (187 bytes) --
-data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)
+-- type_defs[10] (115 bytes) --
+data WorkingState = WorkingState { changes :: DirtySummary, operation :: Maybe InProgressKind } deriving (Show, Eq)
 -- end type_defs[10] --
 
--- type_defs[11] (93 bytes) --
-data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)
+-- type_defs[11] (185 bytes) --
+data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)
 -- end type_defs[11] --
 
--- type_defs[12] (113 bytes) --
-data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)
+-- type_defs[12] (164 bytes) --
+data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)
 -- end type_defs[12] --
 
--- type_defs[13] (71 bytes) --
-data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)
+-- type_defs[13] (187 bytes) --
+data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)
 -- end type_defs[13] --
 
--- type_defs[14] (65 bytes) --
-instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t
+-- type_defs[14] (93 bytes) --
+data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)
 -- end type_defs[14] --
 
--- type_defs[15] (57 bytes) --
-instance ToJSON GitOid where toJSON (GitOid t) = toJSON t
+-- type_defs[15] (113 bytes) --
+data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)
 -- end type_defs[15] --
 
--- type_defs[16] (57 bytes) --
-instance ToJSON GitRef where toJSON (GitRef t) = toJSON t
+-- type_defs[16] (71 bytes) --
+data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)
 -- end type_defs[16] --
 
 -- type_defs[17] (65 bytes) --
-instance ToJSON BranchName where toJSON (BranchName t) = toJSON t
+instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t
 -- end type_defs[17] --
 
--- type_defs[18] (63 bytes) --
-instance ToJSON InProgressKind where toJSON k = toJSON (show k)
+-- type_defs[18] (57 bytes) --
+instance ToJSON GitOid where toJSON (GitOid t) = toJSON t
 -- end type_defs[18] --
 
--- type_defs[19] (169 bytes) --
-instance ToJSON DirtySummary where toJSON d = object ["staged" .= d.staged, "unstaged" .= d.unstaged, "untracked" .= d.untracked, "ignoredExcluded" .= d.ignoredExcluded]
+-- type_defs[19] (57 bytes) --
+instance ToJSON GitRef where toJSON (GitRef t) = toJSON t
 -- end type_defs[19] --
 
--- type_defs[20] (177 bytes) --
-instance ToJSON GitFailureReceipt where toJSON r = object ["args" .= r.gitArgs, "cwd" .= r.gitCwd, "exitCode" .= r.gitExitCode, "stdout" .= r.gitStdout, "stderr" .= r.gitStderr]
+-- type_defs[20] (65 bytes) --
+instance ToJSON BranchName where toJSON (BranchName t) = toJSON t
 -- end type_defs[20] --
 
--- type_defs[21] (1544 bytes) --
-data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)
+-- type_defs[21] (63 bytes) --
+instance ToJSON InProgressKind where toJSON k = toJSON (show k)
+-- end type_defs[21] --
+
+-- type_defs[22] (169 bytes) --
+instance ToJSON DirtySummary where toJSON d = object ["staged" .= d.staged, "unstaged" .= d.unstaged, "untracked" .= d.untracked, "ignoredExcluded" .= d.ignoredExcluded]
+-- end type_defs[22] --
+
+-- type_defs[23] (177 bytes) --
+instance ToJSON GitFailureReceipt where toJSON r = object ["args" .= r.gitArgs, "cwd" .= r.gitCwd, "exitCode" .= r.gitExitCode, "stdout" .= r.gitStdout, "stderr" .= r.gitStderr]
+-- end type_defs[23] --
+
+-- type_defs[24] (2024 bytes) --
+data WorktreeError = SourceDirty DirtySummary | NotARepository Text | WorktreeLost WorktreeId | DirtySubmoduleUnsupported Text | SourceOperationInProgress InProgressKind | WorktreeBusy WorktreeId Text | SubmissionUnstable WorktreeId | WorktreeUnauthorized WorktreeId | WorktreeAuthorityDenied Text | GitFailure GitFailureReceipt | WorktreeNotRegistered WorktreeId | InvalidRegistryRoot Text Text | StorageFailure Text Text deriving (Show, Eq)
 instance ToJSON WorktreeError where
   toJSON e = case e of
     SourceDirty dirty -> object ["tag" .= ("SourceDirty" :: Text), "dirty" .= dirty]
@@ -1496,11 +1512,14 @@ instance ToJSON WorktreeError where
     DirtySubmoduleUnsupported submodule -> object ["tag" .= ("DirtySubmoduleUnsupported" :: Text), "submodule" .= submodule]
     SourceOperationInProgress inProgress -> object ["tag" .= ("SourceOperationInProgress" :: Text), "inProgress" .= inProgress]
     WorktreeBusy busyId holder -> object ["tag" .= ("WorktreeBusy" :: Text), "busyId" .= busyId, "holder" .= holder]
+    SubmissionUnstable unstableId -> object ["tag" .= ("SubmissionUnstable" :: Text), "unstableId" .= unstableId]
+    WorktreeUnauthorized unauthorizedId -> object ["tag" .= ("WorktreeUnauthorized" :: Text), "unauthorizedId" .= unauthorizedId]
+    WorktreeAuthorityDenied authorityDetail -> object ["tag" .= ("WorktreeAuthorityDenied" :: Text), "authorityDetail" .= authorityDetail]
     GitFailure receipt -> object ["tag" .= ("GitFailure" :: Text), "receipt" .= receipt]
     WorktreeNotRegistered notRegisteredId -> object ["tag" .= ("WorktreeNotRegistered" :: Text), "notRegisteredId" .= notRegisteredId]
     InvalidRegistryRoot root inside -> object ["tag" .= ("InvalidRegistryRoot" :: Text), "root" .= root, "inside" .= inside]
     StorageFailure storagePath storageDetail -> object ["tag" .= ("StorageFailure" :: Text), "storagePath" .= storagePath, "storageDetail" .= storageDetail]
--- end type_defs[21] --
+-- end type_defs[24] --
 
 -- end type_defs --
 
@@ -1511,7 +1530,7 @@ import Tidepool.Worktree
 
 -- end extra_imports --
 
--- helpers (5 items) --
+-- helpers (6 items) --
 -- helpers[0] (347 bytes) --
 -- | Create a managed worktree. `Left (SourceDirty summary)` when the
 -- source is dirty and the spec did not opt in; case-match the error
@@ -1554,6 +1573,14 @@ worktreeId h = h.handleReceipt.treeId
 mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)
 mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)
 -- end helpers[4] --
+
+-- helpers[5] (377 bytes) --
+-- | Observe a candidate checkout through one bounded Worktree operation.
+-- This reports submitted HEAD, dirty state, and in-progress operation
+-- together; it does not seal or mutate the checkout.
+observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)
+observeSubmission = send . WorktreeObserveSubmission
+-- end helpers[5] --
 
 -- end helpers --
 
@@ -2202,22 +2229,26 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 `Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits.
 -- end prompt_card.0 --
 
--- constructors (4 items) --
--- constructors[0] (88 bytes) --
-ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> Actor (Int, Int)
+-- constructors (5 items) --
+-- constructors[0] (98 bytes) --
+ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> [Text] -> Actor (Int, Int)
 -- end constructors[0] --
 
 -- constructors[1] (56 bytes) --
 ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
 -- end constructors[1] --
 
--- constructors[2] (62 bytes) --
-ActorCallWith :: (Int, Int) -> protocol result -> Actor result
+-- constructors[2] (64 bytes) --
+ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
 -- end constructors[2] --
 
--- constructors[3] (54 bytes) --
-ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- constructors[3] (62 bytes) --
+ActorCallWith :: (Int, Int) -> protocol result -> Actor result
 -- end constructors[3] --
+
+-- constructors[4] (54 bytes) --
+ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- end constructors[4] --
 
 -- end constructors --
 
@@ -2346,6 +2377,48 @@ import Tidepool.Actor
 Maybe
 -- end default_row_args[0] --
 
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+
+=============================== EFFECT: ActorMcp ===============================
+
+-- type_name (8 bytes) --
+ActorMcp
+-- end type_name --
+
+-- description (159 bytes) --
+Private resident-policy boundary for actor-scoped MCP tools. Authored code uses `serveTools`; Rust owns transport while Haskell owns declarations and dispatch.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (2 items) --
+-- constructors[0] (74 bytes) --
+ActorMcpAwaitWith :: Value -> Text -> Maybe Text -> ActorMcp (Text, Value)
+-- end constructors[0] --
+
+-- constructors[1] (41 bytes) --
+ActorMcpReplyWith :: Value -> ActorMcp ()
+-- end constructors[1] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (0 items) --
+-- end extra_imports --
+
+-- helpers (0 items) --
+-- end helpers --
+
+-- type_params (0 items) --
+-- end type_params --
+
+-- default_row_args (0 items) --
 -- end default_row_args --
 
 -- helpers_row_polymorphic --

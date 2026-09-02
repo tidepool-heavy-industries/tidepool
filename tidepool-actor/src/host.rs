@@ -140,6 +140,9 @@ pub struct ResidentHostShutdownReport {
 pub struct ResidentMcpInstallation {
     pub actor: ActorRef,
     pub policy: Arc<crate::ResidentMcpPolicy>,
+    /// Haskell-authored first User message for an attached interactive agent.
+    /// The deployment owner transports it without interpreting it.
+    pub initial_user_message: Option<String>,
     /// Capability-specific worktree recipes captured from the actor
     /// definition. Deployment must bind these to `actor` before launching an
     /// external application; they are correlation data, not authority alone.
@@ -1094,6 +1097,7 @@ where
                     ResidentMcpInstallation {
                         actor,
                         policy,
+                        initial_user_message: awaiting.initial_user_message.clone(),
                         launch_worktrees,
                     },
                 ));

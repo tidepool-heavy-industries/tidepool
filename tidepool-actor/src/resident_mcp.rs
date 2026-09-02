@@ -16,6 +16,7 @@ pub(crate) struct ResidentMcpAwait {
     pub(crate) continuation: ResidentHole,
     pub(crate) declarations: Vec<tidepool_tool::ToolDeclaration>,
     pub(crate) synopsis: String,
+    pub(crate) initial_user_message: Option<String>,
 }
 
 /// A completed invocation waiting for Rust to acknowledge its result.

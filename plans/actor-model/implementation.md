@@ -926,17 +926,18 @@ Implement this boundary in order:
    authorization, root custody, and event stream. The composition root makes
    no OAuth request: the interactive backend owns its conversation, while the
    resident provider is unavailable unless a later policy explicitly installs
-   one. A fresh stock TUI receives one launch-time startup prompt because its
-   resumable rollout does not exist until the first user message; later input
-   uses the durable inbox and native push path.
+   one. A fresh stock TUI receives the Haskell-authored startup value as its
+   first User message because its resumable rollout does not exist until that
+   submission; later input uses the durable inbox and native push path.
 
    The bundled `Tidepool.Actors.DevSwarm` policy and `shoal host` composition
    are landed. The root exposes typed stateful `actorStatus`, `spawnWorker`,
    `listWorkers`, nonblocking `collectWorker`, and explicit `ackWorker` tools.
    A spawned worker stabilizes at its own `serveTools` policy, is handed to
-   deployment through the host's single-consumer lifecycle stream, exposes its
-   typed startup assignment, and completes through `finishWork` with a retained
-   `CandidateReceipt`. A focused GHC/JIT test proves root installation,
+   deployment through the host's single-consumer lifecycle stream, receives
+   its typed startup assignment directly as the initial User message, and
+   completes through `finishWork` with a retained `CandidateReceipt`. There is
+   no parallel assignment lookup tool. A focused GHC/JIT test proves root installation,
    MCP-routed `startActor`, child-policy installation, terminal MCP settlement,
    replayable typed collection, and acknowledgement without opening an
    interactive process.

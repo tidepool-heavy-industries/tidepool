@@ -8,7 +8,7 @@ pub fn actor_mcp_decl() -> crate::EffectDecl {
         description: "Private resident-policy boundary for actor-scoped MCP tools. Authored code uses `serveTools`; Rust owns transport while Haskell owns declarations and dispatch.",
         prompt_card: None,
         constructors: &[
-            "ActorMcpAwaitWith :: Value -> Text -> ActorMcp (Text, Value)",
+            "ActorMcpAwaitWith :: Value -> Text -> Maybe Text -> ActorMcp (Text, Value)",
             "ActorMcpReplyWith :: Value -> ActorMcp ()",
         ],
         type_defs: &[],

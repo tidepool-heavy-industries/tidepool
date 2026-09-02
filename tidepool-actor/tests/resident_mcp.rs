@@ -180,6 +180,7 @@ async fn resident_policy_serves_repeated_typed_haskell_calls_and_dies_with_its_a
         panic!("root policy retired before installation");
     };
     assert_eq!(installation.actor, actor);
+    assert_eq!(installation.initial_user_message, None);
     let policy = installation.policy;
     let server = tidepool_mcp::DynamicMcpServer::from_resident_policy(policy)
         .expect("project resident policy into MCP");

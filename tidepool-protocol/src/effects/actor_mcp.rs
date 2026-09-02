@@ -45,6 +45,11 @@ pub fn actor_mcp() -> Effect {
                         ty: HsType::Text,
                         rust: RustBinding::Derived,
                     },
+                    Arg {
+                        name: "initialUserMessage",
+                        ty: HsType::maybe(HsType::Text),
+                        rust: RustBinding::Derived,
+                    },
                 ],
                 ret: HsType::Tuple(vec![HsType::Text, HsType::Value]),
                 errors: None,
