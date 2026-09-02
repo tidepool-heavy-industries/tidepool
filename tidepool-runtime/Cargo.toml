@@ -23,6 +23,7 @@ tidepool-bridge.workspace = true
 tidepool-bridge-derive.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 tempfile.workspace = true
 ciborium.workspace = true
 log.workspace = true

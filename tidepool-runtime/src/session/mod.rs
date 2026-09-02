@@ -63,7 +63,7 @@ pub use view::{SessionCompileView, SourceImports};
 pub use workbench::{
     classify_workbench_item, resident_workbench_templates, run_block_sequence, BlockExecution,
     BlockSequenceOutcome, CommittedBlock, MetaCommandLine, ParsedBlock, WorkSequence,
-    WorkbenchItem,
+    WorkbenchItem, WorkbenchRequest,
 };
 
 pub use turn::{

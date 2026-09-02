@@ -26,6 +26,7 @@ use tidepool_mcp::{describe_effects_index, CapturedOutput, EffectDecl, EffectRos
 use tidepool_repr::{MonotonicIdIssuer, SessionId};
 use tidepool_runtime::session::{
     classify_workbench_item, GraceOutcome, ModuleEnv, TurnSupervisor, WorkbenchItem,
+    WorkbenchRequest,
 };
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
@@ -194,30 +195,8 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 // Request types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SessionBlockRequest {
-    /// List of GHCi-capable items to run in sequence. Each item is one of:
-    /// a top-level declaration (`data Foo = …`, `f x = …`), a bind statement
-    /// (`x <- e` / `let x = e`), a bare expression, or a `:command`
-    /// (`:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`, `:stub <n>`, `:program`).
-    /// Items are classified automatically; execution stops on the first error.
-    /// Each declaration item is its own module, so a type signature and its
-    /// binding (and all equations of a multi-clause function) must share ONE
-    /// newline-separated item.
-    pub items: Vec<String>,
-    /// Optional payload available as `input :: Aeson.Value` to every evaluated
-    /// item in the block (binds, `let`s, and bare expressions). Pass large or
-    /// quote-heavy content here to avoid Haskell string escaping. Mirrors the
-    /// stateless `eval` tool's `input` lane.
-    #[serde(default)]
-    pub input: Option<serde_json::Value>,
-    /// Set `true` to get the full diagnostic shape: per-item `index` and
-    /// double-encoded `result` string, plus top-level `generation` /
-    /// `valGeneration` counters. Default (`false`): the slim shape with inline
-    /// JSON, no generation counters, and final-expression value at top level only.
-    #[serde(default)]
-    pub verbose: Option<bool>,
-}
+/// Backward-compatible public name for the shared workbench request.
+pub type SessionBlockRequest = WorkbenchRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionResumeRequest {

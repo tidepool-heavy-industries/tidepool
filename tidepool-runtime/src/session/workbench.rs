@@ -8,10 +8,31 @@
 
 use std::future::Future;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use super::{
     assemble_bind_module, assemble_expression_module, insert_preamble_imports, ExpressionLift,
     TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
+
+/// One ordered request against a persistent Haskell workbench.
+///
+/// This is transport-neutral despite the JSON-shaped optional input: MCP,
+/// provider-native fenced execution, tests, and future frontends must agree on
+/// item sequencing and input mounting without copying the request contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkbenchRequest {
+    /// GHCi-capable items run in source order. Execution stops at the first
+    /// rejected or suspended item while preserving earlier commits.
+    pub items: Vec<String>,
+    /// Optional structured payload mounted as @input :: Aeson.Value@.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    /// Request the frontend's expanded diagnostic receipt when supported.
+    #[serde(default)]
+    pub verbose: Option<bool>,
+}
 
 /// One tokenized `:command`. Frontends interpret the name and arguments they
 /// own; tokenization itself has one implementation.
