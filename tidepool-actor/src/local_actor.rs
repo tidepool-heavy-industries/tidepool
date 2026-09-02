@@ -52,12 +52,40 @@ pub struct KernelContext {
     identity: ActorRef,
     myself: RactorRef<KernelMessage>,
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
+    directory: LocalActorDirectory,
+}
+
+/// Process-local exact-incarnation routing and terminal-observation index.
+///
+/// This is deliberately not a scheduler or lifecycle state machine. Ractor
+/// owns runnable actors and mailboxes; each actor owns its terminal cell. The
+/// directory only resolves the identity carried by a live Haskell `ActorRef`
+/// to that pair of owners.
+#[derive(Clone, Default)]
+pub struct LocalActorDirectory {
+    actors: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, LocalActorRef>>>,
+}
+
+impl LocalActorDirectory {
+    #[must_use]
+    pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
+        self.actors.read().get(&actor).cloned()
+    }
+
+    fn insert(&self, actor: LocalActorRef) {
+        self.actors.write().insert(actor.identity(), actor);
+    }
 }
 
 impl KernelContext {
     #[must_use]
     pub fn identity(&self) -> ActorRef {
         self.identity
+    }
+
+    #[must_use]
+    pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
+        self.directory.resolve(actor)
     }
 
     /// Start a linked child and return its exact handle only after startup.
@@ -78,6 +106,7 @@ impl KernelContext {
                 LocalActorArguments {
                     behavior,
                     terminal: terminal.clone(),
+                    directory: self.directory.clone(),
                 },
             )
             .await?;
@@ -156,6 +185,7 @@ pub struct LocalActor<B>(PhantomData<fn() -> B>);
 pub struct LocalActorArguments<B> {
     pub behavior: B,
     pub terminal: RetainedActorExit,
+    pub directory: LocalActorDirectory,
 }
 
 pub struct LocalActorState<B> {
@@ -182,12 +212,17 @@ where
             identity,
             myself,
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            directory: arguments.directory,
         };
         let mut state = LocalActorState {
             context,
             behavior: arguments.behavior,
             terminal: arguments.terminal,
         };
+        state.context.directory.insert(LocalActorRef::new(
+            state.context.myself.clone(),
+            state.terminal.clone(),
+        ));
         match state.behavior.start(&state.context).await {
             Ok(KernelStep::Continue(())) => {}
             Ok(KernelStep::Stop { terminal, .. }) => {
@@ -351,12 +386,14 @@ where
     B: KernelBehavior,
 {
     let terminal = RetainedActorExit::new();
+    let directory = LocalActorDirectory::default();
     let (address, task) = Actor::spawn(
         name,
         LocalActor::<B>(PhantomData),
         LocalActorArguments {
             behavior,
             terminal: terminal.clone(),
+            directory,
         },
     )
     .await?;
