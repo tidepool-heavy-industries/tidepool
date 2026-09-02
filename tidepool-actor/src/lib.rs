@@ -32,6 +32,7 @@ mod start;
 mod termination;
 mod timeline;
 mod wait;
+mod worker_ledger;
 
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
@@ -102,3 +103,9 @@ pub use start::{
 pub use termination::{ActorExitAlreadyPublished, ActorTerminal, RetainedActorExit};
 pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
 pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};
+pub use worker_ledger::{
+    AcceptedWorker, AcknowledgementDisposition, CustodyCleanup, ReservedWorker,
+    WorkerAcknowledgement, WorkerCollection, WorkerHandle, WorkerLedger, WorkerLedgerError,
+    WorkerPhase, WorkerReservation, WorkerSpec, WorkerSpecError, WorkerStartResult, WorkerSummary,
+    WorkerTerminal,
+};

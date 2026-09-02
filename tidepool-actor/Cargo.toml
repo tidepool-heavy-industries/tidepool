@@ -10,6 +10,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blake3.workspace = true
 futures-util.workspace = true
 parking_lot.workspace = true
 ractor.workspace = true
@@ -29,6 +30,7 @@ tidepool-model-output.workspace = true
 tidepool-repr.workspace = true
 tidepool-runtime.workspace = true
 tidepool-tool.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 frunk.workspace = true
