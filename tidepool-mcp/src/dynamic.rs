@@ -227,6 +227,7 @@ fn valid_tool_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::ServiceExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn declaration(name: &str) -> ToolDeclaration {
@@ -277,6 +278,26 @@ mod tests {
                 serde_json::json!("object")
             )]))
         );
+    }
+
+    #[tokio::test]
+    async fn declared_tools_survive_the_real_mcp_inventory_boundary() {
+        let server = DynamicMcpServer::new(
+            vec![declaration("session_run")],
+            Some("Persistent actor session".to_string()),
+            |_, _| Box::pin(async { Ok(serde_json::json!({})) }),
+        )
+        .unwrap();
+        let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+        let client = ().serve(client_transport).await.unwrap();
+
+        let inventory = client.peer().list_tools(None).await.unwrap();
+        assert_eq!(inventory.tools.len(), 1);
+        assert_eq!(inventory.tools[0].name, "session_run");
+
+        client.cancel().await.unwrap();
+        server_task.abort();
     }
 
     #[tokio::test]

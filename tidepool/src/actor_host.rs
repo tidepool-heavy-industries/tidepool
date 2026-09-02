@@ -974,6 +974,51 @@ fn current_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
+/// Serve one actor policy for the actor's lifetime, not for the lifetime of a
+/// particular proxy process. Codex legitimately reconnects while refreshing
+/// its MCP inventory; a transport disconnect must not make the resident actor
+/// lose its interaction surface.
+async fn serve_actor_mcp_endpoint(
+    listener: UnixListener,
+    server: DynamicMcpServer,
+    actor: ActorRef,
+    credential: NodeCredential,
+) -> Result<(), InteractiveApplicationError> {
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
+        let connection = async {
+            let (_handshake, stream) = accept_proxy(stream, |candidate| {
+                if candidate.actor != actor {
+                    return Err("actor identity does not match this endpoint".into());
+                }
+                if candidate.credential != credential {
+                    return Err("actor proxy credential is invalid".into());
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
+            let (read, write) = stream.into_split();
+            server
+                .clone()
+                .serve((read, write))
+                .await
+                .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?
+                .waiting()
+                .await
+                .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?;
+            Ok::<_, InteractiveApplicationError>(())
+        }
+        .await;
+        if let Err(error) = connection {
+            tracing::warn!(actor = ?actor, %error, "actor MCP connection ended with an error; accepting a replacement");
+        }
+    }
+}
+
 async fn launch_prepared_interactive_application(
     installation: ResidentMcpInstallation,
     context: InteractiveLaunchContext,
@@ -1097,32 +1142,9 @@ async fn launch_prepared_interactive_application(
     );
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildPolicy, error))?;
-    let service = tokio::spawn(async move {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
-        let (_handshake, stream) = accept_proxy(stream, |candidate| {
-            if candidate.actor != actor {
-                return Err("actor identity does not match this endpoint".into());
-            }
-            if candidate.credential != credential {
-                return Err("actor proxy credential is invalid".into());
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
-        let (read, write) = stream.into_split();
-        server
-            .serve((read, write))
-            .await
-            .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?
-            .waiting()
-            .await
-            .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?;
-        Ok(())
-    });
+    let service = tokio::spawn(serve_actor_mcp_endpoint(
+        listener, server, actor, credential,
+    ));
     if cancelled.try_recv().is_ok() {
         service.abort();
         let _ = service.await;
@@ -1381,11 +1403,7 @@ async fn retire_interactive_application(
             application_error(deployment.actor, InteractiveOperation::StopProcess, error)
         });
     tokio::join!(
-        stop_retired_mcp_service(
-            deployment.actor,
-            &mut deployment.service,
-            APPLICATION_TASK_GRACE_TIMEOUT,
-        ),
+        stop_retired_mcp_service(deployment.actor, &mut deployment.service,),
         async {
             if let Some(delivery) = delivery.as_mut() {
                 stop_retired_delivery(deployment.actor, delivery, APPLICATION_TASK_GRACE_TIMEOUT)
@@ -1416,27 +1434,17 @@ async fn retire_interactive_application(
     }
 }
 
-/// Settle actor-local tasks after the actor has already reached a terminal
-/// state. A client that keeps its MCP transport open cannot invalidate the
-/// retained actor result or fail unrelated actors; after the grace period the
-/// host owns forced cancellation.
+/// Stop the actor-lifetime MCP listener after its application pane is gone.
+/// Individual proxy connections are deliberately replaceable, so normal
+/// endpoint completion is not a useful retirement signal.
 async fn stop_retired_mcp_service(
     actor: ActorRef,
     service: &mut tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
-    grace: Duration,
 ) {
-    match tokio::time::timeout(grace, &mut *service).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(error))) => {
-            tracing::warn!(actor = ?actor, %error, "retired actor MCP service stopped with an error");
-        }
-        Ok(Err(error)) => {
+    service.abort();
+    if let Err(error) = service.await {
+        if !error.is_cancelled() {
             tracing::warn!(actor = ?actor, %error, "retired actor MCP service task failed");
-        }
-        Err(_) => {
-            tracing::debug!(actor = ?actor, "forcing retired actor MCP service to stop");
-            service.abort();
-            let _ = service.await;
         }
     }
 }
@@ -1600,9 +1608,52 @@ mod tests {
     use tidepool_actor::ResidentHostParkedKind;
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
+        ToolDeclaration, ToolKind,
     };
     use tidepool_testing::eval_harness;
     use tidepool_worktree::WorktreeSpec;
+
+    #[tokio::test]
+    async fn actor_mcp_inventory_survives_a_proxy_reconnect() {
+        let actor = ActorRef::first(tidepool_actor::ActorId(7));
+        let credential = NodeCredential("reconnect-secret".into());
+        let server = DynamicMcpServer::new(
+            vec![ToolDeclaration {
+                name: "session_run".into(),
+                description: "Run persistent Haskell".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: Some(serde_json::json!({"type": "object"})),
+                kind: ToolKind::Call,
+            }],
+            Some("Persistent actor session".into()),
+            |_, _| Box::pin(async { Ok(serde_json::json!({})) }),
+        )
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = root.path().join("actor.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        let service = tokio::spawn(serve_actor_mcp_endpoint(
+            listener,
+            server,
+            actor,
+            credential.clone(),
+        ));
+        let handshake = tidepool_node::NodeHandshake::current(actor, credential);
+
+        for _ in 0..2 {
+            let stream = tidepool_node::connect_proxy(&endpoint, &handshake)
+                .await
+                .unwrap();
+            let client = ().serve(stream).await.unwrap();
+            let inventory = client.peer().list_tools(None).await.unwrap();
+            assert_eq!(inventory.tools.len(), 1);
+            assert_eq!(inventory.tools[0].name, "session_run");
+            client.cancel().await.unwrap();
+        }
+
+        service.abort();
+        let _ = service.await;
+    }
 
     #[tokio::test]
     async fn idle_application_waits_for_its_first_real_conversation_binding() {
@@ -1853,7 +1904,7 @@ mod tests {
         let mut delivery = tokio::spawn(std::future::pending::<()>());
 
         tokio::join!(
-            stop_retired_mcp_service(actor, &mut service, Duration::ZERO),
+            stop_retired_mcp_service(actor, &mut service),
             stop_retired_delivery(actor, &mut delivery, Duration::ZERO),
         );
 

@@ -65,5 +65,6 @@ parking_lot.workspace = true
 
 
 [dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tempfile.workspace = true
 tidepool-testing.workspace = true

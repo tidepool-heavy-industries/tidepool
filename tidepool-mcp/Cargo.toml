@@ -32,6 +32,7 @@ serde_json = { workspace = true, features = ["arbitrary_precision"] }
 blake3.workspace = true
 
 [dev-dependencies]
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tidepool-protocol.workspace = true
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`tidepool/src/main.rs`).
