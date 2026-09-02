@@ -53,6 +53,10 @@ impl<H, O> ResidentActorRoot<H, O> {
             outcome,
         }
     }
+
+    pub(crate) fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentOutcome) {
+        (self.descriptor, self.machine, self.outcome)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

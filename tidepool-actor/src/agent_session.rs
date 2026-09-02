@@ -204,7 +204,9 @@ impl AdmittedAgentSession {
     /// completion and continuation resumption.
     pub(crate) fn return_to_haskell(self) -> Result<TurnLease, ActorRegistryError> {
         self.lease
-            .ok_or(ActorRegistryError::LocalActorOwnsAdmission(self.session.actor))?
+            .ok_or(ActorRegistryError::LocalActorOwnsAdmission(
+                self.session.actor,
+            ))?
             .transition(ActorTurnKind::Haskell)
     }
 

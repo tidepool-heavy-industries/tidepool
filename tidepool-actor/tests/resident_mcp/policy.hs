@@ -17,8 +17,8 @@ let childDefinition :: ActorDefinition Int Maybe Int
               pure (EchoOutput (request.value * 2))
         , spawnChild =
             tool "Start one supervised child actor." $ \request -> do
-              _ <- startActor childDefinition request.seed
-              pure (SpawnOutput True)
+              outcome <- runActor childDefinition request.seed
+              pure (SpawnOutput (outcome == Completed request.seed))
         , currentValue =
             tool "Return the current resident state." $ \_ ->
               pure (StateOutput current)

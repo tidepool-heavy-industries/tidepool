@@ -23,6 +23,7 @@ mod mailbox;
 mod mount;
 mod profile;
 mod registry;
+mod resident_actor;
 mod resident_interactive;
 mod resident_lifecycle;
 mod resident_mailbox;
@@ -83,6 +84,9 @@ pub use registry::{
     ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorRuntimeWake,
     ActorRuntimeWakes, ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor,
     TurnLease,
+};
+pub use resident_actor::{
+    spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentKernelBehavior,
 };
 pub use resident_interactive::ResidentInteractivePolicy;
 pub use resident_lifecycle::{

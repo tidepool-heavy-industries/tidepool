@@ -22,6 +22,14 @@ impl ResidentInteractivePolicy {
         actor: ActorRef,
         requests: tokio::sync::mpsc::UnboundedSender<ResidentMcpInvocation>,
     ) -> Self {
+        Self::with_client(ResidentMcpClient::new(actor, requests))
+    }
+
+    pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
+        Self::with_client(ResidentMcpClient::local(actor))
+    }
+
+    fn with_client(client: ResidentMcpClient) -> Self {
         let input_schema = schemars::schema_for!(WorkbenchRequest).as_value().clone();
         Self {
             declarations: vec![ToolDeclaration {
@@ -32,7 +40,7 @@ impl ResidentInteractivePolicy {
                 kind: ToolKind::Call,
             }]
             .into(),
-            client: ResidentMcpClient::new(actor, requests),
+            client,
         }
     }
 }
@@ -49,11 +57,16 @@ impl ResidentMcpEndpoint for ResidentInteractivePolicy {
     }
 
     fn dispatch_boxed(&self, name: String, arguments: serde_json::Value) -> ResidentMcpFuture {
-        let client = ResidentMcpClient {
-            actor: self.client.actor,
-            requests: self.client.requests.clone(),
-            dispatch_gate: Arc::clone(&self.client.dispatch_gate),
-        };
-        Box::pin(async move { client.dispatch(name, arguments).await })
+        let client = self.client.clone();
+        Box::pin(async move {
+            if name != SESSION_RUN_TOOL {
+                return Err(crate::ResidentMcpError::Failed(format!(
+                    "unknown actor workbench tool `{name}`"
+                )));
+            }
+            let request = serde_json::from_value(arguments)
+                .map_err(|error| crate::ResidentMcpError::Failed(error.to_string()))?;
+            client.dispatch_workbench(request).await
+        })
     }
 }

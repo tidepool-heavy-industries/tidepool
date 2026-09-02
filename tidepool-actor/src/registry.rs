@@ -100,6 +100,20 @@ impl ActorDescriptor {
     pub fn source_imports(&self) -> &ActorSourceImports {
         &self.source_imports
     }
+
+    /// Materialize this immutable deployment description for one exact local
+    /// actor identity. Registry-backed and Ractor-backed execution use the
+    /// same context shape; only the owner of sequential admission differs.
+    #[must_use]
+    pub fn session_context(&self, actor: ActorRef) -> ActorSessionContext {
+        ActorSessionContext {
+            actor,
+            placement: self.placement,
+            effect_policy: self.effect_policy,
+            live_payload: self.live_payload,
+            source_imports: self.source_imports.clone(),
+        }
+    }
 }
 
 /// A private initialization capability. No callable [`ActorRef`] is exposed

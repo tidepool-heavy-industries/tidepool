@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 
-use tidepool_runtime::session::ResidentHole;
+use tidepool_runtime::session::{ResidentHole, WorkbenchRequest};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::ActorRef;
@@ -65,10 +65,17 @@ pub trait ResidentMcpEndpoint: Send + Sync {
     fn dispatch_boxed(&self, name: String, arguments: serde_json::Value) -> ResidentMcpFuture;
 }
 
+#[derive(Clone)]
+enum ResidentMcpTransport {
+    Legacy(mpsc::UnboundedSender<ResidentMcpInvocation>),
+    Local(crate::LocalActorRef),
+}
+
+#[derive(Clone)]
 pub(crate) struct ResidentMcpClient {
-    pub(crate) actor: ActorRef,
-    pub(crate) requests: mpsc::UnboundedSender<ResidentMcpInvocation>,
-    pub(crate) dispatch_gate: Arc<tokio::sync::Mutex<()>>,
+    actor: ActorRef,
+    transport: ResidentMcpTransport,
+    dispatch_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ResidentMcpClient {
@@ -78,7 +85,15 @@ impl ResidentMcpClient {
     ) -> Self {
         Self {
             actor,
-            requests,
+            transport: ResidentMcpTransport::Legacy(requests),
+            dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
+        Self {
+            actor: actor.identity(),
+            transport: ResidentMcpTransport::Local(actor),
             dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -89,25 +104,89 @@ impl ResidentMcpClient {
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, ResidentMcpError> {
         let _turn = self.dispatch_gate.lock().await;
-        let (response, receive) = oneshot::channel();
-        self.requests
-            .send(ResidentMcpInvocation {
-                actor: self.actor,
-                name,
-                arguments,
-                response,
-            })
-            .map_err(|_| {
-                ResidentMcpError::Unavailable("the owning actor host has stopped".into())
-            })?;
-        receive
-            .await
-            .map_err(|_| {
-                ResidentMcpError::Unavailable(
-                    "the actor stopped before settling the invocation".into(),
+        match &self.transport {
+            ResidentMcpTransport::Legacy(requests) => {
+                let (response, receive) = oneshot::channel();
+                requests
+                    .send(ResidentMcpInvocation {
+                        actor: self.actor,
+                        name,
+                        arguments,
+                        response,
+                    })
+                    .map_err(|_| {
+                        ResidentMcpError::Unavailable("the owning actor host has stopped".into())
+                    })?;
+                receive
+                    .await
+                    .map_err(|_| {
+                        ResidentMcpError::Unavailable(
+                            "the actor stopped before settling the invocation".into(),
+                        )
+                    })?
+                    .map_err(ResidentMcpError::Failed)
+            }
+            ResidentMcpTransport::Local(actor) => {
+                let (response, receive) = oneshot::channel();
+                actor
+                    .address()
+                    .send_message(crate::KernelMessage::Mcp {
+                        name,
+                        arguments,
+                        reply: response.into(),
+                    })
+                    .map_err(|_| {
+                        ResidentMcpError::Unavailable("the owning actor has stopped".into())
+                    })?;
+                receive
+                    .await
+                    .map_err(|_| {
+                        ResidentMcpError::Unavailable(
+                            "the actor stopped before settling the invocation".into(),
+                        )
+                    })?
+                    .map_err(|error| ResidentMcpError::Failed(error.to_string()))
+            }
+        }
+    }
+
+    pub(crate) async fn dispatch_workbench(
+        &self,
+        request: WorkbenchRequest,
+    ) -> Result<serde_json::Value, ResidentMcpError> {
+        match &self.transport {
+            ResidentMcpTransport::Legacy(_) => {
+                let arguments = serde_json::to_value(request)
+                    .map_err(|error| ResidentMcpError::Failed(error.to_string()))?;
+                self.dispatch(
+                    crate::resident_interactive::SESSION_RUN_TOOL.into(),
+                    arguments,
                 )
-            })?
-            .map_err(ResidentMcpError::Failed)
+                .await
+            }
+            ResidentMcpTransport::Local(actor) => {
+                let _turn = self.dispatch_gate.lock().await;
+                let (response, receive) = oneshot::channel();
+                actor
+                    .address()
+                    .send_message(crate::KernelMessage::Workbench {
+                        request,
+                        reply: response.into(),
+                    })
+                    .map_err(|_| {
+                        ResidentMcpError::Unavailable("the owning actor has stopped".into())
+                    })?;
+                let response = receive.await.map_err(|_| {
+                    ResidentMcpError::Unavailable(
+                        "the actor stopped before settling the workbench invocation".into(),
+                    )
+                })?;
+                let response =
+                    response.map_err(|error| ResidentMcpError::Failed(error.to_string()))?;
+                serde_json::to_value(response)
+                    .map_err(|error| ResidentMcpError::Failed(error.to_string()))
+            }
+        }
     }
 }
 
@@ -141,12 +220,19 @@ impl ResidentMcpEndpoint for ResidentMcpPolicy {
     }
 
     fn dispatch_boxed(&self, name: String, arguments: serde_json::Value) -> ResidentMcpFuture {
-        let client = ResidentMcpClient {
-            actor: self.client.actor,
-            requests: self.client.requests.clone(),
-            dispatch_gate: Arc::clone(&self.client.dispatch_gate),
-        };
+        let client = self.client.clone();
         Box::pin(async move { client.dispatch(name, arguments).await })
+    }
+}
+
+pub(crate) fn install_local_resident_mcp(
+    actor: crate::LocalActorRef,
+    awaiting: &ResidentMcpAwait,
+) -> ResidentMcpPolicy {
+    ResidentMcpPolicy {
+        declarations: awaiting.declarations.clone().into(),
+        instructions: (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone()),
+        client: ResidentMcpClient::local(actor),
     }
 }
 
