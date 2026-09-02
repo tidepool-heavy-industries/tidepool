@@ -44,15 +44,22 @@ then unfold again from what integration revealed. The canonical contract is
 
 The first production composition root is `shoal`: one host process owns the
 resident Haskell machine and every actor, while external Codex TUIs occupy
-tmux panes and connect through authenticated `shoal proxy` MCP children. This
-is deployment topology, not a second actor identity or scheduler.
+tmux panes and connect through authenticated `shoal proxy` MCP children. Local
+actor scheduling, mailboxes, links, and supervision use Ractor. Tidepool adds
+live Haskell execution, authority, provider sessions, and retained typed exits
+above that substrate; it does not maintain a second actor scheduler.
 
 ## Accepted direction
 
 - An actor combines one persistent Haskell environment, one serial control
-  flow, one agent context, and one effect stack fixed for that incarnation
+  flow, one agent context, and one effect stack fixed for that exact identity
   under Rust-owned authority. Resident and interactive contexts are execution
   forms under the same identity and lifecycle, not separate actor systems.
+- Ractor owns in-process task scheduling, sequential mailboxes, local
+  addresses, linked ownership, and lifecycle notification. Same-machine
+  messages move ordinary `Send + 'static` Rust values and are never serialized.
+  Tidepool owns managed Haskell roots, exact execution context, effect
+  authorization, model sessions, and repeatable typed exit observation.
 - Experimental resident-Haskell effect profiles are named `ReadWrite` and `ReadOnly`. A `ReadWrite`
   actor may start either profile; a `ReadOnly` actor may start only `ReadOnly`.
   They test row selection and nominal interpreter policy; they are not Codex
@@ -63,7 +70,7 @@ is deployment topology, not a second actor identity or scheduler.
 - Fresh spawn deploys an explicit program into a fresh context. Structural
   fork clones one exact model/Haskell/control point and applies registered
   capability and actor-linear-reference policy.
-- `startActor` publishes only a ready exact-incarnation reference. Exact calls
+- `startActor` publishes only a ready exact reference. Exact calls
   never invent results or substitute actors; failure-prone jobs use
   `startActor`/`awaitExit` supervision and explicit Haskell control flow.
 - A private sealed deployment hides an actor definition's concrete Haskell
@@ -82,6 +89,11 @@ is deployment topology, not a second actor identity or scheduler.
   subtree.
 - Model-authored verification should normally run authoritative checks and an
   independent fresh-actor review before acceptance.
+- Worker lifecycle and custody are live Rust interpreter state, not a
+  model-visible `[WorkerRecord]` snapshot threaded between Haskell calls.
+  Haskell invokes typed batch lifecycle effects, receives structured results,
+  and sees an immutable activation context containing correlated lifecycle
+  wakes. Authored policy values remain ordinary immutable Haskell values.
 - A worktree-backed worker submits a typed exit that combines an explicitly
   model-authored report with one Rust-observed repository state. Collection is
   repeatable until explicit acknowledgment; transport delivery never consumes

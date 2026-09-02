@@ -31,6 +31,13 @@ The repository's standing mechanism index remains authoritative:
 The actor work adds no second registry, root ledger, transcript, turn parser,
 checkout path, durable log primitive, or effect-row ABI.
 
+Ractor is the sole target substrate for in-process actor task scheduling,
+mailboxes, local addresses, links, and supervision. The landed
+`ActorRegistry`/`ResidentActorHost` implementation is now an acceptance oracle,
+not standing architecture. The replacement consumes Ractor directly and
+deletes the matching registry, wake, task-table, and deployment scheduling
+code. An adapter that leaves both runtimes alive is not an acceptable endpoint.
+
 Every Haskell API addition must answer:
 
 1. Does authored Haskell need this distinction for typed behavior or policy?
@@ -175,6 +182,17 @@ application failure under real provider/process races.
 
 ### Not landed
 
+- Ractor does not yet own production actor scheduling. Before cutover, a
+  focused spike must prove startup publication, linked supervision, subtree
+  shutdown, panic/kill cleanup, dropped RPC replies, and direct movement of
+  Tidepool live-value custody through local `Send + 'static` messages. No
+  cluster or serialization feature is part of this work;
+- the production Haskell root still exposes `[WorkerRecord]` as copied
+  lifecycle state. Replace it with Rust-owned `WorkerLedger` interpreter state,
+  typed batch effects, and one activation-stable `sessionContext` binding whose
+  plural wakes contain correlation only. Collection remains authoritative and
+  replayable; acknowledgement is effectful and releases custody without erasing
+  the immutable receipt;
 - the remaining Stage 6 adversarial acceptance case is cancellation
   specifically during readiness resumption. Resident machine access now keeps
   each checkout receipt inside the blocking task that owns its machine, so
@@ -239,6 +257,58 @@ These choices remove branches from the first implementation:
   Machine checkout spans only one Haskell run segment.
 - Live runtime restart is out of scope. Durable JSON and recoverable external
   resources use their existing owners.
+- Local actor messages are ordinary moved Rust values. Actor communication is
+  never serialized merely to cross a task boundary.
+- `startWorkers` is the worker interpreter primitive. Singular start is a
+  Haskell singleton wrapper; one failed batch member does not roll back
+  independent accepted members.
+- Lifecycle history, idempotency, worktree custody, acknowledgement, and
+  tombstones live in a Rust-owned worker ledger. Authored Haskell never passes
+  that ledger or a snapshot token back to the interpreter.
+
+## 3A. Ractor replacement and live-worker-state tranche
+
+Deliver this tranche before structural fork or broader workflow vocabulary:
+
+1. Validate the minimal local-only Ractor dependency against live-value drop,
+   cancellation, readiness, supervision, and shutdown requirements.
+2. Introduce one closed, non-serializable `KernelMessage` protocol and one
+   exact handle pairing a Ractor address with Tidepool's retained exit cell.
+3. Move root and child construction, sequential turns, cast, call, wait, and
+   owner notification to one canonical Ractor actor implementation. Calls
+   carry ancestry for cycle rejection; waits observe the retained exit cell.
+4. Move resident Haskell, provider, MCP, and external-agent execution into the
+   owning actor. Machine checkout remains shorter-lived than the actor message
+   handler.
+5. Introduce the Rust-owned worker ledger and `startWorkers`, live inspection,
+   replayable collection, and idempotent acknowledgement effects. Reserve all
+   batch keys before concurrent provisioning and return one typed result per
+   input in input order.
+6. Inject one immutable `sessionContext` per root activation. It contains the
+   drained/coalesced lifecycle event IDs and worker handles that caused the
+   activation; child exits during the turn wait for the next context.
+7. Delete `[WorkerRecord]` threading and complete interactive root turns with
+   `()` or an authored policy value. Structured start results contain their
+   handles directly.
+8. Separate acknowledgement disposition, logical settlement, custody release,
+   cleanup, and retained receipt lifetime. Cleanup failure is visible and
+   retryable but never rolls acknowledgement back.
+9. Give actor repositories private mutable build-output directories, provide
+   typed provisioning progress, and correlate MCP, compilation, effect,
+   worktree, actor, lifecycle, and wake spans in `.shoal/logs`.
+10. Add `shoal new`: initialize Git, create only ignored `.shoal/` operational
+    content, install `/.shoal/` in `.git/info/exclude`, and create an empty base
+    commit. It creates no project scaffold.
+11. Cut production over and delete the old wake receiver, registry mailbox and
+    parked-obligation scheduler, host actor/task mirrors, special root path,
+    and fleet-wide deployment coordinator.
+
+The deletion gate is behavioral, not file-shaped. The Ractor path must first
+prove exact readiness, repeatable typed exits, non-reentrant calls, cycle
+rejection, child-failure isolation, recursive shutdown, cancellation cleanup,
+concurrent batch start, dropped-response idempotency, and the cross-session
+live-value forcing regression. Once those pass, the old scheduler is removed
+in the same fold rather than retained behind compatibility traits.
 
 ## 4. Stage 1 — one resident Haskell workbench
 

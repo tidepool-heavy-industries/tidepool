@@ -12,7 +12,7 @@ considered alone. Every actor combines:
 4. Rust-owned identity, lifecycle, execution context, and authority.
 
 ```text
-                     Rust actor runtime
+                  Ractor local actor runtime
         identity · mailbox · scheduling · supervision
         model context · capabilities · resource scopes
                               │
@@ -41,9 +41,9 @@ The first two execution forms share the same actor kernel:
   while the backend owns its conversation and native user interaction.
 
 Execution form is not identity or authority. Both forms use the same exact
-`ActorRef`, ownership tree, lifecycle registry, execution principal, profiles,
-mailbox, terminal records, and event stream. A single incarnation may not
-silently change form; recreation is a new incarnation.
+`ActorRef`, Ractor ownership tree and mailbox, execution principal, profiles,
+terminal records, and event stream. Recreation creates another exact identity;
+V0 has no in-place restart or retargeting.
 
 For a resident actor, Haskell controls when to open a result-bearing agent
 session and fixes its result type. An agent-backed actor receives runtime facts
@@ -58,8 +58,8 @@ inventory, not a required Rust struct layout.
 
 | Component | Purpose |
 |---|---|
-| `ActorId` and incarnation | Stable routing identity plus stale-handle fencing |
-| mailbox | Queued calls, casts, replies, and system events |
+| exact actor identity | One process-local Ractor address; never retargeted |
+| mailbox | Ractor-owned queue of local calls, casts, and runtime requests |
 | actor program continuation | The currently running or parked installed `Eff` computation |
 | program snapshot | Current persistent declarations, bindings, and installed behavior roots |
 | agent context | Resident canonical conversation or an opaque interactive-backend thread binding, plus compaction and usage facts the backend exposes |
@@ -69,7 +69,7 @@ inventory, not a required Rust struct layout.
 | capability grants | Owned, launch-derived, inherited, revoked, and fork-policy metadata |
 | runtime resource scope | Parked frames, handles, cancellation state, and live roots |
 | durable namespace | Explicit access to the existing JSON get/put backend |
-| supervision state | Lifecycle owner, children, terminal records, owner-wake delivery, stop reason, and deadlines |
+| supervision state | Ractor links plus Tidepool terminal cells, owner-wake correlation, stop reason, and cleanup policy |
 
 The mailbox and Haskell program are sequential for one actor. Concurrency is
 expressed by several actors and asynchronous actor operations between them.
@@ -92,30 +92,29 @@ Two nested admissions have different lifetimes and must not be conflated:
   the admitted actor waits on a provider, actor reply, or external operation,
   so another actor may use the shared machine without re-entering the first.
 
-The initial scheduler uses one FIFO ready queue per machine session for those
-Haskell run segments. Newly ready segments join the tail. This provides
+The existing resident-machine checkout owns one FIFO ready queue per machine
+session for Haskell run segments. Newly ready segments join the tail. This provides
 deterministic cooperative ordering, not preemptive fairness: a non-suspending
 segment can monopolize that machine. Rust requests cancellation at available
 safepoints and reports the limitation; workloads needing hard isolation use
 separate machine sessions. All JIT admission stays on the existing checkout
-path, while actor-turn admission stays in the actor registry.
+path. Ractor's sequential message handler supplies actor-turn admission; no
+second registry lock or host task table mirrors that state.
 
-Actor admission changes phase; it is never reacquired recursively. If an
-admitted authored Haskell turn suspends on `deliberate`, the effect dispatcher
-transfers that same admission into the agent-session executor. Completion
-resumes the parked continuation under the same admission. Startup derives its
-first admission from the unpublished-start capability. Backend-native owner
-wakes do not enter this scheduler or re-enter Haskell. The implementation may refine
-the current `TurnLease` into a phase-aware guard, but it must not add another
-lock or call `begin_turn` from inside an already-admitted turn.
+One Ractor message handler owns an actor for the full logical operation. If an
+authored Haskell turn suspends on `deliberate`, a call, a wait, or an external
+operation, that handler remains pending while releasing any machine checkout;
+the actor cannot process another ordinary message. Kill and shutdown remain
+framework control operations. Backend-native owner wakes queue for a later
+activation and never re-enter the current Haskell continuation.
 
 ## 3. Ownership boundary
 
 ### Rust owns
 
-- actor and incarnation identifiers;
-- actor registry and mailbox lifetime;
-- scheduling and admission to a shared machine session;
+- exact process-local actor identities and Tidepool-to-Ractor handles;
+- Ractor actor construction, links, mailbox lifetime, and sequential turns;
+- admission to a shared machine session through the resident checkout;
 - model-provider threads or supervised interactive-agent processes, exact
   context/thread bindings, compaction, push delivery, and cache accounting;
 - one Rust effect interpreter per actor, routing nominal request constructors
@@ -129,6 +128,11 @@ lock or call `begin_turn` from inside an already-admitted turn.
   transport;
 - durable namespace allocation and external resource cleanup;
 - authoritative structured actor events and resource-growth accounting.
+
+Ractor is a local execution dependency, not a wire contract. `KernelMessage`
+is one closed Rust enum carrying moved in-process values. The local actor layer
+enables no cluster or serialization feature. JSON remains confined to actual
+external and durable boundaries.
 
 ### Haskell owns
 
