@@ -26,6 +26,27 @@ pub struct ChildExitNotice {
     pub terminal: ActorTerminal,
 }
 
+/// Result of one complete logical behavior operation.
+///
+/// `Stop` carries the ordinary operation result as well as the immutable
+/// actor terminal record. The wrapper can therefore settle a caller or MCP
+/// transport before stopping without turning successful actor completion into
+/// an error or scheduling a private self-message.
+#[derive(Debug)]
+pub enum KernelStep<T> {
+    Continue(T),
+    Stop { output: T, terminal: ActorTerminal },
+}
+
+impl<T> KernelStep<T> {
+    fn into_parts(self) -> (T, Option<ActorTerminal>) {
+        match self {
+            Self::Continue(output) => (output, None),
+            Self::Stop { output, terminal } => (output, Some(terminal)),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct KernelContext {
     identity: ActorRef,
@@ -78,14 +99,14 @@ pub trait KernelBehavior: Send + 'static {
     fn start(
         &mut self,
         context: &KernelContext,
-    ) -> impl std::future::Future<Output = Result<(), KernelBehaviorError>> + Send;
+    ) -> impl std::future::Future<Output = Result<KernelStep<()>, KernelBehaviorError>> + Send;
 
     fn cast(
         &mut self,
         context: &KernelContext,
         sender: ActorRef,
         request: MailboxValue,
-    ) -> impl std::future::Future<Output = Result<(), KernelBehaviorError>> + Send;
+    ) -> impl std::future::Future<Output = Result<KernelStep<()>, KernelBehaviorError>> + Send;
 
     fn call(
         &mut self,
@@ -93,20 +114,24 @@ pub trait KernelBehavior: Send + 'static {
         caller: ActorRef,
         ancestry: crate::CallAncestry,
         request: MailboxValue,
-    ) -> impl std::future::Future<Output = Result<MailboxValue, KernelBehaviorError>> + Send;
+    ) -> impl std::future::Future<Output = Result<KernelStep<MailboxValue>, KernelBehaviorError>> + Send;
 
     fn mcp(
         &mut self,
         context: &KernelContext,
         name: String,
         arguments: serde_json::Value,
-    ) -> impl std::future::Future<Output = Result<serde_json::Value, KernelInvocationFailure>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<KernelStep<serde_json::Value>, KernelInvocationFailure>,
+    > + Send;
 
     fn workbench(
         &mut self,
         context: &KernelContext,
         request: WorkbenchRequest,
-    ) -> impl std::future::Future<Output = Result<WorkbenchResponse, KernelInvocationFailure>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>,
+    > + Send;
 
     fn external_application_failed(
         &mut self,
@@ -163,10 +188,17 @@ where
             behavior: arguments.behavior,
             terminal: arguments.terminal,
         };
-        if let Err(error) = state.behavior.start(&state.context).await {
-            let terminal = failed_terminal(format!("actor startup failed: {error}"));
-            let _ = state.terminal.publish(terminal);
-            return Err(Box::new(error));
+        match state.behavior.start(&state.context).await {
+            Ok(KernelStep::Continue(())) => {}
+            Ok(KernelStep::Stop { terminal, .. }) => {
+                publish_terminal(&state.terminal, &terminal);
+                state.context.myself.stop(Some(terminal.summary));
+            }
+            Err(error) => {
+                let terminal = failed_terminal(format!("actor startup failed: {error}"));
+                let _ = state.terminal.publish(terminal);
+                return Err(Box::new(error));
+            }
         }
         Ok(state)
     }
@@ -179,8 +211,9 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             KernelMessage::Cast { sender, request } => {
-                if let Err(error) = state.behavior.cast(&state.context, sender, request).await {
-                    fail_actor(&myself, state, format!("actor cast failed: {error}"));
+                match state.behavior.cast(&state.context, sender, request).await {
+                    Ok(step) => stop_after_step(&myself, state, step),
+                    Err(error) => fail_actor(&myself, state, format!("actor cast failed: {error}")),
                 }
             }
             KernelMessage::Call {
@@ -197,8 +230,12 @@ where
                     .call(&state.context, caller, ancestry, request)
                     .await
                 {
-                    Ok(value) => {
+                    Ok(step) => {
+                        let (value, terminal) = step.into_parts();
                         let _ = reply.send(Ok(value));
+                        if let Some(terminal) = terminal {
+                            stop_actor(&myself, state, terminal);
+                        }
                     }
                     Err(error) => {
                         let detail = error.to_string();
@@ -214,11 +251,31 @@ where
                 name,
                 arguments,
                 reply,
-            } => {
-                let _ = reply.send(state.behavior.mcp(&state.context, name, arguments).await);
-            }
+            } => match state.behavior.mcp(&state.context, name, arguments).await {
+                Ok(step) => {
+                    let (output, terminal) = step.into_parts();
+                    let _ = reply.send(Ok(output));
+                    if let Some(terminal) = terminal {
+                        stop_actor(&myself, state, terminal);
+                    }
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
             KernelMessage::Workbench { request, reply } => {
-                let _ = reply.send(state.behavior.workbench(&state.context, request).await);
+                match state.behavior.workbench(&state.context, request).await {
+                    Ok(step) => {
+                        let (output, terminal) = step.into_parts();
+                        let _ = reply.send(Ok(output));
+                        if let Some(terminal) = terminal {
+                            stop_actor(&myself, state, terminal);
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
             KernelMessage::ExternalApplicationFailed { failure, reply } => {
                 let detail = format!("native actor application failed: {}", failure.detail);
@@ -307,7 +364,24 @@ where
 }
 
 fn fail_actor<B>(myself: &RactorRef<KernelMessage>, state: &LocalActorState<B>, detail: String) {
-    let terminal = failed_terminal(detail);
+    stop_actor(myself, state, failed_terminal(detail));
+}
+
+fn stop_after_step<B>(
+    myself: &RactorRef<KernelMessage>,
+    state: &LocalActorState<B>,
+    step: KernelStep<()>,
+) {
+    if let KernelStep::Stop { terminal, .. } = step {
+        stop_actor(myself, state, terminal);
+    }
+}
+
+fn stop_actor<B>(
+    myself: &RactorRef<KernelMessage>,
+    state: &LocalActorState<B>,
+    terminal: ActorTerminal,
+) {
     publish_terminal(&state.terminal, &terminal);
     myself.stop(Some(terminal.summary));
 }
@@ -379,8 +453,11 @@ mod tests {
     }
 
     impl KernelBehavior for ProbeBehavior {
-        async fn start(&mut self, _context: &KernelContext) -> Result<(), KernelBehaviorError> {
-            Ok(())
+        async fn start(
+            &mut self,
+            _context: &KernelContext,
+        ) -> Result<KernelStep<()>, KernelBehaviorError> {
+            Ok(KernelStep::Continue(()))
         }
 
         async fn cast(
@@ -388,13 +465,13 @@ mod tests {
             _context: &KernelContext,
             _sender: ActorRef,
             _request: MailboxValue,
-        ) -> Result<(), KernelBehaviorError> {
+        ) -> Result<KernelStep<()>, KernelBehaviorError> {
             if self.fail_cast {
                 Err(KernelBehaviorError {
                     detail: "cast probe".into(),
                 })
             } else {
-                Ok(())
+                Ok(KernelStep::Continue(()))
             }
         }
 
@@ -404,8 +481,8 @@ mod tests {
             _caller: ActorRef,
             _ancestry: crate::CallAncestry,
             request: MailboxValue,
-        ) -> Result<MailboxValue, KernelBehaviorError> {
-            Ok(request)
+        ) -> Result<KernelStep<MailboxValue>, KernelBehaviorError> {
+            Ok(KernelStep::Continue(request))
         }
 
         async fn mcp(
@@ -413,7 +490,7 @@ mod tests {
             context: &KernelContext,
             name: String,
             _arguments: serde_json::Value,
-        ) -> Result<serde_json::Value, KernelInvocationFailure> {
+        ) -> Result<KernelStep<serde_json::Value>, KernelInvocationFailure> {
             if name == "spawn" {
                 let child = context
                     .spawn_child(None, FailingChild)
@@ -423,6 +500,14 @@ mod tests {
                         detail: error.to_string(),
                     })?;
                 *self.spawned_child.lock() = Some(child);
+            } else if name == "finish" {
+                return Ok(KernelStep::Stop {
+                    output: serde_json::Value::String(name),
+                    terminal: ActorTerminal {
+                        kind: ActorExitKind::Completed,
+                        summary: "finished through MCP".into(),
+                    },
+                });
             } else if name == "first" {
                 self.calls.lock().push("first-start");
                 self.release_first.notified().await;
@@ -430,20 +515,20 @@ mod tests {
             } else {
                 self.calls.lock().push("second");
             }
-            Ok(serde_json::Value::String(name))
+            Ok(KernelStep::Continue(serde_json::Value::String(name)))
         }
 
         async fn workbench(
             &mut self,
             _context: &KernelContext,
             _request: WorkbenchRequest,
-        ) -> Result<WorkbenchResponse, KernelInvocationFailure> {
-            Ok(WorkbenchResponse {
+        ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
+            Ok(KernelStep::Continue(WorkbenchResponse {
                 status: WorkbenchRunStatus::Committed,
                 items: Vec::new(),
                 next_index: 0,
                 total: 0,
-            })
+            }))
         }
 
         async fn external_application_failed(
@@ -470,8 +555,11 @@ mod tests {
     struct FailingChild;
 
     impl KernelBehavior for FailingChild {
-        async fn start(&mut self, _context: &KernelContext) -> Result<(), KernelBehaviorError> {
-            Ok(())
+        async fn start(
+            &mut self,
+            _context: &KernelContext,
+        ) -> Result<KernelStep<()>, KernelBehaviorError> {
+            Ok(KernelStep::Continue(()))
         }
 
         async fn cast(
@@ -479,7 +567,7 @@ mod tests {
             _context: &KernelContext,
             _sender: ActorRef,
             _request: MailboxValue,
-        ) -> Result<(), KernelBehaviorError> {
+        ) -> Result<KernelStep<()>, KernelBehaviorError> {
             Err(KernelBehaviorError {
                 detail: "child failed".into(),
             })
@@ -491,8 +579,8 @@ mod tests {
             _caller: ActorRef,
             _ancestry: crate::CallAncestry,
             request: MailboxValue,
-        ) -> Result<MailboxValue, KernelBehaviorError> {
-            Ok(request)
+        ) -> Result<KernelStep<MailboxValue>, KernelBehaviorError> {
+            Ok(KernelStep::Continue(request))
         }
 
         async fn mcp(
@@ -500,7 +588,7 @@ mod tests {
             context: &KernelContext,
             _name: String,
             _arguments: serde_json::Value,
-        ) -> Result<serde_json::Value, KernelInvocationFailure> {
+        ) -> Result<KernelStep<serde_json::Value>, KernelInvocationFailure> {
             Err(KernelInvocationFailure::Rejected {
                 actor: context.identity(),
                 detail: "child has no MCP policy".into(),
@@ -511,7 +599,7 @@ mod tests {
             &mut self,
             context: &KernelContext,
             _request: WorkbenchRequest,
-        ) -> Result<WorkbenchResponse, KernelInvocationFailure> {
+        ) -> Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure> {
             Err(KernelInvocationFailure::Rejected {
                 actor: context.identity(),
                 detail: "child has no workbench".into(),
@@ -630,6 +718,35 @@ mod tests {
         assert_eq!(terminal.kind, ActorExitKind::Failed);
         assert!(terminal.summary.contains("cast probe"));
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_operation_can_reply_and_publish_terminal_in_one_step() {
+        let (behavior, _, _, _, _) = behavior(false);
+        let (actor, task) = spawn_local_actor(None, behavior).await.expect("spawn");
+        let reply = actor
+            .address()
+            .call(
+                |reply| KernelMessage::Mcp {
+                    name: "finish".into(),
+                    arguments: serde_json::Value::Null,
+                    reply,
+                },
+                None,
+            )
+            .await
+            .expect("RPC transport")
+            .expect("actor replied")
+            .expect("successful actor reply");
+        assert_eq!(reply, serde_json::Value::String("finish".into()));
+        task.await.expect("actor task");
+        assert_eq!(
+            actor.terminal().get(),
+            Some(ActorTerminal {
+                kind: ActorExitKind::Completed,
+                summary: "finished through MCP".into(),
+            })
+        );
     }
 
     #[tokio::test]

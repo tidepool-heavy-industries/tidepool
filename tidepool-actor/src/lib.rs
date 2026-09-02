@@ -68,7 +68,7 @@ pub use kernel::{
 };
 pub use local_actor::{
     spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
-    LocalActor, LocalActorArguments, LocalActorState,
+    KernelStep, LocalActor, LocalActorArguments, LocalActorState,
 };
 pub use mailbox::{
     CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
