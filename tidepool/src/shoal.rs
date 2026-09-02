@@ -360,7 +360,7 @@ async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|source| {
             runtime_error(format!(
-                "Bubblewrap is required for Shoal actor repositories: {source}"
+                "Bubblewrap is required for Shoal actor worktrees: {source}"
             ))
         })?;
     if !boundary.status.success() {

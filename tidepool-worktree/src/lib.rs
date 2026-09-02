@@ -2,10 +2,10 @@
 //! for authored Haskell to drive.
 //!
 //! `Worktree` is the public workflow concept. Its current managed storage is an
-//! ordinary private repository whose mutable Git metadata lives inside the
-//! checkout and whose initial objects are borrowed from a retained source via
-//! Git alternates. This lets an actor use normal Git without sharing refs,
-//! config, or locks with the source checkout.
+//! native linked Git worktree. Working files, the index, and `HEAD` are local
+//! to the actor while commits, branches, configuration, and object storage use
+//! the source repository's ordinary shared namespace. Candidate commits are
+//! therefore immediately reviewable and integrable by the owner.
 //!
 //! This crate owns everything that is *git truth*: creating and recording those
 //! retained checkouts, snapshotting a dirty source without touching it,

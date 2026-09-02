@@ -174,11 +174,11 @@ releases the active binding and fails the child; the retain-first worktree
 remains.
 
 The handle names the workflow resource, while its current physical checkout is
-a private Git repository. Mutable metadata belongs to that repository; initial
-objects are borrowed from the recorded source repository. Shoal projects the
-active repository writable and source plus sibling repositories read-only for
-the external process. The source is therefore also a retained storage
-dependency until the worker repository is repacked or retired.
+a native linked Git worktree. Working files, index, and HEAD belong to that
+checkout; objects, refs, configuration, and administrative metadata share the
+source repository's ordinary namespace. Shoal projects the active working tree
+and Git common directory writable while source plus sibling working files are
+read-only. This is collaboration topology, not a Git-metadata security boundary.
 
 Copying a recipe or decorated definition transfers no authority: the
 interpreter permits a child only while the binding table names its exact

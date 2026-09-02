@@ -2,13 +2,14 @@
 
 This crate owns checkout creation/retention, its durable registry, repository
 inspection, coalesced events, snapshots, and the narrow typed merge primitive.
-`Worktree` remains the workflow term, but new managed checkouts are private Git
-repositories with private mutable metadata and borrowed source objects.
+`Worktree` remains the workflow term. Managed checkouts are native linked Git
+worktrees: working files, index, and HEAD are per actor; objects, refs, config,
+and administrative metadata share the source repository's namespace.
 
 - Never dirty the source working tree. Registry state, managed repositories,
   journals, and temporary indexes live outside it.
-- Keep the recorded source repository alive while a managed repository exists:
-  Git alternates make that immutable-object dependency real.
+- Shared Git metadata is intentional collaboration infrastructure, not an
+  isolation boundary. Do not add publication/import machinery between actors.
 - Retain first: no deletion, GC, or silent recreation of a missing managed
   worktree without an explicit design decision.
 - Every git subprocess goes through `GitCli` so environment scrubbing and

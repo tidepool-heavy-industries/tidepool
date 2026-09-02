@@ -90,18 +90,15 @@ fn clean_creation_from_current_repository_leaves_source_untouched() {
         handle.receipt().origin,
         WorktreeOrigin::CurrentRepository
     ));
-    assert!(handle.cwd().join(".git").is_dir());
+    assert!(handle.cwd().join(".git").is_file());
     assert_eq!(
-        inspect::git_common_dir(&git, handle.cwd()).expect("resolve private Git metadata"),
-        handle.cwd().join(".git")
+        inspect::git_common_dir(&git, handle.cwd()).expect("resolve shared Git metadata"),
+        repo.path().join(".git")
     );
-    assert!(git
-        .run(handle.cwd(), &["remote", "get-url", "origin"])
-        .is_err());
 }
 
 #[test]
-fn worker_git_mutations_stay_in_its_private_repository() {
+fn worker_commit_is_visible_in_shared_namespace_without_moving_source_head() {
     let repo = TestRepo::init().expect("init");
     repo.writer()
         .commit_file("base.txt", "base", "base")
@@ -111,7 +108,7 @@ fn worker_git_mutations_stay_in_its_private_repository() {
     let base = tempfile::TempDir::new().expect("tempdir");
     let manager = manager_over(&repo, base.path());
     let handle = manager
-        .create(&WorktreeSpec::from_current_repository("private-git"))
+        .create(&WorktreeSpec::from_current_repository("shared-git"))
         .expect("create");
     let worker = repo.writer_at(handle.cwd());
     worker
@@ -120,19 +117,28 @@ fn worker_git_mutations_stay_in_its_private_repository() {
     let candidate = worker.head().expect("candidate head");
     let git = GitCli::new();
     git.try_run(handle.cwd(), &["config", "tidepool.worker", "yes"])
-        .expect("write worker-local config");
+        .expect("write shared config");
 
     assert_eq!(
         repo.writer().head().expect("source head after work"),
         source_head
     );
     let source_worker_ref = format!("refs/heads/{}", handle.branch().as_str());
-    assert!(git
-        .run(repo.path(), &["show-ref", "--verify", &source_worker_ref])
-        .is_err());
-    assert!(git
-        .run(repo.path(), &["config", "--get", "tidepool.worker"])
-        .is_err());
+    assert_eq!(
+        git.run(
+            repo.path(),
+            &["show-ref", "--hash", "--verify", &source_worker_ref]
+        )
+        .expect("worker branch visible at source")
+        .trimmed(),
+        candidate.as_str()
+    );
+    assert_eq!(
+        git.run(repo.path(), &["config", "--get", "tidepool.worker"])
+            .expect("shared config visible")
+            .trimmed(),
+        "yes"
+    );
     assert!(git
         .run(
             repo.path(),
@@ -142,13 +148,8 @@ fn worker_git_mutations_stay_in_its_private_repository() {
                 &format!("{}^{{commit}}", candidate.as_str())
             ]
         )
-        .is_err());
-    assert_eq!(
-        git.run(handle.cwd(), &["config", "--get", "tidepool.worker"])
-            .expect("read worker config")
-            .trimmed(),
-        "yes"
-    );
+        .is_ok());
+    assert!(!repo.path().join("candidate.txt").exists());
 }
 
 #[test]
@@ -212,9 +213,8 @@ fn clean_creation_from_another_managed_worktree() {
     }
 }
 
-/// A shared clone records its immediate object source. This makes the retained
-/// lifetime dependency explicit through a chain instead of pretending every
-/// generation borrows directly from the original project repository.
+/// The durable receipt records the immediate checkout a child was seeded
+/// from, even though every linked worktree shares one Git namespace.
 #[test]
 fn from_worktree_creation_records_each_immediate_seed_repository() {
     let repo = TestRepo::init().expect("init");
@@ -235,7 +235,7 @@ fn from_worktree_creation_records_each_immediate_seed_repository() {
         .expect("create b from a");
     assert_eq!(b.receipt().source_repository, a.cwd());
 
-    // Chained: c borrows from b, whose alternates in turn name a.
+    // Chained: c is seeded from b's current state.
     let c = manager
         .create(&WorktreeSpec::from_worktree(b.id().clone(), "c"))
         .expect("create c from b");

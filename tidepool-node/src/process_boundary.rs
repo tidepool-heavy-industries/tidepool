@@ -4,10 +4,10 @@
 //! filesystem, environment, network, credentials, and process namespace stay
 //! available. Bubblewrap only makes selected repository roots read-only and
 //! then re-exposes one narrower actor workspace as writable at a stable
-//! model-visible project path. That is enough to give Codex ordinary Git
-//! inside its private repository without letting a routine command mutate the
-//! source checkout or a sibling worker, or requiring one project-trust entry
-//! per generated repository.
+//! model-visible project path. The composition root may also expose shared Git
+//! metadata writable for native linked-worktree semantics. The boundary keeps
+//! actor working files separate without requiring one project-trust entry per
+//! generated checkout.
 
 use std::path::{Path, PathBuf};
 

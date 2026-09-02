@@ -216,30 +216,27 @@ resource; initialization that needs resource authority will require a future
 generic startup-admission seam. This replaces automatic post-spawn worktree
 allocation: there is one worktree owner, one binding, and one authority path.
 
-`Worktree` is the public workflow concept, not a commitment to Git's linked
-worktree storage. The current manager creates an ordinary private repository
-for each worker. Its refs, index, config, reflogs, locks, and new objects live
-under that checkout's writable `.git`; its initial objects are borrowed from
-the retained source repository through Git alternates. Shoal launches Codex in
-a Tidepool-owned mount namespace where the active repository is writable and
-the source plus sibling repositories are read-only. Codex therefore uses
-ordinary Git—including commits, branches, rebases, and recovery—without sharing
-mutable Git metadata with its source.
+`Worktree` is the public workflow concept. The current manager uses Git's
+native linked worktrees: working files, index, and `HEAD` are per actor, while
+objects, branches, refs, configuration, and administrative metadata inhabit
+one ordinary repository namespace shared with the root. A completed candidate
+is therefore directly reviewable and integrable by OID or branch without a
+publication/import protocol.
 
 All interactive actors see their active repository at one stable virtual
 project path; separate mount namespaces map that name to different real
-repositories. This avoids accumulating one Codex project-trust entry per
-generated checkout. Worker namespaces keep the source read-only. The root
+working trees. This avoids accumulating one Codex project-trust entry per
+generated checkout. Worker namespaces keep source and sibling working files
+read-only while exposing the shared Git common directory writable. The root
 namespace instead maps its source checkout read-write because accepting a
 candidate, advancing the shared base, and only then spawning dependent work is
 the root's fold responsibility.
 
-This V0 boundary is operational write containment, not a security claim. The
-agent still inherits its environment, network, credentials, caches, and host
-process namespace. The source dependency is also real: a borrowed-object
-repository must not outlive the recorded source unless its objects are first
-repacked locally. Harden or sever those dependencies only when a concrete
-deployment requires it; do not reintroduce shared-`.git` exceptions.
+This V0 boundary separates working files; it is not a security claim. Actors
+can intentionally mutate shared Git metadata, as ordinary linked-worktree
+users can. They also inherit environment, network, credentials, caches, and
+the host process namespace. Stronger repository authority must be introduced
+as a different deployment policy if a concrete deployment needs it.
 
 The external model submits only an authored report. While its `finish_work`
 tool call is waiting, trusted Haskell asks the Rust-owned Worktree interpreter

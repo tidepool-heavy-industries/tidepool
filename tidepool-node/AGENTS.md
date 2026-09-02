@@ -14,9 +14,9 @@ choices.
   cursor before the last hop succeeds.
 - Keep payloads typed until a concrete transport boundary renders them.
 - A node proxy forwards MCP; it does not authorize or interpret tools.
-- `ProcessMountBoundary` presents one real repository at a stable
-  model-visible path. Worker composition makes the private repository writable
-  while protecting source and siblings; root composition makes its source
-  repository writable because integration is root work. It is operational
-  write containment, not a hardened security sandbox: it does not isolate the
-  environment, network, credentials, or process namespace.
+- `ProcessMountBoundary` presents one real checkout at a stable model-visible
+  path. Worker composition makes its linked working tree writable while
+  protecting source and sibling working files; shared Git metadata remains
+  writable by design. Root composition makes its source checkout writable
+  because integration is root work. This is operational working-file
+  separation, not a hardened security sandbox.

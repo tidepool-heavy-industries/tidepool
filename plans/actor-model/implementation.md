@@ -997,26 +997,25 @@ Implement this boundary in order:
    only after exact-incarnation binding. Candidate submission combines an
    authored report with one trusted Worktree observation; collection is
    replayable until explicit acknowledgment. Worker Codex processes run in
-   retained private repositories. Each checkout owns its mutable Git metadata
-   and borrows initial objects from its retained source through alternates. A
+   retained linked worktrees. Each checkout owns its working files, index, and
+   HEAD while sharing the source repository's Git namespace. A
    reusable `tidepool-node` process boundary makes the active repository
-   visible at one stable Codex project path. A worker's private repository is
-   writable while source plus sibling repositories are read-only; the root's
+   visible at one stable Codex project path. A worker's working tree and the
+   shared Git common directory are writable while source plus sibling working
+   files are read-only; the root's
    source is writable so it can fold an accepted candidate before spawning
    dependent work from the advanced HEAD. The stable path requires one
    project-trust entry rather than one per generated repository. Codex then
    runs with its redundant inner filesystem sandbox disabled. Source-checkout
    extractor process pins are removed before launch so each repository resolves
-   tools from its own sources. This permits normal Git commits and recovery
-   without exposing shared refs, config, hooks, or locks. It is operational
-   write containment rather than a hardened sandbox: environment, network,
-   credentials, caches, and the process namespace remain shared. Policy reload,
-   severing the borrowed-object dependency, and broader commit/evidence folding
-   remain later work.
-   The existing `mergeBranchInto` operation remains branch-local: it does not
-   import a candidate from another private repository. The later fold path must
-   name the exact candidate OID, import it into the target, and apply the same
-   typed merge/abort semantics; sharing refs again is not an acceptable shortcut.
+   tools from its own sources. This permits normal Git commits and recovery in
+   one directly reviewable branch/object namespace. Shared refs, config, hooks,
+   and locks are intentional V0 infrastructure. This is working-file
+   separation rather than a hardened sandbox: environment, network,
+   credentials, caches, and the process namespace remain shared. Policy reload
+   and broader commit/evidence folding remain later work. The existing
+   `mergeBranchInto` operation can directly name a candidate branch because all
+   managed worktrees share the same Git namespace.
    `ReadWrite`/`ReadOnly` therefore remain explicitly
    experimental resident-effect classifications rather than process-security
    claims; the initial production machine intentionally handles no ambient

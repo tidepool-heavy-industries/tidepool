@@ -5,7 +5,7 @@ use std::process::Command;
 use tidepool_node::{ProcessInvocation, ProcessMountBoundary};
 
 #[test]
-fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
+fn linked_actor_worktree_commits_into_shared_git_namespace() {
     let root = tempfile::tempdir().expect("temp root");
     let source = root.path().join("source");
     let workers = root.path().join("workers");
@@ -22,36 +22,36 @@ fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
     std::fs::create_dir_all(&workers).expect("create worker root");
     std::fs::create_dir_all(&project_root).expect("create project root");
     git(
-        &workers,
-        [
-            "clone",
-            "--shared",
-            source.to_str().unwrap(),
-            actor.to_str().unwrap(),
-        ],
+        &source,
+        ["worktree", "add", "-b", "actor", actor.to_str().unwrap()],
     );
     git(
-        &workers,
+        &source,
         [
-            "clone",
-            "--shared",
-            source.to_str().unwrap(),
+            "worktree",
+            "add",
+            "-b",
+            "sibling",
             sibling.to_str().unwrap(),
         ],
     );
+    let common_git = source.join(".git");
 
-    let boundary =
-        ProcessMountBoundary::new(&actor, [source.clone(), workers.clone()], [actor.clone()])
-            .expect("boundary")
-            .with_project_root(&project_root)
-            .expect("stable project root");
+    let boundary = ProcessMountBoundary::new(
+        &actor,
+        [source.clone(), workers.clone(), common_git.clone()],
+        [actor.clone(), common_git],
+    )
+    .expect("boundary")
+    .with_project_root(&project_root)
+    .expect("stable project root");
     let script = format!(
         "test \"$(pwd)\" = {project_root} && \
          git config user.name Actor && \
          git config user.email actor@example.invalid && \
          printf 'candidate\\n' > candidate.txt && \
          git add candidate.txt && git commit -m candidate && \
-         ! git -C {source} config tidepool.escaped yes && \
+         git -C {source} show-ref --verify refs/heads/actor && \
          ! touch {sibling}/escaped",
         source = source.display(),
         sibling = sibling.display(),
@@ -83,17 +83,18 @@ fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
             .stdout,
         b"candidate\n"
     );
-    assert!(!Command::new("git")
+    assert!(Command::new("git")
         .args([
             "-C",
             source.to_str().unwrap(),
-            "config",
-            "--get",
-            "tidepool.escaped"
+            "cat-file",
+            "-e",
+            "actor^{commit}"
         ])
         .status()
         .unwrap()
         .success());
+    assert!(!source.join("candidate.txt").exists());
     assert!(!sibling.join("escaped").exists());
 }
 
