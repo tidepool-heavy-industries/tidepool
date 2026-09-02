@@ -163,6 +163,18 @@ pub struct MetaCommandLine {
     pub arguments: String,
 }
 
+/// The discovery commands shared by every persistent Haskell workbench.
+///
+/// Frontends may add operational commands of their own, but these names and
+/// argument contracts are part of the GHCi-shaped language rather than an MCP
+/// or actor adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkbenchDiscovery {
+    Type(String),
+    Info(String),
+    Bindings,
+}
+
 impl MetaCommandLine {
     /// Parse a command with an optional leading colon.
     pub fn parse(raw: &str) -> Result<Self, String> {
@@ -178,6 +190,29 @@ impl MetaCommandLine {
             name: name.to_string(),
             arguments: arguments.to_string(),
         })
+    }
+
+    /// Interpret this line when it names the common discovery subset.
+    pub fn discovery(&self) -> Result<Option<WorkbenchDiscovery>, String> {
+        let required = |command: &str| {
+            if self.arguments.is_empty() {
+                Err(format!(":{command} requires an argument"))
+            } else {
+                Ok(self.arguments.clone())
+            }
+        };
+        match self.name.as_str() {
+            "t" | "type" => required("type").map(WorkbenchDiscovery::Type).map(Some),
+            "i" | "info" => required("info").map(WorkbenchDiscovery::Info).map(Some),
+            "bindings" | "b" => {
+                if self.arguments.is_empty() {
+                    Ok(Some(WorkbenchDiscovery::Bindings))
+                } else {
+                    Err(":bindings does not accept arguments".into())
+                }
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -252,7 +287,7 @@ pub fn resident_workbench_templates(
                 "__result",
                 effect_stack,
                 "{{TURN_STMT}}",
-                "{{BINDERS}}",
+                "({{BINDERS}})",
                 false,
             ),
         },
@@ -477,6 +512,28 @@ mod tests {
                 arguments: "answer".into(),
             })
         );
+    }
+
+    #[test]
+    fn discovery_commands_have_one_shared_argument_contract() {
+        assert_eq!(
+            MetaCommandLine::parse(":type startWorkers")
+                .unwrap()
+                .discovery()
+                .unwrap(),
+            Some(WorkbenchDiscovery::Type("startWorkers".into()))
+        );
+        assert_eq!(
+            MetaCommandLine::parse(":bindings")
+                .unwrap()
+                .discovery()
+                .unwrap(),
+            Some(WorkbenchDiscovery::Bindings)
+        );
+        assert!(MetaCommandLine::parse(":info")
+            .unwrap()
+            .discovery()
+            .is_err());
     }
 
     #[test]

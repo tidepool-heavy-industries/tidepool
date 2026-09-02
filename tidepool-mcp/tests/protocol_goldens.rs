@@ -65,6 +65,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "ActorLocal",
             "ActorMcp",
             "AgentSession",
+            "WorkerKernel",
         ]
     );
 }
@@ -195,6 +196,12 @@ fn effect_decls_golden_matches_committed_file() {
 fn effects_core_module_universal_golden_matches_committed_file() {
     let generated = tidepool_mcp::effects_core_module_source();
     assert_matches_golden("effects_core_module.standard.hs", &generated);
+}
+
+#[test]
+fn effects_authored_module_universal_golden_matches_committed_file() {
+    let generated = tidepool_mcp::effects_authored_module_source();
+    assert_matches_golden("effects_authored_module.standard.hs", &generated);
 }
 
 #[test]

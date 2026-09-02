@@ -131,6 +131,7 @@ pub struct ResidentKernelBehavior<H, O> {
     launch_worktrees: Vec<String>,
     policy_installed: bool,
     activation_wakes: Option<Vec<crate::WorkerWake>>,
+    owns_worker_runtime: bool,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -149,6 +150,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees: Vec::new(),
             policy_installed: false,
             activation_wakes: None,
+            owns_worker_runtime: true,
         }
     }
 
@@ -168,6 +170,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees,
             policy_installed: false,
             activation_wakes: None,
+            owns_worker_runtime: false,
         }
     }
 
@@ -500,6 +503,8 @@ where
             Request::Attach {
                 handle,
                 actor,
+                exit_ref,
+                custody_realm,
                 continuation,
             } => {
                 if !kernel.owns_child(actor) {
@@ -514,7 +519,7 @@ where
                 let result = self
                     .environment
                     .workers
-                    .attach(context.actor, handle, child)
+                    .attach(context.actor, handle, child, exit_ref, custody_realm)
                     .map_err(protocol)?;
                 if let Some(installation) = self
                     .environment
@@ -542,17 +547,6 @@ where
                         .map_err(protocol)?,
                 ),
             ),
-            Request::Submit {
-                handle,
-                receipt,
-                continuation,
-            } => {
-                self.environment
-                    .workers
-                    .submit(context.actor, handle, receipt)
-                    .map_err(protocol)?;
-                (continuation, None)
-            }
             Request::List { continuation } => (
                 continuation,
                 Some(
@@ -562,7 +556,7 @@ where
                         .map_err(protocol)?,
                 ),
             ),
-            Request::Collect {
+            Request::Inspect {
                 handles,
                 continuation,
             } => (
@@ -570,22 +564,42 @@ where
                 Some(
                     self.environment
                         .workers
-                        .collect(context.actor, handles)
+                        .inspect(context.actor, handles)
                         .map_err(protocol)?,
                 ),
             ),
+            Request::BorrowExit {
+                handle,
+                continuation,
+            } => {
+                let exit_ref = self
+                    .environment
+                    .workers
+                    .borrow_exit(context.actor, handle)
+                    .map_err(protocol)?;
+                return self
+                    .environment
+                    .runner
+                    .resume_live_borrowed(context.clone(), continuation, exit_ref)
+                    .await;
+            }
             Request::Acknowledge {
                 acknowledgements,
                 continuation,
-            } => (
-                continuation,
-                Some(
+            } => {
+                let (answer, released) = self
+                    .environment
+                    .workers
+                    .acknowledge(context.actor, acknowledgements)
+                    .map_err(protocol)?;
+                for lease in released {
                     self.environment
-                        .workers
-                        .acknowledge(context.actor, acknowledgements)
-                        .map_err(protocol)?,
-                ),
-            ),
+                        .runner
+                        .close_realm(context.clone(), lease.custody_realm())
+                        .await?;
+                }
+                (continuation, Some(answer))
+            }
             Request::SessionContext { continuation } => {
                 if self.activation_wakes.is_none() {
                     self.activation_wakes = Some(
@@ -598,7 +612,7 @@ where
                 let wakes = self.activation_wakes.as_deref().unwrap_or_default();
                 let value = serde_json::json!({
                     "workerWakes": wakes.iter().map(|wake| serde_json::json!({
-                        "wakeEvent": wake.event,
+                        "wakeEvent": { "lifecycleEventId": wake.event },
                         "wakeHandle": { "workerId": wake.handle.as_str() },
                     })).collect::<Vec<_>>()
                 });
@@ -723,6 +737,12 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        if self.owns_worker_runtime {
+            // The root may consult its activation context before reaching its
+            // first interactive suspension, so authority must exist during
+            // actor initialization rather than after readiness publication.
+            self.environment.workers.install_root(context.actor);
+        }
         let outcome = match boot {
             ResidentBoot::Prepared(outcome) => *outcome,
             ResidentBoot::Entry(entry) => {
@@ -1261,7 +1281,7 @@ where
             let worker_wake = self
                 .environment
                 .workers
-                .child_exited(notice.child.identity(), &notice.terminal);
+                .child_exited(notice.child.identity());
             let _ = self
                 .environment
                 .deployments
@@ -1311,7 +1331,6 @@ where
     let name = Some(descriptor.label().to_owned());
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
     let (actor, task) = crate::spawn_local_actor(name, behavior).await?;
-    workers.install_root(actor.identity());
     Ok((actor, task, receiver))
 }
 

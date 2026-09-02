@@ -616,7 +616,7 @@ async fn non_value_decl_omits_type() {
         "decl head present for the data decl, got: {text}"
     );
     let response: serde_json::Value =
-        serde_json::from_str(&text).expect("data declaration response is JSON");
+        serde_json::from_str(text).expect("data declaration response is JSON");
     assert!(
         response.get("type").is_none(),
         "a data decl has no term-level type — field omitted, got: {text}"

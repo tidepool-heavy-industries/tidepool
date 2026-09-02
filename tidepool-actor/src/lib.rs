@@ -77,8 +77,7 @@ pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, R
 pub use wait::{actor_terminal_value, ActorWaitError};
 pub use worker_ledger::{
     AcceptedWorker, AcknowledgementDisposition, ReservedWorker, WorkerAcknowledgement,
-    WorkerCollection, WorkerCustody, WorkerHandle, WorkerLedger, WorkerLedgerError, WorkerPhase,
+    WorkerHandle, WorkerInspection, WorkerLedger, WorkerLedgerError, WorkerPhase,
     WorkerReservation, WorkerSpec, WorkerSpecError, WorkerStartResult, WorkerSummary,
-    WorkerTerminal,
 };
 pub use worker_runtime::WorkerWake;

@@ -8,20 +8,26 @@ pub fn worker_kernel_decl() -> crate::EffectDecl {
         description: "Private interpreter boundary for Rust-owned worker lifecycle and custody. Authored code uses the typed DevSwarm facade, never these constructors.",
         prompt_card: None,
         constructors: &[
-            "WorkerReserveBatchWith :: Value -> WorkerKernel Value",
-            "WorkerAttachWith :: Text -> (Int, Int) -> WorkerKernel Value",
-            "WorkerFailStartWith :: Text -> Text -> WorkerKernel Value",
-            "WorkerSubmitWith :: Text -> Value -> WorkerKernel ()",
-            "WorkerListWith :: WorkerKernel Value",
-            "WorkerCollectWith :: Value -> WorkerKernel Value",
-            "WorkerAcknowledgeWith :: Value -> WorkerKernel Value",
-            "WorkerSessionContextWith :: WorkerKernel Value",
+            "WorkerReserveBatchWith :: Value -> WorkerKernel exit Value",
+            "WorkerAttachWith :: Text -> ExitRef exit -> (Int, Int) -> WorkerKernel exit Value",
+            "WorkerFailStartWith :: Text -> Text -> WorkerKernel exit Value",
+            "WorkerListWith :: WorkerKernel exit Value",
+            "WorkerInspectWith :: Value -> WorkerKernel exit Value",
+            "WorkerBorrowExitWith :: Text -> WorkerKernel exit (ExitRef exit)",
+            "WorkerAcknowledgeWith :: Value -> WorkerKernel exit Value",
+            "WorkerSessionContextWith :: WorkerKernel exit Value",
         ],
         type_defs: &[],
-        extra_imports: &[],
+        extra_imports: &[
+            "import Tidepool.Internal.ActorRef (ExitRef)",
+        ],
         helpers: &[],
-        type_params: &[],
-        default_row_args: &[],
+        type_params: &[
+            "exit",
+        ],
+        default_row_args: &[
+            "Value",
+        ],
         helpers_row_polymorphic: true,
     }
 }

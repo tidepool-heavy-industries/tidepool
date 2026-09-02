@@ -9,6 +9,7 @@ import Tidepool.Prelude hiding (error)
 import Control.Monad.Fail (MonadFail(..))
 import Data.Void (Void)
 import Data.Kind (Type)
+import Tidepool.Internal.ActorRef (ExitRef)
 import qualified Tidepool.Data.Text as T
 import qualified Data.Map.Strict as Map
 import qualified Tidepool.Aeson.KeyMap as KM
@@ -271,6 +272,16 @@ data ActorMcp a where
 
 data AgentSession a where
   AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output
+
+data WorkerKernel exit a where
+  WorkerReserveBatchWith :: Value -> WorkerKernel exit Value
+  WorkerAttachWith :: Text -> ExitRef exit -> (Int, Int) -> WorkerKernel exit Value
+  WorkerFailStartWith :: Text -> Text -> WorkerKernel exit Value
+  WorkerListWith :: WorkerKernel exit Value
+  WorkerInspectWith :: Value -> WorkerKernel exit Value
+  WorkerBorrowExitWith :: Text -> WorkerKernel exit (ExitRef exit)
+  WorkerAcknowledgeWith :: Value -> WorkerKernel exit Value
+  WorkerSessionContextWith :: WorkerKernel exit Value
 
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.

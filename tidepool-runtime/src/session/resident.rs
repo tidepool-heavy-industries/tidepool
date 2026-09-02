@@ -53,6 +53,7 @@
 //! bind's tenured root riding out as a [`ValueHandle`].
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -309,11 +310,13 @@ impl Drop for CustodyTransfer {
 /// [`ResidentSession::run`]/[`ResidentSession::run_bind`]/[`ResidentSession::run_rooted_entry`]
 /// hand back on suspension: a [`ParkKind::Plain`] turn's hole needs nothing
 /// extra to resume; a [`ParkKind::Binding`] turn's hole must materialize its
-/// binder into the value plane on completion, using the SAME binder/generation
-/// its initiating `run_bind` carried.
+/// binder into the value plane on completion; and a [`ParkKind::Project`]
+/// hole must atomically materialize every GHC-reported pattern binder. Binding
+/// obligations retain the SAME binder metadata and generation carried by the
+/// initiating operation.
 ///
-/// `PlainHole` and `BindingHole` have no public constructors or fields. The
-/// session creates them at suspension time, keeping each completion obligation
+/// None of the hole payloads have public constructors or fields. The session
+/// creates them at suspension time, keeping each completion obligation
 /// inseparable from the token consumed by [`ResidentSession::resume`].
 #[derive(Clone, Debug)]
 pub struct PlainHole {
@@ -328,13 +331,23 @@ pub struct BindingHole {
     generation: Generation,
 }
 
+/// See [`ResidentHole`]'s doc — a projected pattern bind retains every GHC
+/// binder and its one shared value generation across suspension.
+#[derive(Clone, Debug)]
+pub struct ProjectedBindingHole {
+    id: String,
+    binders: Vec<BoundBinder>,
+    generation: Generation,
+}
+
 /// The public continuation token: a sum over a parked turn's completion
-/// obligation. See [`PlainHole`]/[`BindingHole`]'s docs for why neither
-/// variant is externally constructible.
+/// obligation. See the hole payload docs for why no variant is externally
+/// constructible.
 #[derive(Clone, Debug)]
 pub enum ResidentHole {
     Plain(PlainHole),
     Binding(BindingHole),
+    ProjectedBinding(ProjectedBindingHole),
 }
 
 impl ResidentHole {
@@ -346,6 +359,7 @@ impl ResidentHole {
         match self {
             ResidentHole::Plain(h) => &h.id,
             ResidentHole::Binding(h) => &h.id,
+            ResidentHole::ProjectedBinding(h) => &h.id,
         }
     }
 
@@ -355,6 +369,14 @@ impl ResidentHole {
             HoleSeed::Binding { binder, generation } => ResidentHole::Binding(BindingHole {
                 id,
                 binder,
+                generation,
+            }),
+            HoleSeed::ProjectedBinding {
+                binders,
+                generation,
+            } => ResidentHole::ProjectedBinding(ProjectedBindingHole {
+                id,
+                binders,
                 generation,
             }),
         }
@@ -369,6 +391,10 @@ impl ResidentHole {
             ResidentHole::Plain(_) => HoleSeed::Plain,
             ResidentHole::Binding(h) => HoleSeed::Binding {
                 binder: h.binder.clone(),
+                generation: h.generation,
+            },
+            ResidentHole::ProjectedBinding(h) => HoleSeed::ProjectedBinding {
+                binders: h.binders.clone(),
                 generation: h.generation,
             },
         }
@@ -393,10 +419,15 @@ impl ResidentHole {
 
 /// What kind of hole [`ResidentSession::classify_parked`] mints on a fresh
 /// suspension — [`ResidentHole`] minus the id, which is minted alongside it.
+#[derive(Clone)]
 enum HoleSeed {
     Plain,
     Binding {
         binder: BoundBinder,
+        generation: Generation,
+    },
+    ProjectedBinding {
+        binders: Vec<BoundBinder>,
         generation: Generation,
     },
 }
@@ -960,19 +991,20 @@ where
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         let seed = hole.seed();
-        let (cont_id, bind) = match hole {
-            ResidentHole::Plain(hole) => (hole.id, None),
-            ResidentHole::Binding(hole) => {
-                let bind = Some((hole.binder, hole.generation));
-                (hole.id, bind)
-            }
+        let cont_id = match hole {
+            ResidentHole::Plain(hole) => hole.id,
+            ResidentHole::Binding(hole) => hole.id,
+            ResidentHole::ProjectedBinding(hole) => hole.id,
         };
         let transfer = custody.into_transfer();
         tracing::debug!(
             continuation = %cont_id,
             handle = ?transfer.handle,
-            binding = bind.as_ref().map(|(binder, _)| binder.name.as_str()),
-            generation = bind.as_ref().map(|(_, generation)| generation.0),
+            obligation = match &seed {
+                HoleSeed::Plain => "plain",
+                HoleSeed::Binding { .. } => "binding",
+                HoleSeed::ProjectedBinding { .. } => "projected-binding",
+            },
             actor_scope = ?self.run_context.lexical_scope,
             actor_realm = ?self.run_context.resource_scope,
             "resuming resident continuation with rooted value"
@@ -982,7 +1014,6 @@ where
             &cont_id,
             ResumeInput::Handle(transfer.handle),
             seed,
-            bind,
             Some(&provenance),
         );
         if result.is_ok() {
@@ -1208,14 +1239,19 @@ where
     /// outlives every delivery.
     pub fn resume_handle_borrowed(
         &mut self,
-        cont_id: &str,
+        hole: ResidentHole,
         handle: RootedValueRef,
     ) -> Result<ResidentOutcome, ResidentError> {
+        let seed = hole.seed();
+        let cont_id = match hole {
+            ResidentHole::Plain(hole) => hole.id,
+            ResidentHole::Binding(hole) => hole.id,
+            ResidentHole::ProjectedBinding(hole) => hole.id,
+        };
         self.reenter(
-            cont_id,
+            &cont_id,
             ResumeInput::Handle(handle.handle),
-            HoleSeed::Plain,
-            None,
+            seed,
             Some(&handle.provenance),
         )
     }
@@ -1306,6 +1342,17 @@ where
             .into_iter()
             .map(|(name, _)| name.0.clone())
             .collect()
+    }
+
+    /// Source for the current declaration that introduced `name`, if it was
+    /// authored in this resident session. Types and values share GHC's
+    /// declaration plane, so discovery frontends should query both through
+    /// this one view.
+    pub fn declaration_source(&self, name: &str) -> Option<&str> {
+        self.core
+            .lib()
+            .decl_type_source(name)
+            .or_else(|| self.core.lib().decl_value_source(name))
     }
 
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
@@ -1574,6 +1621,71 @@ where
         if completed {
             self.materialize_binder(binder, gen, bound)?;
             self.binding_provenance.insert(binder.var_id, provenance);
+        }
+        Ok(resident_outcome)
+    }
+
+    /// Run one GHC-classified pattern bind and materialize every projected
+    /// component atomically into the current lexical scope. The JIT owns tuple
+    /// projection; Rust receives only GHC's binder metadata and never parses
+    /// the authored pattern.
+    pub fn run_projected_bind_with_sites(
+        &mut self,
+        name_hint: &str,
+        expr: &CoreExpr,
+        table: &DataConTable,
+        binders: &[BoundBinder],
+        gen: Generation,
+        sites: &[YieldSite],
+    ) -> Result<ResidentOutcome, ResidentError> {
+        let n_fields = NonZeroUsize::new(binders.len()).ok_or_else(|| {
+            ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
+                "a projected resident bind requires at least one GHC binder".into(),
+            ))))
+        })?;
+        self.core.set_val_gen(gen);
+        let provenance = self.provenance_for(expr, sites)?;
+        self.core
+            .merge_table(table)
+            .map_err(ResidentError::TableCollision)?;
+        self.core
+            .bootstrap_if_needed(expr, table)
+            .map_err(ResidentError::Bootstrap)?;
+        let env = self.seed_external_env_for(expr);
+        let function = self
+            .core
+            .add_fragment_session(name_hint, expr, &env)
+            .map_err(ResidentError::AddFunction)?;
+        let effect_policy = self.core.effect_policy();
+        let live_payload = self.core.live_payload_policy();
+        let realm = self.run_context.resource_scope;
+        let principal = self.run_context.principal;
+        let outcome = self.on_eval_thread(move |machine, table, handlers, captured| {
+            let run = SuspensionRun::fragment(
+                function,
+                table,
+                effect_policy,
+                realm,
+                ParkKind::Project { n_fields },
+            )
+            .with_live_payload(live_payload)
+            .with_principal(principal);
+            machine
+                .run_until_suspension(run, handlers, captured)
+                .map(|outcome| project_parked(machine, outcome, realm))
+        })?;
+        let projected = match &outcome {
+            ParkedRun::Completed { projected, .. } => projected.clone(),
+            ParkedRun::Suspended { .. } => Vec::new(),
+        };
+        let completed = matches!(outcome, ParkedRun::Completed { .. });
+        let seed = HoleSeed::ProjectedBinding {
+            binders: binders.to_vec(),
+            generation: gen,
+        };
+        let resident_outcome = self.classify_parked(outcome, None, seed, Arc::clone(&provenance));
+        if completed {
+            self.materialize_binders(binders, gen, projected, provenance)?;
         }
         Ok(resident_outcome)
     }
@@ -2012,15 +2124,12 @@ where
         answer: Value,
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole.seed();
-        match hole {
-            ResidentHole::Plain(h) => {
-                self.reenter(&h.id, ResumeInput::Answer(answer), seed, None, None)
-            }
-            ResidentHole::Binding(h) => {
-                let bind = Some((h.binder, h.generation));
-                self.reenter(&h.id, ResumeInput::Answer(answer), seed, bind, None)
-            }
-        }
+        let id = match hole {
+            ResidentHole::Plain(h) => h.id,
+            ResidentHole::Binding(h) => h.id,
+            ResidentHole::ProjectedBinding(h) => h.id,
+        };
+        self.reenter(&id, ResumeInput::Answer(answer), seed, None)
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -2034,13 +2143,7 @@ where
         cont_id: &str,
         reason: String,
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(
-            cont_id,
-            ResumeInput::Abort(reason),
-            HoleSeed::Plain,
-            None,
-            None,
-        )
+        self.reenter(cont_id, ResumeInput::Abort(reason), HoleSeed::Plain, None)
     }
 
     fn reenter(
@@ -2048,7 +2151,6 @@ where
         cont_id: &str,
         input: ResumeInput,
         seed: HoleSeed,
-        bind: Option<(BoundBinder, Generation)>,
         additional_provenance: Option<&ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
@@ -2109,16 +2211,33 @@ where
         // A completed bind materializes AFTER `classify_parked` has already
         // retired this hole, so a materialize failure cannot leave the hole
         // stuck on a frame the machine no longer holds.
-        let bound = match &outcome {
-            ParkedRun::Completed { bound, .. } => *bound,
-            ParkedRun::Suspended { .. } => None,
+        let (bound, projected) = match &outcome {
+            ParkedRun::Completed {
+                bound, projected, ..
+            } => (*bound, projected.clone()),
+            ParkedRun::Suspended { .. } => (None, Vec::new()),
         };
         let completed = matches!(outcome, ParkedRun::Completed { .. });
-        let resident_outcome =
-            self.classify_parked(outcome, Some(cont_id), seed, Arc::clone(&provenance));
-        if let (Some((binder, gen)), true) = (bind, completed) {
-            self.materialize_binder(&binder, gen, bound)?;
-            self.binding_provenance.insert(binder.var_id, provenance);
+        let resident_outcome = self.classify_parked(
+            outcome,
+            Some(cont_id),
+            seed.clone(),
+            Arc::clone(&provenance),
+        );
+        if completed {
+            match seed {
+                HoleSeed::Plain => {}
+                HoleSeed::Binding { binder, generation } => {
+                    self.materialize_binder(&binder, generation, bound)?;
+                    self.binding_provenance.insert(binder.var_id, provenance);
+                }
+                HoleSeed::ProjectedBinding {
+                    binders,
+                    generation,
+                } => {
+                    self.materialize_binders(&binders, generation, projected, provenance)?;
+                }
+            }
         }
         Ok(resident_outcome)
     }
@@ -2199,6 +2318,105 @@ where
             visible = self.current_binding_in(scope, &binder.name).is_some(),
             "materialized completed resident binding"
         );
+        Ok(())
+    }
+
+    fn materialize_binders(
+        &mut self,
+        binders: &[BoundBinder],
+        gen: Generation,
+        handles: Vec<ValueHandle>,
+        provenance: Arc<ProgramProvenance>,
+    ) -> Result<(), ResidentError> {
+        if binders.len() != handles.len() {
+            let produced = handles.len();
+            for handle in handles {
+                if let Some(machine) = self.core.machine_mut() {
+                    machine.discard_handle(handle);
+                }
+            }
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(format!(
+                    "projected bind produced {} roots for {} GHC binders",
+                    produced,
+                    binders.len()
+                )),
+            ))));
+        }
+        let scope = self.run_context.lexical_scope;
+        if !self.core.scope_tree().is_live(scope) {
+            for handle in handles {
+                if let Some(machine) = self.core.machine_mut() {
+                    machine.discard_handle(handle);
+                }
+            }
+            return Err(SessionError::DeadScope(scope).into());
+        }
+        // Validate the whole projection before consuming any handle. This is
+        // the atomicity membrane: an internal mismatch cannot leave half a
+        // Haskell pattern installed or half its roots detached from realm
+        // custody.
+        let Some(machine) = self.core.machine_mut() else {
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler("projected bind completed without a resident machine".into()),
+            ))));
+        };
+        if handles
+            .iter()
+            .any(|handle| machine.handle_slot(*handle).is_none())
+        {
+            for handle in handles {
+                machine.discard_handle(handle);
+            }
+            return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                EffectError::Handler(
+                    "projected bind root was unknown to the resident machine".into(),
+                ),
+            ))));
+        }
+        let mut slots = Vec::with_capacity(handles.len());
+        let mut remaining_handles = handles.into_iter();
+        while let Some(handle) = remaining_handles.next() {
+            let Some(slot) = machine.take_handle_root(handle) else {
+                // Defensive even though the immutable preflight above and
+                // this loop share one exclusive machine borrow.
+                for slot in slots {
+                    machine.abandon_uncommitted_root(slot);
+                }
+                for remaining in remaining_handles {
+                    machine.discard_handle(remaining);
+                }
+                return Err(ResidentError::Run(RuntimeError::Jit(JitError::Effect(
+                    EffectError::Handler(
+                        "projected bind root disappeared during atomic materialization".into(),
+                    ),
+                ))));
+            };
+            slots.push(slot);
+        }
+
+        let mut entries: Vec<BindingEntry> = Vec::with_capacity(binders.len());
+        for (binder, slot) in binders.iter().zip(slots) {
+            let value = match binder.tier {
+                ValueTier::Tier0Data => BoundValue::Tier0Forced(slot),
+                ValueTier::Tier1Closure => BoundValue::Tier1Closure(slot),
+            };
+            entries.push(BindingEntry {
+                name: BindingName(binder.name.clone()),
+                id: SessionVarId::from_extract(binder.var_id),
+                module: SessionModule::val(gen),
+                value,
+                type_display: Some(binder.type_display.clone()),
+                defining_expr: None,
+                scope,
+            });
+        }
+        self.core.bind_replacing_decls_in(scope, entries)?;
+        self.core.set_val_gen(gen);
+        for binder in binders {
+            self.binding_provenance
+                .insert(binder.var_id, Arc::clone(&provenance));
+        }
         Ok(())
     }
 
@@ -2385,13 +2603,15 @@ where
 /// boundary: a bind's tenured `!Send` `RootSlot` is minted into a
 /// [`ValueHandle`] IN-THREAD (`realm`-owned) and the id crosses instead —
 /// resolved back to its slot by `materialize_binder` on the session thread.
-/// `CompletedProject`/`CompletedRender` are unreachable on this lane (the
-/// resident session parks only `Plain`/`Binding`); live-payload presence is
-/// dropped because the payload itself is acquired explicitly from its frame.
+/// `CompletedProject` is the multi-binder lane; `CompletedRender` remains
+/// unreachable because resident turns do not use render parking. Live-payload
+/// presence is dropped because the payload itself is acquired explicitly from
+/// its frame.
 enum ParkedRun {
     Completed {
         value: Value,
         bound: Option<ValueHandle>,
+        projected: Vec<ValueHandle>,
     },
     Suspended {
         id: ContinuationId,
@@ -2407,13 +2627,26 @@ fn project_parked(
     realm: RealmId,
 ) -> ParkedRun {
     match outcome {
-        ParkedOutcome::CompletedValue(value) => ParkedRun::Completed { value, bound: None },
+        ParkedOutcome::CompletedValue(value) => ParkedRun::Completed {
+            value,
+            bound: None,
+            projected: Vec::new(),
+        },
         ParkedOutcome::CompletedBinding { value, root } => ParkedRun::Completed {
             value,
             bound: Some(machine.mint_handle_from_root(root, realm)),
+            projected: Vec::new(),
         },
-        ParkedOutcome::CompletedProject { .. } | ParkedOutcome::CompletedRender { .. } => {
-            unreachable!("the resident lane parks only Plain/Binding turns")
+        ParkedOutcome::CompletedProject { roots } => ParkedRun::Completed {
+            value: Value::Lit(tidepool_repr::Literal::LitString(b"pattern bound".to_vec())),
+            bound: None,
+            projected: roots
+                .into_iter()
+                .map(|root| machine.mint_handle_from_root(root, realm))
+                .collect(),
+        },
+        ParkedOutcome::CompletedRender { .. } => {
+            unreachable!("the resident lane does not park render turns")
         }
         ParkedOutcome::Suspended { id, request, .. } => ParkedRun::Suspended { id, request },
     }

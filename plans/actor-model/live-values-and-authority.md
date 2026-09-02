@@ -90,10 +90,11 @@ ReadOnly  -> ReadOnly
 Rust validates the edge, while GHC checks the definition against the selected
 child row. Profile identity is launch metadata and remains separate from the
 program image and launch grants. Definitions and profile names convey no
-authority by themselves. `ReadOnly` means no ambient write effects; it may
-still create `ReadOnly` children and call an explicitly supplied writer
-`ActorRef`. Preventing that would be an information-flow policy, not capability
-attenuation, and is outside this contract.
+authority by themselves. `ReadOnly` means the row omits `FsWrite`, not that
+every explicit capability operation is observational; it may still create
+`ReadOnly` children, use a granted `WorktreeHandle`, and call an explicitly
+supplied writer `ActorRef`. Preventing that would be an information-flow
+policy, not capability attenuation, and is outside this contract.
 
 The common authorization behavior should be registered callers rather than a
 blanket prohibition on copying the surrounding value. A failed operation

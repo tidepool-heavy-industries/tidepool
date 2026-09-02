@@ -16,9 +16,10 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution, OutputSink,
-    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
-    SessionRunContext, TurnRequest, TurnResult,
+    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution,
+    MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, RootedValueRef, SessionRunContext, TurnRequest, TurnResult,
+    ValueTier, WorkbenchDiscovery,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -640,9 +641,17 @@ where
     O: OutputSink + Sync,
 {
     if block.source.trim_start().starts_with(':') {
-        return Ok(ResidentWorkbenchStep::Rejected(
-            "meta commands are not part of the actor-local workbench; submit Haskell declarations or expressions".into(),
-        ));
+        return match run_discovery(
+            session,
+            context,
+            source,
+            expected_type,
+            type_modules,
+            &block,
+        )? {
+            Ok(output) => Ok(ResidentWorkbenchStep::Committed(output)),
+            Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
+        };
     }
     let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
     let compiled = match compile_block(
@@ -691,22 +700,36 @@ where
         TurnResult::Bind {
             bound, compiled, ..
         } => {
-            if bound.len() != 1 {
-                return Ok(ResidentWorkbenchStep::Rejected(
-                    "bind one name per workbench item, or split the binding into separate items"
-                        .into(),
-                ));
-            }
-            let name = bound[0].name.clone();
-            let outcome = session.run_bind_with_sites(
-                "actor_interactive_bind",
-                &compiled.expr,
-                &compiled.table,
-                &bound[0],
-                generation,
-                &compiled.asks,
-            );
-            start_fragment_settlement(session, context, Some(name), outcome)
+            let names = bound
+                .iter()
+                .map(|binder| binder.name.clone())
+                .collect::<Vec<_>>();
+            let outcome = match bound.as_slice() {
+                [] => session.run_with_sites(
+                    "actor_interactive_discard_bind",
+                    &compiled.expr,
+                    &compiled.table,
+                    &compiled.asks,
+                ),
+                [binder] => session.run_bind_with_sites(
+                    "actor_interactive_bind",
+                    &compiled.expr,
+                    &compiled.table,
+                    binder,
+                    generation,
+                    &compiled.asks,
+                ),
+                binders => session.run_projected_bind_with_sites(
+                    "actor_interactive_pattern_bind",
+                    &compiled.expr,
+                    &compiled.table,
+                    binders,
+                    generation,
+                    &compiled.asks,
+                ),
+            };
+            let receipt = (!names.is_empty()).then(|| names.join(", "));
+            start_fragment_settlement(session, context, receipt, outcome)
         }
         TurnResult::Expr { compiled, .. } => {
             let outcome = session.run_with_sites(
@@ -950,10 +973,21 @@ where
                                 specs: json(&specs),
                                 continuation: hole,
                             },
-                            Request::WorkerAttachWith(handle, (id, incarnation)) => {
+                            Request::WorkerAttachWith(handle, _, (id, incarnation)) => {
+                                let custody_realm = RealmId::fresh();
+                                let exit_ref = session
+                                    .live_payload_handle_owned_by(hole.cont_id(), custody_realm)
+                                    .ok_or_else(|| {
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            "worker attachment carried no live exit reference"
+                                                .into(),
+                                        )
+                                    })?;
                                 Captured::Attach {
                                     handle,
                                     actor: crate::wait::decode_address(id, incarnation)?,
+                                    exit_ref,
+                                    custody_realm,
                                     continuation: hole,
                                 }
                             }
@@ -962,14 +996,13 @@ where
                                 detail,
                                 continuation: hole,
                             },
-                            Request::WorkerSubmitWith(handle, receipt) => Captured::Submit {
-                                handle,
-                                receipt: json(&receipt),
+                            Request::WorkerListWith => Captured::List { continuation: hole },
+                            Request::WorkerInspectWith(handles) => Captured::Inspect {
+                                handles: json(&handles),
                                 continuation: hole,
                             },
-                            Request::WorkerListWith => Captured::List { continuation: hole },
-                            Request::WorkerCollectWith(handles) => Captured::Collect {
-                                handles: json(&handles),
+                            Request::WorkerBorrowExitWith(handle) => Captured::BorrowExit {
+                                handle,
                                 continuation: hole,
                             },
                             Request::WorkerAcknowledgeWith(acknowledgements) => {
@@ -1308,6 +1341,24 @@ where
             .with_machine(context, move |session, _, _| {
                 session
                     .resume_handle(hole, value)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    /// Deliver a value whose root remains owned by a longer-lived runtime
+    /// resource. Collection may borrow the same actor exit reference more
+    /// than once until acknowledgement closes its custody realm.
+    pub(crate) async fn resume_live_borrowed(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        value: RootedValueRef,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .resume_handle_borrowed(hole, value)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
@@ -1658,6 +1709,21 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    if block.source.trim_start().starts_with(':') {
+        return match run_discovery(
+            session,
+            context,
+            source,
+            expected_type,
+            type_modules,
+            &block,
+        )? {
+            Ok(output) => Ok(BlockExecution::Committed(output)),
+            Err(diagnostic) => Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
+                diagnostic,
+            ))),
+        };
+    }
     let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
     let compiled = match compile_block(
         session,
@@ -1705,26 +1771,41 @@ where
         TurnResult::Bind {
             bound, compiled, ..
         } => {
-            if bound.len() != 1 {
-                return Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
-                    "the resident actor workbench currently materializes one binding per statement; bind the tuple to one name or split this into separate blocks"
-                        .into(),
-                )));
-            }
-            let outcome = session.run_bind_with_sites(
-                "actor_workbench_bind",
-                &compiled.expr,
-                &compiled.table,
-                &bound[0],
-                generation,
-                &compiled.asks,
-            );
+            let names = bound
+                .iter()
+                .map(|binder| binder.name.clone())
+                .collect::<Vec<_>>();
+            let outcome = match bound.as_slice() {
+                [] => session.run_with_sites(
+                    "actor_workbench_discard_bind",
+                    &compiled.expr,
+                    &compiled.table,
+                    &compiled.asks,
+                ),
+                [binder] => session.run_bind_with_sites(
+                    "actor_workbench_bind",
+                    &compiled.expr,
+                    &compiled.table,
+                    binder,
+                    generation,
+                    &compiled.asks,
+                ),
+                binders => session.run_projected_bind_with_sites(
+                    "actor_workbench_pattern_bind",
+                    &compiled.expr,
+                    &compiled.table,
+                    binders,
+                    generation,
+                    &compiled.asks,
+                ),
+            };
+            let receipt = (!names.is_empty()).then(|| names.join(", "));
             settle_run(
                 session,
                 context,
                 &compiled.table,
                 outcome,
-                Some(&bound[0].name),
+                receipt.as_deref(),
             )
         }
         TurnResult::Expr { compiled, .. } => {
@@ -1735,6 +1816,144 @@ where
                 &compiled.asks,
             );
             settle_run(session, context, &compiled.table, outcome, None)
+        }
+    }
+}
+
+fn run_discovery<H, O>(
+    session: &ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    expected_type: &str,
+    type_modules: &[String],
+    block: &ParsedBlock,
+) -> Result<Result<String, String>, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let line = match MetaCommandLine::parse(&block.source) {
+        Ok(line) => line,
+        Err(diagnostic) => return Ok(Err(diagnostic)),
+    };
+    let command = match line.discovery() {
+        Ok(Some(command)) => command,
+        Ok(None) => {
+            return Ok(Err(format!(
+                "unknown actor workbench command `:{}` (supported: :type, :info, :bindings)",
+                line.name
+            )))
+        }
+        Err(diagnostic) => return Ok(Err(diagnostic)),
+    };
+    let include_paths = session
+        .compile_view_in(context.placement.lexical_scope)
+        .and_then(|view| context.compile_view(view).ok())
+        .map(|view| {
+            view.with_type_modules(type_modules)
+                .include_paths(&source.base_include)
+        })
+        .unwrap_or_else(|| source.base_include.to_vec());
+    match command {
+        WorkbenchDiscovery::Bindings => {
+            let mut bindings = session.binding_names_in(context.placement.lexical_scope);
+            bindings.sort();
+            let lines = bindings
+                .into_iter()
+                .filter_map(|name| {
+                    let (_, _, tier, type_display) =
+                        session.current_binding_in(context.placement.lexical_scope, &name)?;
+                    let tier = match tier {
+                        ValueTier::Tier0Data => "data",
+                        ValueTier::Tier1Closure => "closure",
+                    };
+                    Some(format!(
+                        "{name} :: {} [{tier}]",
+                        type_display.unwrap_or_else(|| "<type unavailable>".into())
+                    ))
+                })
+                .collect::<Vec<_>>();
+            Ok(Ok(if lines.is_empty() {
+                "no persistent bindings".into()
+            } else {
+                lines.join("\n")
+            }))
+        }
+        WorkbenchDiscovery::Info(name) => {
+            if let Some((_, _, tier, type_display)) =
+                session.current_binding_in(context.placement.lexical_scope, &name)
+            {
+                let tier = match tier {
+                    ValueTier::Tier0Data => "data",
+                    ValueTier::Tier1Closure => "closure",
+                };
+                return Ok(Ok(format!(
+                    "{name} :: {} [{tier}]",
+                    type_display.unwrap_or_else(|| "<type unavailable>".into())
+                )));
+            }
+            if let Some(declaration) = session.declaration_source(&name) {
+                return Ok(Ok(declaration.to_string()));
+            }
+            if let Some(info) = tidepool_runtime::session::introspect::stdlib_info(
+                &include_paths,
+                &name,
+            )
+            .or_else(|| {
+                tidepool_runtime::session::introspect::stdlib_value_info(&include_paths, &name)
+            }) {
+                return Ok(Ok(
+                    serde_json::to_string_pretty(&info).unwrap_or_else(|_| info.to_string())
+                ));
+            }
+            Ok(Err(format!(
+                "`:info {name}` found no visible binding or declaration; use `:type {name}` for an expression"
+            )))
+        }
+        WorkbenchDiscovery::Type(expression) => {
+            // An exported polymorphic effect verb cannot be generalized from
+            // the local probe binding used by the turn compiler. Its authored
+            // signature is both more useful and more exact than forcing a
+            // concrete actor row merely to satisfy the probe.
+            if expression.chars().all(|character| {
+                character.is_alphanumeric() || character == '_' || character == '\''
+            }) {
+                if let Some(info) = tidepool_runtime::session::introspect::stdlib_value_info(
+                    &include_paths,
+                    &expression,
+                ) {
+                    if let Some(signature) = info.get("shape").and_then(serde_json::Value::as_str) {
+                        return Ok(Ok(signature.to_string()));
+                    }
+                }
+            }
+            let probe = ParsedBlock {
+                ordinal: block.ordinal,
+                total: block.total,
+                source: format!("let __tidepool_type_probe = ({expression})"),
+            };
+            let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
+            match compile_block(
+                session,
+                context,
+                source,
+                &effect_stack,
+                type_modules,
+                &probe,
+            )? {
+                CompiledBlock::Rejected(diagnostic) => Ok(Err(diagnostic)),
+                CompiledBlock::Ready(compiled) => match compiled.result {
+                    TurnResult::Bind { bound, .. } => match bound.into_iter().next() {
+                        Some(binding) => {
+                            Ok(Ok(format!("{expression} :: {}", binding.type_display)))
+                        }
+                        None => Ok(Err("GHC returned no type for the probe".into())),
+                    },
+                    _ => Ok(Err(
+                        "GHC did not classify the type probe as a binding".into()
+                    )),
+                },
+            }
         }
     }
 }

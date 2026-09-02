@@ -24,7 +24,7 @@ impl ResidentInteractivePolicy {
         Self {
             declarations: vec![ToolDeclaration {
                 name: SESSION_RUN_TOOL.into(),
-                description: "Run ordered GHCi-style Haskell items in this actor's persistent session. Declarations and bindings survive later calls. Actor operations are ordinary Haskell effects; start every independent child before awaiting any result. Complete the enclosing typed agent session with `complete value` only when its fixed Haskell result is ready.".into(),
+                description: "Run ordered GHCi-style Haskell items in this actor's persistent session. Ordinary declarations, expressions, and pattern bindings survive later calls; inspect them with `:type EXPR`, `:info NAME`, and `:bindings`. Items commit in order, so after a later rejection retry only that item and its suffix. `sessionInput` is the stable typed input for this activation. Actor operations are ordinary Haskell effects; start every independent child before collecting results. Complete the enclosing typed agent session with `complete value` only when its fixed Haskell result is ready.".into(),
                 input_schema,
                 output_schema: Some(schemars::schema_for!(WorkbenchResponse).as_value().clone()),
                 kind: ToolKind::Call,
@@ -42,7 +42,7 @@ impl ResidentMcpEndpoint for ResidentInteractivePolicy {
 
     fn instructions(&self) -> Option<&str> {
         Some(
-            "Use session_run as the primary actor orchestration surface. Build persistent Haskell declarations and live bindings; use native coding tools for repository work.",
+            "Use session_run as the primary actor orchestration surface. Its items are Haskell, not a JSON domain protocol: build persistent declarations and live bindings, query types with :type/:info/:bindings, and use native coding tools for repository work.",
         )
     }
 

@@ -1,15 +1,14 @@
 //! Rust-owned worker lifecycle layered over ordinary local actors.
 
-use std::collections::HashMap;
-
 use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
+use tidepool_codegen::suspension::RealmId;
+use tidepool_runtime::session::{ResidentHole, RootCustody, RootedValueRef};
 
 use crate::{
-    AcknowledgementDisposition, ActorExitKind, ActorRef, ActorTerminal, LocalActorRef,
-    WorkerCollection, WorkerHandle, WorkerLedger, WorkerPhase, WorkerStartResult, WorkerTerminal,
+    AcknowledgementDisposition, ActorRef, LocalActorRef, WorkerHandle, WorkerInspection,
+    WorkerLedger, WorkerPhase, WorkerStartResult,
 };
-use tidepool_runtime::session::ResidentHole;
 
 pub(crate) enum ResidentWorkerRequest {
     ReserveBatch {
@@ -19,6 +18,8 @@ pub(crate) enum ResidentWorkerRequest {
     Attach {
         handle: String,
         actor: ActorRef,
+        exit_ref: RootCustody,
+        custody_realm: RealmId,
         continuation: ResidentHole,
     },
     FailStart {
@@ -26,16 +27,15 @@ pub(crate) enum ResidentWorkerRequest {
         detail: String,
         continuation: ResidentHole,
     },
-    Submit {
-        handle: String,
-        receipt: serde_json::Value,
-        continuation: ResidentHole,
-    },
     List {
         continuation: ResidentHole,
     },
-    Collect {
+    Inspect {
         handles: serde_json::Value,
+        continuation: ResidentHole,
+    },
+    BorrowExit {
+        handle: String,
         continuation: ResidentHole,
     },
     Acknowledge {
@@ -53,12 +53,31 @@ pub struct WorkerWake {
     pub handle: WorkerHandle,
 }
 
+#[derive(Clone)]
+pub(crate) struct WorkerExitLease {
+    actor: LocalActorRef,
+    exit_ref: RootedValueRef,
+    custody_realm: RealmId,
+}
+
+impl WorkerExitLease {
+    fn actor(&self) -> ActorRef {
+        self.actor.identity()
+    }
+
+    pub(crate) fn custody_realm(&self) -> RealmId {
+        self.custody_realm
+    }
+
+    pub(crate) fn exit_ref(&self) -> RootedValueRef {
+        self.exit_ref.clone()
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct WorkerRuntime {
     root: RwLock<Option<ActorRef>>,
-    ledger: Mutex<WorkerLedger<serde_json::Value>>,
-    by_actor: Mutex<HashMap<ActorRef, WorkerHandle>>,
-    submitted: Mutex<HashMap<WorkerHandle, serde_json::Value>>,
+    ledger: Mutex<WorkerLedger<WorkerExitLease>>,
     wakes: Mutex<Vec<WorkerWake>>,
     next_event: Mutex<u64>,
 }
@@ -131,22 +150,26 @@ impl WorkerRuntime {
         owner: ActorRef,
         handle: String,
         actor: LocalActorRef,
+        exit_ref: RootCustody,
+        custody_realm: RealmId,
     ) -> Result<serde_json::Value, String> {
         self.require_root(owner)?;
         let handle = WorkerHandle::from_raw(handle);
         let accepted = {
             let mut ledger = self.ledger.lock();
+            let lease = WorkerExitLease {
+                actor: actor.clone(),
+                exit_ref: exit_ref.into_rooted_ref(),
+                custody_realm,
+            };
             ledger
-                .commit_started_handle(&handle)
+                .commit_started_handle(&handle, lease)
                 .map_err(|error| error.to_string())?;
             ledger
                 .accepted(&handle)
                 .cloned()
                 .ok_or_else(|| format!("worker {handle} disappeared after attachment"))?
         };
-        self.by_actor
-            .lock()
-            .insert(actor.identity(), handle.clone());
         Ok(start_json(&WorkerStartResult::Accepted(accepted)))
     }
 
@@ -175,44 +198,10 @@ impl WorkerRuntime {
         }))
     }
 
-    pub(crate) fn submit(
-        &self,
-        actor: ActorRef,
-        handle: String,
-        receipt: serde_json::Value,
-    ) -> Result<(), String> {
-        let handle = WorkerHandle::from_raw(handle);
-        if self.by_actor.lock().get(&actor) != Some(&handle) {
-            return Err("worker submission did not match the executing actor principal".into());
-        }
-        if self.submitted.lock().insert(handle, receipt).is_some() {
-            return Err("worker submitted more than one candidate receipt".into());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn child_exited(
-        &self,
-        actor: ActorRef,
-        terminal: &ActorTerminal,
-    ) -> Option<WorkerWake> {
-        let handle = self.by_actor.lock().remove(&actor)?;
-        let submitted = self.submitted.lock().remove(&handle);
-        let outcome =
-            match terminal.kind {
-                ActorExitKind::Completed => submitted
-                    .map(WorkerTerminal::Completed)
-                    .unwrap_or_else(|| WorkerTerminal::Failed {
-                        detail: "worker exited without submitting a candidate receipt".into(),
-                    }),
-                ActorExitKind::Failed => WorkerTerminal::Failed {
-                    detail: terminal.summary.clone(),
-                },
-                ActorExitKind::Cancelled => WorkerTerminal::Cancelled {
-                    detail: terminal.summary.clone(),
-                },
-            };
-        if let Err(error) = self.ledger.lock().settle(&handle, outcome) {
+    pub(crate) fn child_exited(&self, actor: ActorRef) -> Option<WorkerWake> {
+        let mut ledger = self.ledger.lock();
+        let handle = ledger.find_attached(|lease| lease.actor() == actor)?;
+        if let Err(error) = ledger.settle(&handle) {
             tracing::error!(
                 worker = %handle.as_str(),
                 actor = ?actor,
@@ -238,7 +227,7 @@ impl WorkerRuntime {
         ))
     }
 
-    pub(crate) fn collect(
+    pub(crate) fn inspect(
         &self,
         actor: ActorRef,
         handles: serde_json::Value,
@@ -251,41 +240,56 @@ impl WorkerRuntime {
             handles
                 .into_iter()
                 .map(|handle| {
-                    collection_json(&ledger.collect(&WorkerHandle::from_raw(handle.worker_id)))
+                    inspection_json(&ledger.inspect(&WorkerHandle::from_raw(handle.worker_id)))
                 })
                 .collect(),
         ))
+    }
+
+    pub(crate) fn borrow_exit(
+        &self,
+        actor: ActorRef,
+        handle: String,
+    ) -> Result<RootedValueRef, String> {
+        self.require_root(actor)?;
+        self.ledger
+            .lock()
+            .collect_attachment(&WorkerHandle::from_raw(handle))
+            .map(|lease| lease.exit_ref())
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn acknowledge(
         &self,
         actor: ActorRef,
         acknowledgements: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<(serde_json::Value, Vec<WorkerExitLease>), String> {
         self.require_root(actor)?;
         let acknowledgements: Vec<RequestedAcknowledgement> =
             serde_json::from_value(acknowledgements).map_err(|error| error.to_string())?;
         let mut ledger = self.ledger.lock();
-        Ok(serde_json::Value::Array(
-            acknowledgements
-                .into_iter()
-                .map(|request| {
-                    let disposition = match request.disposition {
-                        DispositionWire::IntegratedAs { oid } => {
-                            AcknowledgementDisposition::IntegratedAs(oid)
-                        }
-                        DispositionWire::Reviewed => AcknowledgementDisposition::Reviewed,
-                        DispositionWire::Rejected { reason } => {
-                            AcknowledgementDisposition::Rejected { reason }
-                        }
-                    };
-                    acknowledgement_json(&ledger.acknowledge(
-                        &WorkerHandle::from_raw(request.worker.worker_id),
-                        disposition,
-                    ))
-                })
-                .collect(),
-        ))
+        let mut released = Vec::new();
+        let values = acknowledgements
+            .into_iter()
+            .map(|request| {
+                let disposition = match request.disposition {
+                    DispositionWire::IntegratedAs { oid } => {
+                        AcknowledgementDisposition::IntegratedAs(oid)
+                    }
+                    DispositionWire::Reviewed => AcknowledgementDisposition::Reviewed,
+                    DispositionWire::Rejected { reason } => {
+                        AcknowledgementDisposition::Rejected { reason }
+                    }
+                };
+                let (acknowledgement, lease) = ledger.acknowledge(
+                    &WorkerHandle::from_raw(request.worker.worker_id),
+                    disposition,
+                );
+                released.extend(lease);
+                acknowledgement_json(&acknowledgement)
+            })
+            .collect();
+        Ok((serde_json::Value::Array(values), released))
     }
 
     pub(crate) fn take_wakes(&self, actor: ActorRef) -> Result<Vec<WorkerWake>, String> {
@@ -320,8 +324,8 @@ fn start_json(result: &WorkerStartResult) -> serde_json::Value {
         WorkerStartResult::Failed { accepted, detail } => {
             serde_json::json!({"tag":"WorkerStartFailed","accepted":accepted_json(accepted),"detail":detail})
         }
-        WorkerStartResult::Tombstoned(accepted) => {
-            serde_json::json!({"tag":"WorkerTombstoned","accepted":accepted_json(accepted)})
+        WorkerStartResult::Acknowledged(accepted) => {
+            serde_json::json!({"tag":"WorkerStartAcknowledged","accepted":accepted_json(accepted)})
         }
     }
 }
@@ -340,57 +344,40 @@ fn summary_json(summary: &crate::WorkerSummary) -> serde_json::Value {
     })
 }
 
-fn terminal_json(terminal: &WorkerTerminal<serde_json::Value>) -> serde_json::Value {
-    match terminal {
-        WorkerTerminal::Completed(receipt) => {
-            serde_json::json!({"tag":"WorkCompleted","receipt":receipt})
+fn inspection_json(inspection: &WorkerInspection) -> serde_json::Value {
+    match inspection {
+        WorkerInspection::Pending(handle) => {
+            serde_json::json!({"tag":"WorkerInspectionPending","worker":{"workerId":handle.as_str()}})
         }
-        WorkerTerminal::Failed { detail } => {
-            serde_json::json!({"tag":"WorkFailed","detail":detail})
+        WorkerInspection::Ready(handle) => {
+            serde_json::json!({"tag":"WorkerInspectionExitReady","worker":{"workerId":handle.as_str()}})
         }
-        WorkerTerminal::Cancelled { detail } => {
-            serde_json::json!({"tag":"WorkCancelled","detail":detail})
+        WorkerInspection::StartFailed { handle, detail } => {
+            serde_json::json!({"tag":"WorkerInspectionStartFailed","worker":{"workerId":handle.as_str()},"detail":detail})
         }
-    }
-}
-
-fn collection_json(collection: &WorkerCollection<serde_json::Value>) -> serde_json::Value {
-    match collection {
-        WorkerCollection::Pending(handle) => {
-            serde_json::json!({"tag":"WorkerPending","worker":{"workerId":handle.as_str()}})
+        WorkerInspection::Acknowledged(handle) => {
+            serde_json::json!({"tag":"WorkerInspectionAcknowledged","worker":{"workerId":handle.as_str()}})
         }
-        WorkerCollection::Collected { handle, outcome } => {
-            serde_json::json!({"tag":"WorkerCollected","worker":{"workerId":handle.as_str()},"outcome":terminal_json(outcome)})
-        }
-        WorkerCollection::Acknowledged { handle, outcome } => {
-            serde_json::json!({"tag":"WorkerCollectionAcknowledged","worker":{"workerId":handle.as_str()},"outcome":terminal_json(outcome)})
-        }
-        WorkerCollection::NotFound(handle) => {
-            serde_json::json!({"tag":"WorkerNotFound","worker":{"workerId":handle.as_str()}})
+        WorkerInspection::NotFound(handle) => {
+            serde_json::json!({"tag":"WorkerInspectionUnknown","worker":{"workerId":handle.as_str()}})
         }
     }
 }
 
-fn acknowledgement_json(
-    acknowledgement: &crate::WorkerAcknowledgement<serde_json::Value>,
-) -> serde_json::Value {
+fn acknowledgement_json(acknowledgement: &crate::WorkerAcknowledgement) -> serde_json::Value {
     use crate::WorkerAcknowledgement::*;
     match acknowledgement {
         Acknowledged {
             handle,
             disposition,
-            custody,
-            ..
         } => {
-            serde_json::json!({"tag":"WorkerAcknowledged","worker":{"workerId":handle.as_str()},"disposition":disposition_json(disposition),"custody":custody_json(custody)})
+            serde_json::json!({"tag":"WorkerAcknowledged","worker":{"workerId":handle.as_str()},"disposition":disposition_json(disposition)})
         }
         AlreadyAcknowledged {
             handle,
             disposition,
-            custody,
-            ..
         } => {
-            serde_json::json!({"tag":"WorkerAlreadyAcknowledged","worker":{"workerId":handle.as_str()},"disposition":disposition_json(disposition),"custody":custody_json(custody)})
+            serde_json::json!({"tag":"WorkerAlreadyAcknowledged","worker":{"workerId":handle.as_str()},"disposition":disposition_json(disposition)})
         }
         NotCollected(handle) => {
             serde_json::json!({"tag":"WorkerNotCollected","worker":{"workerId":handle.as_str()}})
@@ -413,21 +400,13 @@ fn disposition_json(disposition: &AcknowledgementDisposition) -> serde_json::Val
     }
 }
 
-fn custody_json(custody: &crate::WorkerCustody) -> serde_json::Value {
-    match custody {
-        crate::WorkerCustody::WorktreeRetained => {
-            serde_json::json!({"tag":"WorktreeRetained"})
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ActorId;
 
     #[test]
-    fn typed_json_boundary_preserves_idempotency_collection_and_tombstones() {
+    fn typed_metadata_boundary_preserves_idempotency_and_acknowledged_keys() {
         let runtime = WorkerRuntime::default();
         let root = ActorRef::first(ActorId(1));
         runtime.install_root(root);
@@ -449,11 +428,10 @@ mod tests {
             .fail_start(root, handle.clone(), "launch failed".into())
             .unwrap();
         let collected = runtime
-            .collect(root, serde_json::json!([{"workerId":handle}]))
+            .inspect(root, serde_json::json!([{"workerId":handle}]))
             .unwrap();
-        assert_eq!(collected[0]["tag"], "WorkerCollected");
-        assert_eq!(collected[0]["outcome"]["tag"], "WorkFailed");
-        let acknowledged = runtime
+        assert_eq!(collected[0]["tag"], "WorkerInspectionStartFailed");
+        let (acknowledged, released) = runtime
             .acknowledge(
                 root,
                 serde_json::json!([{
@@ -462,6 +440,7 @@ mod tests {
                 }]),
             )
             .unwrap();
+        assert!(released.is_empty());
         assert_eq!(acknowledged[0]["tag"], "WorkerAcknowledged");
         let tombstoned = runtime
             .reserve_batch(
@@ -469,7 +448,7 @@ mod tests {
                 serde_json::json!([{"key":"implementation","assignment":"build it"}]),
             )
             .unwrap();
-        assert_eq!(tombstoned[0]["tag"], "WorkerTombstoned");
+        assert_eq!(tombstoned[0]["tag"], "WorkerStartAcknowledged");
     }
 
     #[test]

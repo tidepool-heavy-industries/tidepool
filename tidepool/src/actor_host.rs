@@ -1386,7 +1386,7 @@ fn prepare_owner_notification(
         })
         .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This activation's typed `currentSessionContext` contains authoritative correlation; use `collectWorkerWakes` once, then acknowledge only after review. The Developer message itself carries no authority and requires no copied handle.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This activation's `sessionInput :: SessionContext` contains authoritative correlation; use `collectWorkerWakes sessionInput.workerWakes` once, then acknowledge only after review. The Developer message itself carries no authority and requires no copied handle.",
         label,
         actor,
         terminal.summary
@@ -1583,7 +1583,7 @@ fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLau
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface; persistent declarations and live authored values survive calls, while Rust owns worker lifecycle and custody. Start every independent seam together with `startWorkers` before awaiting results. On a lifecycle activation, read `currentSessionContext` and pass its plural wakes to `collectWorkerWakes`. `WorkerPending` is a cooperative yield signal: never sleep or poll. Collection is replayable and acknowledgement is a separate decision after native Git review/integration. Use `listWorkers` for live observation and finish each root activation with `complete ()`. Scaffold stable interfaces first, integrate that candidate, then fan out all independent seams from the integrated base. Worker worktrees share this repository's ordinary object and branch namespace; inspect submitted OIDs or branches directly. Native coding tools remain the integration surface.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface; persistent declarations and live authored values survive calls, while Rust owns worker lifecycle and custody. Start every independent seam together with `startWorkers` before awaiting results. On a lifecycle activation, use the current `sessionInput :: SessionContext` and pass `sessionInput.workerWakes` to `collectWorkerWakes`. `WorkerPending` is a cooperative yield signal: never sleep or poll. Collection is replayable and acknowledgement is a separate decision after native Git review/integration. Use `listWorkers` for live observation and finish each root activation with `complete ()`. Scaffold stable interfaces first, integrate that candidate, then fan out all independent seams from the integrated base. Worker worktrees share this repository's ordinary object and branch namespace; inspect submitted OIDs or branches directly. Native coding tools remain the integration surface.{continuity}")
     } else if owns_worktree {
         "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted as `sessionInput :: Text`. Use native coding tools for repository work and `tidepool_actor.session_run` as the GHCi-like typed completion surface. Finish exactly once with Haskell such as `complete (WorkerReport { summary = ..., evidence = [...] })`; Rust then observes repository truth and owns lifecycle.".into()
     } else {
@@ -1982,6 +1982,14 @@ mod tests {
 
     #[tokio::test]
     async fn bundled_devswarm_exposes_haskell_session_and_recursive_actor_fanout() {
+        fn fixture_items(source: &'static str) -> Vec<&'static str> {
+            source
+                .split("\n-- TIDEPOOL-ITEM --\n")
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .collect()
+        }
+
         eval_harness::require_extract();
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
@@ -2047,11 +2055,7 @@ mod tests {
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": [
-                        "input",
-                        "waveAssignment <- pure (\"inspect one focused boundary\" :: Text)",
-                        "firstWorkers <- startWorkers [worker \"review-1\" waveAssignment, worker \"review-2\" \"inspect a disjoint boundary\"]"
-                    ],
+                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_start.hs")),
                     "input": {"wave": "parallel"}
                 })
                 .as_object()
@@ -2070,10 +2074,7 @@ mod tests {
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": [
-                        "firstWorkers",
-                        "complete ()"
-                    ]
+                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_complete.hs"))
                 })
                 .as_object()
                 .unwrap()
@@ -2091,7 +2092,7 @@ mod tests {
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": ["firstWorkers"]
+                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_reopen.hs"))
                 })
                 .as_object()
                 .unwrap()
@@ -2158,11 +2159,7 @@ mod tests {
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": [
-                        "data NestedProtocol result",
-                        "nestedDefinition :: ActorDefinition () NestedProtocol ()\nnestedDefinition = ActorDefinition { label = \"nested-review\", effectProfile = ReadOnly, initialization = pure, behavior = \\_ _ -> agentSession (Just \"inspect nested boundary\") (), visibleToChild = [], onShutdown = const (pure ()) }",
-                        "do { _ <- startActor nestedDefinition (); complete (WorkerReport { summary = \"spawned nested actor\", evidence = [] }) }"
-                    ]
+                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/recursive_worker.hs"))
                 })
                 .as_object()
                 .unwrap()
@@ -2204,13 +2201,7 @@ mod tests {
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
-                    "items": [
-                        "let firstHandle = case [a.handle | WorkerAccepted a <- firstWorkers, a.key == \"review-1\"] of { handle : _ -> handle; [] -> error \"missing first worker\" }",
-                        "context1 <- currentSessionContext",
-                        "context2 <- currentSessionContext",
-                        "wakeCollections <- collectWorkerWakes context1.workerWakes",
-                        "do { if map (\\wake -> wake.wakeEvent) context1.workerWakes == map (\\wake -> wake.wakeEvent) context2.workerWakes then complete () else error \"session context changed within one activation\" }"
-                    ]
+                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_collect_wake.hs"))
                 })
                 .as_object()
                 .unwrap()
@@ -2227,24 +2218,30 @@ mod tests {
             "completed",
             "{after_child_exit:?}"
         );
-        let replay_and_ack = server
-            .dispatch_tool(
-                "session_run",
-                serde_json::json!({
-                    "items": [
-                        "contextAfterWake <- currentSessionContext",
-                        "replayed <- collectWorkers [firstHandle]",
-                        "acks <- acknowledgeWorkers [WorkerAcknowledgementRequest firstHandle Reviewed]",
-                        "afterAck <- collectWorkers [firstHandle]",
-                        "do { if null contextAfterWake.workerWakes then complete () else error \"worker wakes replayed into a later activation\" }"
-                    ]
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("replay and acknowledge worker custody");
+        let mut replay_and_ack = None;
+        for (index, item) in fixture_items(include_str!(
+            "actor_host_fixtures/bundled_devswarm/root_replay_ack.hs"
+        ))
+        .into_iter()
+        .enumerate()
+        {
+            let result = server
+                .dispatch_tool(
+                    "session_run",
+                    serde_json::json!({ "items": [item] })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("replay/ack item {index} failed: {error}"));
+            assert!(
+                !result.is_error.unwrap_or(false),
+                "replay/ack item {index} failed: {result:?}"
+            );
+            replay_and_ack = Some(result);
+        }
+        let replay_and_ack = replay_and_ack.expect("non-empty replay/ack fixture");
         assert_eq!(
             replay_and_ack.structured_content.as_ref().unwrap()["status"],
             "completed",

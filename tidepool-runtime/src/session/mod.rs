@@ -19,6 +19,7 @@
 mod dialect;
 pub mod engine;
 pub mod facade;
+pub mod introspect;
 pub mod kernel;
 pub mod persistent;
 pub mod registry;
@@ -64,8 +65,9 @@ pub use workbench::{
     classify_workbench_item, escape_workbench_haskell_string, normalize_workbench_input,
     resident_workbench_templates, run_block_sequence, workbench_input_binding,
     workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
-    MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchItem, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchDiscovery, WorkbenchItem,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus,
 };
 
 pub use turn::{

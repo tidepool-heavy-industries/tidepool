@@ -214,8 +214,8 @@ pub struct HelpRequest {
 
 /// The two include roots a compile needs to see the whole effect surface —
 /// returned together because they are cache-addressed SEPARATELY and both
-/// must be on the include path (GHC resolves `Tidepool.Effects`'s `import
-/// Tidepool.Effects.Core` against the `core` root).
+/// must be on the include path (GHC resolves `Tidepool.Effects`'s authored
+/// facade, and that facade resolves Core, against the `core` root).
 ///
 /// **`core` is the universal stable half**: every compile resolves the same
 /// content-addressed effect vocabulary. The narrow shim row controls which
@@ -227,7 +227,8 @@ pub struct HelpRequest {
 /// answer type changes between windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectsModuleDirs {
-    /// Include root holding universal `Tidepool/Effects/Core.hs`.
+    /// Include root holding universal `Tidepool/Effects/Core.hs` and its
+    /// model-authored `Tidepool/Effects/Authored.hs` facade.
     pub core: PathBuf,
     /// Include root holding `Tidepool/Effects.hs` (the shim) and
     /// `Tidepool/Orchestrate.hs` — row-keyed.
@@ -236,16 +237,15 @@ pub struct EffectsModuleDirs {
 
 impl EffectsModuleDirs {
     /// Both roots, in the order a GHC include-path search would want them
-    /// (core first: the shim's `import Tidepool.Effects.Core` resolves
-    /// against it, though GHC's own search order does not actually require
-    /// this — listed core-first purely for readability at call sites).
+    /// (core first: the shim's authored-facade import resolves against it,
+    /// though GHC's own search order does not require this).
     #[must_use]
     pub fn include_paths(&self) -> [PathBuf; 2] {
         [self.core.clone(), self.shim.clone()]
     }
 }
 
-/// Write universal `Tidepool/Effects/Core.hs` and
+/// Write universal `Tidepool/Effects/Core.hs`, its authored facade, and
 /// `Tidepool/Effects.hs` + `Tidepool/Orchestrate.hs` (row-keyed) into their two
 /// content-addressed directories and return both (see [`EffectsModuleDirs`]).
 /// Idempotent: each path is keyed on its own module source(s), so distinct
@@ -285,11 +285,10 @@ pub fn ensure_effects_module_at(
     Ok(EffectsModuleDirs { core, shim })
 }
 
-/// Write the universal stable `Tidepool/Effects/Core.hs` module into its own
-/// content-addressed dir and return it. Separate from the shim/orchestrate
-/// write so the decl plane (which needs Core on its include path but NEVER
-/// the per-window shim — see `tidepool-mcp/CLAUDE.md`) can materialize it
-/// without also minting a throwaway row-keyed dir.
+/// Write the universal stable Core module and authored facade into their own
+/// content-addressed dir. The declaration plane imports the facade but never
+/// the per-window shim, so it can materialize this pair without minting a
+/// throwaway row-keyed dir.
 pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
     write_core_module(&effects_core_module_source())
 }
@@ -299,7 +298,14 @@ pub fn ensure_effects_core_module() -> std::io::Result<PathBuf> {
 /// generated sources to re-materialize them if the staging dir is reaped)
 /// calls this instead of re-deriving the universal text each time.
 pub fn write_core_module(core_src: &str) -> std::io::Result<PathBuf> {
-    write_module_dir("tidepool-effects-core", &[("Effects/Core.hs", core_src)])
+    let authored = effects_authored_module_source();
+    write_module_dir(
+        "tidepool-effects-core",
+        &[
+            ("Effects/Core.hs", core_src),
+            ("Effects/Authored.hs", &authored),
+        ],
+    )
 }
 
 /// Write just the per-window shim (`Tidepool/Effects.hs` +

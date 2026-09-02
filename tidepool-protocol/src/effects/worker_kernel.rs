@@ -5,7 +5,9 @@
 //! acknowledgement without exposing a copied registry value to Haskell.
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
+use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, TypeParam, Verb};
+
+const TYPE_PARAMS: &[TypeParam] = &[TypeParam::value("exit")];
 
 fn json_arg(name: &'static str) -> Arg {
     Arg {
@@ -37,10 +39,10 @@ pub fn worker_kernel() -> Effect {
             "Authored code uses the typed DevSwarm facade, never these constructors.",
         ],
         prompt_card: None,
-        type_params: &[],
-        default_row_args: &[],
+        type_params: TYPE_PARAMS,
+        default_row_args: &["Value"],
         helpers_row_polymorphic: true,
-        extra_imports: &[],
+        extra_imports: &["import Tidepool.Internal.ActorRef (ExitRef)"],
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,
@@ -59,6 +61,11 @@ pub fn worker_kernel() -> Effect {
                 method: "worker_attach_with",
                 args: vec![
                     text_arg("handle"),
+                    Arg {
+                        name: "exitRef",
+                        ty: HsType::app(HsType::Named("ExitRef"), HsType::Var("exit")),
+                        rust: RustBinding::CoreValue,
+                    },
                     Arg {
                         name: "actor",
                         ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
@@ -80,15 +87,6 @@ pub fn worker_kernel() -> Effect {
                 extract: None,
             },
             Verb {
-                ctor: "WorkerSubmitWith",
-                method: "worker_submit_with",
-                args: vec![text_arg("handle"), json_arg("receipt")],
-                ret: HsType::Unit,
-                errors: None,
-                handling: HandlingClass::Actor,
-                extract: None,
-            },
-            Verb {
                 ctor: "WorkerListWith",
                 method: "worker_list_with",
                 args: vec![],
@@ -98,10 +96,19 @@ pub fn worker_kernel() -> Effect {
                 extract: None,
             },
             Verb {
-                ctor: "WorkerCollectWith",
-                method: "worker_collect_with",
+                ctor: "WorkerInspectWith",
+                method: "worker_inspect_with",
                 args: vec![json_arg("handles")],
                 ret: HsType::Value,
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "WorkerBorrowExitWith",
+                method: "worker_borrow_exit_with",
+                args: vec![text_arg("handle")],
+                ret: HsType::app(HsType::Named("ExitRef"), HsType::Var("exit")),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

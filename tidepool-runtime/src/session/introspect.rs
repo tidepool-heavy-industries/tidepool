@@ -1,4 +1,4 @@
-//! `:i <Name>` resolution for stdlib/preamble types — the source-scan lane.
+//! Source-backed `:info` resolution shared by persistent Haskell workbenches.
 //!
 //! Session value bindings, built-in effect decl `type_defs`, and
 //! session-declared types don't cover everything `:i` needs to resolve: the
@@ -64,6 +64,86 @@ pub fn stdlib_info(include_dirs: &[PathBuf], name: &str) -> Option<serde_json::V
             }
         }
     })
+}
+
+/// Extract top-level value signatures, joining indented continuation lines.
+///
+/// This is source vocabulary rather than MCP machinery; both the preamble
+/// digest and workbench discovery use this one scanner.
+pub fn extract_signatures(src: &str) -> Vec<String> {
+    fn valid_head(head: &str) -> bool {
+        (head.starts_with(|character: char| character.is_ascii_lowercase() || character == '_')
+            && head.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '\''
+            }))
+            || (head.starts_with('(') && head.ends_with(')'))
+    }
+    fn inline_head(line: &str) -> Option<&str> {
+        if line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let (head, _) = line.split_once("::")?;
+        let head = head.trim_end();
+        (!head.is_empty() && !head.contains(' ') && valid_head(head)).then_some(head)
+    }
+
+    let mut signatures = Vec::new();
+    let mut current: Option<String> = None;
+    let mut pending_head: Option<String> = None;
+    for line in src.lines() {
+        if inline_head(line).is_some() {
+            if let Some(signature) = current.take() {
+                signatures.push(signature);
+            }
+            pending_head = None;
+            current = Some(line.to_string());
+        } else if let Some(head) = pending_head.take() {
+            let trimmed = line.trim();
+            if line.starts_with(char::is_whitespace) && trimmed.starts_with("::") {
+                current = Some(format!("{head} {trimmed}"));
+            } else {
+                if (line.starts_with("data ") || line.starts_with("type "))
+                    && !line.contains("where")
+                {
+                    signatures.push(line.to_string());
+                }
+                let candidate = line.trim();
+                if !line.starts_with(char::is_whitespace)
+                    && !candidate.contains(char::is_whitespace)
+                    && valid_head(candidate)
+                {
+                    pending_head = Some(candidate.to_string());
+                }
+            }
+        } else if let Some(signature) = current.as_mut() {
+            let trimmed = line.trim();
+            if line.starts_with(char::is_whitespace)
+                && !trimmed.is_empty()
+                && !trimmed.starts_with("--")
+            {
+                signature.push(' ');
+                signature.push_str(trimmed);
+            } else if let Some(signature) = current.take() {
+                signatures.push(signature);
+            }
+        } else if (line.starts_with("data ") || line.starts_with("type "))
+            && !line.contains("where")
+        {
+            signatures.push(line.to_string());
+        } else {
+            let candidate = line.trim();
+            if !line.starts_with(char::is_whitespace)
+                && !candidate.contains(char::is_whitespace)
+                && valid_head(candidate)
+            {
+                pending_head = Some(candidate.to_string());
+            }
+        }
+    }
+    if let Some(signature) = current {
+        signatures.push(signature);
+    }
+    signatures
 }
 
 /// Resolve a lowercase VALUE/function name (`findDef`, not a type/class/
@@ -159,7 +239,7 @@ fn collect_value_hits(
 /// signature whose head identifier matches `name`.
 fn scan_file_for_value(path: &Path, name: &str) -> Option<serde_json::Value> {
     let src = fs::read_to_string(path).ok()?;
-    let sigs = tidepool_mcp::extract_sigs(&src);
+    let sigs = extract_signatures(&src);
     let sig = sigs.into_iter().find(|s| {
         s.split_once("::")
             .map(|(head, _)| head.trim() == name)
@@ -570,6 +650,17 @@ data Gadt where
         assert_eq!(v["shape"], "findWidget :: Text -> Text -> M Widget");
         assert_eq!(v["module"], "Search");
         assert_eq!(v["source"], "stdlib");
+    }
+
+    #[test]
+    fn value_signature_with_name_on_its_own_line() {
+        let signatures = extract_signatures(
+            "startWorkers\n  :: Member WorkerKernel effs\n  => [WorkerSpec]\n  -> Eff effs [WorkerStart]\n",
+        );
+        assert_eq!(
+            signatures,
+            ["startWorkers :: Member WorkerKernel effs => [WorkerSpec] -> Eff effs [WorkerStart]"]
+        );
     }
 
     #[test]

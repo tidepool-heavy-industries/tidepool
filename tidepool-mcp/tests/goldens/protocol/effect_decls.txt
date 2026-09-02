@@ -2470,3 +2470,81 @@ import Tidepool.Agent.Session
 true
 -- end helpers_row_polymorphic --
 
+=============================== EFFECT: WorkerKernel ===============================
+
+-- type_name (12 bytes) --
+WorkerKernel
+-- end type_name --
+
+-- description (145 bytes) --
+Private interpreter boundary for Rust-owned worker lifecycle and custody. Authored code uses the typed DevSwarm facade, never these constructors.
+-- end description --
+
+-- prompt_card: None --
+
+-- constructors (8 items) --
+-- constructors[0] (58 bytes) --
+WorkerReserveBatchWith :: Value -> WorkerKernel exit Value
+-- end constructors[0] --
+
+-- constructors[1] (81 bytes) --
+WorkerAttachWith :: Text -> ExitRef exit -> (Int, Int) -> WorkerKernel exit Value
+-- end constructors[1] --
+
+-- constructors[2] (62 bytes) --
+WorkerFailStartWith :: Text -> Text -> WorkerKernel exit Value
+-- end constructors[2] --
+
+-- constructors[3] (41 bytes) --
+WorkerListWith :: WorkerKernel exit Value
+-- end constructors[3] --
+
+-- constructors[4] (53 bytes) --
+WorkerInspectWith :: Value -> WorkerKernel exit Value
+-- end constructors[4] --
+
+-- constructors[5] (64 bytes) --
+WorkerBorrowExitWith :: Text -> WorkerKernel exit (ExitRef exit)
+-- end constructors[5] --
+
+-- constructors[6] (57 bytes) --
+WorkerAcknowledgeWith :: Value -> WorkerKernel exit Value
+-- end constructors[6] --
+
+-- constructors[7] (51 bytes) --
+WorkerSessionContextWith :: WorkerKernel exit Value
+-- end constructors[7] --
+
+-- end constructors --
+
+-- type_defs (0 items) --
+-- end type_defs --
+
+-- extra_imports (1 items) --
+-- extra_imports[0] (43 bytes) --
+import Tidepool.Internal.ActorRef (ExitRef)
+-- end extra_imports[0] --
+
+-- end extra_imports --
+
+-- helpers (0 items) --
+-- end helpers --
+
+-- type_params (1 items) --
+-- type_params[0] (4 bytes) --
+exit
+-- end type_params[0] --
+
+-- end type_params --
+
+-- default_row_args (1 items) --
+-- default_row_args[0] (5 bytes) --
+Value
+-- end default_row_args[0] --
+
+-- end default_row_args --
+
+-- helpers_row_polymorphic --
+true
+-- end helpers_row_polymorphic --
+

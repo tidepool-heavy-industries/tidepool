@@ -45,14 +45,16 @@ must existentially package that closure's row.
 
 ## Generated effects modules
 
-The generated surface has two layers:
+The generated surface has three modules across two cache layers:
 
 - `Tidepool.Effects.Core`: the universal stable GADTs, records, errors, and
-  row-polymorphic helpers;
-- `Tidepool.Effects`: per-compile shim that re-exports Core and defines the
-  concrete `M` row.
+  row-polymorphic helpers, including interpreter-only constructors;
+- `Tidepool.Effects.Authored`: a stable facade which hides those private
+  constructors while re-exporting the authored vocabulary;
+- `Tidepool.Effects`: the per-compile shim which re-exports `Authored` and
+  defines the concrete `M` row.
 
-Persistent declarations validate against Core without importing the shim.
+Persistent declarations validate against `Authored` without importing the shim.
 `generalize_m_signatures` permits model-authored signatures using `M` to be
 inferred row-polymorphically. Explicit concrete `Eff '[...]` rows remain
 concrete and may fail when reused under another row.

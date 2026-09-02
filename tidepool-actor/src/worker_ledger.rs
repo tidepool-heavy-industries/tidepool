@@ -86,7 +86,7 @@ pub enum WorkerStartResult {
         accepted: AcceptedWorker,
         detail: String,
     },
-    Tombstoned(AcceptedWorker),
+    Acknowledged(AcceptedWorker),
 }
 
 #[derive(Debug)]
@@ -108,23 +108,14 @@ pub struct ReservedWorker {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerTerminal<R> {
-    Completed(R),
-    Failed { detail: String },
-    Cancelled { detail: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerCollection<R> {
+pub enum WorkerInspection {
     Pending(WorkerHandle),
-    Collected {
+    Ready(WorkerHandle),
+    StartFailed {
         handle: WorkerHandle,
-        outcome: WorkerTerminal<R>,
+        detail: String,
     },
-    Acknowledged {
-        handle: WorkerHandle,
-        outcome: WorkerTerminal<R>,
-    },
+    Acknowledged(WorkerHandle),
     NotFound(WorkerHandle),
 }
 
@@ -136,24 +127,14 @@ pub enum AcknowledgementDisposition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerCustody {
-    /// V0 retains the managed worktree and branch for later inspection.
-    WorktreeRetained,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerAcknowledgement<R> {
+pub enum WorkerAcknowledgement {
     Acknowledged {
         handle: WorkerHandle,
         disposition: AcknowledgementDisposition,
-        custody: WorkerCustody,
-        outcome: WorkerTerminal<R>,
     },
     AlreadyAcknowledged {
         handle: WorkerHandle,
         disposition: AcknowledgementDisposition,
-        custody: WorkerCustody,
-        outcome: WorkerTerminal<R>,
     },
     NotCollected(WorkerHandle),
     NotFound(WorkerHandle),
@@ -175,17 +156,17 @@ pub struct WorkerSummary {
     pub phase: WorkerPhase,
 }
 
-enum EntryState<R> {
+enum EntryState<A> {
     Reserved,
-    Running,
+    Running {
+        attachment: A,
+    },
     Terminal {
-        outcome: WorkerTerminal<R>,
+        attachment: A,
         collected: bool,
     },
     Acknowledged {
-        outcome: WorkerTerminal<R>,
         disposition: AcknowledgementDisposition,
-        custody: WorkerCustody,
     },
     StartFailed {
         detail: String,
@@ -193,10 +174,10 @@ enum EntryState<R> {
     },
 }
 
-struct WorkerEntry<R> {
+struct WorkerEntry<A> {
     spec: WorkerSpec,
     accepted: AcceptedWorker,
-    state: EntryState<R>,
+    state: EntryState<A>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -207,6 +188,8 @@ pub enum WorkerLedgerError {
     Unknown(WorkerHandle),
     #[error("worker is already terminal: {0}")]
     AlreadyTerminal(WorkerHandle),
+    #[error("worker exit is not ready for collection: {0}")]
+    ExitNotReady(WorkerHandle),
 }
 
 impl std::fmt::Display for WorkerHandle {
@@ -215,12 +198,12 @@ impl std::fmt::Display for WorkerHandle {
     }
 }
 
-pub struct WorkerLedger<R> {
+pub struct WorkerLedger<A> {
     by_key: HashMap<String, WorkerHandle>,
-    entries: HashMap<WorkerHandle, WorkerEntry<R>>,
+    entries: HashMap<WorkerHandle, WorkerEntry<A>>,
 }
 
-impl<R> Default for WorkerLedger<R> {
+impl<A> Default for WorkerLedger<A> {
     fn default() -> Self {
         Self {
             by_key: HashMap::new(),
@@ -229,7 +212,7 @@ impl<R> Default for WorkerLedger<R> {
     }
 }
 
-impl<R> WorkerLedger<R> {
+impl<A: Clone> WorkerLedger<A> {
     #[must_use]
     pub fn accepted(&self, handle: &WorkerHandle) -> Option<&AcceptedWorker> {
         self.entries.get(handle).map(|entry| &entry.accepted)
@@ -257,13 +240,13 @@ impl<R> WorkerLedger<R> {
             }
             let result = match &entry.state {
                 EntryState::Acknowledged { .. } => {
-                    WorkerStartResult::Tombstoned(entry.accepted.clone())
+                    WorkerStartResult::Acknowledged(entry.accepted.clone())
                 }
                 EntryState::StartFailed { detail, .. } => WorkerStartResult::Failed {
                     accepted: entry.accepted.clone(),
                     detail: detail.clone(),
                 },
-                EntryState::Reserved | EntryState::Running | EntryState::Terminal { .. } => {
+                EntryState::Reserved | EntryState::Running { .. } | EntryState::Terminal { .. } => {
                     WorkerStartResult::Existing(entry.accepted.clone())
                 }
             };
@@ -297,6 +280,7 @@ impl<R> WorkerLedger<R> {
     pub fn commit_started(
         &mut self,
         reservation: WorkerReservation,
+        attachment: A,
     ) -> Result<(), WorkerLedgerError> {
         let handle = reservation.accepted.handle;
         let Some(entry) = self.entries.get_mut(&handle) else {
@@ -305,13 +289,14 @@ impl<R> WorkerLedger<R> {
         if !matches!(entry.state, EntryState::Reserved) {
             return Err(WorkerLedgerError::InvalidReservation(handle));
         }
-        entry.state = EntryState::Running;
+        entry.state = EntryState::Running { attachment };
         Ok(())
     }
 
     pub fn commit_started_handle(
         &mut self,
         handle: &WorkerHandle,
+        attachment: A,
     ) -> Result<(), WorkerLedgerError> {
         let Some(entry) = self.entries.get_mut(handle) else {
             return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
@@ -319,7 +304,7 @@ impl<R> WorkerLedger<R> {
         if !matches!(entry.state, EntryState::Reserved) {
             return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
         }
-        entry.state = EntryState::Running;
+        entry.state = EntryState::Running { attachment };
         Ok(())
     }
 
@@ -360,19 +345,19 @@ impl<R> WorkerLedger<R> {
         Ok(())
     }
 
-    pub fn settle(
-        &mut self,
-        handle: &WorkerHandle,
-        outcome: WorkerTerminal<R>,
-    ) -> Result<(), WorkerLedgerError> {
+    pub fn settle(&mut self, handle: &WorkerHandle) -> Result<(), WorkerLedgerError> {
         let Some(entry) = self.entries.get_mut(handle) else {
             return Err(WorkerLedgerError::Unknown(handle.clone()));
         };
-        if !matches!(entry.state, EntryState::Running) {
+        if !matches!(entry.state, EntryState::Running { .. }) {
             return Err(WorkerLedgerError::AlreadyTerminal(handle.clone()));
         }
+        let EntryState::Running { attachment } = &entry.state else {
+            unreachable!("running state was checked above")
+        };
+        let attachment = attachment.clone();
         entry.state = EntryState::Terminal {
-            outcome,
+            attachment,
             collected: false,
         };
         Ok(())
@@ -391,36 +376,57 @@ impl<R> WorkerLedger<R> {
         summaries.sort_by(|left, right| left.accepted.key.cmp(&right.accepted.key));
         summaries
     }
-}
-
-impl<R: Clone> WorkerLedger<R> {
     #[must_use]
-    pub fn collect(&mut self, handle: &WorkerHandle) -> WorkerCollection<R> {
+    pub fn inspect(&mut self, handle: &WorkerHandle) -> WorkerInspection {
         let Some(entry) = self.entries.get_mut(handle) else {
-            return WorkerCollection::NotFound(handle.clone());
+            return WorkerInspection::NotFound(handle.clone());
         };
         match &mut entry.state {
-            EntryState::Reserved | EntryState::Running => WorkerCollection::Pending(handle.clone()),
-            EntryState::Terminal { outcome, collected } => {
-                *collected = true;
-                WorkerCollection::Collected {
-                    handle: handle.clone(),
-                    outcome: outcome.clone(),
-                }
+            EntryState::Reserved | EntryState::Running { .. } => {
+                WorkerInspection::Pending(handle.clone())
             }
-            EntryState::Acknowledged { outcome, .. } => WorkerCollection::Acknowledged {
-                handle: handle.clone(),
-                outcome: outcome.clone(),
-            },
+            EntryState::Terminal { .. } => WorkerInspection::Ready(handle.clone()),
+            EntryState::Acknowledged { .. } => WorkerInspection::Acknowledged(handle.clone()),
             EntryState::StartFailed { detail, collected } => {
                 *collected = true;
-                WorkerCollection::Collected {
+                WorkerInspection::StartFailed {
                     handle: handle.clone(),
-                    outcome: WorkerTerminal::Failed {
-                        detail: detail.clone(),
-                    },
+                    detail: detail.clone(),
                 }
             }
+        }
+    }
+
+    #[must_use]
+    pub fn find_attached(&self, mut predicate: impl FnMut(&A) -> bool) -> Option<WorkerHandle> {
+        self.entries.iter().find_map(|(handle, entry)| {
+            let attachment = match &entry.state {
+                EntryState::Running { attachment } | EntryState::Terminal { attachment, .. } => {
+                    attachment
+                }
+                EntryState::Reserved
+                | EntryState::Acknowledged { .. }
+                | EntryState::StartFailed { .. } => return None,
+            };
+            predicate(attachment).then(|| handle.clone())
+        })
+    }
+
+    /// Borrow the attached exact exit reference and mark logical collection.
+    /// The attachment itself remains in the terminal entry until acknowledgement.
+    pub fn collect_attachment(&mut self, handle: &WorkerHandle) -> Result<A, WorkerLedgerError> {
+        let Some(entry) = self.entries.get_mut(handle) else {
+            return Err(WorkerLedgerError::Unknown(handle.clone()));
+        };
+        match &mut entry.state {
+            EntryState::Terminal {
+                attachment,
+                collected,
+            } => {
+                *collected = true;
+                Ok(attachment.clone())
+            }
+            _ => Err(WorkerLedgerError::ExitNotReady(handle.clone())),
         }
     }
 
@@ -429,73 +435,66 @@ impl<R: Clone> WorkerLedger<R> {
         &mut self,
         handle: &WorkerHandle,
         disposition: AcknowledgementDisposition,
-    ) -> WorkerAcknowledgement<R> {
+    ) -> (WorkerAcknowledgement, Option<A>) {
         let Some(entry) = self.entries.get_mut(handle) else {
-            return WorkerAcknowledgement::NotFound(handle.clone());
+            return (WorkerAcknowledgement::NotFound(handle.clone()), None);
         };
         match &entry.state {
             EntryState::Terminal {
-                outcome,
-                collected: true,
+                collected: true, ..
             } => {
-                let outcome = outcome.clone();
-                entry.state = EntryState::Acknowledged {
-                    outcome: outcome.clone(),
-                    disposition: disposition.clone(),
-                    custody: WorkerCustody::WorktreeRetained,
+                let EntryState::Terminal { attachment, .. } = &entry.state else {
+                    unreachable!("terminal state was checked above")
                 };
-                WorkerAcknowledgement::Acknowledged {
-                    handle: handle.clone(),
-                    disposition,
-                    custody: WorkerCustody::WorktreeRetained,
-                    outcome,
-                }
+                let attachment = attachment.clone();
+                entry.state = EntryState::Acknowledged {
+                    disposition: disposition.clone(),
+                };
+                (
+                    WorkerAcknowledgement::Acknowledged {
+                        handle: handle.clone(),
+                        disposition,
+                    },
+                    Some(attachment),
+                )
             }
             EntryState::StartFailed {
-                detail,
-                collected: true,
+                collected: true, ..
             } => {
-                let outcome = WorkerTerminal::Failed {
-                    detail: detail.clone(),
-                };
                 entry.state = EntryState::Acknowledged {
-                    outcome: outcome.clone(),
                     disposition: disposition.clone(),
-                    custody: WorkerCustody::WorktreeRetained,
                 };
-                WorkerAcknowledgement::Acknowledged {
-                    handle: handle.clone(),
-                    disposition,
-                    custody: WorkerCustody::WorktreeRetained,
-                    outcome,
-                }
+                (
+                    WorkerAcknowledgement::Acknowledged {
+                        handle: handle.clone(),
+                        disposition,
+                    },
+                    None,
+                )
             }
-            EntryState::Acknowledged {
-                outcome,
-                disposition,
-                custody,
-            } => WorkerAcknowledgement::AlreadyAcknowledged {
-                handle: handle.clone(),
-                disposition: disposition.clone(),
-                custody: custody.clone(),
-                outcome: outcome.clone(),
-            },
+            EntryState::Acknowledged { disposition } => (
+                WorkerAcknowledgement::AlreadyAcknowledged {
+                    handle: handle.clone(),
+                    disposition: disposition.clone(),
+                },
+                None,
+            ),
             EntryState::Reserved
-            | EntryState::Running
+            | EntryState::Running { .. }
             | EntryState::Terminal {
                 collected: false, ..
             }
             | EntryState::StartFailed {
                 collected: false, ..
-            } => WorkerAcknowledgement::NotCollected(handle.clone()),
+            } => (WorkerAcknowledgement::NotCollected(handle.clone()), None),
         }
     }
 }
 
-fn phase<R>(state: &EntryState<R>) -> WorkerPhase {
+fn phase<A>(state: &EntryState<A>) -> WorkerPhase {
     match state {
         EntryState::Reserved => WorkerPhase::Provisioning,
-        EntryState::Running => WorkerPhase::Running,
+        EntryState::Running { .. } => WorkerPhase::Running,
         EntryState::Terminal {
             collected: false, ..
         } => WorkerPhase::Terminal,
@@ -524,7 +523,7 @@ mod tests {
 
     #[test]
     fn batch_reservation_is_ordered_independent_and_idempotent() {
-        let mut ledger = WorkerLedger::<String>::default();
+        let mut ledger = WorkerLedger::<()>::default();
         let reserved = ledger.reserve_batch(vec![spec("a", "one\r\ntwo"), spec("b", "other")]);
         assert_eq!(reserved.len(), 2);
         let a = accepted(&reserved[0]);
@@ -550,37 +549,45 @@ mod tests {
     }
 
     #[test]
-    fn collection_is_replayable_and_acknowledgement_owns_cleanup() {
-        let mut ledger = WorkerLedger::<String>::default();
+    fn collection_is_replayable_until_acknowledgement() {
+        let mut ledger = WorkerLedger::<()>::default();
         let mut reserved = ledger.reserve_batch(vec![spec("worker", "do work")]);
         let reservation = reserved[0].reservation.take().expect("reservation");
         let handle = reservation.accepted().handle.clone();
-        ledger.commit_started(reservation).expect("commit start");
-        assert_eq!(
-            ledger.collect(&handle),
-            WorkerCollection::Pending(handle.clone())
-        );
         ledger
-            .settle(&handle, WorkerTerminal::Completed("receipt".into()))
-            .expect("settle");
+            .commit_started(reservation, ())
+            .expect("commit start");
         assert_eq!(
-            ledger.acknowledge(&handle, AcknowledgementDisposition::Reviewed),
+            ledger.inspect(&handle),
+            WorkerInspection::Pending(handle.clone())
+        );
+        ledger.settle(&handle).expect("settle");
+        assert_eq!(
+            ledger
+                .acknowledge(&handle, AcknowledgementDisposition::Reviewed)
+                .0,
             WorkerAcknowledgement::NotCollected(handle.clone())
         );
 
-        let first = ledger.collect(&handle);
-        assert_eq!(ledger.collect(&handle), first);
+        assert_eq!(
+            ledger.inspect(&handle),
+            WorkerInspection::Ready(handle.clone())
+        );
+        assert_eq!(
+            ledger.inspect(&handle),
+            WorkerInspection::Ready(handle.clone())
+        );
+        assert_eq!(ledger.collect_attachment(&handle), Ok(()));
+        assert_eq!(ledger.collect_attachment(&handle), Ok(()));
         let acknowledged = ledger.acknowledge(
             &handle,
             AcknowledgementDisposition::IntegratedAs("abc123".into()),
         );
         assert!(matches!(
-            acknowledged,
-            WorkerAcknowledgement::Acknowledged {
-                custody: WorkerCustody::WorktreeRetained,
-                ..
-            }
+            acknowledged.0,
+            WorkerAcknowledgement::Acknowledged { .. }
         ));
+        assert_eq!(acknowledged.1, Some(()));
         let repeated = ledger.acknowledge(
             &handle,
             AcknowledgementDisposition::Rejected {
@@ -588,25 +595,21 @@ mod tests {
             },
         );
         assert!(matches!(
-            repeated,
+            repeated.0,
             WorkerAcknowledgement::AlreadyAcknowledged {
                 disposition: AcknowledgementDisposition::IntegratedAs(ref oid),
-                custody: WorkerCustody::WorktreeRetained,
                 ..
             } if oid == "abc123"
         ));
-        assert!(matches!(
-            ledger.collect(&handle),
-            WorkerCollection::Acknowledged {
-                outcome: WorkerTerminal::Completed(ref receipt),
-                ..
-            } if receipt == "receipt"
-        ));
+        assert_eq!(
+            ledger.inspect(&handle),
+            WorkerInspection::Acknowledged(handle)
+        );
     }
 
     #[test]
-    fn failed_provisioning_is_collectible_acknowledgeable_and_tombstoned() {
-        let mut ledger = WorkerLedger::<String>::default();
+    fn failed_provisioning_is_collectible_acknowledgeable_and_reserved() {
+        let mut ledger = WorkerLedger::<()>::default();
         let mut reserved = ledger.reserve_batch(vec![spec("worker", "do work")]);
         let accepted = accepted(&reserved[0]);
         ledger
@@ -616,17 +619,16 @@ mod tests {
             )
             .expect("fail start");
         assert!(matches!(
-            ledger.collect(&accepted.handle),
-            WorkerCollection::Collected {
-                outcome: WorkerTerminal::Failed { ref detail },
-                ..
-            } if detail == "could not launch"
+            ledger.inspect(&accepted.handle),
+            WorkerInspection::StartFailed { ref detail, .. } if detail == "could not launch"
         ));
         assert!(matches!(
-            ledger.acknowledge(&accepted.handle, AcknowledgementDisposition::Reviewed),
+            ledger
+                .acknowledge(&accepted.handle, AcknowledgementDisposition::Reviewed)
+                .0,
             WorkerAcknowledgement::Acknowledged { .. }
         ));
         let retried = ledger.reserve_batch(vec![spec("worker", "do work")]);
-        assert_eq!(retried[0].result, WorkerStartResult::Tombstoned(accepted));
+        assert_eq!(retried[0].result, WorkerStartResult::Acknowledged(accepted));
     }
 }

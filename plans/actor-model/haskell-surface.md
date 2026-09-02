@@ -68,8 +68,11 @@ The public library exposes these profile rows:
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol
    , Actor
+   , ActorMcp
+   , AgentSession
    , Deliberate
    , FsRead
+   , Worktree
    ]
 
 type ReadWriteEffects protocol =
@@ -129,10 +132,11 @@ may start either profile; a `ReadOnly` actor may start only `ReadOnly`. Rust
 validates this attenuation edge, while GHC checks the actor definition against
 the selected row. The profile does not constrain native coding-agent tools or
 provide process isolation. Within the resident effect machine, `ReadOnly`
-excludes ambient write effects, but may still call
-an explicitly supplied writer `ActorRef`. Actor-local declarations, bindings,
-conversation growth, and behavior replacement are not ambient resource writes,
-so a `ReadOnly` actor remains self-extending.
+means specifically that the row lacks `FsWrite`; it is not a claim that every
+capability-bearing operation in the row is observational. It may use an
+explicit `WorktreeHandle` or call a supplied writer `ActorRef`. Actor-local
+declarations, bindings, conversation growth, and behavior replacement remain
+available, so a `ReadOnly` actor remains self-extending.
 
 Profile membership, resource authority, and code identity stay orthogonal. A
 profile limits which operation classes Haskell can express. The actor's
@@ -769,8 +773,7 @@ program policy by default, not a universal evidence ladder in the kernel.
 ### Worktree-backed worker submission
 
 The first DevSwarm policy uses ordinary application types rather than adding a
-generic workflow algebra. The exact spelling may follow the existing generated
-Worktree types, but the public shape is:
+generic workflow algebra. Its landed public receipt shape is:
 
 ```haskell
 data HeadState
@@ -803,37 +806,99 @@ Git state must be surfaced; rendered Git text never drives policy. An
 observation failure makes successful submission unsatisfiable rather than
 inviting the model to supply repository facts.
 
-The worker definition closes over its granted `WorktreeHandle`. Its
-`finish_work` input is only `WorkerReport`; the trusted handler performs the
-observation and completes the actor with `CandidateReceipt`. Dirty work still
-completes normally with a truthful receipt. It is not an immutable integration
-artifact, so the owner normally rejects or revises it in V0.
+The worker's actor program closes over its granted `WorktreeHandle`. Its agent
+session returns only `WorkerReport`; trusted Haskell observes the repository
+and completes the actor with `CandidateReceipt`. Dirty work still completes
+normally with a truthful receipt. It is not an immutable integration artifact,
+so the owner normally rejects or revises it in V0.
 
-The interactive root keeps the exact `ActorRef` private and exposes an
-application-level `WorkerHandle`. Its policy has these semantics:
+The interactive root keeps exact `ActorRef` values behind the DevSwarm facade
+and exposes application-level handles and effectful operations:
 
-- spawning a new key creates one worktree and actor and returns
-  `WorkerAccepted handle` once actor creation succeeds and deployment is
+```haskell
+startWorkers
+  :: Members '[Actor, Worktree, WorkerKernel CandidateReceipt] effs
+  => [WorkerSpec]
+  -> Eff effs [WorkerStartResult]
+
+listWorkers
+  :: Member (WorkerKernel CandidateReceipt) effs
+  => Eff effs [WorkerSummary]
+
+collectWorkerWakes
+  :: Members '[Actor, WorkerKernel CandidateReceipt] effs
+  => [WorkerWake]
+  -> Eff effs [WorkerCollection]
+
+acknowledgeWorkers
+  :: Member (WorkerKernel CandidateReceipt) effs
+  => [WorkerAcknowledgementRequest]
+  -> Eff effs [WorkerAcknowledgement]
+```
+
+`WorkerKernel` and its constructors are interpreter-private despite appearing
+in these explanatory constraints. Authored code imports the named functions
+and types from `Tidepool.Actors.DevSwarm`; the generated authored-effects
+facade does not export raw kernel requests.
+
+Rust owns the mutable worker ledger. Haskell does not receive or return a
+registry snapshot. Each root activation instead receives a stable
+`sessionInput :: SessionContext`; its plural `workerWakes` are correlation for
+that activation, while collection remains authoritative for the result.
+
+The normal fan-out turn is ordinary Haskell:
+
+```haskell
+(implementation, review) <- do
+  starts <- startWorkers
+    [ worker "implementation" implementationPrompt
+    , worker "review" reviewPrompt
+    ]
+  case map workerHandleOf starts of
+    [Just a, Just b] -> pure (a, b)
+    _ -> error "worker wave was not accepted"
+
+complete ()
+```
+
+On a lifecycle activation:
+
+```haskell
+collections <- collectWorkerWakes sessionInput.workerWakes
+collections
+```
+
+After native review or integration, authored policy explicitly selects the
+handles whose custody it has finished evaluating and calls
+`acknowledgeWorkers`; collection never implies integration. The runtime
+contract is:
+
+- starting a new key creates one worktree and actor and returns an
+  `AcceptedWorker` inside `WorkerAccepted` once actor creation succeeds and deployment is
   requested;
 - retrying the same key with the same typed request returns the same handle;
-- retrying it with a different assignment or requested launch policy returns
-  `WorkerKeyConflict`; lookup and comparison happen before any new worktree or
+- retrying it with a different normalized assignment returns
+  `WorkerStartConflict`; lookup and comparison happen before any new worktree or
   grant is allocated;
-- retrying an acknowledged key reports `WorkerAlreadyAcknowledged` and never
+- retrying an acknowledged key reports `WorkerStartAcknowledged` and never
   starts another actor; keys remain reserved for this root incarnation;
-- `collect_worker handle` is nonblocking and non-consuming, returning pending,
-  the repeatable exact outcome, already-acknowledged, or unknown; pending is a
+- `collectWorkers` and `collectWorkerWakes` are nonblocking and non-consuming,
+  returning pending, the repeatable exact outcome, already-acknowledged, or
+  unknown; pending is a
   cooperative yield signal, so the interactive root ends its turn rather than
   sleeping or polling and Shoal starts a new turn on lifecycle transition;
-- `ack_worker handle` is valid only after `collect_worker` has observed a
-  terminal result, drops the retained `ActorRef`, and leaves a tombstone; and
-- `list_workers` reports handles and their current application state.
+- `acknowledgeWorkers` is valid only after collection has observed a terminal
+  result, releases live exit custody, records the disposition, and leaves a
+  tombstone; and
+- `listWorkers` reports observational summaries without returning a mutation
+  token.
 
-The request comparison is over the typed normalized request retained in
-Haskell state, never a rendered JSON string or hash chosen by the model.
-Transport acknowledgment cannot roll arbitrary Haskell effects back; these
-idempotent application semantics make an unknown MCP delivery outcome safe to
-retry.
+The request comparison and fingerprint live in Rust's interpreter-owned
+ledger, never in model-threaded Haskell state or a hash chosen by the model.
+Ordered workbench items commit their successful prefix, so after a later item
+is rejected the model retries only that item and its suffix. Idempotent worker
+operations make an unknown transport outcome safe to retry without pretending
+arbitrary Haskell effects can be rolled back.
 
 ## 14. What must leave Haskell
 

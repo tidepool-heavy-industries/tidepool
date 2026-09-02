@@ -49,6 +49,9 @@ layer have been deleted.
 - Completion values cross consecutive agent sessions through managed Haskell
   custody. The returned value is rooted before the producing completion scope
   closes; the next activation can force it safely.
+- The actor workbench and ordinary REPL share one parser for `:type`, `:info`,
+  and `:bindings`. GHC-derived binder metadata also supports ordinary pattern
+  bindings, including bindings whose right-hand side suspends and resumes.
 
 ### Haskell actor surface
 
@@ -75,9 +78,10 @@ layer have been deleted.
 - Accepted results contain opaque worker handles directly. Same key plus a
   different assignment yields a typed conflict; acknowledged keys remain
   tombstoned for the root incarnation.
-- `currentSessionContext` is stable within one activation and contains
+- `sessionInput :: SessionContext` is a stable activation snapshot containing
   coalesced lifecycle event IDs plus worker handles. An exit during the turn is
-  observed by the next activation.
+  observed by the next activation; no live-registry query races the authored
+  policy.
 - Collection is nonblocking and replayable. Acknowledgement is a separate,
   idempotent policy decision recording `IntegratedAs`, `Reviewed`, or
   `Rejected`.
@@ -165,13 +169,15 @@ of the Ractor cutover.
 
 ### Near-term UX and operations
 
-- Generate concise actor API discovery from the exported Haskell surface,
-  including exact signatures, constructors, purity, batch examples,
-  partial-item commit semantics, and the distinction between an MCP execution
-  cell and a pending worker.
-- Support the useful GHCi inspection subset (`:type`, `:info`, and binding/type
-  inventory) and ordinary pattern bindings through the shared workbench
-  parser, rather than actor-specific syntax.
+- Generate concise happy-path examples from the exported Haskell surface and
+  distinguish an outer tool-execution cell from a pending worker in the
+  eventual non-JSON frontend. Exact signatures, constructors, binding
+  inventory, and ordered partial-commit semantics are already discoverable in
+  the shared workbench.
+- Retire the declaration plane's textual `M`-signature generalization once the
+  frontend has a type-aware authored-module path. Until then, teach reusable
+  declarations with `Member` constraints and do not extend the rewrite with
+  more syntax heuristics.
 - Improve concise rendering for worker starts, collections, acknowledgements,
   and root completion while retaining a verbose structured view.
 - Measure and separately attribute queueing, compilation, worktree creation,

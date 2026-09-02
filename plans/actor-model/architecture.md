@@ -613,9 +613,10 @@ of an attached coding-agent process and is not an operating-system sandbox.
 Profile identity is launch metadata, separate from the program image, process
 policy, worktree placement, and per-resource grants. A profile name or
 definition grants no authority by itself. Within the resident effect machine,
-`ReadOnly` excludes ambient write effects but still
-includes actor creation and messaging; it may call an explicitly supplied
-writer actor, which is delegation rather than ambient write authority. Changes
+`ReadOnly` means the experimental row lacks `FsWrite`; it is not a security or
+global-purity claim about every explicit capability operation in that row. It
+still includes actor creation and messaging, may use a granted
+`WorktreeHandle`, and may call an explicitly supplied writer actor. Changes
 to its own Haskell environment and model conversation remain ordinary local
 execution, so `ReadOnly` does not disable self-extension.
 

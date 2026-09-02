@@ -207,14 +207,22 @@ impl MetaCommand {
     }
 
     pub(crate) fn from_line(line: MetaCommandLine) -> Result<MetaCommand, String> {
+        if let Some(command) = line.discovery()? {
+            return Ok(match command {
+                tidepool_runtime::session::WorkbenchDiscovery::Type(expression) => {
+                    MetaCommand::Type(ExprText(expression))
+                }
+                tidepool_runtime::session::WorkbenchDiscovery::Info(name) => {
+                    MetaCommand::Info(name)
+                }
+                tidepool_runtime::session::WorkbenchDiscovery::Bindings => MetaCommand::Bindings,
+            });
+        }
         let head = line.name.as_str();
         let rest = line.arguments.as_str();
         match head {
-            "bindings" | "b" => Ok(MetaCommand::Bindings),
             "reset" => Ok(MetaCommand::Reset),
             "program" | "prog" => Ok(MetaCommand::Program),
-            "t" | "type" => Ok(MetaCommand::Type(ExprText(rest.to_string()))),
-            "i" | "info" => Ok(MetaCommand::Info(rest.to_string())),
             "vocab" => Ok(MetaCommand::Vocab(if rest.is_empty() {
                 None
             } else {

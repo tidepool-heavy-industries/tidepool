@@ -167,19 +167,19 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
 /// This is [`session_decl_module_env`]'s import surface MINUS the per-window
 /// SHIM (`Tidepool.Effects`, whose only content is `type M` — a row that
 /// genuinely varies turn to turn — and `Tidepool.Orchestrate`, which is
-/// `M`-typed throughout) PLUS the STABLE `Tidepool.Effects.Core` (every effect
-/// GADT + type_defs + `Member`-polymorphic helper, universal and
-/// content-addressed, so identical across every window and actor incarnation).
+/// `M`-typed throughout) PLUS the stable `Tidepool.Effects.Authored` facade.
+/// The facade re-exports Core's domain types and row-polymorphic helpers while
+/// keeping interpreter-only request constructors out of authored scope.
 ///
 /// The practical effect: a declaration written `Member <Eff> effs => ... ->
 /// Eff effs T` validates here and persists across turns/windows (it
-/// mentions only Core's stable tycons). A declaration that instead spells
+/// mentions only stable authored tycons). A declaration that instead spells
 /// the per-window `M` alias ALSO validates and persists — `M` still never
 /// resolves here (the shim is not on this plane's include path), but the
 /// decl plane strips an M-mentioning signature before compiling
 /// (`tidepool_runtime::session::render`'s `generalize_m_signatures`, gated on
 /// exactly this env excluding `import Tidepool.Effects`) and lets GHC infer
-/// the body's type from its use of Core's helpers — the same
+/// the body's type from its use of authored helpers — the same
 /// `Member <Eff> effs => ... -> Eff effs T` shape a hand-written
 /// row-polymorphic signature would have. The model's own spelling of `M` is
 /// therefore no longer something it needs to reason about here; only a
@@ -204,7 +204,7 @@ pub fn pure_decl_module_env() -> ModuleEnv {
         .filter(|l| *l != "import Tidepool.Effects")
         .map(String::from)
         .collect();
-    imports.push("import Tidepool.Effects.Core".to_string());
+    imports.push("import Tidepool.Effects.Authored".to_string());
     ModuleEnv {
         pragmas: decl_pragmas(),
         imports,
@@ -867,25 +867,6 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     desc
 }
 
-/// True if `line` opens a top-level type signature (`name ::` or
-/// `(op) ::` at column 0) — comment lines and indented code never match.
-fn sig_start(line: &str) -> bool {
-    if line.starts_with(char::is_whitespace) {
-        return false;
-    }
-    let Some((head, _)) = line.split_once("::") else {
-        return false;
-    };
-    let h = head.trim_end();
-    if h.is_empty() || h.contains(' ') {
-        return false;
-    }
-    (h.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
-        && h.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\''))
-        || (h.starts_with('(') && h.ends_with(')'))
-}
-
 /// Extract top-level type signatures (joining indented continuation
 /// lines) plus `data`/`type` heads from Haskell source.
 ///
@@ -893,37 +874,7 @@ fn sig_start(line: &str) -> bool {
 /// value-signature lane (`introspect::stdlib_value_info`), which needs the
 /// same lowercase-signature scan `:vocab` already relies on here.
 pub fn extract_sigs(src: &str) -> Vec<String> {
-    let mut sigs: Vec<String> = Vec::new();
-    let mut cur: Option<String> = None;
-    for line in src.lines() {
-        if sig_start(line) {
-            if let Some(s) = cur.take() {
-                sigs.push(s);
-            }
-            cur = Some(line.to_string());
-        } else if let Some(s) = cur.as_mut() {
-            let t = line.trim();
-            // Indented continuation of a multi-line signature.
-            if line.starts_with(char::is_whitespace) && !t.is_empty() && !t.starts_with("--") {
-                s.push(' ');
-                s.push_str(t);
-            } else {
-                #[allow(
-                    clippy::unwrap_used,
-                    reason = "cur is set to Some before this branch is reachable (else branch of the same if)"
-                )]
-                sigs.push(cur.take().unwrap());
-            }
-        } else if (line.starts_with("data ") || line.starts_with("type "))
-            && !line.contains("where")
-        {
-            sigs.push(line.to_string());
-        }
-    }
-    if let Some(s) = cur.take() {
-        sigs.push(s);
-    }
-    sigs
+    tidepool_runtime::session::introspect::extract_signatures(src)
 }
 
 /// Parse the `module Library ( module A, module B, … ) where` re-export list

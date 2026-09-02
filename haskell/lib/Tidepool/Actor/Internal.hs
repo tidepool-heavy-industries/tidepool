@@ -33,11 +33,8 @@ import Data.Kind (Type)
 import Data.Text (Text)
 import Prelude
 
-import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, AgentSession, Deliberate, FsRead, FsWrite, WorkerKernel, Worktree)
-import Tidepool.Internal.ExitCell (ExitCell)
-
-data ActorRef (protocol :: Type -> Type) exit where
-  ActorRef :: Int -> Int -> ExitCell pending exit -> ActorRef protocol exit
+import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, AgentSession, Deliberate, FsRead, FsWrite, Worktree)
+import Tidepool.Internal.ActorRef (ActorRef (..))
 
 -- | Experimental named profiles for resident Haskell effect rows. The witness
 -- fixes the child row, while Rust independently validates spawn attenuation
@@ -55,7 +52,6 @@ type ReadOnlyEffects protocol =
    , Deliberate
    , FsRead
    , Worktree
-   , WorkerKernel
    ]
 
 type ReadWriteEffects protocol = FsWrite ': ReadOnlyEffects protocol

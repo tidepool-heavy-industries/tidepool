@@ -14,11 +14,11 @@ use tidepool_bridge_derive::FromCore;
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum WorkerKernelReq {
     WorkerReserveBatchWith(tidepool_eval::value::Value),
-    WorkerAttachWith(String, (i64, i64)),
+    WorkerAttachWith(String, tidepool_eval::value::Value, (i64, i64)),
     WorkerFailStartWith(String, String),
-    WorkerSubmitWith(String, tidepool_eval::value::Value),
     WorkerListWith,
-    WorkerCollectWith(tidepool_eval::value::Value),
+    WorkerInspectWith(tidepool_eval::value::Value),
+    WorkerBorrowExitWith(String),
     WorkerAcknowledgeWith(tidepool_eval::value::Value),
     WorkerSessionContextWith,
 }
