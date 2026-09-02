@@ -317,10 +317,11 @@ fences keep Haskell in the assistant text channel; external agents use MCP
 because Tidepool cannot safely interpret their prose as executable output.
 
 The common agent-session executor owns this response-to-block-to-resident-run
-loop. A session opened by `deliberate` carries one typed `Complete output`
-expectation. Initialization may open the same result-bearing session, but is
-not a second session kind. Lifecycle wake delivery is backend input, not
-another executor or completion shape.
+loop. The `agentSession` effect opens it with one typed `Complete output`
+expectation and an optional first User message. `deliberate` remains an
+ordinary resident-model operation; it is not the lifecycle or transport name
+for every external agent interaction. Lifecycle wake delivery is backend
+input, not another executor or completion shape.
 One admitted agent session owns the actor for the complete interaction: its
 provider rounds, ordered fenced-Haskell execution, transport retries, and
 corrective rounds. A provider response is only a borrowed round inside that

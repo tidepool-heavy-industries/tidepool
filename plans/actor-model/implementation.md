@@ -1265,32 +1265,36 @@ Tree-shaped UI may remain as a projection over actor events. Durable get/put,
 worktree recovery, operator gates, and generic JSONL mechanics retain their
 existing owners.
 
-### Stage 7B — external-agent persistent Haskell transport
+### Stage 7B — external-agent persistent Haskell transport [vertical landed]
 
 The landed Shoal vertical proves deployment and typed tool dispatch, but its
 bespoke `spawn_worker`/`collect_worker`/`ack_worker` surface makes the external
 model an imperative client of a predesigned application. Replace that surface
 with the same self-writing Haskell medium used by resident actors:
 
-1. extract the request, classification, sequencing, and receipt vocabulary
+1. [landed] extract the request, classification, sequencing, JSON-input
+   rendering, and receipt vocabulary
    shared by `tidepool-repl` and actor workbenches into one frontend-neutral
    component; do not share their session managers;
-2. add one typed agent-session suspension whose Haskell call site fixes the
+2. [landed] add one typed agent-session suspension whose Haskell call site fixes the
    mounted input and `Complete output` expectation and whose optional prompt is
    transported as the first User message;
-3. mount one `session_run` MCP tool for an external agent, backed by the
+3. [landed] mount one `session_run` MCP tool for an external agent, backed by the
    actor's existing resident machine, lexical scope, principal, and effect
    interpreter;
-4. generalize the existing actor-host boundary driver so a disposable
+4. [landed] generalize the existing actor-host boundary driver so a disposable
    workbench fragment can start, call, poll, and await actors without growing a
    second scheduler or continuation registry;
-5. retain the fragment realm, block cursor, bind materialization, and response
-   custody across suspension, then close each exactly once;
-6. migrate the root to an idle session and workers to prompted sessions whose
+5. [landed] retain the block cursor, bind materialization, and response custody
+   across suspension inside the actor's existing resource scope; do not invent
+   a second fragment-realm lifetime registry;
+6. [landed] migrate the root to an idle session and workers to prompted sessions whose
    typed completion feeds trusted Haskell repository observation; and
-7. delete the actor-specific half of `Tidepool.Agent.Contract`, the `ActorMcp`
-   effect, JSON worker handles, collection/acknowledgment state, and bespoke
-   actor-control tools after parity.
+7. [pending compatibility cleanup] migrate the remaining users of the
+   actor-specific half of `Tidepool.Agent.Contract` and the `ActorMcp` effect,
+   then delete that compatibility transport. DevSwarm's typed Haskell worker
+   records, replayable collection, and acknowledgement remain domain policy;
+   only their bespoke JSON tool projection has been removed.
 
 The actor-local transport deliberately has no machine-reset operation and no
 caller-resumed `ask`: actor effects park and resume through the host. A single
@@ -1298,6 +1302,17 @@ caller-resumed `ask`: actor effects park and resume through the host. A single
 them, and a child must be able to define and start another typed actor. Those
 are the acceptance conditions for recursive parallel decomposition, not an
 optional UX follow-up.
+
+The public DevSwarm helpers use `Member` constraints, not the root's concrete
+row. A model can therefore define a single `do` block which scaffolds state,
+starts several independent actors, and returns the updated live record set.
+Effectful local variables inside that block naturally survive its suspensions;
+top-level declarations and ordinary completed bindings persist between
+`session_run` calls. Cleanup of the compatibility `ActorMcp` path remains
+separate from proving this new vertical and must not create a second driver.
+An actor definition with no worktree recipe still receives the same Haskell
+session surface over a read-only source checkout, so orchestration and review
+actors do not need to masquerade as coding workers.
 
 ## 11. Stage 8 — lifecycle delivery hardening
 

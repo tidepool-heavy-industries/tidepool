@@ -543,6 +543,9 @@ Required behavior:
   type;
 - natural-language prose and non-Haskell fences never execute;
 - later blocks in one response observe earlier successful commits;
+- an effectful orchestration chain that shares local results should normally
+  be one Haskell `do` item, so its lexical variables remain in the suspended
+  continuation while child effects run;
 - fenced execution remains available across all model rounds in the session;
 - model compaction preserves a concise inventory of important bindings and
   installed behavior.
