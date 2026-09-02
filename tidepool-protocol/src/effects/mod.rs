@@ -6,6 +6,16 @@
 //! `tidepool-mcp/src/effect_defs.rs`. Effects migrate one at a time,
 //! smallest first, with no flag day.
 
+/// Positional constructor payloads are still the common schema spelling.
+/// Keep their conversion into the explicit [`crate::types::VariantFields`]
+/// sum local to the effect-declaration DSL rather than repeating it at every
+/// constructor.
+macro_rules! positional_fields {
+    ($($field:expr),* $(,)?) => {
+        crate::types::VariantFields::Positional(vec![$($field),*])
+    };
+}
+
 pub mod actor;
 pub mod actor_kernel;
 pub mod actor_local;

@@ -1442,8 +1442,8 @@ data InProgressKind = InProgressMerge | InProgressRebase | InProgressCherryPick 
 data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)
 -- end type_defs[8] --
 
--- type_defs[9] (81 bytes) --
-data HeadState = OnBranch BranchName GitOid | Detached GitOid deriving (Show, Eq)
+-- type_defs[9] (126 bytes) --
+data HeadState = OnBranch { headBranch :: BranchName, headOid :: GitOid } | Detached { headOid :: GitOid } deriving (Show, Eq)
 -- end type_defs[9] --
 
 -- type_defs[10] (115 bytes) --

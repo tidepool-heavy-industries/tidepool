@@ -231,27 +231,27 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "WatchCommit",
-                        fields: vec![HsType::Named("WorktreeId")],
+                        fields: positional_fields![HsType::Named("WorktreeId")],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "WatchHead",
-                        fields: vec![HsType::Named("WorktreeId")],
+                        fields: positional_fields![HsType::Named("WorktreeId")],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "WatchDeadline",
-                        fields: vec![HsType::Int],
+                        fields: positional_fields![HsType::Int],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "WatchAsync",
-                        fields: vec![HsType::Int],
+                        fields: positional_fields![HsType::Int],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "WatchMailbox",
-                        fields: vec![HsType::Int],
+                        fields: positional_fields![HsType::Int],
                         doc: &[],
                     },
                 ],
@@ -276,17 +276,17 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "Advanced",
-                        fields: vec![HsType::list(HsType::Named("GitOid"))],
+                        fields: positional_fields![HsType::list(HsType::Named("GitOid"))],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "Amended",
-                        fields: vec![HsType::Named("GitOid"), HsType::Named("GitOid")],
+                        fields: positional_fields![HsType::Named("GitOid"), HsType::Named("GitOid")],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "Rewritten",
-                        fields: vec![HsType::list(HsType::Tuple(vec![
+                        fields: positional_fields![HsType::list(HsType::Tuple(vec![
                             HsType::Named("GitOid"),
                             HsType::Named("GitOid"),
                         ]))],
@@ -294,17 +294,17 @@ fn type_defs() -> Vec<TypeDef> {
                     },
                     SumVariant {
                         ctor: "Rewound",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "Switched",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "UnknownChange",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                 ],
@@ -451,12 +451,12 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "ObservedCommit",
-                        fields: vec![HsType::Named("EventId"), HsType::Named("CommitReceipt")],
+                        fields: positional_fields![HsType::Named("EventId"), HsType::Named("CommitReceipt")],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "ObservedHeadChange",
-                        fields: vec![
+                        fields: positional_fields![
                             HsType::Named("EventId"),
                             HsType::Named("HeadChangeReceipt"),
                         ],
@@ -464,17 +464,17 @@ fn type_defs() -> Vec<TypeDef> {
                     },
                     SumVariant {
                         ctor: "ObservedTick",
-                        fields: vec![HsType::Named("EventId"), HsType::Named("Tick")],
+                        fields: positional_fields![HsType::Named("EventId"), HsType::Named("Tick")],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "ObservedAsyncDone",
-                        fields: vec![HsType::Named("EventId"), HsType::Int],
+                        fields: positional_fields![HsType::Named("EventId"), HsType::Int],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "ObservedMessage",
-                        fields: vec![HsType::Named("EventId"), HsType::Int, HsType::Value],
+                        fields: positional_fields![HsType::Named("EventId"), HsType::Int, HsType::Value],
                         doc: &[],
                     },
                 ],

@@ -21,7 +21,9 @@
 
 use super::{header, index_body, module_name as effect_module_name, GeneratedFile};
 use crate::hs::HsType;
-use crate::schema::{Effect, IdentityPayload, TypeDef, TypeShape, Validation, WireDerive};
+use crate::schema::{
+    Effect, IdentityPayload, TypeDef, TypeShape, Validation, VariantFields, WireDerive,
+};
 
 /// Where this effect's wire module lives, relative to the workspace root.
 #[must_use]
@@ -258,11 +260,29 @@ fn emit_type_decl(e: &Effect, t: &TypeDef, out: &mut String) {
                 for line in v.doc {
                     out.push_str(&format!("    /// {line}\n"));
                 }
-                if v.fields.is_empty() {
-                    out.push_str(&format!("    {},\n", v.ctor));
-                } else {
-                    let tys: Vec<String> = v.fields.iter().map(|f| rust_type(e, f)).collect();
-                    out.push_str(&format!("    {}({}),\n", v.ctor, tys.join(", ")));
+                match &v.fields {
+                    VariantFields::Positional(fields) if fields.is_empty() => {
+                        out.push_str(&format!("    {},\n", v.ctor));
+                    }
+                    VariantFields::Positional(fields) => {
+                        let types: Vec<String> =
+                            fields.iter().map(|field| rust_type(e, field)).collect();
+                        out.push_str(&format!("    {}({}),\n", v.ctor, types.join(", ")));
+                    }
+                    VariantFields::Named(fields) => {
+                        out.push_str(&format!("    {} {{\n", v.ctor));
+                        for field in fields {
+                            for line in field.doc {
+                                out.push_str(&format!("        /// {line}\n"));
+                            }
+                            out.push_str(&format!(
+                                "        {}: {},\n",
+                                field.rust_name,
+                                rust_type(e, &field.ty)
+                            ));
+                        }
+                        out.push_str("    },\n");
+                    }
                 }
             }
             out.push_str("}\n");

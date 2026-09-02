@@ -67,6 +67,12 @@ pub(crate) fn in_progress_kind_to_wire(in_progress_kind: InProgressKind) -> WtIn
 
 // DirtySummary::into_wire — HAND-WRITTEN, not generated: `usize` → `i64` widening on `ignoredExcluded`, and the three lists are cloned out of a borrow
 
+// HeadState::into_wire — HAND-WRITTEN, not generated: both variants wrap domain identity values into generated wire identities
+
+// WorkingState::into_wire — HAND-WRITTEN, not generated: composes DirtySummary and optional InProgressKind conversions
+
+// SubmissionObservation::into_wire — HAND-WRITTEN, not generated: composes the generated identity, head-state, and working-state conversions
+
 // GitFailureReceipt::into_wire — HAND-WRITTEN, not generated: `PathBuf` → lossy `String`, `Option<i32>` → `Option<i64>`
 
 // WorktreeReceipt::into_wire — HAND-WRITTEN, not generated: field renames (`worktree_id`→`tree_id`, `created_at_ms`→`created_at`) plus a `PathBuf` → lossy `String`

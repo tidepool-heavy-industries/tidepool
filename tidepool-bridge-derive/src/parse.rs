@@ -13,11 +13,26 @@ pub struct VariantInfo {
     /// derive-generated lookups call `get_by_qualified_name("<module>.<core_name>")`
     /// to disambiguate constructors that share name and arity across modules.
     pub core_module: Option<String>,
-    pub fields: Vec<Type>,
-    /// Whether the Rust variant is tuple-style (`V(...)`) — a ZERO-field tuple
-    /// variant (`V()`, as the effect projection macro emits) must be
-    /// constructed with parens, while a unit variant must not.
-    pub is_tuple: bool,
+    pub shape: VariantShape,
+}
+
+/// The Rust syntax of an enum constructor. Core constructor fields remain
+/// positional; this shape solely preserves how generated Rust must bind and
+/// construct them.
+pub enum VariantShape {
+    Unit,
+    Tuple(Vec<Type>),
+    Named(Vec<FieldInfo>),
+}
+
+impl VariantShape {
+    pub fn types(&self) -> Vec<&Type> {
+        match self {
+            Self::Unit => Vec::new(),
+            Self::Tuple(fields) => fields.iter().collect(),
+            Self::Named(fields) => fields.iter().map(|field| &field.ty).collect(),
+        }
+    }
 }
 
 pub struct StructInfo {
@@ -110,15 +125,33 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
             ..
         } = parse_core_attr(&variant.attrs)?;
 
-        let is_tuple = matches!(&variant.fields, Fields::Unnamed(_));
-        let fields = match &variant.fields {
-            Fields::Unnamed(f) => f.unnamed.iter().map(|field| field.ty.clone()).collect(),
-            Fields::Unit => Vec::new(),
-            Fields::Named(_) => {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    "Named fields are not supported in variants",
-                ))
+        let shape = match &variant.fields {
+            Fields::Unnamed(fields) => VariantShape::Tuple(
+                fields
+                    .unnamed
+                    .iter()
+                    .map(|field| field.ty.clone())
+                    .collect(),
+            ),
+            Fields::Unit => VariantShape::Unit,
+            Fields::Named(fields) => {
+                let mut named = Vec::with_capacity(fields.named.len());
+                for field in &fields.named {
+                    let attr = parse_core_attr(&field.attrs)?;
+                    let Some(ident) = field.ident.clone() else {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "named variant field has no identifier",
+                        ));
+                    };
+                    named.push(FieldInfo {
+                        ident,
+                        ty: field.ty.clone(),
+                        hs_name: attr.hs,
+                        hs_type: attr.hs_type,
+                    });
+                }
+                VariantShape::Named(named)
             }
         };
 
@@ -128,8 +161,7 @@ pub fn parse_enum(input: &DeriveInput) -> Result<EnumInfo, syn::Error> {
             rust_name,
             core_name: core_name_str,
             core_module,
-            is_tuple,
-            fields,
+            shape,
         });
     }
 

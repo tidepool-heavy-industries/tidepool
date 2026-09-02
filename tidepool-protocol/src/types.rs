@@ -93,13 +93,22 @@ impl TypeDef {
             TypeShape::Sum { variants } => {
                 let vs: Vec<String> = variants
                     .iter()
-                    .map(|v| {
-                        let mut s = String::from(v.ctor);
-                        for f in &v.fields {
-                            s.push(' ');
-                            s.push_str(&f.render_app_arg());
+                    .map(|v| match &v.fields {
+                        VariantFields::Positional(fields) => {
+                            let mut rendered = String::from(v.ctor);
+                            for field in fields {
+                                rendered.push(' ');
+                                rendered.push_str(&field.render_app_arg());
+                            }
+                            rendered
                         }
-                        s
+                        VariantFields::Named(fields) => {
+                            let rendered: Vec<String> = fields
+                                .iter()
+                                .map(|field| format!("{} :: {}", field.hs_name, field.ty.render()))
+                                .collect();
+                            format!("{} {{ {} }}", v.ctor, rendered.join(", "))
+                        }
                     })
                     .collect();
                 vs.join(" | ")
@@ -172,29 +181,43 @@ impl TypeDef {
                 if fields.is_empty() {
                     errs.push(format!("{name}: a record with no fields is not a record"));
                 }
-                let mut hs_seen: Vec<&str> = Vec::new();
-                let mut rust_seen: Vec<&str> = Vec::new();
-                for f in fields {
-                    if hs_seen.contains(&f.hs_name) {
-                        errs.push(format!("{name}: two fields named `{}`", f.hs_name));
-                    }
-                    if rust_seen.contains(&f.rust_name) {
-                        errs.push(format!("{name}: two Rust fields named `{}`", f.rust_name));
-                    }
-                    hs_seen.push(f.hs_name);
-                    rust_seen.push(f.rust_name);
-                }
+                errs.extend(validate_record_fields(name, None, fields));
             }
             TypeShape::Sum { variants } => {
                 if variants.is_empty() {
                     errs.push(format!("{name}: a sum with no variants is uninhabited"));
                 }
                 let mut seen: Vec<&str> = Vec::new();
+                let mut hs_fields: Vec<(&str, &HsType)> = Vec::new();
                 for v in variants {
                     if seen.contains(&v.ctor) {
                         errs.push(format!("{name}: two variants named `{}`", v.ctor));
                     }
                     seen.push(v.ctor);
+                    if let VariantFields::Named(fields) = &v.fields {
+                        if fields.is_empty() {
+                            errs.push(format!(
+                                "{name}.{}: a named constructor must have at least one field",
+                                v.ctor
+                            ));
+                        }
+                        errs.extend(validate_record_fields(name, Some(v.ctor), fields));
+                        for field in fields {
+                            if let Some((_, prior_ty)) = hs_fields
+                                .iter()
+                                .find(|(field_name, _)| *field_name == field.hs_name)
+                            {
+                                if *prior_ty != &field.ty {
+                                    errs.push(format!(
+                                        "{name}: record field `{}` has different types across variants",
+                                        field.hs_name
+                                    ));
+                                }
+                            } else {
+                                hs_fields.push((field.hs_name, &field.ty));
+                            }
+                        }
+                    }
                 }
             }
             TypeShape::Identity {
@@ -267,7 +290,7 @@ pub enum TypeShape {
         /// Fields in wire order.
         fields: Vec<RecordField>,
     },
-    /// `data X = A | B T | C T U` — a sum.
+    /// `data X = A | B T | C { field :: U }` — a sum.
     Sum {
         /// Variants in declaration order.
         variants: Vec<SumVariant>,
@@ -349,6 +372,35 @@ pub struct RecordField {
     pub doc: &'static [&'static str],
 }
 
+/// The payload shape of one sum constructor.
+#[derive(Clone, Debug)]
+pub enum VariantFields {
+    /// `Ctor A B` / `Ctor(A, B)`.
+    Positional(Vec<HsType>),
+    /// `Ctor { field :: A }` / `Ctor { field: A }`.
+    Named(Vec<RecordField>),
+}
+
+impl VariantFields {
+    /// Whether this constructor has no payload.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Positional(fields) => fields.is_empty(),
+            Self::Named(fields) => fields.is_empty(),
+        }
+    }
+
+    /// Its payload types in Core constructor order.
+    #[must_use]
+    pub fn types(&self) -> Vec<&HsType> {
+        match self {
+            Self::Positional(fields) => fields.iter().collect(),
+            Self::Named(fields) => fields.iter().map(|field| &field.ty).collect(),
+        }
+    }
+}
+
 /// One variant of a [`TypeShape::Sum`].
 #[derive(Clone, Debug)]
 pub struct SumVariant {
@@ -356,10 +408,38 @@ pub struct SumVariant {
     /// constructor IS the Rust variant name, which is why an enum needs no
     /// `#[core(name)]`.
     pub ctor: &'static str,
-    /// Positional payload types, in order.
-    pub fields: Vec<HsType>,
+    /// Constructor payload fields, in Core order.
+    pub fields: VariantFields,
     /// Rust doc-comment lines for the variant, WITHOUT their `/// ` prefix.
     pub doc: &'static [&'static str],
+}
+
+fn validate_record_fields(
+    type_name: &str,
+    variant: Option<&str>,
+    fields: &[RecordField],
+) -> Vec<String> {
+    let owner = variant.map_or_else(
+        || type_name.to_string(),
+        |variant| format!("{type_name}.{variant}"),
+    );
+    let mut errors = Vec::new();
+    let mut hs_seen: Vec<&str> = Vec::new();
+    let mut rust_seen: Vec<&str> = Vec::new();
+    for field in fields {
+        if hs_seen.contains(&field.hs_name) {
+            errors.push(format!("{owner}: two fields named `{}`", field.hs_name));
+        }
+        if rust_seen.contains(&field.rust_name) {
+            errors.push(format!(
+                "{owner}: two Rust fields named `{}`",
+                field.rust_name
+            ));
+        }
+        hs_seen.push(field.hs_name);
+        rust_seen.push(field.rust_name);
+    }
+    errors
 }
 
 // ---------------------------------------------------------------------------
@@ -722,13 +802,22 @@ pub enum AdapterKind {
 mod tests {
     use super::*;
 
+    fn named_field(hs_name: &'static str, rust_name: &'static str, ty: HsType) -> RecordField {
+        RecordField {
+            hs_name,
+            rust_name,
+            ty,
+            doc: &[],
+        }
+    }
+
     fn sum_shape(ctors: &[&'static str]) -> TypeShape {
         TypeShape::Sum {
             variants: ctors
                 .iter()
                 .map(|c| SumVariant {
                     ctor: c,
-                    fields: vec![],
+                    fields: VariantFields::Positional(vec![]),
                     doc: &[],
                 })
                 .collect(),
@@ -789,5 +878,104 @@ mod tests {
                 .any(|e| e.contains("names domain variant `A` twice")),
             "{errs:?}"
         );
+    }
+
+    #[test]
+    fn named_sum_fields_render_as_haskell_record_constructors() {
+        let type_def = TypeDef {
+            name: "Head",
+            wire_rust: None,
+            shape: TypeShape::Sum {
+                variants: vec![
+                    SumVariant {
+                        ctor: "Attached",
+                        fields: VariantFields::Named(vec![
+                            named_field("branch", "branch", HsType::Text),
+                            named_field("oid", "oid", HsType::Text),
+                        ]),
+                        doc: &[],
+                    },
+                    SumVariant {
+                        ctor: "Detached",
+                        fields: VariantFields::Named(vec![named_field("oid", "oid", HsType::Text)]),
+                        doc: &[],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WireDerives(&[]),
+            domain: None,
+            doc: &[],
+        };
+
+        assert_eq!(
+            type_def.render_decl(),
+            "data Head = Attached { branch :: Text, oid :: Text } | Detached { oid :: Text } deriving (Show, Eq)"
+        );
+        assert!(type_def.validate().is_empty());
+    }
+
+    #[test]
+    fn named_sum_field_types_must_agree_across_constructors() {
+        let shape = TypeShape::Sum {
+            variants: vec![
+                SumVariant {
+                    ctor: "Textual",
+                    fields: VariantFields::Named(vec![named_field(
+                        "payload",
+                        "payload",
+                        HsType::Text,
+                    )]),
+                    doc: &[],
+                },
+                SumVariant {
+                    ctor: "Numeric",
+                    fields: VariantFields::Named(vec![named_field(
+                        "payload",
+                        "payload",
+                        HsType::Int,
+                    )]),
+                    doc: &[],
+                },
+            ],
+        };
+        let type_def = TypeDef {
+            name: "Payload",
+            wire_rust: None,
+            shape,
+            json: JsonInstance::None,
+            derives: WireDerives(&[]),
+            domain: None,
+            doc: &[],
+        };
+
+        assert!(type_def
+            .validate()
+            .iter()
+            .any(|error| error.contains("different types across variants")));
+    }
+
+    #[test]
+    fn empty_named_sum_constructor_is_rejected() {
+        let type_def = TypeDef {
+            name: "Empty",
+            wire_rust: None,
+            shape: TypeShape::Sum {
+                variants: vec![SumVariant {
+                    ctor: "Empty",
+                    fields: VariantFields::Named(vec![]),
+                    doc: &[],
+                }],
+            },
+            json: JsonInstance::None,
+            derives: WireDerives(&[]),
+            domain: None,
+            doc: &[],
+        };
+
+        assert!(type_def
+            .validate()
+            .iter()
+            .any(|error| error.contains("must have at least one field")));
     }
 }

@@ -101,9 +101,17 @@ pub struct WtDirtySummary {
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum WtHeadState {
     /// The checkout is attached to this branch at this commit.
-    OnBranch(WtBranchName, WtGitOid),
+    OnBranch {
+        /// The checked-out branch.
+        branch: WtBranchName,
+        /// The commit checked out at observation time.
+        oid: WtGitOid,
+    },
     /// The checkout has a detached HEAD at this commit.
-    Detached(WtGitOid),
+    Detached {
+        /// The detached commit checked out at observation time.
+        oid: WtGitOid,
+    },
 }
 
 /// Mutable repository state observed with a submitted HEAD.

@@ -51,17 +51,17 @@ pub fn actor() -> Effect {
                 variants: vec![
                     SumVariant {
                         ctor: "ActorCompletedStatus",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "ActorFailedStatus",
-                        fields: vec![HsType::Text],
+                        fields: positional_fields![HsType::Text],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "ActorCancelledStatus",
-                        fields: vec![HsType::Text],
+                        fields: positional_fields![HsType::Text],
                         doc: &[],
                     },
                 ],

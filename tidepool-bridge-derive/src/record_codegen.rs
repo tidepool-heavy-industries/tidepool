@@ -5,7 +5,7 @@
 //! determines it) and embedded as a string literal in the generated
 //! `haskell_decl()`.
 
-use crate::parse::{DataInfo, EnumInfo, StructInfo};
+use crate::parse::{DataInfo, EnumInfo, StructInfo, VariantShape};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Ident, Type};
@@ -137,17 +137,53 @@ fn struct_decl(info: &StructInfo) -> Result<String, syn::Error> {
     }
 }
 
-/// Render the Haskell `data` decl for an enum (positional variant fields,
-/// matching the bridge's positional enum encoding).
+/// Render the Haskell `data` decl for an enum. Rust tuple constructors remain
+/// positional; Rust struct constructors become Haskell record constructors.
+/// Both retain the same positional Core field order.
 fn enum_decl(info: &EnumInfo) -> Result<String, syn::Error> {
     let name = info.name.to_string();
     let mut variants = Vec::with_capacity(info.variants.len());
-    for v in &info.variants {
-        let mut parts = vec![v.core_name.clone()];
-        for ty in &v.fields {
-            parts.push(paren_if_multi(&hs_type(ty)?));
-        }
-        variants.push(parts.join(" "));
+    for variant in &info.variants {
+        let rendered = match &variant.shape {
+            VariantShape::Unit => variant.core_name.clone(),
+            VariantShape::Tuple(fields) => {
+                let mut parts = vec![variant.core_name.clone()];
+                for ty in fields {
+                    parts.push(paren_if_multi(&hs_type(ty)?));
+                }
+                parts.join(" ")
+            }
+            VariantShape::Named(fields) if fields.is_empty() => {
+                return Err(syn::Error::new_spanned(
+                    &variant.rust_name,
+                    "CoreRecord cannot render an empty named variant; use a unit variant",
+                ));
+            }
+            VariantShape::Named(fields) => {
+                let rendered_fields: Result<Vec<_>, syn::Error> = fields
+                    .iter()
+                    .map(|field| {
+                        Ok(format!(
+                            "{} :: {}",
+                            field
+                                .hs_name
+                                .clone()
+                                .unwrap_or_else(|| snake_to_camel(&field.ident.to_string())),
+                            match &field.hs_type {
+                                Some(ty) => ty.clone(),
+                                None => hs_type(&field.ty)?,
+                            }
+                        ))
+                    })
+                    .collect();
+                format!(
+                    "{} {{ {} }}",
+                    variant.core_name,
+                    rendered_fields?.join(", ")
+                )
+            }
+        };
+        variants.push(rendered);
     }
     Ok(format!(
         "data {name} = {} deriving (Show, Eq)",

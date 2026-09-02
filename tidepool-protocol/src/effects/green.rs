@@ -79,17 +79,17 @@ pub fn green() -> Effect {
                 variants: vec![
                     SumVariant {
                         ctor: "AsyncRunning",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "AsyncSettled",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "AsyncWasCancelled",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                 ],

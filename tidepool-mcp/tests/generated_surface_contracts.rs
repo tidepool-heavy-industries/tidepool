@@ -312,3 +312,19 @@ fn worktree_head_is_effectful_and_worktree_id_is_pure() {
         "worktreeId must stay pure — the handle already carries its receipt"
     );
 }
+
+/// Sum constructors with meaningful components use named JSON fields. This is
+/// the model-facing shape: callers should never need positional knowledge such
+/// as `contents[0]` to distinguish a branch name from its commit.
+#[test]
+fn head_state_json_uses_named_constructor_fields() {
+    let src = authored_worktree_module();
+    assert!(src.contains("\"branch\" .= headBranch"));
+    assert!(src.contains("\"oid\" .= headOid"));
+    assert!(src.contains("branch <- value .: \"branch\""));
+    assert!(src.contains("oid <- value .: \"oid\""));
+    assert!(
+        !src.contains("\"contents\""),
+        "HeadState must not regress to an opaque positional payload"
+    );
+}

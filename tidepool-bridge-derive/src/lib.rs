@@ -20,7 +20,9 @@
 //! }
 //! ```
 //!
-//! Variant fields are positionally matched against the constructor's arguments.
+//! Tuple and named variant fields are matched against the constructor's
+//! arguments in declaration order. Field names are Rust-side structure; Core
+//! constructors remain positional.
 //!
 //! # Struct mapping
 //!

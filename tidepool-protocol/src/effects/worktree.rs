@@ -11,7 +11,7 @@ use crate::hs::HsType;
 use crate::schema::{
     AdapterKind, Arg, DomainMap, Effect, ErrorAdt, ErrorField, ErrorVariant, HandlingClass, Helper,
     HelperBody, IdentityPayload, JsonInstance, OuterEffect, Polymorphism, RecordField, RustBinding,
-    SumVariant, TypeDef, TypeShape, Validation, Verb, WireDerives,
+    SumVariant, TypeDef, TypeShape, Validation, VariantFields, Verb, WireDerives,
 };
 use crate::types::WireDerive::{
     Clone as DClone, Copy as DCopy, Debug as DDebug, Default as DDefault, Eq as DEq,
@@ -175,17 +175,17 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "SourceCurrentRepository",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "SourceRef",
-                        fields: vec![HsType::Named("GitRef")],
+                        fields: positional_fields![HsType::Named("GitRef")],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "SourceWorktree",
-                        fields: vec![HsType::Named("WorktreeId")],
+                        fields: positional_fields![HsType::Named("WorktreeId")],
                         doc: &[],
                     },
                 ],
@@ -209,12 +209,12 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "RequireClean",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "AllowDirtySnapshot",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                 ],
@@ -277,27 +277,27 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "InProgressMerge",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "InProgressRebase",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "InProgressCherryPick",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "InProgressRevert",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                     SumVariant {
                         ctor: "InProgressBisect",
-                        fields: vec![],
+                        fields: positional_fields![],
                         doc: &[],
                     },
                 ],
@@ -387,15 +387,30 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "OnBranch",
-                        fields: vec![
-                            HsType::Named("BranchName"),
-                            HsType::Named("GitOid"),
-                        ],
+                        fields: VariantFields::Named(vec![
+                            RecordField {
+                                hs_name: "headBranch",
+                                rust_name: "branch",
+                                ty: HsType::Named("BranchName"),
+                                doc: &["The checked-out branch."],
+                            },
+                            RecordField {
+                                hs_name: "headOid",
+                                rust_name: "oid",
+                                ty: HsType::Named("GitOid"),
+                                doc: &["The commit checked out at observation time."],
+                            },
+                        ]),
                         doc: &["The checkout is attached to this branch at this commit."],
                     },
                     SumVariant {
                         ctor: "Detached",
-                        fields: vec![HsType::Named("GitOid")],
+                        fields: VariantFields::Named(vec![RecordField {
+                            hs_name: "headOid",
+                            rust_name: "oid",
+                            ty: HsType::Named("GitOid"),
+                            doc: &["The detached commit checked out at observation time."],
+                        }]),
                         doc: &["The checkout has a detached HEAD at this commit."],
                     },
                 ],
@@ -680,7 +695,7 @@ fn type_defs() -> Vec<TypeDef> {
                 variants: vec![
                     SumVariant {
                         ctor: "Merged",
-                        fields: vec![HsType::Named("GitOid")],
+                        fields: positional_fields![HsType::Named("GitOid")],
                         doc: &[
                             "The merge landed a new commit — the target's `HEAD` afterward. Always a",
                             "genuine merge commit (`--no-ff`), never a fast-forward.",
@@ -688,7 +703,7 @@ fn type_defs() -> Vec<TypeDef> {
                     },
                     SumVariant {
                         ctor: "Conflict",
-                        fields: vec![HsType::list(HsType::Text)],
+                        fields: positional_fields![HsType::list(HsType::Text)],
                         doc: &[
                             "The merge conflicted. The paths are what git reported unmerged, read",
                             "BEFORE the abort; the target worktree is guaranteed clean by the time",

@@ -221,13 +221,14 @@ instance JsonSchema DirtySummary where
     ]
 
 instance ToJSON HeadState where
-  toJSON (OnBranch branch oid) = object
+  toJSON OnBranch { headBranch, headOid } = object
     [ "tag" .= ("OnBranch" :: Text)
-    , "contents" .= [toJSON branch, toJSON oid]
+    , "branch" .= headBranch
+    , "oid" .= headOid
     ]
-  toJSON (Detached oid) = object
+  toJSON Detached { headOid } = object
     [ "tag" .= ("Detached" :: Text)
-    , "contents" .= oid
+    , "oid" .= headOid
     ]
 
 instance FromJSON HeadState where
@@ -235,18 +236,21 @@ instance FromJSON HeadState where
     tag <- value .: "tag"
     case tag :: Text of
       "OnBranch" -> do
-        (branch, oid) <- value .: "contents"
-        pure (OnBranch branch oid)
-      "Detached" -> Detached <$> value .: "contents"
+        branch <- value .: "branch"
+        oid <- value .: "oid"
+        pure OnBranch { headBranch = branch, headOid = oid }
+      "Detached" -> Detached <$> value .: "oid"
       _ -> Error "unknown HeadState"
 
 instance JsonSchema HeadState where
   jsonSchema _ = object
     [ ("oneOf", Array
         [ objectSchema (Just "OnBranch")
-            [("contents", tupleSchema [jsonSchema (Proxy @BranchName), jsonSchema (Proxy @GitOid)], True)]
+            [ ("branch", jsonSchema (Proxy @BranchName), True)
+            , ("oid", jsonSchema (Proxy @GitOid), True)
+            ]
         , objectSchema (Just "Detached")
-            [("contents", jsonSchema (Proxy @GitOid), True)]
+            [("oid", jsonSchema (Proxy @GitOid), True)]
         ])
     ]
 

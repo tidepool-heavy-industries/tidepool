@@ -777,8 +777,8 @@ generic workflow algebra. Its landed public receipt shape is:
 
 ```haskell
 data HeadState
-  = OnBranch BranchName GitOid
-  | Detached GitOid
+  = OnBranch { headBranch :: BranchName, headOid :: GitOid }
+  | Detached { headOid :: GitOid }
 
 data WorkingState = WorkingState
   { changes   :: DirtySummary

@@ -12,7 +12,7 @@
 use crate::hs::{render_member_signature, render_member_signature_with, render_signature, HsType};
 pub use crate::types::{
     AdapterKind, DomainMap, IdentityPayload, JsonInstance, RecordField, SumVariant, TypeDef,
-    TypeShape, Validation, WireDerive, WireDerives,
+    TypeShape, Validation, VariantFields, WireDerive, WireDerives,
 };
 
 /// The sentinel a substrate helper's rendered text carries as its first
@@ -403,7 +403,9 @@ impl Effect {
                     .iter()
                     .map(|v| SumVariant {
                         ctor: v.ctor,
-                        fields: v.fields.iter().map(|f| f.ty.clone()).collect(),
+                        fields: VariantFields::Positional(
+                            v.fields.iter().map(|f| f.ty.clone()).collect(),
+                        ),
                         doc: &[],
                     })
                     .collect());
@@ -539,7 +541,9 @@ impl Effect {
         for t in &self.type_defs {
             let referenced: Vec<&HsType> = match &t.shape {
                 TypeShape::Record { fields } => fields.iter().map(|f| &f.ty).collect(),
-                TypeShape::Sum { variants } => variants.iter().flat_map(|v| &v.fields).collect(),
+                TypeShape::Sum { variants } => {
+                    variants.iter().flat_map(|v| v.fields.types()).collect()
+                }
                 TypeShape::Identity { .. } => Vec::new(),
             };
             for ty in referenced {
@@ -668,7 +672,8 @@ impl Effect {
                             ));
                         }
                         for v in variants {
-                            if !matches!(v.fields.as_slice(), [HsType::Text]) {
+                            let fields = v.fields.types();
+                            if fields.len() != 1 || fields[0] != &HsType::Text {
                                 errs.push(format!(
                                     "{}: helper {} renders `{type_name}`, whose variant \
                                      `{}` does not carry exactly one Text field",

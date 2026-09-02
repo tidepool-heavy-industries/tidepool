@@ -310,6 +310,34 @@ enum TwoVariant {
     Second(i64),
 }
 
+#[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
+enum NamedVariant {
+    NamedFields { left: i64, right: String },
+}
+
+#[test]
+fn named_variant_round_trips_in_core_field_order() {
+    let mut table = standard_datacon_table();
+    table.insert(DataCon {
+        id: DataConId(51),
+        name: "NamedFields".into(),
+        tag: 1,
+        rep_arity: 2,
+        field_bangs: vec![],
+        qualified_name: None,
+        type_name: String::new(),
+    });
+    let original = NamedVariant::NamedFields {
+        left: 7,
+        right: "named".into(),
+    };
+
+    let encoded = original.to_value(&table).expect("encode named variant");
+    let decoded = NamedVariant::from_value(&encoded, &table).expect("decode named variant");
+
+    assert_eq!(decoded, original);
+}
+
 /// A table that registers ONLY `SecondVariant` — `FirstVariant` is absent
 /// entirely (as if this compilation's table simply never carried it).
 fn partial_two_variant_table() -> DataConTable {

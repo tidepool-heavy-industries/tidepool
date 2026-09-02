@@ -245,10 +245,13 @@ fn dirty_summary_to_wire(d: &DirtySummary) -> WtDirtySummary {
 
 fn head_state_to_wire(head: &HeadState) -> WtHeadState {
     match head {
-        HeadState::OnBranch { branch, oid } => {
-            WtHeadState::OnBranch(branch_name_to_wire(branch), git_oid_to_wire(oid))
-        }
-        HeadState::Detached { oid } => WtHeadState::Detached(git_oid_to_wire(oid)),
+        HeadState::OnBranch { branch, oid } => WtHeadState::OnBranch {
+            branch: branch_name_to_wire(branch),
+            oid: git_oid_to_wire(oid),
+        },
+        HeadState::Detached { oid } => WtHeadState::Detached {
+            oid: git_oid_to_wire(oid),
+        },
     }
 }
 

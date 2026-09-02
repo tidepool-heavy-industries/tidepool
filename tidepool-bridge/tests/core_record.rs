@@ -41,6 +41,11 @@ enum SampleEnum {
     Python,
     #[core(name = "Tagged")]
     Tagged(i64, Option<String>),
+    Located {
+        #[core(hs = "source", hs_type = "FilePath")]
+        source_path: String,
+        line: i64,
+    },
 }
 
 #[test]
@@ -66,7 +71,7 @@ fn nested_struct_decl_is_exact() {
 fn enum_haskell_decl_is_exact() {
     assert_eq!(
         SampleEnum::haskell_decl(),
-        "data SampleEnum = Rust | Python | Tagged Int (Maybe Text) deriving (Show, Eq)"
+        "data SampleEnum = Rust | Python | Tagged Int (Maybe Text) | Located { source :: FilePath, line :: Int } deriving (Show, Eq)"
     );
 }
 

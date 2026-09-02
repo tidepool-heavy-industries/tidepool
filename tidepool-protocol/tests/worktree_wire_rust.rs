@@ -73,21 +73,42 @@ fn struct_fields<'a>(module: &'a str, name: &str) -> Vec<(&'a str, &'a str)> {
         .collect()
 }
 
-/// Variant texts inside `pub enum NAME { … }`, in source order — e.g.
-/// `"SourceRef(WtGitRef)"`, `"RequireClean"`.
-fn enum_variants<'a>(module: &'a str, name: &str) -> Vec<&'a str> {
+/// Variant texts inside `pub enum NAME { … }`, in source order. Struct-style
+/// variants are normalized onto one line while preserving field order.
+fn enum_variants(module: &str, name: &str) -> Vec<String> {
     let marker = format!("pub enum {name} {{");
     let start = module
         .find(&marker)
         .unwrap_or_else(|| panic!("no `pub enum {name}` in the generated module"));
     let body = &module[start + marker.len()..];
     let end = body.find("\n}\n").expect("unterminated enum");
-    body[..end]
+    let lines: Vec<&str> = body[..end]
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("///"))
-        .map(|l| l.trim_end_matches(','))
-        .collect()
+        .collect();
+    let mut variants = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if let Some(variant) = line.strip_suffix('{') {
+            let mut fields = Vec::new();
+            index += 1;
+            while index < lines.len() && lines[index] != "}," {
+                fields.push(lines[index].trim_end_matches(','));
+                index += 1;
+            }
+            variants.push(format!(
+                "{} {{ {} }}",
+                variant.trim_end(),
+                fields.join(", ")
+            ));
+        } else {
+            variants.push(line.trim_end_matches(',').to_string());
+        }
+        index += 1;
+    }
+    variants
 }
 
 /// The doc/derive/`#[core(name = …)]` text immediately preceding a
@@ -142,11 +163,7 @@ fn assert_enum(module: &str, wire_name: &str, derive_line: &str, variants: &[&st
         "{wire_name}: an enum must never carry #[core(name = …)] — its data \
          constructors ARE its variant names"
     );
-    assert_eq!(
-        enum_variants(module, wire_name),
-        variants,
-        "{wire_name}: variant name/order mismatch"
-    );
+    assert_eq!(enum_variants(module, wire_name), variants);
 }
 
 /// Every field/variant, in order, transcribed by hand from
@@ -247,6 +264,42 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
             ("unstaged", "Vec<String>"),
             ("untracked", "Vec<String>"),
             ("ignored_excluded", "i64"),
+        ],
+    );
+
+    assert_enum(
+        &module,
+        "WtHeadState",
+        WIRE,
+        &[
+            "OnBranch { branch: WtBranchName, oid: WtGitOid }",
+            "Detached { oid: WtGitOid }",
+        ],
+    );
+
+    assert_struct(
+        &module,
+        "WtWorkingState",
+        "WorkingState",
+        WIRE,
+        true,
+        &[
+            ("changes", "WtDirtySummary"),
+            ("operation", "Option<WtInProgressKind>"),
+        ],
+    );
+
+    assert_struct(
+        &module,
+        "WtSubmissionObservation",
+        "SubmissionObservation",
+        WIRE,
+        true,
+        &[
+            ("observed_worktree_id", "WtWorktreeId"),
+            ("base_head", "WtGitOid"),
+            ("submitted_head", "WtHeadState"),
+            ("working_state", "WtWorkingState"),
         ],
     );
 

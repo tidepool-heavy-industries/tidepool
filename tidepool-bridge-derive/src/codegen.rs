@@ -1,4 +1,4 @@
-use crate::parse::{EnumInfo, StructInfo};
+use crate::parse::{EnumInfo, StructInfo, VariantShape};
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
@@ -167,7 +167,9 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     add_trait_bounds(
         &mut generics,
         &trait_path,
-        info.variants.iter().flat_map(|v| v.fields.iter().cloned()),
+        info.variants
+            .iter()
+            .flat_map(|variant| variant.shape.types().into_iter().cloned()),
     );
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -178,9 +180,10 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
         let rust_name = &variant.rust_name;
         let core_name = &variant.core_name;
         let core_module = variant.core_module.as_ref();
-        let rust_arity = variant.fields.len();
+        let fields = variant.shape.types();
+        let rust_arity = fields.len();
 
-        let core_arity: usize = core_arity(variant.fields.iter());
+        let core_arity: usize = core_arity(fields.iter().copied());
         let core_arity_u32 = core_arity as u32;
 
         // Build per-Rust-field construction expressions. PhantomData fields
@@ -188,7 +191,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
         // Core field slot.
         let mut core_ix: usize = 0;
         let mut field_exprs: Vec<TokenStream> = Vec::with_capacity(rust_arity);
-        for ty in &variant.fields {
+        for ty in &fields {
             if is_phantom_data(ty) {
                 field_exprs.push(quote! { <#ty as core::default::Default>::default() });
             } else {
@@ -200,10 +203,13 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
             }
         }
 
-        let construction = if rust_arity == 0 && !variant.is_tuple {
-            quote! { #name::#rust_name }
-        } else {
-            quote! { #name::#rust_name(#(#field_exprs),*) }
+        let construction = match &variant.shape {
+            VariantShape::Unit => quote! { #name::#rust_name },
+            VariantShape::Tuple(_) => quote! { #name::#rust_name(#(#field_exprs),*) },
+            VariantShape::Named(fields) => {
+                let field_names = fields.iter().map(|field| &field.ident);
+                quote! { #name::#rust_name { #(#field_names: #field_exprs),* } }
+            }
         };
 
         // `question_mark = false`: a failed lookup for THIS variant's
@@ -258,7 +264,9 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
     add_trait_bounds(
         &mut generics,
         &trait_path,
-        info.variants.iter().flat_map(|v| v.fields.iter().cloned()),
+        info.variants
+            .iter()
+            .flat_map(|variant| variant.shape.types().into_iter().cloned()),
     );
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
@@ -269,19 +277,14 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
         let rust_name = &variant.rust_name;
         let core_name = &variant.core_name;
         let core_module = variant.core_module.as_ref();
-        let rust_arity = variant.fields.len();
+        let fields = variant.shape.types();
 
-        let core_arity: usize = variant
-            .fields
-            .iter()
-            .filter(|ty| !is_phantom_data(ty))
-            .count();
+        let core_arity: usize = fields.iter().filter(|ty| !is_phantom_data(ty)).count();
         let core_arity_u32 = core_arity as u32;
 
         // Bind ALL rust fields (so the pattern compiles) but we underscore
         // phantom fields since they aren't encoded.
-        let field_bindings: Vec<_> = variant
-            .fields
+        let field_bindings: Vec<_> = fields
             .iter()
             .enumerate()
             .map(|(i, ty)| {
@@ -301,10 +304,13 @@ pub fn generate_to_core(info: &EnumInfo) -> TokenStream {
         // nullary constructor — #335's `LlmBudget`) still needs the `()`
         // pattern; only a genuine unit variant (`Foo::Bar`) omits it. Mirrors
         // `generate_from_core`'s construction-side check just below.
-        let pattern = if rust_arity == 0 && !variant.is_tuple {
-            quote! { #name::#rust_name }
-        } else {
-            quote! { #name::#rust_name(#(#pattern_idents),*) }
+        let pattern = match &variant.shape {
+            VariantShape::Unit => quote! { #name::#rust_name },
+            VariantShape::Tuple(_) => quote! { #name::#rust_name(#(#pattern_idents),*) },
+            VariantShape::Named(fields) => {
+                let field_names = fields.iter().map(|field| &field.ident);
+                quote! { #name::#rust_name { #(#field_names: #pattern_idents),* } }
+            }
         };
 
         let field_to_values = field_bindings
