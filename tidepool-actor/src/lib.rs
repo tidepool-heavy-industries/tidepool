@@ -18,6 +18,7 @@ mod host;
 mod identity;
 mod interactive_session;
 mod kernel;
+mod local_actor;
 mod mailbox;
 mod mount;
 mod profile;
@@ -63,6 +64,10 @@ pub use interactive_session::{
 pub use kernel::{
     CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,
     KernelInvocationReply, KernelMessage, KernelWorkbenchReply, LocalActorRef,
+};
+pub use local_actor::{
+    spawn_local_actor, KernelBehavior, KernelBehaviorError, LocalActor, LocalActorArguments,
+    LocalActorState,
 };
 pub use mailbox::{
     CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
