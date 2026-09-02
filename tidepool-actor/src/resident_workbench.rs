@@ -28,6 +28,10 @@ use crate::{ActorCompileViewError, AdmittedAgentSession, AgentBlockStop, AgentWo
 
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
+fn actor_effect_stack(expected_type: &str) -> String {
+    format!("(Complete ({expected_type}) ': ActorEffects)")
+}
+
 /// Trusted source environment supplied by actor deployment. The canonical
 /// `ActorEffects` alias itself lives in the imported Haskell facade; Rust does
 /// not reflect or authorize its row entries.
@@ -653,7 +657,7 @@ where
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
         };
     }
-    let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
+    let effect_stack = actor_effect_stack(expected_type);
     let compiled = match compile_block(
         session,
         context,
@@ -1700,135 +1704,13 @@ where
             context.live_payload,
         )
         .map_err(ResidentActorWorkbenchError::Resident)?;
-    let outcome = execute_fragment(session, context, source, expected_type, type_modules, block);
+    let outcome = begin_fragment(session, context, source, expected_type, type_modules, block)
+        .and_then(|step| adapt_agent_step(session, step));
     session.close_realm(fragment_realm);
     session
         .set_actor_execution(actor_context, context.effect_policy, context.live_payload)
         .map_err(ResidentActorWorkbenchError::Resident)?;
     outcome
-}
-
-fn execute_fragment<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    expected_type: &str,
-    type_modules: &[String],
-    block: ParsedBlock,
-) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    if block.source.trim_start().starts_with(':') {
-        return match run_discovery(
-            session,
-            context,
-            source,
-            expected_type,
-            type_modules,
-            &block,
-        )? {
-            Ok(output) => Ok(BlockExecution::Committed(output)),
-            Err(diagnostic) => Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
-                diagnostic,
-            ))),
-        };
-    }
-    let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
-    let compiled = match compile_block(
-        session,
-        context,
-        source,
-        &effect_stack,
-        type_modules,
-        &block,
-    )? {
-        CompiledBlock::Ready(compiled) => compiled,
-        CompiledBlock::Rejected(diagnostic) => {
-            return Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
-                diagnostic,
-            )));
-        }
-    };
-    let ReadyBlock {
-        result,
-        generation,
-        declaration_source,
-    } = *compiled;
-    match result {
-        TurnResult::Decl(receipt) => {
-            match session.define_scoped_in(context.placement.lexical_scope, &[&declaration_source])
-            {
-                Ok(generation) => Ok(BlockExecution::Committed(format!(
-                    "defined {} at generation {}",
-                    if receipt.binders.is_empty() {
-                        "declaration".to_string()
-                    } else {
-                        receipt.binders.join(", ")
-                    },
-                    generation.0
-                ))),
-                Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
-                    Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
-                        classify_session(&error).message,
-                    )))
-                }
-                Err(error) => Err(ResidentActorWorkbenchError::Resident(
-                    ResidentError::Session(error),
-                )),
-            }
-        }
-        TurnResult::Bind {
-            bound, compiled, ..
-        } => {
-            let names = bound
-                .iter()
-                .map(|binder| binder.name.clone())
-                .collect::<Vec<_>>();
-            let outcome = match bound.as_slice() {
-                [] => session.run_with_sites(
-                    "actor_workbench_discard_bind",
-                    &compiled.expr,
-                    &compiled.table,
-                    &compiled.asks,
-                ),
-                [binder] => session.run_bind_with_sites(
-                    "actor_workbench_bind",
-                    &compiled.expr,
-                    &compiled.table,
-                    binder,
-                    generation,
-                    &compiled.asks,
-                ),
-                binders => session.run_projected_bind_with_sites(
-                    "actor_workbench_pattern_bind",
-                    &compiled.expr,
-                    &compiled.table,
-                    binders,
-                    generation,
-                    &compiled.asks,
-                ),
-            };
-            let receipt = (!names.is_empty()).then(|| names.join(", "));
-            settle_run(
-                session,
-                context,
-                &compiled.table,
-                outcome,
-                receipt.as_deref(),
-            )
-        }
-        TurnResult::Expr { compiled, .. } => {
-            let outcome = session.run_with_sites(
-                "actor_workbench_expr",
-                &compiled.expr,
-                &compiled.table,
-                &compiled.asks,
-            );
-            settle_run(session, context, &compiled.table, outcome, None)
-        }
-    }
 }
 
 fn run_discovery<H, O>(
@@ -1943,7 +1825,7 @@ where
                 total: block.total,
                 source: format!("let __tidepool_type_probe = ({expression})"),
             };
-            let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
+            let effect_stack = actor_effect_stack(expected_type);
             match compile_block(
                 session,
                 context,
@@ -1969,65 +1851,40 @@ where
     }
 }
 
-fn settle_run<H, O>(
+fn adapt_agent_step<H, O>(
     session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    table: &DataConTable,
-    outcome: Result<ResidentOutcome, ResidentError>,
-    bound_name: Option<&str>,
+    step: ResidentWorkbenchStep,
 ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
-        Err(ResidentError::Run(error)) => {
-            return Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(
-                error.to_string(),
-            )));
-        }
-        Err(error) => {
-            return Err(ResidentActorWorkbenchError::Resident(error));
-        }
-    };
-    match outcome {
-        ResidentOutcome::Completed { output, result } => {
-            let mut receipt = match bound_name {
-                Some(name) => format!("bound `{name}`"),
-                None => result.to_string_pretty(),
-            };
-            if !output.is_empty() {
-                receipt.push_str("\n\nOutput:\n");
-                receipt.push_str(&output.join("\n"));
-            }
-            Ok(BlockExecution::Committed(receipt))
-        }
-        ResidentOutcome::BindingsCommitted { output } => Ok(BlockExecution::Committed(
-            projected_binding_receipt(bound_name, &output)?,
+    match step {
+        ResidentWorkbenchStep::Committed(receipt) => Ok(BlockExecution::Committed(receipt)),
+        ResidentWorkbenchStep::Rejected(diagnostic) => Ok(BlockExecution::Stopped(
+            AgentBlockStop::Rejected(diagnostic),
         )),
-        ResidentOutcome::Suspended {
-            output,
-            hole,
-            request,
-        } => {
-            let request_kind = ResidentRequest::decode(&request, table);
-            if matches!(&request_kind, Ok(ResidentRequest::Complete(_))) {
-                let completion = session
-                    .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
-                    .ok_or(ResidentActorWorkbenchError::MissingCompletionPayload)?;
-                return Ok(BlockExecution::Stopped(AgentBlockStop::Completed(
-                    completion,
-                )));
-            }
-            let output = if output.is_empty() {
+        ResidentWorkbenchStep::Completed(completion) => Ok(BlockExecution::Stopped(
+            AgentBlockStop::Completed(completion),
+        )),
+        ResidentWorkbenchStep::Running { fragment, outcome } => {
+            let ResidentOutcome::Suspended { request, .. } = *outcome else {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "running workbench step did not carry a suspension".into(),
+                ));
+            };
+            let operation = ResidentRequest::decode(&request, session.data_con_table())
+                .map_or_else(
+                    |error| error.to_string(),
+                    |request| request.operation().to_string(),
+                );
+            let output = if fragment.output.is_empty() {
                 String::new()
             } else {
-                format!("\n\nOutput before suspension:\n{}", output.join("\n"))
-            };
-            let operation = match request_kind {
-                Ok(request) => request.operation().to_string(),
-                Err(error) => error.to_string(),
+                format!(
+                    "\n\nOutput before suspension:\n{}",
+                    fragment.output.join("\n")
+                )
             };
             Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(format!(
                 "fragment suspended on `{}`, which the current actor interpreter could not settle{output}",
