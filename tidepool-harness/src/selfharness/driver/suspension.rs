@@ -291,7 +291,9 @@ impl SelfHarnessDriver {
                     // to the main loop, which classifies and services it.
                     return Ok(outcome);
                 }
-                ResidentOutcome::Completed { .. } => return Ok(outcome),
+                ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => {
+                    return Ok(outcome)
+                }
             }
         }
     }

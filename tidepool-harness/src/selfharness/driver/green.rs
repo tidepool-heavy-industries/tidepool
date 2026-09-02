@@ -700,6 +700,7 @@ impl SelfHarnessDriver {
                         engine::classify_hole(request, &table, &asks).ok()
                     }
                     ResidentOutcome::Completed { .. } => None,
+                    ResidentOutcome::BindingsCommitted { .. } => None,
                 };
                 match classified {
                     Some(c) if matches!(c.routing, SuspensionRouting::Fork { .. }) => {
@@ -718,6 +719,9 @@ impl SelfHarnessDriver {
                                 subagent_batch.push((chain, hole.cont_id().to_string(), request));
                             }
                             ResidentOutcome::Completed { .. } => {
+                                unreachable!("classified as Suspended above")
+                            }
+                            ResidentOutcome::BindingsCommitted { .. } => {
                                 unreachable!("classified as Suspended above")
                             }
                         }

@@ -191,6 +191,9 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
         .expect("run bind turn (scope A)")
     {
         ResidentOutcome::Completed { .. } => {}
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a single-name bind must return its value")
+        }
         ResidentOutcome::Suspended { .. } => panic!("a pure `pure 41` bind must not suspend"),
     }
 
@@ -210,6 +213,9 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
         .expect("run bind turn (scope B)")
     {
         ResidentOutcome::Completed { .. } => {}
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a single-name bind must return its value")
+        }
         ResidentOutcome::Suspended { .. } => panic!("a pure `pure 99` bind must not suspend"),
     }
 
@@ -282,6 +288,9 @@ fn second_scope_fragment_env_excludes_first_scopes_session_var_id() {
     {
         ResidentOutcome::Completed { result, .. } => {
             assert_eq!(result.to_json(), serde_json::json!(99));
+        }
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("an expression run must return its value")
         }
         ResidentOutcome::Suspended { .. } => panic!("the read turn must not suspend"),
     }

@@ -170,6 +170,9 @@ fn multi_turn_accumulates_across_suspend_resume() {
             hole
         }
         ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at `ask`, not complete"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("turn 1 should suspend at `ask`, not bind names")
+        }
     };
 
     // The session is now suspended — no OS thread is parked (E2). A NEW run is
@@ -205,6 +208,9 @@ fn multi_turn_accumulates_across_suspend_resume() {
             assert_eq!(result.to_json(), serde_json::json!(0));
         }
         ResidentOutcome::Suspended { .. } => panic!("resume should complete, not re-suspend"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a value-returning resume must not report a projected binding")
+        }
     }
     assert!(
         session.is_idle(),
@@ -252,6 +258,9 @@ fn multi_turn_accumulates_across_suspend_resume() {
             );
         }
         ResidentOutcome::Suspended { .. } => panic!("turn 2 should complete"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a value-returning turn must not report a projected binding")
+        }
     }
 }
 
@@ -292,6 +301,9 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
     let hole = match session.run("t1", &t1_expr, &t1_table).expect("turn 1 runs") {
         ResidentOutcome::Suspended { hole, .. } => hole,
         ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at ask"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("turn 1 should suspend at ask, not bind names")
+        }
     };
 
     // A CHILD turn runs against the suspended parent. It allocates a sizeable
@@ -354,6 +366,9 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
             assert_eq!(result.to_json(), serde_json::json!(0));
         }
         ResidentOutcome::Suspended { .. } => panic!("resume should complete"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a value-returning resume must not report a projected binding")
+        }
     }
     assert!(session.is_idle());
 
@@ -379,6 +394,9 @@ fn nested_child_runs_while_parent_suspended_then_resumes() {
             );
         }
         ResidentOutcome::Suspended { .. } => panic!("verify turn should complete"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a value-returning turn must not report a projected binding")
+        }
     }
 }
 
@@ -426,6 +444,9 @@ fn retryable_resume_failure_does_not_wedge_the_session() {
     let hole = match session.run("t1", &t1_expr, &t1_table).expect("turn 1 runs") {
         ResidentOutcome::Suspended { hole, .. } => hole,
         ResidentOutcome::Completed { .. } => panic!("turn 1 should suspend at `ask`"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("turn 1 should suspend at `ask`, not bind names")
+        }
     };
 
     // A bottom-bearing answer (an unforced thunk reference): the JIT's A5
@@ -457,6 +478,9 @@ fn retryable_resume_failure_does_not_wedge_the_session() {
             assert_eq!(result.to_json(), serde_json::json!(42));
         }
         ResidentOutcome::Suspended { .. } => panic!("corrected resume should complete"),
+        ResidentOutcome::BindingsCommitted { .. } => {
+            panic!("a value-returning resume must not report a projected binding")
+        }
     }
     assert!(
         session.is_idle(),
@@ -493,6 +517,9 @@ fn plain_turns_reuse_the_machine() {
                 assert_eq!(result.to_json(), serde_json::json!(expected));
             }
             ResidentOutcome::Suspended { .. } => panic!("a pure turn should not suspend"),
+            ResidentOutcome::BindingsCommitted { .. } => {
+                panic!("a pure value turn must not report a projected binding")
+            }
         }
         assert!(session.is_idle());
     }

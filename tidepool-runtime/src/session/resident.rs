@@ -438,7 +438,8 @@ enum HoleSeed {
 /// resident turn is driven by direct `run_*` calls (not the oneshot engine), so
 /// this is a distinct, smaller enum: no `Paused`/`TimedOut` (timeout-yield is
 /// permanently excluded from the stowable resident path, by design),
-/// and completion carries the bridged result value.
+/// and completion distinguishes value-producing turns from projected binds
+/// whose products were installed directly into the lexical scope.
 // `Completed`'s `EvalResult` is the large variant; like the engine's
 // `SuspendableRun`, this is a transient boundary carrier destructured
 // immediately by the caller, so the size asymmetry is inherent, not a leak.
@@ -451,6 +452,10 @@ pub enum ResidentOutcome {
         output: Vec<String>,
         result: EvalResult,
     },
+    /// A projected pattern bind completed and its named values were installed
+    /// in the resident lexical scope. Unlike an expression completion, this
+    /// operation has no result value of its own.
+    BindingsCommitted { output: Vec<String> },
     /// The turn suspended at an `Ask`. The machine holds the continuation
     /// internally (stowed as data); call [`ResidentSession::resume`] with the
     /// answer. `request` is the bridged `Ask` request; `hole` is the minted
@@ -1609,10 +1614,11 @@ where
         // `resume` on the `ResidentHole::Binding` this mints below, which
         // carries `binder`/`gen` forward itself.
         let bound = match &outcome {
-            ParkedRun::Completed { bound, .. } => *bound,
+            ParkedRun::CompletedValue { bound, .. } => *bound,
+            ParkedRun::CompletedProject { .. } => None,
             ParkedRun::Suspended { .. } => None,
         };
-        let completed = matches!(outcome, ParkedRun::Completed { .. });
+        let completed = !matches!(outcome, ParkedRun::Suspended { .. });
         let seed = HoleSeed::Binding {
             binder: binder.clone(),
             generation: gen,
@@ -1675,10 +1681,11 @@ where
                 .map(|outcome| project_parked(machine, outcome, realm))
         })?;
         let projected = match &outcome {
-            ParkedRun::Completed { projected, .. } => projected.clone(),
+            ParkedRun::CompletedProject { projected } => projected.clone(),
+            ParkedRun::CompletedValue { .. } => Vec::new(),
             ParkedRun::Suspended { .. } => Vec::new(),
         };
-        let completed = matches!(outcome, ParkedRun::Completed { .. });
+        let completed = !matches!(outcome, ParkedRun::Suspended { .. });
         let seed = HoleSeed::ProjectedBinding {
             binders: binders.to_vec(),
             generation: gen,
@@ -1736,13 +1743,16 @@ where
                 .map(|o| project_parked(machine, o, child_realm))
         })?;
         match outcome {
-            ParkedRun::Completed { value, .. } => {
+            ParkedRun::CompletedValue { value, .. } => {
                 let _ = self.captured.drain();
                 Ok(EvalResult::new(
                     value,
                     self.core.session_table().clone(),
                     Vec::new(),
                 ))
+            }
+            ParkedRun::CompletedProject { .. } => {
+                unreachable!("a value-returning child run cannot complete as a projection")
             }
             ParkedRun::Suspended { .. } => {
                 // Scope exit for the throwaway realm — the child's park (and
@@ -2212,12 +2222,11 @@ where
         // retired this hole, so a materialize failure cannot leave the hole
         // stuck on a frame the machine no longer holds.
         let (bound, projected) = match &outcome {
-            ParkedRun::Completed {
-                bound, projected, ..
-            } => (*bound, projected.clone()),
+            ParkedRun::CompletedValue { bound, .. } => (*bound, Vec::new()),
+            ParkedRun::CompletedProject { projected } => (None, projected.clone()),
             ParkedRun::Suspended { .. } => (None, Vec::new()),
         };
-        let completed = matches!(outcome, ParkedRun::Completed { .. });
+        let completed = !matches!(outcome, ParkedRun::Suspended { .. });
         let resident_outcome = self.classify_parked(
             outcome,
             Some(cont_id),
@@ -2525,29 +2534,25 @@ where
         provenance: Arc<ProgramProvenance>,
     ) -> ResidentOutcome {
         match outcome {
-            ParkedRun::Completed { value, .. } => {
-                if let Some(hole) = resumed {
-                    if let Some((_, id)) = self.parked.iter().find(|(h, _)| h == hole) {
-                        self.parked_provenance.remove(id);
-                    }
-                    self.parked.retain(|(h, _)| h != hole);
-                }
+            ParkedRun::CompletedValue { value, .. } => {
+                self.retire_resumed(resumed);
                 let output = self.captured.drain();
                 ResidentOutcome::Completed {
                     output,
                     result: EvalResult::new(value, self.core.session_table().clone(), Vec::new()),
                 }
             }
+            ParkedRun::CompletedProject { .. } => {
+                self.retire_resumed(resumed);
+                ResidentOutcome::BindingsCommitted {
+                    output: self.captured.drain(),
+                }
+            }
             ParkedRun::Suspended { id, request } => {
                 // A resume that re-suspended: the OLD hole is spent (the
                 // frame was consumed; a fresh frame parked under a FRESH id —
                 // ids are never reused) and the new one replaces it.
-                if let Some(hole) = resumed {
-                    if let Some((_, old_id)) = self.parked.iter().find(|(h, _)| h == hole) {
-                        self.parked_provenance.remove(old_id);
-                    }
-                    self.parked.retain(|(h, _)| h != hole);
-                }
+                self.retire_resumed(resumed);
                 let cont_id = self.next_cont_id();
                 self.parked.push((cont_id.clone(), id));
                 self.parked_provenance.insert(id, provenance);
@@ -2559,6 +2564,16 @@ where
                 }
             }
         }
+    }
+
+    fn retire_resumed(&mut self, resumed: Option<&str>) {
+        let Some(hole) = resumed else {
+            return;
+        };
+        if let Some((_, id)) = self.parked.iter().find(|(name, _)| name == hole) {
+            self.parked_provenance.remove(id);
+        }
+        self.parked.retain(|(name, _)| name != hole);
     }
 }
 
@@ -2608,9 +2623,11 @@ where
 /// presence is dropped because the payload itself is acquired explicitly from
 /// its frame.
 enum ParkedRun {
-    Completed {
+    CompletedValue {
         value: Value,
         bound: Option<ValueHandle>,
+    },
+    CompletedProject {
         projected: Vec<ValueHandle>,
     },
     Suspended {
@@ -2627,19 +2644,12 @@ fn project_parked(
     realm: RealmId,
 ) -> ParkedRun {
     match outcome {
-        ParkedOutcome::CompletedValue(value) => ParkedRun::Completed {
-            value,
-            bound: None,
-            projected: Vec::new(),
-        },
-        ParkedOutcome::CompletedBinding { value, root } => ParkedRun::Completed {
+        ParkedOutcome::CompletedValue(value) => ParkedRun::CompletedValue { value, bound: None },
+        ParkedOutcome::CompletedBinding { value, root } => ParkedRun::CompletedValue {
             value,
             bound: Some(machine.mint_handle_from_root(root, realm)),
-            projected: Vec::new(),
         },
-        ParkedOutcome::CompletedProject { roots } => ParkedRun::Completed {
-            value: Value::Lit(tidepool_repr::Literal::LitString(b"pattern bound".to_vec())),
-            bound: None,
+        ParkedOutcome::CompletedProject { roots } => ParkedRun::CompletedProject {
             projected: roots
                 .into_iter()
                 .map(|root| machine.mint_handle_from_root(root, realm))

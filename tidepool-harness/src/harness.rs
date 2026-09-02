@@ -2308,6 +2308,9 @@ impl Harness {
                 }
                 Ok(engine::TurnOutcome::Completed { rendered })
             }
+            Ok(ResidentOutcome::BindingsCommitted { .. }) => Err(HarnessError::Resident(
+                "projected binding completion reached a value-returning harness turn".into(),
+            )),
             Ok(ResidentOutcome::Suspended { hole, request, .. }) => {
                 let classified = engine::classify_hole(&request, &table, &asks)?;
                 let hole_id = hole.cont_id().to_string();
@@ -3070,6 +3073,9 @@ impl Harness {
                 // persisted session lets `follow_up` reopen it with heap intact.
                 Ok(())
             }
+            ResidentOutcome::BindingsCommitted { .. } => Err(HarnessError::Resident(
+                "projected binding completion reached a value-returning harness resume".into(),
+            )),
             ResidentOutcome::Suspended {
                 hole: fresh_hole,
                 request,

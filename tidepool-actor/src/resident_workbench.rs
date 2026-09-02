@@ -791,6 +791,10 @@ where
             }
             Ok(ResidentWorkbenchStep::Committed(receipt))
         }
+        ResidentOutcome::BindingsCommitted { output } => {
+            let receipt = projected_binding_receipt(fragment.bound_name.as_deref(), &output)?;
+            Ok(ResidentWorkbenchStep::Committed(receipt))
+        }
         ResidentOutcome::Suspended {
             output,
             hole,
@@ -829,7 +833,9 @@ where
         actor_realm: RealmId,
     ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
         let (hole, request) = match outcome {
-            ResidentOutcome::Completed { .. } => return Ok(ResidentActorBoundary::Completed),
+            ResidentOutcome::Completed { .. } | ResidentOutcome::BindingsCommitted { .. } => {
+                return Ok(ResidentActorBoundary::Completed);
+            }
             ResidentOutcome::Suspended { hole, request, .. } => (hole, request),
         };
 
@@ -1156,6 +1162,11 @@ where
                     .map_err(ResidentActorWorkbenchError::Resident)?
                 {
                     ResidentOutcome::Completed { .. } => Ok(()),
+                    ResidentOutcome::BindingsCommitted { .. } => {
+                        Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "shutdown completed as an impossible projected binding".into(),
+                        ))
+                    }
                     ResidentOutcome::Suspended { request, .. } => {
                         let request = ResidentRequest::decode(&request, session.data_con_table())?;
                         Err(ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -1992,6 +2003,9 @@ where
             }
             Ok(BlockExecution::Committed(receipt))
         }
+        ResidentOutcome::BindingsCommitted { output } => Ok(BlockExecution::Committed(
+            projected_binding_receipt(bound_name, &output)?,
+        )),
         ResidentOutcome::Suspended {
             output,
             hole,
@@ -2021,6 +2035,23 @@ where
             ))))
         }
     }
+}
+
+fn projected_binding_receipt(
+    bound_name: Option<&str>,
+    output: &[String],
+) -> Result<String, ResidentActorWorkbenchError> {
+    let name = bound_name.ok_or_else(|| {
+        ResidentActorWorkbenchError::ActorProtocol(
+            "projected binding completed without binder metadata".into(),
+        )
+    })?;
+    let mut receipt = format!("bound `{name}`");
+    if !output.is_empty() {
+        receipt.push_str("\n\nOutput:\n");
+        receipt.push_str(&output.join("\n"));
+    }
+    Ok(receipt)
 }
 
 #[cfg(test)]

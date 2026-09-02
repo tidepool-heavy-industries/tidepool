@@ -620,6 +620,7 @@ impl SelfHarnessDriver {
             .map_err(|e| DriverError::Session(format!("harness-ctx bind run failed: {e}")))?;
         match outcome {
             ResidentOutcome::Completed { .. } => Ok(()),
+            ResidentOutcome::BindingsCommitted { .. } => Ok(()),
             ResidentOutcome::Suspended { .. } => Err(DriverError::Session(
                 "harness-ctx bind suspended unexpectedly — must be a pure value".into(),
             )),
@@ -1259,6 +1260,9 @@ impl SelfHarnessDriver {
                         ResidentOutcome::Completed { .. } => {
                             unreachable!("ready_for_subagent_batch checked Suspended above")
                         }
+                        ResidentOutcome::BindingsCommitted { .. } => {
+                            unreachable!("ready_for_subagent_batch checked Suspended above")
+                        }
                     }
                 }
                 let this = &*self;
@@ -1317,6 +1321,12 @@ impl SelfHarnessDriver {
                     result: result.into_value(),
                     table: compiled.table.clone(),
                 },
+                ResidentOutcome::BindingsCommitted { .. } => {
+                    return Err(DriverError::Session(
+                        "green thread completed as a projected binding where a value was required"
+                            .into(),
+                    ));
+                }
                 ResidentOutcome::Suspended { hole, request, .. } => {
                     let classified =
                         engine::classify_hole(&request, &compiled.table, &compiled.asks)?;
@@ -1704,6 +1714,11 @@ impl SelfHarnessDriver {
             ResidentOutcome::Suspended { .. } => {
                 return Err(DriverError::Session(
                     "render suspended unexpectedly — render must be a pure function".into(),
+                ))
+            }
+            ResidentOutcome::BindingsCommitted { .. } => {
+                return Err(DriverError::Session(
+                    "render completed as a projected binding instead of Text".into(),
                 ))
             }
         };
