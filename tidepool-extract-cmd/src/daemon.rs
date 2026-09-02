@@ -323,7 +323,7 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
             let worker_argv = match normalize_worker_argv(argv) {
                 Ok(argv) => argv,
                 Err(_) => {
-                    let _ = write_rejected(&mut connection, "invalid V3 worker request");
+                    let _ = write_rejected(&mut connection, "invalid V4 worker request");
                     continue;
                 }
             };

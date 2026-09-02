@@ -38,6 +38,7 @@ import Tidepool.DiagJson
   ( ReportOutcome(..), diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
+import Tidepool.Introspection (encodeInspectionResult, runInspection)
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, scaffoldOutputBase )
 import Tidepool.SessionArtifacts
@@ -113,12 +114,28 @@ dispatch compiler timing args =
     (file : _)
         -- Classification consumes every input; all other modes use the first.
         | requestClassify args                    -> runClassifyMode timing args
+        | isJust (requestInspection args)         -> runInspectionMode compiler args file
         -- A turn may also carry session fields, so it precedes session dispatch.
         | requestTurn args                        -> runTurnMode compiler args file
         -- Multi-target compilation may also carry a stable-value scope.
         | not (null (requestTargets args))        -> timePhase timing "total" (processFile compiler timing args file)
         -- Normal one-shot extraction.
         | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
+
+runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
+runInspectionMode compiler args path = do
+  res <- try $ do
+    query <- maybe (fail "inspection request is missing its query") pure (requestInspection args)
+    out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
+    let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
+    compiled <- compiler scope path (requestIncludes args) (requestBuildProductsDir args)
+    result <- runInspection
+      (prHscEnv compiled)
+      (prTargetRdrEnv compiled)
+      (prCapturedType compiled)
+      query
+    BS.writeFile out (encodeInspectionResult result)
+  reportDiags res
 
 
 -- | Prepend the harness language profile to a scratch copy of the first input.

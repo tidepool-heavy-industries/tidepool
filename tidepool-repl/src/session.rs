@@ -40,9 +40,10 @@ use tidepool_repr::{
 use tidepool_runtime::session::{
     assemble_bind_module, classify_block, extract_ask_request, insert_preamble_imports,
     place_turn_stmt, subtract_import_list_names, BoundBinder, CompiledTurn, ExportItem,
-    GateDispatcher, ModuleEnv, PersistentSession, SessionCompileView, SessionError, SessionLib,
-    SourceImports, TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, ValueTier, WorkSequence,
+    GateDispatcher, InspectionQuery, InspectionRequest, ModuleEnv, PersistentSession,
+    SessionCompileView, SessionError, SessionLib, SourceImports, TemplateSelector,
+    TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
+    WorkSequence,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, value_to_json, CompileError, FailureClass, Phase,
@@ -208,10 +209,6 @@ pub struct Session {
     /// alongside effectful (materialized) binds. Latest-wins per name; a
     /// cross-plane rebind removes the name from the other plane.
     pure_binds: std::collections::BTreeMap<String, PureBind>,
-    /// Disposable interface identity. Kept in the high half of the generation
-    /// space so read-only probes never consume or collide with committed value
-    /// generations.
-    scratch_gen: u64,
 }
 
 /// A pure bind that lives in the decl plane (GHCi-environment model). Its
@@ -487,7 +484,6 @@ impl Session {
             cancel_slot: None,
             last_stubs: Vec::new(),
             pure_binds: std::collections::BTreeMap::new(),
-            scratch_gen: 1_u64 << 63,
         })
     }
 
@@ -1308,7 +1304,8 @@ impl Session {
     /// core record-dot idiom) can't monomorphize the unresolved constraint and
     /// the probe FAILS — an empty type display; NMR reports it faithfully.
     fn probe_name_type(&mut self, name: &str) -> Option<String> {
-        let preamble = to_nmr_pragmas(&self.patched_preamble());
+        let preamble =
+            tidepool_runtime::session::enable_no_monomorphism_restriction(&self.patched_preamble());
         let imports = self.session_imports();
         let eval_input = self.eval_input.clone();
         let template = wrap_pure_ref_source(&preamble, &imports, "{{TURN}}", eval_input.as_ref());
@@ -2250,140 +2247,9 @@ impl Session {
                         "error": ":t requires an expression"
                     }));
                 }
-                let preamble = self.patched_preamble();
-                let probe_gen = Generation(self.scratch_gen);
-                self.scratch_gen = self.scratch_gen.saturating_add(1);
-                let imports = self.turn_imports(expr);
-                let eval_input = self.eval_input.clone();
-                let turn_text = format!("let __t = {expr}");
-                let template_source = wrap_bind_source(
-                    &preamble,
-                    &self.cfg.effect_stack,
-                    &imports,
-                    "{{TURN_STMT}}",
-                    "{{BINDERS}}",
-                    eval_input.as_ref(),
-                );
-                let turn = match self.compile_repl_turn(
-                    &turn_text,
-                    vec![TurnTemplate {
-                        kind: TemplateSelector::Bind,
-                        source: template_source.clone(),
-                    }],
-                    TurnClassification {
-                        kind: TurnKind::Bind,
-                        binders: vec!["__t".to_string()],
-                        items: Vec::new(),
-                    },
-                    probe_gen,
-                ) {
-                    Ok(turn) => turn,
-                    Err(e) => {
-                        return TurnOutcome::Meta(serde_json::json!({
-                            "error": format!(
-                                "compile error: {}",
-                                render_compile_fail_body(&e.error, &e.source, e.user_lines)
-                            )
-                        }))
-                    }
-                };
-                match turn.binders.into_iter().next() {
-                    Some(binder) => TurnOutcome::Meta(serde_json::json!({
-                        "type": binder.type_display
-                    })),
-                    None => TurnOutcome::Meta(serde_json::json!({
-                        "error": "no type information captured"
-                    })),
-                }
+                self.run_inspection(InspectionQuery::TypeOf(expr.clone()))
             }
-            MetaCommand::Info(name) => {
-                // 1. Bound value lookup (highest priority — a session binding shadows types).
-                if let Some((_, entry)) = self
-                    .core
-                    .bindings()
-                    .iter_current()
-                    .find(|(n, _)| n.0 == *name)
-                {
-                    return TurnOutcome::Meta(serde_json::json!({
-                        "name": name,
-                        "type": entry.type_display.clone().unwrap_or_default(),
-                        "tier": if entry.value.is_forced() { "Tier0Data" } else { "Tier1Closure" },
-                        "module": entry.module.module_name(),
-                    }));
-                }
-                // 1b. Pure bind (decl-backed) — part of the environment too.
-                if let Some(pb) = self.pure_binds.get(name) {
-                    return TurnOutcome::Meta(serde_json::json!({
-                        "name": name,
-                        "type": pb.type_display,
-                        "tier": "DeclBacked",
-                        "module": tidepool_repr::SessionModule::lib(pb.gen).module_name(),
-                    }));
-                }
-                // 2. Built-in effect decl type_defs (data/newtype/type) and GADT constructors.
-                for decl in self.cfg.roster.decls() {
-                    for type_def in decl.type_defs {
-                        if type_def_head(type_def) == Some(name.as_str()) {
-                            return TurnOutcome::Meta(serde_json::json!({
-                                "name": name,
-                                "shape": *type_def,
-                            }));
-                        }
-                    }
-                    for con in decl.constructors {
-                        if con.split("::").next().map(str::trim) == Some(name.as_str()) {
-                            return TurnOutcome::Meta(serde_json::json!({
-                                "name": name,
-                                "shape": *con,
-                                "effect": decl.type_name,
-                            }));
-                        }
-                    }
-                }
-                // 3. Session-defined types (data/newtype/type/class from declaration items).
-                if let Some(src) = self.core.lib().decl_type_source(name) {
-                    return TurnOutcome::Meta(serde_json::json!({
-                        "name": name,
-                        "shape": src,
-                        "source": "session",
-                    }));
-                }
-                // 3b. Session-defined values/functions (`f x = …`). These are
-                // decls, not bindings or types, so they need their own lookup
-                // here rather than falling through to a total miss. (#318)
-                if let Some(src) = self.core.lib().decl_value_source(name) {
-                    return TurnOutcome::Meta(serde_json::json!({
-                        "name": name,
-                        "shape": src,
-                        "source": "session",
-                    }));
-                }
-                // 4. Stdlib/preamble types (`Proc`, `Hit`, … — source-scanned
-                // from the same include dirs the session compiles against).
-                if let Some(info) =
-                    tidepool_runtime::session::introspect::stdlib_info(&self.cfg.base_include, name)
-                {
-                    return TurnOutcome::Meta(info);
-                }
-                // 4b. Stdlib/library VALUES (`findDef`, … — lowercase names
-                // `:vocab` already lists via the same signature scanner, but
-                // step 4 above is type-only and bails immediately on a
-                // lowercase name).
-                if let Some(info) = tidepool_runtime::session::introspect::stdlib_value_info(
-                    &self.cfg.base_include,
-                    name,
-                ) {
-                    return TurnOutcome::Meta(info);
-                }
-                // 5. Total miss.
-                TurnOutcome::Meta(serde_json::json!({
-                    "error": "not a bound value or known type",
-                    "name": name,
-                    "hint": "searched session bindings, effect types, session declarations, \
-                             and the stdlib/library sources; for an expression's type use \
-                             `:t <expr>`",
-                }))
-            }
+            MetaCommand::Info(name) => self.run_inspection(InspectionQuery::Info(name.clone())),
             MetaCommand::Stub(n, page) => {
                 TurnOutcome::Meta(crate::truncate::stub_fetch(&self.last_stubs, *n, *page))
             }
@@ -2452,6 +2318,28 @@ impl Session {
             MetaCommand::Browse(only) => {
                 TurnOutcome::Meta(browse_effects(self.cfg.roster.decls(), only.as_deref()))
             }
+        }
+    }
+
+    fn run_inspection(&self, query: InspectionQuery) -> TurnOutcome {
+        let query_source = match &query {
+            InspectionQuery::TypeOf(expression) => expression.as_str(),
+            InspectionQuery::Info(name) => name.as_str(),
+        };
+        let preamble = self.patched_preamble();
+        let imports = self.turn_imports(query_source);
+        let inject_modules = self.live_val_modules();
+        let include = self.turn_include();
+        match tidepool_runtime::session::run_inspection(InspectionRequest {
+            preamble: &preamble,
+            imports: &imports,
+            include: &include,
+            session_root: self.session_root(),
+            inject_modules: &inject_modules,
+            query,
+        }) {
+            Ok(result) => TurnOutcome::Inspection(result.render()),
+            Err(error) => TurnOutcome::Error(classify_compile(&error).message),
         }
     }
 
@@ -3107,20 +2995,6 @@ fn wrap_bare_it_pure(
 /// instead of `type: null`. Unused at runtime and harmless (session compiles
 /// are not `-Werror`).
 ///
-/// Insert `NoMonomorphismRestriction` into a preamble's `LANGUAGE` pragma so a
-/// probe compile generalizes a constrained pure bind instead of failing to
-/// monomorphize it. Idempotent — a no-op if NMR is already present.
-fn to_nmr_pragmas(preamble: &str) -> String {
-    if preamble.contains("NoMonomorphismRestriction") {
-        return preamble.to_string();
-    }
-    preamble.replacen(
-        "NoImplicitPrelude,",
-        "NoImplicitPrelude, NoMonomorphismRestriction,",
-        1,
-    )
-}
-
 fn wrap_pure_ref_source(
     preamble: &str,
     imports: &str,
@@ -3240,6 +3114,7 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
             serde_json::Value::Object(obj)
         }
         TurnOutcome::Meta(v) => v.clone(),
+        TurnOutcome::Inspection(output) => serde_json::json!({ "output": output }),
         TurnOutcome::Error(e) => serde_json::json!({ "error": e }),
         TurnOutcome::Block { .. } => serde_json::json!({ "error": "nested block" }),
     }
@@ -3248,6 +3123,7 @@ fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
 /// Extract the declared head name from a Haskell type declaration string.
 /// Returns `Some(name)` when the string starts with `data`/`newtype`/`type`
 /// and the next token is the type name; `None` for functions, instances, etc.
+#[cfg(test)]
 fn type_def_head(src: &str) -> Option<&str> {
     let s = src.trim();
     let rest = s

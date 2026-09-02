@@ -24,6 +24,7 @@ library tidepool-extract-internal
     Tidepool.FatIface
     Tidepool.GhcPipeline
     Tidepool.Identity
+    Tidepool.Introspection
     Tidepool.IR
     Tidepool.Metadata
     Tidepool.PrimOps

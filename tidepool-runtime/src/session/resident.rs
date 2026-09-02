@@ -1349,17 +1349,6 @@ where
             .collect()
     }
 
-    /// Source for the current declaration that introduced `name`, if it was
-    /// authored in this resident session. Types and values share GHC's
-    /// declaration plane, so discovery frontends should query both through
-    /// this one view.
-    pub fn declaration_source(&self, name: &str) -> Option<&str> {
-        self.core
-            .lib()
-            .decl_type_source(name)
-            .or_else(|| self.core.lib().decl_value_source(name))
-    }
-
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
     /// scope — inherited names are not counted, only locally-bound ones).
     /// Returns to 0 when the scope retires.

@@ -237,9 +237,8 @@ async fn bindings_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// Case 6 — `:t` / `:i` are IMPLEMENTED: `:t` reports an expression's inferred
-// type (via the throwaway-bind → type_display path); `:i` reports a bound
-// name's type/tier.
+// Case 6 — `:t` / `:i` are IMPLEMENTED through the exact GHC environment used
+// by the next ordinary turn. Inspection neither evaluates nor mutates state.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn type_and_info_are_implemented() {

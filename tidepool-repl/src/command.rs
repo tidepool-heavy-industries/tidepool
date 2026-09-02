@@ -310,6 +310,8 @@ pub enum TurnOutcome {
     },
     /// A meta-command item produced this structured result.
     Meta(Json),
+    /// GHC-backed `:type` or `:info` produced familiar textual output.
+    Inspection(String),
     /// `session_run` block result: per-item outcomes + the last expression value.
     Block {
         items: Vec<BlockItemResult>,
@@ -377,11 +379,17 @@ impl TurnOutcome {
             TurnOutcome::Meta(v) => {
                 serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
             }
+            TurnOutcome::Inspection(output) => output.clone(),
             TurnOutcome::Block {
                 items,
                 value,
                 shape,
             } => {
+                if value.is_none() && items.len() == 1 {
+                    if let Some(output) = items[0].result.get("output").and_then(Json::as_str) {
+                        return output.to_string();
+                    }
+                }
                 if let ResponseShape::Verbose {
                     generation,
                     val_gen,

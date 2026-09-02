@@ -1,6 +1,6 @@
 //! REPL type-query and effectful-value persistence regressions. Wide GHC type
-//! renderings exercise bound-binder JSON escaping; the later cases exercise
-//! stable effect rows and values across turn-module boundaries.
+//! renderings exercise the inspection receipt; the later cases exercise stable
+//! effect rows and values across turn-module boundaries.
 
 mod common;
 use common::*;
@@ -31,8 +31,8 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
     let t = repl.cmd(":t steerRepro").await;
     let out = t.expect_ok(":t steerRepro (must not crash on a wide wrapped type)");
     assert!(
-        !out.contains("invalid bound-binder JSON") && !out.contains("control character"),
-        ":t must not surface a JSON-parse error from an unescaped newline: {}",
+        !out.contains("inspection receipt") && !out.contains("control character"),
+        ":t must decode a multiline GHC rendering without a wire error: {}",
         t.text
     );
     assert!(
@@ -40,6 +40,22 @@ async fn t_on_wide_multiline_signature_does_not_crash() {
         ":t steerRepro should report a function type: {}",
         t.text
     );
+}
+
+/// Inspection asks GHC in a generalizing context. Merely mentioning an
+/// imported polymorphic function must not specialize it to a defaulted type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t_on_imported_polymorphic_value_stays_polymorphic() {
+    require_extract();
+    let repl = Repl::new();
+
+    let t = repl.cmd(":t fmap").await;
+    let out = t.expect_ok(":t fmap");
+    assert!(
+        out.contains("Functor"),
+        "fmap retains its constraint: {out}"
+    );
+    assert!(out.contains("->"), "fmap retains its function type: {out}");
 }
 
 /// `:t` on an M-returning expression must report the authored spelling and

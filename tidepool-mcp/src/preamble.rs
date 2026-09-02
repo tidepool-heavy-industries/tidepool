@@ -851,14 +851,83 @@ pub(crate) fn build_eval_tool_description(effects: &[EffectDecl]) -> String {
     desc
 }
 
-/// Extract top-level type signatures (joining indented continuation
-/// lines) plus `data`/`type` heads from Haskell source.
-///
-/// `pub` (not `pub(crate)`): reused cross-crate by `tidepool-repl`'s `:i`
-/// value-signature lane (`introspect::stdlib_value_info`), which needs the
-/// same lowercase-signature scan `:vocab` already relies on here.
-pub fn extract_sigs(src: &str) -> Vec<String> {
-    tidepool_runtime::session::introspect::extract_signatures(src)
+/// Extract the narrow source vocabulary shown by MCP help. This is indexing
+/// metadata, not semantic Haskell introspection; `:type` and `:info` are GHC
+/// operations owned by `tidepool-runtime`.
+pub(crate) fn extract_sigs(src: &str) -> Vec<String> {
+    fn valid_head(head: &str) -> bool {
+        (head.starts_with(|character: char| character.is_ascii_lowercase() || character == '_')
+            && head.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '_' || character == '\''
+            }))
+            || (head.starts_with('(') && head.ends_with(')'))
+    }
+    fn inline_head(line: &str) -> Option<&str> {
+        if line.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let (head, _) = line.split_once("::")?;
+        let head = head.trim_end();
+        (!head.is_empty() && !head.contains(' ') && valid_head(head)).then_some(head)
+    }
+
+    let mut signatures = Vec::new();
+    let mut current: Option<String> = None;
+    let mut pending_head: Option<String> = None;
+    for line in src.lines() {
+        if inline_head(line).is_some() {
+            if let Some(signature) = current.take() {
+                signatures.push(signature);
+            }
+            pending_head = None;
+            current = Some(line.to_string());
+        } else if let Some(head) = pending_head.take() {
+            let trimmed = line.trim();
+            if line.starts_with(char::is_whitespace) && trimmed.starts_with("::") {
+                current = Some(format!("{head} {trimmed}"));
+            } else {
+                if (line.starts_with("data ") || line.starts_with("type "))
+                    && !line.contains("where")
+                {
+                    signatures.push(line.to_string());
+                }
+                let candidate = line.trim();
+                if !line.starts_with(char::is_whitespace)
+                    && !candidate.contains(char::is_whitespace)
+                    && valid_head(candidate)
+                {
+                    pending_head = Some(candidate.to_string());
+                }
+            }
+        } else if let Some(signature) = current.as_mut() {
+            let trimmed = line.trim();
+            if line.starts_with(char::is_whitespace)
+                && !trimmed.is_empty()
+                && !trimmed.starts_with("--")
+            {
+                signature.push(' ');
+                signature.push_str(trimmed);
+            } else if let Some(signature) = current.take() {
+                signatures.push(signature);
+            }
+        } else if (line.starts_with("data ") || line.starts_with("type "))
+            && !line.contains("where")
+        {
+            signatures.push(line.to_string());
+        } else {
+            let candidate = line.trim();
+            if !line.starts_with(char::is_whitespace)
+                && !candidate.contains(char::is_whitespace)
+                && valid_head(candidate)
+            {
+                pending_head = Some(candidate.to_string());
+            }
+        }
+    }
+    if let Some(signature) = current {
+        signatures.push(signature);
+    }
+    signatures
 }
 
 /// Parse the `module Library ( module A, module B, … ) where` re-export list

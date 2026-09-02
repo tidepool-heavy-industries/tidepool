@@ -50,8 +50,11 @@ layer have been deleted.
   custody. The returned value is rooted before the producing completion scope
   closes; the next activation can force it safely.
 - The actor workbench and ordinary REPL share one parser for `:type`, `:info`,
-  and `:bindings`. GHC-derived binder metadata also supports ordinary pattern
-  bindings, including bindings whose right-hand side suspends and resumes.
+  and `:bindings`. `:type` and `:info` resolve through one GHC-backed runtime
+  inspection path against the exact next-turn compile view; source scanners
+  are not semantic authority. GHC-derived binder metadata also supports
+  ordinary pattern bindings, including bindings whose right-hand side
+  suspends and resumes.
 
 ### Haskell actor surface
 

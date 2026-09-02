@@ -48,7 +48,8 @@ import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Types.Unique.Set (UniqSet, emptyUniqSet, addOneToUniqSet, elementOfUniqSet)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC.Types.TypeEnv (typeEnvIds)
-import GHC.Tc.Types (TcGblEnv, tcg_type_env)
+import GHC.Tc.Types (TcGblEnv, tcg_rdr_env, tcg_type_env)
+import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
 import GHC.Types.Var (setVarName)
@@ -96,6 +97,9 @@ data PipelineResult = PipelineResult
   -- @Expr.hs:<line>:<col>@ location exactly like a compile error does. Empty
   -- on a clean compile.
   , prWarnings :: [String]
+  -- | GHC's resolved reader environment for the target module. Inspection
+  -- uses this exact scope rather than reconstructing visibility from source.
+  , prTargetRdrEnv :: GlobalRdrEnv
   }
 
 -- | The normal one-shot extraction. This is exactly
@@ -623,6 +627,13 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     -- the dependencies-then-target order it used to build by hand.
     let allBinds  = concatMap mg_binds depGuts ++ mg_binds targetGuts
         allTyCons = concatMap (mg_tcs . mfDesugared) fronts
+    targetRdrEnv <- case [ tcg_rdr_env (mfTcGblEnv front)
+                         | front <- fronts
+                         , ms_mod_name (mfSummary front) == targetModName' ] of
+      env : _ -> pure env
+      [] -> liftIO $ ioError $ userError $
+        pvLabel variant ++ ": target module '" ++ targetModName
+        ++ "' was typechecked without a retained reader environment"
     hscFinal <- getSession
     warnings <- liftIO (nub . reverse <$> readIORef warnRef)
     return PipelineResult
@@ -632,6 +643,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
       , prCapturedType = capturedTy
       , prResultType   = resultTy
       , prWarnings     = warnings
+      , prTargetRdrEnv = targetRdrEnv
       }
 
 

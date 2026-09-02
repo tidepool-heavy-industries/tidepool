@@ -508,6 +508,24 @@ impl ExtractCmd {
         self
     }
 
+    /// Ask the compiler worker for GHC's type of an expression.
+    pub fn inspect_type(&mut self, expression: &str) -> &mut Self {
+        self.request.inspect_type(expression);
+        self
+    }
+
+    /// Ask the compiler worker for GHC's information about an in-scope name.
+    pub fn inspect_info(&mut self, name: &str) -> &mut Self {
+        self.request.inspect_info(name);
+        self
+    }
+
+    /// Inspection-result CBOR sidecar.
+    pub fn inspect_out(&mut self, path: impl AsRef<OsStr>) -> &mut Self {
+        self.request.inspect_out(path);
+        self
+    }
+
     /// The full argv (positional inputs first, then flags in the order they
     /// were set), without the program. Exposed for tests and diagnostics.
     pub fn argv(&self) -> Vec<OsString> {
@@ -639,6 +657,26 @@ mod tests {
                 "a",
             ]
         );
+    }
+
+    #[test]
+    fn inspection_request_keeps_query_and_output_typed() {
+        let mut cmd = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved("x"));
+        cmd.input("Expr.hs")
+            .inspect_type("fmap")
+            .inspect_out("inspection.cbor");
+        assert_eq!(
+            strs(&cmd.argv()),
+            vec![
+                "Expr.hs",
+                "--inspect-type",
+                "fmap",
+                "--inspect-out",
+                "inspection.cbor",
+            ]
+        );
+        let decoded = ExtractRequest::decode(&cmd.request_bytes()).unwrap();
+        assert_eq!(decoded.cli_argv(), cmd.argv());
     }
 
     /// One test owns `$TIDEPOOL_EXTRACT` for this binary (all cases in

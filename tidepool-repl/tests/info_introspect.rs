@@ -1,54 +1,21 @@
-//! `:i <Name>` stdlib/preamble resolution — DIMENSION: the source-scan lane.
-//!
-//! THE CONTRACT under test: `:i` on a name that is neither a session binding
-//! nor an effect type resolves against the stdlib/library SOURCES the session
-//! compiles against (`introspect::stdlib_info` over the base include dirs):
-//!   - `:i Proc` / `:i Hit` return the real `Tidepool.Records` declaration
-//!     with fields AND types verbatim (`exitCode :: Int`, …), `source: "stdlib"`,
-//!   - a constructor-only name (`UpdateNoChange`) returns its ENCLOSING data
-//!     declaration plus a `constructor` key,
-//!   - a session-declared type (`data Hit = Hit Int`) still SHADOWS the
-//!     stdlib `Hit` (`source: "session"`),
-//!   - a total miss carries the self-explaining `hint` alongside the error.
-//!
-//! Each test drives the REAL `tidepool-repl` MCP entry point (`dispatch_tool`)
-//! through the shared harness (`common::*`), whose `base_include` points at the
-//! in-repo `haskell/lib` — so these hits come from the actual `Records.hs`.
+//! GHC-authoritative `:info` over the exact environment used by a REPL turn.
 
 mod common;
 use common::*;
 
-/// Parse a meta turn's text body as JSON (meta commands emit pure JSON).
-fn parse_meta(text: &str) -> serde_json::Value {
-    serde_json::from_str(text)
-        .unwrap_or_else(|e| panic!("expected JSON meta body, got:\n{text}\nparse err: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Case 1 — `:i Proc` resolves the stdlib record with fields + types verbatim.
-// ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn info_resolves_stdlib_proc() {
     require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":i Proc").await;
-    let v = parse_meta(t.expect_ok(":i Proc"));
-    assert_eq!(v["name"], "Proc", "name echoed: {v}");
-    assert_eq!(v["source"], "stdlib", "resolved via the source scan: {v}");
-    // Proc is a bridged record (GENERATED from the Rust wire-struct), so its
-    // `data` decl lives in Tidepool.Records.Bridged, not Tidepool.Records.
-    assert_eq!(
-        v["module"], "Tidepool.Records.Bridged",
-        "module from header: {v}"
-    );
-    let shape = v["shape"].as_str().expect("shape is a string");
+    let shape = t.expect_ok(":i Proc");
     for field in ["exitCode :: Int", "stdout :: Text", "stderr :: Text"] {
         assert!(shape.contains(field), "shape must carry `{field}`: {shape}");
     }
     assert!(
-        v["file"].as_str().unwrap().ends_with("Records/Bridged.hs"),
-        "file points at the defining source: {v}"
+        shape.contains("data Proc"),
+        "GHC rendered the declaration: {shape}"
     );
 }
 
@@ -61,9 +28,7 @@ async fn info_resolves_stdlib_hit() {
     let repl = Repl::new();
 
     let t = repl.cmd(":i Hit").await;
-    let v = parse_meta(t.expect_ok(":i Hit"));
-    assert_eq!(v["source"], "stdlib", "{v}");
-    let shape = v["shape"].as_str().expect("shape is a string");
+    let shape = t.expect_ok(":i Hit");
     for field in ["path :: Text", "line :: Int", "text :: Text"] {
         assert!(shape.contains(field), "shape must carry `{field}`: {shape}");
     }
@@ -79,13 +44,10 @@ async fn info_constructor_only_hit() {
     let repl = Repl::new();
 
     let t = repl.cmd(":i UpdateNoChange").await;
-    let v = parse_meta(t.expect_ok(":i UpdateNoChange"));
-    assert_eq!(v["constructor"], "UpdateNoChange", "{v}");
-    assert_eq!(v["source"], "stdlib", "{v}");
-    let shape = v["shape"].as_str().expect("shape is a string");
+    let shape = t.expect_ok(":i UpdateNoChange");
     assert!(
-        shape.starts_with("data UpdateOutcome"),
-        "shape is the enclosing decl: {shape}"
+        shape.contains("data UpdateOutcome") && shape.contains("UpdateNoChange"),
+        "GHC identifies the constructor in its enclosing declaration: {shape}"
     );
 }
 
@@ -101,16 +63,18 @@ async fn session_decl_shadows_stdlib() {
 
     // Before the session decl, Hit resolves from the stdlib.
     let t = repl.cmd(":i Hit").await;
-    let v = parse_meta(t.expect_ok(":i Hit (pre-decl)"));
-    assert_eq!(v["source"], "stdlib", "pre-decl Hit is the stdlib one: {v}");
+    let before = t.expect_ok(":i Hit (pre-decl)");
+    assert!(
+        before.contains("path :: Text"),
+        "pre-decl Hit is the stdlib one: {before}"
+    );
 
     repl.def("data Hit = Hit Int").await.expect_ok("decl Hit");
     let t = repl.cmd(":i Hit").await;
-    let v = parse_meta(t.expect_ok(":i Hit (post-decl)"));
-    assert_eq!(v["source"], "session", "session decl wins: {v}");
+    let shape = t.expect_ok(":i Hit (post-decl)");
     assert!(
-        v["shape"].as_str().unwrap().contains("Hit Int"),
-        "shape is the session declaration: {v}"
+        shape.contains("Hit Int") && !shape.contains("path :: Text"),
+        "shape is the session declaration: {shape}"
     );
 }
 
@@ -119,17 +83,10 @@ async fn session_decl_shadows_stdlib() {
 // every lane that was searched.
 // ---------------------------------------------------------------------------
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn info_miss_carries_hint() {
+async fn info_miss_is_concise() {
     require_extract();
     let repl = Repl::new();
 
     let t = repl.cmd(":i Nonexistent").await;
-    let v = parse_meta(&t.text);
-    assert_eq!(v["error"], "not a bound value or known type", "{v}");
-    assert_eq!(v["name"], "Nonexistent", "{v}");
-    let hint = v["hint"].as_str().expect("miss carries a hint");
-    assert!(
-        hint.contains("stdlib") && hint.contains(":t"),
-        "hint names the searched lanes and the :t affordance: {hint}"
-    );
+    assert_eq!(t.expect_ok(":i Nonexistent"), "unknown name `Nonexistent`");
 }

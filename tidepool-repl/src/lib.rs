@@ -28,8 +28,10 @@
 //! - [`manager`] — the single-session ownership slot (`Idle | Running |
 //!   Suspended`) with atomic checkout/restore.
 //! - [`server`] — the MCP `ServerHandler`, the three session tools, and the bindings resource.
-//! - [`introspect`] — `:i` source-scan resolution for stdlib/preamble types.
 //! - [`truncate`] — Rust-side result truncation + the `:stub <n>` fetch lane.
+//!
+//! GHC-backed `:type`/`:info` inspection is shared with actor workbenches by
+//! `tidepool-runtime`; this frontend owns only its presentation.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 pub mod command;

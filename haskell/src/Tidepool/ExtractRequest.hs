@@ -3,6 +3,7 @@
 -- options; CLI compatibility is owned by the launcher layer.
 module Tidepool.ExtractRequest
   ( RequestField(..)
+  , InspectionRequest(..)
   , WorkerRequest(..)
   , workerRequestFromArgv
   , workerArgv
@@ -35,6 +36,9 @@ data RequestField
   | ClassifyOut FilePath
   | HarnessProfile
   | BuildProductsDir FilePath
+  | InspectType String
+  | InspectInfo String
+  | InspectOut FilePath
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -59,6 +63,8 @@ data WorkerRequest = WorkerRequest
   , requestClassifyOut :: Maybe FilePath
   , requestHarnessProfile :: Bool
   , requestBuildProductsDir :: Maybe FilePath
+  , requestInspection :: Maybe InspectionRequest
+  , requestInspectOut :: Maybe FilePath
   }
   deriving (Eq, Show)
 
@@ -83,7 +89,12 @@ emptyWorkerRequest = WorkerRequest
   , requestClassifyOut = Nothing
   , requestHarnessProfile = False
   , requestBuildProductsDir = Nothing
+  , requestInspection = Nothing
+  , requestInspectOut = Nothing
   }
+
+data InspectionRequest = InspectTypeOf String | InspectNameInfo String
+  deriving (Eq, Show)
 
 requestFromFields :: [RequestField] -> WorkerRequest
 requestFromFields = foldl apply emptyWorkerRequest
@@ -109,9 +120,12 @@ requestFromFields = foldl apply emptyWorkerRequest
       ClassifyOut path -> request { requestClassifyOut = Just path }
       HarnessProfile -> request { requestHarnessProfile = True }
       BuildProductsDir path -> request { requestBuildProductsDir = Just path }
+      InspectType expression -> request { requestInspection = Just (InspectTypeOf expression) }
+      InspectInfo name -> request { requestInspection = Just (InspectNameInfo name) }
+      InspectOut path -> request { requestInspectOut = Just path }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v3"
+workerRequestFlag = "--worker-request-v4"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -130,7 +144,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String [RequestField]
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ003"
+  if magic /= "TPREQ004"
     then Left "worker request: unsupported magic or version"
     else do
       (count, rest) <- pWord32 body
@@ -140,7 +154,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ003" <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ004" <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -163,6 +177,9 @@ encodeField field = case field of
   ClassifyOut value -> taggedText 21 value
   HarnessProfile -> BS.singleton 24
   BuildProductsDir value -> taggedText 25 value
+  InspectType value -> taggedText 26 value
+  InspectInfo value -> taggedText 27 value
+  InspectOut value -> taggedText 28 value
 
 taggedText :: Word8 -> String -> BS.ByteString
 taggedText tag value = BS.singleton tag <> textFrame value
@@ -218,6 +235,9 @@ pField bytes = do
     21 -> mapParser ClassifyOut pText rest
     24 -> Right (HarnessProfile, rest)
     25 -> mapParser BuildProductsDir pText rest
+    26 -> mapParser InspectType pText rest
+    27 -> mapParser InspectInfo pText rest
+    28 -> mapParser InspectOut pText rest
     _  -> Left ("worker request: unknown field tag " ++ show tag)
   where
     retired tag = Left ("worker request: retired field tag " ++ show tag)

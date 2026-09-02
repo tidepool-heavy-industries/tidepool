@@ -354,6 +354,48 @@ pub fn insert_preamble_imports(preamble: &str, imports: &str) -> String {
     out
 }
 
+/// Enable generalization for compiler-only probes. Session declaration
+/// modules already use this rule; inspection and pure-reference probes must
+/// do the same or an imported polymorphic value can acquire a misleading
+/// monomorphic type merely because it was mentioned by the probe.
+#[must_use]
+pub fn enable_no_monomorphism_restriction(preamble: &str) -> String {
+    if preamble.contains("NoMonomorphismRestriction") {
+        return preamble.to_string();
+    }
+    preamble.replacen(
+        "NoImplicitPrelude,",
+        "NoImplicitPrelude, NoMonomorphismRestriction,",
+        1,
+    )
+}
+
+/// Assemble the compiler-only module used by `:type` and `:info`. A type
+/// query binds the expression through an explicit-brace `let`, preserving
+/// arbitrary user layout and quasiquote bytes; an info query needs only a
+/// target-module anchor so GHC produces its resolved reader environment.
+pub fn assemble_inspection_module(
+    preamble: &str,
+    imports: &str,
+    expression: Option<&str>,
+) -> String {
+    let preamble = enable_no_monomorphism_restriction(preamble);
+    let mut source = insert_preamble_imports(&preamble, imports);
+    match expression {
+        Some(expression) => {
+            source.push_str("\n__user = let {\n __b =\n");
+            source.push_str(expression);
+            if !expression.ends_with('\n') {
+                source.push('\n');
+            }
+            source.push_str(" } in __b\n");
+        }
+        None => source
+            .push_str("\n__tidepool_inspection_anchor :: ()\n__tidepool_inspection_anchor = ()\n"),
+    }
+    source
+}
+
 /// Assemble a "bind-shaped" session-turn module by concatenating, in order:
 /// `preamble_with_imports` (imports already inserted — see
 /// [`insert_preamble_imports`]), the `-- [user]\n` marker, caller-supplied
@@ -1260,6 +1302,26 @@ mod tests {
     #[test]
     fn preamble_default_marker_matches_mcp_constant() {
         assert_eq!(PREAMBLE_DEFAULT_MARKER, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
+    }
+
+    #[test]
+    fn inspection_module_preserves_expression_and_generalizes_probe() {
+        let preamble = concat!(
+            "{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}\n",
+            "module Expr where\n",
+            "default (Int)\n",
+        );
+        let expression = "do\n  x <- pure 1\n  pure x\n";
+        let source = assemble_inspection_module(
+            preamble,
+            "Tidepool.Prelude\nTidepool.Session.Lib.G7",
+            Some(expression),
+        );
+
+        assert!(source.contains("NoImplicitPrelude, NoMonomorphismRestriction,"));
+        assert!(source.contains("import Tidepool.Prelude\nimport Tidepool.Session.Lib.G7\n"));
+        assert!(source.contains(&format!(" __b =\n{expression} }} in __b\n")));
+        assert_eq!(source.matches("NoMonomorphismRestriction").count(), 1);
     }
 
     /// An empty item list must short-circuit before extractor resolution.

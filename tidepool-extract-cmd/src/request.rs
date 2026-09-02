@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v3";
-const MAGIC: &[u8; 8] = b"TPREQ003";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v4";
+const MAGIC: &[u8; 8] = b"TPREQ004";
 
 #[derive(Clone, Debug)]
 enum Field {
@@ -25,6 +25,9 @@ enum Field {
     InjectVal(OsString),
     BindGen(u64),
     HarnessProfile,
+    InspectType(String),
+    InspectInfo(String),
+    InspectOut(OsString),
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -83,6 +86,13 @@ impl ExtractRequest {
                     request.bind_gen(generation);
                 }
                 Some("--harness-profile") => request.fields.push(Field::HarnessProfile),
+                Some("--inspect-type") => request.fields.push(Field::InspectType(
+                    text_value(&mut args, "--inspect-type")?.into(),
+                )),
+                Some("--inspect-info") => request.fields.push(Field::InspectInfo(
+                    text_value(&mut args, "--inspect-info")?.into(),
+                )),
+                Some("--inspect-out") => request.inspect_out(value(&mut args, "--inspect-out")?),
                 Some(option) if option.starts_with('-') => {
                     return Err(CliError::new(format!("unknown option: {option}")));
                 }
@@ -141,6 +151,9 @@ impl ExtractRequest {
                 21 => Field::ClassifyOut(decoder.os_string()?),
                 24 => Field::HarnessProfile,
                 25 => Field::BuildProductsDir(decoder.os_string()?),
+                26 => Field::InspectType(decoder.string()?),
+                27 => Field::InspectInfo(decoder.string()?),
+                28 => Field::InspectOut(decoder.os_string()?),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -260,6 +273,19 @@ impl ExtractRequest {
         self.fields.push(Field::BindGen(value));
     }
 
+    pub(crate) fn inspect_type(&mut self, expression: &str) {
+        self.fields.push(Field::InspectType(expression.to_owned()));
+    }
+
+    pub(crate) fn inspect_info(&mut self, name: &str) {
+        self.fields.push(Field::InspectInfo(name.to_owned()));
+    }
+
+    pub(crate) fn inspect_out(&mut self, value: impl AsRef<OsStr>) {
+        self.fields
+            .push(Field::InspectOut(value.as_ref().to_owned()));
+    }
+
     pub(crate) fn cli_argv(&self) -> Vec<OsString> {
         let mut inputs = Vec::new();
         let mut flags = Vec::new();
@@ -292,6 +318,9 @@ impl ExtractRequest {
                     flag(&mut flags, "--bind-gen", OsStr::new(&value.to_string()))
                 }
                 Field::HarnessProfile => flags.push("--harness-profile".into()),
+                Field::InspectType(value) => flag(&mut flags, "--inspect-type", OsStr::new(value)),
+                Field::InspectInfo(value) => flag(&mut flags, "--inspect-info", OsStr::new(value)),
+                Field::InspectOut(value) => flag(&mut flags, "--inspect-out", value),
             }
         }
         inputs.extend(flags);
@@ -398,7 +427,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v3 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v4 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -469,6 +498,9 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
             out.extend_from_slice(&value.to_le_bytes());
         }
         Field::HarnessProfile => out.push(24),
+        Field::InspectType(value) => tagged_frame(out, 26, OsStr::new(value)),
+        Field::InspectInfo(value) => tagged_frame(out, 27, OsStr::new(value)),
+        Field::InspectOut(value) => tagged_frame(out, 28, value),
     }
 }
 

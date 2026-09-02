@@ -555,8 +555,9 @@ Required behavior:
 - model compaction preserves a concise inventory of important bindings and
   installed behavior.
 
-Useful introspection should include familiar `:type` and `:info` plus a small
-Tidepool surface such as:
+Familiar `:type` and `:info` are GHC-backed views over the actor's exact live
+compile scope; `:bindings` uses already-captured GHC binder metadata. Further
+useful Tidepool introspection may include:
 
 - `:goal` — current required result type and mounted inputs;
 - `:bindings` — live names, types, ownership, and abbreviated values;

@@ -16,10 +16,10 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_turn, BlockExecution,
-    MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, RootedValueRef, SessionRunContext, TurnRequest, TurnResult,
-    ValueTier, WorkbenchDiscovery,
+    insert_preamble_imports, resident_workbench_templates, run_inspection, run_turn,
+    BlockExecution, InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock,
+    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, RootedValueRef,
+    SessionRunContext, TurnRequest, TurnResult, ValueTier, WorkbenchDiscovery,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -645,14 +645,7 @@ where
     O: OutputSink + Sync,
 {
     if block.source.trim_start().starts_with(':') {
-        return match run_discovery(
-            session,
-            context,
-            source,
-            expected_type,
-            type_modules,
-            &block,
-        )? {
+        return match run_discovery(session, context, source, type_modules, &block)? {
             Ok(output) => Ok(ResidentWorkbenchStep::Committed(output)),
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
         };
@@ -1717,7 +1710,6 @@ fn run_discovery<H, O>(
     session: &ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    expected_type: &str,
     type_modules: &[String],
     block: &ParsedBlock,
 ) -> Result<Result<String, String>, ResidentActorWorkbenchError>
@@ -1739,14 +1731,6 @@ where
         }
         Err(diagnostic) => return Ok(Err(diagnostic)),
     };
-    let include_paths = session
-        .compile_view_in(context.placement.lexical_scope)
-        .and_then(|view| context.compile_view(view).ok())
-        .map(|view| {
-            view.with_type_modules(type_modules)
-                .include_paths(&source.base_include)
-        })
-        .unwrap_or_else(|| source.base_include.to_vec());
     match command {
         WorkbenchDiscovery::Bindings => {
             let mut bindings = session.binding_names_in(context.placement.lexical_scope);
@@ -1772,82 +1756,61 @@ where
                 lines.join("\n")
             }))
         }
-        WorkbenchDiscovery::Info(name) => {
-            if let Some((_, _, tier, type_display)) =
-                session.current_binding_in(context.placement.lexical_scope, &name)
-            {
-                let tier = match tier {
-                    ValueTier::Tier0Data => "data",
-                    ValueTier::Tier1Closure => "closure",
-                };
-                return Ok(Ok(format!(
-                    "{name} :: {} [{tier}]",
-                    type_display.unwrap_or_else(|| "<type unavailable>".into())
-                )));
-            }
-            if let Some(declaration) = session.declaration_source(&name) {
-                return Ok(Ok(declaration.to_string()));
-            }
-            if let Some(info) = tidepool_runtime::session::introspect::stdlib_info(
-                &include_paths,
-                &name,
-            )
-            .or_else(|| {
-                tidepool_runtime::session::introspect::stdlib_value_info(&include_paths, &name)
-            }) {
-                return Ok(Ok(
-                    serde_json::to_string_pretty(&info).unwrap_or_else(|_| info.to_string())
-                ));
-            }
-            Ok(Err(format!(
-                "`:info {name}` found no visible binding or declaration; use `:type {name}` for an expression"
-            )))
+        WorkbenchDiscovery::Info(name) => inspect_actor(
+            session,
+            context,
+            source,
+            type_modules,
+            InspectionQuery::Info(name),
+        ),
+        WorkbenchDiscovery::Type(expression) => inspect_actor(
+            session,
+            context,
+            source,
+            type_modules,
+            InspectionQuery::TypeOf(expression),
+        ),
+    }
+}
+
+fn inspect_actor<H, O>(
+    session: &ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    query: InspectionQuery,
+) -> Result<Result<String, String>, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let session_view = session
+        .compile_view_in(context.placement.lexical_scope)
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
+            ))
+        })?;
+    let compile_view = context
+        .compile_view(session_view)?
+        .with_type_modules(type_modules);
+    let includes = compile_view.include_paths(&source.base_include);
+    let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let injected = compile_view.injected_module_names();
+    let imports = compile_view.turn_imports();
+    match run_inspection(InspectionRequest {
+        preamble: &source.preamble,
+        imports: &imports,
+        include: &include_refs,
+        session_root: compile_view.session_root(),
+        inject_modules: &injected,
+        query,
+    }) {
+        Ok(result) => Ok(Ok(result.render())),
+        Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
+            Ok(Err(classify_compile(&error).message))
         }
-        WorkbenchDiscovery::Type(expression) => {
-            // An exported polymorphic effect verb cannot be generalized from
-            // the local probe binding used by the turn compiler. Its authored
-            // signature is both more useful and more exact than forcing a
-            // concrete actor row merely to satisfy the probe.
-            if expression.chars().all(|character| {
-                character.is_alphanumeric() || character == '_' || character == '\''
-            }) {
-                if let Some(info) = tidepool_runtime::session::introspect::stdlib_value_info(
-                    &include_paths,
-                    &expression,
-                ) {
-                    if let Some(signature) = info.get("shape").and_then(serde_json::Value::as_str) {
-                        return Ok(Ok(signature.to_string()));
-                    }
-                }
-            }
-            let probe = ParsedBlock {
-                ordinal: block.ordinal,
-                total: block.total,
-                source: format!("let __tidepool_type_probe = ({expression})"),
-            };
-            let effect_stack = actor_effect_stack(expected_type);
-            match compile_block(
-                session,
-                context,
-                source,
-                &effect_stack,
-                type_modules,
-                &probe,
-            )? {
-                CompiledBlock::Rejected(diagnostic) => Ok(Err(diagnostic)),
-                CompiledBlock::Ready(compiled) => match compiled.result {
-                    TurnResult::Bind { bound, .. } => match bound.into_iter().next() {
-                        Some(binding) => {
-                            Ok(Ok(format!("{expression} :: {}", binding.type_display)))
-                        }
-                        None => Ok(Err("GHC returned no type for the probe".into())),
-                    },
-                    _ => Ok(Err(
-                        "GHC did not classify the type probe as a binding".into()
-                    )),
-                },
-            }
-        }
+        Err(error) => Err(ResidentActorWorkbenchError::Compile(error)),
     }
 }
 

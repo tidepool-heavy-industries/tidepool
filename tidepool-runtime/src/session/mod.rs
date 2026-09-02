@@ -19,7 +19,7 @@
 mod dialect;
 pub mod engine;
 pub mod facade;
-pub mod introspect;
+pub mod inspection;
 pub mod kernel;
 pub mod persistent;
 pub mod registry;
@@ -32,6 +32,9 @@ pub mod workbench;
 
 pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
 
+pub use inspection::{
+    run_inspection, InfoEntry, InspectionQuery, InspectionRequest, InspectionResult,
+};
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
 pub use persistent::{
@@ -71,10 +74,11 @@ pub use workbench::{
 };
 
 pub use turn::{
-    assemble_bind_module, assemble_expression_module, classify_block, insert_preamble_imports,
-    place_turn_stmt, render_template, run_turn, BoundBinder, CompiledTurn, DeclarationReceipt,
-    ExpressionLift, TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest,
-    TurnResult, TurnTemplate, ValueTier, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, assemble_expression_module, assemble_inspection_module, classify_block,
+    enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt, render_template,
+    run_turn, BoundBinder, CompiledTurn, DeclarationReceipt, ExpressionLift, TemplateSelector,
+    TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
+    DECL_TEMPLATE_SOURCE,
 };
 
 use std::collections::HashMap;
@@ -292,47 +296,6 @@ impl SessionLib {
     pub fn import_line_in(&self, scope: ScopeId) -> Option<String> {
         self.current_module_in(scope)
             .map(|m| format!("import {}", m.module_name()))
-    }
-
-    /// Source text of the most recent declaration turn that introduces a type or
-    /// class named `name` (via `ExportItem::Type` or `ExportItem::Class`).
-    /// Returns `None` if no such declaration exists in the session. Used by
-    /// `:i <Type>` to surface session-defined type shapes.
-    #[must_use]
-    pub fn decl_type_source(&self, name: &str) -> Option<&str> {
-        self.log
-            .turns
-            .iter()
-            .rev()
-            .find(|t| {
-                t.items.iter().any(|item| match item {
-                    ExportItem::Type { name: n, .. } | ExportItem::Class { name: n, .. } => {
-                        n == name
-                    }
-                    ExportItem::Value { .. } => false,
-                })
-            })
-            .and_then(|t| t.sources.first())
-            .map(String::as_str)
-    }
-
-    /// Source text of the most recent declaration turn that introduces a
-    /// value/function named `name` (via `ExportItem::Value`). Returns `None` if
-    /// no such declaration exists. Used by `:i <name>` to surface
-    /// session-defined function/value definitions.
-    #[must_use]
-    pub fn decl_value_source(&self, name: &str) -> Option<&str> {
-        self.log
-            .turns
-            .iter()
-            .rev()
-            .find(|t| {
-                t.items
-                    .iter()
-                    .any(|item| matches!(item, ExportItem::Value { name: n } if n == name))
-            })
-            .and_then(|t| t.sources.first())
-            .map(String::as_str)
     }
 
     /// The replayable decl half of a `:program` notebook repaint: turn source

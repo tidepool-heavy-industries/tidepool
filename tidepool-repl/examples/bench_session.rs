@@ -178,6 +178,7 @@ fn outcome_label(step: &TurnStep) -> &'static str {
         TurnStep::Completed(TurnOutcome::MultiBound { .. }) => "MultiBound",
         TurnStep::Completed(TurnOutcome::Defined { .. }) => "Defined",
         TurnStep::Completed(TurnOutcome::Meta(_)) => "Meta",
+        TurnStep::Completed(TurnOutcome::Inspection(_)) => "Inspection",
         TurnStep::Completed(TurnOutcome::Block { .. }) => "Block",
         TurnStep::Completed(TurnOutcome::Error(_)) => "Error",
         TurnStep::Suspended(_) => "Suspended",
