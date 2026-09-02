@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model,
             effort,
         } => {
+            let _log_path = tidepool::shoal::init_host_tracing(&workspace, &run_id)?;
             tidepool::shoal::host(tidepool::shoal::HostOptions {
                 workspace,
                 session,

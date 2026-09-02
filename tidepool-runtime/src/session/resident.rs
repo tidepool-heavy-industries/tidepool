@@ -880,8 +880,16 @@ where
         let provenance = self.parked_provenance.get(&id).cloned().unwrap_or_default();
         let machine = self.core.machine_mut()?;
         let slot = machine.take_parked_live_payload_root(id)?;
+        let handle = machine.mint_handle_from_root(slot, realm);
+        tracing::debug!(
+            hole,
+            frame = ?id,
+            owner = ?realm,
+            ?handle,
+            "claimed parked live payload"
+        );
         Some(RootCustody::new(
-            machine.mint_handle_from_root(slot, realm),
+            handle,
             Arc::clone(&self.custody_cleanup),
             provenance,
         ))
@@ -960,6 +968,15 @@ where
             }
         };
         let transfer = custody.into_transfer();
+        tracing::debug!(
+            continuation = %cont_id,
+            handle = ?transfer.handle,
+            binding = bind.as_ref().map(|(binder, _)| binder.name.as_str()),
+            generation = bind.as_ref().map(|(_, generation)| generation.0),
+            actor_scope = ?self.run_context.lexical_scope,
+            actor_realm = ?self.run_context.resource_scope,
+            "resuming resident continuation with rooted value"
+        );
         let provenance = Arc::clone(&transfer.provenance);
         let result = self.reenter(
             &cont_id,
@@ -1483,6 +1500,11 @@ where
         gen: Generation,
         sites: &[YieldSite],
     ) -> Result<ResidentOutcome, ResidentError> {
+        // Claim the compiled value-module identity before this bind can park.
+        // Another actor may compile against the same resident session while
+        // this one awaits an effect; completion-time advancement would let it
+        // overwrite this bind's `Val.G<g>` interface.
+        self.core.set_val_gen(gen);
         let provenance = self.provenance_for(expr, sites)?;
         self.core
             .merge_table(table)
@@ -2117,6 +2139,14 @@ where
         bound: Option<ValueHandle>,
     ) -> Result<(), ResidentError> {
         let scope = self.run_context.lexical_scope;
+        tracing::debug!(
+            binder = %binder.name,
+            generation = gen.0,
+            ?scope,
+            ?bound,
+            tier = ?binder.tier,
+            "materializing completed resident binding"
+        );
         if !self.core.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope).into());
         }
@@ -2162,6 +2192,13 @@ where
             },
         )?;
         self.core.set_val_gen(gen);
+        tracing::debug!(
+            binder = %binder.name,
+            generation = gen.0,
+            ?scope,
+            visible = self.current_binding_in(scope, &binder.name).is_some(),
+            "materialized completed resident binding"
+        );
         Ok(())
     }
 

@@ -5,6 +5,7 @@
 //! the authenticated stdio MCP transport child that Codex requires.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -87,9 +88,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             "tmux session {session_name:?} already exists; attach with `tmux attach -t {session_name}` or replace it with `shoal init --recreate`"
         )));
     }
-    let session_root = workspace
-        .join(".tidepool")
-        .join("shoal")
+    let session_root = shoal_state_root(&workspace)
+        .join("sessions")
         .join(&session_name);
     std::fs::create_dir_all(&session_root)?;
     let root_binding_path = session_root.join("root-binding.json");
@@ -105,6 +105,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();
+    let log_path = shoal_log_path(&workspace, &run_id);
     let run_root = tidepool_runtime::paths::cache_dir()
         .join("shoal")
         .join("runs")
@@ -163,6 +164,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         write_status(&status_path, &failed)?;
         return Err(error.into());
     }
+    println!("log:    {}", log_path.display());
 
     let interactive = match wait_until_interactive(&tmux, &status_path, &run_id).await {
         Ok(interactive) => interactive,
@@ -189,7 +191,6 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     println!("status: {}", status_path.display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
-        println!("logs:   tmux capture-pane -p -S -200 -t {session_name}:Host");
         println!("stop:   tmux kill-session -t {session_name}");
         Ok(())
     } else {
@@ -200,10 +201,19 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
 }
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::info!(
+        run_id = %options.run_id,
+        session = %options.session,
+        workspace = %options.workspace.display(),
+        "starting Shoal actor host"
+    );
     let result = run_host(&options).await;
     let failed = result.is_err();
     let settled = settle_host_result(result, &options);
     if failed {
+        if let Err(error) = &settled {
+            tracing::error!(error = %error, "Shoal actor host failed");
+        }
         if let Ok(tmux) = TmuxSession::new(options.session.clone()) {
             let _ = tmux.kill().await;
         }
@@ -317,7 +327,7 @@ fn settle_host_result(
     };
     let status = RunStatus::new(&options.run_id, &options.workspace, &options.session, phase);
     if let Err(error) = write_status(&options.status_path, &status) {
-        eprintln!("shoal host: could not publish terminal status: {error}");
+        tracing::error!(error = %error, "could not publish terminal Shoal status");
     }
     result
 }
@@ -432,6 +442,39 @@ fn write_status(path: &Path, status: &RunStatus) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn shoal_state_root(workspace: &Path) -> PathBuf {
+    workspace.join(".shoal")
+}
+
+pub fn shoal_log_path(workspace: &Path, run_id: &str) -> PathBuf {
+    shoal_state_root(workspace)
+        .join("logs")
+        .join(format!("{run_id}.log"))
+}
+
+pub fn init_host_tracing(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = shoal_log_path(workspace, run_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| runtime_error("Shoal log path has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(tidepool_codegen::debug::tracing_env_filter("info"))
+        .with_writer(Mutex::new(file))
+        .try_init()
+        .map_err(|error| runtime_error(format!("could not initialize Shoal tracing: {error}")))?;
+    tidepool_codegen::debug::init_logging();
+    Ok(path)
+}
+
 fn default_session_name(workspace: &Path) -> String {
     let source = workspace
         .file_name()
@@ -533,6 +576,14 @@ mod tests {
         assert_eq!(
             default_session_name(Path::new("/tmp/🐟")),
             "shoal-workspace"
+        );
+    }
+
+    #[test]
+    fn shoal_logs_live_under_the_repository_local_state_directory() {
+        assert_eq!(
+            shoal_log_path(Path::new("/tmp/project"), "run-1"),
+            Path::new("/tmp/project/.shoal/logs/run-1.log")
         );
     }
 

@@ -1057,7 +1057,7 @@ pub extern "C" fn runtime_shape_trap(
 ) -> *mut u8 {
     let label = ShapeTrapKind::label(kind as u64);
     // Identify the enclosing compiled function (emit threads its name in).
-    if fn_name_ptr != 0 && fn_name_len > 0 && fn_name_len < 4096 {
+    let function_name = if fn_name_ptr != 0 && fn_name_len > 0 && fn_name_len < 4096 {
         // SAFETY: emit interns the name in the pipeline-owned arena
         // (`CodegenPipeline::intern_name`) and passes its exact ptr/len; the
         // arena outlives all code compiled by that pipeline, so the pointer
@@ -1069,7 +1069,10 @@ pub extern "C" fn runtime_shape_trap(
             ))
         };
         eprintln!("[{}] in compiled fn: {}", label, name);
-    }
+        Some(name)
+    } else {
+        None
+    };
     // If a runtime error is already pending (e.g. DivisionByZero), the poison
     // value cascaded into a case expression. Return poison again instead of
     // aborting — the error flag will be detected when with_signal_protection
@@ -1144,6 +1147,17 @@ pub extern "C" fn runtime_shape_trap(
         .collect();
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "[{}] raw bytes: {:02x?}", label, raw_bytes);
+    tracing::error!(
+        target: "tidepool_codegen::shape_trap",
+        kind = label,
+        function = function_name.unwrap_or("<unknown>"),
+        scrutinee_ptr = %format_args!("{scrut_ptr:#x}"),
+        tag = tag_byte,
+        tag_name,
+        expected_tags = ?expected,
+        raw_bytes = ?raw_bytes,
+        "JIT heap-shape invariant failed"
+    );
 
     if tag_byte == layout::TAG_CON {
         // SAFETY: tag_byte == TAG_CON confirms Con; reading con_tag and num_fields at known offsets.

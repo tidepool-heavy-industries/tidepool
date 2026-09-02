@@ -2029,14 +2029,14 @@ mod tests {
         let hosted = tokio::spawn(host.run_until_shutdown(async move {
             let _ = shutdown_requested.await;
         }));
-        let result = server
+        let bound_start = server
             .dispatch_tool(
                 "session_run",
                 serde_json::json!({
                     "items": [
                         "input",
                         "waveAssignment <- pure (\"inspect one focused boundary\" :: Text)",
-                        "do { (_, afterOne) <- startWorker \"review-1\" waveAssignment sessionInput; (_, next) <- startWorker \"review-2\" \"inspect a disjoint boundary\" afterOne; complete next }"
+                        "firstWorker <- startWorker \"review-1\" waveAssignment sessionInput"
                     ],
                     "input": {"wave": "parallel"}
                 })
@@ -2045,12 +2045,54 @@ mod tests {
                 .clone(),
             )
             .await
-            .expect("run root Haskell session");
+            .expect("bind the first started worker");
+        assert!(!bound_start.is_error.unwrap_or(false), "{bound_start:?}");
+        assert_eq!(
+            bound_start.structured_content.as_ref().unwrap()["status"],
+            "committed",
+            "{bound_start:?}"
+        );
+        let result = server
+            .dispatch_tool(
+                "session_run",
+                serde_json::json!({
+                    "items": [
+                        "firstWorker",
+                        "do { (_, next) <- startWorker \"review-2\" \"inspect a disjoint boundary\" (snd firstWorker); complete next }"
+                    ]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("reuse the effectful binding in the next root Haskell session");
         assert!(!result.is_error.unwrap_or(false), "{result:?}");
         assert_eq!(
             result.structured_content.as_ref().unwrap()["status"],
             "completed",
             "{result:?}"
+        );
+        let reopened = server
+            .dispatch_tool(
+                "session_run",
+                serde_json::json!({
+                    "items": ["sessionInput"]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("force state returned into the next root Haskell session");
+        assert!(
+            !reopened.is_error.unwrap_or(false),
+            "reopened root session lost its live input: {reopened:?}"
+        );
+        assert_eq!(
+            reopened.structured_content.as_ref().unwrap()["status"],
+            "committed",
+            "{reopened:?}"
         );
         let mut worker_prompts = Vec::new();
         let mut recursive_worker = None;
@@ -2122,6 +2164,31 @@ mod tests {
             recursive_result.structured_content.as_ref().unwrap()["status"],
             "completed",
             "{recursive_result:?}"
+        );
+        let collect_source = format!(
+            "do {{ (_, next) <- collectWorkerResult (WorkerHandle \"{}\") sessionInput; complete next }}",
+            worker_tree.as_str()
+        );
+        let after_child_exit = server
+            .dispatch_tool(
+                "session_run",
+                serde_json::json!({
+                    "items": [collect_source]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await
+            .expect("force carried root state after one child exits");
+        assert!(
+            !after_child_exit.is_error.unwrap_or(false),
+            "a child exit corrupted the root session input: {after_child_exit:?}"
+        );
+        assert_eq!(
+            after_child_exit.structured_content.as_ref().unwrap()["status"],
+            "completed",
+            "{after_child_exit:?}"
         );
         let nested = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
             .await

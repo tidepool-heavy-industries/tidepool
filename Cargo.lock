@@ -3896,6 +3896,7 @@ dependencies = [
  "tidepool-testing",
  "tidepool-tool",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4004,6 +4005,7 @@ dependencies = [
  "tidepool-heap",
  "tidepool-repr",
  "tidepool-testing",
+ "tracing",
  "tracing-subscriber",
 ]
 

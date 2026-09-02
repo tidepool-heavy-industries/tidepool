@@ -56,7 +56,10 @@ pub type ActorMachineRegistry<H, O> = SessionRegistry<ResidentSession<H, O>, Str
 
 /// Shared checkout boundary for every actor machine entry path. Fenced
 /// fragments and installed actor programs differ above this layer, but use
-/// exactly the same admission and settlement mechanism.
+/// exactly the same admission and settlement mechanism. Every checkout
+/// installs the supplied actor context before invoking its operation, so a
+/// child cannot leak its lexical scope, resource realm, or principal into the
+/// next parent or sibling entry.
 struct ResidentMachineAccess<H, O> {
     machines: Arc<ActorMachineRegistry<H, O>>,
     source: ActorWorkbenchSource,
@@ -434,6 +437,21 @@ where
             // cancelled while this closure is running; settlement must not
             // depend on that caller continuing to poll the JoinHandle.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tracing::debug!(
+                    actor_id = context.actor.id.0,
+                    incarnation = context.actor.incarnation.0,
+                    session = ?context.placement.session,
+                    resource_scope = ?context.placement.resource_scope,
+                    lexical_scope = ?context.placement.lexical_scope,
+                    "entering resident actor machine"
+                );
+                session
+                    .set_actor_execution(
+                        context.run_context(),
+                        context.effect_policy,
+                        context.live_payload,
+                    )
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
                 operation(&mut session, &context, &source)
             }));
             match outcome {
@@ -493,13 +511,6 @@ where
         let type_modules = Arc::clone(&self.type_modules);
         self.access
             .with_machine(context, move |session, context, source| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
                 let block = ParsedBlock {
                     ordinal: 1,
                     total: 1,
@@ -557,14 +568,7 @@ where
         answer: RootCustody,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _source| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+            .with_machine(context, move |session, _context, _source| {
                 session
                     .resume_handle(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -636,10 +640,6 @@ where
             "meta commands are not part of the actor-local workbench; submit Haskell declarations or expressions".into(),
         ));
     }
-    let actor_context = context.run_context();
-    session
-        .set_actor_execution(actor_context, context.effect_policy, context.live_payload)
-        .map_err(ResidentActorWorkbenchError::Resident)?;
     let effect_stack = format!("(Complete ({expected_type}) ': ActorEffects)");
     let compiled = match compile_block(
         session,
@@ -751,13 +751,6 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    session
-        .set_actor_execution(
-            context.run_context(),
-            context.effect_policy,
-            context.live_payload,
-        )
-        .map_err(ResidentActorWorkbenchError::Resident)?;
     match outcome {
         ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
@@ -815,13 +808,6 @@ where
 
         self.access
             .with_machine(context, move |session, context, _| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
                 match decoded {
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorStartWith(
@@ -981,14 +967,7 @@ where
         realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+            .with_machine(context, move |session, _context, _| {
                 session
                     .run_rooted_entry("actor_program", entry, 0, realm, None)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -1086,15 +1065,10 @@ where
             crate::ActorExitKind::Cancelled => 2,
         };
         self.access
-            .with_machine_wait(context, admission_timeout, move |session, context, _| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
-                match session
+            .with_machine_wait(
+                context,
+                admission_timeout,
+                move |session, _context, _| match session
                     .run_rooted_entry("actor_shutdown", hook, argument, realm, None)
                     .map_err(ResidentActorWorkbenchError::Resident)?
                 {
@@ -1106,8 +1080,8 @@ where
                             request.operation()
                         )))
                     }
-                }
-            })
+                },
+            )
             .await
     }
 
@@ -1147,14 +1121,7 @@ where
         handler_realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
-            .with_machine(context, move |session, context, _| {
-                session
-                    .set_actor_execution(
-                        context.run_context(),
-                        context.effect_policy,
-                        context.live_payload,
-                    )
-                    .map_err(ResidentActorWorkbenchError::Resident)?;
+            .with_machine(context, move |session, _context, _| {
                 session
                     .run_rooted_application(
                         "actor_mailbox_handler",
@@ -1586,6 +1553,16 @@ where
     let include = compile_view.include_paths(&source.base_include);
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let injected = compile_view.injected_module_names();
+    tracing::debug!(
+        actor_id = context.actor.id.0,
+        incarnation = context.actor.incarnation.0,
+        lexical_scope = ?context.placement.lexical_scope,
+        generation = compile_view.next_value_generation().0,
+        imports = %compile_view.turn_imports(),
+        injected = ?injected,
+        source = %block.source,
+        "compiling resident actor workbench item"
+    );
     let request = TurnRequest {
         turn_text: &block.source,
         templates: &templates,

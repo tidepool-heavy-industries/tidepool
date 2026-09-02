@@ -197,8 +197,7 @@ impl PersistentSession {
     pub fn val_gen(&self) -> Generation {
         self.val_gen
     }
-    /// Set the value-binding generation (a consumer advances it when a bind
-    /// materializes at a freshly-minted `Val.G<g>`).
+    /// Advance the value-module generation high-water mark.
     pub fn set_val_gen(&mut self, g: Generation) {
         // MONOTONIC MAX, not assignment: with any-order resume, two in-flight
         // bind turns can materialize out of mint order —
