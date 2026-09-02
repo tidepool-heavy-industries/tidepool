@@ -173,6 +173,13 @@ registered checkout as the external application cwd. Failure before launch
 releases the active binding and fails the child; the retain-first worktree
 remains.
 
+The handle names the workflow resource, while its current physical checkout is
+a private Git repository. Mutable metadata belongs to that repository; initial
+objects are borrowed from the recorded source repository. Shoal projects the
+active repository writable and source plus sibling repositories read-only for
+the external process. The source is therefore also a retained storage
+dependency until the worker repository is repacked or retired.
+
 Copying a recipe or decorated definition transfers no authority: the
 interpreter permits a child only while the binding table names its exact
 run/id/incarnation principal. V0 does not expose recipe-bound resources during

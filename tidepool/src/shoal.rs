@@ -91,7 +91,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join(&session_name);
     std::fs::create_dir_all(&session_root)?;
     let root_binding_path = session_root.join("root-binding.json");
-    preflight().await?;
+    preflight(&workspace).await?;
     if options.recreate {
         // Validate continuity before stopping a currently healthy session.
         // The host repeats this check at launch so a later disappearance also
@@ -320,7 +320,7 @@ fn settle_host_result(
     result
 }
 
-async fn preflight() -> Result<(), Box<dyn std::error::Error>> {
+async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     crate::haskell_sources::ensure_stdlib()?;
     crate::haskell_sources::ensure_actor_policy()?;
     tidepool_runtime::toolchain::bind_extract_endpoint()?;
@@ -337,6 +337,27 @@ async fn preflight() -> Result<(), Box<dyn std::error::Error>> {
         return Err(runtime_error(
             "installed Codex lacks `codex queue --thread --message` support",
         ));
+    }
+
+    let boundary = tokio::process::Command::new(tidepool_node::BUBBLEWRAP_PROGRAM)
+        .args(["--bind", "/", "/", "--ro-bind"])
+        .arg(workspace)
+        .arg(workspace)
+        .args(["--chdir"])
+        .arg(workspace)
+        .args(["--", "/bin/true"])
+        .output()
+        .await
+        .map_err(|source| {
+            runtime_error(format!(
+                "Bubblewrap is required for Shoal actor repositories: {source}"
+            ))
+        })?;
+    if !boundary.status.success() {
+        return Err(runtime_error(format!(
+            "Bubblewrap cannot establish the Shoal process boundary: {}",
+            String::from_utf8_lossy(&boundary.stderr).trim()
+        )));
     }
     Ok(())
 }

@@ -1,10 +1,14 @@
-# Managed worktrees and repository observation
+# Managed coding checkouts and repository observation
 
-This crate owns worktree creation/retention, its durable registry, repository
+This crate owns checkout creation/retention, its durable registry, repository
 inspection, coalesced events, snapshots, and the narrow typed merge primitive.
+`Worktree` remains the workflow term, but new managed checkouts are private Git
+repositories with private mutable metadata and borrowed source objects.
 
-- Never dirty the source working tree. Registry state, managed worktrees,
+- Never dirty the source working tree. Registry state, managed repositories,
   journals, and temporary indexes live outside it.
+- Keep the recorded source repository alive while a managed repository exists:
+  Git alternates make that immutable-object dependency real.
 - Retain first: no deletion, GC, or silent recreation of a missing managed
   worktree without an explicit design decision.
 - Every git subprocess goes through `GitCli` so environment scrubbing and

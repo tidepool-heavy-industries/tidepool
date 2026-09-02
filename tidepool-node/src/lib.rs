@@ -3,10 +3,14 @@
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 mod inbox;
+mod process_boundary;
 mod proxy;
 mod tmux;
 
 pub use inbox::{DurableEnvelope, DurableInbox, InboxError};
+pub use process_boundary::{
+    ProcessBoundaryError, ProcessInvocation, ProcessMountBoundary, BUBBLEWRAP_PROGRAM,
+};
 pub use proxy::{
     accept_proxy, connect_proxy, proxy_stdio, NodeCredential, NodeHandshake, NodeProxyError,
     NODE_PROTOCOL_VERSION,

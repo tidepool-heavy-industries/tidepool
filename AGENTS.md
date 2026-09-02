@@ -63,7 +63,7 @@ providers, scheduling, resources, persistence, and argument parsing.
   conversations, model-output parsing, and coding-agent backends.
 - `tidepool-actor`: actor identity, lifecycle, mailbox, and actor sessions.
 - `tidepool-repl`, `tidepool-harness`, `tidepool-web`: user-facing runtimes.
-- `tidepool-worktree`: managed worktrees and repository observation.
+- `tidepool-worktree`: managed coding checkouts and repository observation.
 
 Read the nearest nested `AGENTS.md` before editing a subsystem. Use
 `docs/GLOSSARY.md` for names, especially model-facing text. `plans/README.md`

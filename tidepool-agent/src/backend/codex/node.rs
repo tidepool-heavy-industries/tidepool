@@ -15,7 +15,8 @@ use crate::interactive::{
 };
 use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
-    InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, ReasoningEffort,
+    InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, InteractiveNativeSandbox,
+    ReasoningEffort,
 };
 use tidepool_actor::{ActorId, ActorRef, Incarnation};
 use tidepool_node::{NodeCredential, NodeHandshake};
@@ -129,11 +130,11 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, A
     command
         .arg("--ask-for-approval")
         .arg("never")
-        .arg("--sandbox")
-        .arg("workspace-write");
-    for root in &spec.additional_writable_roots {
-        command.arg("--add-dir").arg(root);
-    }
+        .arg("--sandbox");
+    command.arg(match spec.native_sandbox {
+        InteractiveNativeSandbox::BackendWorkspaceWrite => "workspace-write",
+        InteractiveNativeSandbox::HostMountBoundary => "danger-full-access",
+    });
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
@@ -512,7 +513,7 @@ mod tests {
             effort: Some(ReasoningEffort::Medium),
             developer_instructions: "actor charter".to_string(),
             initial_prompt: Some("initialize through typed tools".to_string()),
-            additional_writable_roots: vec!["/tmp/shared-git".to_string()],
+            native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
             mcp: crate::InteractiveMcpServer {
                 name: "tidepool_actor".to_string(),
                 command: "/tmp/shoal".to_string(),
@@ -534,10 +535,8 @@ mod tests {
             .any(|args| args == ["--ask-for-approval", "never"]));
         assert!(args
             .windows(2)
-            .any(|args| args == ["--sandbox", "workspace-write"]));
-        assert!(args
-            .windows(2)
-            .any(|args| args == ["--add-dir", "/tmp/shared-git"]));
+            .any(|args| args == ["--sandbox", "danger-full-access"]));
+        assert!(!args.iter().any(|arg| arg == "--add-dir"));
         assert!(args
             .iter()
             .any(|arg| arg.contains("mcp_servers.tidepool_actor.command")));
@@ -568,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn resumed_tui_launch_carries_the_same_sandbox_roots_after_the_subcommand() {
+    fn resumed_tui_launch_carries_the_same_native_sandbox_after_the_subcommand() {
         let mut spec = InteractiveAgentSpec {
             mode: InteractiveLaunchMode::Resume(BackendThreadId(
                 "019c7724-20a7-7710-bc89-dbc054f9a940".to_string(),
@@ -577,7 +576,7 @@ mod tests {
             effort: None,
             developer_instructions: String::new(),
             initial_prompt: None,
-            additional_writable_roots: vec!["/tmp/shared-git".to_string()],
+            native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
             mcp: crate::InteractiveMcpServer {
                 name: "tidepool_actor".to_string(),
                 command: "/tmp/shoal".to_string(),
@@ -593,19 +592,18 @@ mod tests {
         assert_eq!(args[1], "019c7724-20a7-7710-bc89-dbc054f9a940");
         assert!(args
             .windows(2)
-            .any(|args| args == ["--sandbox", "workspace-write"]));
-        assert!(args
-            .windows(2)
-            .any(|args| args == ["--add-dir", "/tmp/shared-git"]));
+            .any(|args| args == ["--sandbox", "danger-full-access"]));
+        assert!(!args.iter().any(|arg| arg == "--add-dir"));
 
         spec.mode = InteractiveLaunchMode::Fresh;
         let fresh_args = command_for(&spec).unwrap().args;
-        for option in ["--sandbox", "--add-dir"] {
-            assert_eq!(
-                args.iter().position(|arg| arg == option).unwrap() - 2,
-                fresh_args.iter().position(|arg| arg == option).unwrap()
-            );
-        }
+        assert_eq!(
+            args.iter().position(|arg| arg == "--sandbox").unwrap() - 2,
+            fresh_args
+                .iter()
+                .position(|arg| arg == "--sandbox")
+                .unwrap()
+        );
     }
 
     #[test]
@@ -616,7 +614,7 @@ mod tests {
             effort: None,
             developer_instructions: String::new(),
             initial_prompt: None,
-            additional_writable_roots: Vec::new(),
+            native_sandbox: InteractiveNativeSandbox::BackendWorkspaceWrite,
             mcp: crate::InteractiveMcpServer {
                 name: "bad.name".to_string(),
                 command: "proxy".to_string(),

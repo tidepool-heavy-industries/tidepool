@@ -138,8 +138,4 @@ fn a_removed_checkout_is_lost_not_an_empty_observation() {
         manager.observe_submission(&handle),
         Err(WorktreeError::WorktreeLost(handle.id().clone()))
     );
-    assert_eq!(
-        manager.worktree_git_common_dir(&handle),
-        Err(WorktreeError::WorktreeLost(handle.id().clone()))
-    );
 }

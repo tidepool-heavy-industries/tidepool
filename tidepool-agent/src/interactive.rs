@@ -73,6 +73,16 @@ pub enum InteractiveLaunchMode {
     Fork(BackendThreadId),
 }
 
+/// Which layer owns native filesystem containment for an interactive agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractiveNativeSandbox {
+    /// Let the backend confine writes to its workspace.
+    BackendWorkspaceWrite,
+    /// A validated outer process mount boundary owns containment, so the
+    /// backend must not install its conflicting `.git`-protecting sandbox.
+    HostMountBoundary,
+}
+
 /// A backend-rendered interactive process invocation.
 ///
 /// Process ownership stays with the deployment adapter (tmux for Shoal). The
@@ -109,9 +119,7 @@ pub struct InteractiveAgentSpec {
     /// First user message. A fresh stock TUI needs this to create the rollout
     /// addressed by subsequent native push operations.
     pub initial_prompt: Option<String>,
-    /// Directories writable in addition to the process working root. Linked
-    /// worktree deployments use this for their resolved shared Git metadata.
-    pub additional_writable_roots: Vec<String>,
+    pub native_sandbox: InteractiveNativeSandbox,
     pub mcp: InteractiveMcpServer,
 }
 

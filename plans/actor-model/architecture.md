@@ -216,6 +216,23 @@ resource; initialization that needs resource authority will require a future
 generic startup-admission seam. This replaces automatic post-spawn worktree
 allocation: there is one worktree owner, one binding, and one authority path.
 
+`Worktree` is the public workflow concept, not a commitment to Git's linked
+worktree storage. The current manager creates an ordinary private repository
+for each worker. Its refs, index, config, reflogs, locks, and new objects live
+under that checkout's writable `.git`; its initial objects are borrowed from
+the retained source repository through Git alternates. Shoal launches Codex in
+a Tidepool-owned mount namespace where the active repository is writable and
+the source plus sibling repositories are read-only. Codex therefore uses
+ordinary Git—including commits, branches, rebases, and recovery—without sharing
+mutable Git metadata with its source.
+
+This V0 boundary is operational write containment, not a security claim. The
+agent still inherits its environment, network, credentials, caches, and host
+process namespace. The source dependency is also real: a borrowed-object
+repository must not outlive the recorded source unless its objects are first
+repacked locally. Harden or sever those dependencies only when a concrete
+deployment requires it; do not reintroduce shared-`.git` exceptions.
+
 The external model submits only an authored report. While its `finish_work`
 tool call is waiting, trusted Haskell asks the Rust-owned Worktree interpreter
 for one coherent submission observation and constructs the worker's typed

@@ -222,14 +222,13 @@ impl SpawnRequest {
     }
 
     /// The cycle shape for a resolved workspace.
-    pub fn cycle_spec(&self, cwd: String, extra_writable_roots: Vec<String>) -> CycleSpec {
+    pub fn cycle_spec(&self, cwd: String) -> CycleSpec {
         CycleSpec {
             cwd,
             task: self.task.clone(),
             output_schema: self.output_schema.clone(),
             model: self.model,
             effort: self.effort,
-            extra_writable_roots,
         }
     }
 }
@@ -455,13 +454,6 @@ impl SpawnSubstrate {
         &self.bindings
     }
 
-    /// The source repository managed worktrees are created from. A worker's
-    /// write sandbox must admit its `.git`, because a LINKED worktree's git
-    /// metadata lives there and not under the worktree.
-    pub fn source_repository(&self) -> &std::path::Path {
-        self.manager.source_repository()
-    }
-
     /// Mint the next in-process agent identity. PROVISIONAL: not durable
     /// across restarts.
     pub fn mint_agent_id(&mut self) -> AgentId {
@@ -667,7 +659,7 @@ impl CycleSaga {
         request: &SpawnRequest,
     ) -> Result<CycleProgress, SpawnError> {
         // Allocate, mint, bind — no backend call under this lock.
-        let (worktree, agent, binding_ref, git_dir, lease) = {
+        let (worktree, agent, binding_ref, lease) = {
             let mut sub = lock_substrate(substrate, SpawnStage::Allocating)?;
             let worktree = sub.resolve_workspace(&request.workspace)?;
             let agent = sub.mint_agent_id();
@@ -677,16 +669,7 @@ impl CycleSaga {
                 sanitize_agent_label(&request.agent_label)
             );
             let lease = sub.bind(worktree.id(), &binding_ref)?;
-            // The linked worktree's git metadata lives in the SOURCE repo's
-            // `.git`; the sandbox must admit it or no worker can ever commit.
-            // Derived from the RESOLVED worktree's own recorded provenance
-            // (`WorktreeReceipt.source_repository`), never the handler-wide
-            // `SpawnSubstrate::source_repository` — a worktree resolved from
-            // a different source repository than the one the handler was
-            // configured with (e.g. `SpawnWorkspace::Existing`, or any future
-            // multi-repo manager) must get ITS OWN `.git`, not the handler's.
-            let git_dir = utf8_or_panic(&worktree.receipt().source_repository.join(".git"));
-            (worktree, agent, binding_ref, git_dir, lease)
+            (worktree, agent, binding_ref, lease)
         };
         // Lock released — everything below may block for a whole turn, and
         // every failure path from here must settle the binding `Released`.
@@ -707,7 +690,7 @@ impl CycleSaga {
 
         // `cwd` is per-cycle, not at thread creation — see `CycleSpec`'s docs.
         let cwd = utf8_or_panic(worktree.cwd());
-        let event = match backend.start_turn(&thread, &request.cycle_spec(cwd, vec![git_dir])) {
+        let event = match backend.start_turn(&thread, &request.cycle_spec(cwd)) {
             Ok(event) => event,
             Err(error) => {
                 return Err(roll_back_detached(

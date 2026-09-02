@@ -1,4 +1,5 @@
-//! Creating and looking up managed worktrees, including dirty-source snapshots.
+//! Creating and looking up retained managed repositories, including
+//! dirty-source snapshots.
 
 use std::ffi::OsString;
 use std::fs;
@@ -124,7 +125,7 @@ impl WorktreeHandle {
 pub struct WorktreeManager {
     git: GitCli,
     registry: WorktreeRegistry,
-    /// Where managed working trees are materialized. Outside the source tree.
+    /// Where managed repositories are materialized. Outside the source tree.
     worktree_root: PathBuf,
     /// The repository `from_current_repository` means.
     source_repository: PathBuf,
@@ -145,20 +146,17 @@ impl WorktreeManager {
         }
     }
 
-    /// The source repository every `SourceCurrentRepository` worktree is
-    /// created from — the path handed to [`Self::new`]. A spawner needs it
-    /// to grant a worker's write sandbox the repo's `.git` (a linked
-    /// worktree's git metadata lives there, not under the worktree).
-    pub fn source_repository(&self) -> &Path {
-        &self.source_repository
-    }
-
     pub fn git(&self) -> &GitCli {
         &self.git
     }
 
     pub fn registry(&self) -> &WorktreeRegistry {
         &self.registry
+    }
+
+    /// Root containing every managed repository owned by this manager.
+    pub fn managed_root(&self) -> &Path {
+        &self.worktree_root
     }
 
     /// Create a managed worktree.
@@ -213,16 +211,40 @@ impl WorktreeManager {
         };
         self.registry.put(&provisional)?;
 
-        let args: Vec<OsString> = vec![
-            "worktree".into(),
-            "add".into(),
+        // The worker gets private mutable Git metadata while borrowing the
+        // seed repository's immutable objects through Git's alternates
+        // mechanism. This is intentionally an ordinary repository rather
+        // than `git worktree add`: branches, the index, config, reflogs,
+        // hooks, and newly written objects then belong to this worker alone.
+        let clone_args: Vec<OsString> = vec![
+            "clone".into(),
             "-q".into(),
-            "-b".into(),
-            OsString::from(branch.as_str()),
+            "--shared".into(),
+            "--no-checkout".into(),
+            "--no-tags".into(),
+            "--".into(),
+            resolved.git_repository.clone().into_os_string(),
             cwd.clone().into_os_string(),
-            OsString::from(resolved.seed.as_str()),
         ];
-        self.git.try_run(&resolved.git_repository, &args)?;
+        self.git.try_run(&self.worktree_root, &clone_args)?;
+        self.git.try_run(
+            &cwd,
+            &[
+                "checkout",
+                "-q",
+                "-b",
+                branch.as_str(),
+                resolved.seed.as_str(),
+            ],
+        )?;
+        // A retained actor repository has no writable upstream. Candidate
+        // transfer is an explicit owner operation, never an accidental push
+        // through the clone's local-path `origin`.
+        self.git.try_run(&cwd, &["remote", "remove", "origin"])?;
+        self.git
+            .try_run(&cwd, &["config", "user.name", "Tidepool Worker"])?;
+        self.git
+            .try_run(&cwd, &["config", "user.email", "tidepool-worker@localhost"])?;
 
         let finalized = WorktreeReceipt {
             status: WorktreeRecordStatus::Finalized,
@@ -270,19 +292,18 @@ impl WorktreeManager {
                     .lookup(wid)?
                     .ok_or_else(|| WorktreeError::WorktreeNotRegistered(wid.clone()))?;
                 let cwd = handle.cwd().to_path_buf();
-                // The parent's OWN recorded `source_repository` is already the
-                // resolved repository root (by induction, since every branch
-                // here records a root, never a checkout) — chain through it
-                // rather than recording this parent worktree's checkout path.
-                let source_repository = handle.receipt().source_repository.clone();
                 let (seed, snapshot_ref) =
                     self.resolve_dirty_or_clean(&cwd, spec.dirty_policy, id)?;
                 Ok(ResolvedSeed {
                     seed,
                     snapshot_ref,
                     origin: WorktreeOrigin::Worktree(wid.clone()),
-                    git_repository: cwd,
-                    source_repository,
+                    git_repository: cwd.clone(),
+                    // `git clone --shared` borrows from the immediate seed
+                    // repository. Recording that exact dependency is more
+                    // useful than pretending every generation depends only
+                    // on the original project root.
+                    source_repository: cwd,
                 })
             }
         }
@@ -361,18 +382,6 @@ impl WorktreeManager {
         Ok(GitOid::from_raw(out.trimmed()))
     }
 
-    /// Resolve the shared Git metadata directory that makes native commits
-    /// from this linked checkout possible.
-    pub fn worktree_git_common_dir(
-        &self,
-        handle: &WorktreeHandle,
-    ) -> Result<PathBuf, WorktreeError> {
-        if !worktree_present(handle.cwd()) {
-            return Err(WorktreeError::WorktreeLost(handle.id().clone()));
-        }
-        inspect::git_common_dir(&self.git, handle.cwd())
-    }
-
     /// Observe the current submitted repository state as one bounded,
     /// internally consistent operation. This does not seal the worktree.
     pub fn observe_submission(
@@ -383,20 +392,14 @@ impl WorktreeManager {
     }
 }
 
-/// What a new worktree should be rooted at, and in which repository the
-/// `git worktree add` invocation must run.
+/// What a new managed repository should be rooted at, and which repository it
+/// borrows immutable objects from.
 struct ResolvedSeed {
     seed: GitOid,
     snapshot_ref: Option<GitRef>,
     origin: WorktreeOrigin,
-    /// Where to invoke `git` to materialize this worktree — the parent
-    /// worktree's checkout for a from-worktree spec (dirty/HEAD state is
-    /// particular to that checkout), the repository root otherwise. NOT what
-    /// gets recorded as [`WorktreeReceipt::source_repository`]; see that
-    /// field for why the two diverge.
+    /// Immediate repository passed to `git clone --shared`.
     git_repository: PathBuf,
-    /// The resolved underlying repository root to record as
-    /// [`WorktreeReceipt::source_repository`] — always a repository root,
-    /// never a worktree checkout, even when [`Self::git_repository`] is one.
+    /// Durable record of that immediate borrowed-object dependency.
     source_repository: PathBuf,
 }

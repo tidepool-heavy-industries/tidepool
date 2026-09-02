@@ -35,7 +35,7 @@ services its effects.
 | `tidepool-repl` | Stateful GHCi-style MCP server |
 | `tidepool-harness` | Resident authored-harness runtime and driver |
 | `tidepool-agent` | Typed coding-agent backend boundary |
-| `tidepool-worktree` | Managed worktrees, repository observation, and journal |
+| `tidepool-worktree` | Managed coding checkouts, repository observation, and journal |
 | `tidepool-web` | Operator UI |
 | `tidepool` | Public facade and composition-root binaries |
 | `harness-dogfooding/` | Authored harnesses, including the Haskell devswarm |
@@ -47,6 +47,7 @@ Small support crates have short local charters describing their exact scope.
 | Mechanism | Home |
 |---|---|
 | git subprocess invocation | `tidepool-worktree::git::GitCli` |
+| interactive actor process mount boundary | `tidepool-node::process_boundary` |
 | durable JSONL append/read | shared primitive in `tidepool-repr` |
 | durable single-consumer delivery queue and ack cursor | `tidepool-node::DurableInbox` |
 | config, cache, and project paths | `tidepool-toolchain::paths` |

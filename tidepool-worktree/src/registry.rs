@@ -80,11 +80,10 @@ pub struct WorktreeReceipt {
     /// snapshot commit. `None` for a clean creation.
     pub snapshot_ref: Option<GitRef>,
     pub origin: WorktreeOrigin,
-    /// Absolute path of the source repository this tree was created from.
-    /// Always a repository root, never a worktree checkout — for a
-    /// from-worktree spec this is the resolved underlying repository
-    /// (chained through the parent's own `source_repository`), not the
-    /// parent worktree's `cwd`.
+    /// Absolute path of the immediate repository this tree was created from.
+    /// Managed repositories borrow its immutable objects through Git's
+    /// alternates mechanism, so this is both provenance and a retained
+    /// lifetime dependency. A from-worktree child records its parent's cwd.
     pub source_repository: PathBuf,
     /// Unix epoch milliseconds.
     pub created_at_ms: i64,

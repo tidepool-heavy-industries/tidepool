@@ -22,7 +22,7 @@ pub mod spawn;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
     InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
-    InteractiveLaunchMode, InteractiveMcpServer, InteractiveProxyBinding,
+    InteractiveLaunchMode, InteractiveMcpServer, InteractiveNativeSandbox, InteractiveProxyBinding,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,

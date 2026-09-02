@@ -153,6 +153,7 @@
             pkgs.openssl
             pkgs.jq
             pkgs.just
+            pkgs.bubblewrap
             # No sccache here, deliberately. It IS active for every build on
             # this box, but via `build.rustc-wrapper` in ~/.cargo/config.toml
             # (host-global, outside this flake), naming an absolute store path

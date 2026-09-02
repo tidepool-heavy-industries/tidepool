@@ -996,17 +996,23 @@ Implement this boundary in order:
    closes the handle into its definition, and launches the external process
    only after exact-incarnation binding. Candidate submission combines an
    authored report with one trusted Worktree observation; collection is
-   replayable until explicit acknowledgment. Worker Codex processes now use
-   `workspace-write` rooted at their retained checkout, and source-checkout
-   extractor process pins are removed before launch so each worktree resolves
-   tools from its own sources. Linked worktrees still require write access to
-   the repository's shared Git directory. This prevents direct parent-checkout
-   file writes but does not isolate refs, configuration, hooks, objects, or
-   worktree administration; it is containment, not a repository-security
-   boundary. True isolation needs private Git metadata (for example a worker
-   clone) or a narrow mediated submission service, not more shared-directory
-   exceptions. Policy reload and broader commit/evidence folding remain later
-   work.
+   replayable until explicit acknowledgment. Worker Codex processes run in
+   retained private repositories. Each checkout owns its mutable Git metadata
+   and borrows initial objects from its retained source through alternates. A
+   reusable `tidepool-node` process boundary makes the active repository
+   writable and source plus sibling repositories read-only, then runs Codex
+   with its redundant inner filesystem sandbox disabled. Source-checkout
+   extractor process pins are removed before launch so each repository resolves
+   tools from its own sources. This permits normal Git commits and recovery
+   without exposing shared refs, config, hooks, or locks. It is operational
+   write containment rather than a hardened sandbox: environment, network,
+   credentials, caches, and the process namespace remain shared. Policy reload,
+   severing the borrowed-object dependency, and broader commit/evidence folding
+   remain later work.
+   The existing `mergeBranchInto` operation remains branch-local: it does not
+   import a candidate from another private repository. The later fold path must
+   name the exact candidate OID, import it into the target, and apply the same
+   typed merge/abort semantics; sharing refs again is not an acceptable shortcut.
    `ReadWrite`/`ReadOnly` therefore remain explicitly
    experimental resident-effect classifications rather than process-security
    claims; the initial production machine intentionally handles no ambient

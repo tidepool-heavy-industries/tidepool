@@ -22,8 +22,8 @@ use tidepool_actor::{
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
-    InteractiveAgentSpec, InteractiveLaunchMode, InteractiveMcpServer, InteractiveProxyBinding,
-    ReasoningEffort,
+    InteractiveAgentSpec, InteractiveLaunchMode, InteractiveMcpServer, InteractiveNativeSandbox,
+    InteractiveProxyBinding, ReasoningEffort,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
@@ -32,7 +32,8 @@ use tidepool_handlers::{ActorWorktreeAuthority, ActorWorktreeHandler, WorktreeHa
 use tidepool_mcp::{CapturedOutput, DynamicMcpServer};
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
 use tidepool_node::{
-    accept_proxy, DurableInbox, NodeCredential, TmuxLaunch, TmuxPaneId, TmuxSession,
+    accept_proxy, DurableInbox, NodeCredential, ProcessInvocation, ProcessMountBoundary,
+    TmuxLaunch, TmuxPaneId, TmuxSession, BUBBLEWRAP_PROGRAM,
 };
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
@@ -353,7 +354,7 @@ fn actor_worktree_resources(
         .to_string();
     let root = tidepool_runtime::paths::cache_dir()
         .join("shoal")
-        .join("actor-worktrees")
+        .join("actor-repositories")
         .join(project);
     actor_worktree_resources_at(&root, workspace)
 }
@@ -363,8 +364,15 @@ fn actor_worktree_resources_at(
     workspace: &Path,
 ) -> Result<(WorktreeManager, BindingTable), tidepool_worktree::WorktreeError> {
     let registry = WorktreeRegistry::open(root.join("registry"))?;
+    let repositories = root.join("repositories");
+    std::fs::create_dir_all(&repositories).map_err(|error| {
+        tidepool_worktree::WorktreeError::StorageFailure {
+            path: repositories.clone(),
+            detail: error.to_string(),
+        }
+    })?;
     Ok((
-        WorktreeManager::new(GitCli::new(), registry, root.join("checkouts"), workspace),
+        WorktreeManager::new(GitCli::new(), registry, repositories, workspace),
         BindingTable::open(root.join("bindings"))?,
     ))
 }
@@ -959,23 +967,23 @@ async fn launch_prepared_interactive_application(
         bindings: _,
     } = context;
     let actor = installation.actor;
-    let _ = worktrees;
     let workspace = worktree.as_ref().map_or_else(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
     );
-    let additional_writable_roots = worktree
+    let writable_roots = worktree
         .as_ref()
-        .map(|handle| {
-            worktrees
-                .worktree_git_common_dir(handle)
-                .map(|path| vec![path.to_string_lossy().into_owned()])
-                .map_err(|error| {
-                    application_error(actor, InteractiveOperation::PrepareRuntime, error)
-                })
-        })
-        .transpose()?
+        .map(|handle| vec![handle.cwd().to_path_buf()])
         .unwrap_or_default();
+    let process_boundary = ProcessMountBoundary::new(
+        &workspace,
+        [
+            config.workspace.clone(),
+            worktrees.managed_root().to_path_buf(),
+        ],
+        writable_roots,
+    )
+    .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
@@ -1035,7 +1043,7 @@ async fn launch_prepared_interactive_application(
         effort: config.effort,
         developer_instructions,
         initial_prompt,
-        additional_writable_roots,
+        native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
         mcp: InteractiveMcpServer {
             name: "tidepool_actor".into(),
             command: config.proxy_program.clone(),
@@ -1048,6 +1056,13 @@ async fn launch_prepared_interactive_application(
     let command = backend
         .render(&spec)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildCommand, error))?;
+    let command = process_boundary.wrap(
+        BUBBLEWRAP_PROGRAM,
+        ProcessInvocation {
+            program: command.program,
+            args: command.args,
+        },
+    );
     let server = DynamicMcpServer::from_resident_policy(installation.policy)
         .map_err(|error| application_error(actor, InteractiveOperation::BuildPolicy, error))?;
     let service = tokio::spawn(async move {
@@ -1506,7 +1521,7 @@ fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
         };
         format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
     } else {
-        "You are a Tidepool worker actor. Your process working directory is an owned retained git worktree; never edit the parent checkout. The native workspace sandbox prevents parent-checkout file writes, but linked worktrees still share repository metadata: modify only your assigned branch and do not change repository configuration, hooks, other refs, or other worktrees. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
+        "You are a Tidepool worker actor. Your process working directory is an owned retained Git repository with private mutable metadata; the source checkout and sibling worker repositories are read-only. Use ordinary Git workflows freely inside this repository. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
     }
 }
 
@@ -1760,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_workspaces_are_distinct_managed_worktrees_outside_the_source_checkout() {
+    fn worker_workspaces_are_distinct_private_repositories_outside_the_source_checkout() {
         let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
@@ -1780,6 +1795,8 @@ mod tests {
         assert_ne!(first.cwd(), second.cwd());
         assert!(!first.cwd().starts_with(repository.path()));
         assert!(!second.cwd().starts_with(repository.path()));
+        assert!(first.cwd().join(".git").is_dir());
+        assert!(second.cwd().join(".git").is_dir());
         assert_eq!(
             std::fs::read_to_string(repository.path().join("README.md")).unwrap(),
             "source\n"

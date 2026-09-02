@@ -1,10 +1,16 @@
-//! Managed git worktrees and typed repository events — the Rust substrate for
-//! authored Haskell to drive.
+//! Managed coding checkouts and typed repository events — the Rust substrate
+//! for authored Haskell to drive.
 //!
-//! This crate owns everything that is *git truth*: creating retained worktrees,
-//! recording them durably so a restart can still find them, snapshotting a dirty
-//! source without touching it, observing HEAD movement, and journalling what was
-//! observed. It knows nothing about effects, the JIT, Haskell, or agents.
+//! `Worktree` is the public workflow concept. Its current managed storage is an
+//! ordinary private repository whose mutable Git metadata lives inside the
+//! checkout and whose initial objects are borrowed from a retained source via
+//! Git alternates. This lets an actor use normal Git without sharing refs,
+//! config, or locks with the source checkout.
+//!
+//! This crate owns everything that is *git truth*: creating and recording those
+//! retained checkouts, snapshotting a dirty source without touching it,
+//! observing HEAD movement, and journalling what was observed. It knows nothing
+//! about effects, the JIT, Haskell, or agents.
 //!
 //! The effect surface that exposes this to authored Haskell (`Tidepool.Worktree`,
 //! `Tidepool.Event`, `withHandler`) lives outside this crate. Keeping the
@@ -15,8 +21,8 @@
 //! ## What this crate deliberately does NOT have
 //!
 //! No deletion, GC, or retention policy. Retain-first is a locked decision:
-//! every worktree, branch, snapshot ref, and receipt survives indefinitely in
-//! v1. A worktree a human removed by hand becomes
+//! every checkout, branch, snapshot ref, and receipt survives indefinitely in
+//! v1. A checkout a human removed by hand becomes
 //! [`WorktreeError::WorktreeLost`]; it is never silently recreated.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]

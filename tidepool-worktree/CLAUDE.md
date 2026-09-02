@@ -54,14 +54,18 @@ failure stays the ordinary `WorktreeError::GitFailure`). It IS exposed as a
 generated from `tidepool-protocol`'s schema like every other Worktree verb —
 `merge.rs` is the shared definition of merge, conflict classification, and
 abort. Conflict resolution and operations it does not cover remain authored
-policy. Haskell callers reach those operations through the shared
+policy. The branch must already exist in the target repository. Managed actor
+repositories deliberately do not share refs, so cross-repository candidate
+folding needs a future exact-OID import-and-merge operation; do not restore
+shared Git metadata to make this older branch-local primitive appear to work.
+Haskell callers reach operations outside this boundary through the shared
 `Tidepool.Worktree.gitIn` helper.
 
-**Never dirty the source.** The registry root, worktree root, journal, and any
-temporary index all live OUTSIDE the source working tree. Managed branches use
-`TIDEPOOL_BRANCH_PREFIX`; snapshot commits use `TIDEPOOL_SNAPSHOT_REF_PREFIX`,
-deliberately outside `refs/heads/` so they never appear in an operator's
-`git branch`.
+**Never dirty the source.** The registry root, managed repository root,
+journal, and any temporary index all live OUTSIDE the source working tree.
+Managed branches use `TIDEPOOL_BRANCH_PREFIX` inside their private repository;
+snapshot commits use `TIDEPOOL_SNAPSHOT_REF_PREFIX` in the source, deliberately
+outside `refs/heads/` so they never appear in an operator's `git branch`.
 
 **Retain first.** No deletion, no GC, no retention policy. A worktree a human
 removed by hand becomes `WorktreeError::WorktreeLost`; it is never silently
