@@ -23,6 +23,7 @@ pub struct KernelBehaviorError {
 
 #[derive(Debug, Clone)]
 pub struct ChildExitNotice {
+    pub owner: ActorRef,
     pub child: LocalActorRef,
     pub terminal: ActorTerminal,
 }
@@ -406,7 +407,11 @@ where
         };
         state
             .behavior
-            .child_exited(ChildExitNotice { child, terminal })
+            .child_exited(ChildExitNotice {
+                owner: state.context.identity,
+                child,
+                terminal,
+            })
             .await;
         Ok(())
     }

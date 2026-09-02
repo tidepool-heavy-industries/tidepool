@@ -213,6 +213,44 @@ impl LocalActorRef {
     pub fn terminal(&self) -> &RetainedActorExit {
         &self.terminal
     }
+
+    pub async fn report_external_failure(
+        &self,
+        failure: ExternalApplicationFailure,
+    ) -> Result<ExternalFailureDisposition, KernelInvocationFailure> {
+        if self.terminal.get().is_some() {
+            return Ok(ExternalFailureDisposition::AlreadyTerminal);
+        }
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::ExternalApplicationFailed {
+                failure,
+                reply: reply.into(),
+            })
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+        receive
+            .await
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+    }
+
+    pub async fn shutdown(
+        &self,
+        terminal: ActorTerminal,
+    ) -> Result<ActorTerminal, KernelInvocationFailure> {
+        if let Some(existing) = self.terminal.get() {
+            return Ok(existing);
+        }
+        let (reply, receive) = tokio::sync::oneshot::channel();
+        self.address
+            .send_message(KernelMessage::Shutdown {
+                terminal,
+                reply: reply.into(),
+            })
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+        receive
+            .await
+            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+    }
 }
 
 #[cfg(test)]

@@ -33,6 +33,7 @@ use crate::{
 #[derive(Clone)]
 pub struct LocalResidentInstallation {
     pub actor: LocalActorRef,
+    pub label: String,
     pub policy: Arc<dyn ResidentMcpEndpoint>,
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
@@ -445,6 +446,7 @@ where
                             ));
                         let installation = LocalResidentInstallation {
                             actor,
+                            label: self.descriptor.label().to_owned(),
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
@@ -482,6 +484,7 @@ where
                             Arc::new(crate::ResidentInteractivePolicy::local(actor.clone()));
                         let installation = LocalResidentInstallation {
                             actor,
+                            label: self.descriptor.label().to_owned(),
                             policy,
                             initial_user_message: request.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),

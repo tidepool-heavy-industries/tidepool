@@ -14,11 +14,10 @@ use frunk::{hlist, HCons, HNil};
 use parking_lot::Mutex;
 use rmcp::ServiceExt;
 use tidepool_actor::{
-    ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorRegistry,
-    ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
-    ExternalApplicationFailureClass, ExternalFailureDisposition, ResidentActorDeployment,
-    ResidentActorHost, ResidentActorHostControl, ResidentActorRoot, ResidentLifecyclePolicy,
-    ResidentMcpInstallation,
+    spawn_resident_root, ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement,
+    ActorRef, ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
+    ExternalApplicationFailureClass, ExternalFailureDisposition, LocalActorRef,
+    LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
@@ -108,6 +107,8 @@ impl ModelProvider for NoResidentProvider {
 
 struct InteractiveDeployment {
     actor: ActorRef,
+    local_actor: LocalActorRef,
+    label: String,
     pane: TmuxPaneId,
     workspace: PathBuf,
     inbox: Arc<DurableInbox<String>>,
@@ -146,6 +147,7 @@ struct OwnerNotification {
 struct PendingInteractiveLaunch {
     cancel: oneshot::Sender<()>,
     worker_handle: Option<String>,
+    label: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -219,15 +221,13 @@ fn application_error(
 }
 
 struct InteractiveFleet {
-    registry: ActorRegistry,
-    root: ActorRef,
+    root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
     tmux: TmuxSession,
     backend: Arc<dyn InteractiveAgentBackend>,
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
-    control: ResidentActorHostControl,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
 }
 
@@ -249,7 +249,6 @@ pub async fn run(
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
 
-    let registry = ActorRegistry::new();
     let (worktrees, bindings) = actor_worktree_resources(&config.workspace)?;
     let bindings = Arc::new(Mutex::new(bindings));
     let worktree_authority =
@@ -260,17 +259,9 @@ pub async fn run(
         worktrees.clone(),
         worktree_authority.clone(),
     )?;
-    let mut host = ResidentActorHost::new(
-        registry.clone(),
-        source,
-        Arc::new(NoResidentProvider),
-        None,
-        ResidentLifecyclePolicy::default(),
-    )?;
-    let deployments = host.take_deployments()?;
-    let control = host.control();
-    let root_actor = host.launch_root(root).await?;
-    worktree_authority.install_root(root_actor.into());
+    let (root_actor, mut root_task, deployments) =
+        spawn_resident_root(source, Arc::new(NoResidentProvider), None, root).await?;
+    worktree_authority.install_root(root_actor.identity().into());
 
     let tmux = TmuxSession::new(&config.tmux_session)?;
     if !tmux.exists().await? {
@@ -281,20 +272,16 @@ pub async fn run(
     }
     let backend = native_interactive_backend();
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let mut host_task =
-        tokio::spawn(host.run_until_shutdown(wait_for_shutdown(shutdown_rx.clone())));
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         InteractiveFleet {
-            registry,
-            root: root_actor,
+            root: root_actor.clone(),
             config,
             run_root,
             tmux,
             backend,
             worktrees,
             bindings,
-            control,
             readiness,
         },
         shutdown_rx,
@@ -302,12 +289,7 @@ pub async fn run(
 
     enum FirstStop {
         Signal,
-        Host(
-            Result<
-                tidepool_actor::ResidentHostShutdownReport,
-                tidepool_actor::ResidentActorHostError,
-            >,
-        ),
+        Root,
         Applications(Result<(), String>),
     }
     let first = tokio::select! {
@@ -315,23 +297,37 @@ pub async fn run(
             signal?;
             FirstStop::Signal
         }
-        result = &mut host_task => FirstStop::Host(result.map_err(join_error)?),
+        result = &mut root_task => {
+            result.map_err(join_error)?;
+            FirstStop::Root
+        },
         result = &mut applications_task => FirstStop::Applications(result.map_err(join_error)?),
     };
     shutdown.send_replace(true);
 
     match first {
         FirstStop::Signal => {
-            host_task.await.map_err(join_error)??;
+            root_actor
+                .shutdown(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "Shoal operator requested shutdown".into(),
+                })
+                .await?;
+            root_task.await.map_err(join_error)?;
             await_applications(&mut applications_task).await?;
         }
-        FirstStop::Host(result) => {
-            result?;
+        FirstStop::Root => {
             await_applications(&mut applications_task).await?;
         }
         FirstStop::Applications(result) => {
             result.map_err(runtime_error)?;
-            host_task.await.map_err(join_error)??;
+            root_actor
+                .shutdown(ActorTerminal {
+                    kind: ActorExitKind::Failed,
+                    summary: "Shoal interactive application fleet stopped".into(),
+                })
+                .await?;
+            root_task.await.map_err(join_error)?;
         }
     }
     Ok(())
@@ -511,12 +507,11 @@ fn render_root_compile_failure(
 }
 
 async fn run_interactive_applications(
-    mut lifecycle: mpsc::UnboundedReceiver<ResidentActorDeployment>,
+    mut lifecycle: mpsc::UnboundedReceiver<LocalResidentDeployment>,
     fleet: InteractiveFleet,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let InteractiveFleet {
-        registry,
         root,
         config,
         run_root,
@@ -524,11 +519,11 @@ async fn run_interactive_applications(
         backend,
         worktrees,
         bindings,
-        control,
         readiness,
     } = fleet;
+    let root_identity = root.identity();
     let launch_context = InteractiveLaunchContext {
-        root,
+        root: root_identity,
         config,
         run_root,
         tmux: tmux.clone(),
@@ -540,6 +535,7 @@ async fn run_interactive_applications(
     let mut launches = JoinSet::new();
     let mut binding_discoveries = JoinSet::new();
     let mut pending_launches = HashMap::new();
+    let mut retired_correlations: HashMap<ActorRef, (String, Option<String>)> = HashMap::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
@@ -558,19 +554,17 @@ async fn run_interactive_applications(
                             ))
                 }) {
                     let actor = deployments[index].actor;
+                    let local_actor = deployments[index].local_actor.clone();
                     deployments[index].failure_reported = true;
                     let detail = "interactive application exited before actor settlement".to_string();
-                    if actor == root {
+                    if actor == root_identity {
                         break Some(format!("root {actor:?}: {detail}"));
                     }
-                    let result = control
-                        .fail_external_application(
-                            actor,
-                            ExternalApplicationFailure {
-                                class: ExternalApplicationFailureClass::UnexpectedExit,
-                                detail,
-                            },
-                        )
+                    let result = local_actor
+                        .report_external_failure(ExternalApplicationFailure {
+                            class: ExternalApplicationFailureClass::UnexpectedExit,
+                            detail,
+                        })
                         .await;
                     match result {
                         Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
@@ -586,10 +580,10 @@ async fn run_interactive_applications(
             event = lifecycle.recv() => {
                 let Some(event) = event else { break None };
                 match event {
-                    ResidentActorDeployment::PolicyInstalled(installation) => {
+                    LocalResidentDeployment::PolicyInstalled(installation) => {
                         let context = launch_context.clone();
-                        let actor = installation.actor;
-                        let worker_handle = (actor != root)
+                        let actor = installation.actor.identity();
+                        let worker_handle = (actor != root_identity)
                             .then_some(installation.launch_worktrees.as_slice())
                             .and_then(|worktrees| match worktrees {
                                 [worktree] => Some(worktree.clone()),
@@ -601,38 +595,40 @@ async fn run_interactive_applications(
                             PendingInteractiveLaunch {
                                 cancel,
                                 worker_handle,
+                                label: installation.label.clone(),
                             },
                         );
                         debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
                         launches.spawn(async move {
+                            let local_actor = installation.actor.clone();
                             let result = launch_interactive_application(
                                 installation,
                                 context,
                                 cancelled,
                             ).await;
-                            (actor, result)
+                            (local_actor, result)
                         });
                     }
-                    ResidentActorDeployment::Retired { actor, terminal } => {
-                        let pending_worker_handle = pending_launches.remove(&actor).and_then(|pending| {
+                    LocalResidentDeployment::Retired { actor, terminal } => {
+                        let pending = pending_launches.remove(&actor);
+                        if let Some(pending) = pending {
                             let _ = pending.cancel.send(());
-                            pending.worker_handle
-                        });
-                        match prepare_owner_notification(
-                            actor,
-                            &terminal,
-                            &registry,
-                            &deployments,
-                            pending_worker_handle.as_deref(),
-                        ) {
-                            Ok(Some(notification)) => {
-                                notifications.spawn(publish_owner_notification(notification));
-                            }
-                            Ok(None) => {}
-                            Err(error) => break Some(error),
+                            retired_correlations.insert(
+                                actor,
+                                (pending.label, pending.worker_handle),
+                            );
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
+                            retired_correlations.entry(actor).or_insert_with(|| {
+                                (
+                                    deployment.label.clone(),
+                                    deployment
+                                        .worktree
+                                        .as_ref()
+                                        .map(|worktree| worktree.id().to_string()),
+                                )
+                            });
                             let tmux = tmux.clone();
                             let bindings = Arc::clone(&bindings);
                             let binding_terminal = if terminal.kind == ActorExitKind::Completed {
@@ -650,15 +646,26 @@ async fn run_interactive_applications(
                             });
                         }
                     }
+                    LocalResidentDeployment::ChildExited(notice) => {
+                        let retired = retired_correlations.remove(&notice.child.identity());
+                        if let Some(notification) = prepare_owner_notification(
+                            &notice,
+                            &deployments,
+                            retired.as_ref(),
+                        ) {
+                            notifications.spawn(publish_owner_notification(notification));
+                        }
+                    }
                 }
             }
             launched = launches.join_next(), if !launches.is_empty() => {
                 match launched {
-                    Some(Ok((actor, Ok(Some(launched))))) => {
+                    Some(Ok((local_actor, Ok(Some(launched))))) => {
+                        let actor = local_actor.identity();
                         pending_launches.remove(&actor);
                         let deployment = launched.deployment;
-                        if actor == root {
-                            let _ = readiness.send(ActorHostReadiness::AwaitingInput { root });
+                        if actor == root_identity {
+                            let _ = readiness.send(ActorHostReadiness::AwaitingInput { root: root_identity });
                         }
                         let pane = deployment.pane.clone();
                         let tmux = tmux.clone();
@@ -674,22 +681,21 @@ async fn run_interactive_applications(
                         });
                         deployments.push(deployment);
                     }
-                    Some(Ok((actor, Ok(None)))) => {
+                    Some(Ok((local_actor, Ok(None)))) => {
+                        let actor = local_actor.identity();
                         pending_launches.remove(&actor);
                     }
-                    Some(Ok((actor, Err(error)))) => {
+                    Some(Ok((local_actor, Err(error)))) => {
+                        let actor = local_actor.identity();
                         pending_launches.remove(&actor);
-                        if actor == root {
+                        if actor == root_identity {
                             break Some(error.to_string());
                         }
-                        let result = control
-                            .fail_external_application(
-                                actor,
-                                ExternalApplicationFailure {
-                                    class: error.operation.failure_class(),
-                                    detail: error.detail,
-                                },
-                            )
+                        let result = local_actor
+                            .report_external_failure(ExternalApplicationFailure {
+                                class: error.operation.failure_class(),
+                                detail: error.detail,
+                            })
                             .await;
                         match result {
                             Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
@@ -729,9 +735,9 @@ async fn run_interactive_applications(
                             delivery_shutdown,
                             delivery,
                         };
-                        if actor == root {
+                        if actor == root_identity {
                             let _ = readiness.send(ActorHostReadiness::Ready {
-                                root,
+                                root: root_identity,
                                 thread,
                             });
                         }
@@ -741,17 +747,21 @@ async fn run_interactive_applications(
                             continue;
                         };
                         deployment.failure_reported = true;
-                        if actor == root {
+                        if actor == root_identity {
                             break Some(error.to_string());
                         }
-                        let result = control
-                            .fail_external_application(
-                                actor,
-                                ExternalApplicationFailure {
-                                    class: error.operation.failure_class(),
-                                    detail: error.detail,
-                                },
-                            )
+                        let Some(local_actor) = deployments
+                            .iter()
+                            .find(|application| application.actor == actor)
+                            .map(|application| application.local_actor.clone())
+                        else {
+                            break Some(format!("lost exact local actor for failed application {actor:?}"));
+                        };
+                        let result = local_actor
+                            .report_external_failure(ExternalApplicationFailure {
+                                class: error.operation.failure_class(),
+                                detail: error.detail,
+                            })
                             .await;
                         match result {
                             Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
@@ -854,11 +864,11 @@ async fn run_interactive_applications(
 }
 
 async fn launch_interactive_application(
-    installation: ResidentMcpInstallation,
+    installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<()>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
-    let actor = installation.actor;
+    let actor = installation.actor.identity();
     let prepared = prepare_actor_worktree(&installation, &context)?;
     let worktree = prepared.as_ref().map(|(handle, _)| handle.clone());
     let result =
@@ -890,10 +900,10 @@ async fn launch_interactive_application(
 }
 
 fn prepare_actor_worktree(
-    installation: &ResidentMcpInstallation,
+    installation: &LocalResidentInstallation,
     context: &InteractiveLaunchContext,
 ) -> Result<Option<(WorktreeHandle, ActiveBinding)>, InteractiveApplicationError> {
-    let actor = installation.actor;
+    let actor = installation.actor.identity();
     let raw_id =
         match actor_workspace_request(actor == context.root, &installation.launch_worktrees)
             .map_err(|detail| {
@@ -1020,7 +1030,7 @@ async fn serve_actor_mcp_endpoint(
 }
 
 async fn launch_prepared_interactive_application(
-    installation: ResidentMcpInstallation,
+    installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<()>,
@@ -1035,16 +1045,17 @@ async fn launch_prepared_interactive_application(
         bindings: _,
     } = context;
     let actor = installation.actor;
+    let actor_identity = actor.identity();
     let workspace = worktree.as_ref().map_or_else(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
     );
     let git_common_dir =
         tidepool_worktree::git::inspect::git_common_dir(worktrees.git(), &workspace).map_err(
-            |error| application_error(actor, InteractiveOperation::PrepareRuntime, error),
+            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
         )?;
     let writable_roots = writable_repository_roots(
-        actor == root,
+        actor_identity == root,
         &config.workspace,
         worktree.as_ref().map(WorktreeHandle::cwd),
         &git_common_dir,
@@ -1060,13 +1071,19 @@ async fn launch_prepared_interactive_application(
         writable_roots,
     )
     .and_then(|boundary| boundary.with_project_root(&agent_workspace))
-    .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
+    .map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
-    let actor_root = run_root.join(format!("{}-{}", actor.id.0, actor.incarnation.0));
-    std::fs::create_dir_all(&actor_root)
-        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
+    let actor_root = run_root.join(format!(
+        "{}-{}",
+        actor_identity.id.0, actor_identity.incarnation.0
+    ));
+    std::fs::create_dir_all(&actor_root).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
     let run_socket_id = run_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -1074,16 +1091,18 @@ async fn launch_prepared_interactive_application(
     let socket_root = std::env::temp_dir().join(format!(
         "tidepool-{}-{}-{}",
         &run_socket_id[..run_socket_id.len().min(8)],
-        actor.id.0,
-        actor.incarnation.0
+        actor_identity.id.0,
+        actor_identity.incarnation.0
     ));
-    std::fs::create_dir_all(&socket_root)
-        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
+    std::fs::create_dir_all(&socket_root).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
     let endpoint = socket_root.join("mcp.sock");
-    let listener = UnixListener::bind(&endpoint)
-        .map_err(|error| application_error(actor, InteractiveOperation::BindProxy, error))?;
+    let listener = UnixListener::bind(&endpoint).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::BindProxy, error)
+    })?;
     let credential = NodeCredential(uuid::Uuid::new_v4().to_string());
-    let binding_path = if actor == root {
+    let binding_path = if actor_identity == root {
         config.root_binding_path.clone()
     } else {
         actor_root.join("binding.json")
@@ -1093,16 +1112,18 @@ async fn launch_prepared_interactive_application(
             actor_root.join("inbox.jsonl"),
             actor_root.join("inbox.cursor"),
         )
-        .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?,
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?,
     );
     let binding = InteractiveProxyBinding {
-        actor,
+        actor: actor_identity,
         endpoint,
         credential: credential.clone(),
         binding_path: binding_path.clone(),
         workspace: agent_workspace.clone(),
     };
-    let launch_mode = if actor == root {
+    let launch_mode = if actor_identity == root {
         config.root_launch_mode.clone()
     } else {
         InteractiveLaunchMode::Fresh
@@ -1112,7 +1133,7 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
     };
     let developer_instructions =
-        developer_instructions(actor == root, worktree.is_some(), &launch_mode);
+        developer_instructions(actor_identity == root, worktree.is_some(), &launch_mode);
     let proxy_environment = binding.environment();
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
@@ -1130,9 +1151,9 @@ async fn launch_prepared_interactive_application(
             required: true,
         },
     };
-    let command = backend
-        .render(&spec)
-        .map_err(|error| application_error(actor, InteractiveOperation::BuildCommand, error))?;
+    let command = backend.render(&spec).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::BuildCommand, error)
+    })?;
     let command = process_boundary.wrap(
         BUBBLEWRAP_PROGRAM,
         ProcessInvocation {
@@ -1140,10 +1161,14 @@ async fn launch_prepared_interactive_application(
             args: command.args,
         },
     );
-    let server = DynamicMcpServer::from_resident_policy(installation.policy)
-        .map_err(|error| application_error(actor, InteractiveOperation::BuildPolicy, error))?;
+    let server = DynamicMcpServer::from_resident_policy(installation.policy).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::BuildPolicy, error)
+    })?;
     let service = tokio::spawn(serve_actor_mcp_endpoint(
-        listener, server, actor, credential,
+        listener,
+        server,
+        actor_identity,
+        credential,
     ));
     if cancelled.try_recv().is_ok() {
         service.abort();
@@ -1154,12 +1179,15 @@ async fn launch_prepared_interactive_application(
     let launch_environment = actor_launch_environment(
         config.pane_environment.clone(),
         proxy_environment,
-        actor == root,
+        actor_identity == root,
     );
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
         tmux.spawn_window(&TmuxLaunch {
-            window_name: format!("actor-{}-{}", actor.id.0, actor.incarnation.0),
+            window_name: format!(
+                "actor-{}-{}",
+                actor_identity.id.0, actor_identity.incarnation.0
+            ),
             cwd: workspace.clone(),
             program: command.program,
             args: command.args,
@@ -1175,7 +1203,7 @@ async fn launch_prepared_interactive_application(
             let _ = service.await;
             let _ = std::fs::remove_dir_all(&socket_root);
             return Err(application_error(
-                actor,
+                actor_identity,
                 InteractiveOperation::LaunchProcess,
                 error,
             ));
@@ -1185,18 +1213,18 @@ async fn launch_prepared_interactive_application(
             let _ = service.await;
             let _ = std::fs::remove_dir_all(&socket_root);
             return Err(application_error(
-                actor,
+                actor_identity,
                 InteractiveOperation::LaunchProcess,
                 format!("tmux launch exceeded {PROCESS_OPERATION_TIMEOUT:?}"),
             ));
         }
     };
 
-    if actor == root {
+    if actor_identity == root {
         if let Err(error) = tmux.select_window_for_pane(&pane).await {
             abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
             return Err(application_error(
-                actor,
+                actor_identity,
                 InteractiveOperation::LaunchProcess,
                 error,
             ));
@@ -1208,7 +1236,9 @@ async fn launch_prepared_interactive_application(
     }
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
-            actor,
+            actor: actor_identity,
+            local_actor: actor,
+            label: installation.label,
             pane,
             workspace,
             inbox,
@@ -1326,21 +1356,20 @@ async fn run_delivery_pump(
 }
 
 fn prepare_owner_notification(
-    actor: ActorRef,
-    terminal: &ActorTerminal,
-    registry: &ActorRegistry,
+    notice: &tidepool_actor::ChildExitNotice,
     deployments: &[InteractiveDeployment],
-    pending_worker_handle: Option<&str>,
-) -> Result<Option<OwnerNotification>, String> {
-    let Some(owner) = registry.owner(actor).map_err(|error| error.to_string())? else {
-        return Ok(None);
-    };
-    let Some(owner_application) = deployments.iter().find(|app| app.actor == owner) else {
-        return Ok(None);
-    };
-    let descriptor = registry
-        .descriptor(actor)
-        .map_err(|error| error.to_string())?;
+    retired: Option<&(String, Option<String>)>,
+) -> Option<OwnerNotification> {
+    let actor = notice.child.identity();
+    let terminal = &notice.terminal;
+    let owner_application = deployments.iter().find(|app| app.actor == notice.owner)?;
+    let label = deployments
+        .iter()
+        .find(|application| application.actor == actor)
+        .map(|application| application.label.as_str())
+        .or_else(|| retired.map(|(label, _)| label.as_str()))
+        .unwrap_or("child");
+    let pending_worker_handle = retired.and_then(|(_, handle)| handle.as_deref());
     let kind = match terminal.kind {
         ActorExitKind::Completed => "completed",
         ActorExitKind::Failed => "failed",
@@ -1363,14 +1392,14 @@ fn prepare_owner_notification(
         .unwrap_or_default();
     let message = format!(
         "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This wake is the cue to use `session_run`, call `collectWorkerResult handle sessionInput` once, and return its updated records with `complete`; it carries correlation only. If that worker was already acknowledged, no further action is required.",
-        descriptor.label(),
+        label,
         actor,
         terminal.summary
     );
-    Ok(Some(OwnerNotification {
+    Some(OwnerNotification {
         inbox: Arc::clone(&owner_application.inbox),
         message,
-    }))
+    })
 }
 
 async fn publish_owner_notification(notification: OwnerNotification) -> Result<(), String> {
@@ -1605,7 +1634,6 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_actor::ResidentHostParkedKind;
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
         ToolDeclaration, ToolKind,
@@ -1981,33 +2009,20 @@ mod tests {
             runtime_namespace(session_root.path()),
             Arc::clone(&bindings),
         );
-        let registry = ActorRegistry::new();
         let (source, root) =
             compile_root(&config, session_root.path(), worktrees, authority.clone())
                 .expect("compile root policy");
-        let mut host = ResidentActorHost::new(
-            registry,
-            source,
-            Arc::new(NoResidentProvider),
-            None,
-            ResidentLifecyclePolicy::default(),
-        )
-        .expect("construct host");
-        let mut deployments = host.take_deployments().expect("take deployment stream");
-        let actor = host.launch_root(root).await.expect("launch root");
-        authority.install_root(actor.into());
-        let report = host.run_until_idle().await.expect("install policy");
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
-        assert_eq!(
-            report.parked[&ResidentHostParkedKind::InteractiveSession],
-            1
-        );
-        let ResidentActorDeployment::PolicyInstalled(root_installation) =
+        let (actor, hosted, mut deployments) =
+            spawn_resident_root(source, Arc::new(NoResidentProvider), None, root)
+                .await
+                .expect("spawn resident root");
+        authority.install_root(actor.identity().into());
+        let LocalResidentDeployment::PolicyInstalled(root_installation) =
             deployments.try_recv().expect("root policy installation")
         else {
             panic!("root policy retired before installation");
         };
-        assert_eq!(root_installation.actor, actor);
+        assert_eq!(root_installation.actor.identity(), actor.identity());
         assert_eq!(root_installation.initial_user_message, None);
         let policy = root_installation.policy;
         let names = policy
@@ -2025,10 +2040,6 @@ mod tests {
         assert!(session_run.description.contains("GHCi-style"));
 
         let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
-        let (request_shutdown, shutdown_requested) = tokio::sync::oneshot::channel();
-        let hosted = tokio::spawn(host.run_until_shutdown(async move {
-            let _ = shutdown_requested.await;
-        }));
         let bound_start = server
             .dispatch_tool(
                 "session_run",
@@ -2101,7 +2112,7 @@ mod tests {
                 .await
                 .expect("worker installation timeout")
                 .expect("worker session installation");
-            let ResidentActorDeployment::PolicyInstalled(worker) = worker else {
+            let LocalResidentDeployment::PolicyInstalled(worker) = worker else {
                 panic!("worker retired before session installation");
             };
             assert_eq!(worker.launch_worktrees.len(), 1);
@@ -2131,8 +2142,8 @@ mod tests {
         let worker_tree = WorktreeId::from_raw(recursive_worker.launch_worktrees[0].clone());
         let worker_principal = WorktreePrincipal::exact_actor(
             &runtime_namespace(session_root.path()),
-            recursive_worker.actor.id.0,
-            recursive_worker.actor.incarnation.0,
+            recursive_worker.actor.identity().id.0,
+            recursive_worker.actor.identity().incarnation.0,
         );
         let worker_binding = bindings
             .lock()
@@ -2194,7 +2205,7 @@ mod tests {
             .await
             .expect("nested installation timeout")
             .expect("nested session installation");
-        let ResidentActorDeployment::PolicyInstalled(nested) = nested else {
+        let LocalResidentDeployment::PolicyInstalled(nested) = nested else {
             panic!("nested actor retired before session installation");
         };
         assert_eq!(
@@ -2204,12 +2215,14 @@ mod tests {
         worker_binding
             .release(&mut bindings.lock())
             .expect("release worker binding");
-        request_shutdown.send(()).expect("request shutdown");
-        let shutdown = hosted.await.expect("host task").expect("shutdown host");
-        assert!(
-            !result.is_error.unwrap_or(false),
-            "{result:?}; host failures: {:?}",
-            shutdown.run.failures
-        );
+        actor
+            .shutdown(ActorTerminal {
+                kind: ActorExitKind::Cancelled,
+                summary: "test complete".into(),
+            })
+            .await
+            .expect("shutdown root");
+        hosted.await.expect("root actor task");
+        assert!(!result.is_error.unwrap_or(false), "{result:?}");
     }
 }
