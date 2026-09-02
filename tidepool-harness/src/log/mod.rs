@@ -23,7 +23,6 @@ use serde_json::Value;
 use crate::provider::{Role, Usage};
 use crate::tree::{FanBadge, HoleId, NodeId, PriceClass, SiteId};
 
-mod actor_adapter;
 mod reader;
 mod version;
 mod writer;
@@ -31,7 +30,6 @@ mod writer;
 #[cfg(test)]
 mod tests;
 
-pub use actor_adapter::{read_actor_events, ActorEventAdapter};
 pub use reader::{EventIter, LogReader, ReadError};
 pub use writer::{LogWriter, WriteError};
 

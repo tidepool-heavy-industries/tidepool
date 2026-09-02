@@ -40,8 +40,8 @@ data ActorRef (protocol :: Type -> Type) exit where
   ActorRef :: Int -> Int -> ExitCell pending exit -> ActorRef protocol exit
 
 -- | Experimental named profiles for resident Haskell effect rows. The witness
--- fixes the child row; Rust independently validates spawn attenuation and
--- installed interpreters authorize nominal requests. These profiles do not
+-- fixes the child row, while Rust independently validates spawn attenuation
+-- and principal- or grant-sensitive operations. These profiles do not
 -- sandbox native tools belonging to an attached coding-agent process.
 data EffectProfile (protocol :: Type -> Type) effs where
   ReadOnly :: EffectProfile protocol (ReadOnlyEffects protocol)

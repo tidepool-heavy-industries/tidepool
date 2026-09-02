@@ -1,9 +1,16 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::ActorExitKind;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorExitKind {
+    Completed,
+    Failed,
+    Cancelled,
+}
 
 /// Immutable lifecycle result for one exact actor incarnation.
 ///

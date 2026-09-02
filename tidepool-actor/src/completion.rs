@@ -18,9 +18,8 @@ use tidepool_runtime::YieldSite;
 
 use crate::generated::deliberate::DeliberateReq;
 use crate::{
-    run_result_session, ActorAgentSession, ActorMachineRegistry, ActorRegistryError,
-    ActorWorkbenchSource, AgentExecutionError, CompletionExpectation, ResidentActorWorkbench,
-    ResidentActorWorkbenchError, TurnLease,
+    run_result_session, ActorMachineRegistry, ActorWorkbenchSource, AgentExecutionError,
+    CompletionExpectation, ResidentActorWorkbench, ResidentActorWorkbenchError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,8 +147,6 @@ impl ResidentCompletion {
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentCompletionError {
     #[error(transparent)]
-    Admission(#[from] ActorRegistryError),
-    #[error(transparent)]
     Workbench(#[from] ResidentActorWorkbenchError),
     #[error(transparent)]
     Execution(#[from] AgentExecutionError<ResidentActorWorkbenchError>),
@@ -197,27 +194,6 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    /// Resolve one public `deliberate` suspension and resume the exact
-    /// authored Haskell continuation. Actor admission transitions Haskell →
-    /// agent session → Haskell without a release gap; the resident machine is
-    /// checked out only for input mounting, fenced execution, and final
-    /// continuation resumption.
-    pub async fn resolve(
-        &self,
-        agent: &ActorAgentSession,
-        haskell_turn: TurnLease,
-        provider: &dyn DynModelProvider,
-        completion: ResidentCompletion,
-        sink: Option<StreamSink>,
-    ) -> Result<(TurnLease, ResidentOutcome), ResidentCompletionError> {
-        let mut admitted = agent.enter_from_haskell_turn(haskell_turn)?;
-        let outcome = self
-            .resolve_admitted(&mut admitted, provider, completion, sink)
-            .await?;
-        let haskell_turn = admitted.return_to_haskell()?;
-        Ok((haskell_turn, outcome))
-    }
-
     pub(crate) async fn resolve_admitted(
         &self,
         admitted: &mut crate::AdmittedAgentSession,

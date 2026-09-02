@@ -4230,7 +4230,6 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "thiserror",
- "tidepool-actor",
  "tidepool-agent",
  "tidepool-atomic-write",
  "tidepool-bridge",

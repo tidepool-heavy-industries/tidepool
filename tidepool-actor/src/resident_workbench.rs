@@ -23,9 +23,7 @@ use tidepool_runtime::session::{
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
-use crate::{
-    ActorCompileViewError, ActorRegistryError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench,
-};
+use crate::{ActorCompileViewError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench};
 
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
@@ -82,7 +80,7 @@ pub struct ResidentActorWorkbench<H, O> {
 /// Live execution state for one workbench item that suspended on an actor
 /// effect. The continuation and any value it binds remain owned by the
 /// actor's resource scope; this value only carries the item-local rendering
-/// state needed while the host settles nominal effects.
+/// state needed while the actor interpreter settles nominal effects.
 pub(crate) struct ResidentWorkbenchFragment {
     bound_name: Option<String>,
     output: Vec<String>,
@@ -349,8 +347,6 @@ impl<H, O> ResidentActorWorkbench<H, O> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
-    #[error(transparent)]
-    Registry(#[from] ActorRegistryError),
     #[error(transparent)]
     CompileView(#[from] ActorCompileViewError),
     #[error("resident machine checkout failed: {0}")]
@@ -858,7 +854,7 @@ where
                         ..,
                     )) => {
                         let target =
-                            crate::ActorWait::decode_target(&request, session.data_con_table())?;
+                            crate::wait::decode_wait_target(&request, session.data_con_table())?;
                         Ok(ResidentActorBoundary::Wait(ResidentWaitRequest {
                             target,
                             continuation: hole,
@@ -954,11 +950,10 @@ where
                                 specs: json(&specs),
                                 continuation: hole,
                             },
-                            Request::WorkerAttachWith(handle, (id, incarnation), worktree) => {
+                            Request::WorkerAttachWith(handle, (id, incarnation)) => {
                                 Captured::Attach {
                                     handle,
                                     actor: crate::wait::decode_address(id, incarnation)?,
-                                    worktree,
                                     continuation: hole,
                                 }
                             }
@@ -1155,19 +1150,6 @@ where
             .await
     }
 
-    pub(crate) async fn capture_receiver(
-        &self,
-        context: crate::ActorSessionContext,
-        outcome: ResidentOutcome,
-        actor_realm: RealmId,
-    ) -> Result<InstalledReceiver, ResidentActorWorkbenchError> {
-        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
-        match boundary {
-            ResidentActorBoundary::Receive(receiver) => Ok(receiver),
-            other => Err(unexpected_boundary("receive", &other)),
-        }
-    }
-
     pub(crate) async fn run_mailbox_handler(
         &self,
         context: crate::ActorSessionContext,
@@ -1188,32 +1170,6 @@ where
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
-    }
-
-    pub(crate) async fn capture_outbound(
-        &self,
-        context: crate::ActorSessionContext,
-        outcome: ResidentOutcome,
-    ) -> Result<ResidentOutbound, ResidentActorWorkbenchError> {
-        let actor_realm = context.placement.resource_scope;
-        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
-        match boundary {
-            ResidentActorBoundary::Outbound(outbound) => Ok(outbound),
-            other => Err(unexpected_boundary("call or cast", &other)),
-        }
-    }
-
-    pub(crate) async fn capture_wait(
-        &self,
-        context: crate::ActorSessionContext,
-        outcome: ResidentOutcome,
-    ) -> Result<ResidentWaitRequest, ResidentActorWorkbenchError> {
-        let actor_realm = context.placement.resource_scope;
-        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
-        match boundary {
-            ResidentActorBoundary::Wait(wait) => Ok(wait),
-            other => Err(unexpected_boundary("awaitExit", &other)),
-        }
     }
 
     pub(crate) async fn capture_kernel_value(

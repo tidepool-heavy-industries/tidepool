@@ -1,20 +1,18 @@
 //! Rust-owned substrate for self-writing Haskell actors.
 //!
 //! Owns exact actor identity and lifecycle, typed live-value mailboxes,
-//! resident agent sessions, Haskell actor startup, supervision, and the
-//! neutral event stream. Machine execution remains in `tidepool-runtime`;
+//! resident agent sessions, Haskell actor startup, and supervision. Machine
+//! execution remains in `tidepool-runtime`;
 //! provider transport remains behind `tidepool-model`'s seams.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
 mod agent_session;
-mod authorization;
 mod completion;
-mod event;
+mod descriptor;
 mod executor;
 mod external_application;
 mod generated;
-mod host;
 mod identity;
 mod interactive_session;
 mod kernel;
@@ -22,16 +20,12 @@ mod local_actor;
 mod mailbox;
 mod mount;
 mod profile;
-mod registry;
 mod resident_actor;
 mod resident_interactive;
-mod resident_lifecycle;
-mod resident_mailbox;
 mod resident_mcp;
 mod resident_workbench;
 mod start;
 mod termination;
-mod timeline;
 mod wait;
 mod worker_ledger;
 mod worker_runtime;
@@ -39,26 +33,16 @@ mod worker_runtime;
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
 };
-pub use authorization::{ActorEffectRefusal, ActorOperationClass, ActorProfileHandler};
 pub use completion::{
     CompletionCaptureError, CompletionRequest, CompletionRequestError, ResidentCompletion,
     ResidentCompletionError, ResidentCompletionExecutor,
 };
-pub use event::{
-    ActorEvent, ActorEventRecord, ActorExitKind, ActorRole, AnswerDisposition, CallDisposition,
-    EventCausality, MailboxMessageKind, ModelUsage, StartInitiator, WaitDisposition,
-};
+pub use descriptor::ActorDescriptor;
 pub use executor::{
     run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
 };
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
-};
-pub use host::{
-    ResidentActorDeployment, ResidentActorHost, ResidentActorHostControl,
-    ResidentActorHostControlError, ResidentActorHostError, ResidentActorRoot,
-    ResidentHostParkedKind, ResidentHostRunReport, ResidentHostShutdownReport,
-    ResidentHostTaskError, ResidentMcpInstallation,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
@@ -72,46 +56,29 @@ pub use local_actor::{
     spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
     KernelStep, LocalActor, LocalActorArguments, LocalActorDirectory, LocalActorState,
 };
-pub use mailbox::{
-    CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
-    MessageId, ParkedObligation, WaitError, WaitId, WaitTicket,
-};
+pub use mailbox::MailboxValue;
 pub use mount::{
-    mount_actor_turn, ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget,
-    ActorSessionContext, ActorSourceImports, MountActorTurnError,
+    ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
+    ActorSourceImports,
 };
 pub use profile::ActorEffectProfile;
-pub use registry::{
-    ActorDescriptor, ActorLifecycle, ActorRegistry, ActorRegistryError, ActorRuntimeWake,
-    ActorRuntimeWakes, ActorTurnKind, CallDelivery, CastDelivery, MailboxDelivery, StartingActor,
-    TurnLease,
-};
 pub use resident_actor::{
-    spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentKernelBehavior,
+    spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
+    ResidentKernelBehavior,
 };
 pub use resident_interactive::ResidentInteractivePolicy;
-pub use resident_lifecycle::{
-    ResidentActorLifecycle, ResidentLifecycleError, ResidentLifecyclePolicy,
-};
-pub use resident_mailbox::{
-    OutboundSettlement, ResidentActorMailbox, ResidentCall, ResidentCallPoll, ResidentMailboxError,
-    ResidentWait, ResidentWaitPoll,
-};
 pub use resident_mcp::{ResidentMcpEndpoint, ResidentMcpError, ResidentMcpPolicy};
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError,
 };
-pub use start::{
-    ActorStartCaptureError, ResidentActorStart, ResidentActorStartError, ResidentActorStarter,
-};
-pub use termination::{ActorExitAlreadyPublished, ActorTerminal, RetainedActorExit};
-pub use timeline::{ActorTimeline, ActorTimelines, TimelineError, TimelineLifecycle};
-pub use wait::{actor_terminal_value, ActorWait, ActorWaitError};
+pub use start::{ActorStartCaptureError, ResidentActorStart};
+pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
+pub use wait::{actor_terminal_value, ActorWaitError};
 pub use worker_ledger::{
-    AcceptedWorker, AcknowledgementDisposition, CustodyCleanup, ReservedWorker,
-    WorkerAcknowledgement, WorkerCollection, WorkerHandle, WorkerLedger, WorkerLedgerError,
-    WorkerPhase, WorkerReservation, WorkerSpec, WorkerSpecError, WorkerStartResult, WorkerSummary,
+    AcceptedWorker, AcknowledgementDisposition, ReservedWorker, WorkerAcknowledgement,
+    WorkerCollection, WorkerCustody, WorkerHandle, WorkerLedger, WorkerLedgerError, WorkerPhase,
+    WorkerReservation, WorkerSpec, WorkerSpecError, WorkerStartResult, WorkerSummary,
     WorkerTerminal,
 };
 pub use worker_runtime::WorkerWake;

@@ -1,8 +1,6 @@
-//! Interpreter-owned worker idempotency, result custody, and cleanup facts.
+//! Interpreter-owned worker idempotency, result custody, and retention facts.
 
 use std::collections::HashMap;
-
-use crate::LocalActorRef;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkerHandle(String);
@@ -138,10 +136,9 @@ pub enum AcknowledgementDisposition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CustodyCleanup {
-    Pending,
-    Released,
-    Deferred { detail: String },
+pub enum WorkerCustody {
+    /// V0 retains the managed worktree and branch for later inspection.
+    WorktreeRetained,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,13 +146,13 @@ pub enum WorkerAcknowledgement<R> {
     Acknowledged {
         handle: WorkerHandle,
         disposition: AcknowledgementDisposition,
-        cleanup: CustodyCleanup,
+        custody: WorkerCustody,
         outcome: WorkerTerminal<R>,
     },
     AlreadyAcknowledged {
         handle: WorkerHandle,
         disposition: AcknowledgementDisposition,
-        cleanup: CustodyCleanup,
+        custody: WorkerCustody,
         outcome: WorkerTerminal<R>,
     },
     NotCollected(WorkerHandle),
@@ -178,9 +175,9 @@ pub struct WorkerSummary {
     pub phase: WorkerPhase,
 }
 
-enum EntryState<R, A> {
+enum EntryState<R> {
     Reserved,
-    Running(A),
+    Running,
     Terminal {
         outcome: WorkerTerminal<R>,
         collected: bool,
@@ -188,7 +185,7 @@ enum EntryState<R, A> {
     Acknowledged {
         outcome: WorkerTerminal<R>,
         disposition: AcknowledgementDisposition,
-        cleanup: CustodyCleanup,
+        custody: WorkerCustody,
     },
     StartFailed {
         detail: String,
@@ -196,10 +193,10 @@ enum EntryState<R, A> {
     },
 }
 
-struct WorkerEntry<R, A> {
+struct WorkerEntry<R> {
     spec: WorkerSpec,
     accepted: AcceptedWorker,
-    state: EntryState<R, A>,
+    state: EntryState<R>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -210,8 +207,6 @@ pub enum WorkerLedgerError {
     Unknown(WorkerHandle),
     #[error("worker is already terminal: {0}")]
     AlreadyTerminal(WorkerHandle),
-    #[error("worker cleanup is not pending: {0}")]
-    CleanupNotPending(WorkerHandle),
 }
 
 impl std::fmt::Display for WorkerHandle {
@@ -220,12 +215,12 @@ impl std::fmt::Display for WorkerHandle {
     }
 }
 
-pub struct WorkerLedger<R, A = LocalActorRef> {
+pub struct WorkerLedger<R> {
     by_key: HashMap<String, WorkerHandle>,
-    entries: HashMap<WorkerHandle, WorkerEntry<R, A>>,
+    entries: HashMap<WorkerHandle, WorkerEntry<R>>,
 }
 
-impl<R, A> Default for WorkerLedger<R, A> {
+impl<R> Default for WorkerLedger<R> {
     fn default() -> Self {
         Self {
             by_key: HashMap::new(),
@@ -234,7 +229,7 @@ impl<R, A> Default for WorkerLedger<R, A> {
     }
 }
 
-impl<R, A> WorkerLedger<R, A> {
+impl<R> WorkerLedger<R> {
     #[must_use]
     pub fn accepted(&self, handle: &WorkerHandle) -> Option<&AcceptedWorker> {
         self.entries.get(handle).map(|entry| &entry.accepted)
@@ -268,7 +263,7 @@ impl<R, A> WorkerLedger<R, A> {
                     accepted: entry.accepted.clone(),
                     detail: detail.clone(),
                 },
-                EntryState::Reserved | EntryState::Running(_) | EntryState::Terminal { .. } => {
+                EntryState::Reserved | EntryState::Running | EntryState::Terminal { .. } => {
                     WorkerStartResult::Existing(entry.accepted.clone())
                 }
             };
@@ -302,7 +297,6 @@ impl<R, A> WorkerLedger<R, A> {
     pub fn commit_started(
         &mut self,
         reservation: WorkerReservation,
-        actor: A,
     ) -> Result<(), WorkerLedgerError> {
         let handle = reservation.accepted.handle;
         let Some(entry) = self.entries.get_mut(&handle) else {
@@ -311,14 +305,13 @@ impl<R, A> WorkerLedger<R, A> {
         if !matches!(entry.state, EntryState::Reserved) {
             return Err(WorkerLedgerError::InvalidReservation(handle));
         }
-        entry.state = EntryState::Running(actor);
+        entry.state = EntryState::Running;
         Ok(())
     }
 
     pub fn commit_started_handle(
         &mut self,
         handle: &WorkerHandle,
-        actor: A,
     ) -> Result<(), WorkerLedgerError> {
         let Some(entry) = self.entries.get_mut(handle) else {
             return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
@@ -326,7 +319,7 @@ impl<R, A> WorkerLedger<R, A> {
         if !matches!(entry.state, EntryState::Reserved) {
             return Err(WorkerLedgerError::InvalidReservation(handle.clone()));
         }
-        entry.state = EntryState::Running(actor);
+        entry.state = EntryState::Running;
         Ok(())
     }
 
@@ -375,7 +368,7 @@ impl<R, A> WorkerLedger<R, A> {
         let Some(entry) = self.entries.get_mut(handle) else {
             return Err(WorkerLedgerError::Unknown(handle.clone()));
         };
-        if !matches!(entry.state, EntryState::Running(_)) {
+        if !matches!(entry.state, EntryState::Running) {
             return Err(WorkerLedgerError::AlreadyTerminal(handle.clone()));
         }
         entry.state = EntryState::Terminal {
@@ -383,14 +376,6 @@ impl<R, A> WorkerLedger<R, A> {
             collected: false,
         };
         Ok(())
-    }
-
-    #[must_use]
-    pub fn running_actor(&self, handle: &WorkerHandle) -> Option<&A> {
-        let EntryState::Running(actor) = &self.entries.get(handle)?.state else {
-            return None;
-        };
-        Some(actor)
     }
 
     #[must_use]
@@ -408,16 +393,14 @@ impl<R, A> WorkerLedger<R, A> {
     }
 }
 
-impl<R: Clone, A> WorkerLedger<R, A> {
+impl<R: Clone> WorkerLedger<R> {
     #[must_use]
     pub fn collect(&mut self, handle: &WorkerHandle) -> WorkerCollection<R> {
         let Some(entry) = self.entries.get_mut(handle) else {
             return WorkerCollection::NotFound(handle.clone());
         };
         match &mut entry.state {
-            EntryState::Reserved | EntryState::Running(_) => {
-                WorkerCollection::Pending(handle.clone())
-            }
+            EntryState::Reserved | EntryState::Running => WorkerCollection::Pending(handle.clone()),
             EntryState::Terminal { outcome, collected } => {
                 *collected = true;
                 WorkerCollection::Collected {
@@ -459,12 +442,12 @@ impl<R: Clone, A> WorkerLedger<R, A> {
                 entry.state = EntryState::Acknowledged {
                     outcome: outcome.clone(),
                     disposition: disposition.clone(),
-                    cleanup: CustodyCleanup::Pending,
+                    custody: WorkerCustody::WorktreeRetained,
                 };
                 WorkerAcknowledgement::Acknowledged {
                     handle: handle.clone(),
                     disposition,
-                    cleanup: CustodyCleanup::Pending,
+                    custody: WorkerCustody::WorktreeRetained,
                     outcome,
                 }
             }
@@ -478,27 +461,27 @@ impl<R: Clone, A> WorkerLedger<R, A> {
                 entry.state = EntryState::Acknowledged {
                     outcome: outcome.clone(),
                     disposition: disposition.clone(),
-                    cleanup: CustodyCleanup::Pending,
+                    custody: WorkerCustody::WorktreeRetained,
                 };
                 WorkerAcknowledgement::Acknowledged {
                     handle: handle.clone(),
                     disposition,
-                    cleanup: CustodyCleanup::Pending,
+                    custody: WorkerCustody::WorktreeRetained,
                     outcome,
                 }
             }
             EntryState::Acknowledged {
                 outcome,
                 disposition,
-                cleanup,
+                custody,
             } => WorkerAcknowledgement::AlreadyAcknowledged {
                 handle: handle.clone(),
                 disposition: disposition.clone(),
-                cleanup: cleanup.clone(),
+                custody: custody.clone(),
                 outcome: outcome.clone(),
             },
             EntryState::Reserved
-            | EntryState::Running(_)
+            | EntryState::Running
             | EntryState::Terminal {
                 collected: false, ..
             }
@@ -507,37 +490,12 @@ impl<R: Clone, A> WorkerLedger<R, A> {
             } => WorkerAcknowledgement::NotCollected(handle.clone()),
         }
     }
-
-    pub fn record_cleanup(
-        &mut self,
-        handle: &WorkerHandle,
-        cleanup: CustodyCleanup,
-    ) -> Result<(), WorkerLedgerError> {
-        let Some(entry) = self.entries.get_mut(handle) else {
-            return Err(WorkerLedgerError::Unknown(handle.clone()));
-        };
-        let EntryState::Acknowledged {
-            cleanup: retained, ..
-        } = &mut entry.state
-        else {
-            return Err(WorkerLedgerError::CleanupNotPending(handle.clone()));
-        };
-        match (&*retained, cleanup) {
-            (CustodyCleanup::Released, _) => {
-                Err(WorkerLedgerError::CleanupNotPending(handle.clone()))
-            }
-            (_, update) => {
-                *retained = update;
-                Ok(())
-            }
-        }
-    }
 }
 
-fn phase<R, A>(state: &EntryState<R, A>) -> WorkerPhase {
+fn phase<R>(state: &EntryState<R>) -> WorkerPhase {
     match state {
         EntryState::Reserved => WorkerPhase::Provisioning,
-        EntryState::Running(_) => WorkerPhase::Running,
+        EntryState::Running => WorkerPhase::Running,
         EntryState::Terminal {
             collected: false, ..
         } => WorkerPhase::Terminal,
@@ -566,7 +524,7 @@ mod tests {
 
     #[test]
     fn batch_reservation_is_ordered_independent_and_idempotent() {
-        let mut ledger = WorkerLedger::<String, ()>::default();
+        let mut ledger = WorkerLedger::<String>::default();
         let reserved = ledger.reserve_batch(vec![spec("a", "one\r\ntwo"), spec("b", "other")]);
         assert_eq!(reserved.len(), 2);
         let a = accepted(&reserved[0]);
@@ -593,13 +551,11 @@ mod tests {
 
     #[test]
     fn collection_is_replayable_and_acknowledgement_owns_cleanup() {
-        let mut ledger = WorkerLedger::<String, ()>::default();
+        let mut ledger = WorkerLedger::<String>::default();
         let mut reserved = ledger.reserve_batch(vec![spec("worker", "do work")]);
         let reservation = reserved[0].reservation.take().expect("reservation");
         let handle = reservation.accepted().handle.clone();
-        ledger
-            .commit_started(reservation, ())
-            .expect("commit start");
+        ledger.commit_started(reservation).expect("commit start");
         assert_eq!(
             ledger.collect(&handle),
             WorkerCollection::Pending(handle.clone())
@@ -621,18 +577,10 @@ mod tests {
         assert!(matches!(
             acknowledged,
             WorkerAcknowledgement::Acknowledged {
-                cleanup: CustodyCleanup::Pending,
+                custody: WorkerCustody::WorktreeRetained,
                 ..
             }
         ));
-        ledger
-            .record_cleanup(
-                &handle,
-                CustodyCleanup::Deferred {
-                    detail: "busy".into(),
-                },
-            )
-            .expect("record deferred cleanup");
         let repeated = ledger.acknowledge(
             &handle,
             AcknowledgementDisposition::Rejected {
@@ -643,7 +591,7 @@ mod tests {
             repeated,
             WorkerAcknowledgement::AlreadyAcknowledged {
                 disposition: AcknowledgementDisposition::IntegratedAs(ref oid),
-                cleanup: CustodyCleanup::Deferred { .. },
+                custody: WorkerCustody::WorktreeRetained,
                 ..
             } if oid == "abc123"
         ));
@@ -654,23 +602,11 @@ mod tests {
                 ..
             } if receipt == "receipt"
         ));
-        ledger
-            .record_cleanup(&handle, CustodyCleanup::Released)
-            .expect("cleanup completes");
-        assert_eq!(
-            ledger.record_cleanup(
-                &handle,
-                CustodyCleanup::Deferred {
-                    detail: "late failure".into(),
-                }
-            ),
-            Err(WorkerLedgerError::CleanupNotPending(handle))
-        );
     }
 
     #[test]
     fn failed_provisioning_is_collectible_acknowledgeable_and_tombstoned() {
-        let mut ledger = WorkerLedger::<String, ()>::default();
+        let mut ledger = WorkerLedger::<String>::default();
         let mut reserved = ledger.reserve_batch(vec![spec("worker", "do work")]);
         let accepted = accepted(&reserved[0]);
         ledger

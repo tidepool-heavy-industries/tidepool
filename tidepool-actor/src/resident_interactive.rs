@@ -5,10 +5,7 @@ use std::sync::Arc;
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 use tidepool_tool::{ToolDeclaration, ToolKind};
 
-use crate::resident_mcp::{
-    ResidentMcpClient, ResidentMcpEndpoint, ResidentMcpFuture, ResidentMcpInvocation,
-};
-use crate::ActorRef;
+use crate::resident_mcp::{ResidentMcpClient, ResidentMcpEndpoint, ResidentMcpFuture};
 
 pub(crate) const SESSION_RUN_TOOL: &str = "session_run";
 
@@ -18,13 +15,6 @@ pub struct ResidentInteractivePolicy {
 }
 
 impl ResidentInteractivePolicy {
-    pub(crate) fn new(
-        actor: ActorRef,
-        requests: tokio::sync::mpsc::UnboundedSender<ResidentMcpInvocation>,
-    ) -> Self {
-        Self::with_client(ResidentMcpClient::new(actor, requests))
-    }
-
     pub(crate) fn local(actor: crate::LocalActorRef) -> Self {
         Self::with_client(ResidentMcpClient::local(actor))
     }

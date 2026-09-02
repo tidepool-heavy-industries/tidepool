@@ -12,7 +12,7 @@ use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_model::{DynModelProvider, StreamSink};
 use tidepool_runtime::session::{
-    OutputSink, ParsedBlock, ResidentOutcome, RootCustody, WorkbenchItemReceipt,
+    OutputSink, ParsedBlock, ResidentOutcome, ResidentSession, RootCustody, WorkbenchItemReceipt,
     WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
 };
 use tokio::sync::mpsc;
@@ -27,9 +27,35 @@ use crate::{
     ActorSessionContext, ActorTerminal, ActorWorkbenchSource, ChildExitNotice,
     ExternalApplicationFailure, ExternalFailureDisposition, KernelBehavior, KernelBehaviorError,
     KernelCallFailure, KernelContext, KernelInvocationFailure, KernelMessage, KernelStep,
-    LocalActorRef, MailboxValue, ResidentActorRoot, ResidentActorRunner,
-    ResidentActorWorkbenchError, ResidentCompletionExecutor, ResidentMcpEndpoint,
+    LocalActorRef, MailboxValue, ResidentActorRunner, ResidentActorWorkbenchError,
+    ResidentCompletionExecutor, ResidentMcpEndpoint,
 };
+
+/// A compiled root at the point where ownership moves into its local actor.
+pub struct ResidentActorRoot<H, O> {
+    descriptor: ActorDescriptor,
+    machine: ResidentSession<H, O>,
+    outcome: ResidentOutcome,
+}
+
+impl<H, O> ResidentActorRoot<H, O> {
+    #[must_use]
+    pub fn new(
+        descriptor: ActorDescriptor,
+        machine: ResidentSession<H, O>,
+        outcome: ResidentOutcome,
+    ) -> Self {
+        Self {
+            descriptor,
+            machine,
+            outcome,
+        }
+    }
+
+    fn into_parts(self) -> (ActorDescriptor, ResidentSession<H, O>, ResidentOutcome) {
+        (self.descriptor, self.machine, self.outcome)
+    }
+}
 
 #[derive(Clone)]
 pub struct LocalResidentInstallation {
@@ -62,6 +88,7 @@ struct ResidentEnvironment<H, O> {
     workers: Arc<crate::worker_runtime::WorkerRuntime>,
     pending_worker_installations:
         Arc<Mutex<std::collections::HashMap<ActorRef, LocalResidentInstallation>>>,
+    retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -74,6 +101,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             deployments: self.deployments.clone(),
             workers: Arc::clone(&self.workers),
             pending_worker_installations: Arc::clone(&self.pending_worker_installations),
+            retired: Arc::clone(&self.retired),
         }
     }
 }
@@ -180,6 +208,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .insert(installation.actor.identity(), installation);
         }
     }
+
+    fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        if self.environment.retired.lock().insert(actor) {
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::Retired { actor, terminal });
+        }
+    }
 }
 
 impl<H, O> ResidentKernelBehavior<H, O>
@@ -196,9 +233,7 @@ where
                 "resident actor has no model transcript".into(),
             )
         })?;
-        let mut admitted = session
-            .begin_agent_session()
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let mut admitted = session.begin_agent_session();
         self.environment
             .completions
             .resolve_admitted(
@@ -465,7 +500,6 @@ where
             Request::Attach {
                 handle,
                 actor,
-                worktree,
                 continuation,
             } => {
                 if !kernel.owns_child(actor) {
@@ -480,7 +514,7 @@ where
                 let result = self
                     .environment
                     .workers
-                    .attach(context.actor, handle, child, worktree)
+                    .attach(context.actor, handle, child)
                     .map_err(protocol)?;
                 if let Some(installation) = self
                     .environment
@@ -1217,18 +1251,13 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self
-                .environment
-                .deployments
-                .send(LocalResidentDeployment::Retired {
-                    actor: kernel.identity(),
-                    terminal: terminal.clone(),
-                });
+            self.publish_retired(kernel.identity(), terminal.clone());
         })
     }
 
     fn child_exited(&mut self, notice: ChildExitNotice) -> futures_util::future::BoxFuture<'_, ()> {
         Box::pin(async move {
+            self.publish_retired(notice.child.identity(), notice.terminal.clone());
             let worker_wake = self
                 .environment
                 .workers
@@ -1277,6 +1306,7 @@ where
         deployments,
         workers: Arc::clone(&workers),
         pending_worker_installations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
     };
     let name = Some(descriptor.label().to_owned());
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);

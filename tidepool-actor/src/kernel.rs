@@ -168,9 +168,9 @@ impl std::fmt::Debug for KernelMessage {
 
 /// Exact local address paired with immutable terminal observation.
 ///
-/// The Ractor PID is unique for the process lifetime. Tidepool currently keeps
-/// incarnation `1` in its Haskell-facing address for migration compatibility;
-/// no restart or same-lineage substitution semantics are implied.
+/// The Ractor PID is unique for the process lifetime. V0 assigns incarnation
+/// `1` because actors are never restarted in place; no same-lineage
+/// substitution semantics are implied.
 #[derive(Clone)]
 pub struct LocalActorRef {
     identity: ActorRef,

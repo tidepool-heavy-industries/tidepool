@@ -31,6 +31,7 @@ module Tidepool.Actors.DevSwarm
   , WorkerCollection (..)
   , AcknowledgementDisposition (..)
   , WorkerAcknowledgementRequest (..)
+  , WorkerCustody (..)
   , WorkerAcknowledgement (..)
   , WorkerReport (..)
   , WorkerOutcome (..)
@@ -169,9 +170,20 @@ data WorkerAcknowledgementRequest = WorkerAcknowledgementRequest
   }
   deriving (Generic, FromJSON, JsonSchema, ToJSON)
 
+data WorkerCustody = WorktreeRetained
+  deriving (Generic, FromJSON, JsonSchema, ToJSON)
+
 data WorkerAcknowledgement
-  = WorkerAcknowledged { worker :: WorkerHandle }
-  | WorkerAlreadyAcknowledged { worker :: WorkerHandle }
+  = WorkerAcknowledged
+      { worker :: WorkerHandle
+      , disposition :: AcknowledgementDisposition
+      , custody :: WorkerCustody
+      }
+  | WorkerAlreadyAcknowledged
+      { worker :: WorkerHandle
+      , disposition :: AcknowledgementDisposition
+      , custody :: WorkerCustody
+      }
   | WorkerNotCollected { worker :: WorkerHandle }
   | WorkerAcknowledgementUnknown { worker :: WorkerHandle }
   deriving (Generic, FromJSON, JsonSchema, ToJSON)
@@ -249,7 +261,6 @@ startWorkers specs = do
             ( WorkerAttachWith
                 acceptedWorker.handle.workerId
                 (actorId, incarnation)
-                (renderWorktreeId (worktreeId tree))
             )
     provision result = pure result
 

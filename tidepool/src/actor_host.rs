@@ -464,7 +464,6 @@ fn compile_root(
     )?;
     let descriptor = ActorDescriptor::new(
         "devswarm-root",
-        ["AgentSession", "Actor", "Worktree", "WorkerKernel"],
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),
@@ -1068,6 +1067,18 @@ async fn launch_prepared_interactive_application(
     std::fs::create_dir_all(&actor_root).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
+    let build_output = if actor_identity == root || worktree.is_some() {
+        let relative = PathBuf::from(".shoal").join("build").join(format!(
+            "actor-{}-{}",
+            actor_identity.id.0, actor_identity.incarnation.0
+        ));
+        std::fs::create_dir_all(workspace.join(&relative)).map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+        Some(agent_workspace.join(relative))
+    } else {
+        None
+    };
     let run_socket_id = run_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -1164,6 +1175,7 @@ async fn launch_prepared_interactive_application(
         config.pane_environment.clone(),
         proxy_environment,
         actor_identity == root,
+        build_output.as_deref(),
     );
     let pane = match tokio::time::timeout(
         PROCESS_OPERATION_TIMEOUT,
@@ -1269,8 +1281,15 @@ fn actor_launch_environment(
     mut inherited: BTreeMap<String, String>,
     actor_local: BTreeMap<String, String>,
     is_root: bool,
+    build_output: Option<&Path>,
 ) -> ActorLaunchEnvironment {
     inherited.extend(actor_local);
+    if let Some(build_output) = build_output {
+        inherited.insert(
+            "CARGO_TARGET_DIR".into(),
+            build_output.to_string_lossy().into_owned(),
+        );
+    }
     let unset = workspace_local_toolchain_pins(is_root);
     inherited.retain(|name, _| !unset.contains(name));
     ActorLaunchEnvironment {
@@ -1564,7 +1583,7 @@ fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLau
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface; persistent declarations and live authored values survive calls, while Rust owns worker lifecycle and custody. Start independent seams together with `startWorkers`. On a lifecycle activation, read `currentSessionContext` and pass its plural wakes to `collectWorkerWakes`; never sleep or poll. Collection is replayable and acknowledgement is a separate decision after native Git review/integration. Use `listWorkers` for live observation and finish each root activation with `complete ()`. Scaffold stable interfaces first, integrate that candidate, then fan out all independent seams from the integrated base. Worker worktrees share this repository's ordinary object and branch namespace, so submitted OIDs are directly reviewable. Native coding tools remain the integration surface.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface; persistent declarations and live authored values survive calls, while Rust owns worker lifecycle and custody. Start every independent seam together with `startWorkers` before awaiting results. On a lifecycle activation, read `currentSessionContext` and pass its plural wakes to `collectWorkerWakes`. `WorkerPending` is a cooperative yield signal: never sleep or poll. Collection is replayable and acknowledgement is a separate decision after native Git review/integration. Use `listWorkers` for live observation and finish each root activation with `complete ()`. Scaffold stable interfaces first, integrate that candidate, then fan out all independent seams from the integrated base. Worker worktrees share this repository's ordinary object and branch namespace; inspect submitted OIDs or branches directly. Native coding tools remain the integration surface.{continuity}")
     } else if owns_worktree {
         "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted as `sessionInput :: Text`. Use native coding tools for repository work and `tidepool_actor.session_run` as the GHCi-like typed completion surface. Finish exactly once with Haskell such as `complete (WorkerReport { summary = ..., evidence = [...] })`; Rust then observes repository truth and owns lifecycle.".into()
     } else {
@@ -1723,7 +1742,7 @@ mod tests {
         assert!(resumed.contains("`WorkerPending` is a cooperative yield signal"));
         assert!(resumed.contains("never sleep or poll"));
         assert!(resumed.contains("inspect submitted OIDs or branches directly"));
-        assert!(resumed.contains("start every independent seam before awaiting results"));
+        assert!(resumed.contains("Start every independent seam"));
     }
 
     #[test]
@@ -1785,6 +1804,9 @@ mod tests {
             ]),
             BTreeMap::from([("TIDEPOOL_ACTOR_PROXY_ENDPOINT".into(), "socket".into())]),
             false,
+            Some(Path::new(
+                "/tmp/tidepool-actor-workspace/.shoal/build/actor-2-1",
+            )),
         );
         assert_eq!(
             launch.unset,
@@ -1795,6 +1817,10 @@ mod tests {
             ]
             .into_iter()
             .collect()
+        );
+        assert_eq!(
+            launch.set.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/tmp/tidepool-actor-workspace/.shoal/build/actor-2-1")
         );
         assert_eq!(launch.set.get("PATH").map(String::as_str), Some("/bin"));
         assert_eq!(
@@ -1816,6 +1842,7 @@ mod tests {
             BTreeMap::from([("TIDEPOOL_EXTRACT".into(), "/source/extract".into())]),
             BTreeMap::new(),
             true,
+            None,
         );
         assert!(launch.unset.is_empty());
         assert_eq!(

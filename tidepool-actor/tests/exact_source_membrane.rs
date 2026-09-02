@@ -1,9 +1,7 @@
 //! Fresh actor compilation sees only exact facades, never the ambient session
 //! module that defined them.
 
-use tidepool_actor::{
-    ActorDescriptor, ActorPlacement, ActorRegistry, ActorSourceImports, StartInitiator,
-};
+use tidepool_actor::{ActorDescriptor, ActorPlacement, ActorRef, ActorSourceImports};
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
@@ -12,7 +10,7 @@ use tidepool_testing::eval_harness;
 mod support;
 
 #[test]
-fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
+fn actor_context_carries_an_exact_facade_into_an_isolated_compile_view() {
     eval_harness::require_extract();
     let stdlib = eval_harness::prelude_path();
     let root = tempfile::tempdir().expect("session root");
@@ -43,22 +41,17 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
         .expect("isolated compile view");
     assert_eq!(isolated_view.library(), None, "ambient Lib.G must not leak");
 
-    let descriptor = ActorDescriptor::new(
+    let actor = ActorRef::first(tidepool_actor::ActorId(1));
+    let context = ActorDescriptor::new(
         "fresh reviewer",
-        ["Actor"],
         ActorPlacement {
             session: session_id,
             resource_scope: RealmId::fresh(),
             lexical_scope: actor_scope,
         },
     )
-    .with_source_imports(ActorSourceImports::from_exact_facades([&facade]));
-    let registry = ActorRegistry::new();
-    let starting = registry
-        .begin_start(None, descriptor, StartInitiator::Runtime)
-        .expect("begin actor startup");
-    let actor = registry.publish_ready(starting).expect("publish actor");
-    let context = registry.session_context(actor).expect("actor context");
+    .with_source_imports(ActorSourceImports::from_exact_facades([&facade]))
+    .session_context(actor);
     let actor_view = context
         .compile_view(isolated_view)
         .expect("bind isolated source view to actor");
@@ -68,7 +61,6 @@ fn descriptor_carries_an_exact_facade_into_an_isolated_compile_view() {
         facade.module_name(),
         "the exact facade is the actor's sole session-specific source import"
     );
-
     assert!(matches!(
         context.compile_view(source_view),
         Err(tidepool_actor::ActorCompileViewError::WrongLexicalScope { .. })

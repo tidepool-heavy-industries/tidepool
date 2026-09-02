@@ -10,11 +10,11 @@ use tidepool_runtime::session::{
     SessionRunContext, SourceImports,
 };
 
-use crate::{ActorRef, ActorRegistry, ActorRegistryError, ActorTurnKind, TurnLease};
+use crate::ActorRef;
 
 /// Immutable location of one actor incarnation in the resident Haskell
-/// machine. The registry owns this mapping; turn callers select an actor, not
-/// an independently assembled set of scopes.
+/// machine. The actor owns this mapping; callers select an actor, not an
+/// independently assembled set of scopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActorPlacement {
     pub session: SessionId,
@@ -47,7 +47,7 @@ impl ActorSourceImports {
 
 /// An actor's exact, owned source-side compilation snapshot.
 ///
-/// Construction validates the session and lexical scope against the registry
+/// Construction validates the session and lexical scope against the actor
 /// context before pairing them with the actor's explicit facade imports. A
 /// compiler can therefore consume this value without separately carrying an
 /// ambient session view or caller-selected import set.
@@ -164,7 +164,7 @@ impl ActorSessionContext {
 }
 
 /// Narrow target seam used to mount the real resident session without moving
-/// machine ownership into the actor registry.
+/// machine ownership into actor-local code.
 pub trait ActorRunTarget {
     type Error;
 
@@ -204,131 +204,5 @@ where
         live_payload: LivePayloadPolicy,
     ) -> Result<(), Self::Error> {
         self.set_actor_execution(context, effect_policy, live_payload)
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MountActorTurnError<TargetError> {
-    #[error(transparent)]
-    Registry(#[from] ActorRegistryError),
-    #[error("resident target rejected actor context: {0}")]
-    Target(TargetError),
-}
-
-/// Atomically, from the caller's perspective, admit one actor turn and install
-/// its scopes/principal on a checked-out resident target. If context
-/// installation fails, the local lease drops before the error escapes.
-pub fn mount_actor_turn<Target>(
-    registry: &ActorRegistry,
-    target: &mut Target,
-    actor: ActorRef,
-    kind: ActorTurnKind,
-) -> Result<TurnLease, MountActorTurnError<Target::Error>>
-where
-    Target: ActorRunTarget,
-{
-    let lease = registry.begin_turn(actor, kind)?;
-    let context = lease.session_context();
-    install_actor_context(target, &context).map_err(MountActorTurnError::Target)?;
-    Ok(lease)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ActorDescriptor, StartInitiator};
-
-    #[derive(Default)]
-    struct FakeTarget {
-        installed: Option<SessionRunContext>,
-        effect_policy: Option<EffectRunPolicy>,
-        live_payload: Option<LivePayloadPolicy>,
-        fail: bool,
-    }
-
-    impl ActorRunTarget for FakeTarget {
-        type Error = &'static str;
-
-        fn install_actor_execution(
-            &mut self,
-            context: SessionRunContext,
-            effect_policy: EffectRunPolicy,
-            live_payload: LivePayloadPolicy,
-        ) -> Result<(), Self::Error> {
-            if self.fail {
-                Err("dead scope")
-            } else {
-                self.installed = Some(context);
-                self.effect_policy = Some(effect_policy);
-                self.live_payload = Some(live_payload);
-                Ok(())
-            }
-        }
-    }
-
-    fn ready_actor(registry: &ActorRegistry) -> ActorRef {
-        let starting = registry
-            .begin_start(
-                None,
-                ActorDescriptor::new(
-                    "actor",
-                    std::iter::empty::<String>(),
-                    ActorPlacement {
-                        session: tidepool_repr::SessionId(1),
-                        resource_scope: RealmId(11),
-                        lexical_scope: ScopeId::ROOT,
-                    },
-                ),
-                StartInitiator::Runtime,
-            )
-            .expect("begin startup");
-        registry.publish_ready(starting).expect("publish actor")
-    }
-
-    #[test]
-    fn installs_exact_actor_principal_and_holds_turn_lease() {
-        let registry = ActorRegistry::new();
-        let actor = ready_actor(&registry);
-        let mut target = FakeTarget::default();
-        let context = registry.session_context(actor).expect("actor context");
-        let lease = mount_actor_turn(&registry, &mut target, actor, ActorTurnKind::Haskell)
-            .expect("mount actor");
-
-        assert_eq!(target.installed, Some(context.run_context()));
-        assert_eq!(target.effect_policy, Some(context.effect_policy));
-        assert_eq!(target.live_payload, Some(context.live_payload));
-        assert_eq!(context.effect_policy, EffectRunPolicy::HandleOrSuspend);
-        assert_eq!(
-            context.live_payload,
-            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE
-        );
-        assert!(matches!(
-            registry.begin_turn(actor, ActorTurnKind::AgentSession),
-            Err(ActorRegistryError::Busy { .. })
-        ));
-        drop(lease);
-        registry
-            .begin_turn(actor, ActorTurnKind::AgentSession)
-            .expect("lease released");
-    }
-
-    #[test]
-    fn target_rejection_releases_actor_admission() {
-        let registry = ActorRegistry::new();
-        let actor = ready_actor(&registry);
-        let mut target = FakeTarget {
-            installed: None,
-            effect_policy: None,
-            live_payload: None,
-            fail: true,
-        };
-        let result = mount_actor_turn(&registry, &mut target, actor, ActorTurnKind::Haskell);
-        assert!(matches!(
-            result,
-            Err(MountActorTurnError::Target("dead scope"))
-        ));
-        registry
-            .begin_turn(actor, ActorTurnKind::AgentSession)
-            .expect("failed mount released lease");
     }
 }

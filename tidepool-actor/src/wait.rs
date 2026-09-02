@@ -3,20 +3,7 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 
 use crate::generated::actor::ActorReq;
-use crate::{
-    ActorExitKind, ActorId, ActorRef, ActorRegistry, ActorTerminal, Incarnation, WaitError, WaitId,
-    WaitTicket,
-};
-
-/// A Haskell `awaitExit` parked against the registry's exact target incarnation.
-///
-/// The value is deliberately just a Rust wait ticket. The successful typed
-/// exit remains in the managed Haskell cell carried by `ActorRef`; settling
-/// this ticket supplies only the terminal metadata that sequences the cell
-/// read in the resumed continuation.
-pub struct ActorWait {
-    ticket: WaitTicket,
-}
+use crate::{ActorExitKind, ActorId, ActorRef, ActorTerminal, Incarnation};
 
 pub(crate) struct ResidentPollRequest {
     pub(crate) target: ActorRef,
@@ -29,71 +16,19 @@ pub enum ActorWaitError {
     InvalidIdentity { actor_id: i64, incarnation: i64 },
     #[error(transparent)]
     Decode(#[from] BridgeError),
-    #[error(transparent)]
-    Wait(#[from] WaitError),
     #[error("actor wait decoder received a non-wait request")]
     UnexpectedRequest,
 }
 
-impl ActorWait {
-    pub(crate) fn id(&self) -> WaitId {
-        self.ticket.id()
-    }
-
-    /// Decode `ActorWaitWith` and register the wait after the caller's active
-    /// Haskell turn lease has been released.
-    pub fn register(
-        registry: &ActorRegistry,
-        waiter: ActorRef,
-        request: &Value,
-        table: &DataConTable,
-    ) -> Result<Self, ActorWaitError> {
-        let target = Self::decode_target(request, table)?;
-        Self::register_target(registry, waiter, target)
-    }
-
-    pub(crate) fn decode_target(
-        request: &Value,
-        table: &DataConTable,
-    ) -> Result<ActorRef, ActorWaitError> {
-        let ActorReq::ActorWaitWith((actor_id, incarnation)) =
-            ActorReq::from_value(request, table)?
-        else {
-            return Err(ActorWaitError::UnexpectedRequest);
-        };
-        let (Ok(actor_id_u64), Ok(incarnation_u64)) =
-            (u64::try_from(actor_id), u64::try_from(incarnation))
-        else {
-            return Err(ActorWaitError::InvalidIdentity {
-                actor_id,
-                incarnation,
-            });
-        };
-        Ok(ActorRef {
-            id: ActorId(actor_id_u64),
-            incarnation: Incarnation(incarnation_u64),
-        })
-    }
-
-    pub(crate) fn register_target(
-        registry: &ActorRegistry,
-        waiter: ActorRef,
-        target: ActorRef,
-    ) -> Result<Self, ActorWaitError> {
-        Ok(Self {
-            ticket: registry.register_wait(waiter, target)?,
-        })
-    }
-
-    /// Poll without consuming a pending wait. A terminal result is immutable,
-    /// so a later Haskell `awaitExit` may register independently and observe it
-    /// again.
-    pub fn poll(&mut self) -> Result<Option<ActorTerminal>, ActorWaitError> {
-        match self.ticket.poll()? {
-            crate::ExitObservation::Pending => Ok(None),
-            crate::ExitObservation::Exited(terminal) => Ok(Some(terminal)),
-        }
-    }
+pub(crate) fn decode_wait_target(
+    request: &Value,
+    table: &DataConTable,
+) -> Result<ActorRef, ActorWaitError> {
+    let ActorReq::ActorWaitWith((actor_id, incarnation)) = ActorReq::from_value(request, table)?
+    else {
+        return Err(ActorWaitError::UnexpectedRequest);
+    };
+    decode_address(actor_id, incarnation)
 }
 
 pub(crate) fn decode_poll_target(
@@ -108,8 +43,7 @@ pub(crate) fn decode_poll_target(
 }
 
 pub(crate) fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef, ActorWaitError> {
-    let (Ok(actor_id_u64), Ok(incarnation_u64)) =
-        (u64::try_from(actor_id), u64::try_from(incarnation))
+    let (Ok(actor_id), Ok(incarnation)) = (u64::try_from(actor_id), u64::try_from(incarnation))
     else {
         return Err(ActorWaitError::InvalidIdentity {
             actor_id,
@@ -117,14 +51,13 @@ pub(crate) fn decode_address(actor_id: i64, incarnation: i64) -> Result<ActorRef
         });
     };
     Ok(ActorRef {
-        id: ActorId(actor_id_u64),
-        incarnation: Incarnation(incarnation_u64),
+        id: ActorId(actor_id),
+        incarnation: Incarnation(incarnation),
     })
 }
 
-/// Encode Rust's immutable terminal metadata as the actor effect's internal
-/// Haskell status. This carries no successful domain value: completion merely
-/// authorizes the resumed `Tidepool.Actor.awaitExit` to read its shared exit cell.
+/// Encode immutable terminal metadata. Successful domain data remains in the
+/// shared Haskell exit cell carried by the exact actor reference.
 pub fn actor_terminal_value(
     terminal: &ActorTerminal,
     table: &DataConTable,

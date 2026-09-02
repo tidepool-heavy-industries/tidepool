@@ -75,8 +75,8 @@ owning module's public operations. Registry entries record:
 
 Actor interpreters use the same principal and grant records. The Haskell row
 does not serve as a capability token, and Rust carries no reflected copy of
-it. A named effect profile selects a concrete model-facing row and matching
-interpreter policy; it authorizes classes of expressible intent, not concrete
+it. A named effect profile selects a concrete model-facing row and spawn
+attenuation class; it authorizes classes of expressible intent, not concrete
 resources. Principals, grants, and opaque handles authorize those resources at
 use time.
 
@@ -147,7 +147,7 @@ continuation.
 
 Fresh spawn needs one explicit way to authorize a child for a particular
 resource. The runtime must not recursively inspect the startup value for
-capability leaves, and static interpreter policy cannot name per-instance
+capability leaves, and a static effect profile cannot name per-instance
 resources such as one worktree.
 
 Capability modules expose narrow definition decorators rather than a generic

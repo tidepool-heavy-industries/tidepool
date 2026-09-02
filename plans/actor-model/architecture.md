@@ -42,8 +42,10 @@ The first two execution forms share the same actor kernel:
 
 Execution form is not identity or authority. Both forms use the same exact
 `ActorRef`, Ractor ownership tree and mailbox, execution principal, profiles,
-terminal records, and event stream. Recreation creates another exact identity;
-V0 has no in-place restart or retargeting.
+and terminal records. They currently emit structured tracing and lifecycle
+wakes through their existing owners; a shared neutral event projection is a
+future observability boundary, not a second actor runtime. Recreation creates
+another exact identity; V0 has no in-place restart or retargeting.
 
 For a resident actor, Haskell controls when to open a result-bearing agent
 session and fixes its result type. An agent-backed actor receives runtime facts
@@ -340,8 +342,9 @@ one actor turn.
 
 ### Actor events and observability
 
-The actor kernel emits one neutral event stream rather than a second logging
-mechanism beside the existing durable harness journal. Each event carries the
+Actor observability should converge on one neutral event projection rather
+than a second logging mechanism beside tracing and durable application logs.
+Each event carries the
 exact actor incarnation, per-actor sequence, ownership and causality context,
 and relevant turn, block, call, suspension, or terminal identity. The initial
 event vocabulary covers lifecycle, ownership, mailbox settlement, provider
@@ -528,9 +531,10 @@ An external interactive agent is an application attached to an actor, not a
 second actor identity or lifecycle owner. A worker-spawn response means the
 resident actor exists and deployment has been requested; it does not promise
 that the external application is already online. Launch failure or unexpected
-application death while the child is live asks `ResidentActorHost` to fail
-that exact actor, making the ordinary retained `ActorExit` authoritative while
-leaving the owner alive. Deployment tasks never mutate the registry directly.
+application death while the child is live asks the owning local actor to fail
+that exact child, making the ordinary retained `ActorExit` authoritative while
+leaving the owner alive. Deployment tasks request actor transitions rather
+than mutating lifecycle state directly.
 
 Lifecycle precedence is decided once by the host. If terminal settlement wins
 the race, later application exit is cleanup and cannot rewrite the actor's
@@ -603,7 +607,7 @@ ReadOnly  -> ReadOnly
 ```
 
 Each name currently denotes an experimental resident-Haskell effect row and
-nominal interpreter policy. Rust validates the spawn edge, and GHC checks the
+spawn-attenuation class. Rust validates the spawn edge, and GHC checks the
 definition against the selected child row. It does not constrain native tools
 of an attached coding-agent process and is not an operating-system sandbox.
 Profile identity is launch metadata, separate from the program image, process
@@ -900,7 +904,7 @@ effect-stack change creates a new actor incarnation and a new `ActorRef`.
 
 Termination first publishes the immutable terminal transition, then invokes
 the actor's typed shutdown handler for cooperative Haskell cleanup. Hook
-failure is recorded as a neutral actor event and never rewrites that terminal
+failure is recorded as a structured runtime diagnostic and never rewrites that terminal
 result. Rust remains responsible for eventual forced termination and all
 external-resource cleanup. The planned watchdog is twelve hours, configurable
 per deployment; it is a leak backstop rather than an interactive timeout.
@@ -947,12 +951,12 @@ ultimate owner of every external resource.
 10. JSON serialization is never required for same-machine actor communication.
 11. Fork points pair one immutable provider prefix, Haskell snapshot, and
     cloned control continuation.
-12. External actions are reachable only through the actor kernel and checked
-    capabilities; the model-facing environment exposes no ambient `IO`, FFI,
-    or unsafe escape hatch that bypasses the execution principal.
+12. Resident Haskell external actions are reachable only through interpreted
+    effects and checked capabilities; its model-facing environment exposes no
+    ambient `IO`, FFI, or unsafe escape hatch that bypasses the execution
+    principal. Attached native agents have a separate process policy.
 13. One actor incarnation has one fixed Haskell effect vocabulary and one
-    actor-local effect profile and interpreter policy. Rust routes by nominal
-    request identity,
+    actor-local effect profile. Rust routes by nominal request identity,
     never by union position or a duplicated effect-row ABI.
 14. Every child exit remains available through exact typed observation and
    produces one informational native wake for a live agent-backed owner; it

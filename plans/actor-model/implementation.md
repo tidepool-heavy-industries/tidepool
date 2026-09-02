@@ -1,1506 +1,212 @@
-# Implementation plan
-
-## 1. Delivery discipline
-
-Build permanent components in dependency order and prove each through one real
-vertical use. Do not construct a temporary actor stack and later extract the
-pieces that happened to survive.
-
-[architecture.md](architecture.md) owns runtime semantics and invariants.
-[haskell-surface.md](haskell-surface.md) owns the public Haskell contract. This
-file owns current implementation status, delivery order, acceptance evidence,
-and deletion gates. If it restates another document's semantics, delete the
-restatement.
-
-Backward compatibility is not a constraint. An old mechanism remains only
-while it is the acceptance oracle for its replacement. Once the replacement
-has parity for the behavior still wanted, delete the old path rather than
-retaining a permanent adapter.
-
-The repository's standing mechanism index remains authoritative:
-
-- machine checkout, resident state, and turn-module compilation stay in
-  `tidepool-runtime`;
-- actor identity, lifecycle, turns, mailboxes, and events stay in
-  `tidepool-actor`;
-- provider-neutral conversation and calls stay in `tidepool-model`;
-- fenced-output parsing stays in `tidepool-model-output`;
-- durable append/read stays in `tidepool-repr`;
-- live roots and continuations stay in the existing runtime/codegen ledgers.
-
-The actor work adds no second registry, root ledger, transcript, turn parser,
-checkout path, durable log primitive, or effect-row ABI.
-
-Ractor is the sole target substrate for in-process actor task scheduling,
-mailboxes, local addresses, links, and supervision. The landed
-`ActorRegistry`/`ResidentActorHost` implementation is now an acceptance oracle,
-not standing architecture. The replacement consumes Ractor directly and
-deletes the matching registry, wake, task-table, and deployment scheduling
-code. An adapter that leaves both runtimes alive is not an acceptable endpoint.
-
-Every Haskell API addition must answer:
-
-1. Does authored Haskell need this distinction for typed behavior or policy?
-2. Can Rust settle it and provide concise Developer context instead?
-3. Is there one familiar operation rather than paired low/high-level routes?
-4. Is the concept easier for a model to use than to misuse?
-
-If Rust can handle it and Haskell has no policy choice, keep it out of the DSL.
-A new effect is welcome when it contributes a distinct algebra, interpreter,
-and useful row constraint; do not use effects as names for lifecycle modes or
-configuration records.
-
-## 2. Current implementation baseline
-
-This is the canonical status inventory for the plan.
-
-Stages 7B and 7C are landed. Keep the self-hosting surface narrow until live
-Shoal exercises confirm candidate custody, worktree authority, and exact child
-application failure under real provider/process races.
-
-### Landed
-
-- `tidepool-actor` owns exact-incarnation identity, lifecycle state, the
-  ownership tree, turn admission, live-value mailboxes, call/cast settlement,
-  repeatable waits, and neutral actor events.
-- Successful typed exits use the shared Haskell cell carried by `ActorRef`;
-  Rust retains terminal metadata rather than another payload root.
-- Actor placement binds one session, lexical scope, resource scope, execution
-  principal, effect-run policy, and exact source-import membrane.
-- One `ActorAgentSession` state belongs to each incarnation. One admitted
-  agent session spans provider rounds and mounted Haskell execution.
-- `tidepool-model` owns the provider-neutral conversation/call seam, and
-  `tidepool-model-output` owns fenced-Haskell extraction.
-- `PersistentSession` owns resident declarations, bindings, compile views,
-  checkout, and continuations. Exact export facades can expose selected
-  declaration identities without inheriting a parent scope.
-- `session::workbench` owns the shared source classifier, meta-command parser,
-  ordered/prefix-preserving block cursor, and canonical declaration, bind, and
-  pure/effectful expression templates. REPL, harness, and actor frontends use
-  those mechanics rather than carrying their own parser or cursor.
-- The resident runtime also owns the canonical model-authored Haskell dialect.
-  MCP re-exports it, declaration and standalone environments derive their
-  intentional variants, and the unavoidable Haskell extractor mirror is
-  cross-language tested; adding `RankNTypes` no longer requires another
-  hand-copied Rust extension list.
-- `tidepool-actor` owns one multi-round agent-session executor. Its
-  resident adapter checks the machine out only for a Haskell segment, compiles
-  against the actor's exact source view, and returns a GHC-checked live value
-  through the private `Complete result` completion effect.
-- Public `deliberate` is a nominal suspension with no authored type strings or
-  runtime `Typeable` convention. The extractor gives each site a stable
-  binder-qualified identity and records its output and live-input types,
-  defining modules, and structured nominal type heads directly from GHC.
-  Missing sidecars and colliding site identities fail closed.
-- Compiler provenance follows parked continuations, resident bindings, live
-  custody transfers, and rooted actor entries. Resuming with a live value
-  unions provenance and rejects contradictory metadata; actor adapters derive
-  startup and `deliberate`-site contracts from the rooted program rather than from
-  caller-supplied side tables.
-- Result-bearing sessions have a real GHC/JIT vertical: a rejected wrong-typed
-  completion preserves prior declarations and bindings, the corrective round
-  completes, the never-run suffix stays unexecuted, and a closure-valued result
-  remains callable after the fragment resource realm closes.
-- One resident actor runner now owns internal sealing, isolated-scope allocation,
-  rooted-entry startup, typed-session capture, readiness resumption, and
-  exact parent resumption over the existing machine checkout mechanism. The
-  trusted entry wrapper raises the authored row under the kernel-private
-  `ActorKernel` effect; `ActorLocal` and model-facing profiles contain no
-  readiness or settlement operation. Kernel requests validate their child realm
-  and expected phase before the
-  registry may publish. The registry owns publication and terminal settlement;
-  there is no second actor dispatcher or program-root registry.
-- The construction substrate exposes one public `ActorDefinition` ->
-  `startActor` route. Its private sealing step materializes a content-addressed
-  exact facade directly from the rooted entry's GHC provenance while capturing
-  the sole start suspension. A real GHC/JIT/provider vertical covers sealing,
-  isolated startup with zero or multiple sequential result-bearing sessions,
-  realm-checked readiness, child completion, and parent resume.
-- The model-facing `call`, `cast`, rank-2 `receive`, and `serve` vocabulary is
-  now typed, extractor-backed, and exercised through the real resident machine.
-  `receive` installs an opaque rooted handler and uses one private `ActorKernel`
-  effect for named reply/continue settlement. The Rust mailbox interpreter
-  moves live requests through that handler, truthfully settles call/cast, and
-  atomically publishes a call reply with the callee's next installed receive.
-  Recursive `serve` assigns its typed site at the concrete outer call and
-  reuses it internally, rather than making the generic library body pretend to
-  contain a monomorphic suspension.
-- Resident `awaitExit` now parks through the existing exact wait registry and
-  resumes with terminal metadata only. A real mailbox-driven child fills its
-  shared Haskell `ExitCell`, replies, exits, and is then observed with the same
-  typed value; no Rust exit-value store or second root registry exists. Wait
-  registration now takes over the active Haskell turn before that turn releases
-  admission, so suspension exposes no re-entry gap.
-- Shared resident-machine `checkout_wait` now provides one FIFO admission gate
-  and notification channel per session. This is the actor runnable-segment
-  queue and the existing harness checkout path at once; the former global
-  notification could wake the wrong session and has been removed.
-- One resident lifecycle component owns Rust-forced subtree termination: it
-  captures the exact cleanup set and publishes terminal state in one registry
-  critical section, then closes every captured actor realm, attempting the
-  whole subtree even if one cleanup fails. A concurrently admitted child can
-  therefore never be cancelled without its realm entering cleanup. Resident
-  continuation failures, failed/unpublishable startup, and ordinary resident
-  mailbox completion use this same atomic cleanup-batch path.
-- The full Haskell `ActorDefinition` GADT selects `ReadWrite` or `ReadOnly`,
-  carries exact child-visible exports, and installs one typed cooperative
-  shutdown hook before readiness. The lifecycle owner runs hooks child-first
-  for every captured terminal path and still closes every realm if a hook
-  fails or suspends on a disallowed operation. Hook failures enter the neutral
-  actor event stream and do not replace the retained terminal result.
-- Cooperative shutdown now bounds machine-admission wait through one
-  lifecycle-owned deployment policy. Admission timeout is reported through
-  the neutral shutdown-hook event and does not prevent Rust-owned realm
-  closure from being attempted.
-- Resident mailbox custody now follows the canonical ownership protocol:
-  accepted requests are rehomed to the target realm, replies are rehomed to
-  the caller realm before atomic publication, and a completed callee can close
-  its realm immediately without invalidating either value. Immediate and
-  mailbox-driven completion both reap execution resources while the shared
-  Haskell exit cell remains reachable through `ActorRef`.
-- Effect-schema metadata centrally curates authored constructors, supporting
-  types, and helpers. The generated public shim and model-facing descriptions
-  consume the same allowlists; internal Core retains the full nominal
-  substrate vocabulary.
-- Rust effect routing is nominal; no positional handler-prefix contract or
-  reflected Haskell row ABI remains.
-- Actor descriptors and creation events carry immutable `ReadWrite` or
-  `ReadOnly` profile identity. The registry enforces the initial attenuation
-  lattice before allocating a child identity: `ReadWrite` may preserve or
-  attenuate, while `ReadOnly` may only preserve `ReadOnly`. The neutral actor
-  timeline retains profile and descriptive effect-stack metadata for
-  observability without using either for runtime authorization.
-- The resident fenced-Haskell path now proves model-authored construction: a
-  parent session declares fresh startup and GADT protocol types, returns a live
-  `Eff` program that constructs and starts the full `ActorDefinition`, calls it,
-  awaits it, and applies its closure-valued retained exit. The fixed outer
-  program sees only the computation's old result type. No source replay or
-  actor-specific value registry participates.
-- Sealing rejects a same-spelled head redefined between definition and start
-  before allocating a child, and a compile-failure fixture proves that a
-  `ReadOnly` definition cannot use `FsWrite`.
-
-### Not landed
-
-- Ractor does not yet own production actor scheduling. The focused substrate
-  spike is landed: it proves startup publication, linked supervision with
-  Tidepool's crash-isolating override, explicit subtree shutdown, panic/kill
-  custody cleanup, abandoned RPC cleanup, and direct movement of Tidepool live
-  values through local `Send + 'static` messages. It also proves two contracts
-  the cutover must encode rather than assume: Ractor kill does not run
-  `post_stop`, and killing a parent does not recursively kill its children. No
-  cluster or serialization feature is part of this work;
-- the production Haskell root still exposes `[WorkerRecord]` as copied
-  lifecycle state. Replace it with Rust-owned `WorkerLedger` interpreter state,
-  typed batch effects, and one activation-stable `sessionContext` binding whose
-  plural wakes contain correlation only. Collection remains authoritative and
-  replayable; acknowledgement is effectful and releases custody without erasing
-  the immutable receipt;
-- the remaining Stage 6 adversarial acceptance case is cancellation
-  specifically during readiness resumption. Resident machine access now keeps
-  each checkout receipt inside the blocking task that owns its machine, so
-  dropping a cancelled async waiter cannot strand a session; a deterministic
-  readiness-timing test still needs a real blocking seam. Duplicate
-  root-session rejection,
-  an outer host-task panic, and a dead synchronous callee are covered through
-  the production host. The full host vertical already performs a repeatable
-  late wait after the target has exited. Provider-backed startup cancellation,
-  startup panic cleanup, quiescence, and session removal are also landed;
-- capability-specific worktree launch grants and the adaptive recursive
-  worktree policy built on them, including authoritative candidate submission,
-  replayable collection, and exact external-application failure routing;
-- an eventual trusted Haskell public-intent -> kernel-effect split; V0 does not
-  require it, but current profiles, facades, and nominal handlers must leave it
-  additive without changing the actor API, program images, profile semantics,
-  or Rust dispatch. Constructor curation remains interaction hygiene rather
-  than authority;
-- immutable live-binding snapshots or structural context fork;
-- deletion of the superseded selfharness path.
-
-The legacy harness and REPL are migration inputs and behavior oracles, not
-architectures to preserve.
-
-## 3. Fixed implementation choices
-
-These choices remove branches from the first implementation:
-
-- V0 sends the actor's canonical `Conversation` by exact replay. A provider
-  cursor is not a second conversation mode; it may later be a disposable
-  optimization derived from that transcript.
-- A program image contains code/value deployment identity and explicit source
-  exports. It does not own placement, authority, or an interpreter.
-- V0 specializes `Member`-polymorphic authored behavior into one concrete row
-  per incarnation and runs that stack directly. The private sealed deployment
-  hides the row behind stable startup/protocol/exit indexes. Rust authorizes
-  nominal requests without a reflected row ABI. Trusted Haskell lowering is
-  optional after V0, but the public and runtime boundaries must be ready for it
-  without redesign.
-- V0 has named `ReadWrite` and `ReadOnly` profiles. `ReadWrite` may spawn either;
-  `ReadOnly` may spawn only `ReadOnly`. The profile fixes the model-facing row
-  and interpreter policy, while grants and opaque handles authorize resources.
-- Models author `ActorDefinition` and pass it directly to `startActor`, which
-  performs exact sealing internally. Initialization may call the child model
-  runtime; installation is pure. V0 has no alternate startup mode or
-  lifecycle-specific mini-DSL.
-- One indexed `ActorLocal protocol` effect ties the authored continuation's
-  protocol to the definition; `ActorDefinition startup protocol exit` already
-  ties its exit to the eventual `ActorRef`. The `receive` algebra
-  exposes no callback registry, public reply token, or parallel mailbox API.
-  There is no public `ActorProgram` wrapper around the `Eff` value.
-- Per-instance resource authority uses opaque, capability-specific launch-grant
-  recipes attached immutably to a definition. V0 has no generic public
-  delegation/revocation API and never scans a startup value for capabilities.
-- Same-machine calls carry live values. Rust never invents a result or
-  substitutes a same-typed actor; an exact-call failure abandons the current
-  fragment and is actor-terminal only when that fragment is the installed
-  program continuation.
-- Fresh spawn precedes structural fork. Program-image reuse is spawn; resuming
-  an actor is scheduling.
-- Actor-turn admission spans a complete logical turn or agent session.
-  Machine checkout spans only one Haskell run segment.
-- Live runtime restart is out of scope. Durable JSON and recoverable external
-  resources use their existing owners.
-- Local actor messages are ordinary moved Rust values. Actor communication is
-  never serialized merely to cross a task boundary.
-- `startWorkers` is the worker interpreter primitive. Singular start is a
-  Haskell singleton wrapper; one failed batch member does not roll back
-  independent accepted members.
-- Lifecycle history, idempotency, worktree custody, acknowledgement, and
-  tombstones live in a Rust-owned worker ledger. Authored Haskell never passes
-  that ledger or a snapshot token back to the interpreter.
-
-## 3A. Ractor replacement and live-worker-state tranche
-
-Deliver this tranche before structural fork or broader workflow vocabulary:
-
-1. Validate the minimal local-only Ractor dependency against live-value drop,
-   cancellation, readiness, supervision, and shutdown requirements.
-2. Introduce one closed, non-serializable `KernelMessage` protocol and one
-   exact handle pairing a Ractor address with Tidepool's retained exit cell.
-3. Move root and child construction, sequential turns, cast, call, wait, and
-   owner notification to one canonical Ractor actor implementation. Calls
-   carry ancestry for cycle rejection; waits observe the retained exit cell.
-4. Move resident Haskell, provider, MCP, and external-agent execution into the
-   owning actor. Machine checkout remains shorter-lived than the actor message
-   handler.
-5. Introduce the Rust-owned worker ledger and `startWorkers`, live inspection,
-   replayable collection, and idempotent acknowledgement effects. Reserve all
-   batch keys before concurrent provisioning and return one typed result per
-   input in input order.
-6. Inject one immutable `sessionContext` per root activation. It contains the
-   drained/coalesced lifecycle event IDs and worker handles that caused the
-   activation; child exits during the turn wait for the next context.
-7. Delete `[WorkerRecord]` threading and complete interactive root turns with
-   `()` or an authored policy value. Structured start results contain their
-   handles directly.
-8. Separate acknowledgement disposition, logical settlement, custody release,
-   cleanup, and retained receipt lifetime. Cleanup failure is visible and
-   retryable but never rolls acknowledgement back.
-9. Give actor repositories private mutable build-output directories, provide
-   typed provisioning progress, and correlate MCP, compilation, effect,
-   worktree, actor, lifecycle, and wake spans in `.shoal/logs`.
-10. Add `shoal new`: initialize Git, create only ignored `.shoal/` operational
-    content, install `/.shoal/` in `.git/info/exclude`, and create an empty base
-    commit. It creates no project scaffold.
-11. Cut production over and delete the old wake receiver, registry mailbox and
-    parked-obligation scheduler, host actor/task mirrors, special root path,
-    and fleet-wide deployment coordinator.
-
-The worker-facing result and cleanup vocabulary in this tranche is structured,
-not prose-shaped:
-
-- acknowledgement records why custody was released (`IntegratedAs`,
-  `Reviewed`, or `Rejected`) without pretending Haskell performed integration;
-- its result distinguishes logical acknowledgement from custody release,
-  worktree deletion, ref retention, log retention, and deferred cleanup;
-- cleanup failure schedules retry and remains observable, but cannot resurrect
-  an acknowledged obligation or replace its retained receipt;
-- `WorkerReport` grows typed findings, severity, source locations, checks,
-  candidate identity, and residual risks. Free-form evidence remains available
-  without being the only representation of routine facts;
-- default rendering is concise, with explicit verbose inspection. Every sum
-  uses one constructor encoding rather than frontend-specific `_con` and
-  `constructor` variants.
-
-Operational support follows the same ownership boundaries:
-
-- each actor repository receives a private mutable build-output directory;
-  dependency caches may be shared only where their writers are safe to share;
-- provisioning exposes coarse typed phases (`Accepted`, `Queued`,
-  `ProvisioningRepository`, `StartingActor`) rather than a second streaming
-  job protocol;
-- tracing correlates MCP execution, compilation, actor effect, worktree,
-  external agent, lifecycle event, and root activation. `McpExecutionPending`
-  and `WorkerPending` remain distinctly named because they are unrelated
-  lifecycles;
-- completion returns a compact host receipt (outstanding worker count and wake
-  subscription state), not merely an uninformative success sentinel;
-- generated API guidance owns stable signatures, examples, partial-item commit
-  semantics, and pending-state explanations. Developer messages carry current
-  activation facts and constitutional policy, not a duplicated API manual;
-- worktree retention and garbage collection are explicit runtime policies.
-  Read-only work may later use lighter custody, and internal refs may later
-  reduce namespace clutter, but neither optimization complicates V0.
-
-The V0 trust claim remains deliberately modest: managed worktrees provide
-cooperative change custody and ordinary Git ergonomics, not security isolation.
-Any future untrusted-execution boundary is a separate sandbox design.
-
-The deletion gate is behavioral, not file-shaped. The Ractor path must first
-prove exact readiness, repeatable typed exits, non-reentrant calls, cycle
-rejection, child-failure isolation, recursive shutdown, cancellation cleanup,
-concurrent batch start, dropped-response idempotency, and the cross-session
-live-value forcing regression. Once those pass, the old scheduler is removed
-in the same fold rather than retained behind compatibility traits.
-
-## 4. Stage 1 — one resident Haskell workbench
-
-Extract the frontend-neutral resident execution core beside
-`PersistentSession`. It owns:
-
-- GHC-sourced declaration/bind/expression classification;
-- the canonical resident turn-module builders assigned to
-  `tidepool-runtime::session::turn`;
-- exact compile-view and source-import use;
-- per-item compile, execution, and declaration/binding commit;
-- ordered multi-item/block cursors and successful-prefix preservation;
-- session introspection for types, declarations, bindings, and exact export
-  candidates;
-- one meta-command parser with a narrow extension hook for frontend-owned
-  queries.
-
-It does not own provider calls, MCP JSON, actor lifecycle, presentation,
-`Ask` settlement, or domain-specific suspensions.
-
-Use the existing implementation pieces rather than wrapping them:
-
-- move `tidepool-actor::sequence` into the workbench owner;
-- route the actor, REPL, and legacy harness through the same ordered core;
-- follow the root one-home decision for turn modules: move any
-  frontend-neutral source assembly out of `tidepool-mcp::eval_prep`, and
-  narrow or rename the MCP-only stateless eval renderer instead of merging two
-  types merely because both are currently called `TurnTemplate`;
-- remove the harness compatibility re-export and duplicate unit tests for the
-  fenced-block parser.
-
-Thin frontend adapters remain legitimate: the REPL maps neutral outcomes to
-MCP responses, while actors retain live values and all suspensions. What must
-disappear is duplicated classification, compile/commit, cursor, and
-command-parsing logic. Actor-specific `:goal`, `:program`, and `:capabilities`
-views come from one actor-owned introspection snapshot through the extension
-hook; the workbench does not copy actor state downward.
-
-Acceptance:
-
-- REPL and actor integration tests execute the same declaration/bind/expression
-  corpus through the shared core;
-- a later item observes earlier successful commits;
-- failure or suspension preserves the exact committed prefix and never runs
-  the suffix;
-- exact actor source imports cannot be replaced by ambient scope or arbitrary
-  import strings;
-- `:type`/binding inventory data and meta-command parsing each have one
-  implementation;
-- no production actor dependency on `tidepool-mcp`;
-- the superseded high-level block drivers and generic actor sequence helper are
-  deleted in the same change that moves their callers.
-
-## 5. Stage 2 — one result-bearing agent session
-
-Complete one result-bearing agent session before adding actor construction.
-
-The actor-owned executor has one provider/Haskell loop and one internal sealed
-typed-completion obligation, used by sessions opened through `deliberate`.
-Backend-native input to an interactive actor remains backend input; it does
-not create a second executor or acknowledgment protocol.
-
-`Deliberate` remains the Haskell effect and `deliberate` the operation that
-opens a result-bearing session. Rust modules, state machines, and events should
-name the generic `AgentSession` and its current completion or acknowledgment
-expectation; do not reintroduce a `Deliberation` or `Goal` runtime object.
-
-Refine the current actor `TurnLease` into the one phase-aware admission guard
-if necessary. A `deliberate` suspension transfers the already-held authored-
-program admission into the executor; it must not call `begin_turn` again.
-Startup derives the same guard from `StartingActor`, while a root session
-starts it from an idle actor. This is a state transition in one serialization
-mechanism, not a nested lease protocol.
-
-Deliver typed completion first:
-
-- mount the goal input as a live Haskell binding;
-- add exactly one scoped `Complete output` effect to a workbench with a typed
-  caller;
-- retain any outer return expectations privately so authored Haskell can see
-  and settle only the innermost one;
-- expose `complete`, with no public obligation id or token, and have GHC check
-  its argument against the expected type;
-- supply the actor-owned `:goal` view through the workbench extension hook;
-- append Haskell-authored task context as a User message;
-- send the full canonical conversation to the provider;
-- execute every tagged Haskell fence in order;
-- return compilation/execution receipts as conversation context;
-- continue after declarations or a wrong-typed completion without losing
-  committed work;
-- refuse synchronous same-actor `deliberate` re-entry while allowing the model
-  to define and return closures containing future `deliberate` calls;
-- settle exactly once when the correct live value is produced.
-
-Acceptance:
-
-- one agent-session admission remains held across provider waits, transport
-  retry, fenced execution, and corrective rounds;
-- a session opened from an active Haskell turn transfers that exact
-  admission and resumes the same continuation without nested `begin_turn`;
-- machine checkout is absent during provider waits and reacquired only for
-  Haskell run segments;
-- a function-valued result survives later suspension and GC and remains
-  callable;
-- Haskell source never becomes a JSON tool argument;
-- exact replay preserves byte-identical transcript prefixes and reports cached
-  input usage;
-- provider failure leaves one truthful transcript and one terminal actor
-  failure, never a hidden adapter continuation.
-- an unsatisfiable operation in a fenced fragment abandons that fragment and
-  returns one structured receipt without resuming it or terminating the actor;
-  the same failure in the installed program remains terminal.
-
-Deletion gate: the legacy `drive_model_turn`/answerer loop may remain only
-until its production caller runs through this executor; it is then deleted,
-not kept as a second agent-session route.
-
-## 6. Stage 3 — one real `startActor` (vertical landed; hardening remains)
-
-The first real sealing/startup vertical is landed. It deliberately uses the
-same public `ActorDefinition` -> `startActor` route intended for model-authored
-definitions; there is no privileged static-spec constructor or public sealing verb.
-This stage remains open until the lifecycle and race acceptance below are
-complete.
-
-### Interpreter policy
-
-Do not introduce a reflected effect-row ABI. The named profile is sealed launch
-metadata, not a Haskell authority token passed to handlers. The compiled actor
-entry fixes its Haskell row; ordinary existential packaging hides that row
-inside the private deployment. V0 runs that row directly. Rust remains nominal
-and checks lifecycle phase, principal, realm, incarnation, and grants at use
-time. A later trusted Haskell intent-to-kernel split may strengthen the static
-boundary without changing the actor API or Rust dispatch.
-
-The landed vertical uses the existing `ReadWrite`-equivalent row and source
-vocabulary. Completing the named-profile path adds no positional dispatcher or
-reflected row registry: profile selection specializes the definition, Rust
-validates attenuation, and the existing actor interpreter handles the resulting
-nominal requests.
-
-### Haskell definition
-
-Use the single definition shape in
-[haskell-surface.md](haskell-surface.md#3-actor-definitions-are-haskell-values):
-
-- one `Member`-polymorphic initialization action, specialized to the child's
-  concrete row, whose authored call site supplies GHC's
-  `deliberate`-site metadata;
-- one behavior selector specialized to that same row;
-- one explicit list of model-visible top-level export heads;
-- one shutdown handler specialized to the same row with closing-phase
-  interpreter restrictions.
-
-Startup, the installed program, fenced workbench fragments, and shutdown all
-compile against the same fixed row. The interpreter's lifecycle phase—not a
-second monad or altered stack—controls which `ActorLocal` operations are legal.
-
-The landed vertical starts one checked-in definition through the public
-operation and derives an initial exact facade from compiler provenance. A
-single private capture owns the rooted entry, derives the facade, mints the
-isolated child scope, and assembles immutable launch metadata without routing a
-deployment token through authored Haskell. Stage 5 completes the membrane with an
-authored exact-export manifest and definition/facade coherence probes; it
-strengthens this same operation rather than adding another construction path
-or image registry.
-
-The process composition root is the sole bootstrap exception: it creates the
-single actor registry, binds that same registry into authorized handlers and
-the host, creates the initial root actor, and installs its interpreter policy
-directly. Child
-construction, including the first test child, goes through the same registry
-lifecycle and `startActor` path that model-authored Haskell will use.
-
-The Haskell library hides exactly one row-erasure membrane when it hands the
-existential child entry to Rust. The entry travels as the existing rooted live
-payload; Rust never decodes the row or dispatches by a union position. A
-private readiness request, absent from `ActorLocal` and every model-facing
-profile, marks the end of pure installation. The interpreter accepts that
-request only from the installed-program resource realm and startup phase, so
-fenced model code cannot forge readiness merely by importing a constructor
-name.
-The parked readiness continuation itself retains the installed program; do not
-add a program-root registry beside the resident continuation machinery.
-
-### Startup sequence
-
-1. capture the rooted definition entry, derive its exact facade from compiler
-   provenance, and authorize the caller to instantiate it;
-2. allocate an unpublished child identity, scope, resource realm, interpreter,
-   conversation, exit cell, and ownership edge;
-3. deploy the authored exact program facade into a fresh lexical scope;
-4. run the rooted child entry, whose authored initialization action carries the
-   typed startup value;
-5. service each sequential User-role result-bearing session through the Stage 2
-   executor until initialization returns;
-6. validate, while still unpublished, that installation parked the private
-   readiness request in the child's own resource realm;
-7. publish readiness, settle the parent's start continuation with the exact
-   `ActorRef`, and schedule the validated installed continuation through
-   ordinary actor-turn admission.
-
-Capability-specific launch-grant recipes are intentionally not part of this
-vertical. When the first concrete resource needs them, redemption belongs at
-the authorization/allocation boundary above without changing the actor entry,
-readiness, or publication mechanism.
-
-Failure before readiness publishes no reference and recursively cleans the
-unpublished subtree. Death after readiness but before caller resumption may
-return an already-terminal exact reference; `awaitExit` must still observe
-its retained result.
-
-Acceptance:
-
-- one checked-in definition starts through the sole public construction
-  operation and the same private sealing/lifecycle path reserved for model-authored use;
-- startup carries its existential child entry as a rooted value without
-  positional dispatch metadata or Rust row reflection;
-- unauthorized definition start fails before allocation or model inference;
-- copying a definition does not transfer caller authorization;
-- the child's model sees only the runtime facade and authored program exports,
-  never ambient parent bindings or transcript;
-- startup cannot nest another model session during pure installation;
-- readiness, cancellation, exit, and publication races are exhaustively
-  tested;
-- successful closure-valued exit survives child execution-resource reaping.
-
-The `ReadWrite`/`ReadOnly` row proof belongs with named profiles in Stage 5.
-Stage 3 must leave no reflected ABI or registry that profile selection would
-have to route around.
-
-The first Stage 3 vertical installed a one-shot continuation that immediately
-returned `exit` after initialization. Stage 4 now extends that exact root and
-continuation path with installed receives; it did not introduce a second
-program registry or actor dispatcher.
-
-## 7. Stage 4 — actor operations and supervision
-
-Expose the small Haskell actor vocabulary:
-
-- `startActor`, `runActor`, `call`, `cast`, `receive`, and `awaitExit`;
-- ordinary `serve`/worker combinators rather than runtime role presets;
-- repeatable exact exits and typed shutdown reasons;
-- no `tryStart`/`tryCall`/`tryCast`/`tryWait` mirror family.
-
-`receive` is the sole public mailbox-consumption primitive. Its
-`ActorLocal protocol` connects the actor program's protocol to the request;
-the enclosing definition separately fixes exit. Its rank-2 handler returns the exact protocol result plus
-the program's next state, while the runtime-private reply obligation cannot
-escape into model-authored Haskell. `serve` and state-machine loops are library
-code over this primitive.
-
-The Rust registry already provides:
-
-- synchronous wait-edge tracking and `A -> B -> A` cycle rejection;
-- owner termination recursively stopping its subtree.
-
-The resident call/cast/receive/serve vertical, atomic reply-plus-next-state
-settlement, exact waits, typed shutdown, and per-session FIFO machine admission
-are landed. The remaining lifecycle work must extend the existing lifecycle
-owner rather than adding another scheduler, cleanup registry, shutdown path,
-or exit-value store.
-
-The call/cancel/reply linearization cases are now pinned: caller cancellation
-after handler admission does not fail the callee, target exit before reply
-fails the exact call while delivery retains its request until released, and a
-reply published before target exit remains observable. Normal resident
-completion now transfers one typed cleanup batch for the entire recursively
-terminated subtree; it cannot publish child exits while stranding their realms
-or shutdown hooks. Remaining acceptance covers cancellation while the startup
-future itself is being dropped. The lifecycle-owned shutdown admission
-watchdog is landed. The first real request/reply child vertical is landed.
-
-## 8. Stage 5 — dynamic sealing and caller-checked authority
-
-The initial named-profile path is landed end to end. `ActorDefinition` selects
-one statically known Haskell row, while `ActorDescriptor` records the matching
-immutable `ReadWrite` or `ReadOnly` identity. Creation events preserve it and
-`ActorRegistry` rejects `ReadOnly -> ReadWrite` before consuming an actor
-identity. Profile identity remains neutral metadata: it neither reflects an
-arbitrary Haskell row nor grants access to a resource.
-
-The profile contract is:
-
-- `ReadWrite` actors may start `ReadWrite` or `ReadOnly` children;
-- `ReadOnly` actors may start only `ReadOnly` children;
-- GHC checks each definition against the selected profile row;
-- Rust validates the spawn edge before allocation;
-- profile identity remains launch metadata, separate from program images and
-  per-resource grants;
-- `ReadOnly` excludes ambient write effects but may call an explicitly supplied
-  writer actor.
-
-Registry tests prove every permitted metadata edge and reject `ReadOnly ->
-ReadWrite` without consuming an identity. The Haskell start vertical compiles
-and runs definitions specialized to both rows, and a compile-failure fixture
-rejects a write-using `ReadOnly` definition.
-
-The single private start capture now combines compiler-inferred dependencies
-with `visibleToChild`, resolves that exact facade before allocation, and routes
-the rooted entry through the normal isolated child lifecycle. A real resident
-model session now defines a fresh GADT protocol, constructs and starts its
-definition, calls it, and retrieves a closure-valued exit inside one live
-returned computation. Keep this one membrane; do not add a second image
-registry or public sealing operation.
-
-The sealing proof must cover:
-
-- the rooted definition value;
-- exact dependency-closed session-module identities;
-- the definition's explicit model-visible top-level heads, resolved through
-  GHC metadata against the definition's exact compile view;
-- source and agent-session provenance.
-
-Sealing and installed-root state supply the actor-owned `:program` snapshot;
-the resident workbench neither owns nor reconstructs that state.
-
-It must reuse the code arena, source-facade mechanism, root ledger, and resource
-realms. It must not replay source to manufacture nominally new types, inherit a
-live parent scope, or introduce a program-image registry.
-
-The landed membrane proof uses one model-authored GADT child: the model defines
-the protocol and definition, names a minimal child-visible head set, starts it,
-calls the child with the same nominal protocol type, and receives a
-closure-valued result. A sealing adversary redefines one selected head between
-definition and start and proves that the operation fails before allocation
-rather than pairing the definition with a same-spelled later type. Keep
-sealing inside the one start operation; do not split image, export, and
-installation into separately stateful public APIs.
-
-Sealing must compile the real child entry facade plus typed startup/installed-
-continuation adapters before allocating the child. That proof must cover the
-existential startup-result type as well as the public startup, protocol, and
-exit types; a string-level
-head match is not sufficient evidence of nominal compatibility.
-
-Complete caller-checked capability behavior in the same stage:
-
-- moving a closure never transfers its creator's principal;
-- opaque operations consult the receiver's grants at use time;
-- actor-definition launch and capability use obey the same caller-check
-  model;
-- backend and worktree identifiers remain resource identities, not competing
-  actor principals.
-
-## 9. Stage 6 — one production actor-system host
-
-The first production consumer must own actor tasks and runnable work, not
-merely bundle the registry, runner, starter, mailbox, and lifecycle structs.
-It composes the existing components into one host that owns:
-
-- root actor bootstrap;
-- routing installed outcomes through `Deliberate`, `Start`, `Call`, `Cast`,
-  and `Wait`;
-- mailbox readiness and dispatch;
-- call/wait wakeup without periodic scans;
-- child-task ownership, cancellation, and root/subtree completion.
-
-Add one typed readiness/wakeup mechanism shared by mailbox, call, wait, and
-lifecycle transitions. `ActorRegistry` remains the authority for actor
-admission and `SessionRegistry::checkout_wait` remains the authority for
-machine admission. Do not build separate per-operation schedulers or a façade
-whose only behavior is forwarding to several public structs.
-
-Before the host launches asynchronous starts, it must own each startup through
-settlement. In-band cancellation or a caught task panic transfers the exact
-unpublished cleanup batch to the existing lifecycle owner and the task remains
-driven until that epilogue finishes. The lifecycle owner runs cooperative
-shutdown when possible, bounds admission wait with a watchdog, and closes every
-captured realm regardless of hook failure or timeout.
-
-Acceptance covers cancellation during a provider-backed startup and during
-readiness resumption, exactly-once terminal publication, child-first hook/root
-settlement, closure of every captured realm, restoration of parent admission,
-typed wakeup for each runnable source, and quiescent host shutdown.
-
-### Ordered Stage 6 TODOs
-
-Implement these in order. Each item should land as a stable, tested boundary;
-do not create an empty host facade and fill it in later.
-
-1. [x] **Centralize installed-program boundary classification.**
-
-   - Add one closed actor-boundary sum for the next installed-program boundary:
-     completion, `Deliberate`, `Start`, `Call`, `Cast`, `Wait`, or stable
-     mailbox receive. Each variant owns only its exact payload.
-   - Those payloads own every continuation and live-custody token needed by
-     that boundary. The host's admitted-work item owns the exact turn lease
-     alongside the boundary; neither layer recovers linear state from event
-     text or inspects raw `ResidentOutcome` requests in several branches.
-   - Replace the existing rendered-constructor-name classifier rather than
-     adding a second parser. Decode model-visible operations through generated
-     nominal request enums; give `Complete` an equally typed decoder instead
-     of retaining its string special case. Unknown or phase-invalid requests
-     fail the actor through one typed protocol error.
-   - Keep startup-only `InstallShutdown`/`Ready` and kernel-private
-     `Reply`/`Continue` out of the installed-program result type. Their current
-     trusted drivers remain their sole interpreters.
-
-2. [x] **Complete the one typed runtime-wake contract.**
-
-   - [x] The registry emits one closed identity-only sum for mailbox acceptance,
-     call settlement, wait-target exit, ready publication, and terminal
-     publication from the same critical section that changes authoritative
-     state. Emission neither awaits nor transfers custody.
-   - [x] The sole receiving end is itself the host-side accumulator. It
-     buffers an early call/wait wake until the corresponding parked
-     continuation has been installed, and deduplicates mailbox readiness by
-     exact actor incarnation. A wake is a level-trigger for rechecking one named item, not
-     permission to scan every actor or obligation.
-   - Do not derive scheduling from the neutral event log, add per-operation
-     `Notify` objects, or create another durable queue. Unit tests must cover a
-     wake arriving before pending-handle installation and repeated wakes for
-     the same mailbox.
-
-3. [x] **Create the production host only once it owns real work.**
-
-   - Add `tidepool-actor/src/host.rs` only in the same change that makes it
-     launch a prepared root and own at least one real actor task. Do not land a
-     public bundle of forwarding accessors first.
-   - The host consumes the composition root's single registry, then constructs
-     and owns the machine registry, runner, completion executor, starter,
-     mailbox adapter, lifecycle owner, sole wake receiver, actor-task set, and
-     parked call/wait tables. The same registry may already be captured by
-     authorized handlers; there is no alternate host-owned registry. Tests may
-     inspect behavior through typed reports and the neutral event stream; they
-     must not require public getters for each substrate component.
-   - [x] Starter and mailbox construction already require the same injected
-     `ResidentActorLifecycle`; neither constructs a private lifecycle policy.
-   - The composition root owns that lifecycle and passes it to every host
-     task. There must be one shutdown policy per host.
-   - Keep registry actor admission and runtime machine checkout as the two
-     existing nested gates. The host adds neither another actor lock nor a
-     second machine scheduler.
-   - The first root-launch input consumes an already compiled resident machine,
-     its first outcome, its exact descriptor, and Rust-selected provider
-     metadata. Compilation remains outside the actor scheduler; after launch,
-     the host owns the machine and actor lifecycle. Reject duplicate session
-     installation before actor publication.
-   - Provider handles are Rust-selected launch metadata owned by actor tasks.
-     Stage 6 uses one injected `Arc<dyn DynModelProvider>` for the vertical;
-     do not add a provider registry or expose model configuration to authored
-     Haskell before Stage 7 defines launch recipes.
-
-4. [x] **Drive one actor through typed boundaries.**
-
-   - Keep actor futures directly in one host-owned unordered task set rather
-     than spawning detached Tokio tasks. Each future owns cloned runtime
-     components, an `Arc` provider handle, its cancellation receiver, and the
-     exact linear boundary custody it is advancing. This preserves logical
-     concurrency while leaving the host as the structured owner.
-   - Add private closed types for task key, task phase, and task result. The
-     task table is keyed by exact actor incarnation and records one of
-     runnable, starting, or parked; strings, event text, and `JoinHandle`
-     state are not scheduling authority.
-   - A runnable actor task advances one admitted turn until it completes or
-     parks on a model session, child start, call, wait, or stable receive.
-     The task owns the `TurnLease` until that transition is installed; no host
-     branch reconstructs admission from the registry after the fact.
-   - Task results return typed next work to the host. The host installs parked
-     call/wait custody before honoring any buffered settlement wake.
-   - The event loop selects between completed task futures and the sole
-     `ActorRuntimeWakes` receiver. It consumes only exact buffered wake keys;
-     it never scans the registry for general runnable work.
-   - Mailbox dispatch runs at most one accepted message per task. If more
-     messages remain, it re-enqueues that actor at the tail; no actor drains an
-     unbounded mailbox while peers are runnable.
-   - Exactly one host task may own an actor incarnation at a time. Registry
-     admission remains the enforcing invariant, while the task table makes
-     duplicate scheduling a host error instead of routine contention.
-
-5. [x] **Move startup custody into structured host task ownership.**
-
-   - [x] The one startup driver now accepts an in-band cancellation signal at
-     every ordinary await. Before publication it transfers the unpublished
-     actor through lifecycle cleanup; after publication it force-terminates
-     the child. Terminal publication and cleanup are never cancellable.
-   - Factor the existing startup driver into a private unpublished-start
-     owner plus phase operations. The owner holds the `StartingActor`, child
-     realm and context, parent lease/hole when present, entry root, readiness
-     continuation, and any captured cleanup batch outside each individually
-     cancellable or unwind-catching operation.
-   - Catch unwind around provider/runtime phase work while the unpublished
-     owner remains outside the caught future. On panic, convert the task to one
-     typed host failure, atomically abort the initializing actor, and await the
-     same lifecycle cleanup before reporting task completion. Do not try to
-     recover custody after the whole startup future has already unwound.
-   - Host cancellation is a signal, never task abortion. Dropping a provider
-     or machine-wait future returns control to the task state, which atomically
-     aborts unpublished startup through `ActorRegistry`, transfers the exact
-     `ActorCleanupBatch` to the one lifecycle owner, and awaits cleanup before
-     the task may finish.
-   - The host must not use `JoinHandle::abort`, `abort_all`, detached cleanup,
-     asynchronous `Drop`, or a second cleanup queue. The supported shutdown
-     contract consumes or mutably borrows the live host and drains it; arbitrary
-     executor destruction is not misrepresented as an asynchronously
-     recoverable event.
-   - Root bootstrap and child `startActor` share the same unpublished registry
-     custody and terminal epilogue. Their initialization producers differ:
-     the root arrives as a prepared machine/outcome, while a child runs its
-     sealed entry and startup sessions. Do not force those inputs through one
-     fake generic startup program merely to share code.
-
-6. [x] **Own shutdown and quiescence.**
-
-   - Model host lifecycle with a closed `Open`/`Closing` state. The transition
-     to `Closing` is idempotent, stops launch and delivery acceptance, and
-     sends cancellation through each task's in-band signal exactly once.
-   - Closing the host rejects new roots, children, and mailbox submissions;
-     signals every owned root; and lets owner termination recursively settle
-     descendants through the existing atomic cleanup-batch path.
-   - Continue driving cancellation epilogues and realm closure after ordinary
-     actor work has stopped. A shutdown admission timeout records the existing
-     neutral failure event and cannot strand the remaining subtree.
-   - Quiescence means no actor task, unpublished startup, pending call/wait,
-     runnable wake, or unprocessed cleanup remains. The drain loop must check
-     all five conditions after absorbing currently queued wakes.
-   - Return a typed shutdown report containing terminal roots and every cleanup
-     failure rather than a Boolean or first-error-only result. Per-subtree
-     lifecycle cleanup may retain its current first-error API internally; the
-     host report accumulates failures across independently owned roots/tasks.
-
-7. [ ] **Prove one real host vertical before adding Stage 7 policy.**
-
-   - [x] Bootstrap a root through the host, run `Deliberate`, start a child, serve
-     a call and cast, await its typed exit, and shut the root subtree down.
-   - Deterministically cancel once during provider-backed startup and once
-     during readiness resumption. Both cases publish one terminal result, run
-     child-first shutdown, close every captured realm, and restore parent
-     admission.
-   - Exercise early and duplicate wake delivery, call failure on target exit,
-     a repeatable late wait, mailbox FIFO/tail requeue, task panic, shutdown
-     admission timeout, and quiescent host completion. The wake cases, late
-     wait, dead-target call, outer task panic, and quiescent completion are
-     landed; readiness-specific cancellation remains.
-   - Use adjacent Haskell fixtures and focused actor targets. This host
-     vertical is the next major boundary at which the broader actor test set
-     is warranted; intermediate commits use narrow unit tests.
-
-### Stage 6 execution tranche
-
-The next linear tranche ends when the production-host vertical above passes.
-Implement it as these reviewable boundaries:
-
-1. [x] **Unpublished-start ownership refactor.**
-
-   - Work in `start.rs` and `resident_lifecycle.rs`; introduce no host facade.
-   - Move initialization state outside cancellable/caught phase futures, then
-     preserve the existing success behavior through the new owner.
-   - Add focused cancellation and injected-panic tests before and after ready
-     publication. Prove one terminal transition, one hook/root settlement,
-     realm closure, and restored parent admission.
-   - Run the actor library tests filtered to startup/lifecycle plus strict
-     Clippy for `tidepool-actor`; do not run the extractor-backed vertical yet.
-
-2. [x] **Host composition root plus root/`Deliberate`/`Start` path.**
-
-   - Add `host.rs`, the direct unordered task set, exact task table, in-band
-     cancellation senders, and one event loop over task results and registry
-     wakes.
-   - Consume a prepared root, advance its typed `Deliberate` boundary, capture
-     its `Start`, and run the child through the unpublished-start owner. Install
-     the resumed parent outcome before consuming any buffered wake.
-   - Test duplicate scheduling as a typed host error, duplicate session launch
-     rejection before publication, and cancellation while the provider and
-     readiness continuation are pending. Duplicate session rejection is
-     landed; readiness-resumption cancellation still needs a real blocking
-     seam rather than a production test hook.
-
-3. [x] **Installed actor boundary routing.**
-
-   - Route completion and stable `Receive`; then add `Cast`, `Call`, and `Wait`
-     using the existing `ResidentActorMailbox` operations.
-   - Store parked call/wait objects in the host before checking buffered
-     `CallReady`/`WaitReady` wakes. A wake rechecks one exact key and either
-     resumes it or leaves it parked; it never manufactures a result.
-   - Schedule mailbox-ready actors at the runnable tail and dispatch one
-     message per task. Test FIFO, tail requeue, early wake, duplicate wake,
-     dead-target call failure, and repeatable late wait.
-
-4. [x] **Structured closing and quiescence.**
-
-   - Reject new work, cooperatively cancel every root task, keep polling task
-     epilogues and runtime wakes, and drain lifecycle cleanup to the explicit
-     quiescence predicate.
-   - Exercise task panic and shutdown-admission timeout without aborting tasks
-     or stranding a realm. Return and assert the typed shutdown report.
-     Outer task panic and quiescence are landed; the existing lifecycle tests
-     cover admission timeout below the host composition boundary.
-
-5. [ ] **Major-boundary verification and surface contraction.**
-
-   - [x] Factor the manual `tests/start_surface.rs` setup into one adjacent
-     fixture and add the host vertical without duplicating its Haskell program.
-     Large Haskell programs remain `include_str!` fixtures.
-   - [x] Run formatting, `git diff --check`, strict actor Clippy, actor library
-     tests, and the one Nix-backed host vertical. This is the tranche's major
-     boundary; broader workspace batteries remain unnecessary.
-   - [x] Audit `lib.rs` exports after the host is the production consumer. The
-     starter/mailbox/workbench orchestration types now have only white-box
-     integration-test consumers outside the crate; there is no production
-     caller to preserve.
-   - [ ] Move those white-box tests behind crate-owned test modules, then make
-     starter/mailbox/workbench orchestration types crate-private where no
-     production caller remains. Do not add a default test-support feature,
-     `doc(hidden)` facade, or other fake contraction solely to keep the current
-     external-test layout.
-
-This tranche deliberately excludes provider/profile production composition,
-worktree grants, owner-wake delivery, structural fork, compiler-endpoint
-identity, and declaration-receipt cleanup. Those begin only after the host
-vertical establishes the runtime ownership boundary.
-
-## 10. Stage 7 — first production actor and DevSwarm vertical
-
-The first production root is agent-backed rather than a one-shot resident
-provider loop. Tidepool owns the daemon and actor tree; the root conversation
-is an ordinary stock Codex TUI using the proven Exomonad node shape: persistent
-thread binding, durable pushed messages, and a node-local MCP server. The
-currently landed MCP command catalog is compiled from Haskell and executed
-under the exact actor principal. The next required vertical replaces that
-transitional catalog with one actor-local persistent `session_run` workbench
-transport.
-
-This does not retire the resident form or make Codex an actor identity. It
-establishes the common lifecycle boundary before worktree grants and recursive
-DevSwarm behavior:
-
-- define the initial production effect profiles and their handler composition;
-- add a long-lived backend-neutral interactive-agent seam, with stock Codex as
-  its first adapter;
-- retain the actor registry and live Haskell machines in one daemon, using a
-  thin per-agent stdio MCP proxy only for rollout discovery and transport;
-- compile the actor-scoped MCP declarations and live dispatch closure from one
-  Haskell tools record;
-- deliver runtime facts through a durable actor inbox and the backend's native
-  push channel;
-- attach the first capability-specific launch recipe to an opaque worktree
-  handle;
-- check the actor principal when the recipe is redeemed;
-- roll grant redemption back with unpublished startup;
-- preserve integration authority only for the owner.
-
-### Stage 7A — principal-aware profile composition
-
-Do not construct separate resident machine types for `ReadWrite` and
-`ReadOnly`. Actors of both profiles share one machine, while profile identity
-belongs to an exact actor incarnation. Profile-aware handlers therefore use
-the actor principal installed in `EffectContext` to query the
-registry's authoritative descriptor before delegating a nominal request.
-
-Implement this boundary in order:
-
-1. [x] Thread the already-installed `SessionRunContext.principal` into effect
-   dispatch. `EffectContext` currently carries only the constructor table and
-   handler user state, so handlers cannot yet authorize the actor selected by
-   `set_actor_execution`; fix that common seam rather than adding actor-global
-   mutable state or capturing a principal in a handler instance. Non-resident
-   callers use the explicit system principal.
-2. [x] Add one reusable authorization decision at the actor/runtime boundary. It
-   accepts the exact dispatch principal and requested operation class, reads
-   the retained descriptor, and returns a closed allow/refuse result. `FsRead`
-   is allowed for both initial profiles; `FsWrite` is allowed only for
-   `ReadWrite`. Missing, stale, and exited principals refuse rather than
-   falling through to another handler. An initializing actor is admitted under
-   its selected profile because authored initialization executes before
-   publication; the private startup owner still prevents external use of its
-   reference.
-3. [x] Keep operation classification nominal and generated where possible. Do not
-   inspect rendered request strings, rely on HList position, or duplicate the
-   Haskell profile rows as a Rust tag prefix. The gate decides a class; the
-   existing filesystem handlers still decode and execute the concrete request.
-4. [x] Provide one reusable profile-authorizing handler decorator and compose
-   it around the shared `FsRead` backend and `FsWrite` handler in the resident
-   proof. The eventual production composition root supplies the workspace root
-   and registry; actor startup does not construct handlers, and no speculative
-   production-stack builder exists before that root. Definitions and profile
-   names convey no filesystem authority without this interpreter and its
-   resource root.
-5. [x] Test the decision table without GHC, then run one focused resident vertical
-   in which a `ReadWrite` actor writes, a `ReadOnly` actor reads, and a
-   `ReadOnly` write is refused by Rust even if a malformed or stale program
-   manages to issue the nominal request. The compile-failure fixture remains a
-   model-surface hygiene test, not the authorization proof.
-6. [x] Finish the first production agent-backed root through
-   `ResidentActorHost`, which remains the sole scheduler for every callback
-   into resident Haskell. Reuse the same registry, machine-access seam, profile
-   authorization, root custody, and event stream. The composition root makes
-   no OAuth request: the interactive backend owns its conversation, while the
-   resident provider is unavailable unless a later policy explicitly installs
-   one. A fresh stock TUI receives the Haskell-authored startup value as its
-   first User message because its resumable rollout does not exist until that
-   submission; later input uses the durable inbox and native push path.
-
-   The bundled `Tidepool.Actors.DevSwarm` policy and `shoal host` composition
-   are landed. The root exposes typed stateful `actorStatus`, `spawnWorker`,
-   `listWorkers`, nonblocking `collectWorker`, and explicit `ackWorker` tools.
-   A spawned worker stabilizes at its own `serveTools` policy, is handed to
-   deployment through the host's single-consumer lifecycle stream, receives
-   its typed startup assignment directly as the initial User message, and
-   completes through `finishWork` with a retained `CandidateReceipt`. There is
-   no parallel assignment lookup tool. A focused GHC/JIT test proves root installation,
-   MCP-routed `startActor`, child-policy installation, terminal MCP settlement,
-   replayable typed collection, and acknowledgement without opening an
-   interactive process.
-
-   Tool declarations retain input and output schemas plus the Haskell endpoint
-   kind (`Call`, `Notify`, `Update`, or `Finish`) through MCP projection. The
-   kind describes resident policy control flow. MCP projection marks the
-   intrinsically stateful kinds as not read-only while leaving ordinary
-   `Call` mutability unspecified; it does not guess destructiveness,
-   idempotence, or open-world behavior.
-
-   The deployment path binds an authenticated private proxy and launches Codex
-   directly in one tmux pane per interactive incarnation. Codex starts
-   `shoal proxy` as its stdio MCP child; there is no per-actor wrapper process.
-   The host validates the rollout binding discovered by that proxy. Root
-   incarnations start ready and idle; Shoal does not manufacture a User turn
-   merely to query their status. Resume reconciliation is constitutional
-   Developer context and therefore applies to the next real turn. A worker's
-   launch-time User prompt remains its actual assignment kickoff; subsequent
-   lifecycle input uses the durable native push operation.
-   Stock Codex does not allocate a fresh conversation identity before its first
-   real submission. Shoal therefore owns the pane, inbox, listener, and cleanup
-   record first and publishes `AwaitingInput`; the first User turn transitions
-   the same application monotonically to bound `Ready` state and enables native
-   push. There is no artificial input deadline. Exact-pane disappearance before
-   binding is an application failure, and the root pane is selected before
-   `shoal init` attaches. An explicitly fresh launch clears any retained root
-   binding from a previous run; only `--recreate` may consume that continuity
-   record.
-   Because one interactive actor admits one turn at a time, a pushed lifecycle
-   input cannot run until the current turn yields. `WorkerPending` therefore
-   directs the model to continue only immediately runnable work or end the
-   turn; it never directs the model to sleep or poll. The lifecycle wake is the
-   cue for one nonblocking collection. A delayed wake after explicit
-   acknowledgement is a no-op.
-   Successful MCP settlement is linearized at the next stable policy boundary:
-   another invocation await or typed actor completion. Ordered deployment
-   retirement then notifies the owner through the same durable native push and
-   reaps the exact child pane. Temporary push failure retains the unacknowledged
-   row for retry. Launch, delivery, and retirement run in independently joined
-   tasks with bounded queue operations and bounded fleet shutdown; the central
-   lifecycle loop does not await external Codex I/O.
-
-   `shoal init` owns the exact tmux session lifecycle and publishes typed
-   `Starting`, `AwaitingInput`, `Ready`, `Failed`, or `Exited` run status.
-   `--recreate` creates a new actor incarnation while resuming a valid retained
-   root conversation.
-   Resume fails closed when the retained binding is invalid, and the new
-   incarnation receives explicit reconciliation context stating that old
-   handles, workers, exits, inbox rows, and resident state were not restored.
-   Child conversations remain fresh. Killing the tmux session tears down the
-   host, Codex panes, and proxy children as one operational unit. The exact
-   retained worker exit remains the Haskell policy's pull-based result; native
-   lifecycle delivery is informational and cannot duplicate that custody.
-
-   Root policy now allocates one retained managed worktree per accepted worker,
-   closes the handle into its definition, and launches the external process
-   only after exact-incarnation binding. Candidate submission combines an
-   authored report with one trusted Worktree observation; collection is
-   replayable until explicit acknowledgment. Worker Codex processes run in
-   retained linked worktrees. Each checkout owns its working files, index, and
-   HEAD while sharing the source repository's Git namespace. A
-   reusable `tidepool-node` process boundary makes the active repository
-   visible at one stable Codex project path. A worker's working tree and the
-   shared Git common directory are writable while source plus sibling working
-   files are read-only; the root's
-   source is writable so it can fold an accepted candidate before spawning
-   dependent work from the advanced HEAD. The stable path requires one
-   project-trust entry rather than one per generated repository. Codex then
-   runs with its redundant inner filesystem sandbox disabled. Source-checkout
-   extractor process pins are removed before launch so each repository resolves
-   tools from its own sources. This permits normal Git commits and recovery in
-   one directly reviewable branch/object namespace. Shared refs, config, hooks,
-   and locks are intentional V0 infrastructure. This is working-file
-   separation rather than a hardened sandbox: environment, network,
-   credentials, caches, and the process namespace remain shared. Policy reload
-   and broader commit/evidence folding remain later work. The existing
-   `mergeBranchInto` operation can directly name a candidate branch because all
-   managed worktrees share the same Git namespace.
-   `ReadWrite`/`ReadOnly` therefore remain explicitly
-   experimental resident-effect classifications rather than process-security
-   claims; the initial production machine intentionally handles no ambient
-   filesystem effect.
-
-   Three implementation seams remain deliberately visible instead of being
-   papered over by Shoal-local machinery:
-
-   - the root is still compiled and installed by the composition root rather
-     than entering through the public `ActorDefinition` startup path; converge
-     these once the ownerless-root case has a real definition-level contract;
-   - `ActorRegistry` retains an in-memory, unbounded observability journal and
-     external conversation events are not yet folded into it; long-running
-     self-hosting needs one cursor/sink retention policy, not a Shoal-only
-     second event log;
-   - registry facts, resident continuation custody, and external deployment
-     resources still live in three owners. Preserve those distinct resource
-     responsibilities while removing duplicated lifecycle transition state;
-     do not introduce another scheduler facade in the meantime.
-
-   Port only the following Exomonad mechanisms into their Tidepool owners:
-   stock-TUI command construction, rollout discovery and versioned binding,
-   `codex queue`, confirmed teardown, durable inbox/cursor delivery, and the
-   transparent stdio MCP proxy. Do not copy Exomonad roles, review policy, Git
-   orchestration, or worktree tools; those become Haskell policy. Record any
-   generally useful extraction seams as an upstream proposal rather than
-   coupling the repositories at runtime.
-
-The gate should be extensible by adding typed operation classes and profile
-decisions, not by turning the two initial profiles into a generic dynamic
-capability framework.
-
-### Stage 7B — capability-bound, replayable candidate submission [landed]
-
-This slice replaced Shoal's automatic worktree allocation and destructive
-worker collection without adding a second candidate registry or a
-Rust-special-cased MCP tool.
-
-1. Add one owning Worktree submission-observation operation.
-   - Return durable worktree ID, recorded base commit, `OnBranch branch oid` or
-     `Detached oid`, path-level `DirtySummary`, and typed in-progress operation
-     in one result.
-   - Establish one consistency contract inside `tidepool-worktree`; callers do
-     not compose separately timed head/status/operation reads. Detected
-     movement produces a typed unstable-observation result after bounded
-     internal retry, never a mixed receipt or unbounded wait.
-   - Call the commit `submittedHead`. Do not claim the worktree is sealed.
-   - Reuse `GitCli`, `WorktreeHandle`, `DirtySummary`, and `InProgressKind`; add
-     `Other(String)` to that existing operation enum if unknown state must be
-     retained rather than introducing a stringly parallel type. Do not add a
-     Shoal Git runner or parse rendered Git text.
-   - Test clean branch, detached head, dirty index/worktree/untracked state,
-     in-progress operation, missing tree, and mutation during observation.
-
-2. Land the first capability-specific launch recipe.
-   - The root creates a fresh managed worktree before `startActor` and retains
-     its handle.
-   - The Worktree capability module decorates the worker definition with an
-     opaque recipe for that exact handle; no public generic grant record or
-     recursive startup-value scan is introduced.
-   - The resident child may reach internal policy readiness with only a recipe;
-     the capability is absent during initialization. Shoal validates and binds
-     that recipe to the exact child before launching its external application.
-     Binding or launch failure fails the child and rolls back the active lease;
-     the worktree itself remains under the retain-first policy.
-   - Replace `tidepool-worktree::AgentRef` string ownership with or narrow it
-     behind exact actor-principal binding rather than adding another map.
-   - Shoal resolves the redeemed binding for the child cwd and deletes its
-     automatic `ActorRef`-labelled worktree allocation path.
-   - Compose the existing Worktree handler into Shoal once. The root may create
-     a fresh tree; the worker may observe only its granted tree. Creation,
-     merge, and unrelated-handle reads remain refused under the child
-     principal. Generalize any required Haskell helper from concrete `M` to a
-     `Member Worktree effs` constraint instead of hard-coding a stack.
-   - Prove same-principal success, cross-principal refusal, stale recipe/ref
-     refusal, old-incarnation refusal, atomic rollback, and one worktree per
-     external worker.
-
-3. Make successful worker submission truthful at the Haskell boundary.
-   - Split the model input `WorkerReport` from the successful
-     `CandidateReceipt` exit.
-   - Close the granted `WorktreeHandle` into the worker definition. While
-     `finish_work` is pending, the trusted Haskell handler obtains one fresh
-     submission observation and constructs the candidate exit.
-   - A clean submitted OID is the immutable review/integration artifact.
-     Dirty state completes truthfully but is non-integrable by default; the
-     runtime does not silently stash, commit, or patch it.
-   - A repository-observation failure cannot be replaced by model JSON and
-     does not yield `WorkCompleted`.
-   - Prove a real worker commit changes `submittedHead`, leaves the source
-     checkout untouched, and cannot forge its worktree/base/head facts through
-     `finish_work` input.
-
-4. Replace destructive blocking collection with an idempotent state machine.
-   - Add exact nonblocking `pollExit`; preserve repeatable `awaitExit` for
-     ordinary resident control flow.
-   - Introduce a distinct model-facing `WorkerHandle`. V0 may derive its wire
-     representation from the fresh `WorktreeId`, but Haskell state retains the
-     exact `ActorRef` and treats JSON only as correlation.
-   - Retain the normalized typed spawn intent. Look up and compare it before
-     allocating a worktree or deriving a grant. Same key plus same intent
-     returns the existing handle while it is live or collectible; same key plus
-     different assignment or requested launch policy returns
-     `WorkerKeyConflict`; an acknowledged key returns
-     `WorkerAlreadyAcknowledged` and stays reserved. Runtime-issued worktree and
-     grant identities are results of the first accepted intent, not fields a
-     retry must reproduce.
-   - `collect_worker` never removes a record. It returns pending, the same
-     terminal outcome on every call, already-acknowledged, or genuinely
-     unknown.
-   - `ack_worker` drops the exact reference only after `collect_worker` has
-     observed a terminal result and leaves a per-incarnation tombstone.
-     `list_workers` reports pending, collected, and acknowledged state rather
-     than only key strings.
-   - Owner notifications carry the same application `WorkerHandle` alongside
-     exact lifecycle identity. They remain informational and need no ordering
-     guarantee or access to the typed candidate value.
-   - Remove model-facing `await_worker`; do not add `await_any`, timeout,
-     progress, or ordered-notification machinery in this slice.
-
-5. Scope replay honestly.
-   - Result replay, key reservation, and acknowledgment last only for the
-     current root incarnation.
-   - `--recreate` may resume the provider thread but creates fresh actor state
-     and explicitly tells the model that old worker handles, bindings, pending
-     results, and acknowledgments are dead.
-   - Retained worktrees remain discoverable external resources but are not
-     automatically rebound or reconstructed as workers.
-
-Stage 7B acceptance:
-
-- dropping the first collection response and retrying returns the identical
-  `CandidateReceipt`;
-- collection followed by a delayed duplicate terminal wake returns the same
-  receipt, or `WorkerAlreadyAcknowledged` after explicit acknowledgment;
-- dropping an acknowledgment response and retrying reports acknowledged;
-- a dropped spawn response can be recovered by retrying the same typed request,
-  while a changed request conflicts;
-- dirty work is reported truthfully and is distinguishable from a clean
-  immutable submitted commit;
-- exact actor and worktree authority remain private despite forgeable JSON;
-  and
-- no new candidate-result registry, Git runner, scheduler, or worktree
-  allocator exists beside the current owners.
-
-Land this slice as one coherent capability/submission commit or a small series
-whose intermediate states compile but are not presented as self-hosting-ready.
-
-### Stage 7C — exact external-application failure routing [landed]
-
-Land this as a separate lifecycle commit because it changes race precedence
-and fleet shutdown behavior.
-
-1. Give deployment supervision one typed control channel into
-   `ResidentActorHost`.
-   - Commands name the exact actor and a structured external-application
-     failure class; rendered `String` remains diagnostic payload, never control
-     flow.
-   - The host remains the only code allowed to settle resident lifecycle,
-     continuation custody, and subtree cleanup. Deployment tasks never mutate
-     `ActorRegistry` directly.
-   - The acknowledged command result distinguishes exact actor failure applied,
-     actor already terminal, and unknown/stale actor. The host decides this
-     race atomically with lifecycle state; the deployment coordinator never
-     infers it from timing or error prose.
-2. Route child failures precisely.
-   - Worktree-binding resolution, command construction, launch, rollout
-     discovery, and unexpected live MCP/process exit fail that exact child.
-   - The parent remains live and observes ordinary `WorkFailed` through its
-     retained reference; one informational lifecycle wake is still delivered.
-   - Root application loss ends the run because no owner can supervise it.
-3. Resolve terminal/application races once.
-   - A terminal actor record wins over later application failure; retirement is
-     bounded cleanup and cannot rewrite the result.
-   - An application failure observed while the actor is live asks the host to
-     publish `Failed` once, then follows normal retirement.
-   - A post-terminal inability to contain an orphaned native process may fail
-     the Shoal run as a resource-containment invariant, but the child's typed
-     result remains immutable.
-4. Keep lifecycle work off the fleet coordinator.
-   - Launch, delivery, retirement, and failure reporting remain independently
-     supervised and bounded.
-   - Child failure is data, not `run_interactive_applications` returning an
-     ensemble error.
-
-Stage 7C acceptance:
-
-- launch failure yields the exact child's retained `WorkFailed` and the root
-  can start and collect another worker;
-- premature live application exit has the same child-local outcome;
-- terminal completion racing proxy/process exit remains `WorkCompleted`;
-- post-terminal cleanup timeout cannot revise or consume the receipt;
-- root application exit still terminates the run; and
-- shutdown and containment paths remain bounded with no orphaned pane, proxy,
-  delivery task, worktree binding, or resident continuation.
-
-Express the first coding jobs with fresh actors. One-shot implementation and
-review use `runActor`, return candidate/review products in typed successful
-exits, and leave the owner to decide and integrate in ordinary Haskell. This
-vertical proves the host, provider, profile, grant, and supervision seams
-without waiting for structural fork or native owner wakes.
-
-Then prove the recursive organization rather than freezing DevSwarm into one
-precomputed fanout. The first self-hosting slice must support:
-
-- a partially preplanned subsystem tree with at least one node that refines
-  its own local plan;
-- worktree-backed microtasks whose typed exits carry exact commit and focused
-  verification receipts;
-- heterogeneous launch policy, with expensive reasoning used for a real
-  design or integration boundary and cheaper execution used for a bounded
-  mechanical leaf;
-- a reviewed fold that accepts or rejects child commits against their exact
-  revisions; and
-- a second unfold whose shape is chosen from the first fold's findings rather
-  than fixed before execution.
-
-This is an acceptance vertical, not a generic workflow algebra. Express its
-task and result types in ordinary Haskell, keep worktree allocation, Git
-operations, model selection, budgets, and cleanup behind Rust-interpreted
-launch capabilities, and extract reusable combinators only from the working
-program. The actor, planning, and Git trees must not be forced into one shared
-registry or node identity.
-
-`tidepool-agent` remains the only coding-backend package. Its `AgentId` is a
-backend-saga identity attached to an actor, not another lifecycle principal.
-`tidepool-worktree::AgentRef` should be renamed or narrowed when actor
-principals replace its string owner binding; durable worktree identity remains
-unchanged.
-
-Once the actor-native vertical has parity, migrate DevSwarm and delete:
-
-- `State`/`render`/`loop` and `ReadState` prompt injection;
-- `RunLLMTurn` and hidden answerer orchestration;
-- `NodeConvo` transcripts and harness-local turn leases;
-- `NodeTree` as lifecycle authority and the special fork/fanout paths;
-- selfharness checkpoint/restart code for live state;
-- JSON-only internal actor-like messages;
-- harness-specific actor event translation once consumers fold neutral events
-  directly.
-
-Tree-shaped UI may remain as a projection over actor events. Durable get/put,
-worktree recovery, operator gates, and generic JSONL mechanics retain their
-existing owners.
-
-### Stage 7B — external-agent persistent Haskell transport [vertical landed]
-
-The landed Shoal vertical proves deployment and typed tool dispatch, but its
-bespoke `spawn_worker`/`collect_worker`/`ack_worker` surface makes the external
-model an imperative client of a predesigned application. Replace that surface
-with the same self-writing Haskell medium used by resident actors:
-
-1. [landed] extract the request, classification, sequencing, JSON-input
-   rendering, and receipt vocabulary
-   shared by `tidepool-repl` and actor workbenches into one frontend-neutral
-   component; do not share their session managers;
-2. [landed] add one typed agent-session suspension whose Haskell call site fixes the
-   mounted input and `Complete output` expectation and whose optional prompt is
-   transported as the first User message;
-3. [landed] mount one `session_run` MCP tool for an external agent, backed by the
-   actor's existing resident machine, lexical scope, principal, and effect
-   interpreter;
-4. [landed] generalize the existing actor-host boundary driver so a disposable
-   workbench fragment can start, call, poll, and await actors without growing a
-   second scheduler or continuation registry;
-5. [landed] retain the block cursor, bind materialization, and response custody
-   across suspension inside the actor's existing resource scope; do not invent
-   a second fragment-realm lifetime registry;
-6. [landed] migrate the root to an idle session and workers to prompted sessions whose
-   typed completion feeds trusted Haskell repository observation; and
-7. [pending compatibility cleanup] migrate the remaining users of the
-   actor-specific half of `Tidepool.Agent.Contract` and the `ActorMcp` effect,
-   then delete that compatibility transport. DevSwarm's typed Haskell worker
-   records, replayable collection, and acknowledgement remain domain policy;
-   only their bespoke JSON tool projection has been removed.
-
-The actor-local transport deliberately has no machine-reset operation and no
-caller-resumed `ask`: actor effects park and resume through the host. A single
-`session_run` must be able to start several children before awaiting any of
-them, and a child must be able to define and start another typed actor. Those
-are the acceptance conditions for recursive parallel decomposition, not an
-optional UX follow-up.
-
-The public DevSwarm helpers use `Member` constraints, not the root's concrete
-row. A model can therefore define a single `do` block which scaffolds state,
-starts several independent actors, and returns the updated live record set.
-Effectful local variables inside that block naturally survive its suspensions;
-top-level declarations and ordinary completed bindings persist between
-`session_run` calls. Cleanup of the compatibility `ActorMcp` path remains
-separate from proving this new vertical and must not create a second driver.
-An actor definition with no worktree recipe still receives the same Haskell
-session surface over a read-only source checkout, so orchestration and review
-actors do not need to masquerade as coding workers.
-
-## 11. Stage 8 — lifecycle delivery hardening
-
-The production V0 wakes a live agent-backed owner for every child exit through
-the same durable backend-native delivery used by Exomonad. Typed results remain
-behind `ActorRef` and `awaitExit`; the notification carries only exact identity,
-label, terminal class, and summary. Delivery never re-enters Haskell and an
-unaccepted push remains pending for retry.
-
-Later hardening may add literal Developer-role injection where a backend
-supports it, batching for high-volume subtrees, and richer delivery
-observability. Do not add a second lifecycle executor, acknowledgment effect, or
-heterogeneous Haskell lifecycle inbox.
-
-## 12. Stage 9 — structural context fork
-
-Fork only after fresh spawn and caller-checked production capabilities have
-real workloads.
-
-One atomic fork point contains:
-
-- the exact immutable provider-conversation prefix;
-- an immutable declaration and live-binding snapshot;
-- the cloned Haskell control continuation;
-- capability-class fork decisions and child interpreter instances.
-
-The declaration plane already freezes generations. Add the missing immutable
-live-binding snapshot using the existing root ledger; mutable scope ancestry is
-not a snapshot. Parent-owned reply, join, pending-call, and continuation
-references remain present as values but fail under child principals.
-
-Multi-child fork publishes atomically. Ordinary repeated spawn gets no batch
-transaction API. Exact replay is the context-cache contract; record cached
-input and divergent allocation rather than adding a provider-specific fork
-mechanism.
-
-## 13. Stage 10 — verification, growth, and rotation
-
-Add provenance for behavior installation, command results, candidate
-revisions, independent review, rollback, and capability refusal. Haskell owns
-the acceptance policy; Rust reports what actually ran against which artifact.
-
-Measure per actor:
-
-- transcript and cached-prefix tokens;
-- active versus scratch declaration generations and roots;
-- mailbox, continuation, handle, and binding-root counts;
-- code arena and old-space high-water marks;
-- fork sharing and divergent allocation.
-
-Use explicit quiescent machine rotation as the first safety valve. It must
-report every live value that cannot be reconstructed. Online code unloading or
-cross-process live-value recovery waits for workload evidence.
-
-## 14. Completion condition
-
-The plan is complete when:
-
-- a real DevSwarm owner runs as a Haskell actor with a resident model and
-  workbench;
-- it completes at least two adaptive unfold/fold rounds over worktree-backed
-  child actors, with the later decomposition derived from the earlier fold;
-- the same organization mixes preplanned structure, locally discovered work,
-  and heterogeneous model cost without changing actor semantics;
-- it can define, internally seal, fresh-spawn, call, supervise, and fork typed child
-  actors;
-- actors exchange function-bearing values under caller-checked authority;
-- `ReadWrite` and `ReadOnly` actors share one machine through nominal request
-  routing, and spawn edges never amplify profiles;
-- startup publishes only ready exact references and exits remain repeatable;
-- owner wakes inform the model without inventing a Haskell lifecycle inbox or
-  re-entering the authored continuation;
-- automated checks and fresh review refer to the exact accepted revision;
-- the old selfharness state/answerer/tree paths are deleted;
-- fenced Haskell remains the primary model interaction surface;
-- resource growth and rotation are observable;
-- standing contracts have moved into owning crate charters and this planning
-  directory can be deleted.
+# Actor implementation status
+
+This file records only the current implementation, its evidence, and the next
+architectural boundaries. Design semantics live in
+[architecture.md](architecture.md); the model-facing contract lives in
+[haskell-surface.md](haskell-surface.md). Superseded phase plans belong in Git
+history, not in this document.
+
+Backward compatibility is not a constraint. Once a replacement proves the
+behavior Tidepool still wants, delete the older mechanism rather than keeping
+an adapter or a second scheduler.
+
+## Landed architecture
+
+### Actor substrate
+
+- Ractor is the sole in-process actor scheduler. It owns serial mailboxes,
+  local addresses, linked ownership, task lifecycle, and supervision.
+- `tidepool-actor::LocalActor` adds exact Tidepool incarnation identity,
+  retained terminal observation, typed live-value messages, call ancestry,
+  and subtree shutdown. It does not mirror Ractor's runnable state.
+- `ResidentKernelBehavior` is the one resident-Haskell actor behavior. Its
+  state owns the installed Haskell continuation, shutdown hook, agent session,
+  and current activation context.
+- A shared `ActorMachineRegistry` owns only resident-machine checkout. It is
+  not an actor registry or scheduler.
+- Root and child actors use the same local-actor path. Root compilation is a
+  bootstrap concern, not a second lifecycle implementation.
+- Graceful termination and supervisor-observed failure converge on one
+  exact-incarnation retirement publication. Duplicate cleanup notifications
+  are suppressed.
+
+The superseded hand-written `ActorRegistry`, `ResidentActorHost`, host task
+table, parked call/wait maps, lifecycle scheduler, and registry authorization
+layer have been deleted.
+
+### Resident Haskell and model sessions
+
+- `tidepool-runtime::PersistentSession` remains the owner of GHC compilation,
+  live roots, continuations, declarations, bindings, and machine checkout.
+- One `ActorAgentSession` belongs to one actor incarnation. Provider inference,
+  fenced-Haskell execution, correction rounds, and completion form one serial
+  actor turn; provider inference does not hold a machine checkout.
+- Resident providers and external Codex applications enter the same actor
+  workbench. External applications use one actor-local MCP transport carrying
+  Haskell source and structured execution receipts, not a parallel domain API.
+- `tidepool-model-output` owns fenced-Haskell parsing. The actor layer has no
+  second parser.
+- Completion values cross consecutive agent sessions through managed Haskell
+  custody. The returned value is rooted before the producing completion scope
+  closes; the next activation can force it safely.
+
+### Haskell actor surface
+
+- Public construction is `ActorDefinition -> startActor`.
+- `call`, `cast`, `receive`, `serve`, `runActor`, and `awaitExit` operate on
+  exact `ActorRef protocol exit` values and move live Haskell values within one
+  machine.
+- Successful exits remain Haskell-owned live cells referenced by `ActorRef`;
+  Rust retains immutable terminal metadata, not a duplicate exit payload.
+- The private `ActorKernel`, `WorkerKernel`, readiness, reply, and settlement
+  constructors are absent from ordinary authored exports.
+- Experimental `ReadWrite` and `ReadOnly` profiles select resident Haskell
+  rows and constrain spawn attenuation. They are not native Codex or OS
+  sandboxes.
+- Public reusable code uses `Member` constraints. Rust does not reflect or
+  compare positional effect-row ABIs.
+
+### Rust-owned worker custody
+
+- Worker lifecycle is interpreter state, not a Haskell registry snapshot.
+- `startWorkers` reserves the complete input batch before provisioning,
+  returns one ordered typed result per request, and is idempotent by normalized
+  assignment fingerprint.
+- Accepted results contain opaque worker handles directly. Same key plus a
+  different assignment yields a typed conflict; acknowledged keys remain
+  tombstoned for the root incarnation.
+- `currentSessionContext` is stable within one activation and contains
+  coalesced lifecycle event IDs plus worker handles. An exit during the turn is
+  observed by the next activation.
+- Collection is nonblocking and replayable. Acknowledgement is a separate,
+  idempotent policy decision recording `IntegratedAs`, `Reviewed`, or
+  `Rejected`.
+- V0 truthfully reports `WorktreeRetained` after acknowledgement. Automatic
+  worktree/ref garbage collection is not implemented and is not implied by
+  logical acknowledgement.
+- Child application launch or premature death fails that exact child and
+  leaves the root alive. Post-terminal application death can only affect
+  cleanup, never rewrite the retained outcome.
+- Worker application installation is held until the root attaches the exact
+  child to its reserved ledger entry, closing the pre-deployment correlation
+  race.
+
+### Shoal and Git custody
+
+- `shoal new` creates only operational `.shoal/` content, installs
+  `/.shoal/` in `.git/info/exclude`, initializes Git when necessary, and creates
+  an empty base commit when needed. It does not scaffold project files.
+- Shoal uses ordinary Git worktrees in the source repository's namespace.
+  Workers can commit and branch normally; this is cooperative change custody,
+  not a Git-metadata security boundary.
+- Each interactive actor sees its checkout at the stable
+  `/tmp/tidepool-actor-workspace` path, avoiding per-worktree Codex trust
+  prompts and making conversation forks relocatable.
+- Each writable actor checkout receives its own `.shoal/build` Cargo target
+  directory. Mutable compiler artifacts are not shared across root and worker
+  incarnations.
+- `finishWork` combines a model-authored report with one Rust-observed Git
+  snapshot: worktree identity, base OID, branch or detached head, submitted
+  OID, dirty state, and in-progress Git operation.
+- Candidate objects live in the shared repository namespace and are directly
+  reviewable and integrable from the root checkout.
+- Lifecycle exits enqueue backend-native wakes. Pending collection instructs
+  the model to end the current turn rather than poll; delayed or duplicate
+  wakes are harmless because collection and acknowledgement are idempotent.
+- Recreating a root starts a new incarnation. The resumed conversation is told
+  that old actor handles, bindings, and pending results are invalid. Durable
+  actor-state restoration is not claimed.
+- Structured tracing writes under `.shoal/logs/` and correlates actor,
+  application, worktree, and lifecycle activity.
+
+## Current acceptance evidence
+
+The current boundary is covered at three levels.
+
+### Pure and component tests
+
+- worker batch reservation order, assignment normalization, idempotent retry,
+  conflicts, replayable collection, acknowledgement, and tombstones;
+- call-cycle ancestry, exact address decoding, terminal encoding, profile
+  attenuation, and source/export membrane helpers;
+- provider-session serialization, queued lifecycle input, and provider failure;
+- generated protocol declarations and Haskell/Rust request decoding.
+
+### Local actor tests
+
+- readiness publication after `pre_start`;
+- one-message-at-a-time processing and call non-reentry;
+- linked child failure not killing an overriding owner;
+- in-flight and queued live-value custody released on kill;
+- abandoned RPC reply custody;
+- explicit recursive subtree shutdown;
+- retained typed completion and exact child-exit observation.
+
+### Real GHC/JIT/Shoal verticals
+
+- a resident root installs its actor-local MCP policy, handles a typed call,
+  starts and awaits a child, and retires exactly once;
+- the bundled DevSwarm starts a batch, forces the returned live state in a
+  later session, receives stable plural wakes, replays collection, and
+  acknowledges results;
+- real Shoal exercises have produced isolated candidate commits with
+  runtime-observed clean receipts, direct root-side review, integration, and
+  lifecycle-triggered continuation.
+
+Run focused tests while iterating. At a major boundary run formatting, strict
+Clippy on touched crates, the complete `tidepool-actor` suite, the bundled
+DevSwarm vertical, and relevant Shoal CLI/integration tests through the Nix
+development shell.
+
+## Remaining work
+
+These are future features or measured hardening seams, not unfinished pieces
+of the Ractor cutover.
+
+### Near-term UX and operations
+
+- Generate concise actor API discovery from the exported Haskell surface,
+  including exact signatures, constructors, purity, batch examples,
+  partial-item commit semantics, and the distinction between an MCP execution
+  cell and a pending worker.
+- Support the useful GHCi inspection subset (`:type`, `:info`, and binding/type
+  inventory) and ordinary pattern bindings through the shared workbench
+  parser, rather than actor-specific syntax.
+- Improve concise rendering for worker starts, collections, acknowledgements,
+  and root completion while retaining a verbose structured view.
+- Measure and separately attribute queueing, compilation, worktree creation,
+  actor execution, MCP transport, and outer-cell resume latency before changing
+  execution architecture.
+- Project direct local-actor lifecycle and execution facts into one neutral,
+  bounded event stream. Do not revive the deleted selfharness-to-actor event
+  adapter or create mutable scheduler state to support observability.
+- Define explicit retention and garbage-collection policy for acknowledged
+  worktrees, refs, logs, and terminal records. Cleanup failure must remain
+  observable without undoing acknowledgement.
+
+### Deliberately deferred architecture
+
+- Structural context fork, including cloned model memory, persistent Haskell
+  snapshot sharing, invalidation of actor-linear continuation references, and
+  per-capability fork policy.
+- Durable cross-incarnation actor recovery or replay of live Haskell values.
+- Distributed actors and serialized protocol boundaries.
+- Trusted Haskell intent-to-kernel lowering. It must fit behind the existing
+  public profiles and nominal interpreters without a reflected effect-row ABI.
+- Arbitrary capability delegation/revocation, detached actors, adoption, and
+  restart supervision.
+- Security isolation for untrusted native workers. Git worktrees and Codex
+  sandbox flags currently express cooperative workspace policy only.
+- More structured worker reports, typed findings/checks, automatic merge
+  policy, and higher-level scaffold/fan-out/fold combinators. Add these when a
+  real workflow demonstrates the useful shape; do not recreate lifecycle
+  state in Haskell.
+
+## Completion rule
+
+The Ractor refactor is complete when the deleted scheduler stays deleted, the
+tests above pass, no production reference names the superseded runtime, and
+the remaining work is honestly classified as a new feature or hardening seam.
+The actor-model planning directory itself can retire after its stable
+contracts have moved into crate-level `AGENTS.md`, Rust/Haskell API docs, and
+the repository glossary.

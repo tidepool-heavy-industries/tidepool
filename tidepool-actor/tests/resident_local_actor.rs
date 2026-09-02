@@ -95,7 +95,7 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().expect("session root");
     let compiled = match run_turn(HaskellTurnRequest {
-        turn_text: include_str!("resident_mcp/policy.hs"),
+        turn_text: include_str!("resident_local_actor/policy.hs"),
         templates: &templates,
         include: &include_refs,
         session_root: session_root.path(),
@@ -140,7 +140,6 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
         .expect("first policy boundary");
     let descriptor = ActorDescriptor::new(
         "resident-local-policy",
-        ["ActorMcp", "Actor"],
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),

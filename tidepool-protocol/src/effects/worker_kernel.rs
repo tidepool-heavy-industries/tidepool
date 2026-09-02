@@ -64,7 +64,6 @@ pub fn worker_kernel() -> Effect {
                         ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
                         rust: RustBinding::Path("(i64, i64)"),
                     },
-                    text_arg("worktree"),
                 ],
                 ret: HsType::Value,
                 errors: None,

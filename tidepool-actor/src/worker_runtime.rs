@@ -19,7 +19,6 @@ pub(crate) enum ResidentWorkerRequest {
     Attach {
         handle: String,
         actor: ActorRef,
-        worktree: String,
         continuation: ResidentHole,
     },
     FailStart {
@@ -48,12 +47,6 @@ pub(crate) enum ResidentWorkerRequest {
     },
 }
 
-#[derive(Clone)]
-pub(crate) struct WorkerActor {
-    pub _actor: LocalActorRef,
-    pub _worktree: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerWake {
     pub event: u64,
@@ -63,7 +56,7 @@ pub struct WorkerWake {
 #[derive(Default)]
 pub(crate) struct WorkerRuntime {
     root: RwLock<Option<ActorRef>>,
-    ledger: Mutex<WorkerLedger<serde_json::Value, WorkerActor>>,
+    ledger: Mutex<WorkerLedger<serde_json::Value>>,
     by_actor: Mutex<HashMap<ActorRef, WorkerHandle>>,
     submitted: Mutex<HashMap<WorkerHandle, serde_json::Value>>,
     wakes: Mutex<Vec<WorkerWake>>,
@@ -138,29 +131,22 @@ impl WorkerRuntime {
         owner: ActorRef,
         handle: String,
         actor: LocalActorRef,
-        worktree: String,
     ) -> Result<serde_json::Value, String> {
         self.require_root(owner)?;
         let handle = WorkerHandle::from_raw(handle);
-        self.ledger
-            .lock()
-            .commit_started_handle(
-                &handle,
-                WorkerActor {
-                    _actor: actor.clone(),
-                    _worktree: worktree,
-                },
-            )
-            .map_err(|error| error.to_string())?;
+        let accepted = {
+            let mut ledger = self.ledger.lock();
+            ledger
+                .commit_started_handle(&handle)
+                .map_err(|error| error.to_string())?;
+            ledger
+                .accepted(&handle)
+                .cloned()
+                .ok_or_else(|| format!("worker {handle} disappeared after attachment"))?
+        };
         self.by_actor
             .lock()
             .insert(actor.identity(), handle.clone());
-        let accepted = self
-            .ledger
-            .lock()
-            .accepted(&handle)
-            .cloned()
-            .ok_or_else(|| format!("worker {handle} disappeared after attachment"))?;
         Ok(start_json(&WorkerStartResult::Accepted(accepted)))
     }
 
@@ -173,16 +159,16 @@ impl WorkerRuntime {
         self.require_root(actor)?;
         let handle = WorkerHandle::from_raw(handle);
         let reported_detail = detail.clone();
-        self.ledger
-            .lock()
-            .fail_start_handle(&handle, detail)
-            .map_err(|error| error.to_string())?;
-        let accepted = self
-            .ledger
-            .lock()
-            .accepted(&handle)
-            .cloned()
-            .ok_or_else(|| format!("worker {handle} disappeared after failed start"))?;
+        let accepted = {
+            let mut ledger = self.ledger.lock();
+            ledger
+                .fail_start_handle(&handle, detail)
+                .map_err(|error| error.to_string())?;
+            ledger
+                .accepted(&handle)
+                .cloned()
+                .ok_or_else(|| format!("worker {handle} disappeared after failed start"))?
+        };
         Ok(start_json(&WorkerStartResult::Failed {
             accepted,
             detail: reported_detail,
@@ -211,24 +197,30 @@ impl WorkerRuntime {
         terminal: &ActorTerminal,
     ) -> Option<WorkerWake> {
         let handle = self.by_actor.lock().remove(&actor)?;
-        let outcome = match terminal.kind {
-            ActorExitKind::Completed => self
-                .submitted
-                .lock()
-                .remove(&handle)
-                .map(WorkerTerminal::Completed)
-                .unwrap_or_else(|| WorkerTerminal::Failed {
-                    detail: "worker exited without submitting a candidate receipt".into(),
-                }),
-            ActorExitKind::Failed => WorkerTerminal::Failed {
-                detail: terminal.summary.clone(),
-            },
-            ActorExitKind::Cancelled => WorkerTerminal::Cancelled {
-                detail: terminal.summary.clone(),
-            },
-        };
-        self.submitted.lock().remove(&handle);
-        let _ = self.ledger.lock().settle(&handle, outcome);
+        let submitted = self.submitted.lock().remove(&handle);
+        let outcome =
+            match terminal.kind {
+                ActorExitKind::Completed => submitted
+                    .map(WorkerTerminal::Completed)
+                    .unwrap_or_else(|| WorkerTerminal::Failed {
+                        detail: "worker exited without submitting a candidate receipt".into(),
+                    }),
+                ActorExitKind::Failed => WorkerTerminal::Failed {
+                    detail: terminal.summary.clone(),
+                },
+                ActorExitKind::Cancelled => WorkerTerminal::Cancelled {
+                    detail: terminal.summary.clone(),
+                },
+            };
+        if let Err(error) = self.ledger.lock().settle(&handle, outcome) {
+            tracing::error!(
+                worker = %handle.as_str(),
+                actor = ?actor,
+                %error,
+                "failed to settle an exited worker in the authoritative ledger"
+            );
+            return None;
+        }
         let mut next = self.next_event.lock();
         *next += 1;
         let wake = WorkerWake {
@@ -384,17 +376,47 @@ fn acknowledgement_json(
 ) -> serde_json::Value {
     use crate::WorkerAcknowledgement::*;
     match acknowledgement {
-        Acknowledged { handle, .. } => {
-            serde_json::json!({"tag":"WorkerAcknowledged","worker":{"workerId":handle.as_str()}})
+        Acknowledged {
+            handle,
+            disposition,
+            custody,
+            ..
+        } => {
+            serde_json::json!({"tag":"WorkerAcknowledged","worker":{"workerId":handle.as_str()},"disposition":disposition_json(disposition),"custody":custody_json(custody)})
         }
-        AlreadyAcknowledged { handle, .. } => {
-            serde_json::json!({"tag":"WorkerAlreadyAcknowledged","worker":{"workerId":handle.as_str()}})
+        AlreadyAcknowledged {
+            handle,
+            disposition,
+            custody,
+            ..
+        } => {
+            serde_json::json!({"tag":"WorkerAlreadyAcknowledged","worker":{"workerId":handle.as_str()},"disposition":disposition_json(disposition),"custody":custody_json(custody)})
         }
         NotCollected(handle) => {
             serde_json::json!({"tag":"WorkerNotCollected","worker":{"workerId":handle.as_str()}})
         }
         NotFound(handle) => {
             serde_json::json!({"tag":"WorkerAcknowledgementUnknown","worker":{"workerId":handle.as_str()}})
+        }
+    }
+}
+
+fn disposition_json(disposition: &AcknowledgementDisposition) -> serde_json::Value {
+    match disposition {
+        AcknowledgementDisposition::IntegratedAs(oid) => {
+            serde_json::json!({"tag":"IntegratedAs","oid":oid})
+        }
+        AcknowledgementDisposition::Reviewed => serde_json::json!({"tag":"Reviewed"}),
+        AcknowledgementDisposition::Rejected { reason } => {
+            serde_json::json!({"tag":"Rejected","reason":reason})
+        }
+    }
+}
+
+fn custody_json(custody: &crate::WorkerCustody) -> serde_json::Value {
+    match custody {
+        crate::WorkerCustody::WorktreeRetained => {
+            serde_json::json!({"tag":"WorktreeRetained"})
         }
     }
 }

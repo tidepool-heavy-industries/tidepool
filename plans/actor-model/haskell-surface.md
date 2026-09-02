@@ -124,7 +124,7 @@ interpreter instance under the child's principal. Different actor rows may
 share one machine because union position has no Rust dispatch meaning.
 
 V0 provides two experimental resident-Haskell profiles: `ReadWrite` and
-`ReadOnly`. Each selects a concrete row and nominal interpreter policy. A `ReadWrite` actor
+`ReadOnly`. Each selects a concrete row and spawn-attenuation class. A `ReadWrite` actor
 may start either profile; a `ReadOnly` actor may start only `ReadOnly`. Rust
 validates this attenuation edge, while GHC checks the actor definition against
 the selected row. The profile does not constrain native coding-agent tools or
@@ -203,8 +203,8 @@ pollExit
 
 V0 runs the selected concrete row directly; reusable helpers remain
 `Member`-polymorphic and specialize into that row. The private deployment may
-existentially hide `initial` and the concrete row, but Rust—not the existential
-or an import—authorizes the resulting nominal requests. The profile is a named
+existentially hide `initial` and the concrete row. Rust separately authorizes
+principal- or grant-sensitive operations; the profile is a named
 compile/deploy choice, not a reflected row ABI or authority token.
 
 Profile selection is part of the one full `ActorDefinition`; it is not a
@@ -281,7 +281,8 @@ closing phase: installed handlers may finish ordinary bounded cleanup, while
 an unhandled suspension such as `Deliberate` or actor startup fails the hook.
 Rust closes the actor realm regardless, so cooperative Haskell cleanup is
 best-effort rather than a prerequisite for hard cleanup. Hook failure is a
-neutral actor event; it does not rewrite the actor's retained terminal result.
+structured runtime diagnostic; it does not rewrite the actor's retained
+terminal result.
 
 Publication and liveness are separate facts. A child may terminate after
 signaling ready but before the caller resumes. The returned reference still

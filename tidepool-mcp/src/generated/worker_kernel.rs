@@ -9,7 +9,7 @@ pub fn worker_kernel_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "WorkerReserveBatchWith :: Value -> WorkerKernel Value",
-            "WorkerAttachWith :: Text -> (Int, Int) -> Text -> WorkerKernel Value",
+            "WorkerAttachWith :: Text -> (Int, Int) -> WorkerKernel Value",
             "WorkerFailStartWith :: Text -> Text -> WorkerKernel Value",
             "WorkerSubmitWith :: Text -> Value -> WorkerKernel ()",
             "WorkerListWith :: WorkerKernel Value",

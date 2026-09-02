@@ -2,7 +2,7 @@
 
 Status: active and incremental. The canonical landed-versus-pending inventory
 and next delivery stage are in
-[the implementation plan](implementation.md#2-current-implementation-baseline).
+[the implementation status](implementation.md#landed-architecture).
 
 ## Thesis
 
@@ -62,7 +62,7 @@ above that substrate; it does not maintain a second actor scheduler.
   authorization, model sessions, and repeatable typed exit observation.
 - Experimental resident-Haskell effect profiles are named `ReadWrite` and `ReadOnly`. A `ReadWrite`
   actor may start either profile; a `ReadOnly` actor may start only `ReadOnly`.
-  They test row selection and nominal interpreter policy; they are not Codex
+  They test row selection and spawn attenuation; they are not Codex
   or operating-system sandboxes. Grants, worktrees, process policy, and opaque
   handles govern concrete runtime resources independently.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
@@ -81,16 +81,16 @@ above that substrate; it does not maintain a second actor scheduler.
 - One actor-turn admission spans a complete result-bearing agent session,
   while shorter machine checkouts serialize only its Haskell run segments.
   Lifecycle wake delivery is backend input, not a second session executor.
-- One neutral actor event stream records runtime truth. Views, durable logs,
-  native owner notifications, and UI are projections; none is a second
-  registry.
+- Actor observability should converge on one neutral projection of runtime
+  truth. Tracing, durable logs, owner notifications, and UI must not become a
+  second scheduler or lifecycle registry.
 - Moving a value does not move authority. Every child exit informs but does
   not kill its live agent-backed owner; owner termination recursively ends its
   subtree.
 - Model-authored verification should normally run authoritative checks and an
   independent fresh-actor review before acceptance.
 - Worker lifecycle and custody are live Rust interpreter state, not a
-  model-visible `[WorkerRecord]` snapshot threaded between Haskell calls.
+  model-visible registry snapshot threaded between Haskell calls.
   Haskell invokes typed batch lifecycle effects, receives structured results,
   and sees an immutable activation context containing correlated lifecycle
   wakes. Authored policy values remain ordinary immutable Haskell values.
@@ -130,7 +130,7 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |
 | agent session | One serialized, possibly multi-round execution of the resident model and fenced-Haskell workbench with a typed `Complete output` expectation |
-| effect profile | An experimental named resident-Haskell row and nominal interpreter policy; initially `ReadWrite` or `ReadOnly`, and not a native-tool sandbox |
+| effect profile | An experimental named resident-Haskell row and spawn-attenuation class; initially `ReadWrite` or `ReadOnly`, and not a native-tool sandbox |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
 | program image | The exact declarations, interface metadata, and live roots captured while `startActor` seals a definition |
 | program snapshot | An immutable point in an actor's Haskell environment, suitable for structural sharing |

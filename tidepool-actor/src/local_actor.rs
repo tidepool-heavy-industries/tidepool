@@ -910,15 +910,20 @@ mod tests {
             .expect("request child");
         spawn_rx.await.expect("spawn reply").expect("spawn result");
         let child = fixture.spawned_child.lock().clone().expect("child handle");
-        child
-            .address()
-            .send_message(KernelMessage::Cast {
-                sender: owner.identity(),
-                request: MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0))),
-            })
-            .expect("fail child");
+        assert_eq!(
+            child
+                .report_external_failure(ExternalApplicationFailure {
+                    class: crate::ExternalApplicationFailureClass::ProcessLaunch,
+                    detail: "codex did not start".into(),
+                })
+                .await
+                .expect("report child application failure"),
+            ExternalFailureDisposition::Applied
+        );
 
-        assert_eq!(child.terminal().wait().await.kind, ActorExitKind::Failed);
+        let child_terminal = child.terminal().wait().await;
+        assert_eq!(child_terminal.kind, ActorExitKind::Failed);
+        assert!(child_terminal.summary.contains("codex did not start"));
         for _ in 0..20 {
             if !fixture.child_exits.lock().is_empty() {
                 break;
