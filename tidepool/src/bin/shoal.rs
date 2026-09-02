@@ -139,7 +139,7 @@ mod tests {
                 workspace: Some(workspace),
                 no_attach: true,
                 ..
-            } if workspace == PathBuf::from("/tmp/project")
+            } if workspace == std::path::Path::new("/tmp/project")
         ));
         assert!(matches!(
             Cli::try_parse_from(["shoal", "proxy"]).unwrap().command,
