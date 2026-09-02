@@ -24,12 +24,12 @@ use crate::start::UnpublishedResidentActor;
 use crate::{
     ActorAgentSession, ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef,
     ActorRegistry, ActorRegistryError, ActorRuntimeWake, ActorRuntimeWakes, ActorTerminal,
-    ActorTurnKind, ActorWorkbenchSource, CallId, ExitObservation, OutboundSettlement,
-    ResidentActorLifecycle, ResidentActorMailbox, ResidentActorRunner, ResidentActorStartError,
-    ResidentActorStarter, ResidentActorWorkbenchError, ResidentCall, ResidentCallPoll,
-    ResidentCompletionError, ResidentCompletionExecutor, ResidentLifecycleError,
-    ResidentLifecyclePolicy, ResidentMailboxError, ResidentWait, ResidentWaitPoll, StartInitiator,
-    TurnLease, WaitId,
+    ActorTurnKind, ActorWorkbenchSource, CallId, ExitObservation, ExternalApplicationFailure,
+    ExternalFailureDisposition, OutboundSettlement, ResidentActorLifecycle, ResidentActorMailbox,
+    ResidentActorRunner, ResidentActorStartError, ResidentActorStarter,
+    ResidentActorWorkbenchError, ResidentCall, ResidentCallPoll, ResidentCompletionError,
+    ResidentCompletionExecutor, ResidentLifecycleError, ResidentLifecyclePolicy,
+    ResidentMailboxError, ResidentWait, ResidentWaitPoll, StartInitiator, TurnLease, WaitId,
 };
 
 /// A compiled root at the point where Rust transfers its machine and first
@@ -165,31 +165,6 @@ pub enum ResidentActorDeployment {
         actor: ActorRef,
         terminal: ActorTerminal,
     },
-}
-
-/// Structured classification of a native application failure observed by a
-/// deployment owner. Diagnostics are payload; this enum, never rendered
-/// string inspection, drives lifecycle policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalApplicationFailureClass {
-    WorktreeBinding,
-    CommandConstruction,
-    ProcessLaunch,
-    ProxyStartup,
-    UnexpectedExit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalApplicationFailure {
-    pub class: ExternalApplicationFailureClass,
-    pub detail: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalFailureDisposition {
-    Applied,
-    AlreadyTerminal,
-    UnknownOrStale,
 }
 
 struct ExternalFailureRequest {

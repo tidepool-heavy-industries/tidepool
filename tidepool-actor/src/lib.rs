@@ -12,10 +12,12 @@ mod authorization;
 mod completion;
 mod event;
 mod executor;
+mod external_application;
 mod generated;
 mod host;
 mod identity;
 mod interactive_session;
+mod kernel;
 mod mailbox;
 mod mount;
 mod profile;
@@ -45,8 +47,10 @@ pub use event::{
 pub use executor::{
     run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
 };
-pub use host::{
+pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
+};
+pub use host::{
     ResidentActorDeployment, ResidentActorHost, ResidentActorHostControl,
     ResidentActorHostControlError, ResidentActorHostError, ResidentActorRoot,
     ResidentHostParkedKind, ResidentHostRunReport, ResidentHostShutdownReport,
@@ -55,6 +59,10 @@ pub use host::{
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
     InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentInteractiveSession,
+};
+pub use kernel::{
+    CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,
+    KernelInvocationReply, KernelMessage, KernelWorkbenchReply, LocalActorRef,
 };
 pub use mailbox::{
     CallFailure, CallId, CallStatus, CallTicket, ExitObservation, MailboxFailure, MailboxValue,
