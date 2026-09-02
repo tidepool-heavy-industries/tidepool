@@ -261,6 +261,8 @@ pub enum ActorRegistryError {
     },
     #[error("the actor runtime wake receiver has already been claimed")]
     WakeReceiverClaimed,
+    #[error("actor {0:?} admission is owned directly by its local actor")]
+    LocalActorOwnsAdmission(ActorRef),
 }
 
 /// Thread-safe ownership and lifecycle registry. It intentionally does not

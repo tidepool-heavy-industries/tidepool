@@ -16,8 +16,9 @@ use crate::{
 /// One actor's accumulating model transcript and legal-boundary queue.
 #[derive(Clone)]
 pub struct ActorAgentSession {
-    registry: ActorRegistry,
+    registry: Option<ActorRegistry>,
     actor: ActorRef,
+    context: ActorSessionContext,
     state: Arc<Mutex<AgentSessionState>>,
 }
 
@@ -60,11 +61,28 @@ impl ActorAgentSession {
     /// transcript and legal-boundary queue.
     pub fn attach(registry: ActorRegistry, actor: ActorRef) -> Result<Self, ActorRegistryError> {
         let state = registry.attach_agent_session(actor)?;
+        let context = registry.session_context(actor)?;
         Ok(Self {
-            registry,
+            registry: Some(registry),
             actor,
+            context,
             state,
         })
+    }
+
+    /// Create the transcript owned by a sequential local actor.
+    ///
+    /// Ractor already supplies exclusive turn admission for this form. The
+    /// resident session still receives the exact actor principal and scopes
+    /// from `context`; only the superseded registry turn lease is absent.
+    #[must_use]
+    pub fn local(context: ActorSessionContext) -> Self {
+        Self {
+            registry: None,
+            actor: context.actor,
+            context,
+            state: Arc::new(Mutex::new(AgentSessionState::new())),
+        }
     }
 
     pub fn queue_system(&self, content: impl Into<String>) {
@@ -93,10 +111,13 @@ impl ActorAgentSession {
     pub fn begin_agent_session(&self) -> Result<AdmittedAgentSession, ActorRegistryError> {
         let lease = self
             .registry
-            .begin_turn(self.actor, ActorTurnKind::AgentSession)?;
+            .as_ref()
+            .map(|registry| registry.begin_turn(self.actor, ActorTurnKind::AgentSession))
+            .transpose()?;
         Ok(AdmittedAgentSession {
             session: self.clone(),
             lease,
+            context: self.context.clone(),
         })
     }
 
@@ -121,7 +142,8 @@ impl ActorAgentSession {
         let lease = lease.transition(ActorTurnKind::AgentSession)?;
         Ok(AdmittedAgentSession {
             session: self.clone(),
-            lease,
+            context: lease.session_context(),
+            lease: Some(lease),
         })
     }
 
@@ -132,7 +154,11 @@ impl ActorAgentSession {
         &self,
         starting: &StartingActor,
     ) -> Result<AdmittedAgentSession, ActorRegistryError> {
-        let lease = self.registry.begin_startup_agent_session(starting)?;
+        let registry = self
+            .registry
+            .as_ref()
+            .ok_or(ActorRegistryError::LocalActorOwnsAdmission(self.actor))?;
+        let lease = registry.begin_startup_agent_session(starting)?;
         let capability = lease.session_context().actor;
         if capability != self.actor {
             return Err(ActorRegistryError::StartupSessionMismatch {
@@ -142,7 +168,8 @@ impl ActorAgentSession {
         }
         Ok(AdmittedAgentSession {
             session: self.clone(),
-            lease,
+            context: lease.session_context(),
+            lease: Some(lease),
         })
     }
 
@@ -156,7 +183,8 @@ impl ActorAgentSession {
 /// this guard; dropping an individual call never releases actor admission.
 pub struct AdmittedAgentSession {
     session: ActorAgentSession,
-    lease: TurnLease,
+    lease: Option<TurnLease>,
+    context: ActorSessionContext,
 }
 
 impl AdmittedAgentSession {
@@ -167,7 +195,7 @@ impl AdmittedAgentSession {
 
     #[must_use]
     pub fn session_context(&self) -> ActorSessionContext {
-        self.lease.session_context()
+        self.context.clone()
     }
 
     /// Return this admitted model/Haskell session to the exact authored
@@ -175,7 +203,9 @@ impl AdmittedAgentSession {
     /// registry: no mailbox or lifecycle turn can enter between typed
     /// completion and continuation resumption.
     pub(crate) fn return_to_haskell(self) -> Result<TurnLease, ActorRegistryError> {
-        self.lease.transition(ActorTurnKind::Haskell)
+        self.lease
+            .ok_or(ActorRegistryError::LocalActorOwnsAdmission(self.session.actor))?
+            .transition(ActorTurnKind::Haskell)
     }
 
     pub(crate) fn queue_developer(&self, content: impl Into<String>) {
@@ -193,8 +223,7 @@ impl AdmittedAgentSession {
     where
         Target: ActorRunTarget,
     {
-        let context = self.lease.session_context();
-        install_actor_context(target, &context)
+        install_actor_context(target, &self.context)
     }
 
     /// Inject queued inputs at a legal provider boundary and assemble one
@@ -223,18 +252,20 @@ impl AdmittedAgentSession {
             // The actor can reach a terminal state after turn admission. The
             // transcript still audits the request we prepared; returning here
             // prevents a provider request from escaping this admitted session.
-            self.session.registry.record_event(
-                self.session.actor,
-                turn_causality(turn),
-                ActorEvent::ModelMessage {
-                    turn,
-                    role: actor_role(message.role),
-                    content: message.content,
-                    usage: None,
-                    reasoning: None,
-                    injected: true,
-                },
-            )?;
+            if let Some(registry) = &self.session.registry {
+                registry.record_event(
+                    self.session.actor,
+                    turn_causality(turn),
+                    ActorEvent::ModelMessage {
+                        turn,
+                        role: actor_role(message.role),
+                        content: message.content,
+                        usage: None,
+                        reasoning: None,
+                        injected: true,
+                    },
+                )?;
+            }
         }
         Ok(PendingProviderRound {
             admitted: self,
@@ -290,18 +321,20 @@ impl PendingProviderRound<'_> {
             state.conversation.append(message);
             state.next_turn += 1;
         }
-        session.registry.record_event(
-            session.actor,
-            turn_causality(self.turn),
-            ActorEvent::ModelMessage {
-                turn: self.turn,
-                role: ActorRole::Assistant,
-                content: reply.clone(),
-                usage: Some(model_usage(usage)),
-                reasoning: reasoning.clone(),
-                injected: false,
-            },
-        )?;
+        if let Some(registry) = &session.registry {
+            registry.record_event(
+                session.actor,
+                turn_causality(self.turn),
+                ActorEvent::ModelMessage {
+                    turn: self.turn,
+                    role: ActorRole::Assistant,
+                    content: reply.clone(),
+                    usage: Some(model_usage(usage)),
+                    reasoning: reasoning.clone(),
+                    injected: false,
+                },
+            )?;
+        }
         Ok(AssistantTurn {
             turn: self.turn,
             blocks: extract_haskell_blocks(&reply),
@@ -413,6 +446,31 @@ mod tests {
             reasoning: None,
             reasoning_items: Vec::new(),
         }
+    }
+
+    #[test]
+    fn local_actor_session_uses_its_owned_context_without_registry_admission() {
+        let context = ActorSessionContext {
+            actor: ActorRef::first(crate::ActorId(41)),
+            placement: crate::ActorPlacement {
+                session: tidepool_repr::SessionId(7),
+                resource_scope: RealmId::fresh(),
+                lexical_scope: ScopeId(9),
+            },
+            effect_policy: EffectRunPolicy::HandleOrSuspend,
+            live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            source_imports: crate::ActorSourceImports::default(),
+        };
+        let session = ActorAgentSession::local(context.clone());
+        session.queue_user("start");
+
+        let mut admitted = session.begin_agent_session().expect("local admission");
+        assert_eq!(admitted.actor(), context.actor);
+        assert_eq!(admitted.session_context(), context);
+        let round = admitted.begin_provider_round(None).expect("provider round");
+        assert_eq!(round.request().messages.len(), 1);
+        round.complete(response("done")).expect("complete round");
+        assert_eq!(session.transcript().len(), 2);
     }
 
     #[test]
