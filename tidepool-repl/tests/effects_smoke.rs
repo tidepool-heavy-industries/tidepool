@@ -95,31 +95,32 @@ async fn full_stack_effects_reachable_through_session() {
     );
 }
 
-/// Declarations and later `session_run` items share the full resident
-/// vocabulary: `M`/`Eff`/`Member`, effect verbs, Prelude shadows, and qualified
-/// library namespaces. Persisted declarations may therefore remain
-/// row-polymorphic until a later invocation selects the concrete session row.
+/// Persistent declarations share the resident domain vocabulary, Prelude
+/// shadows, and qualified library namespaces. This fixed-stack REPL also has
+/// an `M` alias, but portable effectful declarations state `Member`
+/// constraints and remain polymorphic until an invocation selects a concrete
+/// session row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_def_sees_full_eval_vocabulary() {
     require_extract();
     let tmp = tempfile::tempdir().expect("tempdir");
     let server = build_full_server(tmp.path().to_path_buf(), "fx", true);
 
-    // Exercise both the convenient concrete `M` alias and a three-effect
-    // `Member`-polymorphic program alongside qualified library namespaces.
+    // Exercise portable row-polymorphic programs alongside qualified library
+    // namespaces rather than coupling these helpers to this REPL's `M` row.
     let (is_error, text) = run_single(
         &server,
         concat!(
             include_str!("effects_smoke/member_composition.hs"),
             "\n\n\
-             sh :: Text -> M Text\n\
+             sh :: Member Exec effs => Text -> Eff effs Text\n\
          sh cmd = run cmd >>= liftEither <&> \\p -> p.stdout\n\
          \n\
          uniqSorted :: [Int] -> [Int]\n\
          uniqSorted = L.sort . Set.toList . Set.fromList\n\
          \n\
          -- shell-effect module (Git) must be in DECL scope too\n\
-         dirtyCount :: M Int\n\
+         dirtyCount :: Member Git effs => Eff effs Int\n\
          dirtyCount = Git.gitStatus >>= liftEither <&> length",
         ),
         None,

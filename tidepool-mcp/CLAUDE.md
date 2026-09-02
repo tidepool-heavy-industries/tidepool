@@ -55,9 +55,9 @@ The generated surface has three modules across two cache layers:
   defines the concrete `M` row.
 
 Persistent declarations validate against `Authored` without importing the shim.
-`generalize_m_signatures` permits model-authored signatures using `M` to be
-inferred row-polymorphically. Explicit concrete `Eff '[...]` rows remain
-concrete and may fail when reused under another row.
+Their effectful signatures must use `Member` constraints; the declaration
+plane compiles authored signatures verbatim and does not expose the concrete
+per-window `M` alias.
 
 Records and error ADTs may be inline in `type_defs`; they land in Core and are
 nominally stable across turns. Existing `Tidepool.Records.*` modules are valid

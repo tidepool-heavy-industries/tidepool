@@ -179,19 +179,11 @@ impl SelfHarnessDriver {
     /// `Member <Eff> effs => ... -> Eff effs T` validates at define time AND
     /// persists across turns/windows — Core's tycons are the same ones every
     /// later turn's compile sees, so a bound call site unifies cleanly. A
-    /// declaration that instead spells the per-window `M` alias persists
-    /// identically: `M` still never resolves on this plane (the shim isn't on
-    /// its include path), but the plane strips the M-mentioning signature
-    /// before compiling and lets GHC infer the same `Member`-polymorphic
-    /// shape (`tidepool_runtime::session::render`'s `generalize_m_signatures`
-    /// — M carries forward cleanly, so this is no longer a taxonomy the model
-    /// needs to reason about). Only a declaration pinning a genuinely
-    /// CONCRETE row still surfaces the row boundary, and only as an ordinary
-    /// unsolved-`Member` error at whatever later use can't satisfy it — never
-    /// a define-time refusal. The OUTER render/loop compiles never see this
-    /// plane (their include never carries it): the authored harness cannot
-    /// silently depend on model-authored names — unaffected by
-    /// this change.
+    /// declaration that instead spells the per-window `M` alias is invalid on
+    /// this plane: persisted source is compiled exactly as authored, and `M`
+    /// deliberately is not in scope. The OUTER render/loop compiles never see
+    /// this plane (their include never carries it), so the authored harness
+    /// cannot silently depend on model-authored names.
     pub(crate) fn open_outer_plane(
         cfg: &EngineConfig,
     ) -> Option<tidepool_runtime::session::SessionLib> {

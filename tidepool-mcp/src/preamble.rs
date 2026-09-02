@@ -105,7 +105,8 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
 /// The [`ModuleEnv`] for session Lane-A declaration modules under the full
 /// effect stack — the eval pragmas + import surface (via [`EVAL_PRAGMAS`] /
 /// [`eval_import_lines`]) so `session_def` helpers share the eval vocabulary
-/// (e.g. `sh :: Text -> M Text` using `run`, `L.sortBy`, `Set.`, …). The
+/// (e.g. a `Member Exec effs => Text -> Eff effs Text` helper using `run`,
+/// `L.sortBy`, `Set.`, …). The
 /// lens-free [`ModuleEnv::standalone_default`] remains for the plain-toolchain
 /// standalone REPL/tests; this requires the `with-packages` GHC (it imports
 /// `Tidepool.Prelude`, which pulls `Control.Lens`).
@@ -161,32 +162,15 @@ pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> Mo
     }
 }
 
-/// The [`ModuleEnv`] for a pure or stable-effectful declaration plane: the
-/// self-iterating harness's living declaration surface.
+/// The [`ModuleEnv`] for persistent authored declarations.
 ///
-/// This is [`session_decl_module_env`]'s import surface MINUS the per-window
-/// SHIM (`Tidepool.Effects`, whose only content is `type M` — a row that
-/// genuinely varies turn to turn — and `Tidepool.Orchestrate`, which is
-/// `M`-typed throughout) PLUS the stable `Tidepool.Effects.Authored` facade.
-/// The facade re-exports Core's domain types and row-polymorphic helpers while
-/// keeping interpreter-only request constructors out of authored scope.
+/// This excludes the per-window `Tidepool.Effects` shim, whose `M` alias
+/// varies with the active interpreter, and imports the stable
+/// `Tidepool.Effects.Authored` facade instead. Persistent effectful helpers
+/// must therefore state their real row-polymorphic contract with `Member`
+/// constraints. Their source is compiled exactly as authored; the declaration
+/// plane never rewrites or discards type signatures.
 ///
-/// The practical effect: a declaration written `Member <Eff> effs => ... ->
-/// Eff effs T` validates here and persists across turns/windows (it
-/// mentions only stable authored tycons). A declaration that instead spells
-/// the per-window `M` alias ALSO validates and persists — `M` still never
-/// resolves here (the shim is not on this plane's include path), but the
-/// decl plane strips an M-mentioning signature before compiling
-/// (`tidepool_runtime::session::render`'s `generalize_m_signatures`, gated on
-/// exactly this env excluding `import Tidepool.Effects`) and lets GHC infer
-/// the body's type from its use of authored helpers — the same
-/// `Member <Eff> effs => ... -> Eff effs T` shape a hand-written
-/// row-polymorphic signature would have. The model's own spelling of `M` is
-/// therefore no longer something it needs to reason about here; only a
-/// declaration that pins a CONCRETE row (an explicit `Eff '[...]`, not the
-/// bare `M` alias) still fails, and only once some later use genuinely can't
-/// satisfy a `Member` constraint against that pinned row — an ordinary
-/// unsolved-`Member` error at that use site, not a define-time refusal.
 /// Effect companion imports (`Tidepool.Form` etc.) are still excluded, since
 /// they depend on the shim's row being genuinely present. Everything else —
 /// `Tidepool.Prelude` (unqualified `Text`, `object`, the pure vocabulary every
