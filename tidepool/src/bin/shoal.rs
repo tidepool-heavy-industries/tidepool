@@ -12,6 +12,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Initialize an empty Git repository for Shoal orchestration.
+    New {
+        /// Directory to initialize. Defaults to the current directory.
+        path: Option<PathBuf>,
+    },
     /// Create a project-local actor run in its own tmux session.
     Init {
         /// Repository the ensemble will work in. Defaults to the current project.
@@ -73,6 +78,7 @@ impl From<Effort> for ReasoningEffort {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
+        Command::New { path } => tidepool::shoal::new(tidepool::shoal::NewOptions { path }).await,
         Command::Init {
             workspace,
             session,
@@ -125,7 +131,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clap_exposes_the_three_process_boundaries() {
+    fn clap_exposes_the_user_commands_and_process_boundaries() {
+        assert!(matches!(
+            Cli::try_parse_from(["shoal", "new", "/tmp/project"])
+                .unwrap()
+                .command,
+            Command::New { path: Some(path) }
+                if path == std::path::Path::new("/tmp/project")
+        ));
         assert!(matches!(
             Cli::try_parse_from([
                 "shoal",
@@ -148,7 +161,7 @@ mod tests {
         ));
         let help = Cli::try_parse_from(["shoal", "--help"]).unwrap_err();
         let rendered = help.to_string();
-        for command in ["init", "host", "proxy"] {
+        for command in ["new", "init", "host", "proxy"] {
             assert!(rendered.contains(command), "{rendered}");
         }
     }

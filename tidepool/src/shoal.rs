@@ -21,6 +21,11 @@ use crate::actor_host::ACTOR_PROJECT_ROOT;
 
 const STATUS_VERSION: u32 = 2;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
+const SHOAL_EXCLUDE: &str = "/.shoal/";
+
+pub struct NewOptions {
+    pub path: Option<PathBuf>,
+}
 
 pub struct InitOptions {
     pub workspace: Option<PathBuf>,
@@ -41,6 +46,91 @@ pub struct HostOptions {
     pub resume_root: bool,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
+}
+
+/// Initialize the smallest repository that can host a Shoal ensemble.
+///
+/// The command creates no product scaffold. `.shoal/` is runtime-owned and
+/// excluded locally through Git metadata, so using Shoal cannot dirty the
+/// repository or impose an ignore rule on collaborators.
+pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = match options.path {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
+    if workspace.exists() {
+        let mut entries = std::fs::read_dir(&workspace)?;
+        if entries.next().transpose()?.is_some() {
+            return Err(runtime_error(format!(
+                "shoal new requires an empty directory: {}",
+                workspace.display()
+            )));
+        }
+    } else {
+        std::fs::create_dir_all(&workspace)?;
+    }
+    run_git(&workspace, &["init", "--quiet"]).await?;
+
+    let state = workspace.join(".shoal");
+    std::fs::create_dir_all(state.join("logs"))?;
+    std::fs::create_dir_all(state.join("sessions"))?;
+    install_local_exclude(&workspace)?;
+
+    run_git(
+        &workspace,
+        &[
+            "-c",
+            "user.name=Shoal",
+            "-c",
+            "user.email=shoal@localhost",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "Initialize Shoal workspace",
+        ],
+    )
+    .await?;
+
+    let workspace = std::fs::canonicalize(workspace)?;
+    println!(
+        "Initialized empty Shoal workspace at {}",
+        workspace.display()
+    );
+    Ok(())
+}
+
+fn install_local_exclude(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let exclude = workspace.join(".git/info/exclude");
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == SHOAL_EXCLUDE) {
+        return Ok(());
+    }
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(SHOAL_EXCLUDE);
+    updated.push('\n');
+    tidepool_atomic_write::write_best_effort(&exclude, updated.as_bytes())?;
+    Ok(())
+}
+
+async fn run_git(workspace: &Path, arguments: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let output = tokio::process::Command::new("git")
+        .args(arguments)
+        .current_dir(workspace)
+        .output()
+        .await?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(runtime_error(format!(
+        "git {} failed in {}: {}",
+        arguments.join(" "),
+        workspace.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +656,71 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn git_stdout(workspace: &Path, arguments: &[&str]) -> String {
+        let output = tokio::process::Command::new("git")
+            .args(arguments)
+            .current_dir(workspace)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {}: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_creates_only_ignored_shoal_state_and_an_empty_base_commit() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("project");
+
+        new(NewOptions {
+            path: Some(workspace.clone()),
+        })
+        .await
+        .unwrap();
+
+        assert!(workspace.join(".shoal/logs").is_dir());
+        assert!(workspace.join(".shoal/sessions").is_dir());
+        assert!(std::fs::read_to_string(workspace.join(".git/info/exclude"))
+            .unwrap()
+            .lines()
+            .any(|line| line == SHOAL_EXCLUDE));
+        assert_eq!(git_stdout(&workspace, &["status", "--short"]).await, "");
+        assert_eq!(
+            git_stdout(&workspace, &["show", "--format=%s", "--no-patch", "HEAD"])
+                .await
+                .trim(),
+            "Initialize Shoal workspace"
+        );
+        assert_eq!(
+            git_stdout(&workspace, &["ls-tree", "--name-only", "HEAD"]).await,
+            ""
+        );
+    }
+
+    #[tokio::test]
+    async fn new_refuses_to_claim_a_nonempty_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("owned.txt"), "user data").unwrap();
+
+        let error = new(NewOptions {
+            path: Some(workspace.path().into()),
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires an empty directory"));
+        assert!(!workspace.path().join(".git").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("owned.txt")).unwrap(),
+            "user data"
+        );
+    }
 
     #[test]
     fn project_names_become_valid_stable_session_names() {
