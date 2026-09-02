@@ -16,6 +16,8 @@ use tidepool_agent::{
 use tidepool_node::{TmuxLaunch, TmuxSession};
 use tokio::sync::mpsc;
 
+use crate::actor_host::ACTOR_PROJECT_ROOT;
+
 const STATUS_VERSION: u32 = 2;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -324,6 +326,12 @@ async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     crate::haskell_sources::ensure_stdlib()?;
     crate::haskell_sources::ensure_actor_policy()?;
     tidepool_runtime::toolchain::bind_extract_endpoint()?;
+
+    // Codex keys its interactive trust decision by the path visible inside
+    // its process. Every actor gets an isolated repository mounted at this one
+    // stable slot, so this creates one durable entry rather than one per run.
+    std::fs::create_dir_all(ACTOR_PROJECT_ROOT)?;
+    tidepool_agent::trust_interactive_project(Path::new(ACTOR_PROJECT_ROOT))?;
 
     let output = tokio::process::Command::new("codex")
         .args(["queue", "--help"])

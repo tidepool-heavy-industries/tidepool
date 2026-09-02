@@ -14,7 +14,9 @@ choices.
   cursor before the last hop succeeds.
 - Keep payloads typed until a concrete transport boundary renders them.
 - A node proxy forwards MCP; it does not authorize or interpret tools.
-- `ProcessMountBoundary` gives an interactive actor one ordinary writable
-  repository while protecting source and sibling repositories. It is
-  operational write containment, not a hardened security sandbox: it does not
-  isolate the environment, network, credentials, or process namespace.
+- `ProcessMountBoundary` presents one real repository at a stable
+  model-visible path. Worker composition makes the private repository writable
+  while protecting source and siblings; root composition makes its source
+  repository writable because integration is root work. It is operational
+  write containment, not a hardened security sandbox: it does not isolate the
+  environment, network, credentials, or process namespace.

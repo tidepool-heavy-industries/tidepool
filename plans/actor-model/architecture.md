@@ -226,6 +226,14 @@ the source plus sibling repositories are read-only. Codex therefore uses
 ordinary Git—including commits, branches, rebases, and recovery—without sharing
 mutable Git metadata with its source.
 
+All interactive actors see their active repository at one stable virtual
+project path; separate mount namespaces map that name to different real
+repositories. This avoids accumulating one Codex project-trust entry per
+generated checkout. Worker namespaces keep the source read-only. The root
+namespace instead maps its source checkout read-write because accepting a
+candidate, advancing the shared base, and only then spawning dependent work is
+the root's fold responsibility.
+
 This V0 boundary is operational write containment, not a security claim. The
 agent still inherits its environment, network, credentials, caches, and host
 process namespace. The source dependency is also real: a borrowed-object

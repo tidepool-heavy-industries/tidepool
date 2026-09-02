@@ -22,17 +22,23 @@
 //!
 //! # Config isolation
 //!
-//! No normal worker run may mutate the operator's Codex user configuration.
+//! No normal headless worker run may mutate the operator's Codex user
+//! configuration.
 //! The operator's `~/.codex` holds a live
 //! ChatGPT authentication; credentials are never copied or rewritten into an
 //! isolated `CODEX_HOME` to route around this. The shape that avoids the
 //! documented project-trust write is to omit `cwd` from thread start and supply
 //! it at turn start — proving that is sufficient is the first thing this
-//! adapter does, before any run that spends a token.
+//! adapter does, before any run that spends a token. Shoal's interactive TUI
+//! is the deliberate exception: it trusts one stable virtual project path,
+//! never the unbounded set of generated actor repositories.
 
 pub mod driver;
 pub mod dynamic_tools;
 pub mod isolation;
+mod trust;
+
+pub use trust::trust_interactive_project;
 pub mod node;
 pub mod process;
 pub mod replay;

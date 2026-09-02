@@ -3,9 +3,11 @@
 //! This is operational write containment, not a hardened container. The host
 //! filesystem, environment, network, credentials, and process namespace stay
 //! available. Bubblewrap only makes selected repository roots read-only and
-//! then re-exposes one narrower actor workspace as writable. That is enough to
-//! give Codex ordinary Git inside its private repository without letting a
-//! routine command mutate the source checkout or a sibling worker.
+//! then re-exposes one narrower actor workspace as writable at a stable
+//! model-visible project path. That is enough to give Codex ordinary Git
+//! inside its private repository without letting a routine command mutate the
+//! source checkout or a sibling worker, or requiring one project-trust entry
+//! per generated repository.
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +24,7 @@ pub struct ProcessInvocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessMountBoundary {
     cwd: PathBuf,
+    project_root: PathBuf,
     read_only_roots: Vec<PathBuf>,
     writable_roots: Vec<PathBuf>,
 }
@@ -65,10 +68,21 @@ impl ProcessMountBoundary {
         }
 
         Ok(Self {
+            project_root: cwd.clone(),
             cwd,
             read_only_roots,
             writable_roots,
         })
+    }
+
+    /// Present the real process workspace at one stable model-visible path.
+    /// Distinct mount namespaces may reuse the same slot concurrently.
+    pub fn with_project_root(
+        mut self,
+        project_root: impl AsRef<Path>,
+    ) -> Result<Self, ProcessBoundaryError> {
+        self.project_root = canonicalize("model-visible project root", project_root.as_ref())?;
+        Ok(self)
     }
 
     /// Wrap `command` with Bubblewrap. Broad read-only mounts are emitted
@@ -95,9 +109,18 @@ impl ProcessMountBoundary {
             let path = path.to_string_lossy().into_owned();
             args.extend(["--bind".into(), path.clone(), path]);
         }
+        if self.project_root != self.cwd {
+            let writable = self
+                .writable_roots
+                .iter()
+                .any(|root| self.cwd.starts_with(root));
+            args.push(if writable { "--bind" } else { "--ro-bind" }.into());
+            args.push(self.cwd.to_string_lossy().into_owned());
+            args.push(self.project_root.to_string_lossy().into_owned());
+        }
         args.extend([
             "--chdir".into(),
-            self.cwd.to_string_lossy().into_owned(),
+            self.project_root.to_string_lossy().into_owned(),
             "--die-with-parent".into(),
             "--".into(),
             command.program,
@@ -182,5 +205,36 @@ mod tests {
             ProcessMountBoundary::new(&outside, [protected], [outside.clone()]),
             Err(ProcessBoundaryError::WritableOutsideProtectedRoot { .. })
         ));
+    }
+
+    #[test]
+    fn private_workspace_is_mounted_at_one_stable_project_root() {
+        let root = tempfile::tempdir().unwrap();
+        let workers = root.path().join("workers");
+        let actor = workers.join("actor");
+        let project_root = root.path().join("actor-project");
+        std::fs::create_dir_all(&actor).unwrap();
+        std::fs::create_dir_all(&project_root).unwrap();
+        let boundary = ProcessMountBoundary::new(&actor, [workers.clone()], [actor.clone()])
+            .unwrap()
+            .with_project_root(&project_root)
+            .unwrap();
+        let wrapped = boundary.wrap(
+            "bwrap",
+            ProcessInvocation {
+                program: "pwd".into(),
+                args: Vec::new(),
+            },
+        );
+
+        assert!(wrapped.args.windows(3).any(|args| {
+            args[0] == "--bind"
+                && args[1] == actor.to_string_lossy()
+                && args[2] == project_root.to_string_lossy()
+        }));
+        assert!(wrapped
+            .args
+            .windows(2)
+            .any(|args| { args[0] == "--chdir" && args[1] == project_root.to_string_lossy() }));
     }
 }

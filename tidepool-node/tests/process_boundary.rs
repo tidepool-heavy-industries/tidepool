@@ -11,6 +11,7 @@ fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
     let workers = root.path().join("workers");
     let actor = workers.join("actor");
     let sibling = workers.join("sibling");
+    let project_root = root.path().join("actor-project");
     std::fs::create_dir_all(&source).expect("create source");
     git(root.path(), ["init", source.to_str().unwrap()]);
     git(&source, ["config", "user.name", "Source"]);
@@ -19,6 +20,7 @@ fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
     git(&source, ["add", "base.txt"]);
     git(&source, ["commit", "-m", "base"]);
     std::fs::create_dir_all(&workers).expect("create worker root");
+    std::fs::create_dir_all(&project_root).expect("create project root");
     git(
         &workers,
         [
@@ -40,9 +42,12 @@ fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
 
     let boundary =
         ProcessMountBoundary::new(&actor, [source.clone(), workers.clone()], [actor.clone()])
-            .expect("boundary");
+            .expect("boundary")
+            .with_project_root(&project_root)
+            .expect("stable project root");
     let script = format!(
-        "git config user.name Actor && \
+        "test \"$(pwd)\" = {project_root} && \
+         git config user.name Actor && \
          git config user.email actor@example.invalid && \
          printf 'candidate\\n' > candidate.txt && \
          git add candidate.txt && git commit -m candidate && \
@@ -50,6 +55,7 @@ fn actor_repository_is_writable_while_source_and_siblings_are_read_only() {
          ! touch {sibling}/escaped",
         source = source.display(),
         sibling = sibling.display(),
+        project_root = project_root.display(),
     );
     let invocation = boundary.wrap(
         "bwrap",

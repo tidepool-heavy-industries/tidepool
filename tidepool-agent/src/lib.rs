@@ -19,6 +19,7 @@ pub mod interactive;
 pub mod seam;
 pub mod spawn;
 
+pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
     InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,

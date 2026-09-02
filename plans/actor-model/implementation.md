@@ -1000,8 +1000,12 @@ Implement this boundary in order:
    retained private repositories. Each checkout owns its mutable Git metadata
    and borrows initial objects from its retained source through alternates. A
    reusable `tidepool-node` process boundary makes the active repository
-   writable and source plus sibling repositories read-only, then runs Codex
-   with its redundant inner filesystem sandbox disabled. Source-checkout
+   visible at one stable Codex project path. A worker's private repository is
+   writable while source plus sibling repositories are read-only; the root's
+   source is writable so it can fold an accepted candidate before spawning
+   dependent work from the advanced HEAD. The stable path requires one
+   project-trust entry rather than one per generated repository. Codex then
+   runs with its redundant inner filesystem sandbox disabled. Source-checkout
    extractor process pins are removed before launch so each repository resolves
    tools from its own sources. This permits normal Git commits and recovery
    without exposing shared refs, config, hooks, or locks. It is operational

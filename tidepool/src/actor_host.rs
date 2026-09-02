@@ -49,6 +49,11 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
+/// Every interactive actor sees its own repository at this path. Bubblewrap
+/// mount namespaces make the shared name safe across concurrent actors, while
+/// Codex needs only one persisted project-trust decision.
+pub(crate) const ACTOR_PROJECT_ROOT: &str = "/tmp/tidepool-actor-workspace";
+
 const POLICY_MODULE: &str = "Tidepool.Actors.DevSwarm";
 const POLICY_ENTRY: &str = "rootPolicy";
 const POLICY_EFFECTS: &str = "RootEffects";
@@ -971,10 +976,12 @@ async fn launch_prepared_interactive_application(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
     );
-    let writable_roots = worktree
-        .as_ref()
-        .map(|handle| vec![handle.cwd().to_path_buf()])
-        .unwrap_or_default();
+    let writable_roots = writable_repository_roots(
+        actor == root,
+        &config.workspace,
+        worktree.as_ref().map(WorktreeHandle::cwd),
+    );
+    let agent_workspace = PathBuf::from(ACTOR_PROJECT_ROOT);
     let process_boundary = ProcessMountBoundary::new(
         &workspace,
         [
@@ -983,6 +990,7 @@ async fn launch_prepared_interactive_application(
         ],
         writable_roots,
     )
+    .and_then(|boundary| boundary.with_project_root(&agent_workspace))
     .map_err(|error| application_error(actor, InteractiveOperation::PrepareRuntime, error))?;
     if cancelled.try_recv().is_ok() {
         return Ok(None);
@@ -1023,7 +1031,7 @@ async fn launch_prepared_interactive_application(
         endpoint,
         credential: credential.clone(),
         binding_path: binding_path.clone(),
-        workspace: workspace.clone(),
+        workspace: agent_workspace.clone(),
     };
     let launch_mode = if actor == root {
         config.root_launch_mode.clone()
@@ -1048,7 +1056,7 @@ async fn launch_prepared_interactive_application(
             name: "tidepool_actor".into(),
             command: config.proxy_program.clone(),
             args: config.proxy_args.clone(),
-            cwd: workspace.to_string_lossy().into_owned(),
+            cwd: agent_workspace.to_string_lossy().into_owned(),
             forward_env: proxy_environment.keys().cloned().collect(),
             required: true,
         },
@@ -1519,9 +1527,26 @@ fn developer_instructions(root: bool, mode: &InteractiveLaunchMode) -> String {
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. The checkout is writable so you can review and integrate accepted candidates. For dependent work, integrate the predecessor before spawning its successor so the new worker starts from the advanced HEAD. Your actor-scoped MCP tools define the typed actor-control protocol; native coding tools remain a separate execution surface. Rust owns process and actor lifecycle. Start workers, then continue only immediately runnable orchestration. WorkerPending is a cooperative yield signal, not an invitation to poll: never sleep or repeatedly call collect_worker. When no other work is runnable, end the current turn. Shoal will initiate a new turn after a child lifecycle transition; on that informational wake, call collect_worker once for the exact typed result. A delayed wake for an already acknowledged worker requires no action.{continuity}")
     } else {
         "You are a Tidepool worker actor. Your process working directory is an owned retained Git repository with private mutable metadata; the source checkout and sibling worker repositories are read-only. Use ordinary Git workflows freely inside this repository. Your actor-scoped MCP tools define the typed assignment and completion protocol; native coding tools remain a separate execution surface. Retrieve your assignment, do the work, commit coherent changes when the assignment calls for edits, then call finish_work exactly once with its typed result. Rust owns process and actor lifecycle.".into()
+    }
+}
+
+fn writable_repository_roots(
+    root: bool,
+    source: &Path,
+    worker_repository: Option<&Path>,
+) -> Vec<PathBuf> {
+    if root {
+        // Integration advances the source HEAD; child coding happens only in
+        // the exact private repository granted to that child.
+        vec![source.to_path_buf()]
+    } else {
+        worker_repository
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect()
     }
 }
 
@@ -1628,6 +1653,22 @@ mod tests {
         assert!(resumed.contains("were not restored"));
         assert!(resumed.contains("WorkerPending is a cooperative yield signal"));
         assert!(resumed.contains("never sleep or repeatedly call collect_worker"));
+    }
+
+    #[test]
+    fn root_and_worker_receive_different_writable_repository_authority() {
+        let source = Path::new("/source");
+        let worker = Path::new("/workers/one");
+
+        assert_eq!(
+            writable_repository_roots(true, source, None),
+            vec![source.to_path_buf()]
+        );
+        assert_eq!(
+            writable_repository_roots(false, source, Some(worker)),
+            vec![worker.to_path_buf()]
+        );
+        assert!(writable_repository_roots(false, source, None).is_empty());
     }
 
     #[test]
