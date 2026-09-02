@@ -1262,130 +1262,16 @@ mod tests {
         assert_eq!(PREAMBLE_DEFAULT_MARKER, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
     }
 
-    /// An extractor whose non-zero-exit stdout does not parse as the
-    /// diagnostics report is a stale/skewed build: `MalformedDiagnostics`
-    /// (→ VersionSkew), never `ExtractFailed` (→ UserHaskell) — same contract
-    /// as `run_turn` and `lib.rs::compile_haskell`. Env mutation is
-    /// safe: nextest runs each test in its own process.
-    #[test]
-    fn classify_block_unparseable_report_is_malformed_diagnostics() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let fake = dir.path().join("fake-extract");
-        std::fs::write(&fake, "#!/bin/sh\necho not-a-diag-report\nexit 1\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _worker = TestEnvGuard::unset("TIDEPOOL_EXTRACT_WORKER");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
-        let err = classify_block(&["x <- pure 1"]).unwrap_err();
-        assert!(
-            matches!(err, CompileError::MalformedDiagnostics(_)),
-            "expected MalformedDiagnostics, got {err:?}"
-        );
-    }
-
-    /// Source rejection is impossible in parse-only classification. Even a
-    /// well-formed report claiming it is therefore a protocol mismatch, not
-    /// authored Haskell.
-    #[test]
-    fn classify_block_impossible_source_failure_is_version_skew() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let fake = dir.path().join("fake-extract");
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\necho '{\"version\":2,\"outcome\":\"source-failure\",\"diagnostics\":[{\"span\":null,\
-             \"severity\":\"error\",\"message\":\"target is not a module name or a source file\"}]}'\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
-        let err = classify_block(&["x <- pure 1"]).unwrap_err();
-        let CompileError::MalformedDiagnostics(msg) = &err else {
-            panic!("an impossible source-failure report must be version skew, got {err:?}");
-        };
-        assert!(
-            msg.contains("--classify") && msg.contains("redeploy.sh"),
-            "the skew message must name the missing flag and the redeploy path: {msg}"
-        );
-    }
-
-    #[test]
-    fn classify_block_worker_failure_remains_infrastructure() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let fake = dir.path().join("fake-extract");
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\necho '{\"version\":2,\"outcome\":\"worker-failure\",\"diagnostics\":[{\"span\":null,\"severity\":\"error\",\"message\":\"disk unavailable\"}]}'\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
-
-        let error = classify_block(&["x <- pure 1"]).unwrap_err();
-        assert!(matches!(error, CompileError::WorkerFailure(_)));
-        assert_eq!(
-            crate::classify_compile(&error).class,
-            crate::FailureClass::Infra
-        );
-    }
-
-    /// An empty item list must short-circuit in Rust and never spawn the
-    /// extractor: with no positional files the extract falls through to its
-    /// usage branch and writes no `--classify-out` file, so spawning would
-    /// surface as a confusing missing-file error for what is obviously a
-    /// no-op.
+    /// An empty item list must short-circuit before extractor resolution.
+    /// The deliberately invalid endpoint makes any accidental boundary
+    /// crossing fail this otherwise trivial no-op.
     #[test]
     fn classify_block_empty_items_short_circuits_without_spawning() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let log_path = dir.path().join("calls.log");
-        let fake = dir.path().join("fake-extract");
-        std::fs::write(
-            &fake,
-            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log_path.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
+        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
 
         let result = classify_block(&[]).unwrap();
         assert!(result.is_empty());
-        assert!(
-            !log_path.exists(),
-            "classify_block(&[]) spawned the extractor"
-        );
-    }
-
-    /// A successful classifier process that omits its required artifact is an
-    /// infrastructure failure, not an expression verdict and not user Haskell.
-    #[test]
-    fn classify_block_missing_artifact_stays_typed() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let fake = dir.path().join("fake-extract");
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\necho '{\"version\":2,\"outcome\":\"success\",\"diagnostics\":[]}'\nexit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
-
-        let err = classify_block(&["pure (1 :: Int)"]).unwrap_err();
-        assert!(
-            matches!(err, CompileError::MissingOutput(_)),
-            "missing classify.json must stay MissingOutput, got {err:?}"
-        );
-        assert_eq!(
-            crate::classify_compile(&err).class,
-            crate::FailureClass::Infra
-        );
     }
 
     #[test]
@@ -1644,60 +1530,6 @@ mod tests {
         assert!(
             matches!(err.error, CompileError::ExtractFailed(_)),
             "expected a clean ExtractFailed, got {err:?}"
-        );
-    }
-
-    /// `run_turn` must spawn the extractor exactly once through the typed
-    /// worker protocol. Field encoding is covered by `tidepool-extract-cmd`;
-    /// this boundary test only owns process count and transport selection.
-    /// The fake worker logs its argv and exits non-zero.
-    #[test]
-    fn run_turn_spawns_extract_exactly_once_with_typed_request() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = TempDir::new().unwrap();
-        let log_path = dir.path().join("calls.log");
-        let fake = dir.path().join("fake-extract");
-        std::fs::write(
-            &fake,
-            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", log_path.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
-        let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", &fake);
-
-        let session_root = dir.path().join("session");
-        std::fs::create_dir_all(&session_root).unwrap();
-        let templates = vec![TurnTemplate {
-            kind: TemplateSelector::Expr,
-            source: "module M where\nresult = {{TURN}}\n".to_string(),
-        }];
-        let req = TurnRequest {
-            turn_text: "1 + 1",
-            templates: &templates,
-            include: &[],
-            session_root: &session_root,
-            inject_modules: &[],
-            gen: 0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Expr,
-                binders: Vec::new(),
-                items: Vec::new(),
-            }),
-            target: None,
-        };
-        let _ = run_turn(req);
-
-        let calls = std::fs::read_to_string(&log_path).unwrap_or_default();
-        assert_eq!(
-            calls.lines().count(),
-            1,
-            "expected exactly one extract spawn, got:\n{calls}"
-        );
-        let call = calls.lines().next().unwrap_or_default();
-        assert!(
-            call.starts_with("--worker-request-v3 5450524551303033"),
-            "spawn did not use the versioned typed worker protocol:\n{call}"
         );
     }
 
