@@ -56,6 +56,7 @@ const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ShoalDriver";
 const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
 const DRIVER_ENTRY: &str = "rootDriver";
 const DRIVER_EFFECTS: &str = "RootEffects";
+const CHILD_LIFECYCLE_NOTICE: &str = "A child actor changed lifecycle state.";
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -107,7 +108,6 @@ impl ModelProvider for NoResidentProvider {
 struct InteractiveDeployment {
     actor: ActorRef,
     local_actor: LocalActorRef,
-    label: String,
     pane: TmuxPaneId,
     workspace: PathBuf,
     inbox: Arc<DurableInbox<String>>,
@@ -144,7 +144,6 @@ struct OwnerNotification {
 
 struct PendingInteractiveLaunch {
     cancel: oneshot::Sender<()>,
-    label: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -531,7 +530,6 @@ async fn run_interactive_applications(
     let mut launches = JoinSet::new();
     let mut binding_discoveries = JoinSet::new();
     let mut pending_launches = HashMap::new();
-    let mut retired_correlations: HashMap<ActorRef, String> = HashMap::new();
     let mut retirements = JoinSet::new();
     let mut notifications = JoinSet::new();
     let mut health = tokio::time::interval(Duration::from_secs(1));
@@ -584,7 +582,6 @@ async fn run_interactive_applications(
                             actor,
                             PendingInteractiveLaunch {
                                 cancel,
-                                label: installation.label.clone(),
                             },
                         );
                         debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
@@ -611,13 +608,9 @@ async fn run_interactive_applications(
                         let pending = pending_launches.remove(&actor);
                         if let Some(pending) = pending {
                             let _ = pending.cancel.send(());
-                            retired_correlations.insert(actor, pending.label);
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
                             let deployment = deployments.swap_remove(index);
-                            retired_correlations
-                                .entry(actor)
-                                .or_insert_with(|| deployment.label.clone());
                             let tmux = tmux.clone();
                             let bindings = Arc::clone(&bindings);
                             let binding_terminal = if terminal.kind == ActorExitKind::Completed {
@@ -636,12 +629,7 @@ async fn run_interactive_applications(
                         }
                     }
                     LocalResidentDeployment::ChildExited { notice } => {
-                        let retired = retired_correlations.remove(&notice.child.identity());
-                        if let Some(notification) = prepare_owner_notification(
-                            &notice,
-                            &deployments,
-                            retired.as_ref(),
-                        ) {
+                        if let Some(notification) = prepare_owner_notification(&notice, &deployments) {
                             notifications.spawn(publish_owner_notification(notification));
                         }
                     }
@@ -1187,7 +1175,6 @@ async fn launch_prepared_interactive_application(
         deployment: InteractiveDeployment {
             actor: actor_identity,
             local_actor: actor,
-            label: installation.label,
             pane,
             workspace,
             inbox,
@@ -1311,31 +1298,11 @@ async fn run_delivery_pump(
 fn prepare_owner_notification(
     notice: &tidepool_actor::ChildExitNotice,
     deployments: &[InteractiveDeployment],
-    retired: Option<&String>,
 ) -> Option<OwnerNotification> {
-    let actor = notice.child.identity();
-    let terminal = &notice.terminal;
     let owner_application = deployments.iter().find(|app| app.actor == notice.owner)?;
-    let label = deployments
-        .iter()
-        .find(|application| application.actor == actor)
-        .map(|application| application.label.as_str())
-        .or_else(|| retired.map(String::as_str))
-        .unwrap_or("child");
-    let kind = match terminal.kind {
-        ActorExitKind::Completed => "completed",
-        ActorExitKind::Failed => "failed",
-        ActorExitKind::Cancelled => "was cancelled",
-    };
-    let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}. This notification is advisory; retain and inspect the typed `ActorRef` from Haskell when the exit value is authoritative.",
-        label,
-        actor,
-        terminal.summary
-    );
     Some(OwnerNotification {
         inbox: Arc::clone(&owner_application.inbox),
-        message,
+        message: CHILD_LIFECYCLE_NOTICE.into(),
     })
 }
 
@@ -1530,11 +1497,11 @@ fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLau
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. You have a live Haskell workbench, not a prewritten actor program: define the typed protocols, actor definitions, and orchestration this task needs as you go. Orchestrate through supervised typed actors instead of implementing changes in the shared source checkout. `tidepool_actor.haskell` is your primary GHCi-style orchestration surface. Its raw payload is a script. Outside `:{{` / `:}}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; a rejected effectful unit does not install its projected bindings or roll back effects already performed. Start API discovery with `:browse`; inspect `Tidepool.Agent.Action` separately when needed. Persistent declarations and live values survive calls, while Rust owns actor lifecycle and repository custody. `sessionInput :: Maybe ActionFailure` reports only a failed prior compositional action. Start independent actors before waiting. Prefer ordinary Haskell composition: `complete $ nextTurn $ assemble <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, then reactivates this same context with the live typed result. Use `awaitExit` when failure is domain policy. Use `complete (pure ())` to return to silent/manual readiness. Project-specific worker ledgers and receipt protocols are not part of Shoal's core surface; define them only when the task needs them. Native coding tools remain the review and integration surface.{continuity}")
+        format!("You are a Tidepool root actor. You have a live Haskell workbench, not a prewritten actor program: define the typed protocols, actor definitions, and orchestration this task needs as you go. Orchestrate through supervised typed actors instead of implementing changes in the shared source checkout. `tidepool_actor.haskell` is your primary GHCi-style orchestration surface. Its raw payload is a script. Outside `:{{` / `:}}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; a rejected effectful unit does not install its projected bindings or roll back effects already performed. Tool results are compact GHCi-style transcripts: expressions use Haskell rendering, bindings and declarations use short commit notes, and non-renderable values are explicitly opaque. Start API discovery with `:browse`; inspect `Tidepool.Agent.Action` separately when needed. Persistent declarations and live values survive calls, while Rust owns actor lifecycle and repository custody. Conversation messages explain tasks or why execution resumed; typed Haskell state carries identities, correlation, results, and authority. `sessionInput :: Maybe ActionFailure` reports only a failed prior compositional action. Start independent actors before waiting. Prefer ordinary Haskell composition: `complete $ nextTurn $ (,) <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, then reactivates this same context with the live typed result. Use `awaitExit` when failure is domain policy. Use `complete (pure ())` to return to silent/manual readiness. Project-specific worker ledgers and receipt protocols are not part of Shoal's core surface; define them only when the task needs them. Native coding tools remain the review and integration surface.{continuity}")
     } else if owns_worktree {
         "You are a Tidepool actor whose process owns a retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message and `sessionInput` are supplied by the Haskell actor definition. Use native coding tools for repository work and `tidepool_actor.haskell` for typed actor composition and completion. Return executable Haskell with `complete action`, producing the exact exit type chosen by that definition. Rust owns lifecycle and repository custody.".into()
     } else {
-        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.haskell` as your primary GHCi-style actor surface. Outside `:{` / `:}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; effects are not rolled back when a unit rejects. Start API discovery with `:browse`. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return executable Haskell with `complete action`; do not claim or attempt source-checkout mutation authority.".into()
+        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.haskell` as your primary GHCi-style actor surface. Outside `:{` / `:}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; effects are not rolled back when a unit rejects. Tool results are compact GHCi-style transcripts; non-renderable values are explicitly opaque. Start API discovery with `:browse`. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. Conversation messages carry tasks or wake reasons; typed Haskell state carries identity, correlation, results, and authority. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return executable Haskell with `complete action`; do not claim or attempt source-checkout mutation authority.".into()
     }
 }
 
@@ -1604,6 +1571,20 @@ mod tests {
         last.expect("non-empty Haskell fixture")
     }
 
+    async fn dispatch_haskell_script(
+        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        script: &str,
+    ) -> serde_json::Value {
+        endpoint
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: tidepool_actor::HASKELL_TOOL.into(),
+                arguments: ToolArguments::Raw(script.into()),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
+    }
+
     #[tokio::test]
     async fn idle_application_waits_for_its_first_real_conversation_binding() {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -1668,6 +1649,19 @@ mod tests {
         assert!(resumed.contains("not a prewritten actor program"));
         assert!(resumed.contains("Start independent actors before waiting"));
         assert!(resumed.contains("Project-specific worker ledgers"));
+        assert!(resumed.contains("compact GHCi-style transcripts"));
+        assert!(resumed.contains("typed Haskell state carries identities"));
+    }
+
+    #[test]
+    fn child_lifecycle_notice_contains_no_copied_runtime_state() {
+        assert_eq!(
+            CHILD_LIFECYCLE_NOTICE,
+            "A child actor changed lifecycle state."
+        );
+        for forbidden in ["ActorRef", "ActorId", "incarnation", "handle", "summary"] {
+            assert!(!CHILD_LIFECYCLE_NOTICE.contains(forbidden));
+        }
     }
 
     #[test]
@@ -2029,6 +2023,50 @@ mod tests {
             after_rejection["status"], "committed",
             "a rejected actor operation must not consume the surrounding agent session: {after_rejection:?}"
         );
+        let bindings = after_rejection["items"][0]["output"]
+            .as_str()
+            .expect("bindings output");
+        assert!(bindings.contains("deadActor ::"), "{bindings}");
+        assert!(bindings.contains("ActorDefinition"), "{bindings}");
+        assert!(bindings.contains("sessionInput ::"), "{bindings}");
+
+        let rendered = dispatch_haskell_script(
+            policy.as_ref(),
+            "data DisplayProbe = DisplayProbe { probeCode :: Int, probeMessage :: String } deriving Show\nDisplayProbe 7 \"ready\"",
+        )
+        .await;
+        assert_eq!(rendered["status"], "committed", "{rendered:?}");
+        assert_eq!(
+            rendered["items"][1]["output"],
+            "DisplayProbe {probeCode = 7, probeMessage = \"ready\"}"
+        );
+        assert!(
+            !rendered["items"][1]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("constructor"),
+            "{rendered:?}"
+        );
+
+        let opaque =
+            dispatch_haskell_script(policy.as_ref(), "opaqueProbe x = x\nopaqueProbe").await;
+        assert_eq!(opaque["status"], "committed", "{opaque:?}");
+        assert_eq!(opaque["items"][1]["output"], "<opaque value>");
+
+        let compile_rejected = dispatch_haskell_script(
+            policy.as_ref(),
+            "compileAnchor = (1 :: Int)\ncompileBroken = True + 1",
+        )
+        .await;
+        assert_eq!(
+            compile_rejected["status"], "rejected",
+            "{compile_rejected:?}"
+        );
+        let diagnostic = compile_rejected["items"][1]["output"]
+            .as_str()
+            .expect("rejected declaration diagnostic");
+        assert!(diagnostic.contains("<input unit 2>:1:"), "{diagnostic}");
+        assert!(!diagnostic.contains("SessionDecls.hs"), "{diagnostic}");
 
         let failed_action = dispatch_haskell(
             policy.as_ref(),

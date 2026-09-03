@@ -24,6 +24,7 @@ use std::path::Path;
 use ciborium::value::Value as CborValue;
 use tempfile::TempDir;
 use tidepool_extract_cmd::{ExtractCmd, SpawnError};
+use tidepool_toolchain::extract_module_name;
 
 use tidepool_repr::serial::{read_cbor, read_metadata, MetaWarnings};
 use tidepool_repr::{CoreExpr, DataConTable};
@@ -264,6 +265,84 @@ impl From<std::io::Error> for TurnFailure {
     }
 }
 
+/// Render a failed resident turn against the submitted input unit rather than
+/// the generated wrapper module. Diagnostics from other files retain their
+/// original coordinates.
+#[must_use]
+pub fn render_turn_compile_error(
+    error: &CompileError,
+    attempted_source: Option<&str>,
+    turn_text: &str,
+    label: &str,
+) -> String {
+    let CompileError::Diagnostics(diagnostics) = error else {
+        return crate::classify_compile(error).message;
+    };
+    let Some(source) = attempted_source else {
+        return crate::classify_compile(error).message;
+    };
+    let anchor = extract_module_name(source)
+        .map(|module| format!("{}.hs", module.replace('.', "/")))
+        .unwrap_or_else(|| "Expr.hs".into());
+    let (line_offset, col_indent) = turn_user_code_offset(source).unwrap_or((0, 0));
+    let user_lines = turn_user_code_line_range(source, turn_text);
+    crate::diag::render_diagnostics(
+        diagnostics,
+        &crate::diag::RenderOpts {
+            anchor: &anchor,
+            label,
+            user_lines: user_lines.as_ref().map(std::slice::from_ref),
+            line_offset,
+            col_indent,
+            drop_foreign_gen_warnings_except: None,
+            source,
+        },
+    )
+}
+
+/// Locate submitted turn text within one of the shared wrapper templates.
+#[must_use]
+pub fn turn_user_code_offset(source: &str) -> Option<(usize, usize)> {
+    for marker in [
+        "__user = let {\n __b =\n",
+        "__probe = let {\n __b =\n",
+        "__workbenchValue = let {\n __value =\n",
+    ] {
+        if let Some(position) = source.find(marker) {
+            return Some((source[..position + marker.len()].matches('\n').count(), 0));
+        }
+    }
+    const DECL_MODULE: &str = "module SessionDecls where\n";
+    if let Some(position) = source.find(DECL_MODULE) {
+        return Some((
+            source[..position + DECL_MODULE.len()].matches('\n').count(),
+            0,
+        ));
+    }
+    const RESULT_DO: &str = "\n__result = do {\n";
+    source.find(RESULT_DO).map(|position| {
+        (
+            source[..position + RESULT_DO.len()].matches('\n').count(),
+            0,
+        )
+    })
+}
+
+/// Inclusive generated-module line range occupied by the submitted turn.
+#[must_use]
+pub fn turn_user_code_line_range(wrapped: &str, turn_text: &str) -> Option<(usize, usize)> {
+    let (offset, _) = turn_user_code_offset(wrapped)?;
+    let lines = if turn_text.is_empty() {
+        1
+    } else if turn_text.ends_with('\n') {
+        turn_text.matches('\n').count()
+    } else {
+        turn_text.matches('\n').count() + 1
+    };
+    let start = offset + 1;
+    Some((start, start + lines - 1))
+}
+
 /// What a compiled (BIND or EXPR) turn yields. Grouped separately from
 /// [`TurnResult`] so the `Decl` variant, which compiles nothing, carries none
 /// of it.
@@ -457,6 +536,31 @@ pub fn assemble_expression_module(
     expression: &str,
     lift: ExpressionLift,
 ) -> String {
+    assemble_expression_module_with_result(
+        preamble_with_imports,
+        target,
+        effect_stack,
+        expression,
+        lift,
+        ExpressionResult::Raw,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ExpressionResult {
+    Raw,
+    HaskellDisplay,
+    OpaqueDisplay,
+}
+
+fn assemble_expression_module_with_result(
+    preamble_with_imports: &str,
+    target: &str,
+    effect_stack: &str,
+    expression: &str,
+    lift: ExpressionLift,
+    result: ExpressionResult,
+) -> String {
     let mut out = preamble_with_imports.to_string();
     out.push_str("-- [user]\n");
     if matches!(lift, ExpressionLift::Effectful) {
@@ -474,15 +578,69 @@ pub fn assemble_expression_module(
     }
     out.push_str(" } in __value\n");
     out.push_str(&format!("{target} :: Eff {effect_stack} _\n"));
-    match lift {
-        ExpressionLift::Effectful => {
-            out.push_str(&format!("{target} = __workbenchValue\n"));
+    let body = match (lift, result) {
+        (ExpressionLift::Effectful, ExpressionResult::Raw) => "__workbenchValue",
+        (ExpressionLift::Pure, ExpressionResult::Raw) => "pure __workbenchValue",
+        (ExpressionLift::Effectful, ExpressionResult::HaskellDisplay) => {
+            "do { __value <- __workbenchValue ; pure (__value, pack (show __value)) }"
         }
-        ExpressionLift::Pure => {
-            out.push_str(&format!("{target} = pure __workbenchValue\n"));
+        (ExpressionLift::Pure, ExpressionResult::HaskellDisplay) => {
+            "pure (__workbenchValue, pack (show __workbenchValue))"
         }
-    }
+        (ExpressionLift::Effectful, ExpressionResult::OpaqueDisplay) => {
+            "do { _ <- __workbenchValue ; pure (pack \"<opaque value>\") }"
+        }
+        (ExpressionLift::Pure, ExpressionResult::OpaqueDisplay) => {
+            "pure (__workbenchValue `seq` pack \"<opaque value>\")"
+        }
+    };
+    out.push_str(target);
+    out.push_str(" = ");
+    out.push_str(body);
+    out.push('\n');
     out
+}
+
+/// Assemble the display-capable sibling of [`assemble_expression_module`].
+/// The authored expression runs once and returns both its original value and
+/// its Haskell rendering, so Rust never needs to interpret a Haskell value or
+/// re-run an effect merely to print its result.
+pub fn assemble_display_expression_module(
+    preamble_with_imports: &str,
+    target: &str,
+    effect_stack: &str,
+    expression: &str,
+    lift: ExpressionLift,
+) -> String {
+    assemble_expression_module_with_result(
+        preamble_with_imports,
+        target,
+        effect_stack,
+        expression,
+        lift,
+        ExpressionResult::HaskellDisplay,
+    )
+}
+
+/// Assemble an expression fallback for values with no rendering instance.
+/// Effectful values still run exactly once; pure values are evaluated to weak
+/// head normal form. Only the fixed display token crosses into Rust, so
+/// closures and opaque references never enter the value serializer.
+pub fn assemble_opaque_expression_module(
+    preamble_with_imports: &str,
+    target: &str,
+    effect_stack: &str,
+    expression: &str,
+    lift: ExpressionLift,
+) -> String {
+    assemble_expression_module_with_result(
+        preamble_with_imports,
+        target,
+        effect_stack,
+        expression,
+        lift,
+        ExpressionResult::OpaqueDisplay,
+    )
 }
 
 /// Place `turn_text` as a `do`-block statement — the `{{TURN_STMT}}`
@@ -1331,6 +1489,26 @@ mod tests {
             ExpressionLift::Pure,
         );
         assert!(!pure.contains("__workbenchValue ::"));
+    }
+
+    #[test]
+    fn display_expression_keeps_value_and_rendering_in_one_result() {
+        let row = "(Complete Text ': ActorEffects)";
+        let source = assemble_display_expression_module(
+            "module Expr where\n",
+            "__result",
+            row,
+            "effectfulValue",
+            ExpressionLift::Effectful,
+        );
+
+        assert!(source.contains("__value <- __workbenchValue"));
+        assert!(source.contains("pure (__value, pack (show __value))"));
+        assert_eq!(source.matches("effectfulValue").count(), 1);
+        assert_eq!(
+            turn_user_code_line_range(&source, "effectfulValue"),
+            Some((6, 6))
+        );
     }
 
     #[test]

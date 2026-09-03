@@ -120,6 +120,19 @@ enum ResidentStanding {
     Terminal,
 }
 
+#[derive(Default)]
+struct ObservedChildExits(std::collections::HashSet<ActorRef>);
+
+impl ObservedChildExits {
+    fn record(&mut self, child: ActorRef) {
+        self.0.insert(child);
+    }
+
+    fn take(&mut self, child: ActorRef) -> bool {
+        self.0.remove(&child)
+    }
+}
+
 /// All actor-local resident state. No field mirrors runnable/parked lifecycle;
 /// `standing` is the actual Haskell continuation currently owned by the actor.
 pub struct ResidentKernelBehavior<H, O> {
@@ -132,6 +145,7 @@ pub struct ResidentKernelBehavior<H, O> {
     launch_worktrees: Vec<String>,
     policy_installed: bool,
     pending_program: Option<ResidentOutcome>,
+    observed_child_exits: ObservedChildExits,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -150,6 +164,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees: Vec::new(),
             policy_installed: false,
             pending_program: None,
+            observed_child_exits: ObservedChildExits::default(),
         }
     }
 
@@ -169,6 +184,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees,
             policy_installed: false,
             pending_program: None,
+            observed_child_exits: ObservedChildExits::default(),
         }
     }
 
@@ -442,19 +458,28 @@ where
                     ));
                 }
                 let terminal = target.terminal().wait().await;
-                self.environment
+                let outcome = self
+                    .environment
                     .runner
                     .resume_terminal(context.clone(), wait.continuation, terminal)
-                    .await
+                    .await?;
+                self.observed_child_exits.record(wait.target);
+                Ok(outcome)
             }
             ResidentActorBoundary::Poll(poll) => {
                 let terminal = kernel
                     .resolve(poll.target)
                     .and_then(|target| target.terminal().get());
-                self.environment
+                let observed = terminal.is_some();
+                let outcome = self
+                    .environment
                     .runner
                     .resume_optional_terminal(context.clone(), poll.continuation, terminal)
-                    .await
+                    .await?;
+                if observed {
+                    self.observed_child_exits.record(poll.target);
+                }
+                Ok(outcome)
             }
             other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                 "`{}` is not an active actor effect",
@@ -1214,11 +1239,14 @@ where
 
     fn child_exited(&mut self, notice: ChildExitNotice) -> futures_util::future::BoxFuture<'_, ()> {
         Box::pin(async move {
-            self.publish_retired(notice.child.identity(), notice.terminal.clone());
-            let _ = self
-                .environment
-                .deployments
-                .send(LocalResidentDeployment::ChildExited { notice });
+            let child = notice.child.identity();
+            self.publish_retired(child, notice.terminal.clone());
+            if !self.observed_child_exits.take(child) {
+                let _ = self
+                    .environment
+                    .deployments
+                    .send(LocalResidentDeployment::ChildExited { notice });
+            }
         })
     }
 }
@@ -1278,5 +1306,30 @@ fn workbench_response(
         items,
         next_index,
         total,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObservedChildExits;
+    use crate::{ActorId, ActorRef, Incarnation};
+
+    #[test]
+    fn child_exit_observation_is_exact_and_consumed_once() {
+        let observed = ActorRef {
+            id: ActorId(7),
+            incarnation: Incarnation(1),
+        };
+        let replacement = ActorRef {
+            id: ActorId(7),
+            incarnation: Incarnation(2),
+        };
+        let mut exits = ObservedChildExits::default();
+
+        exits.record(observed);
+
+        assert!(!exits.take(replacement));
+        assert!(exits.take(observed));
+        assert!(!exits.take(observed));
     }
 }

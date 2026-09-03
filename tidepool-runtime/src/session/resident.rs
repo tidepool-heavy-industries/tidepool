@@ -1349,6 +1349,34 @@ where
             .collect()
     }
 
+    /// Term-level names visible to a GHCi-style `:bindings` query.
+    ///
+    /// The declaration environment and materialized binding store are one
+    /// lexical view. Materialized names win on collision, matching ordinary
+    /// turn compilation, and the returned order is deterministic. This query
+    /// never forces a live value.
+    pub fn workbench_bindings_in(&self, scope: ScopeId) -> Vec<super::WorkbenchBinding> {
+        let mut bindings = std::collections::BTreeMap::new();
+        for (item, _) in self.core.lib().current_declarations_in(scope) {
+            if let super::ExportItem::Value { name } = &item {
+                bindings.insert(
+                    name.clone(),
+                    super::WorkbenchBinding::declaration(name.clone(), item.render_entry()),
+                );
+            }
+        }
+        for name in self.binding_names_in(scope) {
+            let type_display = self
+                .current_binding_in(scope, &name)
+                .and_then(|(_, _, _, type_display)| type_display);
+            bindings.insert(
+                name.clone(),
+                super::WorkbenchBinding::materialized(name, type_display),
+            );
+        }
+        bindings.into_values().collect()
+    }
+
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
     /// scope — inherited names are not counted, only locally-bound ones).
     /// Returns to 0 when the scope retires.

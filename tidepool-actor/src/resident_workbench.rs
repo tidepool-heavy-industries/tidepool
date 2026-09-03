@@ -16,10 +16,10 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_inspections, run_turn,
-    BlockExecution, GhciInputKind, InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink,
-    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
-    SessionRunContext, TurnRequest, TurnResult, ValueTier, WorkbenchDiscovery,
+    insert_preamble_imports, render_turn_compile_error, resident_workbench_templates,
+    run_inspections, run_turn, BlockExecution, GhciInputKind, InspectionQuery, InspectionRequest,
+    MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RootCustody, SessionRunContext, TurnRequest, TurnResult, WorkbenchDiscovery,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -95,8 +95,14 @@ pub struct ResidentActorWorkbench<H, O> {
 /// actor's resource scope; this value only carries the item-local rendering
 /// state needed while the actor interpreter settles nominal effects.
 pub(crate) struct ResidentWorkbenchFragment {
-    bound_name: Option<String>,
+    display: WorkbenchDisplay,
     output: Vec<String>,
+}
+
+enum WorkbenchDisplay {
+    Binding(String),
+    Haskell,
+    Opaque,
 }
 
 pub(crate) enum ResidentWorkbenchStep {
@@ -719,6 +725,12 @@ where
                     },
                     generation.0
                 )),
+                Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
+                    ResidentWorkbenchStep::Rejected(failure.render_for_input(
+                        &format!("<input unit {}>", block.ordinal),
+                        &block.source,
+                    ))
+                }
                 Err(error) if classify_session(&error).class == FailureClass::UserHaskell => {
                     ResidentWorkbenchStep::Rejected(classify_session(&error).message)
                 }
@@ -761,17 +773,28 @@ where
                     &compiled.asks,
                 ),
             };
-            let receipt = (!names.is_empty()).then(|| names.join(", "));
-            start_fragment_settlement(session, context, receipt, outcome)
+            let display = if names.is_empty() {
+                WorkbenchDisplay::Opaque
+            } else {
+                WorkbenchDisplay::Binding(names.join(", "))
+            };
+            start_fragment_settlement(session, context, display, outcome)
         }
-        TurnResult::Expr { compiled, .. } => {
+        TurnResult::Expr {
+            variant, compiled, ..
+        } => {
             let outcome = session.run_with_sites(
                 "actor_interactive_expr",
                 &compiled.expr,
                 &compiled.table,
                 &compiled.asks,
             );
-            start_fragment_settlement(session, context, None, outcome)
+            let display = if variant < 2 {
+                WorkbenchDisplay::Haskell
+            } else {
+                WorkbenchDisplay::Opaque
+            };
+            start_fragment_settlement(session, context, display, outcome)
         }
     }
 }
@@ -779,7 +802,7 @@ where
 fn start_fragment_settlement<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
-    bound_name: Option<String>,
+    display: WorkbenchDisplay,
     outcome: Result<ResidentOutcome, ResidentError>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
@@ -791,7 +814,7 @@ where
             session,
             context,
             ResidentWorkbenchFragment {
-                bound_name,
+                display,
                 output: Vec::new(),
             },
             outcome,
@@ -814,18 +837,26 @@ where
     match outcome {
         ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
-            let mut receipt = fragment.bound_name.as_deref().map_or_else(
-                || result.to_string_pretty(),
-                |name| format!("bound `{name}`"),
-            );
-            if !fragment.output.is_empty() {
-                receipt.push_str("\n\nOutput:\n");
-                receipt.push_str(&fragment.output.join("\n"));
+            let receipt = match fragment.display {
+                WorkbenchDisplay::Binding(name) => format!("[bound {name}]"),
+                WorkbenchDisplay::Haskell => {
+                    haskell_display(&result).unwrap_or_else(|| "<rendering unavailable>".into())
+                }
+                WorkbenchDisplay::Opaque => "<opaque value>".into(),
+            };
+            let mut transcript = fragment.output.join("\n");
+            if !transcript.is_empty() && !receipt.is_empty() {
+                transcript.push('\n');
             }
-            Ok(ResidentWorkbenchStep::Committed(receipt))
+            transcript.push_str(&receipt);
+            Ok(ResidentWorkbenchStep::Committed(transcript))
         }
         ResidentOutcome::BindingsCommitted { output } => {
-            let receipt = projected_binding_receipt(fragment.bound_name.as_deref(), &output)?;
+            let bound_name = match &fragment.display {
+                WorkbenchDisplay::Binding(name) => Some(name.as_str()),
+                WorkbenchDisplay::Haskell | WorkbenchDisplay::Opaque => None,
+            };
+            let receipt = projected_binding_receipt(bound_name, &output)?;
             Ok(ResidentWorkbenchStep::Committed(receipt))
         }
         ResidentOutcome::Suspended {
@@ -852,6 +883,21 @@ where
             }
         }
     }
+}
+
+fn haskell_display(result: &tidepool_runtime::EvalResult) -> Option<String> {
+    let Value::Con(constructor, fields) = result.value() else {
+        return None;
+    };
+    if result.table().name_of(*constructor) != Some("(,)") {
+        return None;
+    }
+    let [_, rendered] = fields.as_slice() else {
+        return None;
+    };
+    tidepool_runtime::value_to_json(rendered, result.table(), 0)
+        .as_str()
+        .map(str::to_owned)
 }
 
 impl<H, O> ResidentActorRunner<H, O>
@@ -1611,9 +1657,15 @@ where
             generation: compile_view.next_value_generation(),
             declaration_source: compile_view.declaration_source(&block.source),
         }))),
-        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => Ok(
-            CompiledBlock::Rejected(classify_compile(&failure.error).message),
-        ),
+        Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
+            let label = format!("<input unit {}>", block.ordinal);
+            Ok(CompiledBlock::Rejected(render_turn_compile_error(
+                &failure.error,
+                failure.attempted_source.as_deref(),
+                &block.source,
+                &label,
+            )))
+        }
         Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
             classify_compile(&failure.error).message,
         )),
@@ -1694,21 +1746,30 @@ where
     };
     match command {
         WorkbenchDiscovery::Bindings => {
-            let mut bindings = session.binding_names_in(context.placement.lexical_scope);
-            bindings.sort();
+            let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
+            let queries = bindings
+                .iter()
+                .filter_map(|binding| binding.type_query())
+                .map(|expression| InspectionQuery::TypeOf(expression.to_owned()))
+                .collect::<Vec<_>>();
+            let inspected = if queries.is_empty() {
+                Vec::new()
+            } else {
+                inspect_actor_batch(session, context, source, type_modules, &queries)?
+            };
+            let mut inspected = inspected.into_iter();
             let lines = bindings
                 .into_iter()
-                .filter_map(|name| {
-                    let (_, _, tier, type_display) =
-                        session.current_binding_in(context.placement.lexical_scope, &name)?;
-                    let tier = match tier {
-                        ValueTier::Tier0Data => "data",
-                        ValueTier::Tier1Closure => "closure",
-                    };
-                    Some(format!(
-                        "{name} :: {} [{tier}]",
-                        type_display.unwrap_or_else(|| "<type unavailable>".into())
-                    ))
+                .map(|binding| {
+                    let needs_inspection = binding.type_query().is_some();
+                    match binding.type_display {
+                        Some(type_display) => format!("{} :: {type_display}", binding.name),
+                        None if needs_inspection => inspected
+                            .next()
+                            .and_then(Result::ok)
+                            .unwrap_or_else(|| format!("{} :: <type unavailable>", binding.name)),
+                        None => format!("{} :: <type unavailable>", binding.name),
+                    }
                 })
                 .collect::<Vec<_>>();
             Ok(Ok(if lines.is_empty() {

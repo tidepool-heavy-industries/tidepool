@@ -38,7 +38,7 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         ))),
         SessionError::Compile(e) => classify_compile(e),
         SessionError::ValidationFailed(s) => {
-            FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, s.clone())
+            FailureEnvelope::new(FailureClass::UserHaskell, Phase::Compile, s.to_string())
         }
         // A located-but-skewed toolchain is the same failure as a wire-format
         // mismatch — the two sides were built apart — so it classifies as

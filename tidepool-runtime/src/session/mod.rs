@@ -69,14 +69,16 @@ pub use workbench::{
     parse_ghci_input, resident_workbench_templates, run_block_sequence, workbench_input_binding,
     workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
     GhciInputError, GhciInputKind, GhciInputUnit, MetaCommandLine, ParsedBlock, WorkSequence,
-    WorkbenchDiscovery, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest,
-    WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchBinding, WorkbenchDiscovery, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
+    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
 };
 
 pub use turn::{
-    assemble_bind_module, assemble_expression_module, assemble_inspection_module, classify_block,
+    assemble_bind_module, assemble_display_expression_module, assemble_expression_module,
+    assemble_inspection_module, assemble_opaque_expression_module, classify_block,
     enable_no_monomorphism_restriction, insert_preamble_imports, place_turn_stmt, render_template,
-    run_turn, BoundBinder, CompiledTurn, DeclarationReceipt, ExpressionLift, TemplateSelector,
+    render_turn_compile_error, run_turn, turn_user_code_line_range, turn_user_code_offset,
+    BoundBinder, CompiledTurn, DeclarationReceipt, ExpressionLift, TemplateSelector,
     TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
     DECL_TEMPLATE_SOURCE,
 };
@@ -116,6 +118,69 @@ fn stdlib_include_for_validation(
 }
 
 /// Errors from the declaration-accumulation path.
+#[derive(Debug)]
+pub struct DeclarationValidationFailure {
+    diagnostics: Vec<crate::diag::ExtractDiag>,
+    anchor: String,
+    line_offset: usize,
+    source: String,
+}
+
+impl DeclarationValidationFailure {
+    /// Render the structured GHC diagnostics for one frontend-owned location.
+    #[must_use]
+    pub fn render(&self, label: &str) -> String {
+        self.render_with_offset(label, self.line_offset)
+    }
+
+    /// Render against the exact input unit a frontend submitted. Declaration
+    /// modules may hoist trusted imports ahead of that unit, so the module's
+    /// generic body offset can be intentionally unavailable. Matching the
+    /// compiler-highlighted source line back to this one unit restores local
+    /// coordinates without parsing Haskell or relabeling foreign diagnostics.
+    #[must_use]
+    pub fn render_for_input(&self, label: &str, input: &str) -> String {
+        let offset = self
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.span.as_ref())
+            .find_map(|span| {
+                if !span.file.ends_with(&self.anchor) {
+                    return None;
+                }
+                let generated_line = (span.start_line as usize).checked_sub(1)?;
+                let generated = self.source.lines().nth(generated_line)?;
+                input
+                    .lines()
+                    .position(|line| line == generated)
+                    .and_then(|local| (span.start_line as usize).checked_sub(local + 1))
+            })
+            .unwrap_or(self.line_offset);
+        self.render_with_offset(label, offset)
+    }
+
+    fn render_with_offset(&self, label: &str, line_offset: usize) -> String {
+        crate::diag::render_diagnostics(
+            &self.diagnostics,
+            &crate::diag::RenderOpts {
+                anchor: &self.anchor,
+                label,
+                user_lines: None,
+                line_offset,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: Some(&self.anchor),
+                source: &self.source,
+            },
+        )
+    }
+}
+
+impl std::fmt::Display for DeclarationValidationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.render("<decl>").fmt(formatter)
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
     /// Filesystem I/O failure (creating the session root, writing/reading a
@@ -130,7 +195,7 @@ pub enum SessionError {
     /// The candidate gen module failed to type-check via GHC. The declaration
     /// log has been rolled back; the session remains usable.
     #[error("declaration type-check failed: {0}")]
-    ValidationFailed(String),
+    ValidationFailed(DeclarationValidationFailure),
     /// The toolchain itself is misconfigured — no extract, no stdlib, or a
     /// skewed extract/stdlib pair. Never caused by the user's declaration.
     #[error("toolchain: {0}")]
@@ -833,19 +898,14 @@ impl SessionLib {
             } else {
                 0
             };
-            let rendered_text = crate::diag::render_diagnostics(
-                &diags,
-                &crate::diag::RenderOpts {
-                    anchor: &rel,
-                    label: "<decl>",
-                    user_lines: None,
+            return Err(SessionError::ValidationFailed(
+                DeclarationValidationFailure {
+                    diagnostics: diags,
+                    anchor: rel,
                     line_offset,
-                    col_indent: 0,
-                    drop_foreign_gen_warnings_except: Some(&rel),
-                    source: &rendered.source,
+                    source: rendered.source.clone(),
                 },
-            );
-            return Err(SessionError::ValidationFailed(rendered_text));
+            ));
         }
 
         Ok(())

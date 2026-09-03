@@ -39,11 +39,11 @@ use tidepool_repr::{
 };
 use tidepool_runtime::session::{
     assemble_bind_module, classify_block, extract_ask_request, insert_preamble_imports,
-    place_turn_stmt, subtract_import_list_names, BoundBinder, CompiledTurn, ExportItem,
-    GateDispatcher, InspectionQuery, InspectionRequest, ModuleEnv, PersistentSession,
-    SessionCompileView, SessionError, SessionLib, SourceImports, TemplateSelector,
-    TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult, TurnTemplate, ValueTier,
-    WorkSequence,
+    place_turn_stmt, subtract_import_list_names, turn_user_code_line_range, turn_user_code_offset,
+    BoundBinder, CompiledTurn, ExportItem, GateDispatcher, InspectionQuery, InspectionRequest,
+    ModuleEnv, PersistentSession, SessionCompileView, SessionError, SessionLib, SourceImports,
+    TemplateSelector, TurnClassification, TurnFailure, TurnKind, TurnRequest, TurnResult,
+    TurnTemplate, ValueTier, WorkSequence,
 };
 use tidepool_runtime::{
     classify_compile, classify_session, value_to_json, CompileError, FailureClass, Phase,
@@ -1560,7 +1560,7 @@ impl Session {
                 attempted_source,
             } = failure;
             let source = attempted_source.unwrap_or_default();
-            let user_lines = user_code_line_range(&source, turn_text);
+            let user_lines = turn_user_code_line_range(&source, turn_text);
             ReplCompileFailure {
                 error: Box::new(error),
                 source,
@@ -2669,49 +2669,6 @@ fn hide_module_names(preamble: &str, module: &str, extra: &[&str]) -> String {
 /// checked FIRST — those templates also contain a `__result` binding, but the
 /// user text lives under `__user`. Bind wrappers emit no `__user`, so their
 /// `__result = do` is the marker.
-fn user_code_offset(source: &str) -> Option<(usize, usize)> {
-    // Verbatim embeddings (pure-ref / probe / shared eval template): user
-    // text starts right after the bracket, at its ORIGINAL columns — line
-    // offset only, no column indent.
-    for marker in ["__user = let {\n __b =\n", "__probe = let {\n __b =\n"] {
-        if let Some(pos) = source.find(marker) {
-            return Some((source[..pos + marker.len()].matches('\n').count(), 0));
-        }
-    }
-    // Bind wrappers: verbatim inside `__result = do {`. (A `let` bind's first
-    // line gains 2 columns from the decl-brace boundary edit — accepted.)
-    const RESULT_DO: &str = "\n__result = do {\n";
-    source
-        .find(RESULT_DO)
-        .map(|pos| (source[..pos + RESULT_DO.len()].matches('\n').count(), 0))
-}
-
-/// 1-based inclusive line count of `text` as it lands in an assembled module:
-/// every wrap_* shape embeds the caller's text verbatim, forcing at most one
-/// trailing `\n` if it's missing (see `push_verbatim_binding`/`place_turn_stmt`),
-/// and inserts no other line before the closing scaffold — so this count, paired
-/// with `user_code_offset`'s start line, gives the exact end line without
-/// re-scanning the assembled source.
-fn text_line_count(text: &str) -> usize {
-    if text.is_empty() {
-        1
-    } else if text.ends_with('\n') {
-        text.matches('\n').count()
-    } else {
-        text.matches('\n').count() + 1
-    }
-}
-
-/// The 1-based inclusive `(start, end)` line range of `text` within `wrapped`
-/// (a module assembled by one of the `wrap_*` builders below), for the
-/// `--user-code-lines` extract flag. `None` when `wrapped` carries none of the
-/// markers `user_code_offset` recognizes.
-fn user_code_line_range(wrapped: &str, text: &str) -> Option<(usize, usize)> {
-    let (offset, _indent) = user_code_offset(wrapped)?;
-    let start = offset + 1;
-    Some((start, start + text_line_count(text) - 1))
-}
-
 /// Remap `Expr.hs:<L>:<C>` GHC coordinates in a compile error to item-relative
 /// ones (`<item>:l:c`), using the wrapped source the error was produced from.
 /// Foreign paths pass through; unknown wrappers return the error untouched.
@@ -2743,7 +2700,7 @@ fn render_compile_fail_body(
 ) -> String {
     match err {
         CompileError::Diagnostics(diags) => {
-            let (line_offset, col_indent) = user_code_offset(source).unwrap_or((0, 0));
+            let (line_offset, col_indent) = turn_user_code_offset(source).unwrap_or((0, 0));
             let rendered = tidepool_runtime::diag::render_diagnostics(
                 diags,
                 &tidepool_runtime::diag::RenderOpts {

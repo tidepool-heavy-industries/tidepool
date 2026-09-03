@@ -14,8 +14,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    assemble_bind_module, assemble_expression_module, insert_preamble_imports, ExpressionLift,
-    TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
+    assemble_bind_module, assemble_display_expression_module, assemble_opaque_expression_module,
+    insert_preamble_imports, ExpressionLift, TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
 
 #[derive(Parser)]
@@ -359,6 +359,41 @@ pub struct WorkbenchResponse {
     pub total: usize,
 }
 
+/// One term-level name visible in a persistent Haskell workbench.
+///
+/// Declaration-backed values have no stored type display and carry the exact
+/// GHC expression to inspect. Materialized values already retain their
+/// compiler-produced type. Neither case requires forcing the live value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkbenchBinding {
+    pub name: String,
+    pub type_display: Option<String>,
+    type_query: Option<String>,
+}
+
+impl WorkbenchBinding {
+    pub(crate) fn declaration(name: String, type_query: String) -> Self {
+        Self {
+            name,
+            type_display: None,
+            type_query: Some(type_query),
+        }
+    }
+
+    pub(crate) fn materialized(name: String, type_display: Option<String>) -> Self {
+        Self {
+            name,
+            type_display,
+            type_query: None,
+        }
+    }
+
+    #[must_use]
+    pub fn type_query(&self) -> Option<&str> {
+        self.type_query.as_deref()
+    }
+}
+
 /// One tokenized `:command`. Frontends interpret the name and arguments they
 /// own; tokenization itself has one implementation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,10 +529,11 @@ pub fn classify_workbench_item(source: &str) -> Result<WorkbenchItem, String> {
     }
 }
 
-/// Build the canonical raw-value templates for a resident actor workbench.
-/// GHC selects declaration, bind, or expression and tries the two expression
-/// lifts in order. Presentation-heavy frontends may post-process outcomes,
-/// but should not grow another source assembly path.
+/// Build the canonical templates for a resident actor workbench. GHC selects
+/// declaration, bind, or expression. Expressions first try the two
+/// single-evaluation Haskell-display lifts, then opaque-display counterparts
+/// for values without a rendering instance. Frontends may choose how to label
+/// those typed outcomes, but should not grow another source assembly path.
 #[must_use]
 pub fn resident_workbench_templates(
     preamble: &str,
@@ -536,7 +572,7 @@ pub fn resident_workbench_templates(
         },
         TurnTemplate {
             kind: TemplateSelector::Expr,
-            source: assemble_expression_module(
+            source: assemble_display_expression_module(
                 &preamble,
                 "__result",
                 effect_stack,
@@ -546,7 +582,27 @@ pub fn resident_workbench_templates(
         },
         TurnTemplate {
             kind: TemplateSelector::Expr,
-            source: assemble_expression_module(
+            source: assemble_display_expression_module(
+                &preamble,
+                "__result",
+                effect_stack,
+                "{{TURN}}",
+                ExpressionLift::Pure,
+            ),
+        },
+        TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_opaque_expression_module(
+                &preamble,
+                "__result",
+                effect_stack,
+                "{{TURN}}",
+                ExpressionLift::Effectful,
+            ),
+        },
+        TurnTemplate {
+            kind: TemplateSelector::Expr,
+            source: assemble_opaque_expression_module(
                 &preamble,
                 "__result",
                 effect_stack,
@@ -878,6 +934,25 @@ mod tests {
             normalize_workbench_input(&serde_json::Value::String("42".into())),
             serde_json::Value::String("42".into())
         );
+    }
+
+    #[test]
+    fn resident_expression_templates_prefer_haskell_display_then_fall_back() {
+        let templates = resident_workbench_templates("module Expr where\n", "ActorEffects", "");
+        let expressions = templates
+            .iter()
+            .filter(|template| template.kind == TemplateSelector::Expr)
+            .collect::<Vec<_>>();
+
+        assert_eq!(expressions.len(), 4);
+        assert!(expressions[0].source.contains("pack (show __value)"));
+        assert!(expressions[1]
+            .source
+            .contains("pack (show __workbenchValue)"));
+        assert!(!expressions[2].source.contains("pack (show"));
+        assert!(!expressions[3].source.contains("pack (show"));
+        assert!(expressions[2].source.contains("pack \"<opaque value>\""));
+        assert!(expressions[3].source.contains("pack \"<opaque value>\""));
     }
 
     #[test]
