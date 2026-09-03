@@ -19,3 +19,5 @@ path = "src/main.rs"
 # macro's build graph; keeping the digest here avoids any runtime dependency.
 [dependencies]
 blake3 = "=1.8.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

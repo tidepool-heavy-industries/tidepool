@@ -17,7 +17,23 @@ pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
         return Err(FrontendError::Usage(USAGE.to_owned()));
     }
     if args.first().is_some_and(|arg| arg == "--daemon") {
-        return daemon::serve(parse_daemon(&args[1..])?, prepare_worker()?);
+        let config = parse_daemon(&args[1..])?;
+        daemon::init_tracing(&config)?;
+        let result = prepare_worker().and_then(|worker| daemon::serve(&config, worker));
+        match &result {
+            Ok(_) => tracing::info!(
+                target: "tidepool_extract_cmd::daemon",
+                run_id = config.run_id.as_deref().unwrap_or("standalone"),
+                "compiler daemon stopped"
+            ),
+            Err(error) => tracing::error!(
+                target: "tidepool_extract_cmd::daemon",
+                run_id = config.run_id.as_deref().unwrap_or("standalone"),
+                %error,
+                "compiler daemon failed"
+            ),
+        }
+        return result;
     }
     if args
         .first()
@@ -134,6 +150,10 @@ impl PreparedWorker {
         command.env("TIDEPOOL_GHC_LIBDIR", &self.ghc_libdir);
         command
     }
+
+    pub(crate) fn selection(&self) -> &std::path::Path {
+        &self.selection
+    }
 }
 
 fn prepare_worker() -> Result<PreparedWorker, FrontendError> {
@@ -189,6 +209,8 @@ pub(crate) struct DaemonConfig {
     pub rss_ceiling_mb: Option<u64>,
     pub watch_stamp: Option<PathBuf>,
     pub persistent: bool,
+    pub run_id: Option<String>,
+    pub log_path: Option<PathBuf>,
 }
 
 fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
@@ -197,6 +219,8 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
     let mut rss_ceiling_mb = None;
     let mut watch_stamp = None;
     let mut persistent = false;
+    let mut run_id = None;
+    let mut log_path = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let option = arg
@@ -208,6 +232,15 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
             "--rss-ceiling-mb" => rss_ceiling_mb = Some(number(&mut args, option)?),
             "--watch-stamp" => watch_stamp = Some(PathBuf::from(next(&mut args, option)?)),
             "--persistent" => persistent = true,
+            "--run-id" => {
+                run_id = Some(
+                    next(&mut args, option)?
+                        .to_str()
+                        .ok_or_else(|| FrontendError::Usage("--run-id must be UTF-8".to_owned()))?
+                        .to_owned(),
+                )
+            }
+            "--log-path" => log_path = Some(PathBuf::from(next(&mut args, option)?)),
             _ => {
                 return Err(FrontendError::Usage(format!(
                     "unknown daemon option: {option}"
@@ -221,6 +254,8 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
         rss_ceiling_mb,
         watch_stamp,
         persistent,
+        run_id,
+        log_path,
     })
 }
 
@@ -310,9 +345,18 @@ mod tests {
             "--socket".into(),
             "/tmp/compiler.sock".into(),
             "--persistent".into(),
+            "--run-id".into(),
+            "run-1".into(),
+            "--log-path".into(),
+            "/tmp/run-1-compiler.log".into(),
         ])
         .unwrap();
         assert!(config.persistent);
+        assert_eq!(config.run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            config.log_path.as_deref(),
+            Some(std::path::Path::new("/tmp/run-1-compiler.log"))
+        );
 
         let rotating = parse_daemon(&[
             "--socket".into(),

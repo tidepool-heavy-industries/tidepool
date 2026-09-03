@@ -26,7 +26,12 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, ExitStatus, Output, Stdio};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use crate::frontend::{DaemonConfig, FrontendError, PreparedWorker};
 use crate::ExtractRequest;
@@ -49,6 +54,59 @@ const PREFLIGHT_RESPONSE: &[u8; 8] = b"TPDPI001";
 const REQUEST: &[u8; 8] = b"TPDRQ001";
 const ACCEPTED: u8 = 1;
 const REJECTED: u8 = 0;
+
+fn pane_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::new("warn,tidepool_extract_cmd::daemon=info")
+}
+
+fn tracing_subscriber<D, P>(
+    detailed_writer: D,
+    pane_writer: P,
+    detailed_filter: tracing_subscriber::EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    D: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    P: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    let detailed = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(detailed_writer)
+        .with_filter(detailed_filter);
+    let pane = tracing_subscriber::fmt::layer()
+        .compact()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(pane_writer)
+        .with_filter(pane_filter());
+    tracing_subscriber::registry().with(detailed).with(pane)
+}
+
+pub(crate) fn init_tracing(config: &DaemonConfig) -> Result<(), FrontendError> {
+    let detailed: Box<dyn Write + Send> = match &config.log_path {
+        Some(path) => {
+            let parent = path.parent().ok_or_else(|| {
+                FrontendError::Daemon("compiler log path has no parent directory".to_owned())
+            })?;
+            fs::create_dir_all(parent).map_err(FrontendError::Io)?;
+            Box::new(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(FrontendError::Io)?,
+            )
+        }
+        None => Box::new(io::sink()),
+    };
+    let detailed_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+    tracing_subscriber(Mutex::new(detailed), io::stderr, detailed_filter)
+        .try_init()
+        .map_err(|error| {
+            FrontendError::Daemon(format!("could not initialize compiler tracing: {error}"))
+        })
+}
 
 pub(crate) struct DaemonBinding {
     pub(crate) producer: [u8; 32],
@@ -254,7 +312,7 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
     Ok(synthesize_output(code, stdout, stderr))
 }
 
-pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
+pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
     let mut worker = Worker::spawn(&prepared)?;
     let epoch = boot_epoch()?;
@@ -262,8 +320,6 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
     }
     remove_socket(&config.socket)?;
-    let listener =
-        std::os::unix::net::UnixListener::bind(&config.socket).map_err(FrontendError::Io)?;
     let boot_stamp = config
         .watch_stamp
         .as_deref()
@@ -272,6 +328,24 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
         .map_err(FrontendError::Io)?;
     let rotate_after = config.rotate_after.unwrap_or(256);
     let rss_ceiling_mb = config.rss_ceiling_mb.unwrap_or(2048);
+    let executable = std::env::current_exe().map_err(FrontendError::Io)?;
+    let listener =
+        std::os::unix::net::UnixListener::bind(&config.socket).map_err(FrontendError::Io)?;
+    let run_id = config.run_id.as_deref().unwrap_or("standalone");
+    tracing::info!(
+        run_id,
+        version = env!("CARGO_PKG_VERSION"),
+        executable = %executable.display(),
+        worker = %prepared.selection().display(),
+        producer = %hex(&producer),
+        socket = %config.socket.display(),
+        detailed_log = %config
+            .log_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new("disabled"))
+            .display(),
+        "compiler daemon ready"
+    );
 
     let result = (|| {
         let mut served = 0;
@@ -310,12 +384,14 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
                 Err(_) => continue,
             };
             if expected_epoch != epoch {
+                tracing::warn!(run_id, "rejected compiler request for stale daemon epoch");
                 let _ = write_rejected(&mut connection, "daemon boot epoch changed");
                 continue;
             }
             let (cwd, argv) = match read_request(&mut connection) {
                 Ok(request) => request,
                 Err(_) => {
+                    tracing::warn!(run_id, "rejected malformed compiler request");
                     let _ = write_rejected(&mut connection, "invalid compiler request");
                     continue;
                 }
@@ -323,6 +399,7 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
             let worker_argv = match normalize_worker_argv(argv) {
                 Ok(argv) => argv,
                 Err(_) => {
+                    tracing::warn!(run_id, "rejected invalid typed compiler request");
                     let _ = write_rejected(&mut connection, "invalid typed worker request");
                     continue;
                 }
@@ -338,7 +415,34 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
             if connection.write_all(&[ACCEPTED]).is_err() || connection.flush().is_err() {
                 continue;
             }
-            let (code, stdout, stderr) = worker.request(&cwd, &worker_argv)?;
+            let compile_request = compile_request_correlation(&cwd, &worker_argv);
+            let started = Instant::now();
+            tracing::info!(run_id, %compile_request, "compiler request started");
+            tracing::debug!(run_id, %compile_request, source_root = %cwd.display(), "compiler request source");
+            let response = worker.request(&cwd, &worker_argv);
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let (code, stdout, stderr) = match response {
+                Ok(response) => {
+                    tracing::info!(
+                        run_id,
+                        %compile_request,
+                        elapsed_ms,
+                        exit_code = response.0,
+                        "compiler request finished"
+                    );
+                    response
+                }
+                Err(error) => {
+                    tracing::error!(
+                        run_id,
+                        %compile_request,
+                        elapsed_ms,
+                        %error,
+                        "compiler request failed"
+                    );
+                    return Err(error);
+                }
+            };
             served += 1;
             let _ = write_response(&mut connection, code, &stdout, &stderr);
 
@@ -366,6 +470,21 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
     let _ = fs::remove_file(&config.socket);
     worker.shutdown();
     result
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0xf) as usize] as char);
+    }
+    encoded
+}
+
+fn compile_request_correlation(cwd: &Path, worker_argv: &[OsString]) -> String {
+    let digest = blake3::hash(&encode_request(cwd, worker_argv));
+    hex(&digest.as_bytes()[..8])
 }
 
 fn stamp_changed(
@@ -555,6 +674,69 @@ mod tests {
     use std::io::Cursor;
     use std::os::unix::ffi::OsStringExt;
 
+    #[derive(Clone, Default)]
+    struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for CapturedGuard {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedWriter {
+        type Writer = CapturedGuard;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedWriter {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    #[test]
+    fn daemon_tracing_fans_out_safe_info_but_keeps_source_debug_in_the_file() {
+        let detailed = CapturedWriter::default();
+        let pane = CapturedWriter::default();
+        let subscriber = tracing_subscriber(
+            detailed.clone(),
+            pane.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "tidepool_extract_cmd::daemon",
+                compile_request = "request-correlation",
+                "compiler request visible"
+            );
+            tracing::debug!(
+                target: "tidepool_extract_cmd::daemon",
+                source_root = "/sensitive/source",
+                "compiler request source"
+            );
+        });
+
+        let detailed = detailed.text();
+        let pane = pane.text();
+        assert!(detailed.contains("compiler request visible"));
+        assert!(pane.contains("compiler request visible"));
+        assert!(detailed.contains("/sensitive/source"));
+        assert!(!pane.contains("/sensitive/source"));
+        assert!(!detailed.contains('\u{1b}'));
+        assert!(!pane.contains('\u{1b}'));
+    }
+
     fn test_socket(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("tp-daemon-wire-{name}-{}.sock", std::process::id()))
     }
@@ -620,6 +802,22 @@ mod tests {
         assert_eq!(decoded_argv, argv);
         // The whole buffer was consumed — no trailing bytes.
         assert_eq!(cur.position() as usize, cur.get_ref().len());
+    }
+
+    #[test]
+    fn compiler_request_correlation_is_stable_and_content_addressed() {
+        let argv = [
+            OsString::from("--worker-request-v5"),
+            OsString::from("payload"),
+        ];
+        assert_eq!(
+            compile_request_correlation(Path::new("/work"), &argv),
+            compile_request_correlation(Path::new("/work"), &argv)
+        );
+        assert_ne!(
+            compile_request_correlation(Path::new("/work"), &argv),
+            compile_request_correlation(Path::new("/other-work"), &argv)
+        );
     }
 
     #[test]

@@ -18,6 +18,10 @@ use tidepool_agent::{
 use tidepool_node::{TmuxLaunch, TmuxSession};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
+use tracing::Instrument;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use crate::actor_host::ACTOR_PROJECT_ROOT;
 
@@ -209,6 +213,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
 
     let run_id = uuid::Uuid::new_v4().to_string();
     let log_path = shoal_log_path(&workspace, &run_id);
+    let compiler_log_path = shoal_compiler_log_path(&workspace, &run_id);
     let run_root = tidepool_runtime::paths::cache_dir()
         .join("shoal")
         .join("runs")
@@ -232,6 +237,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             &workspace,
             &compiler_socket,
             compiler_program,
+            &run_id,
+            &compiler_log_path,
         ))
         .await;
     if let Err(error) = daemon_launch {
@@ -333,7 +340,13 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-fn compiler_daemon_launch(workspace: &Path, socket: &Path, program: String) -> TmuxLaunch {
+fn compiler_daemon_launch(
+    workspace: &Path,
+    socket: &Path,
+    program: String,
+    run_id: &str,
+    log_path: &Path,
+) -> TmuxLaunch {
     TmuxLaunch {
         window_name: "Compiler".into(),
         cwd: workspace.into(),
@@ -343,6 +356,10 @@ fn compiler_daemon_launch(workspace: &Path, socket: &Path, program: String) -> T
             "--socket".into(),
             socket.display().to_string(),
             "--persistent".into(),
+            "--run-id".into(),
+            run_id.into(),
+            "--log-path".into(),
+            log_path.display().to_string(),
         ],
         environment: pane_environment(),
         unset_environment: std::collections::BTreeSet::new(),
@@ -518,22 +535,25 @@ async fn read_bounded_diagnostics(
 }
 
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let log_path = shoal_log_path(&options.workspace, &options.run_id);
     tracing::info!(
         run_id = %options.run_id,
         session = %options.session,
         workspace = %options.workspace.display(),
+        interactive_agent = %options.interactive_agent.executable().display(),
+        interactive_agent_version = options.interactive_agent.version(),
+        detailed_log = %log_path.display(),
         "starting Shoal actor host"
     );
     let result = run_host(&options).await;
-    let failed = result.is_err();
     let settled = settle_host_result(result, &options);
-    if failed {
-        if let Err(error) = &settled {
-            tracing::error!(error = %error, "Shoal actor host failed");
-        }
+    if let Err(error) = &settled {
+        tracing::error!(run_id = %options.run_id, error = %error, "Shoal actor host failed");
         if let Ok(tmux) = TmuxSession::new(options.session.clone()) {
             let _ = tmux.kill().await;
         }
+    } else {
+        tracing::info!(run_id = %options.run_id, "Shoal actor host stopped");
     }
     settled
 }
@@ -563,7 +583,11 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             pane_environment: pane_environment(),
         },
         readiness_tx,
-    );
+    )
+    .instrument(tracing::info_span!(
+        "shoal_host",
+        run_id = %options.run_id
+    ));
 
     tokio::pin!(run);
     loop {
@@ -577,8 +601,14 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         RunPhase::AwaitingInput { root_actor: root },
                     );
                     write_status(&options.status_path, &status)?;
+                    tracing::info!(
+                        run_id = %options.run_id,
+                        actor = ?root,
+                        "Shoal host ready; root actor is awaiting input"
+                    );
                 }
                 Some(crate::actor_host::ActorHostReadiness::Ready { root, thread }) => {
+                    let thread_id = thread.0.clone();
                     persist_interactive_binding(
                         &options.root_binding_path,
                         thread.clone(),
@@ -594,6 +624,12 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         },
                     );
                     write_status(&options.status_path, &status)?;
+                    tracing::info!(
+                        run_id = %options.run_id,
+                        actor = ?root,
+                        thread = %thread_id,
+                        "root interactive application ready"
+                    );
                 }
                 None => return run.await,
             },
@@ -642,10 +678,14 @@ fn settle_host_result(
         },
     };
     let status = RunStatus::new(&options.run_id, &options.workspace, &options.session, phase);
-    if let Err(error) = write_status(&options.status_path, &status) {
-        tracing::error!(error = %error, "could not publish terminal Shoal status");
+    match (result, write_status(&options.status_path, &status)) {
+        (result, Ok(())) => result,
+        (Ok(()), Err(status_error)) => Err(status_error),
+        (Err(run_error), Err(status_error)) => {
+            tracing::error!(error = %status_error, "could not publish terminal Shoal status");
+            Err(run_error)
+        }
     }
-    result
 }
 
 async fn preflight(
@@ -785,6 +825,39 @@ pub fn shoal_log_path(workspace: &Path, run_id: &str) -> PathBuf {
         .join(format!("{run_id}.log"))
 }
 
+pub fn shoal_compiler_log_path(workspace: &Path, run_id: &str) -> PathBuf {
+    shoal_state_root(workspace)
+        .join("logs")
+        .join(format!("{run_id}-compiler.log"))
+}
+
+fn host_pane_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::new("warn,tidepool::shoal=info,tidepool::actor_host=info")
+}
+
+fn host_tracing_subscriber<D, P>(
+    detailed_writer: D,
+    pane_writer: P,
+    detailed_filter: tracing_subscriber::EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    D: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    P: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    let detailed = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(detailed_writer)
+        .with_filter(detailed_filter);
+    let pane = tracing_subscriber::fmt::layer()
+        .compact()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(pane_writer)
+        .with_filter(host_pane_filter());
+    tracing_subscriber::registry().with(detailed).with(pane)
+}
+
 pub fn init_host_tracing(
     workspace: &Path,
     run_id: &str,
@@ -798,12 +871,13 @@ pub fn init_host_tracing(
         .create(true)
         .append(true)
         .open(&path)?;
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_env_filter(tidepool_codegen::debug::tracing_env_filter("info"))
-        .with_writer(Mutex::new(file))
-        .try_init()
-        .map_err(|error| runtime_error(format!("could not initialize Shoal tracing: {error}")))?;
+    host_tracing_subscriber(
+        Mutex::new(file),
+        std::io::stderr,
+        tidepool_codegen::debug::tracing_env_filter("info"),
+    )
+    .try_init()
+    .map_err(|error| runtime_error(format!("could not initialize Shoal tracing: {error}")))?;
     tidepool_codegen::debug::init_logging();
     Ok(path)
 }
@@ -982,6 +1056,73 @@ mod tests {
             shoal_log_path(Path::new("/tmp/project"), "run-1"),
             Path::new("/tmp/project/.shoal/logs/run-1.log")
         );
+        assert_eq!(
+            shoal_compiler_log_path(Path::new("/tmp/project"), "run-1"),
+            Path::new("/tmp/project/.shoal/logs/run-1-compiler.log")
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedGuard {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedWriter {
+        type Writer = CapturedGuard;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl CapturedWriter {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    #[test]
+    fn host_tracing_fans_out_safe_info_but_keeps_source_debug_in_the_file() {
+        let detailed = CapturedWriter::default();
+        let pane = CapturedWriter::default();
+        let subscriber = host_tracing_subscriber(
+            detailed.clone(),
+            pane.clone(),
+            tracing_subscriber::EnvFilter::new("debug"),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                target: "tidepool::shoal",
+                run_id = "run-visible",
+                "host lifecycle visible"
+            );
+            tracing::debug!(
+                target: "tidepool::shoal",
+                source = "sensitive Haskell source",
+                "host diagnostic detail"
+            );
+        });
+
+        let detailed = detailed.text();
+        let pane = pane.text();
+        assert!(detailed.contains("host lifecycle visible"));
+        assert!(pane.contains("host lifecycle visible"));
+        assert!(detailed.contains("sensitive Haskell source"));
+        assert!(!pane.contains("sensitive Haskell source"));
+        assert!(!detailed.contains('\u{1b}'));
+        assert!(!pane.contains('\u{1b}'));
     }
 
     #[test]
@@ -1007,7 +1148,14 @@ mod tests {
     fn compiler_daemon_is_tmux_owned_and_only_the_host_receives_its_socket() {
         let workspace = Path::new("/tmp/workspace");
         let socket = Path::new("/tmp/run/compiler.sock");
-        let launch = compiler_daemon_launch(workspace, socket, "/tmp/tidepool-extract".into());
+        let log_path = Path::new("/tmp/workspace/.shoal/logs/run-1-compiler.log");
+        let launch = compiler_daemon_launch(
+            workspace,
+            socket,
+            "/tmp/tidepool-extract".into(),
+            "run-1",
+            log_path,
+        );
 
         assert_eq!(launch.window_name, "Compiler");
         assert_eq!(launch.cwd, workspace);
@@ -1018,7 +1166,11 @@ mod tests {
                 "--daemon",
                 "--socket",
                 "/tmp/run/compiler.sock",
-                "--persistent"
+                "--persistent",
+                "--run-id",
+                "run-1",
+                "--log-path",
+                "/tmp/workspace/.shoal/logs/run-1-compiler.log"
             ]
         );
         assert!(!launch

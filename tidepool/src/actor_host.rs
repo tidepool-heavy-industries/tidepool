@@ -1175,6 +1175,15 @@ async fn launch_prepared_interactive_application(
         abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
         return Ok(None);
     }
+    tracing::info!(
+        actor = ?actor_identity,
+        pane = pane.as_str(),
+        worktree = worktree
+            .as_ref()
+            .map(|handle| handle.id().as_str())
+            .unwrap_or("source"),
+        "interactive application launched"
+    );
     Ok(Some(LaunchedInteractiveApplication {
         deployment: InteractiveDeployment {
             actor: actor_identity,
@@ -1241,6 +1250,7 @@ fn actor_launch_environment(
 }
 
 async fn deliver_pending(
+    actor: ActorRef,
     inbox: &Arc<DurableInbox<String>>,
     thread: &BackendThreadId,
     backend: &dyn InteractiveAgentBackend,
@@ -1253,6 +1263,7 @@ async fn deliver_pending(
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
     for message in pending {
+        let inbox_sequence = message.sequence;
         backend
             .push(&cwd, thread, &message.payload)
             .await
@@ -1262,6 +1273,11 @@ async fn deliver_pending(
             .await
             .map_err(|error| format!("inbox acknowledgement task: {error}"))?
             .map_err(|error| error.to_string())?;
+        tracing::info!(
+            actor = ?actor,
+            inbox_sequence,
+            "actor activation delivered"
+        );
     }
     Ok(())
 }
@@ -1280,7 +1296,7 @@ async fn run_delivery_pump(
         tokio::select! {
             _ = &mut shutdown => return,
             _ = health.tick() => {
-                let result = deliver_pending(&inbox, &thread, backend.as_ref(), &workspace).await;
+                let result = deliver_pending(actor, &inbox, &thread, backend.as_ref(), &workspace).await;
                 match result {
                     Ok(()) => {
                         if last_error.take().is_some() {
@@ -1374,7 +1390,14 @@ async fn retire_interactive_application(
             Err(stop)
         }
         (Some(error), None) | (None, Some(error)) => Err(error),
-        (None, None) => Ok(()),
+        (None, None) => {
+            tracing::info!(
+                actor = ?deployment.actor,
+                terminal = ?binding_terminal,
+                "interactive application retired"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -1834,16 +1857,19 @@ mod tests {
             messages: std::sync::Mutex::new(Vec::new()),
         };
         let thread = BackendThreadId("019fe92a-1a66-7820-9481-c0a2d108aba1".into());
+        let actor = ActorRef::first(tidepool_actor::ActorId(7));
 
-        assert!(deliver_pending(&inbox, &thread, &backend, root.path())
-            .await
-            .is_err());
+        assert!(
+            deliver_pending(actor, &inbox, &thread, &backend, root.path())
+                .await
+                .is_err()
+        );
         assert_eq!(inbox.pending().expect("pending after refusal").len(), 1);
 
         backend
             .fail
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        deliver_pending(&inbox, &thread, &backend, root.path())
+        deliver_pending(actor, &inbox, &thread, &backend, root.path())
             .await
             .expect("retry accepted");
         assert!(inbox.pending().expect("acked inbox").is_empty());

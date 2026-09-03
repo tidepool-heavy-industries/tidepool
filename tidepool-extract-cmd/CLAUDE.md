@@ -41,9 +41,9 @@ worker descendants; process-tree ownership is not delegated to test scripts.
 
 ## Wire boundary
 
-The crate remains a dependency leaf for proc macros and uses only `blake3` in
-addition to std. The reviewed digest is required to return immutable boot-time
-identity rather than mutable producer paths. Its wire formats are small,
+The crate remains a dependency leaf for proc macros. In addition to `blake3`
+for immutable endpoint identity, it uses the workspace tracing stack because
+the compiler CLI owns daemon process observability. Its wire formats are small,
 versioned, and implemented in-repo. Keep framing and field validation here;
 keep compiler interpretation in the Haskell worker.
 
