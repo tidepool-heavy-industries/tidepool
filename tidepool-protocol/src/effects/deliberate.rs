@@ -31,7 +31,7 @@ pub fn deliberate() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        extra_imports: &["import Tidepool.Deliberation"],
+        extra_imports: &["import Tidepool.Deliberation (deliberate)"],
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,

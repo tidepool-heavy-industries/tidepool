@@ -12,7 +12,7 @@ pub fn deliberate_decl() -> crate::EffectDecl {
         ],
         type_defs: &[],
         extra_imports: &[
-            "import Tidepool.Deliberation",
+            "import Tidepool.Deliberation (deliberate)",
         ],
         helpers: &[],
         type_params: &[],

@@ -71,6 +71,23 @@ fn shoal_exports_one_lift_helper_with_an_abstract_action_type() {
         "unexpected runner rejection: {}",
         runner_failure.message
     );
+    let completion_error = compile_haskell(
+        include_str!("shoal_action_surface/completion_leak.hs"),
+        "result",
+        &include_refs,
+    )
+    .expect_err("the default Shoal facade must not expose generic completion substrate");
+    let completion_failure = tidepool_runtime::classify_compile(&completion_error);
+    assert_eq!(
+        completion_failure.class,
+        tidepool_runtime::FailureClass::UserHaskell
+    );
+    assert!(
+        completion_failure.message.contains("Complete")
+            || completion_failure.message.contains("complete"),
+        "unexpected completion-substrate rejection: {}",
+        completion_failure.message
+    );
 }
 
 #[test]

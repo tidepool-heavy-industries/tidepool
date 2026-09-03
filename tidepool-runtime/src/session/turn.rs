@@ -303,6 +303,15 @@ pub fn render_turn_compile_error(
 /// Locate submitted turn text within one of the shared wrapper templates.
 #[must_use]
 pub fn turn_user_code_offset(source: &str) -> Option<(usize, usize)> {
+    const GUARDED_PURE_MARKER: &str =
+        "__workbenchValue = let {\n __value = __tidepoolPureWorkbenchValue $ ";
+    if let Some(position) = source.find(GUARDED_PURE_MARKER) {
+        let prefix = &source[..position + GUARDED_PURE_MARKER.len()];
+        let indent = prefix
+            .rsplit_once('\n')
+            .map_or(prefix.len(), |(_, line)| line.len());
+        return Some((prefix.matches('\n').count(), indent));
+    }
     for marker in [
         "__user = let {\n __b =\n",
         "__probe = let {\n __b =\n",
@@ -561,7 +570,25 @@ fn assemble_expression_module_with_result(
     lift: ExpressionLift,
     result: ExpressionResult,
 ) -> String {
-    let mut out = preamble_with_imports.to_string();
+    let mut out = if matches!(lift, ExpressionLift::Pure) {
+        insert_preamble_imports(
+            preamble_with_imports,
+            "qualified GHC.TypeError as TidepoolWorkbenchTypeError",
+        )
+    } else {
+        preamble_with_imports.to_string()
+    };
+    if matches!(lift, ExpressionLift::Pure) {
+        out.push_str(concat!(
+            "\nclass TidepoolPureWorkbenchValue value\n",
+            "instance {-# OVERLAPPABLE #-} TidepoolPureWorkbenchValue value\n",
+            "instance {-# OVERLAPPING #-} TidepoolWorkbenchTypeError.Unsatisfiable ",
+            "('TidepoolWorkbenchTypeError.Text \"an Eff action must typecheck in the current workbench effect row\") ",
+            "=> TidepoolPureWorkbenchValue (Eff effects value)\n",
+            "__tidepoolPureWorkbenchValue :: TidepoolPureWorkbenchValue value => value -> value\n",
+            "__tidepoolPureWorkbenchValue = id\n",
+        ));
+    }
     out.push_str("-- [user]\n");
     if matches!(lift, ExpressionLift::Effectful) {
         // Give GHC the actor's exact row while it infers the user expression.
@@ -571,7 +598,11 @@ fn assemble_expression_module_with_result(
         // the very context needed to infer their inner live action type.
         out.push_str(&format!("__workbenchValue :: Eff {effect_stack} _\n"));
     }
-    out.push_str("__workbenchValue = let {\n __value =\n");
+    if matches!(lift, ExpressionLift::Pure) {
+        out.push_str("__workbenchValue = let {\n __value = __tidepoolPureWorkbenchValue $ ");
+    } else {
+        out.push_str("__workbenchValue = let {\n __value =\n");
+    }
     out.push_str(expression);
     if !expression.ends_with('\n') {
         out.push('\n');
@@ -1509,6 +1540,21 @@ mod tests {
             turn_user_code_line_range(&source, "effectfulValue"),
             Some((6, 6))
         );
+    }
+
+    #[test]
+    fn pure_expression_fallback_rejects_effect_actions_by_type() {
+        let source = assemble_opaque_expression_module(
+            "module Expr where\ndefault (Int)\n",
+            "__result",
+            "'[]",
+            "badAction",
+            ExpressionLift::Pure,
+        );
+
+        assert!(source.contains("TidepoolPureWorkbenchValue (Eff effects value)"));
+        assert!(source.contains("an Eff action must typecheck in the current workbench effect row"));
+        assert!(source.contains("__value = __tidepoolPureWorkbenchValue $ badAction"));
     }
 
     #[test]

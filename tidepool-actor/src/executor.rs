@@ -22,17 +22,28 @@ const PROVIDER_API_ATTEMPTS: usize = 3;
 /// these strings orient the model and render `:goal`-equivalent context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionExpectation {
-    pub task: String,
-    pub expected_type: String,
+    expected_type: String,
 }
 
 impl CompletionExpectation {
     #[must_use]
-    pub fn new(task: impl Into<String>, expected_type: impl Into<String>) -> Self {
+    pub fn new(expected_type: impl Into<String>) -> Self {
         Self {
-            task: task.into(),
             expected_type: expected_type.into(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn goal_text(&self) -> String {
+        format!(
+            "Current typed Haskell goal: produce `{}`. The authoritative input is mounted as `goalInput` in the resident workbench; complete the goal through its typed completion action.",
+            self.expected_type
+        )
+    }
+
+    #[must_use]
+    pub fn expected_type(&self) -> &str {
+        &self.expected_type
     }
 }
 
@@ -78,6 +89,7 @@ pub async fn run_result_session<Workbench>(
     admitted: &mut AdmittedAgentSession,
     provider: &dyn DynModelProvider,
     workbench: &mut Workbench,
+    task: String,
     completion: CompletionExpectation,
     max_tokens: Option<u32>,
     sink: Option<StreamSink>,
@@ -85,11 +97,8 @@ pub async fn run_result_session<Workbench>(
 where
     Workbench: AgentWorkbench,
 {
-    admitted.queue_developer(format!(
-        "Current typed Haskell goal: produce `{}`. The authoritative input is mounted as `goalInput` in the resident workbench; complete the goal through its typed completion action.",
-        completion.expected_type
-    ));
-    admitted.queue_user(completion.task);
+    admitted.queue_developer(completion.goal_text());
+    admitted.queue_user(task);
 
     loop {
         let assistant =

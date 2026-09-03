@@ -7,6 +7,7 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{OutputSink, ResidentHole, ResidentSession, RootCustody};
 
 use crate::completion::{decode_typed_session_site, CompletionRequestError};
+use crate::CompletionExpectation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivationReason {
@@ -88,7 +89,7 @@ pub struct InteractiveSessionRequest {
     pub initial_user_message: Option<String>,
     pub input_type: String,
     pub input_modules: Vec<String>,
-    pub output_type: String,
+    pub completion: CompletionExpectation,
     pub output_modules: Vec<String>,
     pub activation_reason: ActivationReason,
 }
@@ -151,7 +152,7 @@ impl ResidentInteractiveSession {
                 initial_user_message,
                 input_type: signature.input_type,
                 input_modules: signature.input_modules,
-                output_type: signature.output_type,
+                completion: signature.completion,
                 output_modules: signature.output_modules,
                 activation_reason: activation_reason.try_into()?,
             },

@@ -25,12 +25,32 @@ use tidepool_runtime::session::{
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
-use crate::{ActorCompileViewError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench};
+use crate::{
+    ActorCompileViewError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench,
+    CompletionExpectation,
+};
 
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
-fn actor_effect_stack(expected_type: &str) -> String {
-    format!("(Complete ({expected_type}) ': ActorEffects)")
+impl CompletionExpectation {
+    fn effect_stack(&self) -> String {
+        format!(
+            "(TidepoolCompletion.Complete ({}) ': ActorEffects)",
+            self.expected_type()
+        )
+    }
+
+    fn workbench_preamble(&self, preamble: &str) -> String {
+        let mut preamble = insert_preamble_imports(
+            preamble,
+            "qualified Tidepool.Deliberation as TidepoolCompletion",
+        );
+        preamble.push_str(&format!(
+            "\ncomplete :: ({0}) -> Eff (TidepoolCompletion.Complete ({0}) ': ActorEffects) ()\ncomplete = TidepoolCompletion.complete\n",
+            self.expected_type()
+        ));
+        preamble
+    }
 }
 
 /// Trusted source environment supplied by actor deployment. The canonical
@@ -47,9 +67,8 @@ pub struct ActorWorkbenchSource {
 impl ActorWorkbenchSource {
     #[must_use]
     pub fn new(preamble: impl Into<Arc<str>>, base_include: Vec<PathBuf>) -> Self {
-        let preamble = preamble.into();
         Self {
-            preamble: insert_preamble_imports(&preamble, "Tidepool.Deliberation").into(),
+            preamble: preamble.into(),
             base_include: base_include.into(),
             default_browse_module: None,
             workbench_imports: SourceImports::new(),
@@ -90,7 +109,7 @@ impl<H, O> ResidentMachineAccess<H, O> {
 /// Concrete resident workbench for one typed agent-session obligation.
 pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
-    expected_type: String,
+    completion: CompletionExpectation,
     type_modules: Arc<[String]>,
     json_input: Option<serde_json::Value>,
 }
@@ -329,13 +348,13 @@ impl<H, O> ResidentActorRunner<H, O> {
 
     pub(crate) fn workbench(
         &self,
-        expected_type: impl Into<String>,
+        completion: CompletionExpectation,
         type_modules: Vec<String>,
     ) -> ResidentActorWorkbench<H, O> {
         ResidentActorWorkbench::new(
             Arc::clone(&self.access.machines),
             self.access.source.clone(),
-            expected_type,
+            completion,
             type_modules,
         )
     }
@@ -346,12 +365,12 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     pub fn new(
         machines: Arc<ActorMachineRegistry<H, O>>,
         source: ActorWorkbenchSource,
-        expected_type: impl Into<String>,
+        completion: CompletionExpectation,
         type_modules: Vec<String>,
     ) -> Self {
         Self {
             access: ResidentMachineAccess::new(machines, source),
-            expected_type: expected_type.into(),
+            completion,
             type_modules: type_modules.into(),
             json_input: None,
         }
@@ -610,7 +629,7 @@ where
         block: ParsedBlock,
         kind: GhciInputKind,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let expected_type = self.expected_type.clone();
+        let completion = self.completion.clone();
         let type_modules = Arc::clone(&self.type_modules);
         let mut turn_source = self.access.source.clone();
         turn_source.preamble = format!(
@@ -625,7 +644,7 @@ where
                     session,
                     context,
                     &turn_source,
-                    &expected_type,
+                    &completion,
                     &type_modules,
                     block,
                     kind,
@@ -651,7 +670,7 @@ where
         let mut turn_source = self.access.source.clone();
         turn_source.preamble = format!(
             "{}{}",
-            turn_source.preamble,
+            self.completion.workbench_preamble(&turn_source.preamble),
             tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
         )
         .into();
@@ -682,7 +701,7 @@ fn begin_fragment<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    expected_type: &str,
+    completion: &CompletionExpectation,
     type_modules: &[String],
     block: ParsedBlock,
     kind: GhciInputKind,
@@ -691,17 +710,20 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
+    let completion_preamble = completion.workbench_preamble(&source.preamble);
+    let mut source = source.clone();
+    source.preamble = completion_preamble.into();
     if kind == GhciInputKind::Command {
-        return match run_discovery(session, context, source, type_modules, &block)? {
+        return match run_discovery(session, context, &source, type_modules, &block)? {
             Ok(output) => Ok(ResidentWorkbenchStep::Committed(output)),
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
         };
     }
-    let effect_stack = actor_effect_stack(expected_type);
+    let effect_stack = completion.effect_stack();
     let compiled = match compile_block(
         session,
         context,
-        source,
+        &source,
         &effect_stack,
         type_modules,
         &block,
@@ -1581,20 +1603,13 @@ where
         admitted: &AdmittedAgentSession,
         block: ParsedBlock,
     ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, Self::Error> {
-        let expected_type = self.expected_type.clone();
+        let completion = self.completion.clone();
         let type_modules = Arc::clone(&self.type_modules);
         self.access
             .with_machine(
                 admitted.session_context(),
                 move |session, context, source| {
-                    execute_checked_out(
-                        session,
-                        context,
-                        source,
-                        &expected_type,
-                        &type_modules,
-                        block,
-                    )
+                    execute_checked_out(session, context, source, &completion, &type_modules, block)
                 },
             )
             .await
@@ -1709,7 +1724,7 @@ fn execute_checked_out<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    expected_type: &str,
+    completion: &CompletionExpectation,
     type_modules: &[String],
     block: ParsedBlock,
 ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
@@ -1739,7 +1754,7 @@ where
         session,
         context,
         source,
-        expected_type,
+        completion,
         type_modules,
         block,
         kind,

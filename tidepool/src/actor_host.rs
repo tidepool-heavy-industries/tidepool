@@ -2046,6 +2046,100 @@ mod tests {
             .all(|tool| matches!(tool, HostedTool::Custom(_))));
         assert!(policy.tools()[0].description().contains("GHCi-style"));
 
+        let completion_type = dispatch_haskell(policy.as_ref(), [":type complete"]).await;
+        assert_eq!(
+            completion_type["status"], "committed",
+            "{completion_type:?}"
+        );
+        assert_eq!(
+            completion_type["items"][0]["output"],
+            "complete :: AgentAction RootEffects ()\n-> Eff (Complete (AgentAction RootEffects ()) : ActorEffects) ()"
+        );
+
+        let rejection_support = dispatch_haskell_script(
+            policy.as_ref(),
+            "type WrongCompletionPayload = Int\nimport qualified Tidepool.Deliberation as D",
+        )
+        .await;
+        assert_eq!(
+            rejection_support["status"], "committed",
+            "{rejection_support:?}"
+        );
+
+        for wrong in fixture_items(include_str!(
+            "actor_host_fixtures/generic_actor/completion_rejections.hs"
+        )) {
+            let rejected = dispatch_haskell_script(policy.as_ref(), wrong).await;
+            assert_eq!(rejected["status"], "rejected", "{rejected:?}");
+            let diagnostic = rejected["items"][0]["output"]
+                .as_str()
+                .expect("completion rejection diagnostic");
+            assert!(diagnostic.contains("<input unit 1>"), "{diagnostic}");
+            assert_ne!(diagnostic, "<opaque value>");
+
+            let recovered =
+                dispatch_haskell_script(policy.as_ref(), ":bindings\n:type complete").await;
+            assert_eq!(recovered["status"], "committed", "{recovered:?}");
+            assert_eq!(
+                recovered["items"][1]["output"],
+                completion_type["items"][0]["output"]
+            );
+        }
+
+        let multiline_completion = dispatch_haskell_script(
+            policy.as_ref(),
+            include_str!("actor_host_fixtures/generic_actor/multiline_completion.hs"),
+        )
+        .await;
+        assert_eq!(
+            multiline_completion["status"], "completed",
+            "{multiline_completion:?}"
+        );
+        let multiline_activation = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady {
+                        actor: resumed,
+                        message,
+                    }) if resumed == actor.identity() => break message,
+                    Some(_) => {}
+                    None => panic!(
+                        "resident deployment channel closed before multiline completion wake"
+                    ),
+                }
+            }
+        })
+        .await
+        .expect("multiline completion timeout");
+        assert!(multiline_activation.contains("typed result"));
+
+        let one_line_completion = dispatch_haskell_script(
+            policy.as_ref(),
+            "complete $ nextTurn $ liftAction $ pure ()",
+        )
+        .await;
+        assert_eq!(
+            one_line_completion["status"], "completed",
+            "{one_line_completion:?}"
+        );
+        let one_line_activation = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady {
+                        actor: resumed,
+                        message,
+                    }) if resumed == actor.identity() => break message,
+                    Some(_) => {}
+                    None => {
+                        panic!("resident deployment channel closed before one-line completion wake")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("one-line completion timeout");
+        assert!(one_line_activation.contains("typed result"));
+
         let discovery = dispatch_haskell_script(
             policy.as_ref(),
             include_str!("actor_host_fixtures/generic_actor/workbench_discovery.hs"),

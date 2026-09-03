@@ -27,7 +27,7 @@ pub struct CompletionRequest {
     pub task: String,
     pub input_type: String,
     pub input_modules: Vec<String>,
-    pub output_type: String,
+    pub completion: CompletionExpectation,
     pub output_modules: Vec<String>,
 }
 
@@ -35,7 +35,7 @@ pub struct CompletionRequest {
 pub(crate) struct TypedSessionSignature {
     pub(crate) input_type: String,
     pub(crate) input_modules: Vec<String>,
-    pub(crate) output_type: String,
+    pub(crate) completion: CompletionExpectation,
     pub(crate) output_modules: Vec<String>,
 }
 
@@ -64,7 +64,7 @@ impl CompletionRequest {
             task,
             input_type: signature.input_type,
             input_modules: signature.input_modules,
-            output_type: signature.output_type,
+            completion: signature.completion,
             output_modules: signature.output_modules,
         })
     }
@@ -88,7 +88,7 @@ pub(crate) fn decode_typed_session_site(
     Ok(TypedSessionSignature {
         input_type: input.ty.clone(),
         input_modules: input.modules.clone(),
-        output_type: metadata.ty.clone(),
+        completion: CompletionExpectation::new(metadata.ty.clone()),
         output_modules: metadata.modules.clone(),
     })
 }
@@ -212,10 +212,11 @@ where
                 type_modules.push(module.clone());
             }
         }
+        let completion = request.completion;
         let mut workbench = ResidentActorWorkbench::new(
             Arc::clone(&self.machines),
             self.source.clone(),
-            request.output_type.clone(),
+            completion.clone(),
             type_modules,
         );
         workbench
@@ -225,7 +226,8 @@ where
             admitted,
             provider,
             &mut workbench,
-            CompletionExpectation::new(request.task, request.output_type),
+            request.task,
+            completion,
             self.max_tokens,
             sink,
         )

@@ -547,7 +547,7 @@ where
                     let workbench = self
                         .environment
                         .runner
-                        .workbench(request.output_type.clone(), request.output_modules.clone());
+                        .workbench(request.completion.clone(), request.output_modules.clone());
                     workbench
                         .mount_named_input(
                             context.clone(),
@@ -843,7 +843,7 @@ where
             .environment
             .runner
             .workbench(
-                awaiting_view.request.output_type.clone(),
+                awaiting_view.request.completion.clone(),
                 awaiting_view.request.output_modules.clone(),
             )
             .with_json_input(
