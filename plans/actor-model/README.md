@@ -116,6 +116,10 @@ restating it unless an acceptance test needs the detail.
    consequences and the model-facing Haskell experience.
 4. [Implementation plan](implementation.md) owns current status, delivery
    order, acceptance criteria, and retirement work.
+5. [Shoal workbench correctness wave](shoal-workbench-correctness-wave.md)
+   records the next deliberately deferred implementation tranche: a truthful
+   completion boundary, atomic activations, GHCi-shaped discovery, and a
+   Codex-node-only default Shoal surface.
 
 ## Vocabulary
 
