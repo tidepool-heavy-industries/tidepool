@@ -16,23 +16,27 @@ import Prelude
 
 import Tidepool.Actor
 import Tidepool.Agent.Action (AgentAction, runAgentAction)
-import Tidepool.Agent.Session (agentSession)
+import Tidepool.Agent.Session
+  ( SessionActivation (..)
+  , agentSession
+  )
 import Tidepool.Actors.Shoal
 
 type RootEffects = ActorEffects
 
 rootDriver :: Eff RootEffects a
-rootDriver = loop Nothing Nothing
+rootDriver = loop InitialUser Nothing Nothing
   where
-    loop initialUser interruption = do
+    loop activation initialUser interruption = do
       action <-
-        ( agentSession initialUser interruption
+        ( agentSession activation initialUser interruption
             :: Eff RootEffects (AgentAction RootEffects ())
         )
       outcome <- runAgentAction action
       case outcome of
-        Right () -> loop Nothing Nothing
+        Right () -> loop ManualReady Nothing Nothing
         Left failure ->
           loop
-            (Just "Your returned Haskell action stopped at an actor lifecycle failure. The typed failure is mounted as `sessionInput :: Maybe ActionFailure`; decide the next program explicitly.")
+            ActionFailed
+            Nothing
             (Just failure)

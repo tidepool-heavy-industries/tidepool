@@ -79,7 +79,7 @@ sitedVerbs =
   , verb "deliberate" "Tidepool.Deliberation"
       "deliberateSited" "Tidepool.Deliberation" 2 2 False True [1]
   , verb "agentSession" "Tidepool.Agent.Session"
-      "agentSessionSited" "Tidepool.Agent.Session" 2 2 False True [1]
+      "agentSessionSited" "Tidepool.Agent.Session" 2 3 False True [1]
   , resultVerb "nextTurn" "Tidepool.Agent.Action"
       "nextTurnSited" "Tidepool.Agent.Action" 2 1 False True [1]
   , verb "receive" "Tidepool.Actor"

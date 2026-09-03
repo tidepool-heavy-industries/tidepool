@@ -68,8 +68,13 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
             rust_string_literal(effect.name),
             hidden.join(", ")
         );
-        if compact_entry.trim_end().len() <= 100 {
+        if hidden.len() == 1 && compact_entry.trim_end().len() <= 100 {
             contents.push_str(&compact_entry);
+        } else if compact_entry.trim_end().len() <= 100 {
+            contents.push_str("    (\n");
+            contents.push_str(&format!("        {},\n", rust_string_literal(effect.name)));
+            contents.push_str(&format!("        &[{}],\n", hidden.join(", ")));
+            contents.push_str("    ),\n");
         } else {
             contents.push_str("    (\n");
             contents.push_str(&format!("        {},\n", rust_string_literal(effect.name)));

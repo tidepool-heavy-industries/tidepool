@@ -272,7 +272,7 @@ data AgentTools a where
   AgentToolsReplyWith :: Value -> AgentTools ()
 
 data AgentSession a where
-  AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output
+  AgentSessionWith :: Int -> input -> Maybe Text -> Int -> AgentSession output
 
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.

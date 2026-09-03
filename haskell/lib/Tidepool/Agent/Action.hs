@@ -29,7 +29,7 @@ import Tidepool.Actor
   , awaitExit
   , cancelReasonSummary
   )
-import Tidepool.Agent.Session (agentSessionSited)
+import Tidepool.Agent.Session (SessionActivation (ActionCompleted), agentSessionSited)
 import Tidepool.Effects.Core (Actor, AgentSession)
 
 -- | Why a model-authored continuation could not produce its value.
@@ -100,7 +100,8 @@ continueWithSited site input = AgentAction $ do
   continuation <-
     agentSessionSited @(AgentAction effs result) @input
       site
-      (Just "Your Haskell continuation completed. Its typed result is mounted as `sessionInput`; continue the program from that value.")
+      ActionCompleted
+      Nothing
       input
   runAgentAction continuation
 

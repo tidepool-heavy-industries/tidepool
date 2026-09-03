@@ -2440,13 +2440,13 @@ Open this actor's supervised interactive-agent session with a statically typed c
 -- end description --
 
 -- prompt_card: Some --
--- prompt_card.0 (131 bytes) --
-`agentSession prompt input` — expose the persistent Haskell workbench to the attached agent and resume with a GHC-checked result.
+-- prompt_card.0 (142 bytes) --
+`agentSession activation prompt input` — expose the persistent Haskell workbench to the attached agent and resume with a GHC-checked result.
 -- end prompt_card.0 --
 
 -- constructors (1 items) --
--- constructors[0] (69 bytes) --
-AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output
+-- constructors[0] (76 bytes) --
+AgentSessionWith :: Int -> input -> Maybe Text -> Int -> AgentSession output
 -- end constructors[0] --
 
 -- end constructors --

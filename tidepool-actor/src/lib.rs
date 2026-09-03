@@ -45,7 +45,8 @@ pub use external_application::{
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
-    InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentInteractiveSession,
+    ActivationId, ActivationReason, InteractiveSessionCaptureError, InteractiveSessionRequest,
+    ResidentActivation, ResidentInteractiveSession,
 };
 pub use kernel::{
     CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,

@@ -22,7 +22,7 @@ pub fn agent_session() -> Effect {
             "through its actor-local transport.",
         ],
         prompt_card: Some(&[
-            "`agentSession prompt input` — expose the persistent Haskell workbench to the ",
+            "`agentSession activation prompt input` — expose the persistent Haskell workbench to the ",
             "attached agent and resume with a GHC-checked result.",
         ]),
         type_params: &[],
@@ -49,6 +49,11 @@ pub fn agent_session() -> Effect {
                 Arg {
                     name: "initialUserMessage",
                     ty: HsType::maybe(HsType::Text),
+                    rust: RustBinding::Derived,
+                },
+                Arg {
+                    name: "activationReason",
+                    ty: HsType::Int,
                     rust: RustBinding::Derived,
                 },
             ],

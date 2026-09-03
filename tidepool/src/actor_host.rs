@@ -120,6 +120,7 @@ struct InteractiveDeployment {
     socket_root: PathBuf,
     worktree_binding: Option<ActiveBinding>,
     failure_reported: bool,
+    last_activation_sequence: u64,
 }
 
 enum InteractiveConnection {
@@ -599,14 +600,21 @@ async fn run_interactive_applications(
                             (local_actor, result)
                         });
                     }
-                    LocalResidentDeployment::SessionReady { actor, message } => {
-                        let Some(application) = deployments.iter().find(|app| app.actor == actor) else {
+                    LocalResidentDeployment::SessionReady { activation } => {
+                        let actor = activation.id.actor();
+                        let Some(application) = deployments.iter_mut().find(|app| app.actor == actor) else {
                             break Some(format!("resident actor {actor:?} requested a session activation without a deployed application"));
                         };
-                        notifications.spawn(publish_inbox_message(
-                            Arc::clone(&application.inbox),
-                            message,
-                        ));
+                        if accepts_activation(application, &activation) {
+                            let sequence = activation.id.sequence();
+                            if let Err(error) = publish_inbox_message(
+                                Arc::clone(&application.inbox),
+                                activation.message,
+                            ).await {
+                                break Some(error);
+                            }
+                            application.last_activation_sequence = sequence;
+                        }
                     }
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         let pending = pending_launches.remove(&actor);
@@ -1196,12 +1204,34 @@ async fn launch_prepared_interactive_application(
             socket_root,
             worktree_binding: None,
             failure_reported: false,
+            last_activation_sequence: 0,
         },
         binding: InteractiveBindingRequest {
             path: binding_path,
             expected: expected_resume,
         },
     }))
+}
+
+fn accepts_activation(
+    deployment: &InteractiveDeployment,
+    activation: &tidepool_actor::ResidentActivation,
+) -> bool {
+    accepts_activation_id(
+        deployment.actor,
+        deployment.last_activation_sequence,
+        activation.id.actor(),
+        activation.id.sequence(),
+    )
+}
+
+fn accepts_activation_id(
+    actor: ActorRef,
+    last_sequence: u64,
+    candidate_actor: ActorRef,
+    candidate_sequence: u64,
+) -> bool {
+    candidate_actor == actor && candidate_sequence > last_sequence
 }
 
 /// Toolchain processes selected for the source checkout are not valid in a
@@ -1575,6 +1605,17 @@ mod tests {
     use tidepool_testing::eval_harness;
     use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation};
     use tidepool_worktree::WorktreeSpec;
+
+    #[test]
+    fn activation_delivery_refuses_duplicates_and_stale_sequences() {
+        let actor = ActorRef::first(tidepool_actor::ActorId(7));
+        let other_actor = ActorRef::first(tidepool_actor::ActorId(8));
+        assert!(accepts_activation_id(actor, 0, actor, 1));
+        assert!(!accepts_activation_id(actor, 1, actor, 1));
+        assert!(accepts_activation_id(actor, 1, actor, 3));
+        assert!(!accepts_activation_id(actor, 3, actor, 2));
+        assert!(!accepts_activation_id(actor, 3, other_actor, 4));
+    }
 
     async fn dispatch_haskell(
         endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
@@ -2101,10 +2142,11 @@ mod tests {
         let worktree_activation = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 match deployments.recv().await {
-                    Some(LocalResidentDeployment::SessionReady {
-                        actor: resumed,
-                        message,
-                    }) if resumed == actor.identity() => break message,
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == actor.identity() =>
+                    {
+                        break activation.message
+                    }
                     Some(_) => {}
                     None => panic!(
                         "resident deployment channel closed before worktree continuation wake"
@@ -2140,11 +2182,15 @@ mod tests {
         let activation = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 match deployments.recv().await {
-                    Some(LocalResidentDeployment::SessionReady {
-                        actor: resumed,
-                        message,
-                    }) if resumed == actor.identity() => {
-                        break message;
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == actor.identity() =>
+                    {
+                        break activation.message;
+                    }
+                    Some(LocalResidentDeployment::ChildExited { notice })
+                        if notice.owner == actor.identity() =>
+                    {
+                        panic!("an already-awaited child exit generated a redundant wake")
                     }
                     Some(_) => {}
                     None => panic!("resident deployment channel closed before continuation wake"),
@@ -2247,11 +2293,10 @@ mod tests {
         let failure_activation = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 match deployments.recv().await {
-                    Some(LocalResidentDeployment::SessionReady {
-                        actor: resumed,
-                        message,
-                    }) if resumed == actor.identity() => {
-                        break message;
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == actor.identity() =>
+                    {
+                        break activation.message;
                     }
                     Some(_) => {}
                     None => panic!("resident deployment channel closed before failure wake"),

@@ -73,8 +73,7 @@ pub enum LocalResidentDeployment {
     /// interactive application. The message is an ordinary User activation;
     /// the live value itself is mounted as `sessionInput` in Haskell.
     SessionReady {
-        actor: ActorRef,
-        message: String,
+        activation: crate::ResidentActivation,
     },
     ChildExited {
         notice: ChildExitNotice,
@@ -146,6 +145,8 @@ pub struct ResidentKernelBehavior<H, O> {
     policy_installed: bool,
     pending_program: Option<ResidentOutcome>,
     observed_child_exits: ObservedChildExits,
+    deferred_child_failures: Vec<ChildExitNotice>,
+    next_activation_sequence: u64,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -165,6 +166,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             policy_installed: false,
             pending_program: None,
             observed_child_exits: ObservedChildExits::default(),
+            deferred_child_failures: Vec::new(),
+            next_activation_sequence: 1,
         }
     }
 
@@ -185,6 +188,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             policy_installed: false,
             pending_program: None,
             observed_child_exits: ObservedChildExits::default(),
+            deferred_child_failures: Vec::new(),
+            next_activation_sequence: 1,
         }
     }
 
@@ -457,14 +462,12 @@ where
                         "awaitExit crossed a resident machine boundary".into(),
                     ));
                 }
+                self.observed_child_exits.record(wait.target);
                 let terminal = target.terminal().wait().await;
-                let outcome = self
-                    .environment
+                self.environment
                     .runner
                     .resume_terminal(context.clone(), wait.continuation, terminal)
-                    .await?;
-                self.observed_child_exits.record(wait.target);
-                Ok(outcome)
+                    .await
             }
             ResidentActorBoundary::Poll(poll) => {
                 let terminal = kernel
@@ -540,10 +543,7 @@ where
                 }
                 ResidentActorBoundary::AgentSession(session) => {
                     let (request, hole, input) = session.into_parts();
-                    let activation_message = self
-                        .policy_installed
-                        .then(|| request.initial_user_message.clone())
-                        .flatten();
+                    let activation_reason = request.activation_reason;
                     let workbench = self
                         .environment
                         .runner
@@ -577,13 +577,32 @@ where
                     self.standing = ResidentStanding::Interactive(
                         crate::interactive_session::ResidentInteractiveAwait { request, hole },
                     );
-                    if let Some(message) = activation_message {
-                        let _ = self.environment.deployments.send(
-                            LocalResidentDeployment::SessionReady {
-                                actor: context.actor,
-                                message,
-                            },
-                        );
+                    if let Some(activation) = crate::ResidentActivation::mounted(
+                        context.actor,
+                        self.next_activation_sequence,
+                        activation_reason,
+                        match &self.standing {
+                            ResidentStanding::Interactive(awaiting) => {
+                                awaiting.request.input_type.clone()
+                            }
+                            _ => unreachable!(),
+                        },
+                    ) {
+                        self.next_activation_sequence += 1;
+                        let _ = self
+                            .environment
+                            .deployments
+                            .send(LocalResidentDeployment::SessionReady { activation });
+                    }
+                    if activation_reason == crate::ActivationReason::ManualReady {
+                        for notice in self.deferred_child_failures.drain(..) {
+                            if !self.observed_child_exits.take(notice.child.identity()) {
+                                let _ = self
+                                    .environment
+                                    .deployments
+                                    .send(LocalResidentDeployment::ChildExited { notice });
+                            }
+                        }
                     }
                     return Ok(KernelStep::Continue(()));
                 }
@@ -1218,7 +1237,14 @@ where
         Box::pin(async move {
             let child = notice.child.identity();
             self.publish_retired(child, notice.terminal.clone());
-            if !self.observed_child_exits.take(child) {
+            if self.observed_child_exits.take(child)
+                || notice.terminal.kind == ActorExitKind::Completed
+            {
+                return;
+            }
+            if matches!(self.standing, ResidentStanding::Boot) {
+                self.deferred_child_failures.push(notice);
+            } else {
                 let _ = self
                     .environment
                     .deployments
