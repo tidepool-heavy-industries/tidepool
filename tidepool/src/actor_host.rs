@@ -2001,6 +2001,35 @@ mod tests {
         .await;
         assert_eq!(resumed_action["status"], "completed", "{resumed_action:?}");
 
+        let rejected_setup = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/generic_actor/root_rejected_actor_setup.hs"
+            )),
+        )
+        .await;
+        assert_eq!(rejected_setup["status"], "committed", "{rejected_setup:?}");
+        let rejected = policy
+            .dispatch_boxed(ToolInvocation {
+                context: None,
+                name: tidepool_actor::HASKELL_TOOL.into(),
+                arguments: ToolArguments::Raw(
+                    include_str!("actor_host_fixtures/generic_actor/root_rejected_actor_call.hs")
+                        .into(),
+                ),
+            })
+            .await
+            .expect_err("a call to an exited exact actor must fail");
+        assert!(
+            rejected.to_string().contains("has exited"),
+            "unexpected dead-actor failure: {rejected}"
+        );
+        let after_rejection = dispatch_haskell(policy.as_ref(), [":bindings"]).await;
+        assert_eq!(
+            after_rejection["status"], "committed",
+            "a rejected actor operation must not consume the surrounding agent session: {after_rejection:?}"
+        );
+
         let failed_action = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(

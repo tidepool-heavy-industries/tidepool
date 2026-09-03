@@ -14,7 +14,7 @@ functionActor actorLabel fn = ActorDefinition
 -- TIDEPOOL-ITEM --
 :{
 do
-  increment <- startActor (functionActor "increment" ((+ 1) :: Int -> Int)) ()
-  double <- startActor (functionActor "double" ((* 2) :: Int -> Int)) ()
+  increment <- startActor (functionActor "function-worker" ((+ 1) :: Int -> Int)) ()
+  double <- startActor (functionActor "function-worker" ((* 2) :: Int -> Int)) ()
   complete $ nextTurn $ (.) <$> waitOn double <*> waitOn increment
 :}

@@ -66,7 +66,9 @@ data ShutdownReason
 
 data ActorDefinition startup (protocol :: Type -> Type) exit where
   ActorDefinitionInternal
-    :: { internalLabel :: Text
+    :: { -- Human-readable observability label; actor identity comes from
+         -- 'ActorRef', so sibling definitions may deliberately reuse it.
+         internalLabel :: Text
        , internalEffectProfile :: EffectProfile protocol actorEffs
        , internalInitialization :: startup -> Eff actorEffs initial
        , internalBehavior :: startup -> initial -> Eff actorEffs exit
