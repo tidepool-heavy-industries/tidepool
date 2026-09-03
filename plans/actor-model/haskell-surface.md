@@ -514,6 +514,77 @@ serial actor and one accumulating model context. The disposable fragment gets
 an unavailable-operation receipt; defining or returning the future closure
 remains valid.
 
+### Persistent agent requests
+
+Shoal's default `AgentRef` names one long-lived agent-backed actor. Its
+identity, persistent Haskell scope, model conversation, worktree authority,
+and place in the ownership tree survive individual requests. The request
+result is indexed on a separate handle rather than on the actor:
+
+```haskell
+data AgentRef
+data Reply result
+
+request
+  :: forall result input effs
+   . Member Actor effs
+  => AgentRef
+  -> Text
+  -> input
+  -> Eff effs (Reply result)
+```
+
+The result parameter comes first deliberately, making the normal persistent-
+workbench spelling direct and legible:
+
+```haskell
+candidateReview <-
+  request @ReviewReport reviewer
+    "Review this candidate and return your findings."
+    candidate
+```
+
+Inference from a later use remains ordinary Haskell inside one compiled unit,
+but models should use `@ResultType` when retaining a reply across workbench
+units. Do not pass `Proxy`, a JSON schema, a dummy result value, or a rendered
+type name. Compiler metadata carries the concrete monotype and its defining
+modules across the actor boundary.
+
+Dispatch and waiting are separate. The exact final names remain subject to a
+live API spike, but the two observation levels mirror `waitOn` and
+`awaitExit`: one success-shaped `AgentAction` composes common fan-in, while a
+complete outcome is available when failure, cancellation, or target exit is
+domain policy.
+
+```haskell
+left  <- request @ReviewReport reviewerA prompt candidate
+right <- request @ReviewReport reviewerB prompt candidate
+
+complete $ nextTurn $
+  (,) <$> waitReply left <*> waitReply right
+```
+
+On the receiving activation, the workbench exposes exactly the caller-fixed
+contract:
+
+```haskell
+sessionInput :: Candidate
+reply        :: ReviewReport -> SessionM ()
+```
+
+`reply value` uses the same GHC-checking and live-root capture substrate as
+`complete value`, but it settles only the current request. The actor returns
+to its mailbox afterward and may next receive a request for a different type.
+Calling an old reply twice or after its activation was superseded is a runtime
+single-settlement violation, never permission to address another request.
+
+The first vertical must prove a result type declared in the caller's
+persistent session, a closure-valued result, and two consecutively different
+request/result pairs against one still-live target. An abstract result whose
+constructors are intentionally unavailable must be constructed through an
+explicit live builder capability supplied by the caller; the runtime does not
+break Haskell abstraction to manufacture it.
+
 ## 5. The persistent Haskell workbench
 
 The persistent GHCi-style environment is the actor's primary workbench. A

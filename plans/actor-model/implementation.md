@@ -153,6 +153,42 @@ Shoal CLI/integration tests through the Nix development shell.
 These are future features or measured hardening seams, not unfinished pieces
 of the Ractor cutover.
 
+### Persistent Shoal agent messaging
+
+The next self-hosting boundary replaces Shoal's provisional one-shot
+`AgentRef exit` construction shape with long-lived, recursively owned
+agent-backed actors:
+
+1. Construct and ready an `AgentRef` independently of any one work result;
+   preserve its model context, Haskell scope, worktree authority, exact
+   incarnation, and parent/child ownership until explicit shutdown.
+2. Add an ad hoc sited request whose first visible type argument is the result,
+   giving the stable model-facing spelling `request @Result agent prompt input`.
+   Carry compiler-derived input/result types and modules; never parse the
+   prompt or inspect a heap tag to recover the contract.
+3. Return a separate opaque `Reply result` after mailbox admission. Provide a
+   success-shaped `waitReply` for `AgentAction` composition and a complete
+   outcome observer for explicit lifecycle policy.
+4. Generalize the resident interactive standing state from one program
+   completion to a typed activation settlement. Reuse completion's GHC wrapper
+   and root capture; route request settlement back to the exact reply and
+   return the target to readiness instead of terminating it.
+5. Keep one Ractor mailbox and one custody owner. Request cancellation, target
+   exit, abandoned waits, duplicate reply, and subtree shutdown each settle or
+   release every input/reply root exactly once without a second registry.
+6. Curate the default Shoal facade around long-lived `startAgent`,
+   `request @Result`, reply observation, explicit shutdown, worktrees, and
+   `AgentAction`. Keep `ActorDefinition`, indexed protocols, `startActor`,
+   `call`, `receive`, and profiles behind an intentional advanced import.
+7. Dogfood a recursive two-level tree in which an agent starts children,
+   sends typed work and review requests, receives live typed replies, folds
+   exact commits, follows up with a differently typed request to an existing
+   child, and shuts the subtree down explicitly.
+
+Do not land the held one-shot Shoal construction candidate as `AgentRef`; its
+facade curation, worktree binding, site-metadata, and visibility tests may be
+reused after the persistent boundary owns their semantics.
+
 ### Near-term UX and operations
 
 - Generate concise happy-path examples from the exported Haskell surface and

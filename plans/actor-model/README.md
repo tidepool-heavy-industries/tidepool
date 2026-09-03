@@ -66,6 +66,17 @@ above that substrate; it does not maintain a second actor scheduler.
   handles govern concrete runtime resources independently.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
   carry live typed values; JSON is only a durable or external boundary.
+- Shoal's ordinary unit is a long-lived agent-backed actor in the recursive
+  ownership tree, not a one-shot model invocation disguised as an actor.
+  Haskell starts the actor once, sends any number of ad hoc typed requests to
+  that exact incarnation, and stops it separately. One-shot work is a small
+  composition over those operations rather than a second actor model.
+- An ad hoc request fixes its result visibly at the sending boundary, normally
+  as `request @ReviewReport agent prompt input`. Dispatch returns a separate
+  `Reply ReviewReport` that can be awaited later, so independent requests are
+  admitted before ordinary `Applicative` fan-in. The target receives the exact
+  input as a live value and a monomorphic reply obligation; GHC checks the
+  result before Rust transfers it back without serialization.
 - Interactive sessions may return a live `AgentAction`. The hosted-tool call
   settles immediately; the resident actor runs and parks that action, and
   reactivates the same agent context only when the Haskell program asks for
@@ -141,6 +152,8 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | capability | An opaque live value whose operations are authorized by Rust at use time |
 | actor interpreter | Rust-owned nominal handlers and lifecycle policy enforcing requests under one actor principal |
 | owner wake | Informational backend-native input derived from a child exit; typed results remain behind the exact `ActorRef` |
+| agent request | One ad hoc, caller-typed interaction with a long-lived agent-backed actor; it does not define or end that actor |
+| reply | An exact typed handle for one admitted agent request; settlement is separate from actor termination |
 
 ## Relationship to existing work
 

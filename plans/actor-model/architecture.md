@@ -457,6 +457,53 @@ rather than hang forever or silently run a second handler against actor-local
 state. That failure is Rust-owned lifecycle state, not a constructor added
 to the domain protocol.
 
+### Ad hoc requests to agent-backed actors
+
+Indexed GADT protocols remain the advanced surface for a stable service whose
+request vocabulary is worth declaring. They are not the default interaction
+shape for a long-lived Shoal collaborator. A model-facing caller often learns
+the next useful request only after integrating the previous result, and the
+same actor should accept successive requests with unrelated input and result
+types without replacing its identity, Haskell environment, or model context.
+
+The ordinary sending shape is therefore approximately:
+
+```haskell
+review <- request @ReviewReport reviewer prompt candidate
+```
+
+The explicit type application is the boundary rule for persistent workbench
+units: GHC fixes the result before dispatch even when a later separately
+compiled unit cannot contribute inference. The request site records the exact
+input and result types and their compiler-derived module dependencies. Rust
+does not infer a type from the prompt and the target does not choose one.
+
+Dispatch admits the request and returns an exact `Reply ReviewReport`; it does
+not wait for the target. Awaiting that handle is a later Haskell action, so a
+caller can admit several independent requests before composing their results.
+The target actor processes one activation at a time. Its workbench receives
+the live input as `sessionInput` and one activation-local, monomorphic reply
+operation. Settling the reply returns the live result to that exact request
+and returns the actor to readiness. It does not terminate the actor.
+
+Completion and reply share one typed result-compilation and live-root capture
+mechanism. Their dispositions remain distinct: completion resumes a terminal
+or enclosing Haskell continuation; reply settles one request obligation and
+keeps the target alive. Only the operation valid for the current activation is
+presented to the model. Shutdown is a separate actor lifecycle operation.
+
+The Rust-owned activation record correlates exact actor incarnation, request,
+input custody, input and result type metadata, delivery, and single
+settlement. It extends the existing mailbox/call custody owner rather than
+adding a callback registry or serialized result store. Static `call`/`receive`
+and ad hoc agent requests ultimately use the same Ractor mailbox and
+same-machine live-value custody rules.
+
+One-shot work is derived orchestration: start a long-lived agent, issue a
+request, await its reply, and stop it when policy no longer needs the context.
+A convenience helper may package that sequence after repeated use proves its
+value, but `AgentRef` itself does not carry one terminal work-result type.
+
 ### Failure settlement and owner wake
 
 When an actor effect cannot complete, Rust classifies the concrete failure and
