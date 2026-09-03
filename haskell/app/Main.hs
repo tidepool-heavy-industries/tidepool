@@ -245,7 +245,7 @@ processFile compiler timing args path = do
       -- --target/--all-closed, which stay untouched below for every other
       -- caller. One runPipeline invocation (already run, above), several
       -- named targets, one merged meta.cbor — see 'runMultiTargetClosed'.
-      then runMultiTargetClosed timing outDir hscEnv binds mCapturedTy warnTexts (requestTargets args)
+      then runMultiTargetClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts (requestTargets args)
       else case (mTarget, requestAllClosed args) of
       (_, True) -> do
         -- All-closed mode: translate each binding independently via translateModuleClosed
@@ -304,7 +304,7 @@ processFile compiler timing args path = do
             Right (Just closed) -> return (acc ++ [(name, name, closed)])
           ) [] uniqueNames
         -- Validate and emit all surviving fixtures through the shared writer.
-        void $ writeClosedTargets timing outDir binds mCapturedTy warnTexts closedTargets
+        void $ writeClosedTargets timing outDir binds tycons mCapturedTy warnTexts closedTargets
         pruneAllClosedArtifacts outDir (map (\(_, outFileBase, _) -> outFileBase) closedTargets)
 
       (Just targetName, False) ->
@@ -316,7 +316,7 @@ processFile compiler timing args path = do
         -- (tidepool-harness/src/compile.rs passes --target, never
         -- --all-closed), so it's the one carrying translate/cbor_encode/write
         -- timing.
-        void $ writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName targetName
+        void $ writeWholeModuleClosed timing outDir hscEnv binds tycons mCapturedTy warnTexts targetName targetName
 
       (Nothing, False) -> do
         -- Per-binding mode (original behavior). NOT unified with
@@ -348,7 +348,7 @@ processFile compiler timing args path = do
         -- Write DataCon metadata: merge TyCon-derived + usage-derived + transitive + wired-in
         let tyconMeta = collectDataCons tycons
             usedMeta = collectUsedDataCons binds
-            transitiveMeta = collectTransitiveDCons binds
+            transitiveMeta = collectTransitiveDCons tycons binds
             wiredInMeta = wiredInDataCons
             -- Highest priority first; mergeMetaPreserving keeps colliding
             -- (same-varId, different-qualified-name) entries distinct so the
@@ -464,7 +464,7 @@ runTurnMode compiler args path = do
         -- The output file base
         -- stays "result" regardless — every Rust caller reads result.cbor.
         let targetName = fromMaybe scaffoldTargetName (requestTarget args)
-        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName scaffoldOutputBase
+        asksSites <- writeWholeModuleClosed timing outDir hscEnv binds (prTyCons result) mCapturedTy warnTexts targetName scaffoldOutputBase
         let wrapped = T.pack spliced
         case selector of
           SBind -> do

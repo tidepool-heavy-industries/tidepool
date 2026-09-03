@@ -274,6 +274,7 @@ impl PersistentSession {
             .filter(|&dc| self.session_table.get(dc.id) != Some(dc))
             .cloned()
             .collect();
+        let advances_constructor_vocabulary = !incoming.is_empty();
         log::debug!(
             target: "tidepool::session",
             "merge_table turn_cons={turn_cons} skipped={} applied={} session_cons_before={}",
@@ -283,7 +284,13 @@ impl PersistentSession {
         );
         self.session_table
             .extend_checked(incoming)
-            .map_err(|e| format!("session DataConTable collision: {e}"))
+            .map_err(|e| format!("session DataConTable collision: {e}"))?;
+        if advances_constructor_vocabulary {
+            if let Some(machine) = self.machine.as_mut() {
+                machine.refresh_parked_continuation_tables(&self.session_table);
+            }
+        }
+        Ok(())
     }
 
     // -- machine lifecycle -------------------------------------------------

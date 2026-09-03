@@ -2343,9 +2343,12 @@ impl JitEffectMachine {
     /// out of the map. A bottom-bearing answer therefore leaves the frame
     /// parked and rooted, and the caller can retry with a corrected answer.
     ///
-    /// Decoding uses the frame's own table, cloned at park time (see
-    /// [`ContinuationFrame::table`]). This method accepts no caller-supplied
-    /// table, so a frame cannot be resumed against a foreign constructor row.
+    /// Decoding uses the frame's session-owned table snapshot (see
+    /// [`ContinuationFrame::table`]). A resident session refreshes every
+    /// parked frame after collision-checking a newer fragment's constructors,
+    /// because a live closure from that fragment may enter an older frame.
+    /// This method still accepts no caller-supplied table, so an arbitrary
+    /// foreign constructor row cannot be substituted during resume.
     ///
     pub fn resume_continuation<U, H: DispatchEffect<U>>(
         &mut self,
@@ -2394,8 +2397,9 @@ impl JitEffectMachine {
         // Read the GC-CURRENT pointer out of the cell: collections since the
         // park rewrote it in place through the registered slot.
         let continuation = *frame.cell;
-        // Cancellation and constructor metadata belong to the frame; resume
-        // neither re-derives them nor accepts substitutes from the caller.
+        // Cancellation and the session-validated constructor snapshot belong
+        // to the frame; resume neither re-derives them nor accepts substitutes
+        // from the caller.
         let cancel_flag = frame.cancel_flag.clone();
         let table = frame.table.clone();
         // A live payload not claimed before resume is no longer
@@ -2448,6 +2452,18 @@ impl JitEffectMachine {
     /// deterministically.
     pub fn parked_ids(&self) -> Vec<ContinuationId> {
         self.resources.parked_ids()
+    }
+
+    /// Advance every parked continuation to the resident session's current,
+    /// collision-checked constructor vocabulary.
+    ///
+    /// Session fragments are compiled incrementally and their live closures
+    /// may later enter continuations parked by older fragments. Constructor
+    /// metadata is therefore session provenance, not immutable frame-local
+    /// provenance. One-shot machines never call this method.
+    pub fn refresh_parked_continuation_tables(&mut self, table: &DataConTable) {
+        self.resources
+            .refresh_continuation_tables(Arc::new(table.clone()));
     }
 
     /// The runtime resource scope owning the continuation parked under `id`, if any.

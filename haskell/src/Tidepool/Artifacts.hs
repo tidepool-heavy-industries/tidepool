@@ -29,6 +29,7 @@ import System.IO (hPutStrLn, stderr)
 
 import GHC.Core (CoreBind)
 import GHC.Core.DataCon (DataCon)
+import GHC.Core.TyCon (TyCon)
 import GHC.Driver.Env (HscEnv)
 
 import Tidepool.Binders (renderAskJson)
@@ -143,10 +144,10 @@ mergePoisonedTables tables =
 -- program. Metadata unions constructor and diagnostic information across all
 -- targets; @has_io@ is true when any target carries IO.
 writeClosedTargets
-  :: Bool -> FilePath -> [CoreBind] -> Maybe Text -> [Text]
+  :: Bool -> FilePath -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text]
   -> [(String, String, ClosedModule)]  -- ^ (targetName, outFileBase, closed)
   -> IO [(String, [YieldSite])]   -- ^ outFileBase -> typed suspension sites
-writeClosedTargets timing outDir binds mCapturedTy warnTexts targets = do
+writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts targets = do
   let multi = length targets > 1
 
   -- Tree and metadata encoding share one timing phase.
@@ -178,7 +179,7 @@ writeClosedTargets timing outDir binds mCapturedTy warnTexts targets = do
   let allReachBinds  = concatMap twReachBinds writes
       allUsedDCs     = concatMap twUsedDCs writes
       siblingMeta    = siblingCloseDCons allUsedDCs
-      transitiveMeta = collectTransitiveDCons allReachBinds
+      transitiveMeta = collectTransitiveDCons typeUniverse allReachBinds
       wiredInMeta    = wiredInDataCons
       allMeta = mergeMetaPreserving
                   [ wiredInMeta, concatMap twUsedMeta writes, siblingMeta, transitiveMeta ]
@@ -253,10 +254,10 @@ assertMetaCoversEmitted targetName nodes reachBinds allMeta = do
 -- | Translate and emit one target. The compiler binding name and output file
 -- base are separate because session scaffolds use a reserved binding while
 -- callers still consume @result.cbor@.
-writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> Maybe Text -> [Text] -> String -> String -> IO [YieldSite]
-writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetName outFileBase = do
+writeWholeModuleClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> String -> String -> IO [YieldSite]
+writeWholeModuleClosed timing outDir hscEnv binds typeUniverse mCapturedTy warnTexts targetName outFileBase = do
   closed <- translateTargetClosed timing hscEnv binds targetName
-  results <- writeClosedTargets timing outDir binds mCapturedTy warnTexts [(targetName, outFileBase, closed)]
+  results <- writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts [(targetName, outFileBase, closed)]
   case results of
     [(_, sites)] -> return sites
     _ -> error "writeWholeModuleClosed: writeClosedTargets returned an unexpected result shape"
@@ -264,12 +265,12 @@ writeWholeModuleClosed timing outDir hscEnv binds mCapturedTy warnTexts targetNa
 -- | Translate and emit several required targets against one compiler result.
 -- Any target failure aborts the operation; best-effort fixture sweeps use the
 -- lower-level 'writeClosedTargets' after selecting their survivors.
-runMultiTargetClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> Maybe Text -> [Text] -> [String] -> IO ()
-runMultiTargetClosed timing outDir hscEnv binds mCapturedTy warnTexts targetNames = do
+runMultiTargetClosed :: Bool -> FilePath -> HscEnv -> [CoreBind] -> [TyCon] -> Maybe Text -> [Text] -> [String] -> IO ()
+runMultiTargetClosed timing outDir hscEnv binds typeUniverse mCapturedTy warnTexts targetNames = do
   closedTargets <- forM targetNames $ \name -> do
     closed <- translateTargetClosed timing hscEnv binds name
     return (name, name, closed)
-  _ <- writeClosedTargets timing outDir binds mCapturedTy warnTexts closedTargets
+  _ <- writeClosedTargets timing outDir binds typeUniverse mCapturedTy warnTexts closedTargets
   return ()
 
 -- | Encode the ask sites associated with one emitted target.

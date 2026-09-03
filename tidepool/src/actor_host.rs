@@ -1961,6 +1961,48 @@ mod tests {
             .all(|tool| matches!(tool, HostedTool::Custom(_))));
         assert!(policy.tools()[0].description().contains("GHCi-style"));
 
+        let worktree_response = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/generic_actor/root_worktree_response.hs"
+            )),
+        )
+        .await;
+        assert_eq!(
+            worktree_response["status"], "completed",
+            "an abstract interpreter-produced handle must cross into Haskell without ending the session: {worktree_response:?}"
+        );
+        let worktree_activation = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady {
+                        actor: resumed,
+                        message,
+                    }) if resumed == actor.identity() => break message,
+                    Some(_) => {}
+                    None => panic!(
+                        "resident deployment channel closed before worktree continuation wake"
+                    ),
+                }
+            }
+        })
+        .await
+        .expect("worktree continuation timeout");
+        assert!(worktree_activation.contains("typed result"));
+        let worktree_bindings =
+            dispatch_haskell(policy.as_ref(), [":type sessionInput", ":bindings"]).await;
+        assert_eq!(
+            worktree_bindings["status"], "committed",
+            "the interactive session must remain available after an effect response: {worktree_bindings:?}"
+        );
+        assert!(
+            worktree_bindings["items"][0]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("sessionInput :: Either WorktreeError WorktreeHandle"),
+            "{worktree_bindings:?}"
+        );
+
         let live_action = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(

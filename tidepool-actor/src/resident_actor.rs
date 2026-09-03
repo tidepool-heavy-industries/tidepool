@@ -809,31 +809,17 @@ where
         }
     }
 
-    fn restore_interactive_session(
-        &mut self,
-        awaiting: &mut Option<crate::interactive_session::ResidentInteractiveAwait>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        let awaiting = awaiting.take().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "interactive workbench lost its agent-session continuation".into(),
-            )
-        })?;
-        self.standing = ResidentStanding::Interactive(awaiting);
-        Ok(())
-    }
-
     async fn execute_workbench(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         request: WorkbenchRequest,
-        awaiting: &mut Option<crate::interactive_session::ResidentInteractiveAwait>,
     ) -> Result<KernelStep<WorkbenchResponse>, ResidentActorWorkbenchError> {
-        let awaiting_view = awaiting.as_ref().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
+        let ResidentStanding::Interactive(awaiting_view) = &self.standing else {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "interactive workbench lost its agent-session continuation".into(),
-            )
-        })?;
+            ));
+        };
         let workbench = self
             .environment
             .runner
@@ -879,7 +865,6 @@ where
                                 status: WorkbenchItemStatus::Rejected,
                                 output,
                             });
-                            self.restore_interactive_session(awaiting)?;
                             return Ok(KernelStep::Continue(workbench_response(
                                 WorkbenchRunStatus::Rejected,
                                 receipts,
@@ -919,7 +904,6 @@ where
                         status: WorkbenchItemStatus::Rejected,
                         output,
                     });
-                    self.restore_interactive_session(awaiting)?;
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Rejected,
                         receipts,
@@ -928,11 +912,16 @@ where
                     )));
                 }
                 ResidentWorkbenchStep::Completed(answer) => {
-                    let awaiting = awaiting.take().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "completion lost its agent-session continuation".into(),
-                        )
-                    })?;
+                    let awaiting =
+                        match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
+                            ResidentStanding::Interactive(awaiting) => awaiting,
+                            standing => {
+                                self.standing = standing;
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "completion lost its agent-session continuation".into(),
+                                ));
+                            }
+                        };
                     let outcome = workbench
                         .resume_completion(context.clone(), awaiting.hole, answer)
                         .await?;
@@ -955,7 +944,6 @@ where
             }
             index += 1;
         }
-        self.restore_interactive_session(awaiting)?;
         Ok(KernelStep::Continue(workbench_response(
             WorkbenchRunStatus::Committed,
             receipts,
@@ -1143,26 +1131,15 @@ where
     > {
         Box::pin(async move {
             let context = self.context(kernel.identity());
-            let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
-                ResidentStanding::Interactive(awaiting) => awaiting,
-                standing => {
-                    self.standing = standing;
-                    return Err(KernelInvocationFailure::Rejected {
-                        actor: context.actor,
-                        detail: "actor has no active Haskell agent session".into(),
-                    });
-                }
-            };
-            let mut awaiting = Some(awaiting);
-            let result = self
-                .execute_workbench(kernel, &context, request, &mut awaiting)
-                .await;
-            if result.is_err() {
-                if let Some(awaiting) = awaiting.take() {
-                    self.standing = ResidentStanding::Interactive(awaiting);
-                }
+            if !matches!(self.standing, ResidentStanding::Interactive(_)) {
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "actor has no active Haskell agent session".into(),
+                });
             }
-            result.map_err(|error| Self::invocation_failure(context.actor, error))
+            self.execute_workbench(kernel, &context, request)
+                .await
+                .map_err(|error| Self::invocation_failure(context.actor, error))
         })
     }
 

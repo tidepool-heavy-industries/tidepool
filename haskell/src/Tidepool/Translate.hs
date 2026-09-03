@@ -1273,39 +1273,72 @@ mergeMetaPreserving sources =
     [ ((dcmId e, dcmQualName e), e)
     | e <- reverse (concat sources) ]
 
--- | Compute transitive closure of TyCons reachable from all binder types,
--- expanding through newtypes, then return metadata for all their DataCons.
-collectTransitiveDCons :: [CoreBind] -> [DCMeta]
-collectTransitiveDCons binds =
-  let binderTypes = [ idType b | b <- concatMap bindersOfBind binds ]
+-- | Compute the constructor closure of every type that can cross a runtime
+-- boundary in the reachable Core graph.
+--
+-- Effect answers are introduced into continuation binders by Rust. Such a
+-- binder may be local, and its result type may be abstract in the authored
+-- module even though the defining home module's TyCon has a concrete runtime
+-- representation. Resolve every encountered TyCon through @typeUniverse@
+-- before following its constructors; Haskell export lists remain an authored
+-- source boundary, not a restriction on the runtime representation table.
+collectTransitiveDCons :: [TyCon] -> [CoreBind] -> [DCMeta]
+collectTransitiveDCons typeUniverse binds =
+  let canonicalByName = Map.fromListWith preferConcreteTyCon
+                          [ (tyConName tc, tc) | tc <- typeUniverse ]
+      canonical tc = Map.findWithDefault tc (tyConName tc) canonicalByName
+      binderTypes = [ idType b | b <- concatMap bindersOfBindDeep binds ]
       seedTyCons  = filter (not . isGhcCompilerTyCon)
-                      (foldMap (nonDetEltsUniqSet . tyConsOfType) binderTypes)
-      allTyCons   = closeTyCons emptyUniqSet seedTyCons
+                      (map canonical
+                        (foldMap (nonDetEltsUniqSet . tyConsOfType) binderTypes))
+      allTyCons   = closeTyCons canonical emptyUniqSet seedTyCons
   in  concatMap tyConToDCMeta (nonDetEltsUniqSet allTyCons)
   where
-    bindersOfBind (NonRec b _) = [b]
-    bindersOfBind (Rec pairs)  = map fst pairs
+    preferConcreteTyCon left right =
+      case (tyConDataCons_maybe left, tyConDataCons_maybe right) of
+        (Just _, Nothing) -> left
+        (Nothing, Just _) -> right
+        _                 -> left
 
-closeTyCons :: UniqSet TyCon -> [TyCon] -> UniqSet TyCon
-closeTyCons visited []     = visited
-closeTyCons visited (tc:rest)
-  | tc `elementOfUniqSet` visited = closeTyCons visited rest
+    bindersOfBindDeep (NonRec b rhs) = b : bindersOfExpr rhs
+    bindersOfBindDeep (Rec pairs) =
+      map fst pairs ++ concatMap (bindersOfExpr . snd) pairs
+
+    bindersOfExpr (Lam b body) = b : bindersOfExpr body
+    bindersOfExpr (Let binding body) =
+      bindersOfBindDeep binding ++ bindersOfExpr body
+    bindersOfExpr (Case scrutinee binder _ alternatives) =
+      binder : bindersOfExpr scrutinee ++ concatMap bindersOfAlt alternatives
+    bindersOfExpr (App fun argument) = bindersOfExpr fun ++ bindersOfExpr argument
+    bindersOfExpr (Cast expression _) = bindersOfExpr expression
+    bindersOfExpr (Tick _ expression) = bindersOfExpr expression
+    bindersOfExpr _ = []
+
+    bindersOfAlt (Alt _ binders expression) = binders ++ bindersOfExpr expression
+
+closeTyCons :: (TyCon -> TyCon) -> UniqSet TyCon -> [TyCon] -> UniqSet TyCon
+closeTyCons _ visited [] = visited
+closeTyCons canonical visited (rawTc:rest)
+  | tc `elementOfUniqSet` visited = closeTyCons canonical visited rest
   -- Never enter the GHC compiler library's type closure (e.g. DynFlags): it is
   -- enormous and only reachable from compile-time-only TH binders. See
   -- 'isGhcCompilerName'.
-  | isGhcCompilerTyCon tc         = closeTyCons visited rest
+  | isGhcCompilerTyCon tc         = closeTyCons canonical visited rest
   | otherwise =
       let visited' = addOneToUniqSet visited tc
           newtypeChildren = case unwrapNewTyCon_maybe tc of
-            Just (_tvs, reprTy, _coax) -> nonDetEltsUniqSet (tyConsOfType reprTy)
+            Just (_tvs, reprTy, _coax) ->
+              map canonical (nonDetEltsUniqSet (tyConsOfType reprTy))
             Nothing                    -> []
           fieldChildren = case tyConDataCons_maybe tc of
-            Just dcs -> [ ftc
+            Just dcs -> [ canonical ftc
                         | dc <- dcs
                         , Scaled _ ft <- dataConOrigArgTys dc
                         , ftc <- nonDetEltsUniqSet (tyConsOfType ft) ]
             Nothing  -> []
-      in closeTyCons visited' (newtypeChildren ++ fieldChildren ++ rest)
+      in closeTyCons canonical visited' (newtypeChildren ++ fieldChildren ++ rest)
+  where
+    tc = canonical rawTc
 
 tyConToDCMeta :: TyCon -> [DCMeta]
 tyConToDCMeta tc = case tyConDataCons_maybe tc of
@@ -1321,7 +1354,7 @@ tyConToDCMeta tc = case tyConDataCons_maybe tc of
 -- fragment's own Core constructs/matches only SOME of a sum type's variants
 -- — e.g. JSON-decoding a variant this particular compile never builds
 -- itself. 'collectTransitiveDCons' already gives full sibling sets for
--- every TyCon reachable through a top-level binder's TYPE (via
+-- every TyCon reachable through a runtime-reachable binder's TYPE (via
 -- 'closeTyCons'); this covers the complementary case, a TyCon reached only
 -- through Core CONSTRUCTION with no binder of that type in scope.
 siblingCloseDCons :: [DataCon] -> [DCMeta]

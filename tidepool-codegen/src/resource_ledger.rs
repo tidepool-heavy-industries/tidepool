@@ -104,6 +104,19 @@ impl ResourceLedger {
         ids
     }
 
+    /// Replace every parked frame's constructor view with one already
+    /// validated, monotone session-table snapshot.
+    ///
+    /// A live closure compiled by a later resident turn can be delivered into
+    /// an older continuation. That continuation must then interpret effect
+    /// responses using the whole session's constructor vocabulary, not only
+    /// the vocabulary present when the frame first parked.
+    pub(crate) fn refresh_continuation_tables(&mut self, table: Arc<DataConTable>) {
+        for frame in self.continuations.values_mut() {
+            frame.table = Arc::clone(&table);
+        }
+    }
+
     pub(crate) fn insert_handle(&mut self, slot: RootSlot, realm: RealmId) -> ValueHandle {
         let handle = ValueHandle::fresh();
         let replaced = self.handles.insert(handle.0, HandleEntry { slot, realm });
@@ -185,5 +198,35 @@ mod tests {
         assert!(closed.frames.is_empty());
         assert!(closed.handles.is_empty());
         assert_eq!(ledger.counts().cancellation_scopes, 1);
+    }
+
+    #[test]
+    fn parked_frames_receive_one_shared_newer_constructor_table() {
+        let mut ledger = ResourceLedger::default();
+        let realm = RealmId::fresh();
+        let original = Arc::new(DataConTable::new());
+        for value in [std::ptr::null_mut(), std::ptr::dangling_mut()] {
+            ledger.park(ContinuationFrame {
+                cell: Box::new(value),
+                realm,
+                principal: tidepool_repr::PrincipalId::SYSTEM,
+                effect_policy: EffectRunPolicy::SuspendAll,
+                kind: ParkKind::Plain,
+                live_payload_root: None,
+                live_payload: LivePayloadPolicy::None,
+                cancel_flag: Arc::new(AtomicBool::new(false)),
+                table: Arc::clone(&original),
+            });
+        }
+
+        let current = Arc::new(DataConTable::new());
+        ledger.refresh_continuation_tables(Arc::clone(&current));
+
+        for id in ledger.parked_ids() {
+            assert!(Arc::ptr_eq(
+                &ledger.continuation(id).expect("parked frame").table,
+                &current
+            ));
+        }
     }
 }
