@@ -17,6 +17,7 @@
 pub mod actor_host;
 pub mod compile_report;
 pub mod haskell_sources;
+mod host_dynamic_tools;
 pub mod shoal;
 pub use tidepool_bridge as bridge;
 pub use tidepool_bridge_derive as bridge_derive;

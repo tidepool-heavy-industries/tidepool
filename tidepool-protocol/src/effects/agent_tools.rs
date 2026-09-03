@@ -1,26 +1,27 @@
-//! Private suspension boundary for a resident Haskell MCP policy.
+//! Private suspension boundary for a resident Haskell tool policy.
 //!
 //! `Tidepool.Agent.Contract.serveTools` is the authored surface. The policy
 //! compiles one tools record, publishes its declarations while awaiting an
 //! invocation, dispatches the invocation in Haskell, publishes the result,
-//! and repeats. Rust owns MCP transport and actor admission; no live closure
+//! and repeats. Rust owns host projection and actor admission; no live closure
 //! crosses the language boundary.
 
 use crate::hs::HsType;
 use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
 
 #[must_use]
-pub fn actor_mcp() -> Effect {
+pub fn agent_tools() -> Effect {
     Effect {
-        name: "ActorMcp",
+        name: "AgentTools",
         authored_surface: crate::schema::AuthoredSurface::OPAQUE,
-        handler: "ActorMcpDecodeHandler",
-        handler_module: "actor_mcp",
-        req_enum: "ActorMcpReq",
-        decl_fn: "actor_mcp_decl",
+        handler: "AgentToolsDecodeHandler",
+        handler_module: "agent_tools",
+        req_enum: "AgentToolsReq",
+        decl_fn: "agent_tools_decl",
         description: &[
-            "Private resident-policy boundary for actor-scoped MCP tools. Authored code uses ",
-            "`serveTools`; Rust owns transport while Haskell owns declarations and dispatch.",
+            "Private resident-policy boundary for tools exposed to an attached agent. Authored ",
+            "code uses `serveTools`; Rust owns host projection while Haskell owns declarations ",
+            "and dispatch.",
         ],
         prompt_card: None,
         type_params: &[],
@@ -32,8 +33,8 @@ pub fn actor_mcp() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
-                ctor: "ActorMcpAwaitWith",
-                method: "actor_mcp_await_with",
+                ctor: "AgentToolsAwaitWith",
+                method: "agent_tools_await_with",
                 args: vec![
                     Arg {
                         name: "declarations",
@@ -57,8 +58,8 @@ pub fn actor_mcp() -> Effect {
                 extract: None,
             },
             Verb {
-                ctor: "ActorMcpReplyWith",
-                method: "actor_mcp_reply_with",
+                ctor: "AgentToolsReplyWith",
+                method: "agent_tools_reply_with",
                 args: vec![Arg {
                     name: "result",
                     ty: HsType::Value,

@@ -8,16 +8,15 @@ homepage.workspace = true
 documentation.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Durable delivery and proxy substrate for interactive Tidepool actors"
+description = "Durable delivery and process substrate for interactive Tidepool actors"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tidepool-actor.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-repr.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "net", "process"] }
+tokio = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
 tempfile.workspace = true

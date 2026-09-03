@@ -105,15 +105,16 @@ pub enum KernelMessage {
         request: MailboxValue,
         reply: RpcReplyPort<KernelCallReply>,
     },
-    Mcp {
-        name: String,
-        arguments: serde_json::Value,
+    Tool {
+        invocation: tidepool_tool::ToolInvocation,
         reply: RpcReplyPort<KernelInvocationReply>,
     },
     Workbench {
         request: WorkbenchRequest,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    /// Resume actor-owned work after its initiating caller has been settled.
+    Resume,
     ExternalApplicationFailed {
         failure: ExternalApplicationFailure,
         reply: RpcReplyPort<ExternalFailureDisposition>,
@@ -143,17 +144,15 @@ impl std::fmt::Debug for KernelMessage {
                 .field("ancestry", ancestry)
                 .field("request", request)
                 .finish_non_exhaustive(),
-            Self::Mcp {
-                name, arguments, ..
-            } => formatter
-                .debug_struct("Mcp")
-                .field("name", name)
-                .field("arguments", arguments)
+            Self::Tool { invocation, .. } => formatter
+                .debug_struct("Tool")
+                .field("invocation", invocation)
                 .finish_non_exhaustive(),
             Self::Workbench { request, .. } => formatter
                 .debug_struct("Workbench")
                 .field("request", request)
                 .finish_non_exhaustive(),
+            Self::Resume => formatter.write_str("Resume"),
             Self::ExternalApplicationFailed { failure, .. } => formatter
                 .debug_struct("ExternalApplicationFailed")
                 .field("failure", failure)

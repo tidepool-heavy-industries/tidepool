@@ -22,8 +22,8 @@ pub mod spawn;
 pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
-    InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
-    InteractiveLaunchMode, InteractiveMcpServer, InteractiveNativeSandbox, InteractiveProxyBinding,
+    InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentInstallation,
+    InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, InteractiveNativeSandbox,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -39,12 +39,28 @@ pub use spawn::{
 /// Construct the installed native interactive-agent adapter behind its
 /// backend-neutral seam.
 #[must_use]
-pub fn native_interactive_backend() -> std::sync::Arc<dyn InteractiveAgentBackend> {
-    std::sync::Arc::new(backend::codex::CodexInteractiveBackend)
+pub fn native_interactive_backend(
+    installation: InteractiveAgentInstallation,
+) -> std::sync::Arc<dyn InteractiveAgentBackend> {
+    std::sync::Arc::new(backend::codex::CodexInteractiveBackend::new(installation))
+}
+
+/// Resolve and behaviorally verify the interactive agent installed for Shoal.
+pub async fn resolve_native_interactive_agent(
+) -> Result<InteractiveAgentInstallation, AgentBackendError> {
+    backend::codex::node::resolve_installation().await
+}
+
+/// Restore the exact installation passed through Shoal's private host launch.
+pub fn native_interactive_agent_from_parts(
+    executable: std::path::PathBuf,
+    version: String,
+) -> Result<InteractiveAgentInstallation, AgentBackendError> {
+    backend::codex::node::installation_from_parts(executable, version)
 }
 
 /// Read and validate the opaque conversation binding established by the
-/// interactive node's MCP child.
+/// interactive host-tools session callback.
 pub async fn read_interactive_binding(
     path: &std::path::Path,
 ) -> Result<BackendThreadId, AgentBackendError> {
@@ -60,12 +76,4 @@ pub async fn persist_interactive_binding(
     thread: BackendThreadId,
 ) -> Result<(), AgentBackendError> {
     backend::codex::node::write_binding(path, thread).await
-}
-
-/// Run the installed interactive-agent MCP proxy from its typed environment
-/// binding. The caller supplies the ordinary CLI subcommand boundary; this
-/// function never inspects process arguments.
-pub async fn run_interactive_proxy() -> Result<(), Box<dyn std::error::Error>> {
-    backend::codex::node::run_proxy_from_env().await?;
-    Ok(())
 }

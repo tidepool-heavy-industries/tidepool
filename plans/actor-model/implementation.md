@@ -42,7 +42,7 @@ layer have been deleted.
   fenced-Haskell execution, correction rounds, and completion form one serial
   actor turn; provider inference does not hold a machine checkout.
 - Resident providers and external Codex applications enter the same actor
-  workbench. External applications use one actor-local MCP transport carrying
+  workbench. External applications use one actor-local hosted tool carrying
   Haskell source and structured execution receipts, not a parallel domain API.
 - `tidepool-model-output` owns fenced-Haskell parsing. The actor layer has no
   second parser.
@@ -55,6 +55,12 @@ layer have been deleted.
   are not semantic authority. GHC-derived binder metadata also supports
   ordinary pattern bindings, including bindings whose right-hand side
   suspends and resumes.
+- `AgentAction` is the live executable result of an interactive session.
+  Returning it settles the hosted-tool call before execution; the resident
+  actor then owns suspension, resumption, and the explicit next activation.
+- `waitOn` gives already-running actors ordinary `Functor`/`Applicative`/
+  `Monad` fan-in. `nextTurn` mounts the successful live result into the same
+  agent context without JSON or a second continuation registry.
 
 ### Haskell actor surface
 
@@ -71,6 +77,9 @@ layer have been deleted.
   sandboxes.
 - Public reusable code uses `Member` constraints. Rust does not reflect or
   compare positional effect-row ABIs.
+- `Complete result` alone occupies the row head as a scoped result delimiter;
+  this lets GHC infer the exact return type while ordinary capabilities remain
+  `Member`-polymorphic.
 
 ### Rust-owned worker custody
 
@@ -135,7 +144,7 @@ The current boundary is covered at three levels.
 - worker batch reservation order, assignment normalization, idempotent retry,
   conflicts, replayable collection, acknowledgement, and tombstones;
 - call-cycle ancestry, exact address decoding, terminal encoding, profile
-  attenuation, and source/export membrane helpers;
+  attenuation, and source/dependency-closure helpers;
 - provider-session serialization, queued lifecycle input, and provider failure;
 - generated protocol declarations and Haskell/Rust request decoding.
 
@@ -151,8 +160,14 @@ The current boundary is covered at three levels.
 
 ### Real GHC/JIT/Shoal verticals
 
-- a resident root installs its actor-local MCP policy, handles a typed call,
+- a resident root installs its actor-local tool policy, handles a typed call,
   starts and awaits a child, and retires exactly once;
+- an interactive root returns an `AgentAction`, composes two closure-valued
+  child exits with ordinary `Applicative`, settles its hosted-tool caller
+  before waiting, and forces the composed closure as the next activation's
+  live `sessionInput`;
+- the same vertical maps an intentionally failed child into typed
+  `ActionFailure` and reactivates the root without losing its session;
 - the bundled DevSwarm starts a batch, forces the returned live state in a
   later session, receives stable plural wakes, replays collection, and
   acknowledges results;
@@ -184,7 +199,7 @@ of the Ractor cutover.
 - Improve concise rendering for worker starts, collections, acknowledgements,
   and root completion while retaining a verbose structured view.
 - Measure and separately attribute queueing, compilation, worktree creation,
-  actor execution, MCP transport, and outer-cell resume latency before changing
+  actor execution, hosted-tool transport, and outer-cell resume latency before changing
   execution architecture.
 - Project direct local-actor lifecycle and execution facts into one neutral,
   bounded event stream. Do not revive the deleted selfharness-to-actor event

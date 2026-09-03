@@ -1,3 +1,3 @@
 firstWorkers
 -- TIDEPOOL-ITEM --
-complete ()
+complete (pure ())

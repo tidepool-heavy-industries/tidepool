@@ -17,9 +17,9 @@
 -- collector recovers the old coarse figure as the SUM @ghc_setup + ghc_load@
 -- (a flat-sum collector already does this for free); neither row is emitted
 -- twice, so there is nothing to avoid double-counting. On the session path,
--- @inject@ (PHASE 2's Val-iface splice) is a third flat row alongside them,
--- with no normal-path counterpart (it is emitted by @sessionVariant@'s
--- @cpAfterLoad@ hook). @load'@ itself gets NO internal
+-- @inject@ (the dependency-directed Val-iface splices summed across a session
+-- compile) is a third flat row alongside them, with no normal-path
+-- counterpart. @load'@ itself gets NO internal
 -- decomposition: it already redoes the SAME parse\/typecheck\/core2core work
 -- the per-module loop below it redoes a second time, so one row around the
 -- whole call answers what matters. Do not redefine an existing phase's

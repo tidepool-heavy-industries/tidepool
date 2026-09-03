@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use rmcp::{model::*, service::RequestContext, ErrorData as McpError, RoleServer, ServerHandler};
-use tidepool_tool::{ToolDeclaration, ToolKind};
+use tidepool_tool::{HostedTool, ToolArguments, ToolDeclaration, ToolInvocation, ToolKind};
 
 pub type ToolDispatchFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolDispatchError>> + Send + 'static>>;
@@ -33,6 +33,8 @@ pub enum DynamicMcpError {
     InvalidInputSchema { name: String },
     #[error("MCP tool {name:?} has a non-object output schema")]
     InvalidOutputSchema { name: String },
+    #[error("custom tool {0:?} cannot be projected through MCP")]
+    UnsupportedCustomTool(String),
 }
 
 type Dispatcher = dyn Fn(String, serde_json::Value) -> ToolDispatchFuture + Send + Sync + 'static;
@@ -66,15 +68,28 @@ impl DynamicMcpServer {
     /// admission and continuation ownership remain inside the policy; this
     /// adapter owns only MCP declaration and result shapes.
     pub fn from_resident_policy(
-        policy: Arc<dyn tidepool_actor::ResidentMcpEndpoint>,
+        policy: Arc<dyn tidepool_actor::ResidentToolEndpoint>,
     ) -> Result<Self, DynamicMcpError> {
-        let declarations = policy.declarations().to_vec();
+        let declarations = policy
+            .tools()
+            .iter()
+            .map(|tool| match tool {
+                HostedTool::Function(declaration) => Ok(declaration.clone()),
+                HostedTool::Custom(declaration) => Err(DynamicMcpError::UnsupportedCustomTool(
+                    declaration.name.clone(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let instructions = policy.instructions().map(str::to_owned);
         Self::new(declarations, instructions, move |name, arguments| {
             let policy = Arc::clone(&policy);
             Box::pin(async move {
                 policy
-                    .dispatch_boxed(name, arguments)
+                    .dispatch_boxed(ToolInvocation {
+                        context: None,
+                        name,
+                        arguments: ToolArguments::Structured(arguments),
+                    })
                     .await
                     .map_err(|error| ToolDispatchError::Failed(error.to_string()))
             })

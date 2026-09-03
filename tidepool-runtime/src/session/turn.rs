@@ -462,6 +462,14 @@ pub fn assemble_expression_module(
 ) -> String {
     let mut out = preamble_with_imports.to_string();
     out.push_str("-- [user]\n");
+    if matches!(lift, ExpressionLift::Effectful) {
+        // Give GHC the actor's exact row while it infers the user expression.
+        // Without this local signature, the let-bound expression is
+        // generalized before `__result` constrains it; result-indexed scoped
+        // effects such as `Complete (AgentAction ActorEffects ())` then lose
+        // the very context needed to infer their inner live action type.
+        out.push_str(&format!("__workbenchValue :: Eff {effect_stack} _\n"));
+    }
     out.push_str("__workbenchValue = let {\n __value =\n");
     out.push_str(expression);
     if !expression.ends_with('\n') {
@@ -1302,6 +1310,30 @@ mod tests {
     #[test]
     fn preamble_default_marker_matches_mcp_constant() {
         assert_eq!(PREAMBLE_DEFAULT_MARKER, tidepool_mcp::PREAMBLE_DEFAULT_DECL);
+    }
+
+    #[test]
+    fn effectful_expression_is_inferred_under_the_exact_workbench_row() {
+        let row = "(Complete (AgentAction ActorEffects ()) ': ActorEffects)";
+        let effectful = assemble_expression_module(
+            "module Expr where\n",
+            "__result",
+            row,
+            "complete action",
+            ExpressionLift::Effectful,
+        );
+        assert!(effectful.contains(&format!(
+            "__workbenchValue :: Eff {row} _\n__workbenchValue ="
+        )));
+
+        let pure = assemble_expression_module(
+            "module Expr where\n",
+            "__result",
+            row,
+            "42",
+            ExpressionLift::Pure,
+        );
+        assert!(!pure.contains("__workbenchValue ::"));
     }
 
     #[test]

@@ -25,6 +25,7 @@ module Tidepool.Translate
 
 import GHC
 import GHC.Core
+import qualified GHC.Core.Utils as Core
 import GHC.Types.Id
 import GHC.Types.Var (isTyVar, isCoVar, varUnique, varName, setVarUnique)
 import GHC.Types.Unique (getKey, mkUnique)
@@ -78,7 +79,13 @@ import Tidepool.Metadata (DCMeta(..))
 import Tidepool.PrimOps
   ( floatMathToDouble, mapPrimOp, primOpArity, splitMultiReturnPrimOp
   , splitTripleReturnPrimOp, splitUnaryMultiReturnPrimOp, splitWord2DivPrimOp )
-import Tidepool.EffectSchema (SiteType(..), VerbSpec(..), YieldSite(..), sitedVerbs)
+import Tidepool.EffectSchema
+  ( SiteAnswerSource (..)
+  , SiteType (..)
+  , VerbSpec (..)
+  , YieldSite (..)
+  , sitedVerbs
+  )
 import Tidepool.Session (isSessionValModule)
 import Tidepool.TypePolicy
   ( isGhcCompilerName, isGhcCompilerTyCon, modulesOfType, nominalHeadsOfType
@@ -1850,15 +1857,18 @@ translate expr =
     -- FIELD of the verb's row, so this arm carries no per-verb constant.
     Var v | Just spec <- lookupSitedVerb v
           , let typeArgs = filter (not . isValueArg) allArgs
-          -- The answer type is always the FIRST type argument; 'vsTypeArgs'
-          -- says how many the shape requires (any beyond the first are
-          -- discarded — see the rows for which verb discards what and why).
+          -- 'vsTypeArgs' says how many visible type arguments the site's
+          -- shape requires. Primitive verbs take their answer from the first;
+          -- higher-level action combinators expose it as the applied result.
           , Just siteTys@(ty : _) <- leadingTypes (vsTypeArgs spec) typeArgs
           -- The trailing 'vsValueArity' args are the verb's own; anything
           -- before them is 0+ leading `Member <Eff> effs` dictionaries (see
           -- 'splitTrailingArgs').
           , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
-        stableTy <- checkSiteType spec ty
+        let answerTy = case vsAnswerSource spec of
+              FirstTypeArgument -> ty
+              AppliedResultType -> Core.exprType expr
+        stableTy <- checkSiteType spec answerTy
         stableInputs <- mapM (checkSiteInputType spec siteTys) (vsInputTypeArgs spec)
         sitedIdM <- gets (Map.lookup (vsName spec) . tsSitedIds)
         case sitedIdM of

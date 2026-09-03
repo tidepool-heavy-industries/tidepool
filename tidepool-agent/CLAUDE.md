@@ -3,7 +3,7 @@
 **Charter.** Belongs: typed headless subagent spawning, long-lived interactive
 agent process integration, backend adapters, the cycle saga, and model-policy
 allowlists. The ONLY crate that knows a coding backend exists. Does NOT belong:
-actor lifecycle, durable actor inboxes, MCP policy, the `Subagent` effect
+actor lifecycle, durable actor inboxes, resident tool policy, the `Subagent` effect
 handler wiring (`tidepool-handlers`), or worktree creation itself
 (`tidepool-worktree`).
 

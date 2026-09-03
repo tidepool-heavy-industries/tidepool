@@ -1,98 +1,204 @@
-//! Stock-TUI rollout binding and push operations.
+//! Interactive Codex installation, launch, and lifecycle operations.
 //!
-//! The interactive process owns its conversation. Its stdio MCP child learns
-//! the exact surrounding rollout from process ancestry, persists that binding,
-//! and reports it to Tidepool. Subsequent delivery uses the public queue
-//! command; no app-server impersonation or transcript mutation is involved.
+//! Shoal resolves and behaviorally probes one absolute executable before it
+//! mutates tmux state. The resulting value is the sole program used for TUI
+//! launch, queue delivery, and archival. Actor tools are supplied through the
+//! fork's HTTP/1.1-over-UDS host dynamic-tool boundary.
 
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
+use tidepool_extract_cmd::exec_check::is_readable_executable_file;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use crate::interactive::{
-    ENV_ACTOR_BINDING_PATH, ENV_ACTOR_ID, ENV_ACTOR_INCARNATION, ENV_ACTOR_WORKSPACE,
-    ENV_PROXY_CREDENTIAL, ENV_PROXY_ENDPOINT,
-};
 use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
-    InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, InteractiveNativeSandbox,
-    ReasoningEffort,
+    InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
+    InteractiveNativeSandbox, ReasoningEffort,
 };
-use tidepool_actor::{ActorId, ActorRef, Incarnation};
-use tidepool_node::{NodeCredential, NodeHandshake};
 
-/// Run the concrete stdio sidecar configured by the daemon-owned launch.
+const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
+const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+const CLI_DEADLINE: Duration = Duration::from_secs(30);
+const CAPTURE_LIMIT: usize = 64 * 1024;
+
+/// Resolve and behaviorally verify the interactive Codex executable.
 ///
-/// Rollout discovery is a background task: the TUI may require MCP
-/// initialization before it creates its session file, so binding discovery
-/// must never delay or deadlock the MCP handshake.
-pub async fn run_proxy_from_env() -> Result<(), AgentBackendError> {
-    let endpoint = required_path(ENV_PROXY_ENDPOINT)?;
-    let binding_path = required_path(ENV_ACTOR_BINDING_PATH)?;
-    let workspace = required_path(ENV_ACTOR_WORKSPACE)?;
-    let actor = ActorRef {
-        id: ActorId(required_u64(ENV_ACTOR_ID)?),
-        incarnation: Incarnation(required_u64(ENV_ACTOR_INCARNATION)?),
-    };
-    let credential = NodeCredential(required_env(ENV_PROXY_CREDENTIAL)?);
-    let handshake = NodeHandshake::current(actor, credential);
-
-    let discovery = tokio::spawn(discover_and_bind(
-        std::process::id(),
-        workspace,
-        binding_path,
-    ));
-    let proxy = tidepool_node::proxy_stdio(&endpoint, &handshake)
-        .await
-        .map_err(|error| AgentBackendError::BackendUnavailable {
-            detail: error.to_string(),
-        });
-    discovery.abort();
-    proxy
-}
-
-async fn discover_and_bind(parent_pid: u32, cwd: PathBuf, binding_path: PathBuf) {
-    loop {
-        match discover_parent_rollout(parent_pid, &cwd) {
-            Ok(thread) => match write_binding(&binding_path, thread).await {
-                Ok(()) => return,
-                Err(error) => tracing::debug!(%error, "rollout binding write not ready"),
-            },
-            Err(error) => tracing::debug!(%error, "interactive rollout not discoverable yet"),
+/// A configured override is strict: an invalid value never falls through to a
+/// different `codex` on `PATH`.
+pub async fn resolve_installation() -> Result<InteractiveAgentInstallation, AgentBackendError> {
+    let executable = resolve_executable()?;
+    let version_output = probe(&executable, &["--version"], "read version").await?;
+    require_probe(
+        &executable,
+        &["--help"],
+        "host dynamic tools",
+        &["--host-dynamic-tools-socket"],
+    )
+    .await?;
+    require_probe(
+        &executable,
+        &["queue", "--help"],
+        "queue delivery",
+        &["--thread", "--message"],
+    )
+    .await?;
+    require_probe(
+        &executable,
+        &["archive", "--help"],
+        "conversation archival",
+        &[],
+    )
+    .await?;
+    let version = first_nonempty_line(&version_output).ok_or_else(|| {
+        AgentBackendError::ProtocolRejected {
+            detail: "interactive Codex returned an empty version".into(),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    })?;
+    Ok(InteractiveAgentInstallation::new(executable, version))
 }
 
-fn required_env(name: &'static str) -> Result<String, AgentBackendError> {
-    std::env::var(name).map_err(|_| AgentBackendError::ProtocolRejected {
-        detail: format!("interactive actor proxy is missing {name}"),
+/// Reconstitute an installation already verified by Shoal's parent process.
+pub fn installation_from_parts(
+    executable: PathBuf,
+    version: String,
+) -> Result<InteractiveAgentInstallation, AgentBackendError> {
+    if !executable.is_absolute() || !is_readable_executable_file(&executable) {
+        return Err(AgentBackendError::BackendUnavailable {
+            detail: format!(
+                "interactive Codex executable is no longer usable: {}",
+                executable.display()
+            ),
+        });
+    }
+    if version.trim().is_empty() {
+        return Err(AgentBackendError::ProtocolRejected {
+            detail: "interactive Codex version is empty".into(),
+        });
+    }
+    Ok(InteractiveAgentInstallation::new(executable, version))
+}
+
+fn resolve_executable() -> Result<PathBuf, AgentBackendError> {
+    resolve_executable_from(
+        std::env::var_os(ENV_INTERACTIVE_CODEX_BIN),
+        std::env::var_os("PATH"),
+    )
+}
+
+fn resolve_executable_from(
+    configured: Option<OsString>,
+    search_path: Option<OsString>,
+) -> Result<PathBuf, AgentBackendError> {
+    if let Some(configured) = configured {
+        let path = PathBuf::from(configured);
+        if !path.is_absolute() || !is_readable_executable_file(&path) {
+            return Err(AgentBackendError::BackendUnavailable {
+                detail: format!(
+                    "{ENV_INTERACTIVE_CODEX_BIN} must name an absolute readable executable file: {}",
+                    path.display()
+                ),
+            });
+        }
+        return std::fs::canonicalize(&path)
+            .map_err(|error| unavailable("canonicalize interactive Codex", error));
+    }
+
+    let path = search_path.ok_or_else(|| AgentBackendError::BackendUnavailable {
+        detail: format!("{ENV_INTERACTIVE_CODEX_BIN} is unset and PATH is unavailable"),
+    })?;
+    for directory in std::env::split_paths(&path) {
+        for name in executable_names() {
+            let candidate = directory.join(name);
+            if is_readable_executable_file(&candidate) {
+                return std::fs::canonicalize(&candidate)
+                    .map_err(|error| unavailable("canonicalize interactive Codex", error));
+            }
+        }
+    }
+    Err(AgentBackendError::BackendUnavailable {
+        detail: format!(
+            "interactive Codex was not found; set {ENV_INTERACTIVE_CODEX_BIN} to the custom build"
+        ),
     })
 }
 
-fn required_path(name: &'static str) -> Result<PathBuf, AgentBackendError> {
-    required_env(name).map(PathBuf::from)
+#[cfg(windows)]
+fn executable_names() -> &'static [&'static str] {
+    &["codex.exe", "codex"]
 }
 
-fn required_u64(name: &'static str) -> Result<u64, AgentBackendError> {
-    let value = required_env(name)?;
-    value
-        .parse()
-        .map_err(|_| AgentBackendError::ProtocolRejected {
-            detail: format!("interactive actor proxy has invalid {name}={value:?}"),
-        })
+#[cfg(not(windows))]
+fn executable_names() -> &'static [&'static str] {
+    &["codex"]
 }
 
-/// Adapter for an ordinary interactive TUI and its public push commands.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct CodexInteractiveBackend;
+async fn require_probe(
+    executable: &Path,
+    args: &[&str],
+    capability: &str,
+    needles: &[&str],
+) -> Result<(), AgentBackendError> {
+    let output = probe(executable, args, capability).await?;
+    if needles.iter().all(|needle| output.contains(needle)) {
+        return Ok(());
+    }
+    Err(AgentBackendError::ProtocolRejected {
+        detail: format!(
+            "interactive Codex lacks required {capability} support ({})",
+            needles.join(", ")
+        ),
+    })
+}
+
+async fn probe(
+    executable: &Path,
+    args: &[&str],
+    operation: &str,
+) -> Result<String, AgentBackendError> {
+    let output = run_captured(executable, None, args.iter().copied(), PROBE_DEADLINE).await?;
+    if !output.status.success() {
+        return Err(AgentBackendError::RunFailed {
+            detail: format!(
+                "interactive Codex {operation} probe failed ({}): {}",
+                output.status,
+                output.stderr.trim()
+            ),
+        });
+    }
+    Ok(format!("{}\n{}", output.stdout, output.stderr))
+}
+
+fn first_nonempty_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+/// Adapter for the verified interactive TUI and its public lifecycle commands.
+#[derive(Debug, Clone)]
+pub struct CodexInteractiveBackend {
+    installation: InteractiveAgentInstallation,
+}
+
+impl CodexInteractiveBackend {
+    #[must_use]
+    pub fn new(installation: InteractiveAgentInstallation) -> Self {
+        Self { installation }
+    }
+}
 
 impl InteractiveAgentBackend for CodexInteractiveBackend {
     fn render(
         &self,
         spec: &InteractiveAgentSpec,
     ) -> Result<InteractiveAgentCommand, AgentBackendError> {
-        command_for(spec)
+        command_for(&self.installation, spec)
     }
 
     fn push<'a>(
@@ -101,7 +207,12 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         thread: &'a BackendThreadId,
         message: &'a str,
     ) -> InteractiveFuture<'a, ()> {
-        Box::pin(queue_message(Path::new(cwd), thread, message))
+        Box::pin(queue_message(
+            &self.installation,
+            Path::new(cwd),
+            thread,
+            message,
+        ))
     }
 
     fn archive<'a>(
@@ -109,13 +220,30 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         cwd: &'a str,
         thread: &'a BackendThreadId,
     ) -> InteractiveFuture<'a, ()> {
-        Box::pin(archive_thread(Path::new(cwd), thread))
+        Box::pin(archive_thread(&self.installation, Path::new(cwd), thread))
     }
 }
 
-fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, AgentBackendError> {
-    validate_mcp_name(&spec.mcp.name)?;
-    let mut command = Command::new("codex");
+fn command_for(
+    installation: &InteractiveAgentInstallation,
+    spec: &InteractiveAgentSpec,
+) -> Result<InteractiveAgentCommand, AgentBackendError> {
+    if !spec.host_tools_socket.is_absolute() {
+        return Err(AgentBackendError::ProtocolRejected {
+            detail: format!(
+                "host dynamic-tools socket must be absolute: {}",
+                spec.host_tools_socket.display()
+            ),
+        });
+    }
+    let program = installation
+        .executable()
+        .to_str()
+        .ok_or_else(|| AgentBackendError::ProtocolRejected {
+            detail: "interactive Codex executable path is not UTF-8".into(),
+        })?
+        .to_owned();
+    let mut command = Command::new(installation.executable());
     match &spec.mode {
         InteractiveLaunchMode::Fresh => {}
         InteractiveLaunchMode::Resume(thread) => {
@@ -135,6 +263,9 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, A
         InteractiveNativeSandbox::BackendWorkspaceWrite => "workspace-write",
         InteractiveNativeSandbox::HostMountBoundary => "danger-full-access",
     });
+    command
+        .arg("--host-dynamic-tools-socket")
+        .arg(&spec.host_tools_socket);
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
@@ -155,54 +286,12 @@ fn command_for(spec: &InteractiveAgentSpec) -> Result<InteractiveAgentCommand, A
         &spec.developer_instructions,
     )?;
 
-    let prefix = format!("mcp_servers.{}", spec.mcp.name);
-    push_config_string(
-        &mut command,
-        &format!("{prefix}.command"),
-        &spec.mcp.command,
-    )?;
-    push_config_value(
-        &mut command,
-        &format!("{prefix}.args"),
-        serde_json::to_string(&spec.mcp.args).map_err(config_encode_error)?,
-    );
-    // Override a same-named project/global server completely. Values arrive
-    // only through the explicit inherited-name membrane below.
-    push_config_value(&mut command, &format!("{prefix}.env"), "{}".into());
-    push_config_string(&mut command, &format!("{prefix}.cwd"), &spec.mcp.cwd)?;
-    let mut forward_env = spec.mcp.forward_env.clone();
-    forward_env.extend(["TMUX".to_string(), "TMUX_PANE".to_string()]);
-    forward_env.sort();
-    forward_env.dedup();
-    push_config_value(
-        &mut command,
-        &format!("{prefix}.env_vars"),
-        serde_json::to_string(&forward_env).map_err(config_encode_error)?,
-    );
-    push_config_value(
-        &mut command,
-        &format!("{prefix}.required"),
-        spec.mcp.required.to_string(),
-    );
-    push_config_value(&mut command, &format!("{prefix}.enabled"), "true".into());
-    // This is the host-installed, actor-scoped control plane, not an
-    // arbitrary MCP server discovered from user configuration. Its endpoint
-    // is authenticated to the actor principal and Rust still enforces every
-    // operation. Codex has no human approval channel in this deployment
-    // (`approval_policy=never`), so leaving MCP approval in `auto` makes
-    // truthful mutating tools such as `spawn_worker` impossible to call.
-    push_config_string(
-        &mut command,
-        &format!("{prefix}.default_tools_approval_mode"),
-        "approve",
-    )?;
-
     if let Some(prompt) = &spec.initial_prompt {
         command.arg(prompt);
     }
 
     Ok(InteractiveAgentCommand {
-        program: "codex".into(),
+        program,
         args: command
             .as_std()
             .get_args()
@@ -216,35 +305,17 @@ fn push_config_string(
     key: &str,
     value: &str,
 ) -> Result<(), AgentBackendError> {
-    push_config_value(
-        command,
-        key,
-        serde_json::to_string(value).map_err(config_encode_error)?,
-    );
+    command.arg("-c").arg(format!(
+        "{key}={}",
+        serde_json::to_string(value).map_err(config_encode_error)?
+    ));
     Ok(())
-}
-
-fn push_config_value(command: &mut Command, key: &str, value: String) {
-    command.arg("-c").arg(format!("{key}={value}"));
 }
 
 fn config_encode_error(error: serde_json::Error) -> AgentBackendError {
     AgentBackendError::ProtocolRejected {
         detail: format!("cannot encode interactive launch configuration: {error}"),
     }
-}
-
-fn validate_mcp_name(name: &str) -> Result<(), AgentBackendError> {
-    if !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return Ok(());
-    }
-    Err(AgentBackendError::ProtocolRejected {
-        detail: format!("invalid MCP server name {name:?}"),
-    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,10 +325,8 @@ pub struct RolloutBinding {
 }
 
 impl RolloutBinding {
-    /// V1 trusted Codex MCP `_meta.threadId`, which may identify the hosted
-    /// conversation rather than this local resumable TUI rollout. V2 is
-    /// discovered from the owning process ancestry and open session file.
-    pub const VERSION: u32 = 2;
+    /// V3 is bound directly by Codex's host dynamic-tool session callback.
+    pub const VERSION: u32 = 3;
 
     pub fn new(thread: BackendThreadId) -> Result<Self, AgentBackendError> {
         validate_thread(&thread)?;
@@ -312,13 +381,15 @@ pub async fn write_binding(path: &Path, thread: BackendThreadId) -> Result<(), A
         })
 }
 
-pub async fn queue_message(
+async fn queue_message(
+    installation: &InteractiveAgentInstallation,
     cwd: &Path,
     thread: &BackendThreadId,
     message: &str,
 ) -> Result<(), AgentBackendError> {
     validate_thread(thread)?;
     run_cli(
+        installation,
         cwd,
         "queue",
         ["queue", "--thread", thread.0.as_str(), "--message", message],
@@ -326,104 +397,13 @@ pub async fn queue_message(
     .await
 }
 
-pub async fn archive_thread(cwd: &Path, thread: &BackendThreadId) -> Result<(), AgentBackendError> {
-    validate_thread(thread)?;
-    run_cli(cwd, "archive", ["archive", thread.0.as_str()]).await
-}
-
-/// Discover the rollout owned by the surrounding stock TUI.
-///
-/// MCP children are not guaranteed to be direct children of the TUI, so this
-/// walks process ancestry and chooses the newest open non-subagent rollout
-/// whose recorded working directory matches the actor workspace.
-#[cfg(target_os = "linux")]
-pub fn discover_parent_rollout(
-    parent_pid: u32,
+async fn archive_thread(
+    installation: &InteractiveAgentInstallation,
     cwd: &Path,
-) -> Result<BackendThreadId, AgentBackendError> {
-    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
-    let mut pid = parent_pid;
-    for _ in 0..16 {
-        let candidates = rollout_candidates(pid, &canonical_cwd)?;
-        if let Some((_, thread)) = candidates.into_iter().max_by_key(|(modified, _)| *modified) {
-            return Ok(thread);
-        }
-        let next = process_parent_pid(pid)?;
-        if next == 0 || next == pid {
-            break;
-        }
-        pid = next;
-    }
-    Err(AgentBackendError::BackendUnavailable {
-        detail: "no open stock-TUI rollout matched the MCP process ancestry and workspace"
-            .to_string(),
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn rollout_candidates(
-    pid: u32,
-    canonical_cwd: &Path,
-) -> Result<Vec<(std::time::SystemTime, BackendThreadId)>, AgentBackendError> {
-    let entries = std::fs::read_dir(format!("/proc/{pid}/fd"))
-        .map_err(|error| unavailable("inspect MCP process ancestry", error))?;
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let target = match entry.and_then(|entry| std::fs::read_link(entry.path())) {
-            Ok(target) => target,
-            Err(_) => continue,
-        };
-        if target.extension().and_then(|value| value.to_str()) != Some("jsonl")
-            || !target.to_string_lossy().contains("/.codex/sessions/")
-        {
-            continue;
-        }
-        let contents = match std::fs::read_to_string(&target) {
-            Ok(contents) => contents,
-            Err(_) => continue,
-        };
-        let value: serde_json::Value = match contents.lines().next().map(serde_json::from_str) {
-            Some(Ok(value)) => value,
-            _ => continue,
-        };
-        let payload = &value["payload"];
-        if payload["thread_source"].as_str() == Some("subagent") {
-            continue;
-        }
-        let Some(recorded_cwd) = payload["cwd"].as_str() else {
-            continue;
-        };
-        let recorded_cwd =
-            std::fs::canonicalize(recorded_cwd).unwrap_or_else(|_| PathBuf::from(recorded_cwd));
-        if recorded_cwd != canonical_cwd {
-            continue;
-        }
-        let Some(id) = payload["id"].as_str() else {
-            continue;
-        };
-        let thread = BackendThreadId(id.to_owned());
-        if validate_thread(&thread).is_err() {
-            continue;
-        }
-        let modified = std::fs::metadata(&target)
-            .and_then(|metadata| metadata.modified())
-            .map_err(|error| unavailable("inspect rollout descriptor", error))?;
-        candidates.push((modified, thread));
-    }
-    Ok(candidates)
-}
-
-#[cfg(target_os = "linux")]
-fn process_parent_pid(pid: u32) -> Result<u32, AgentBackendError> {
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .map_err(|error| unavailable("inspect MCP process parent", error))?;
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("PPid:\t"))
-        .and_then(|value| value.trim().parse().ok())
-        .ok_or_else(|| AgentBackendError::ProtocolRejected {
-            detail: format!("cannot parse parent pid for process {pid}"),
-        })
+    thread: &BackendThreadId,
+) -> Result<(), AgentBackendError> {
+    validate_thread(thread)?;
+    run_cli(installation, cwd, "archive", ["archive", thread.0.as_str()]).await
 }
 
 fn validate_thread(thread: &BackendThreadId) -> Result<(), AgentBackendError> {
@@ -435,19 +415,12 @@ fn validate_thread(thread: &BackendThreadId) -> Result<(), AgentBackendError> {
 }
 
 async fn run_cli<'a>(
+    installation: &InteractiveAgentInstallation,
     cwd: &Path,
     operation: &'static str,
     args: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), AgentBackendError> {
-    const CLI_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-    let mut command = Command::new("codex");
-    command.args(args).current_dir(cwd).kill_on_drop(true);
-    let output = tokio::time::timeout(CLI_DEADLINE, command.output())
-        .await
-        .map_err(|_| AgentBackendError::BackendUnavailable {
-            detail: format!("interactive {operation} exceeded {CLI_DEADLINE:?}"),
-        })?
-        .map_err(|error| unavailable(operation, error))?;
+    let output = run_captured(installation.executable(), Some(cwd), args, CLI_DEADLINE).await?;
     if output.status.success() {
         return Ok(());
     }
@@ -455,9 +428,83 @@ async fn run_cli<'a>(
         detail: format!(
             "interactive {operation} failed ({}): {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         ),
     })
+}
+
+struct CapturedCommand {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+async fn run_captured<'a>(
+    executable: &Path,
+    cwd: Option<&Path>,
+    args: impl IntoIterator<Item = &'a str>,
+    deadline: Duration,
+) -> Result<CapturedCommand, AgentBackendError> {
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| unavailable("spawn interactive Codex", error))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AgentBackendError::BackendUnavailable {
+            detail: "interactive Codex stdout was not captured".into(),
+        })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AgentBackendError::BackendUnavailable {
+            detail: "interactive Codex stderr was not captured".into(),
+        })?;
+    let captured = tokio::time::timeout(deadline, async {
+        tokio::try_join!(
+            read_bounded(stdout, CAPTURE_LIMIT),
+            read_bounded(stderr, CAPTURE_LIMIT),
+            child.wait(),
+        )
+    })
+    .await
+    .map_err(|_| AgentBackendError::BackendUnavailable {
+        detail: format!("interactive Codex command exceeded {deadline:?}"),
+    })?
+    .map_err(|error| unavailable("run interactive Codex", error))?;
+    Ok(CapturedCommand {
+        stdout: String::from_utf8_lossy(&captured.0).into_owned(),
+        stderr: String::from_utf8_lossy(&captured.1).into_owned(),
+        status: captured.2,
+    })
+}
+
+async fn read_bounded(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    limit: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("captured output exceeded {limit} bytes"),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn unavailable(operation: &str, error: impl std::fmt::Display) -> AgentBackendError {
@@ -471,6 +518,25 @@ mod tests {
     use super::*;
 
     const THREAD: &str = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
+
+    fn installation() -> InteractiveAgentInstallation {
+        InteractiveAgentInstallation::new(
+            PathBuf::from("/nix/store/custom-codex/bin/codex"),
+            "codex 1".into(),
+        )
+    }
+
+    fn spec(mode: InteractiveLaunchMode) -> InteractiveAgentSpec {
+        InteractiveAgentSpec {
+            mode,
+            model: Some("gpt-test".to_string()),
+            effort: Some(ReasoningEffort::Medium),
+            developer_instructions: "actor charter".to_string(),
+            initial_prompt: Some("initialize through typed tools".to_string()),
+            native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
+            host_tools_socket: "/tmp/tidepool/host-tools.sock".into(),
+        }
+    }
 
     #[tokio::test]
     async fn binding_round_trip_is_current_and_exact() {
@@ -506,129 +572,62 @@ mod tests {
     }
 
     #[test]
-    fn fresh_tui_launch_carries_startup_prompt_and_only_its_scoped_mcp_server() {
-        let spec = InteractiveAgentSpec {
-            mode: InteractiveLaunchMode::Fresh,
-            model: Some("gpt-test".to_string()),
-            effort: Some(ReasoningEffort::Medium),
-            developer_instructions: "actor charter".to_string(),
-            initial_prompt: Some("initialize through typed tools".to_string()),
-            native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
-            mcp: crate::InteractiveMcpServer {
-                name: "tidepool_actor".to_string(),
-                command: "/tmp/shoal".to_string(),
-                args: vec!["proxy".to_string()],
-                cwd: "/tmp/work".to_string(),
-                forward_env: vec!["TIDEPOOL_ACTOR_PROXY_ENDPOINT".to_string()],
-                required: true,
-            },
-        };
-        let command = command_for(&spec).unwrap();
-        let args = command.args;
-        assert_eq!(command.program, "codex");
-        assert!(!args.iter().any(|arg| arg == "resume" || arg == "fork"));
-        assert!(args
+    fn fresh_launch_uses_exact_binary_and_host_tools_socket() {
+        let command = command_for(&installation(), &spec(InteractiveLaunchMode::Fresh)).unwrap();
+        assert_eq!(command.program, "/nix/store/custom-codex/bin/codex");
+        assert!(!command
+            .args
+            .iter()
+            .any(|arg| arg == "resume" || arg == "fork"));
+        assert!(command.args.windows(2).any(|args| {
+            args == [
+                "--host-dynamic-tools-socket",
+                "/tmp/tidepool/host-tools.sock",
+            ]
+        }));
+        assert!(command
+            .args
             .iter()
             .any(|arg| arg == "initialize through typed tools"));
-        assert!(args
-            .windows(2)
-            .any(|args| args == ["--ask-for-approval", "never"]));
-        assert!(args
-            .windows(2)
-            .any(|args| args == ["--sandbox", "danger-full-access"]));
-        assert!(!args.iter().any(|arg| arg == "--add-dir"));
-        assert!(args
-            .iter()
-            .any(|arg| arg.contains("mcp_servers.tidepool_actor.command")));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "mcp_servers.tidepool_actor.command=\"/tmp/shoal\""));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "mcp_servers.tidepool_actor.args=[\"proxy\"]"));
-        assert!(args
-            .iter()
-            .any(|arg| arg.contains("developer_instructions")));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "mcp_servers.tidepool_actor.required=true"));
-        assert!(args.iter().any(|arg| {
-            arg == "mcp_servers.tidepool_actor.default_tools_approval_mode=\"approve\""
+        assert!(!command.args.iter().any(|arg| arg.contains("mcp_servers")));
+    }
+
+    #[test]
+    fn resume_keeps_global_options_after_the_subcommand() {
+        let command = command_for(
+            &installation(),
+            &spec(InteractiveLaunchMode::Resume(BackendThreadId(
+                THREAD.into(),
+            ))),
+        )
+        .unwrap();
+        assert_eq!(command.args[0], "resume");
+        assert_eq!(command.args[1], THREAD);
+        assert!(command.args.windows(2).any(|args| {
+            args == [
+                "--host-dynamic-tools-socket",
+                "/tmp/tidepool/host-tools.sock",
+            ]
         }));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "mcp_servers.tidepool_actor.env={}"));
-        let inherited = args
-            .iter()
-            .find(|arg| arg.starts_with("mcp_servers.tidepool_actor.env_vars="))
-            .expect("scoped MCP inherited environment");
-        assert!(inherited.contains("TMUX"));
-        assert!(inherited.contains("TMUX_PANE"));
     }
 
     #[test]
-    fn resumed_tui_launch_carries_the_same_native_sandbox_after_the_subcommand() {
-        let mut spec = InteractiveAgentSpec {
-            mode: InteractiveLaunchMode::Resume(BackendThreadId(
-                "019c7724-20a7-7710-bc89-dbc054f9a940".to_string(),
-            )),
-            model: None,
-            effort: None,
-            developer_instructions: String::new(),
-            initial_prompt: None,
-            native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
-            mcp: crate::InteractiveMcpServer {
-                name: "tidepool_actor".to_string(),
-                command: "/tmp/shoal".to_string(),
-                args: Vec::new(),
-                cwd: "/tmp/work".to_string(),
-                forward_env: Vec::new(),
-                required: true,
-            },
-        };
-
-        let args = command_for(&spec).unwrap().args;
-        assert_eq!(args[0], "resume");
-        assert_eq!(args[1], "019c7724-20a7-7710-bc89-dbc054f9a940");
-        assert!(args
-            .windows(2)
-            .any(|args| args == ["--sandbox", "danger-full-access"]));
-        assert!(!args.iter().any(|arg| arg == "--add-dir"));
-
-        spec.mode = InteractiveLaunchMode::Fresh;
-        let fresh_args = command_for(&spec).unwrap().args;
-        assert_eq!(
-            args.iter().position(|arg| arg == "--sandbox").unwrap() - 2,
-            fresh_args
-                .iter()
-                .position(|arg| arg == "--sandbox")
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn mcp_name_cannot_escape_its_config_namespace() {
-        let mut spec = InteractiveAgentSpec {
-            mode: InteractiveLaunchMode::Fresh,
-            model: None,
-            effort: None,
-            developer_instructions: String::new(),
-            initial_prompt: None,
-            native_sandbox: InteractiveNativeSandbox::BackendWorkspaceWrite,
-            mcp: crate::InteractiveMcpServer {
-                name: "bad.name".to_string(),
-                command: "proxy".to_string(),
-                args: Vec::new(),
-                cwd: "/tmp/work".to_string(),
-                forward_env: Vec::new(),
-                required: true,
-            },
-        };
+    fn host_socket_must_be_absolute() {
+        let mut spec = spec(InteractiveLaunchMode::Fresh);
+        spec.host_tools_socket = "relative.sock".into();
         assert!(matches!(
-            command_for(&spec),
+            command_for(&installation(), &spec),
             Err(AgentBackendError::ProtocolRejected { .. })
         ));
-        spec.mcp.name = "good_name-2".to_string();
-        assert!(command_for(&spec).is_ok());
+    }
+
+    #[test]
+    fn invalid_explicit_binary_never_falls_through_to_path() {
+        let error = resolve_executable_from(
+            Some(OsString::from("relative-codex")),
+            Some(std::env::var_os("PATH").unwrap_or_default()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(ENV_INTERACTIVE_CODEX_BIN));
     }
 }

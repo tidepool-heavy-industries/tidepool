@@ -16,8 +16,7 @@ pub enum ActorReq {
     ActorStartWith(
         String,
         tidepool_eval::value::Value,
-        i64,
-        Vec<String>,
+        crate::ActorEffectProfileWire,
         Vec<String>,
     ),
     ActorWaitWith((i64, i64)),

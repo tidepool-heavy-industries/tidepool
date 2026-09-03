@@ -16,7 +16,6 @@ use crate::schema::{
     Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
     TypeShape, Verb, WireDerive, WireDerives,
 };
-
 fn address_type() -> HsType {
     HsType::Tuple(vec![HsType::Int, HsType::Int])
 }
@@ -44,38 +43,67 @@ pub fn actor() -> Effect {
         default_row_args: &[],
         helpers_row_polymorphic: true,
         extra_imports: &["import Tidepool.Actor"],
-        type_defs: vec![TypeDef {
-            name: "ActorTerminalStatus",
-            wire_rust: None,
-            shape: TypeShape::Sum {
-                variants: vec![
-                    SumVariant {
-                        ctor: "ActorCompletedStatus",
-                        fields: positional_fields![],
-                        doc: &[],
-                    },
-                    SumVariant {
-                        ctor: "ActorFailedStatus",
-                        fields: positional_fields![HsType::Text],
-                        doc: &[],
-                    },
-                    SumVariant {
-                        ctor: "ActorCancelledStatus",
-                        fields: positional_fields![HsType::Text],
-                        doc: &[],
-                    },
-                ],
+        type_defs: vec![
+            TypeDef {
+                name: "ActorEffectProfile",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant {
+                            ctor: "ActorReadWriteProfile",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ActorReadOnlyProfile",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[
+                    WireDerive::Debug,
+                    WireDerive::Clone,
+                    WireDerive::PartialEq,
+                    WireDerive::Eq,
+                ]),
+                domain: None,
+                doc: &["Closed interpreter profile selected for one actor incarnation."],
             },
-            json: JsonInstance::None,
-            derives: WireDerives(&[
-                WireDerive::Debug,
-                WireDerive::Clone,
-                WireDerive::PartialEq,
-                WireDerive::Eq,
-            ]),
-            domain: None,
-            doc: &[],
-        }],
+            TypeDef {
+                name: "ActorTerminalStatus",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant {
+                            ctor: "ActorCompletedStatus",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ActorFailedStatus",
+                            fields: positional_fields![HsType::Text],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ActorCancelledStatus",
+                            fields: positional_fields![HsType::Text],
+                            doc: &[],
+                        },
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[
+                    WireDerive::Debug,
+                    WireDerive::Clone,
+                    WireDerive::PartialEq,
+                    WireDerive::Eq,
+                ]),
+                domain: None,
+                doc: &[],
+            },
+        ],
         foreign_types: &[],
         errors: None,
         verbs: vec![
@@ -101,16 +129,11 @@ pub fn actor() -> Effect {
                     },
                     Arg {
                         name: "profile",
-                        ty: HsType::Int,
-                        rust: RustBinding::Derived,
+                        ty: HsType::Named("ActorEffectProfile"),
+                        rust: RustBinding::Path("crate::ActorEffectProfileWire"),
                     },
                     Arg {
                         name: "launchWorktrees",
-                        ty: HsType::List(Box::new(HsType::Text)),
-                        rust: RustBinding::Derived,
-                    },
-                    Arg {
-                        name: "exports",
                         ty: HsType::List(Box::new(HsType::Text)),
                         rust: RustBinding::Derived,
                     },

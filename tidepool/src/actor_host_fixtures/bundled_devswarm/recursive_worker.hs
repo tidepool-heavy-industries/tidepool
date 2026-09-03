@@ -5,11 +5,18 @@ nestedDefinition = ActorDefinition
   { label = "nested-review"
   , effectProfile = ReadOnly
   , initialization = pure
-  , behavior = \_ _ -> agentSession (Just "inspect nested boundary") ()
-  , visibleToChild = []
+  , behavior = \_ _ -> do
+      action <-
+        ( agentSession (Just "inspect nested boundary") ()
+            :: Eff (ReadOnlyEffects NestedProtocol) (AgentAction (ReadOnlyEffects NestedProtocol) ())
+        )
+      outcome <- runAgentAction action
+      case outcome of
+        Right () -> pure ()
+        Left failure -> error (show failure)
   , onShutdown = const (pure ())
   }
 -- TIDEPOOL-ITEM --
 do
   _ <- startActor nestedDefinition ()
-  complete (WorkerReport { summary = "spawned nested actor", evidence = [] })
+  complete (pure (WorkerReport { summary = "spawned nested actor", evidence = [] }))

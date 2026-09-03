@@ -1,5 +1,3 @@
-input
--- TIDEPOOL-ITEM --
 :type startWorkers
 -- TIDEPOOL-ITEM --
 :info WorkerStartResult

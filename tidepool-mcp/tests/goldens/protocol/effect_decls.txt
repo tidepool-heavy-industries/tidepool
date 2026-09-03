@@ -2230,8 +2230,8 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 -- end prompt_card.0 --
 
 -- constructors (5 items) --
--- constructors[0] (98 bytes) --
-ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> [Text] -> Actor (Int, Int)
+-- constructors[0] (103 bytes) --
+ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorEffectProfile -> [Text] -> Actor (Int, Int)
 -- end constructors[0] --
 
 -- constructors[1] (56 bytes) --
@@ -2252,10 +2252,14 @@ ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
 
 -- end constructors --
 
--- type_defs (1 items) --
--- type_defs[0] (120 bytes) --
-data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
+-- type_defs (2 items) --
+-- type_defs[0] (90 bytes) --
+data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
 -- end type_defs[0] --
+
+-- type_defs[1] (120 bytes) --
+data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
+-- end type_defs[1] --
 
 -- end type_defs --
 
@@ -2383,25 +2387,25 @@ Maybe
 true
 -- end helpers_row_polymorphic --
 
-=============================== EFFECT: ActorMcp ===============================
+=============================== EFFECT: AgentTools ===============================
 
--- type_name (8 bytes) --
-ActorMcp
+-- type_name (10 bytes) --
+AgentTools
 -- end type_name --
 
--- description (159 bytes) --
-Private resident-policy boundary for actor-scoped MCP tools. Authored code uses `serveTools`; Rust owns transport while Haskell owns declarations and dispatch.
+-- description (177 bytes) --
+Private resident-policy boundary for tools exposed to an attached agent. Authored code uses `serveTools`; Rust owns host projection while Haskell owns declarations and dispatch.
 -- end description --
 
 -- prompt_card: None --
 
 -- constructors (2 items) --
--- constructors[0] (74 bytes) --
-ActorMcpAwaitWith :: Value -> Text -> Maybe Text -> ActorMcp (Text, Value)
+-- constructors[0] (78 bytes) --
+AgentToolsAwaitWith :: Value -> Text -> Maybe Text -> AgentTools (Text, Value)
 -- end constructors[0] --
 
--- constructors[1] (41 bytes) --
-ActorMcpReplyWith :: Value -> ActorMcp ()
+-- constructors[1] (45 bytes) --
+AgentToolsReplyWith :: Value -> AgentTools ()
 -- end constructors[1] --
 
 -- end constructors --

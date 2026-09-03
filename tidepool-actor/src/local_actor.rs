@@ -31,20 +31,28 @@ pub struct ChildExitNotice {
 /// Result of one complete logical behavior operation.
 ///
 /// `Stop` carries the ordinary operation result as well as the immutable
-/// actor terminal record. The wrapper can therefore settle a caller or MCP
-/// transport before stopping without turning successful actor completion into
-/// an error or scheduling a private self-message.
+/// actor terminal record. The wrapper can therefore settle a caller or tool
+/// host before stopping. `ContinueLater` is the one explicit scheduler handoff:
+/// settle first, then resume actor-owned work through the same mailbox.
 #[derive(Debug)]
 pub enum KernelStep<T> {
     Continue(T),
-    Stop { output: T, terminal: ActorTerminal },
+    /// Settle the current caller, then resume actor-owned work from a fresh
+    /// mailbox turn. Interactive sessions use this when the model returns a
+    /// live Haskell action.
+    ContinueLater(T),
+    Stop {
+        output: T,
+        terminal: ActorTerminal,
+    },
 }
 
 impl<T> KernelStep<T> {
-    fn into_parts(self) -> (T, Option<ActorTerminal>) {
+    fn into_parts(self) -> (T, Option<ActorTerminal>, bool) {
         match self {
-            Self::Continue(output) => (output, None),
-            Self::Stop { output, terminal } => (output, Some(terminal)),
+            Self::Continue(output) => (output, None, false),
+            Self::ContinueLater(output) => (output, None, true),
+            Self::Stop { output, terminal } => (output, Some(terminal), false),
         }
     }
 }
@@ -187,11 +195,10 @@ pub trait KernelBehavior: Send + 'static {
         request: MailboxValue,
     ) -> BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>>;
 
-    fn mcp<'a>(
+    fn tool<'a>(
         &'a mut self,
         context: &'a KernelContext,
-        name: String,
-        arguments: serde_json::Value,
+        invocation: tidepool_tool::ToolInvocation,
     ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>>;
 
     fn workbench<'a>(
@@ -199,6 +206,20 @@ pub trait KernelBehavior: Send + 'static {
         context: &'a KernelContext,
         request: WorkbenchRequest,
     ) -> BoxFuture<'a, Result<KernelStep<WorkbenchResponse>, KernelInvocationFailure>>;
+
+    /// Continue work deliberately yielded after its initiating caller was
+    /// settled. Behaviors which never return 'ContinueLater' own no pending
+    /// continuation and keep this rejecting default.
+    fn resume<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+    ) -> BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async {
+            Err(KernelBehaviorError {
+                detail: "actor received an internal resume without pending work".into(),
+            })
+        })
+    }
 
     fn external_application_failed<'a>(
         &'a mut self,
@@ -271,6 +292,9 @@ where
         ));
         match state.behavior.start(&state.context).await {
             Ok(KernelStep::Continue(())) => {}
+            Ok(KernelStep::ContinueLater(())) => {
+                state.context.myself.send_message(KernelMessage::Resume)?;
+            }
             Ok(KernelStep::Stop { terminal, .. }) => {
                 finish_actor(&state.context.myself.clone(), &mut state, terminal).await;
             }
@@ -313,11 +337,10 @@ where
                     .await
                 {
                     Ok(step) => {
-                        let (value, terminal) = step.into_parts();
-                        let _ = reply.send(Ok(value));
-                        if let Some(terminal) = terminal {
-                            finish_actor(&myself, state, terminal).await;
-                        }
+                        settle_step(&myself, state, step, |value| {
+                            let _ = reply.send(Ok(value));
+                        })
+                        .await;
                     }
                     Err(error) => {
                         let detail = error.to_string();
@@ -329,36 +352,43 @@ where
                     }
                 },
             },
-            KernelMessage::Mcp {
-                name,
-                arguments,
-                reply,
-            } => match state.behavior.mcp(&state.context, name, arguments).await {
-                Ok(step) => {
-                    let (output, terminal) = step.into_parts();
-                    let _ = reply.send(Ok(output));
-                    if let Some(terminal) = terminal {
-                        finish_actor(&myself, state, terminal).await;
-                    }
-                }
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                }
-            },
-            KernelMessage::Workbench { request, reply } => {
-                match state.behavior.workbench(&state.context, request).await {
+            KernelMessage::Tool { invocation, reply } => {
+                match state.behavior.tool(&state.context, invocation).await {
                     Ok(step) => {
-                        let (output, terminal) = step.into_parts();
-                        let _ = reply.send(Ok(output));
-                        if let Some(terminal) = terminal {
-                            finish_actor(&myself, state, terminal).await;
-                        }
+                        settle_step(&myself, state, step, |output| {
+                            let _ = reply.send(Ok(output));
+                        })
+                        .await;
                     }
                     Err(error) => {
                         let _ = reply.send(Err(error));
                     }
                 }
             }
+            KernelMessage::Workbench { request, reply } => {
+                match state.behavior.workbench(&state.context, request).await {
+                    Ok(step) => {
+                        settle_step(&myself, state, step, |output| {
+                            let _ = reply.send(Ok(output));
+                        })
+                        .await;
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            KernelMessage::Resume => match state.behavior.resume(&state.context).await {
+                Ok(step) => finish_after_step(&myself, state, step).await,
+                Err(error) => {
+                    fail_actor(
+                        &myself,
+                        state,
+                        format!("actor continuation failed: {error}"),
+                    )
+                    .await
+                }
+            },
             KernelMessage::ExternalApplicationFailed { failure, reply } => {
                 let detail = format!("native actor application failed: {}", failure.detail);
                 let disposition = state
@@ -462,8 +492,33 @@ async fn finish_after_step<B>(
 ) where
     B: KernelBehavior,
 {
-    if let KernelStep::Stop { terminal, .. } = step {
+    settle_step(myself, state, step, |_| {}).await;
+}
+
+/// Settle the initiating boundary before applying the actor-owned disposition.
+/// Calls, hosted tools, workbench requests, and cast/resume all share this one
+/// ordering rule; adding a new transport must not reimplement it.
+async fn settle_step<B, T>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    step: KernelStep<T>,
+    settle: impl FnOnce(T),
+) where
+    B: KernelBehavior,
+{
+    let (output, terminal, resume) = step.into_parts();
+    settle(output);
+    if let Some(terminal) = terminal {
         finish_actor(myself, state, terminal).await;
+    } else if resume {
+        if let Err(error) = myself.send_message(KernelMessage::Resume) {
+            fail_actor(
+                myself,
+                state,
+                format!("could not schedule actor continuation: {error}"),
+            )
+            .await;
+        }
     }
 }
 
@@ -540,9 +595,18 @@ mod tests {
     use parking_lot::Mutex;
     use tidepool_repr::SessionId;
     use tidepool_runtime::session::{WorkbenchResponse, WorkbenchRunStatus};
+    use tidepool_tool::{ToolArguments, ToolInvocation};
     use tokio::sync::{oneshot, Notify};
 
     use super::*;
+
+    fn tool_invocation(name: &str) -> ToolInvocation {
+        ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(serde_json::Value::Object(serde_json::Map::new())),
+        }
+    }
 
     struct ProbeBehavior {
         calls: Arc<Mutex<Vec<&'static str>>>,
@@ -588,13 +652,13 @@ mod tests {
             Box::pin(async move { Ok(KernelStep::Continue(request)) })
         }
 
-        fn mcp<'a>(
+        fn tool<'a>(
             &'a mut self,
             context: &'a KernelContext,
-            name: String,
-            _arguments: serde_json::Value,
+            invocation: ToolInvocation,
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
+                let name = invocation.name;
                 if name == "spawn" {
                     let child = context
                         .spawn_child(None, FailingChild)
@@ -609,13 +673,16 @@ mod tests {
                         output: serde_json::Value::String(name),
                         terminal: ActorTerminal {
                             kind: ActorExitKind::Completed,
-                            summary: "finished through MCP".into(),
+                            summary: "finished through an agent tool".into(),
                         },
                     });
                 } else if name == "first" {
                     self.calls.lock().push("first-start");
                     self.release_first.notified().await;
                     self.calls.lock().push("first-end");
+                } else if name == "defer" {
+                    self.calls.lock().push("reply-ready");
+                    return Ok(KernelStep::ContinueLater(serde_json::Value::String(name)));
                 } else {
                     self.calls.lock().push("second");
                 }
@@ -635,6 +702,18 @@ mod tests {
                     next_index: 0,
                     total: 0,
                 }))
+            })
+        }
+
+        fn resume(
+            &mut self,
+            _context: &KernelContext,
+        ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            Box::pin(async move {
+                self.calls.lock().push("resume-start");
+                self.release_first.notified().await;
+                self.calls.lock().push("resume-end");
+                Ok(KernelStep::Continue(()))
             })
         }
 
@@ -703,16 +782,15 @@ mod tests {
             Box::pin(async move { Ok(KernelStep::Continue(request)) })
         }
 
-        fn mcp<'a>(
+        fn tool<'a>(
             &'a mut self,
             context: &'a KernelContext,
-            _name: String,
-            _arguments: serde_json::Value,
+            _invocation: ToolInvocation,
         ) -> BoxFuture<'a, Result<KernelStep<serde_json::Value>, KernelInvocationFailure>> {
             Box::pin(async move {
                 Err(KernelInvocationFailure::Rejected {
                     actor: context.identity(),
-                    detail: "child has no MCP policy".into(),
+                    detail: "child has no tool policy".into(),
                 })
             })
         }
@@ -797,17 +875,15 @@ mod tests {
         let (second_tx, second_rx) = oneshot::channel();
         actor
             .address()
-            .send_message(KernelMessage::Mcp {
-                name: "first".into(),
-                arguments: serde_json::Value::Null,
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("first"),
                 reply: first_tx.into(),
             })
             .expect("queue first");
         actor
             .address()
-            .send_message(KernelMessage::Mcp {
-                name: "second".into(),
-                arguments: serde_json::Value::Null,
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("second"),
                 reply: second_tx.into(),
             })
             .expect("queue second");
@@ -870,9 +946,8 @@ mod tests {
         let reply = actor
             .address()
             .call(
-                |reply| KernelMessage::Mcp {
-                    name: "finish".into(),
-                    arguments: serde_json::Value::Null,
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("finish"),
                     reply,
                 },
                 None,
@@ -887,10 +962,57 @@ mod tests {
             actor.terminal().get(),
             Some(ActorTerminal {
                 kind: ActorExitKind::Completed,
-                summary: "finished through MCP".into(),
+                summary: "finished through an agent tool".into(),
             })
         );
         assert_eq!(&*fixture.calls.lock(), &["shutdown"]);
+    }
+
+    #[tokio::test]
+    async fn deferred_work_settles_the_caller_before_resuming() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let reply = actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("defer"),
+                    reply,
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect("RPC transport")
+            .expect("actor replied")
+            .expect("successful actor reply");
+        assert_eq!(reply, serde_json::Value::String("defer".into()));
+        assert_eq!(&*fixture.calls.lock(), &["reply-ready", "resume-start"]);
+
+        fixture.release.notify_one();
+        for _ in 0..20 {
+            if fixture.calls.lock().last() == Some(&"resume-end") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(fixture.calls.lock().last(), Some(&"resume-end"));
+
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "done".into(),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Shutdown {
+                terminal,
+                reply: shutdown_tx.into(),
+            })
+            .expect("queue shutdown");
+        shutdown_rx.await.expect("shutdown reply");
+        task.await.expect("actor task");
     }
 
     #[tokio::test]
@@ -902,9 +1024,8 @@ mod tests {
         let (spawn_tx, spawn_rx) = oneshot::channel();
         owner
             .address()
-            .send_message(KernelMessage::Mcp {
-                name: "spawn".into(),
-                arguments: serde_json::Value::Null,
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("spawn"),
                 reply: spawn_tx.into(),
             })
             .expect("request child");
@@ -935,9 +1056,8 @@ mod tests {
         let (ping_tx, ping_rx) = oneshot::channel();
         owner
             .address()
-            .send_message(KernelMessage::Mcp {
-                name: "second".into(),
-                arguments: serde_json::Value::Null,
+            .send_message(KernelMessage::Tool {
+                invocation: tool_invocation("second"),
                 reply: ping_tx.into(),
             })
             .expect("owner remains callable");

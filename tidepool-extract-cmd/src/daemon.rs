@@ -631,7 +631,7 @@ mod tests {
     fn malformed_typed_worker_request_is_rejected() {
         let malformed = vec![
             crate::request::WORKER_REQUEST_FLAG.into(),
-            "54505245513030330100000009".into(),
+            "54505245513030340100000009".into(),
         ];
         assert!(matches!(
             normalize_worker_argv(malformed),

@@ -27,13 +27,12 @@ The useful slogan is:
 
 > Each actor is a Haskell program that can extend itself.
 
-“Extend itself” may mean persistent declarations in a resident session or
+"Extend itself" may mean persistent declarations in a resident session or
 editing and reloading an agent-backed actor's Haskell policy. A Tidepool-owned
-provider loop reaches the persistent workbench through fenced Haskell in
-assistant responses. An externally hosted interactive agent reaches the same
-workbench through one actor-local, GHCi-shaped MCP transport because its prose
-is not an executable callback under Tidepool's control. MCP carries Haskell
-source and receipts; it is not a second domain API.
+provider loop reaches the workbench through fenced Haskell; an externally
+hosted interactive agent reaches the same workbench through one actor-local,
+GHCi-shaped hosted tool carrying raw Haskell. The transport differs, but the
+language, persistent heap, interpreter, and typed completion contract do not.
 
 At the system level, those actors form an adaptive unfold/execute/fold loop
 over worktrees. The organization may begin as a detailed plan, a partial
@@ -44,7 +43,7 @@ then unfold again from what integration revealed. The canonical contract is
 
 The first production composition root is `shoal`: one host process owns the
 resident Haskell machine and every actor, while external Codex TUIs occupy
-tmux panes and connect through authenticated `shoal proxy` MCP children. Local
+tmux panes and connect to actor-scoped HTTP-over-UDS host dynamic tools. Local
 actor scheduling, mailboxes, links, and supervision use Ractor. Tidepool adds
 live Haskell execution, authority, provider sessions, and retained typed exits
 above that substrate; it does not maintain a second actor scheduler.
@@ -67,6 +66,11 @@ above that substrate; it does not maintain a second actor scheduler.
   handles govern concrete runtime resources independently.
 - The Haskell DSL stays small and `Member`-polymorphic. Same-machine protocols
   carry live typed values; JSON is only a durable or external boundary.
+- Interactive sessions may return a live `AgentAction`. The hosted-tool call
+  settles immediately; the resident actor runs and parks that action, and
+  reactivates the same agent context only when the Haskell program asks for
+  its next session. Ordinary `Functor`/`Applicative`/`Monad` composition is the
+  orchestration vocabulary.
 - Fresh spawn deploys an explicit program into a fresh context. Structural
   fork clones one exact model/Haskell/control point and applies registered
   capability and actor-linear-reference policy.
@@ -125,11 +129,11 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | Term | Meaning |
 |---|---|
 | actor | One exact identity, mailbox, Haskell program, persistent Haskell environment, and serial resident or interactive agent context |
-| agent-backed actor | An actor whose conversation is owned by a supervised interactive agent application and whose actor-local MCP transport mounts the resident Haskell workbench |
+| agent-backed actor | An actor whose conversation is owned by a supervised interactive agent application and whose actor-local hosted tool mounts the resident Haskell workbench |
 | actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
-| actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, installation, model-visible exports, and shutdown behavior |
+| actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, behavior, profile selection, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |
-| agent session | One serialized, possibly multi-round execution of the resident model and fenced-Haskell workbench with a typed `Complete output` expectation |
+| agent session | One serialized, possibly multi-round resident or externally hosted agent interaction with a typed `Complete output` expectation |
 | effect profile | An experimental named resident-Haskell row and spawn-attenuation class; initially `ReadWrite` or `ReadOnly`, and not a native-tool sandbox |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
 | program image | The exact declarations, interface metadata, and live roots captured while `startActor` seals a definition |

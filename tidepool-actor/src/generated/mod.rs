@@ -3,7 +3,7 @@
 pub mod actor;
 pub mod actor_kernel;
 pub mod actor_local;
-pub mod actor_mcp;
 pub mod agent_session;
+pub mod agent_tools;
 pub mod deliberate;
 pub mod worker_kernel;

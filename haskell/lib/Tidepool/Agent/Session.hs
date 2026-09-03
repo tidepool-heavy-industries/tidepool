@@ -11,6 +11,7 @@
 -- installed actor program resumes.
 module Tidepool.Agent.Session
   ( agentSession
+  , agentSessionSited
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)

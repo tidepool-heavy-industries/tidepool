@@ -8,7 +8,7 @@ pub enum ExternalApplicationFailureClass {
     WorktreeBinding,
     CommandConstruction,
     ProcessLaunch,
-    ProxyStartup,
+    ToolHostStartup,
     UnexpectedExit,
 }
 

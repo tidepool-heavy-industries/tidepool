@@ -257,10 +257,10 @@ fn actor_local_decl_matches_the_schema_exactly() {
 }
 
 #[test]
-fn actor_mcp_decl_matches_the_schema_exactly() {
+fn agent_tools_decl_matches_the_schema_exactly() {
     assert_decl_matches_schema(
-        &tidepool_mcp::actor_mcp_decl(),
-        &tidepool_protocol::effects::actor_mcp::actor_mcp(),
+        &tidepool_mcp::agent_tools_decl(),
+        &tidepool_protocol::effects::agent_tools::agent_tools(),
     );
 }
 
@@ -306,7 +306,7 @@ fn every_schema_effect_is_reachable() {
             "Actor",
             "ActorKernel",
             "ActorLocal",
-            "ActorMcp",
+            "AgentTools",
             "AgentSession",
             "WorkerKernel",
         ],

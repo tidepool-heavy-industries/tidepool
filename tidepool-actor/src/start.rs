@@ -17,6 +17,11 @@ use tidepool_runtime::session::{
 
 use crate::generated::actor::ActorReq;
 use crate::ActorDescriptor;
+#[derive(tidepool_bridge_derive::FromCore)]
+pub enum ActorEffectProfileWire {
+    ActorReadWriteProfile,
+    ActorReadOnlyProfile,
+}
 
 /// One parked parent continuation paired with exclusive custody of its child
 /// entry. Compiler provenance travels with the rooted entry itself.
@@ -51,8 +56,6 @@ pub enum ActorStartCaptureError {
     AmbiguousIncarnation { head: String, modules: Vec<String> },
     #[error("actor start has no live declaration plane")]
     NoCompileView,
-    #[error("actor start carried unknown effect profile {0}")]
-    UnknownProfile(i64),
 }
 
 impl ResidentActorStart {
@@ -71,13 +74,8 @@ impl ResidentActorStart {
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let ActorReq::ActorStartWith(
-            label,
-            _entry_projection,
-            profile,
-            launch_worktrees,
-            explicit_exports,
-        ) = ActorReq::from_value(request, table)?
+        let ActorReq::ActorStartWith(label, _entry_projection, profile, launch_worktrees) =
+            ActorReq::from_value(request, table)?
         else {
             return Err(ActorStartCaptureError::UnexpectedRequest);
         };
@@ -86,11 +84,10 @@ impl ResidentActorStart {
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         let profile = match profile {
-            0 => crate::ActorEffectProfile::ReadWrite,
-            1 => crate::ActorEffectProfile::ReadOnly,
-            other => return Err(ActorStartCaptureError::UnknownProfile(other)),
+            ActorEffectProfileWire::ActorReadWriteProfile => crate::ActorEffectProfile::ReadWrite,
+            ActorEffectProfileWire::ActorReadOnlyProfile => crate::ActorEffectProfile::ReadOnly,
         };
-        let facade = materialize_entry_facade(session, &entry, &explicit_exports)?;
+        let facade = materialize_entry_facade(session, &entry)?;
         let lexical_scope = session.mint_isolated_scope();
         let descriptor = ActorDescriptor::new(
             label,
@@ -124,13 +121,12 @@ impl ResidentActorStart {
 fn materialize_entry_facade<H, O>(
     session: &ResidentSession<H, O>,
     entry: &RootCustody,
-    explicit_exports: &[String],
 ) -> Result<MaterializedFacade, ActorStartCaptureError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let heads = facade_heads(entry.provenance(), explicit_exports);
+    let heads = facade_heads(entry.provenance());
     let scope = session.run_context().lexical_scope;
     validate_head_incarnations(session, scope, entry.provenance(), &heads)?;
     let names: Vec<_> = heads.iter().map(String::as_str).collect();
@@ -196,11 +192,8 @@ where
     Ok(())
 }
 
-fn facade_heads(
-    provenance: &tidepool_runtime::session::ProgramProvenance,
-    explicit_exports: &[String],
-) -> BTreeSet<String> {
-    let mut heads: BTreeSet<_> = explicit_exports.iter().cloned().collect();
+fn facade_heads(provenance: &tidepool_runtime::session::ProgramProvenance) -> BTreeSet<String> {
+    let mut heads = BTreeSet::new();
     for site in provenance.sites() {
         for head in site
             .heads
@@ -220,11 +213,8 @@ mod tests {
     use super::facade_heads;
 
     #[test]
-    fn explicit_facade_heads_are_deduplicated_and_sorted() {
-        let heads = facade_heads(
-            &tidepool_runtime::session::ProgramProvenance::default(),
-            &["Policy".into(), "helper".into(), "Policy".into()],
-        );
-        assert_eq!(heads.into_iter().collect::<Vec<_>>(), ["Policy", "helper"]);
+    fn empty_provenance_requires_no_child_facade() {
+        let heads = facade_heads(&tidepool_runtime::session::ProgramProvenance::default());
+        assert!(heads.is_empty());
     }
 }

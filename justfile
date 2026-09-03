@@ -1,5 +1,6 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 nix := if env_var_or_default("IN_NIX_SHELL", "") == "" { "nix develop --command" } else { "" }
+shoal_nix := "nix develop .#shoal --command"
 
 # Show the supported development workflow.
 default:
@@ -59,14 +60,14 @@ doctor:
 #   just shoal-init -- --session shoal-tidepool-fresh --no-attach
 [positional-arguments]
 shoal-init *args:
-    {{ nix }} scripts/shoal-init.sh "$@"
+    {{ shoal_nix }} scripts/shoal-init.sh "$@"
 
 # Build Shoal from this checkout and run it against the independent console
 # repository. Extra arguments are forwarded to `shoal init`.
 [positional-arguments]
 shoal-console *args:
     test -d "$HOME/dev/shoal-console/.git" || { echo "missing $HOME/dev/shoal-console; initialize it first" >&2; exit 1; }
-    {{ nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-console"
+    {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-console"
 
 # Pre-review gate: checks, suite-manifest validation, and fixture freshness.
 verify: check suite-check fixtures-check

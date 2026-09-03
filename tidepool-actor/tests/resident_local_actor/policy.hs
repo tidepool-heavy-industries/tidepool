@@ -6,7 +6,6 @@ let childDefinition :: ActorDefinition Int Maybe Int
         , initialization = \seed -> pure seed
         , behavior = \_ initial ->
             (pure initial :: Eff (ReadOnlyEffects Maybe) Int)
-        , visibleToChild = []
         , onShutdown = const (pure ())
         }
 

@@ -65,7 +65,7 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
 
     let session = support::process_unique_session(177);
     let declarations = [
-        tidepool_mcp::actor_mcp_decl(),
+        tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
@@ -81,7 +81,7 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     );
     let preamble = format!(
         "{preamble}\
-         type ActorEffects = '[ActorMcp, Actor]\n\
+         type ActorEffects = '[AgentTools, Actor]\n\
          data EchoInput = EchoInput {{ value :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data EchoOutput = EchoOutput {{ doubled :: Int }} deriving (Generic, ToJSON, JsonSchema)\n\
          data SpawnInput = SpawnInput {{ seed :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\

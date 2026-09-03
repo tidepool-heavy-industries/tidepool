@@ -43,6 +43,7 @@ tidepool-harness.workspace = true
 tidepool-worktree.workspace = true
 tidepool-agent.workspace = true
 tidepool-actor.workspace = true
+tidepool-tool.workspace = true
 tidepool-model.workspace = true
 tidepool-node.workspace = true
 tidepool-atomic-write.workspace = true
@@ -58,6 +59,7 @@ axum.workspace = true
 rmcp.workspace = true
 glob.workspace = true
 frunk.workspace = true
+futures-util.workspace = true
 uuid.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
@@ -65,6 +67,7 @@ parking_lot.workspace = true
 
 
 [dev-dependencies]
+reqwest.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 tempfile.workspace = true
 tidepool-testing.workspace = true

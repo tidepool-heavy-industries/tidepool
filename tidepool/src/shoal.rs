@@ -1,20 +1,22 @@
 //! Shoal process composition and one-command tmux bootstrap.
 //!
 //! One host process owns every resident Haskell actor. Interactive actors are
-//! ordinary Codex TUIs launched directly in tmux panes; `shoal proxy` is only
-//! the authenticated stdio MCP transport child that Codex requires.
+//! ordinary interactive-agent TUIs launched directly in tmux panes. Each actor
+//! receives its resident tools through an actor-scoped Unix socket.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tidepool_actor::ActorRef;
 use tidepool_agent::{
-    persist_interactive_binding, read_interactive_binding, BackendThreadId, InteractiveLaunchMode,
-    ReasoningEffort,
+    persist_interactive_binding, read_interactive_binding, BackendThreadId,
+    InteractiveAgentInstallation, InteractiveLaunchMode, ReasoningEffort,
 };
 use tidepool_node::{TmuxLaunch, TmuxSession};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
 use crate::actor_host::ACTOR_PROJECT_ROOT;
@@ -22,6 +24,12 @@ use crate::actor_host::ACTOR_PROJECT_ROOT;
 const STATUS_VERSION: u32 = 2;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 const SHOAL_EXCLUDE: &str = "/.shoal/";
+const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
+const ENV_NIX_STORE_BIN: &str = "TIDEPOOL_SHOAL_NIX_STORE_BIN";
+const GC_ROOT_TIMEOUT: Duration = Duration::from_secs(30);
+const GC_ROOT_ERROR_LIMIT: usize = 16 * 1024;
+const BOUNDARY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const BOUNDARY_PROBE_ERROR_LIMIT: usize = 16 * 1024;
 
 pub struct NewOptions {
     pub path: Option<PathBuf>,
@@ -43,6 +51,7 @@ pub struct HostOptions {
     pub run_root: PathBuf,
     pub status_path: PathBuf,
     pub root_binding_path: PathBuf,
+    pub interactive_agent: InteractiveAgentInstallation,
     pub resume_root: bool,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
@@ -168,6 +177,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         }
     };
     let workspace = std::fs::canonicalize(workspace)?;
+    install_local_exclude(&workspace)?;
+    retain_packaged_interactive_agent(&workspace).await?;
     let session_name = options
         .session
         .unwrap_or_else(|| default_session_name(&workspace));
@@ -183,7 +194,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         .join(&session_name);
     std::fs::create_dir_all(&session_root)?;
     let root_binding_path = session_root.join("root-binding.json");
-    preflight(&workspace).await?;
+    let interactive_agent = preflight(&workspace).await?;
     if options.recreate {
         // Validate continuity before stopping a currently healthy session.
         // The host repeats this check at launch so a later disappearance also
@@ -222,6 +233,10 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         status_path.display().to_string(),
         "--root-binding-path".into(),
         root_binding_path.display().to_string(),
+        "--interactive-agent-bin".into(),
+        interactive_agent.executable().display().to_string(),
+        "--interactive-agent-version".into(),
+        interactive_agent.version().to_owned(),
     ];
     if options.recreate {
         args.push("--resume-root".into());
@@ -290,6 +305,113 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
+/// Retain the Nix-packaged private interactive-agent closure without placing
+/// its executable on the user's ordinary PATH. The project-local symlink is a
+/// durable GC root under Shoal's runtime-owned state directory.
+async fn retain_packaged_interactive_agent(
+    workspace: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    retain_packaged_interactive_agent_from(
+        workspace,
+        std::env::var_os(ENV_PACKAGED_CODEX_CLOSURE).map(PathBuf::from),
+        std::env::var_os(ENV_NIX_STORE_BIN).map(PathBuf::from),
+    )
+    .await
+}
+
+async fn retain_packaged_interactive_agent_from(
+    workspace: &Path,
+    target: Option<PathBuf>,
+    nix_store: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (target, nix_store) = match (target, nix_store) {
+        (None, None) => return Ok(()),
+        (Some(target), Some(nix_store)) => (target, nix_store),
+        _ => {
+            return Err(runtime_error(format!(
+                "{ENV_PACKAGED_CODEX_CLOSURE} and {ENV_NIX_STORE_BIN} must be supplied together"
+            )))
+        }
+    };
+    if !target.is_absolute() || !target.is_dir() {
+        return Err(runtime_error(format!(
+            "{ENV_PACKAGED_CODEX_CLOSURE} is not an absolute package directory: {}",
+            target.display()
+        )));
+    }
+    if !nix_store.is_absolute() || !nix_store.is_file() {
+        return Err(runtime_error(format!(
+            "{ENV_NIX_STORE_BIN} is not an absolute executable file: {}",
+            nix_store.display()
+        )));
+    }
+    let runtime = workspace.join(".shoal/runtime");
+    std::fs::create_dir_all(&runtime)?;
+    let link = runtime.join("interactive-agent");
+    let mut child = tokio::process::Command::new(&nix_store)
+        .arg("--realise")
+        .arg(&target)
+        .arg("--add-root")
+        .arg(&link)
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            runtime_error(format!(
+                "cannot start {ENV_NIX_STORE_BIN} {}: {error}",
+                nix_store.display()
+            ))
+        })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        runtime_error(format!(
+            "{ENV_NIX_STORE_BIN} did not expose its diagnostic stream"
+        ))
+    })?;
+    let result = tokio::time::timeout(GC_ROOT_TIMEOUT, async {
+        tokio::try_join!(
+            read_bounded_diagnostics(stderr, GC_ROOT_ERROR_LIMIT, "Nix GC-root creation"),
+            child.wait()
+        )
+    })
+    .await
+    .map_err(|_| runtime_error(format!("Nix GC-root creation exceeded {GC_ROOT_TIMEOUT:?}")))?;
+    let (stderr, status) = result.map_err(|error| {
+        runtime_error(format!(
+            "cannot register Nix GC root {}: {error}",
+            link.display()
+        ))
+    })?;
+    if !status.success() {
+        return Err(runtime_error(format!(
+            "cannot register Nix GC root {} ({status}): {}",
+            link.display(),
+            String::from_utf8_lossy(&stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+async fn read_bounded_diagnostics(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    limit: usize,
+    operation: &'static str,
+) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{operation} diagnostics exceeded {limit} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
 pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         run_id = %options.run_id,
@@ -328,8 +450,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             policy_root,
             run_root: options.run_root.clone(),
             root_binding_path: options.run_root.join("root-binding.json"),
-            proxy_program: current_executable()?,
-            proxy_args: vec!["proxy".into()],
+            interactive_agent: options.interactive_agent.clone(),
             tmux_session: options.session.clone(),
             model: options.model.clone(),
             effort: options.effort,
@@ -422,7 +543,9 @@ fn settle_host_result(
     result
 }
 
-async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn preflight(
+    workspace: &Path,
+) -> Result<InteractiveAgentInstallation, Box<dyn std::error::Error>> {
     crate::haskell_sources::ensure_stdlib()?;
     crate::haskell_sources::ensure_actor_policy()?;
     tidepool_runtime::toolchain::bind_extract_endpoint()?;
@@ -433,21 +556,10 @@ async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(ACTOR_PROJECT_ROOT)?;
     tidepool_agent::trust_interactive_project(Path::new(ACTOR_PROJECT_ROOT))?;
 
-    let output = tokio::process::Command::new("codex")
-        .args(["queue", "--help"])
-        .output()
-        .await
-        .map_err(|source| {
-            runtime_error(format!("Codex with queue support is required: {source}"))
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() || !stdout.contains("--thread") || !stdout.contains("--message") {
-        return Err(runtime_error(
-            "installed Codex lacks `codex queue --thread --message` support",
-        ));
-    }
+    let interactive_agent = tidepool_agent::resolve_native_interactive_agent().await?;
 
-    let boundary = tokio::process::Command::new(tidepool_node::BUBBLEWRAP_PROGRAM)
+    let mut boundary = tokio::process::Command::new(tidepool_node::BUBBLEWRAP_PROGRAM);
+    boundary
         .args(["--bind", "/", "/", "--ro-bind"])
         .arg(workspace)
         .arg(workspace)
@@ -456,20 +568,46 @@ async fn preflight(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
         // Resolve through the dev/runtime PATH. NixOS deliberately does not
         // provide the FHS `/bin/true` path.
         .args(["--", "true"])
-        .output()
-        .await
-        .map_err(|source| {
-            runtime_error(format!(
-                "Bubblewrap is required for Shoal actor worktrees: {source}"
-            ))
-        })?;
-    if !boundary.status.success() {
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut boundary = boundary.spawn().map_err(|source| {
+        runtime_error(format!(
+            "Bubblewrap is required for Shoal actor worktrees: {source}"
+        ))
+    })?;
+    let stderr = boundary.stderr.take().ok_or_else(|| {
+        runtime_error("Bubblewrap capability probe did not expose its diagnostic stream")
+    })?;
+    let result = tokio::time::timeout(BOUNDARY_PROBE_TIMEOUT, async {
+        tokio::try_join!(
+            read_bounded_diagnostics(
+                stderr,
+                BOUNDARY_PROBE_ERROR_LIMIT,
+                "Bubblewrap capability probe"
+            ),
+            boundary.wait()
+        )
+    })
+    .await
+    .map_err(|_| {
+        runtime_error(format!(
+            "Bubblewrap capability probe exceeded {BOUNDARY_PROBE_TIMEOUT:?}"
+        ))
+    })?;
+    let (stderr, status) = result.map_err(|source| {
+        runtime_error(format!(
+            "Bubblewrap capability probe could not complete: {source}"
+        ))
+    })?;
+    if !status.success() {
         return Err(runtime_error(format!(
             "Bubblewrap cannot establish the Shoal process boundary: {}",
-            String::from_utf8_lossy(&boundary.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         )));
     }
-    Ok(())
+    Ok(interactive_agent)
 }
 
 async fn wait_until_interactive(
@@ -607,8 +745,7 @@ fn effort_name(effort: ReasoningEffort) -> &'static str {
 }
 
 /// Variables whose current values must override a possibly older tmux server
-/// environment. Keep this membrane narrow: proxy credentials are added per
-/// actor, and tmux supplies fresh `TMUX`/`TMUX_PANE` identities itself.
+/// environment. Tmux supplies fresh `TMUX`/`TMUX_PANE` identities itself.
 fn pane_environment() -> std::collections::BTreeMap<String, String> {
     const NAMES: &[&str] = &[
         "PATH",
@@ -772,6 +909,11 @@ mod tests {
             run_root: root.path().join("run"),
             status_path: status_path.clone(),
             root_binding_path: root.path().join("binding.json"),
+            interactive_agent: tidepool_agent::native_interactive_agent_from_parts(
+                std::env::current_exe().unwrap(),
+                "test installation".into(),
+            )
+            .unwrap(),
             resume_root: false,
             model: None,
             effort: None,
@@ -813,5 +955,36 @@ mod tests {
         clear_fresh_root_binding(&binding).unwrap();
         assert!(!binding.exists());
         clear_fresh_root_binding(&binding).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn packaged_interactive_agent_gets_a_replaceable_project_gc_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let fake_nix_store = workspace.path().join("nix-store");
+        std::fs::write(&fake_nix_store, "#!/bin/sh\nln -sfn \"$2\" \"$4\"\n").unwrap();
+        std::fs::set_permissions(&fake_nix_store, std::fs::Permissions::from_mode(0o700)).unwrap();
+        retain_packaged_interactive_agent_from(
+            workspace.path(),
+            Some(first.path().to_path_buf()),
+            Some(fake_nix_store.clone()),
+        )
+        .await
+        .unwrap();
+        let link = workspace.path().join(".shoal/runtime/interactive-agent");
+        assert_eq!(std::fs::read_link(&link).unwrap(), first.path());
+
+        retain_packaged_interactive_agent_from(
+            workspace.path(),
+            Some(second.path().to_path_buf()),
+            Some(fake_nix_store),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_link(link).unwrap(), second.path());
     }
 }

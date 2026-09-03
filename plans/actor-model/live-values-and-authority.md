@@ -168,7 +168,7 @@ the Worktree registry and exact actor binding confer authority.
 The first concrete recipe binds one owner-selected managed worktree to a fresh
 DevSwarm worker. The owner creates the worktree, retains its handle, closes the
 same value into the worker definition, and decorates the definition through
-`withWorktree`. After the child installs its MCP policy, Shoal validates
+`withWorktree`. After the child installs its tool policy, Shoal validates
 exactly one recipe, binds it to that exact actor incarnation, and uses the
 registered checkout as the external application cwd. Failure before launch
 releases the active binding and fails the child; the retain-first worktree

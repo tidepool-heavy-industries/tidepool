@@ -22,7 +22,7 @@ mod mount;
 mod profile;
 mod resident_actor;
 mod resident_interactive;
-mod resident_mcp;
+mod resident_tools;
 mod resident_workbench;
 mod start;
 mod termination;
@@ -66,13 +66,15 @@ pub use resident_actor::{
     spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
     ResidentKernelBehavior,
 };
-pub use resident_interactive::ResidentInteractivePolicy;
-pub use resident_mcp::{ResidentMcpEndpoint, ResidentMcpError, ResidentMcpPolicy};
+pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
+pub use resident_tools::{
+    ResidentToolEndpoint, ResidentToolError, ResidentToolFuture, ResidentToolPolicy,
+};
 pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError,
 };
-pub use start::{ActorStartCaptureError, ResidentActorStart};
+pub use start::{ActorEffectProfileWire, ActorStartCaptureError, ResidentActorStart};
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
 pub use wait::{actor_terminal_value, ActorWaitError};
 pub use worker_ledger::{

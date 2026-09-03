@@ -47,6 +47,10 @@ enum Command {
         status_path: PathBuf,
         #[arg(long)]
         root_binding_path: PathBuf,
+        #[arg(long, hide = true)]
+        interactive_agent_bin: PathBuf,
+        #[arg(long, hide = true)]
+        interactive_agent_version: String,
         #[arg(long)]
         resume_root: bool,
         #[arg(long)]
@@ -54,8 +58,6 @@ enum Command {
         #[arg(long, value_enum)]
         effort: Option<Effort>,
     },
-    /// Proxy one Codex stdio MCP child to its authenticated resident actor.
-    Proxy,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -104,11 +106,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_root,
             status_path,
             root_binding_path,
+            interactive_agent_bin,
+            interactive_agent_version,
             resume_root,
             model,
             effort,
         } => {
             let _log_path = tidepool::shoal::init_host_tracing(&workspace, &run_id)?;
+            let interactive_agent = tidepool_agent::native_interactive_agent_from_parts(
+                interactive_agent_bin,
+                interactive_agent_version,
+            )?;
             tidepool::shoal::host(tidepool::shoal::HostOptions {
                 workspace,
                 session,
@@ -116,13 +124,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 run_root,
                 status_path,
                 root_binding_path,
+                interactive_agent,
                 resume_root,
                 model,
                 effort: effort.map(Into::into),
             })
             .await
         }
-        Command::Proxy => tidepool_agent::run_interactive_proxy().await,
     }
 }
 
@@ -155,14 +163,11 @@ mod tests {
                 ..
             } if workspace == std::path::Path::new("/tmp/project")
         ));
-        assert!(matches!(
-            Cli::try_parse_from(["shoal", "proxy"]).unwrap().command,
-            Command::Proxy
-        ));
         let help = Cli::try_parse_from(["shoal", "--help"]).unwrap_err();
         let rendered = help.to_string();
-        for command in ["new", "init", "host", "proxy"] {
+        for command in ["new", "init", "host"] {
             assert!(rendered.contains(command), "{rendered}");
         }
+        assert!(!rendered.contains("proxy"), "{rendered}");
     }
 }

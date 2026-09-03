@@ -158,8 +158,8 @@ pub(crate) enum ResidentActorBoundary {
     Wait(ResidentWaitRequest),
     Poll(crate::wait::ResidentPollRequest),
     Receive(InstalledReceiver),
-    McpAwait(crate::resident_mcp::ResidentMcpAwait),
-    McpReply(crate::resident_mcp::ResidentMcpReply),
+    ToolAwait(crate::resident_tools::ResidentToolAwait),
+    ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
     Worker(crate::worker_runtime::ResidentWorkerRequest),
 }
@@ -190,8 +190,8 @@ impl ResidentActorBoundary {
             Self::Wait(_) => "awaitExit",
             Self::Poll(_) => "pollExit",
             Self::Receive(_) => "receive",
-            Self::McpAwait(_) => "actor MCP await",
-            Self::McpReply(_) => "actor MCP reply",
+            Self::ToolAwait(_) => "agent tool await",
+            Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
             Self::Worker(_) => "worker ledger",
         }
@@ -212,7 +212,7 @@ enum ResidentRequest {
     Actor(crate::generated::actor::ActorReq),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
-    ActorMcp(crate::generated::actor_mcp::ActorMcpReq),
+    AgentTools(crate::generated::agent_tools::AgentToolsReq),
     AgentSession(crate::generated::agent_session::AgentSessionReq),
     Deliberate(crate::generated::deliberate::DeliberateReq),
     WorkerKernel(crate::generated::worker_kernel::WorkerKernelReq),
@@ -245,7 +245,10 @@ impl ResidentRequest {
             Self::ActorLocal,
             crate::generated::actor_local::ActorLocalReq
         );
-        try_member!(Self::ActorMcp, crate::generated::actor_mcp::ActorMcpReq);
+        try_member!(
+            Self::AgentTools,
+            crate::generated::agent_tools::AgentToolsReq
+        );
         try_member!(
             Self::AgentSession,
             crate::generated::agent_session::AgentSessionReq
@@ -287,12 +290,12 @@ impl ResidentRequest {
             Self::ActorLocal(crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(
                 ..,
             )) => "receive",
-            Self::ActorMcp(crate::generated::actor_mcp::ActorMcpReq::ActorMcpAwaitWith(..)) => {
-                "actor MCP await"
-            }
-            Self::ActorMcp(crate::generated::actor_mcp::ActorMcpReq::ActorMcpReplyWith(..)) => {
-                "actor MCP reply"
-            }
+            Self::AgentTools(
+                crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(..),
+            ) => "agent tool await",
+            Self::AgentTools(
+                crate::generated::agent_tools::AgentToolsReq::AgentToolsReplyWith(..),
+            ) => "agent tool reply",
             Self::AgentSession(
                 crate::generated::agent_session::AgentSessionReq::AgentSessionWith(..),
             ) => "agent session",
@@ -358,6 +361,8 @@ pub enum ResidentActorWorkbenchError {
     Checkout(CheckoutError<String>),
     #[error("resident workbench compiler failed: {0}")]
     Compile(CompileError),
+    #[error("resident workbench compiler infrastructure failed:\n{0}")]
+    CompileInfrastructure(String),
     #[error("resident workbench execution failed: {0}")]
     Resident(ResidentError),
     #[error("resident workbench task panicked or was cancelled: {0}")]
@@ -385,8 +390,8 @@ pub enum ResidentActorWorkbenchError {
     StartCapture(#[from] crate::ActorStartCaptureError),
     #[error(transparent)]
     WaitCapture(#[from] crate::ActorWaitError),
-    #[error("invalid actor MCP declaration set: {0}")]
-    McpDeclarations(serde_json::Error),
+    #[error("invalid agent tool declaration set: {0}")]
+    ToolDeclarations(serde_json::Error),
 }
 
 impl<H, O> ResidentMachineAccess<H, O>
@@ -901,8 +906,8 @@ where
                     ResidentRequest::ActorLocal(
                         crate::generated::actor_local::ActorLocalReq::ActorReceiveWith(site, _),
                     ) => capture_receiver_boundary(session, hole, site, actor_realm),
-                    ResidentRequest::ActorMcp(
-                        crate::generated::actor_mcp::ActorMcpReq::ActorMcpAwaitWith(
+                    ResidentRequest::AgentTools(
+                        crate::generated::agent_tools::AgentToolsReq::AgentToolsAwaitWith(
                             declarations,
                             synopsis,
                             initial_user_message,
@@ -914,9 +919,9 @@ where
                             0,
                         );
                         let declarations = serde_json::from_value(declarations)
-                            .map_err(ResidentActorWorkbenchError::McpDeclarations)?;
-                        Ok(ResidentActorBoundary::McpAwait(
-                            crate::resident_mcp::ResidentMcpAwait {
+                            .map_err(ResidentActorWorkbenchError::ToolDeclarations)?;
+                        Ok(ResidentActorBoundary::ToolAwait(
+                            crate::resident_tools::ResidentToolAwait {
                                 continuation: hole,
                                 declarations,
                                 synopsis,
@@ -924,10 +929,10 @@ where
                             },
                         ))
                     }
-                    ResidentRequest::ActorMcp(
-                        crate::generated::actor_mcp::ActorMcpReq::ActorMcpReplyWith(result),
-                    ) => Ok(ResidentActorBoundary::McpReply(
-                        crate::resident_mcp::ResidentMcpReply {
+                    ResidentRequest::AgentTools(
+                        crate::generated::agent_tools::AgentToolsReq::AgentToolsReplyWith(result),
+                    ) => Ok(ResidentActorBoundary::ToolReply(
+                        crate::resident_tools::ResidentToolReply {
                             continuation: hole,
                             result: tidepool_runtime::value_to_json(
                                 &result,
@@ -1322,7 +1327,7 @@ where
             .await
     }
 
-    pub(crate) async fn resume_mcp_invocation(
+    pub(crate) async fn resume_tool_invocation(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
@@ -1668,7 +1673,9 @@ where
         Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => Ok(
             CompiledBlock::Rejected(classify_compile(&failure.error).message),
         ),
-        Err(failure) => Err(ResidentActorWorkbenchError::Compile(failure.error)),
+        Err(failure) => Err(ResidentActorWorkbenchError::CompileInfrastructure(
+            classify_compile(&failure.error).message,
+        )),
     }
 }
 

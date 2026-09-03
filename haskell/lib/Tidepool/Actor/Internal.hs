@@ -22,7 +22,6 @@ module Tidepool.Actor.Internal
   , effectProfile
   , initialization
   , behavior
-  , visibleToChild
   , onShutdown
   , actorLaunchWorktrees
   , withLaunchWorktree
@@ -33,7 +32,7 @@ import Data.Kind (Type)
 import Data.Text (Text)
 import Prelude
 
-import Tidepool.Effects.Core (Actor, ActorLocal, ActorMcp, AgentSession, Deliberate, FsRead, FsWrite, Worktree)
+import Tidepool.Effects.Core (Actor, ActorLocal, AgentSession, AgentTools, Deliberate, FsRead, FsWrite, Worktree)
 import Tidepool.Internal.ActorRef (ActorRef (..))
 
 -- | Experimental named profiles for resident Haskell effect rows. The witness
@@ -46,7 +45,7 @@ data EffectProfile (protocol :: Type -> Type) effs where
 
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol
-   , ActorMcp
+   , AgentTools
    , AgentSession
    , Actor
    , Deliberate
@@ -71,7 +70,6 @@ data ActorDefinition startup (protocol :: Type -> Type) exit where
        , internalEffectProfile :: EffectProfile protocol actorEffs
        , internalInitialization :: startup -> Eff actorEffs initial
        , internalBehavior :: startup -> initial -> Eff actorEffs exit
-       , internalVisibleToChild :: [Text]
        , internalOnShutdown :: ShutdownReason -> Eff actorEffs ()
        , internalLaunchWorktrees :: [Text]
        }
@@ -85,7 +83,6 @@ pattern ActorDefinition
   -> EffectProfile protocol actorEffs
   -> (startup -> Eff actorEffs initial)
   -> (startup -> initial -> Eff actorEffs exit)
-  -> [Text]
   -> (ShutdownReason -> Eff actorEffs ())
   -> ActorDefinition startup protocol exit
 pattern ActorDefinition
@@ -93,26 +90,25 @@ pattern ActorDefinition
   , effectProfile
   , initialization
   , behavior
-  , visibleToChild
   , onShutdown
   } <- ActorDefinitionInternal
-    label effectProfile initialization behavior visibleToChild onShutdown _
+    label effectProfile initialization behavior onShutdown _
   where
-    ActorDefinition label effectProfile initialization behavior visibleToChild onShutdown =
+    ActorDefinition label effectProfile initialization behavior onShutdown =
       ActorDefinitionInternal
-        label effectProfile initialization behavior visibleToChild onShutdown []
+        label effectProfile initialization behavior onShutdown []
 
 {-# COMPLETE ActorDefinition #-}
 
 actorLaunchWorktrees :: ActorDefinition startup protocol exit -> [Text]
 actorLaunchWorktrees
-  (ActorDefinitionInternal _ _ _ _ _ _ worktrees) = worktrees
+  (ActorDefinitionInternal _ _ _ _ _ worktrees) = worktrees
 
 withLaunchWorktree
   :: Text
   -> ActorDefinition startup protocol exit
   -> ActorDefinition startup protocol exit
 withLaunchWorktree treeId
-  (ActorDefinitionInternal l p initialize install exports shutdown worktrees) =
+  (ActorDefinitionInternal l p initialize install shutdown worktrees) =
     ActorDefinitionInternal
-      l p initialize install exports shutdown (worktrees <> [treeId])
+      l p initialize install shutdown (worktrees <> [treeId])

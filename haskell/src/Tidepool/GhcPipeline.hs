@@ -40,7 +40,13 @@ import qualified Data.Text as Text
 import GHC.Platform (genericPlatform)
 import GHC.Utils.Outputable (renderWithContext, defaultSDocContext, ppr)
 import GHC.Types.Id (idName)
-import GHC.Core.Type (splitAppTy_maybe, splitTyConApp_maybe, splitFunTy_maybe)
+import GHC.Core.Type
+  ( mkInvisForAllTys
+  , mkInvisFunTys
+  , splitAppTy_maybe
+  , splitTyConApp_maybe
+  , splitFunTy_maybe
+  )
 import GHC.Core.TyCon (isTupleTyCon, tyConDataCons_maybe, unwrapNewTyCon_maybe, tyConUnique)
 import GHC.Builtin.Names (fUNTyConKey, unrestrictedFunTyConKey)
 import GHC.Core.DataCon (dataConOrigArgTys)
@@ -52,7 +58,8 @@ import GHC.Tc.Types (TcGblEnv, tcg_rdr_env, tcg_type_env)
 import GHC.Types.Name.Reader (GlobalRdrEnv)
 import GHC.Types.Name (nameOccName, nameUnique, mkExternalName, nameModule_maybe)
 import GHC.Types.Name.Occurrence (mkOccName, occNameSpace, occNameString)
-import GHC.Types.Var (setVarName)
+import GHC.Types.Var (mkTyVarBinder, setVarName)
+import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe, isNothing)
@@ -65,7 +72,8 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, when)
 import Tidepool.ExtractUtil (getLibdir, capitalize)
 import Tidepool.Session
-  ( SessionScope(..), isSessionScopeActive, injectSessionScope, renderSessionModule
+  ( SessionModule(..), SessionModuleKind(..), SessionScope(..)
+  , isSessionScopeActive, injectSessionScope, renderSessionModule
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, emitPhase, monotonicTime, elapsedMs
@@ -160,14 +168,20 @@ data CompilePlan = CompilePlan
     -- ^ The graph handed to @load'@ (the skeleton applies @unpoison@ itself).
   , cpAfterLoad :: SuccessFlag -> Ghc ()
     -- ^ Runs immediately after @load'@ and its @ghc_load@ phase emit, before
-    -- summaries are taken. The session path puts its PHASE-1 load barrier,
-    -- module-graph restore, Val-iface injection and @inject@ phase here.
+    -- summaries are taken. The session path puts its PHASE-1 load barrier and
+    -- module-graph restore here; dependency-directed Val injection occurs at
+    -- 'cpBeforeModule'.
   , cpSummaries :: Ghc [ModSummary]
     -- ^ The modules to compile, in compile ORDER, BEFORE the hs-boot filter
     -- (which is the skeleton's, at one site).
   , cpResultBinders :: [String]
     -- ^ OccNames to try, in order, for 'prResultType' — the @result@ vs
     -- @__result@ convention, which differs by wrapper.
+  , cpBeforeModule :: ModSummary -> Ghc ()
+    -- ^ Runs immediately before one summary is reused or compiled. The
+    -- session path injects value ifaces here, after their declaration-module
+    -- dependencies have entered the HPT and before the first importer needs
+    -- them.
   , cpAfterModule :: ModSummary -> TcGblEnv -> HscEnv -> ModGuts -> Ghc ()
     -- ^ Runs after a module's 'core2core', on the pre-'externalizeInternalTops'
     -- guts. The session path registers deferred modules into the HPT here.
@@ -466,6 +480,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     (fronts, results, mReachable) <- case cpTier plan of
       OptimizeEveryModule -> do
         pairs <- forM summaries $ \modSum -> do
+          cpBeforeModule plan modSum
           let mn = ms_mod_name modSum
           cached <- lookupValidMemo modSum
           case cached of
@@ -505,6 +520,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
         -- never core2core'd, so the memo is never asked to serve one where
         -- reachability differs from what produced the entry.
         pairs <- forM summaries $ \modSum -> do
+          cpBeforeModule plan modSum
           cached <- lookupValidMemo modSum
           case cached of
             Just entry -> do
@@ -830,6 +846,7 @@ normalVariant path = PipelineVariant
         -- this variant while its template names @__result@. Try both, in that
         -- order.
       , cpResultBinders = [scaffoldOutputBase, scaffoldTargetName]
+      , cpBeforeModule = \_ -> pure ()
       , cpAfterModule = \_ _ _ _ -> pure ()
       , cpTier = OptimizeCoreReachable
         -- Phase barrier (backstop): a target or dependency compile error
@@ -863,12 +880,13 @@ normalVariant path = PipelineVariant
 --
 --   1. The source-less @Val.G<g>@ modules are EXCLUDED from @depanal@ (no
 --      source to summarise) and their thin ifaces are INJECTED into the HPT +
---      finder ('injectSessionScope', 'cpAfterLoad') so a turn module's
---      @import Val.G<g>@ resolves.
+--      finder immediately before each source module that imports them. This
+--      preserves the chronological Lib/Val dependency DAG instead of eagerly
+--      manufacturing a cycle.
 --   2. Every module that (transitively) imports one of those — the turn target
 --      included — is excluded from the @load'@ graph (it cannot be compiled
 --      before the Val ifaces exist) and compiled instead in the
---      post-injection loop, which also registers it back into the HPT
+--      dependency-directed loop, which also registers it back into the HPT
 --      ('cpAfterModule').
 --
 -- Its tier is 'OptimizeEveryModule'. Compiling every home module to full -O2
@@ -884,9 +902,12 @@ sessionVariant scope path = PipelineVariant
       let targetModName' = mkModuleName (capitalize (takeBaseName path))
           directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
           importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
+          isSessionLib ms = case parseSessionModule (moduleNameString (ms_mod_name ms)) of
+            Just (SessionModule LibMod _) -> True
+            _                             -> False
           -- Everything that (directly or transitively) imports an injected
           -- Val module can't go through the @load'@ below — its import can
-          -- only resolve once 'cpAfterLoad''s injection has happened. This
+          -- only resolve once dependency-directed injection has happened. This
           -- generalizes the old "just exclude the target" rule: a decl module
           -- (@Lib.G<g>@) that itself imports a Val module is ALSO a
           -- dependency needing deferral, not just the ultimate leaf target.
@@ -918,6 +939,8 @@ sessionVariant scope path = PipelineVariant
                    , case node of
                        ModuleNode _ ms -> not (ms_mod_name ms `Set.member` deferredMods)
                        _               -> True ]
+      injectedRef <- liftIO (newIORef Set.empty)
+      injectMsRef <- liftIO (newIORef (0 :: Integer))
       pure CompilePlan
         -- Compile the turn's home-package SOURCE dependencies
         -- (@Tidepool.Prelude@, @Tidepool.Effects@, @Lib.G<g>@) into the HPT,
@@ -942,20 +965,6 @@ sessionVariant scope path = PipelineVariant
             -- instance env ("No instance for ToJSON …").
             do hscMG <- getSession
                setSession hscMG { hsc_mod_graph = modGraphRaw }
-            -- Inject the live @Val.G<g>@ ifaces into the now dep-populated
-            -- HPT. AFTER @load'@, so its upsweep does not discard them; the
-            -- subsequent per-module compile (no further @load'@) preserves
-            -- them.
-            injectT0 <- monotonicTime
-            hsc0 <- getSession
-            hscInjected <- injectSessionScope scope hsc0
-            setSession hscInjected
-            injectT1 <- monotonicTime
-            -- 'inject' phase (TIDEPOOL_TIMING): the Val-iface injection
-            -- alone. Session-variant-only — the normal variant never injects
-            -- session Vals. FLAT, like every other phase — not summed into
-            -- anything.
-            liftIO (emitPhase timing "inject" (elapsedMs injectT0 injectT1))
             -- Dependency order matters now that MULTIPLE modules (not just
             -- one leaf target) may need deferred, post-injection compilation:
             -- a deferred module that itself depends on another deferred
@@ -974,6 +983,32 @@ sessionVariant scope path = PipelineVariant
           -- target literally named @__result@ (scaffold-reserved, never
           -- @result@).
         , cpResultBinders = [scaffoldTargetName]
+        , cpBeforeModule = \modSum ->
+            when (ms_mod_name modSum `Set.member` deferredMods) $ do
+              injected <- liftIO (readIORef injectedRef)
+              let directImports = Set.fromList (importsOf modSum)
+                  needed =
+                    [ valueModule
+                    | valueModule <- ssValIfaces scope
+                    , let moduleName = renderSessionModule valueModule
+                    , moduleName `Set.member` directImports
+                    , moduleName `Set.notMember` injected
+                    ]
+              when (not (null needed)) $ do
+                -- Inject only the value modules this source module imports.
+                -- Declaration and value generations form one chronological
+                -- dependency DAG: an older Lib may need an older Val, while
+                -- a newer Val's type may mention that Lib. Eagerly injecting
+                -- every live Val before the first deferred Lib creates a
+                -- false cycle and makes GHC reject the still-unloaded Lib.
+                (hscInjected, injectMs) <- timeSection $ do
+                  hsc0 <- getSession
+                  injectSessionScope (scope { ssValIfaces = needed }) hsc0
+                setSession hscInjected
+                liftIO $ do
+                  modifyIORef' injectedRef
+                    (`Set.union` Set.fromList (map renderSessionModule needed))
+                  modifyIORef' injectMsRef (+ injectMs)
           -- A deferred module (target ∪ transitive Val-importers, computed
           -- above) was deliberately excluded from the @load'@, so nothing has
           -- registered it in the HPT yet — do that here, now that the Val
@@ -1005,7 +1040,14 @@ sessionVariant scope path = PipelineVariant
           -- ever left unresolved. The target's @import Val.G<g>@ resolves
           -- from the injection above.
         , cpAfterModule = \modSum tcGblEnv hscEnv simplified ->
-            when (ms_mod_name modSum `Set.member` deferredMods) $ do
+            -- A generated Lib module must also be registered from this
+            -- cycle's typecheck before Val-interface injection. Removing the
+            -- leaf target from load's graph can leave an otherwise ordinary
+            -- Lib predecessor absent from the HPT; a retained value whose
+            -- type mentions that Lib module then makes typecheckIface fail
+            -- with "module ... is not loaded". Generated Libs and deferred
+            -- importers therefore share the same single registration path.
+            when (ms_mod_name modSum `Set.member` deferredMods || isSessionLib modSum) $ do
               (cgGuts, modDetails) <- liftIO $ hscTidy hscEnv simplified
               iface <- liftIO $
                 mkIfaceTc hscEnv Sf_None modDetails modSum (Just (cg_binds cgGuts)) tcGblEnv
@@ -1014,14 +1056,16 @@ sessionVariant scope path = PipelineVariant
               setSession (hscUpdateHPT (\hpt -> addToHpt hpt (ms_mod_name modSum) hmi) hscEnvNow)
         , cpTier = OptimizeEveryModule
           -- The load barrier already fired in 'cpAfterLoad' (see there).
-        , cpBeforeMerge = \_ _ -> pure ()
+        , cpBeforeMerge = \_ _ ->
+            liftIO (readIORef injectMsRef >>= emitPhase timing "inject")
         , cpFinalEnv = hscUpdateFlags canonicalizeDFlags
         }
   }
   where
     -- The injected source-less @Val.G<g>@ modules: excluded from the
     -- downsweep (no source to summarise) — a deferred module's @import@ of
-    -- them resolves from the HPT entry 'cpAfterLoad''s injection registers.
+    -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
+    -- before the importing source module is compiled.
     excludedVal = map renderSessionModule (ssValIfaces scope)
 -- | Read the inferred type of the @__user@ binding out of a module's
 -- typechecked type env and render it to a (re-injectable) string.
@@ -1051,16 +1095,20 @@ capturedBindingType occ tcg =
     []    -> Nothing
 
 -- | Strip a monadic head off a bind target's type: @Eff stack T@ → @T@,
--- @M a@ → @a@. Drops any leading foralls/constraint context first
--- ('tcSplitSigmaTy'), then peels the last type application ('splitAppTy_maybe')
--- — for @Eff es a@ that is @(Eff es) a@, yielding @a@. A non-application body
--- (a nullary type) is returned unchanged.
+-- @M a@ → @a@. Peel leading quantifiers and constraints only long enough to
+-- reach the monadic body, then put them back around the result. Dropping them
+-- produces an invalid thin interface whenever GHC legitimately generalizes a
+-- returned value (a phantom protocol parameter on an 'ActorRef' exposed this
+-- bug as an out-of-scope interface variable).
 stripMonadHead :: Type -> Type
 stripMonadHead ty =
-  let (_, _, body) = tcSplitSigmaTy ty
-  in case splitAppTy_maybe body of
-       Just (_, res) -> res
-       Nothing       -> body
+  let (binders, constraints, body) = tcSplitSigmaTy ty
+      result = case splitAppTy_maybe body of
+        Just (_, res) -> res
+        Nothing       -> body
+  in mkInvisForAllTys
+       (map (mkTyVarBinder SpecifiedSpec) binders)
+       (mkInvisFunTys constraints result)
 
 -- | Is the bound value a CLOSURE (Tier1) rather than first-order data (Tier0)?
 -- True iff @T@ (after stripping its own foralls/context) IS a function type,

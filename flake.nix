@@ -15,6 +15,10 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Codex owns its own locked compiler/package graph. Do not force it onto
+    # Tidepool's Rust overlay: the two workspaces intentionally have distinct
+    # MSRV/toolchain timelines.
+    codex.url = "github:inanna-malick/codex/3c67184039782e8785a19c4ad85631c4aff79b91";
   };
 
   outputs =
@@ -23,6 +27,7 @@
       nixpkgs,
       flake-utils,
       rust-overlay,
+      codex,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -103,6 +108,10 @@
         # version + components; the flake reads it rather than pinning
         # `stable.latest` (which drifts silently on every flake.lock update).
         rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        tidepoolRustPlatform = pkgs.makeRustPlatform {
+          cargo = rust;
+          rustc = rust;
+        };
         # One Haskell package universe for both development and the deployed
         # extractor. The worker loads Tidepool modules at runtime, so a bare
         # compiler is not a usable development toolchain even when it can
@@ -140,6 +149,7 @@
             splitmix
           ]
         );
+        interactiveCodex = codex.packages.${system}.default;
       in
       {
         devShells.default = pkgs.mkShell {
@@ -173,6 +183,24 @@
             echo "  Rust: $(rustc --version)"
             echo "  GHC:  $(ghc --version)"
             echo "  sccache (rustc-wrapper, from ~/.cargo/config.toml): $(sccache --version 2>/dev/null || echo 'not on PATH')"
+          '';
+        };
+
+        # The private Codex is selected by absolute path, not added to PATH.
+        # Ordinary shells and the operator's CODEX_HOME remain untouched.
+        devShells.shoal = pkgs.mkShell {
+          inputsFrom = [ self.devShells.${system}.default ];
+          packages = [
+            pkgs.git
+            pkgs.tmux
+          ];
+          TIDEPOOL_INTERACTIVE_CODEX_BIN = "${interactiveCodex}/bin/codex";
+          TIDEPOOL_SHOAL_CODEX_CLOSURE = "${interactiveCodex}";
+          TIDEPOOL_SHOAL_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
+          shellHook = ''
+            export TIDEPOOL_GHC_LIBDIR="$(ghc --print-libdir)"
+            echo "shoal dev shell"
+            echo "  interactive agent: $TIDEPOOL_INTERACTIVE_CODEX_BIN"
           '';
         };
 
@@ -213,6 +241,53 @@
             export TIDEPOOL_EXTRACT_WORKER="${harness}/bin/tidepool-extract-bin"
             exec ${frontend}/bin/tidepool-extract "$@"
           '';
+
+        packages.shoal-unwrapped = tidepoolRustPlatform.buildRustPackage {
+          pname = "shoal-unwrapped";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [
+            "-p"
+            "tidepool"
+            "--bin"
+            "shoal"
+          ];
+          cargoInstallFlags = [
+            "-p"
+            "tidepool"
+            "--bin"
+            "shoal"
+          ];
+          doCheck = false;
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.openssl ];
+        };
+
+        packages.shoal = pkgs.symlinkJoin {
+          name = "shoal";
+          paths = [ self.packages.${system}.shoal-unwrapped ];
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+          postBuild = ''
+            wrapProgram "$out/bin/shoal" \
+              --prefix PATH : ${
+                pkgs.lib.makeBinPath [
+                  self.packages.${system}.tidepool-extract
+                  pkgs.bubblewrap
+                  pkgs.coreutils
+                  pkgs.git
+                  pkgs.tmux
+                ]
+              } \
+              --set TIDEPOOL_INTERACTIVE_CODEX_BIN "${interactiveCodex}/bin/codex" \
+              --set TIDEPOOL_SHOAL_CODEX_CLOSURE "${interactiveCodex}" \
+              --set TIDEPOOL_SHOAL_NIX_STORE_BIN "${pkgs.nix}/bin/nix-store"
+          '';
+        };
+
+        apps.shoal = flake-utils.lib.mkApp {
+          drv = self.packages.${system}.shoal;
+        };
 
         packages.default = self.packages.${system}.tidepool-extract;
 
@@ -301,6 +376,21 @@
 
           # Covers extractor construction as part of `nix flake check`.
           tidepool-extract = self.packages.${system}.tidepool-extract;
+
+          # Deterministic and model-free. The first private Codex build can be
+          # substantial, so use this targeted check during iteration.
+          codex-host-tools-contract = pkgs.runCommand "codex-host-tools-contract" { } ''
+            ${interactiveCodex}/bin/codex --version
+            test -x ${interactiveCodex}/bin/codex-code-mode-host
+            ${interactiveCodex}/bin/codex-code-mode-host --help
+            ${interactiveCodex}/bin/codex --help | grep --fixed-strings -- '--host-dynamic-tools-socket'
+            ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--thread'
+            ${interactiveCodex}/bin/codex queue --help | grep --fixed-strings -- '--message'
+            ${interactiveCodex}/bin/codex archive --help
+            touch "$out"
+          '';
+
+          shoal = self.packages.${system}.shoal;
         };
       }
     );

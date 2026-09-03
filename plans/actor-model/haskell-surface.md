@@ -68,7 +68,7 @@ The public library exposes these profile rows:
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol
    , Actor
-   , ActorMcp
+   , AgentTools
    , AgentSession
    , Deliberate
    , FsRead
@@ -178,7 +178,6 @@ data ActorDefinition startup protocol exit where
        , effectProfile  :: EffectProfile protocol actorEffs
        , initialization :: startup -> Eff actorEffs initial
        , behavior       :: startup -> initial -> Eff actorEffs exit
-       , visibleToChild :: [Text]
        , onShutdown     :: ShutdownReason -> Eff actorEffs ()
        }
     -> ActorDefinition startup protocol exit
@@ -215,12 +214,11 @@ Profile selection is part of the one full `ActorDefinition`; it is not a
 second start operation, mutable options bag, or runtime row descriptor. The
 GADT existentially hides both the initialization artifact and selected row.
 
-`visibleToChild` names additional top-level heads, not arbitrary Haskell
-export syntax. Internal sealing resolves them through GHC-derived metadata
-against the exact compile view that produced the definition. Selecting a type
-head carries its constructor export shape; selecting a value carries that
-exact declaration identity. Missing, shadow-drifted, or type-incoherent
-selections fail start before child allocation.
+An actor definition captures the exact declarations required by its fields.
+There is no second, string-named export membrane for authored code to keep in
+sync. GHC-derived dependency closure and the interpreter's effect policy are
+the two relevant boundaries: one says what the program means, the other says
+what it may do.
 
 Capability-specific launch grants remain planned, not public API. When added,
 capability-owning modules create opaque recipes for their own resources;
@@ -241,8 +239,8 @@ one.
 `pollExit` is the nonblocking observation counterpart to `awaitExit`, not a
 second failure surface. It returns `Nothing` only while the exact target is
 live and returns the same retained `ActorExit` as every later observation once
-terminal. Fixed resident programs normally use `awaitExit`; an interactive MCP
-policy uses `pollExit` when blocking its sole model-facing tool turn would hide
+terminal. Fixed resident programs normally use `awaitExit`; an interactive tool
+policy uses `pollExit` when blocking its sole model-facing turn would hide
 other completed work.
 
 The outer session that asks a model to author a definition likewise fixes the
@@ -521,17 +519,17 @@ remains valid.
 The persistent GHCi-style environment is the actor's primary workbench. A
 Tidepool-owned provider loop reaches it through fenced Haskell in ordinary
 assistant output. An externally hosted agent such as Codex reaches it through
-one actor-local `session_run` MCP tool, because Tidepool cannot safely treat
-that application's prose as an executable callback. MCP is only the transport
-for Haskell source and receipts; actor operations remain ordinary Haskell
-effects rather than separate JSON tools.
+the actor-local custom tool `tidepool_actor.haskell`, because Tidepool cannot
+safely treat that application's prose as an executable callback. The tool
+carries raw Haskell source and receipts; actor operations remain ordinary
+Haskell effects rather than separate JSON tools.
 
-Every fenced block or `session_run` item executes, in order, against the same
+Every fenced block or `tidepool_actor.haskell` call executes one item against the same
 actor-bound persistent environment. The shared Haskell-aware runner classifies
 declarations, binds, expressions, and supported meta commands. The provider
-adapter extracts explicitly tagged fences; the MCP adapter accepts an explicit
-item list. Neither parses Haskell argument syntax or infers executable intent
-from prose.
+adapter extracts explicitly tagged fences; the hosted custom tool accepts one
+raw Haskell item unchanged. Neither parses Haskell argument syntax or
+infers executable intent from prose.
 
 Required behavior:
 
@@ -770,6 +768,47 @@ A model may author the strategy, but it cannot acquire integration authority
 by returning a persuasive record. Runtime-observed command and actor provenance
 remain distinguishable from model-authored claims. This is prompting and actor-
 program policy by default, not a universal evidence ladder in the kernel.
+
+### Live action composition
+
+An interactive agent returns executable policy, not a request that keeps its
+tool call open while children work:
+
+```haskell
+newtype AgentAction effs result
+
+waitOn
+  :: Member Actor effs
+  => ActorRef protocol exit
+  -> AgentAction effs exit
+
+nextTurn
+  :: Member AgentSession effs
+  => AgentAction effs input
+  -> AgentAction effs result
+```
+
+The ordinary Haskell expression is the orchestration language:
+
+```haskell
+complete $ nextTurn $
+  assemble <$> waitOn filterActor <*> waitOn activityActor
+```
+
+Both actors were started before this expression, so its `Applicative` shape
+describes typed fan-in; it is not hidden scheduler syntax. `complete` settles
+the hosted-tool call immediately. The resident actor then owns and evaluates
+the returned action without occupying a model turn. When `nextTurn` is
+reached, the same interactive context is activated through its native event
+channel and the live result is mounted as `sessionInput`. Closures and
+user-defined types remain heap values throughout.
+
+`waitOn` is intentionally success-shaped. Actor failure short-circuits the
+action into a typed `ActionFailure` mounted in the next activation. Use
+`awaitExit` directly when failure, cancellation, and success are ordinary
+domain branches. All reusable helpers retain `Member` constraints; only
+`Complete result` is row-headed because it is the scoped result delimiter
+from which GHC infers the session's return type.
 
 ### Worktree-backed worker submission
 

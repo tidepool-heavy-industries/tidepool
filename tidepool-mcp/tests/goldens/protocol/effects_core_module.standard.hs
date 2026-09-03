@@ -249,9 +249,10 @@ data Green a where
   AsyncStatusWith :: Int -> Green Int
   AsyncCancelWith :: Int -> Green ()
 
+data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 data Actor a where
-  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> [Text] -> [Text] -> Actor (Int, Int)
+  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorEffectProfile -> [Text] -> Actor (Int, Int)
   ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
   ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
   ActorCallWith :: (Int, Int) -> protocol result -> Actor result
@@ -266,9 +267,9 @@ data ActorKernel a where
 data ActorLocal (api :: Type -> Type) a where
   ActorReceiveWith :: Int -> (forall result. api result -> Eff handlerEffs ()) -> ActorLocal api next
 
-data ActorMcp a where
-  ActorMcpAwaitWith :: Value -> Text -> Maybe Text -> ActorMcp (Text, Value)
-  ActorMcpReplyWith :: Value -> ActorMcp ()
+data AgentTools a where
+  AgentToolsAwaitWith :: Value -> Text -> Maybe Text -> AgentTools (Text, Value)
+  AgentToolsReplyWith :: Value -> AgentTools ()
 
 data AgentSession a where
   AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output

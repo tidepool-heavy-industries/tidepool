@@ -8,9 +8,9 @@ afterAck <- collectWorkers [firstHandle]
 do
   if null
        [ ()
-       | later <- sessionInput.workerWakes
+       | later <- sessionInput.sessionContext.workerWakes
        , earlier <- context1.workerWakes
        , later.wakeEvent == earlier.wakeEvent
        ]
-    then complete ()
+    then complete (pure ())
     else error "a consumed worker wake replayed into a later activation"

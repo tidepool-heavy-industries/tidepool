@@ -23,7 +23,7 @@ considered alone. Every actor combines:
        deliberate :: Member Deliberate effs => Text -> input -> Eff effs output
                               │
                               ▼
-       resident fenced Haskell or actor-local GHCi transport
+       resident fenced Haskell or actor-local hosted tool
            define · inspect · evaluate · spawn · complete
                               │
                          live value a
@@ -37,7 +37,7 @@ The first two execution forms share the same actor kernel:
 - a **resident actor** lets Tidepool own the provider conversation and uses
   fenced Haskell as its primary workbench; and
 - an **agent-backed actor** wraps a long-lived interactive agent application.
-  Its actor-local MCP server transports persistent GHCi-style workbench turns,
+  Its actor-local custom tool transports persistent GHCi-style workbench turns,
   while the backend owns its conversation and native user interaction.
 
 Execution form is not identity or authority. Both forms use the same exact
@@ -50,7 +50,7 @@ another exact identity; V0 has no in-place restart or retargeting.
 For a resident actor, Haskell controls when to open a result-bearing agent
 session and fixes its result type. An agent-backed actor receives runtime facts
 through its durable node inbox and invokes the same resident workbench through
-one GHCi-shaped MCP transport. Rust does not create a second administrative API
+one GHCi-shaped hosted tool. Rust does not create a second administrative API
 or lifecycle session beside that program.
 
 ## 2. Actor components
@@ -126,7 +126,7 @@ activation and never re-enter the current Haskell continuation.
 - capability registration, launch-grant derivation, revocation, and caller
   checks;
 - timeout, cancellation, shutdown, and supervision propagation;
-- network mounts, provider transport, node inboxes, and actor-scoped MCP
+- network mounts, provider transport, node inboxes, and actor-scoped host-tool
   transport;
 - durable namespace allocation and external resource cleanup;
 - authoritative structured actor events and resource-growth accounting.
@@ -152,8 +152,8 @@ external and durable boundaries.
 ### The model owns no runtime mechanism
 
 The model writes Haskell within the interface exposed by its actor. A resident
-actor does so through fenced Haskell; an agent-backed actor edits or invokes
-its Haskell-authored MCP policy through the native agent application. It does
+actor does so through fenced Haskell; an agent-backed actor invokes its
+Haskell-authored tool policy through the native agent application. It does
 not parse process arguments, choose filesystem layouts, maintain actor registries,
 construct provider envelopes, assign identifiers, serialize internal values,
 or implement scheduling loops.
@@ -265,7 +265,7 @@ later would require a captured patch/tree digest or a fresh authoritative
 observation.
 
 The whole product remains the exact live Haskell exit carried by `ActorRef`.
-Rust does not keep a second candidate-result registry, rewrite a named MCP
+Rust does not keep a second candidate-result registry, rewrite a named tool
 result, or join model output to repository facts after actor termination.
 Worktree observation and authorization remain Rust mechanics; Haskell owns the
 workflow product and acceptance decision.
@@ -313,14 +313,26 @@ model loop:
 
 - Tidepool-owned provider loops extract fenced `haskell` or `hs` blocks from
   assistant responses.
-- Externally hosted interactive agents invoke one actor-local `session_run`
-  MCP tool carrying an ordered list of Haskell items.
+- Externally hosted interactive agents invoke the actor-local custom tool
+  `tidepool_actor.haskell`, carrying one raw Haskell item without JSON
+  argument ceremony.
 
 Both routes use the same classifier, persistent declaration/binding scope,
 resident machine, actor principal, effect interpreter, and structured
 receipts. Neither creates another scheduler or machine session. Provider-native
-fences keep Haskell in the assistant text channel; external agents use MCP
-because Tidepool cannot safely interpret their prose as executable output.
+fences keep Haskell in the assistant text channel; external agents use an
+explicit host-tool call because Tidepool cannot safely interpret their prose
+as executable output.
+
+The result of an interactive session may itself be an `AgentAction`: an
+ordinary live Haskell computation over the actor's existing effect row. The
+hosted-tool response settles before that action runs. Rust then evaluates it
+under the resident actor, parks it on actor effects as needed, and activates
+the same agent context only when the action explicitly reaches another agent
+session. Thus `assemble <$> waitOn a <*> waitOn b` is ordinary typed Haskell
+over already-running actors, not a long-lived tool request or a scheduler DSL.
+Its composed result may be a closure or user-defined value and remains in the
+shared heap when mounted into the next activation.
 
 The common agent-session executor owns this response-to-block-to-resident-run
 loop. The `agentSession` effect opens it with one typed `Complete output`
@@ -546,11 +558,12 @@ it cannot revise the already-published child exit.
 
 Interactive application ownership precedes conversation binding. A fresh
 stock Codex TUI has no thread identity until its first real User submission.
-Shoal therefore registers the pane, durable inbox, MCP listener, and cleanup
+Shoal therefore registers the pane, durable inbox, host-tools listener, and cleanup
 resources immediately and reports the root as awaiting input; it does not
 manufacture an inference turn merely to obtain an identifier. The first real
-submission starts the configured MCP child, after which rollout discovery
-binds the exact thread and enables native lifecycle pushes. Binding discovery
+submission creates the thread and Codex attaches it through the actor's
+HTTP-over-UDS `/session` route, which durably binds the exact thread and enables
+native lifecycle pushes. Binding discovery
 has no user-input deadline and remains subordinate to exact pane ownership.
 Workers normally cross this boundary immediately because their assignment is
 their genuine launch-time User prompt.
@@ -779,11 +792,10 @@ the same internal sealing mechanism with a checked-in head manifest.
 
 Sealing compiles the actual child entry facade and typed startup/installed-
 continuation adapters before allocating the child. This is the validation
-membrane for
-the existential initialization type and for every selected protocol or helper
-name: if the startup goal cannot be named and completed through that facade, or
-if a selected same-spelled declaration is not the one used by the rooted
-definition, sealing fails. Rust does not attempt to infer this relationship
+membrane for the existential initialization type and the definition's exact
+GHC-derived dependency closure. Authored code does not maintain a parallel
+list of names. If the startup computation cannot be compiled from that exact
+closure, sealing fails before allocation; Rust does not infer Haskell identity
 from strings.
 
 `Program image` is a code-and-value deployment bundle, not a mandate for
@@ -793,8 +805,8 @@ has:
 
 - a rooted compiled entry closure, executed through the resident machine's
   existing suspension-capable entry path;
-- exact `SessionModule`/interface identities plus an explicit set of exports
-  made visible to the child's fenced-Haskell environment;
+- exact `SessionModule`/interface identities for the compiled dependency
+  closure made visible to the child's Haskell environment;
 - declaration source and documentation retained only for inspection and
   provenance.
 
@@ -932,7 +944,7 @@ ultimate owner of every external resource.
 ## 10. Required invariants
 
 1. One actor has at most one active resident turn of any kind: authored
-   Haskell, fenced-Haskell evaluation, MCP-policy execution, provider
+   Haskell, fenced-Haskell evaluation, hosted-tool execution, provider
    inference owned by Tidepool, or mailbox handling. An interactive backend
    independently guarantees one native conversation turn; every callback into
    Tidepool remains serialized by actor admission.
@@ -977,7 +989,10 @@ ultimate owner of every external resource.
 21. A candidate receipt distinguishes model-authored claims from one coherent
     Rust-observed repository state and calls its commit `submittedHead`, not
     `finalHead`.
-22. Collection is repeatable until explicit acknowledgment. MCP response loss
+22. A hosted-tool call that returns an executable `AgentAction` settles before
+    the action runs; later actor waits and model reactivation are owned by the
+    resident actor, not by an open transport request.
+22. Collection is repeatable until explicit acknowledgment. Host-tool response loss
     cannot silently drop the Haskell `ActorRef` that retains the typed exit.
 23. External child-application failure reaches lifecycle only through the
     resident host owner and never becomes fleet failure merely because the

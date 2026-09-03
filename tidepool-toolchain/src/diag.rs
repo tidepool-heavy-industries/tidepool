@@ -49,7 +49,17 @@ pub fn decode_extract_result(
             Err(CompileError::Diagnostics(report.diagnostics))
         }
         (false, ExtractOutcome::WorkerFailure) => {
-            Err(CompileError::WorkerFailure(report.diagnostics))
+            let mut diagnostics = report.diagnostics;
+            let stderr = String::from_utf8_lossy(stderr);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                diagnostics.push(ExtractDiag {
+                    span: None,
+                    severity: DiagnosticSeverity::Error,
+                    message: format!("compiler worker stderr:\n{}", truncate_tail(stderr, 4_000)),
+                });
+            }
+            Err(CompileError::WorkerFailure(diagnostics))
         }
         (succeeded, outcome) => Err(CompileError::MalformedDiagnostics(format!(
             "extract process/report disagreement: process {} but report outcome was {outcome:?}",
@@ -697,6 +707,21 @@ mod tests {
             decode_extract_result(true, worker, b""),
             Err(CompileError::MalformedDiagnostics(_))
         ));
+    }
+
+    #[test]
+    fn worker_failure_retains_compiler_stderr() {
+        let worker = br#"{"version":2,"outcome":"worker-failure","diagnostics":[]}"#;
+        let Err(CompileError::WorkerFailure(diagnostics)) =
+            decode_extract_result(false, worker, b"typecheckIface\nmodule X is not loaded\n")
+        else {
+            panic!("worker failure must stay typed");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Error);
+        assert!(diagnostics[0]
+            .message
+            .contains("typecheckIface\nmodule X is not loaded"));
     }
 
     // ---- render_diagnostics ----

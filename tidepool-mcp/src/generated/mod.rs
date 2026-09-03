@@ -3,8 +3,8 @@
 pub mod actor;
 pub mod actor_kernel;
 pub mod actor_local;
-pub mod actor_mcp;
 pub mod agent_session;
+pub mod agent_tools;
 pub mod ask_user;
 pub mod deliberate;
 pub mod exec;
@@ -21,8 +21,8 @@ pub mod worktree;
 pub use actor::*;
 pub use actor_kernel::*;
 pub use actor_local::*;
-pub use actor_mcp::*;
 pub use agent_session::*;
+pub use agent_tools::*;
 pub use ask_user::*;
 pub use deliberate::*;
 pub use exec::*;
@@ -53,7 +53,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_decl(),
         actor_kernel_decl(),
         actor_local_decl(),
-        actor_mcp_decl(),
+        agent_tools_decl(),
         agent_session_decl(),
         worker_kernel_decl(),
     ]
@@ -65,7 +65,7 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "Actor",
     "ActorKernel",
     "ActorLocal",
-    "ActorMcp",
+    "AgentTools",
     "AgentSession",
     "WorkerKernel",
 ];
@@ -76,6 +76,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     (
         "Actor",
         &[
+            "ActorEffectProfile",
             "ActorTerminalStatus",
             "ActorStartWith",
             "ActorWaitWith",
@@ -94,7 +95,10 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         ],
     ),
     ("ActorLocal", &["ActorReceiveWith"]),
-    ("ActorMcp", &["ActorMcpAwaitWith", "ActorMcpReplyWith"]),
+    (
+        "AgentTools",
+        &["AgentToolsAwaitWith", "AgentToolsReplyWith"],
+    ),
     ("AgentSession", &["AgentSessionWith"]),
     (
         "WorkerKernel",

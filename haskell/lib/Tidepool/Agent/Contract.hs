@@ -79,7 +79,7 @@ import Tidepool.Aeson.Value (Value, ToJSON (..), object, (.=))
 import Tidepool.Aeson.FromJSON (FromJSON (..), Result (..), fromJSON)
 import Tidepool.Aeson.Schema (JsonSchema (..))
 import Control.Monad.Freer (Eff, Member, send)
-import Tidepool.Effects.Core (ActorMcp (..))
+import Tidepool.Effects.Core (AgentTools (..))
 
 -- ---------------------------------------------------------------------------
 -- Endpoint algebra and server interpretation
@@ -492,13 +492,13 @@ toolKindText kind = case kind of
   UpdateKind -> "update"
   FinishKind -> "finish"
 
--- | Install an immutable tools record as this actor's resident MCP policy.
+-- | Install an immutable tools record as this actor's resident tool policy.
 -- Rust resumes this loop only with names from the declarations published by
 -- the same 'CompiledTools' value; decoding and handler execution stay in
 -- Haskell under the actor's normal effect row.
 serveTools ::
   forall tools effs exit.
-  (HasActorApi tools (Eff effs) () exit, Member ActorMcp effs) =>
+  (HasActorApi tools (Eff effs) () exit, Member AgentTools effs) =>
   tools (AsActorT (Eff effs) () exit) ->
   Eff effs exit
 serveTools tools = serveToolsWith () (const tools)
@@ -509,7 +509,7 @@ serveTools tools = serveToolsWith () (const tools)
 -- policy await, never repeated after a tool invocation.
 serveToolsWithInitialUser ::
   forall tools effs exit.
-  (HasActorApi tools (Eff effs) () exit, Member ActorMcp effs) =>
+  (HasActorApi tools (Eff effs) () exit, Member AgentTools effs) =>
   Text ->
   tools (AsActorT (Eff effs) () exit) ->
   Eff effs exit
@@ -521,7 +521,7 @@ serveToolsWithInitialUser initialUser tools =
 -- 'Update' endpoint can replace it, and only a 'Finish' endpoint can return.
 serveToolsWith ::
   forall tools effs state exit.
-  (HasActorApi tools (Eff effs) state exit, Member ActorMcp effs) =>
+  (HasActorApi tools (Eff effs) state exit, Member AgentTools effs) =>
   state ->
   (state -> tools (AsActorT (Eff effs) state exit)) ->
   Eff effs exit
@@ -529,7 +529,7 @@ serveToolsWith = serveToolsLoop Nothing
 
 serveToolsLoop ::
   forall tools effs state exit.
-  (HasActorApi tools (Eff effs) state exit, Member ActorMcp effs) =>
+  (HasActorApi tools (Eff effs) state exit, Member AgentTools effs) =>
   Maybe Text ->
   state ->
   (state -> tools (AsActorT (Eff effs) state exit)) ->
@@ -542,7 +542,7 @@ serveToolsLoop initialUser initial build = loop initialUser initial
         Right compiled -> do
           (name, arguments) <-
             send
-              ( ActorMcpAwaitWith
+              ( AgentToolsAwaitWith
                   (declarationsToJson (entryDeclarations compiled))
                   (entrySynopsis compiled)
                   startupMessage
@@ -550,13 +550,13 @@ serveToolsLoop initialUser initial build = loop initialUser initial
           step <- entryDispatch compiled name arguments
           case step of
             ActorToolStay result -> do
-              send (ActorMcpReplyWith result)
+              send (AgentToolsReplyWith result)
               loop Nothing state
             ActorToolUpdate result next -> do
-              send (ActorMcpReplyWith result)
+              send (AgentToolsReplyWith result)
               loop Nothing next
             ActorToolFinish result exit -> do
-              send (ActorMcpReplyWith result)
+              send (AgentToolsReplyWith result)
               pure exit
 
 compileActorTools ::

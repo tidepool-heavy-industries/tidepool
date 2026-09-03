@@ -4,60 +4,43 @@
 //! headless worker exposes a stepwise turn protocol; an interactive agent owns
 //! its native conversation and terminal UI. Tidepool launches and supervises
 //! the latter, pushes messages through its supported channel, and services its
-//! actor-scoped MCP child. Pretending those are the same lifecycle would make
+//! actor-scoped hosted tools. Pretending those are the same lifecycle would make
 //! either side lie.
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
-use tidepool_actor::ActorRef;
-use tidepool_node::NodeCredential;
 
-pub(crate) const ENV_PROXY_ENDPOINT: &str = "TIDEPOOL_ACTOR_PROXY_ENDPOINT";
-pub(crate) const ENV_ACTOR_ID: &str = "TIDEPOOL_ACTOR_ID";
-pub(crate) const ENV_ACTOR_INCARNATION: &str = "TIDEPOOL_ACTOR_INCARNATION";
-pub(crate) const ENV_PROXY_CREDENTIAL: &str = "TIDEPOOL_ACTOR_PROXY_CREDENTIAL";
-pub(crate) const ENV_ACTOR_BINDING_PATH: &str = "TIDEPOOL_ACTOR_BINDING_PATH";
-pub(crate) const ENV_ACTOR_WORKSPACE: &str = "TIDEPOOL_ACTOR_WORKSPACE";
-
-/// Environment binding inherited by one interactive agent and its MCP proxy.
+/// One exact, behaviorally verified interactive-agent installation.
 ///
-/// This is the one typed boundary that knows the private environment protocol
-/// consumed by the proxy; composition roots never spell or parse those
-/// variable names.
-pub struct InteractiveProxyBinding {
-    pub actor: ActorRef,
-    pub endpoint: PathBuf,
-    pub credential: NodeCredential,
-    pub binding_path: PathBuf,
-    pub workspace: PathBuf,
+/// Shoal resolves this once before it mutates tmux state, then passes the
+/// value through its private host-process boundary. Every launch and lifecycle
+/// command therefore addresses the same executable rather than consulting
+/// `PATH` again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveAgentInstallation {
+    executable: PathBuf,
+    version: String,
 }
 
-impl InteractiveProxyBinding {
+impl InteractiveAgentInstallation {
+    pub(crate) fn new(executable: PathBuf, version: String) -> Self {
+        Self {
+            executable,
+            version,
+        }
+    }
+
     #[must_use]
-    pub fn environment(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
-            (
-                ENV_PROXY_ENDPOINT.into(),
-                self.endpoint.display().to_string(),
-            ),
-            (ENV_ACTOR_ID.into(), self.actor.id.0.to_string()),
-            (
-                ENV_ACTOR_INCARNATION.into(),
-                self.actor.incarnation.0.to_string(),
-            ),
-            (ENV_PROXY_CREDENTIAL.into(), self.credential.0.clone()),
-            (
-                ENV_ACTOR_BINDING_PATH.into(),
-                self.binding_path.display().to_string(),
-            ),
-            (
-                ENV_ACTOR_WORKSPACE.into(),
-                self.workspace.display().to_string(),
-            ),
-        ])
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
     }
 }
 
@@ -94,21 +77,6 @@ pub struct InteractiveAgentCommand {
     pub args: Vec<String>,
 }
 
-/// One stdio MCP server installed only for this interactive process.
-///
-/// `forward_env` contains names, not values. The process launcher chooses the
-/// launch environment; this list only tells the agent which of those values
-/// its MCP child is allowed to inherit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InteractiveMcpServer {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub cwd: String,
-    pub forward_env: Vec<String>,
-    pub required: bool,
-}
-
 /// Backend-neutral configuration frozen when an interactive process starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveAgentSpec {
@@ -120,7 +88,9 @@ pub struct InteractiveAgentSpec {
     /// addressed by subsequent native push operations.
     pub initial_prompt: Option<String>,
     pub native_sandbox: InteractiveNativeSandbox,
-    pub mcp: InteractiveMcpServer,
+    /// Actor-scoped host dynamic tools served over HTTP/1.1 on this Unix
+    /// socket. The deployment adapter binds it before calling `render`.
+    pub host_tools_socket: PathBuf,
 }
 
 /// Operations a concrete interactive-agent adapter must provide.
@@ -146,26 +116,4 @@ pub trait InteractiveAgentBackend: Send + Sync {
         cwd: &'a str,
         thread: &'a BackendThreadId,
     ) -> InteractiveFuture<'a, ()>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tidepool_actor::{ActorId, ActorRef};
-
-    #[test]
-    fn proxy_binding_is_the_only_environment_protocol_encoder() {
-        let launch = InteractiveProxyBinding {
-            actor: ActorRef::first(ActorId(7)),
-            endpoint: "/tmp/actor.sock".into(),
-            credential: NodeCredential("secret".into()),
-            binding_path: "/tmp/binding.json".into(),
-            workspace: "/tmp/work".into(),
-        };
-        let environment = launch.environment();
-        assert_eq!(environment[ENV_ACTOR_ID], "7");
-        assert_eq!(environment[ENV_ACTOR_INCARNATION], "1");
-        assert_eq!(environment[ENV_PROXY_CREDENTIAL], "secret");
-        assert_eq!(environment[ENV_ACTOR_WORKSPACE], "/tmp/work");
-    }
 }

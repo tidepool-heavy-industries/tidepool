@@ -1,7 +1,9 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
 
 -- | Typed completion of one model deliberation.
 --
@@ -52,5 +54,5 @@ data Complete result a where
 
 -- | Settle the current typed goal with an in-heap value. The value may be a
 -- closure or any other ordinary Haskell value; it is never serialized.
-complete :: Member (Complete result) effs => result -> Eff effs a
+complete :: result -> Eff (Complete result ': effs) a
 complete value = send (CompleteWith 0 value)

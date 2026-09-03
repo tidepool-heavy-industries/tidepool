@@ -1,5 +1,6 @@
 module Tidepool.EffectSchema
   ( VerbSpec(..)
+  , SiteAnswerSource(..)
   , NominalHead(..)
   , SiteType(..)
   , YieldSite(..)
@@ -42,7 +43,16 @@ data VerbSpec = VerbSpec
   , vsListAnswer :: Bool
   , vsMisShapeIsError :: Bool
   , vsInputTypeArgs :: [Int]
+  , vsAnswerSource :: SiteAnswerSource
   }
+  deriving (Eq, Show)
+
+-- | Where a surface verb exposes the value an eventual suspension resumes.
+-- Most primitive verbs name it as their first visible type argument. A
+-- higher-level action combinator can instead return that value directly.
+data SiteAnswerSource
+  = FirstTypeArgument
+  | AppliedResultType
   deriving (Eq, Show)
 
 -- | The complete typed-suspension vocabulary understood by the extractor.
@@ -70,10 +80,17 @@ sitedVerbs =
       "deliberateSited" "Tidepool.Deliberation" 2 2 False True [1]
   , verb "agentSession" "Tidepool.Agent.Session"
       "agentSessionSited" "Tidepool.Agent.Session" 2 2 False True [1]
+  , resultVerb "continueWith" "Tidepool.Agent.Action"
+      "continueWithSited" "Tidepool.Agent.Action" 2 1 False True [1]
+  , resultVerb "nextTurn" "Tidepool.Agent.Action"
+      "nextTurnSited" "Tidepool.Agent.Action" 2 1 False True [1]
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" 1 1 False True []
   , verb "serve" "Tidepool.Actor"
       "serveSited" "Tidepool.Actor" 1 2 False True []
   ]
   where
-    verb = VerbSpec
+    verb name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs =
+      VerbSpec name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs FirstTypeArgument
+    resultVerb name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs =
+      VerbSpec name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs AppliedResultType

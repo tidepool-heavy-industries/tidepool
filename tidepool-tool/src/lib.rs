@@ -1,5 +1,5 @@
-//! Transport-neutral model tool contracts shared by actor policies, agent
-//! backends, and MCP projection.
+//! Transport-neutral model tool contracts shared by actor policies and their
+//! concrete host projections.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,6 +13,78 @@ pub struct ToolDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
     pub kind: ToolKind,
+}
+
+/// One raw-text tool whose concrete host transport supplies no argument
+/// object or schema wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomToolDeclaration {
+    pub name: String,
+    pub description: String,
+}
+
+/// One model-visible resident tool, independent of the protocol that exposes
+/// it to an attached agent application.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HostedTool {
+    Custom(CustomToolDeclaration),
+    Function(ToolDeclaration),
+}
+
+impl HostedTool {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Custom(tool) => &tool.name,
+            Self::Function(tool) => &tool.name,
+        }
+    }
+
+    #[must_use]
+    pub fn description(&self) -> &str {
+        match self {
+            Self::Custom(tool) => &tool.description,
+            Self::Function(tool) => &tool.description,
+        }
+    }
+
+    #[must_use]
+    pub fn accepts(&self, arguments: &ToolArguments) -> bool {
+        matches!(
+            (self, arguments),
+            (Self::Custom(_), ToolArguments::Raw(_))
+                | (
+                    Self::Function(_),
+                    ToolArguments::Structured(serde_json::Value::Object(_))
+                )
+        )
+    }
+}
+
+/// Arguments decoded according to the registered resident tool kind.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolArguments {
+    Raw(String),
+    Structured(serde_json::Value),
+}
+
+/// Transport correlation carried unchanged when the host protocol supplies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolInvocationContext {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub call_id: String,
+    pub namespace: Option<String>,
+}
+
+/// One validated invocation of an actor's resident tool surface.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolInvocation {
+    pub context: Option<ToolInvocationContext>,
+    pub name: String,
+    pub arguments: ToolArguments,
 }
 
 /// Actor-policy meaning retained from the Haskell endpoint algebra.

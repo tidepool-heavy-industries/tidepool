@@ -1,7 +1,7 @@
 //! Composition root for the first actor-native interactive swarm.
 //!
 //! The daemon owns resident Haskell scheduling and exact actor lifecycle. One
-//! stock interactive agent is attached to each installed Haskell MCP policy;
+//! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use frunk::{hlist, HCons, HNil};
 use parking_lot::Mutex;
-use rmcp::ServiceExt;
 use tidepool_actor::{
     spawn_resident_root, ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement,
     ActorRef, ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
@@ -21,18 +20,18 @@ use tidepool_actor::{
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
-    InteractiveAgentSpec, InteractiveLaunchMode, InteractiveMcpServer, InteractiveNativeSandbox,
-    InteractiveProxyBinding, ReasoningEffort,
+    InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveLaunchMode,
+    InteractiveNativeSandbox, ReasoningEffort,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{ActorWorktreeAuthority, ActorWorktreeHandler, WorktreeHandler};
-use tidepool_mcp::{CapturedOutput, DynamicMcpServer};
+use tidepool_mcp::CapturedOutput;
 use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
 use tidepool_node::{
-    accept_proxy, DurableInbox, NodeCredential, ProcessInvocation, ProcessMountBoundary,
-    TmuxLaunch, TmuxPaneId, TmuxSession, BUBBLEWRAP_PROGRAM,
+    DurableInbox, ProcessInvocation, ProcessMountBoundary, TmuxLaunch, TmuxPaneId, TmuxSession,
+    BUBBLEWRAP_PROGRAM,
 };
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
@@ -69,8 +68,7 @@ pub struct ActorHostConfig {
     pub policy_root: PathBuf,
     pub run_root: PathBuf,
     pub root_binding_path: PathBuf,
-    pub proxy_program: String,
-    pub proxy_args: Vec<String>,
+    pub interactive_agent: InteractiveAgentInstallation,
     pub tmux_session: String,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
@@ -83,7 +81,7 @@ pub enum ActorHostReadiness {
     /// The root pane is selected and accepts its first real User input, but a
     /// fresh backend conversation does not yet have a thread identity.
     AwaitingInput { root: ActorRef },
-    /// The MCP sidecar proved the exact surrounding thread, enabling native
+    /// The host-tools session callback proved the exact surrounding thread, enabling native
     /// lifecycle pushes without changing application ownership.
     Ready {
         root: ActorRef,
@@ -120,7 +118,7 @@ struct InteractiveDeployment {
 }
 
 enum InteractiveConnection {
-    // Pane, inbox, proxy listener, and cleanup are already owned in this state.
+    // Pane, inbox, tool listener, and cleanup are already owned in this state.
     AwaitingBinding,
     Bound {
         delivery_shutdown: oneshot::Sender<()>,
@@ -152,11 +150,10 @@ struct PendingInteractiveLaunch {
 enum InteractiveOperation {
     BindWorktree,
     PrepareRuntime,
-    BindProxy,
+    BindToolHost,
     BuildCommand,
     BuildPolicy,
-    AcceptProxy,
-    ServeMcp,
+    ServeToolHost,
     LaunchProcess,
     DiscoverBinding,
     StopProcess,
@@ -167,11 +164,10 @@ impl fmt::Display for InteractiveOperation {
         let name = match self {
             Self::BindWorktree => "bind actor worktree",
             Self::PrepareRuntime => "prepare runtime",
-            Self::BindProxy => "bind proxy",
+            Self::BindToolHost => "bind tool host",
             Self::BuildCommand => "build agent command",
-            Self::BuildPolicy => "build MCP policy",
-            Self::AcceptProxy => "accept proxy",
-            Self::ServeMcp => "serve MCP",
+            Self::BuildPolicy => "build resident tool policy",
+            Self::ServeToolHost => "serve host dynamic tools",
             Self::LaunchProcess => "launch agent process",
             Self::DiscoverBinding => "discover conversation binding",
             Self::StopProcess => "stop agent process",
@@ -188,11 +184,10 @@ impl InteractiveOperation {
                 ExternalApplicationFailureClass::CommandConstruction
             }
             Self::LaunchProcess => ExternalApplicationFailureClass::ProcessLaunch,
-            Self::BindProxy
-            | Self::AcceptProxy
-            | Self::ServeMcp
+            Self::BindToolHost
+            | Self::ServeToolHost
             | Self::DiscoverBinding
-            | Self::PrepareRuntime => ExternalApplicationFailureClass::ProxyStartup,
+            | Self::PrepareRuntime => ExternalApplicationFailureClass::ToolHostStartup,
             Self::StopProcess => ExternalApplicationFailureClass::UnexpectedExit,
         }
     }
@@ -268,7 +263,7 @@ pub async fn run(
             config.tmux_session
         )));
     }
-    let backend = native_interactive_backend();
+    let backend = native_interactive_backend(config.interactive_agent.clone());
     let (shutdown, shutdown_rx) = watch::channel(false);
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
@@ -392,7 +387,7 @@ fn compile_root(
 ) -> Result<(ActorWorkbenchSource, ShoalRoot), Box<dyn std::error::Error>> {
     let declarations = [
         tidepool_mcp::agent_session_decl(),
-        tidepool_mcp::actor_mcp_decl(),
+        tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
@@ -599,6 +594,15 @@ async fn run_interactive_applications(
                             ).await;
                             (local_actor, result)
                         });
+                    }
+                    LocalResidentDeployment::SessionReady { actor, message } => {
+                        let Some(application) = deployments.iter().find(|app| app.actor == actor) else {
+                            break Some(format!("resident actor {actor:?} requested a session activation without a deployed application"));
+                        };
+                        notifications.spawn(publish_inbox_message(
+                            Arc::clone(&application.inbox),
+                            message,
+                        ));
                     }
                     LocalResidentDeployment::Retired { actor, terminal } => {
                         let pending = pending_launches.remove(&actor);
@@ -967,51 +971,6 @@ fn current_time_ms() -> i64 {
     i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
-/// Serve one actor policy for the actor's lifetime, not for the lifetime of a
-/// particular proxy process. Codex legitimately reconnects while refreshing
-/// its MCP inventory; a transport disconnect must not make the resident actor
-/// lose its interaction surface.
-async fn serve_actor_mcp_endpoint(
-    listener: UnixListener,
-    server: DynamicMcpServer,
-    actor: ActorRef,
-    credential: NodeCredential,
-) -> Result<(), InteractiveApplicationError> {
-    loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
-        let connection = async {
-            let (_handshake, stream) = accept_proxy(stream, |candidate| {
-                if candidate.actor != actor {
-                    return Err("actor identity does not match this endpoint".into());
-                }
-                if candidate.credential != credential {
-                    return Err("actor proxy credential is invalid".into());
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|error| application_error(actor, InteractiveOperation::AcceptProxy, error))?;
-            let (read, write) = stream.into_split();
-            server
-                .clone()
-                .serve((read, write))
-                .await
-                .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?
-                .waiting()
-                .await
-                .map_err(|error| application_error(actor, InteractiveOperation::ServeMcp, error))?;
-            Ok::<_, InteractiveApplicationError>(())
-        }
-        .await;
-        if let Err(error) = connection {
-            tracing::warn!(actor = ?actor, %error, "actor MCP connection ended with an error; accepting a replacement");
-        }
-    }
-}
-
 async fn launch_prepared_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
@@ -1089,14 +1048,20 @@ async fn launch_prepared_interactive_application(
         actor_identity.id.0,
         actor_identity.incarnation.0
     ));
-    std::fs::create_dir_all(&socket_root).map_err(|error| {
+    std::fs::create_dir(&socket_root).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
-    let endpoint = socket_root.join("mcp.sock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_root, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
+        )?;
+    }
+    let endpoint = socket_root.join("host-tools.sock");
     let listener = UnixListener::bind(&endpoint).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::BindProxy, error)
+        application_error(actor_identity, InteractiveOperation::BindToolHost, error)
     })?;
-    let credential = NodeCredential(uuid::Uuid::new_v4().to_string());
     let binding_path = if actor_identity == root {
         config.root_binding_path.clone()
     } else {
@@ -1111,13 +1076,6 @@ async fn launch_prepared_interactive_application(
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?,
     );
-    let binding = InteractiveProxyBinding {
-        actor: actor_identity,
-        endpoint,
-        credential: credential.clone(),
-        binding_path: binding_path.clone(),
-        workspace: agent_workspace.clone(),
-    };
     let launch_mode = if actor_identity == root {
         config.root_launch_mode.clone()
     } else {
@@ -1129,7 +1087,6 @@ async fn launch_prepared_interactive_application(
     };
     let developer_instructions =
         developer_instructions(actor_identity == root, worktree.is_some(), &launch_mode);
-    let proxy_environment = binding.environment();
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: config.model.clone(),
@@ -1137,14 +1094,7 @@ async fn launch_prepared_interactive_application(
         developer_instructions,
         initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
-        mcp: InteractiveMcpServer {
-            name: "tidepool_actor".into(),
-            command: config.proxy_program.clone(),
-            args: config.proxy_args.clone(),
-            cwd: agent_workspace.to_string_lossy().into_owned(),
-            forward_env: proxy_environment.keys().cloned().collect(),
-            required: true,
-        },
+        host_tools_socket: endpoint,
     };
     let command = backend.render(&spec).map_err(|error| {
         application_error(actor_identity, InteractiveOperation::BuildCommand, error)
@@ -1156,15 +1106,17 @@ async fn launch_prepared_interactive_application(
             args: command.args,
         },
     );
-    let server = DynamicMcpServer::from_resident_policy(installation.policy).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::BuildPolicy, error)
-    })?;
-    let service = tokio::spawn(serve_actor_mcp_endpoint(
-        listener,
-        server,
-        actor_identity,
-        credential,
-    ));
+    let server = crate::host_dynamic_tools::HostDynamicToolService::new(
+        installation.policy,
+        binding_path.clone(),
+        expected_resume.clone(),
+    )
+    .map_err(|error| application_error(actor_identity, InteractiveOperation::BuildPolicy, error))?;
+    let service = tokio::spawn(async move {
+        server.serve(listener).await.map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::ServeToolHost, error)
+        })
+    });
     if cancelled.try_recv().is_ok() {
         service.abort();
         let _ = service.await;
@@ -1173,7 +1125,6 @@ async fn launch_prepared_interactive_application(
     }
     let launch_environment = actor_launch_environment(
         config.pane_environment.clone(),
-        proxy_environment,
         actor_identity == root,
         build_output.as_deref(),
     );
@@ -1279,11 +1230,9 @@ struct ActorLaunchEnvironment {
 /// rejected by the deployment adapter.
 fn actor_launch_environment(
     mut inherited: BTreeMap<String, String>,
-    actor_local: BTreeMap<String, String>,
     is_root: bool,
     build_output: Option<&Path>,
 ) -> ActorLaunchEnvironment {
-    inherited.extend(actor_local);
     if let Some(build_output) = build_output {
         inherited.insert(
             "CARGO_TARGET_DIR".into(),
@@ -1398,9 +1347,16 @@ fn prepare_owner_notification(
 }
 
 async fn publish_owner_notification(notification: OwnerNotification) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || notification.inbox.publish(notification.message))
+    publish_inbox_message(notification.inbox, notification.message).await
+}
+
+async fn publish_inbox_message(
+    inbox: Arc<DurableInbox<String>>,
+    message: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || inbox.publish(message))
         .await
-        .map_err(|error| format!("owner inbox publisher task: {error}"))?
+        .map_err(|error| format!("actor inbox publisher task: {error}"))?
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1427,7 +1383,7 @@ async fn retire_interactive_application(
             application_error(deployment.actor, InteractiveOperation::StopProcess, error)
         });
     tokio::join!(
-        stop_retired_mcp_service(deployment.actor, &mut deployment.service,),
+        stop_retired_tool_service(deployment.actor, &mut deployment.service,),
         async {
             if let Some(delivery) = delivery.as_mut() {
                 stop_retired_delivery(deployment.actor, delivery, APPLICATION_TASK_GRACE_TIMEOUT)
@@ -1458,17 +1414,15 @@ async fn retire_interactive_application(
     }
 }
 
-/// Stop the actor-lifetime MCP listener after its application pane is gone.
-/// Individual proxy connections are deliberately replaceable, so normal
-/// endpoint completion is not a useful retirement signal.
-async fn stop_retired_mcp_service(
+/// Stop the actor-lifetime host-tools listener after its application pane is gone.
+async fn stop_retired_tool_service(
     actor: ActorRef,
     service: &mut tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
 ) {
     service.abort();
     if let Err(error) = service.await {
         if !error.is_cancelled() {
-            tracing::warn!(actor = ?actor, %error, "retired actor MCP service task failed");
+            tracing::warn!(actor = ?actor, %error, "retired actor tool service task failed");
         }
     }
 }
@@ -1583,11 +1537,11 @@ fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLau
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised workers instead of implementing changes in the shared source checkout. `tidepool_actor.session_run` is your primary GHCi-like orchestration surface; persistent declarations and live authored values survive calls, while Rust owns worker lifecycle and custody. Start every independent seam together with `startWorkers` before awaiting results. On a lifecycle activation, use the current `sessionInput :: SessionContext` and pass `sessionInput.workerWakes` to `collectWorkerWakes`. `WorkerPending` is a cooperative yield signal: never sleep or poll. Collection is replayable and acknowledgement is a separate decision after native Git review/integration. Use `listWorkers` for live observation and finish each root activation with `complete ()`. Scaffold stable interfaces first, integrate that candidate, then fan out all independent seams from the integrated base. Worker worktrees share this repository's ordinary object and branch namespace; inspect submitted OIDs or branches directly. Native coding tools remain the integration surface.{continuity}")
+        format!("You are a Tidepool root actor. Orchestrate through supervised actors instead of implementing changes in the shared source checkout. `tidepool_actor.haskell` is your primary GHCi-like orchestration surface; send one raw Haskell item per call. Persistent declarations and live values survive calls, while Rust owns actor lifecycle and repository custody. `sessionInput :: RootActivation` contains this turn's runtime facts. Start independent actors before waiting. Prefer ordinary Haskell composition: `complete $ nextTurn $ assemble <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, then reactivates this same context with the live typed result. Use `awaitExit` when failure is domain policy. Use `complete (pure ())` to return to silent/manual readiness. Native coding tools remain the review and integration surface.{continuity}")
     } else if owns_worktree {
-        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted as `sessionInput :: Text`. Use native coding tools for repository work and `tidepool_actor.session_run` as the GHCi-like typed completion surface. Finish exactly once with Haskell such as `complete (WorkerReport { summary = ..., evidence = [...] })`; Rust then observes repository truth and owns lifecycle.".into()
+        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted in `sessionInput :: WorkerActivation`. Use native coding tools for repository work and `tidepool_actor.haskell` for typed actor composition and completion. Return executable Haskell with `complete action`; ordinary completion is `complete (pure (WorkerReport { summary = ..., evidence = [...] }))`. Rust then observes repository truth and owns lifecycle.".into()
     } else {
-        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.session_run` as your primary GHCi-like actor surface. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return the session's expected value with `complete`; do not claim or attempt source-checkout mutation authority.".into()
+        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.haskell` as your primary GHCi-like actor surface, sending one raw Haskell item per call. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return executable Haskell with `complete action`; do not claim or attempt source-checkout mutation authority.".into()
     }
 }
 
@@ -1631,51 +1585,30 @@ mod tests {
     use super::*;
     use tidepool_agent::{
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
-        ToolDeclaration, ToolKind,
     };
     use tidepool_testing::eval_harness;
+    use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation};
     use tidepool_worktree::WorktreeSpec;
 
-    #[tokio::test]
-    async fn actor_mcp_inventory_survives_a_proxy_reconnect() {
-        let actor = ActorRef::first(tidepool_actor::ActorId(7));
-        let credential = NodeCredential("reconnect-secret".into());
-        let server = DynamicMcpServer::new(
-            vec![ToolDeclaration {
-                name: "session_run".into(),
-                description: "Run persistent Haskell".into(),
-                input_schema: serde_json::json!({"type": "object"}),
-                output_schema: Some(serde_json::json!({"type": "object"})),
-                kind: ToolKind::Call,
-            }],
-            Some("Persistent actor session".into()),
-            |_, _| Box::pin(async { Ok(serde_json::json!({})) }),
-        )
-        .unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let endpoint = root.path().join("actor.sock");
-        let listener = UnixListener::bind(&endpoint).unwrap();
-        let service = tokio::spawn(serve_actor_mcp_endpoint(
-            listener,
-            server,
-            actor,
-            credential.clone(),
-        ));
-        let handshake = tidepool_node::NodeHandshake::current(actor, credential);
-
-        for _ in 0..2 {
-            let stream = tidepool_node::connect_proxy(&endpoint, &handshake)
+    async fn dispatch_haskell(
+        endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
+        items: impl IntoIterator<Item = &'static str>,
+    ) -> serde_json::Value {
+        let mut last = None;
+        for item in items {
+            let result = endpoint
+                .dispatch_boxed(ToolInvocation {
+                    context: None,
+                    name: tidepool_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw(item.into()),
+                })
                 .await
-                .unwrap();
-            let client = ().serve(stream).await.unwrap();
-            let inventory = client.peer().list_tools(None).await.unwrap();
-            assert_eq!(inventory.tools.len(), 1);
-            assert_eq!(inventory.tools[0].name, "session_run");
-            client.cancel().await.unwrap();
+                .unwrap_or_else(|error| {
+                    panic!("Haskell item failed:\n{item}\n\n{error}\n\nprevious receipt: {last:?}")
+                });
+            last = Some(result);
         }
-
-        service.abort();
-        let _ = service.await;
+        last.expect("non-empty Haskell fixture")
     }
 
     #[tokio::test]
@@ -1802,7 +1735,6 @@ mod tests {
                     "/source/tidepool-extract-worker".into(),
                 ),
             ]),
-            BTreeMap::from([("TIDEPOOL_ACTOR_PROXY_ENDPOINT".into(), "socket".into())]),
             false,
             Some(Path::new(
                 "/tmp/tidepool-actor-workspace/.shoal/build/actor-2-1",
@@ -1823,13 +1755,6 @@ mod tests {
             Some("/tmp/tidepool-actor-workspace/.shoal/build/actor-2-1")
         );
         assert_eq!(launch.set.get("PATH").map(String::as_str), Some("/bin"));
-        assert_eq!(
-            launch
-                .set
-                .get("TIDEPOOL_ACTOR_PROXY_ENDPOINT")
-                .map(String::as_str),
-            Some("socket")
-        );
         assert!(launch
             .unset
             .iter()
@@ -1840,7 +1765,6 @@ mod tests {
     fn root_launch_retains_its_source_checkout_toolchain() {
         let launch = actor_launch_environment(
             BTreeMap::from([("TIDEPOOL_EXTRACT".into(), "/source/extract".into())]),
-            BTreeMap::new(),
             true,
             None,
         );
@@ -1935,7 +1859,7 @@ mod tests {
         let mut delivery = tokio::spawn(std::future::pending::<()>());
 
         tokio::join!(
-            stop_retired_mcp_service(actor, &mut service),
+            stop_retired_tool_service(actor, &mut service),
             stop_retired_delivery(actor, &mut delivery, Duration::ZERO),
         );
 
@@ -2003,8 +1927,11 @@ mod tests {
             workspace: workspace.clone(),
             run_root: runtime.path().join("run"),
             root_binding_path: runtime.path().join("root-binding.json"),
-            proxy_program: "unused-in-compile-test".into(),
-            proxy_args: vec!["proxy".into()],
+            interactive_agent: tidepool_agent::native_interactive_agent_from_parts(
+                std::env::current_exe().unwrap(),
+                "test installation".into(),
+            )
+            .unwrap(),
             tmux_session: "unused-in-compile-test".into(),
             model: None,
             effort: None,
@@ -2037,98 +1964,135 @@ mod tests {
         assert_eq!(root_installation.initial_user_message, None);
         let policy = root_installation.policy;
         let names = policy
-            .declarations()
+            .tools()
             .iter()
-            .map(|declaration| declaration.name.as_str())
+            .map(HostedTool::name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["session_run"]);
+        assert_eq!(names, ["haskell"]);
         assert!(policy
-            .declarations()
+            .tools()
             .iter()
-            .all(|declaration| declaration.output_schema.is_some()));
-        let session_run = &policy.declarations()[0];
-        assert_eq!(session_run.kind, tidepool_agent::ToolKind::Call);
-        assert!(session_run.description.contains("GHCi-style"));
+            .all(|tool| matches!(tool, HostedTool::Custom(_))));
+        assert!(policy.tools()[0].description().contains("GHCi-style"));
 
-        let server = DynamicMcpServer::from_resident_policy(policy).expect("root MCP server");
-        let bound_start = server
-            .dispatch_tool(
-                "session_run",
-                serde_json::json!({
-                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_start.hs")),
-                    "input": {"wave": "parallel"}
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("bind the first started worker");
-        assert!(!bound_start.is_error.unwrap_or(false), "{bound_start:?}");
+        let live_action = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_live_action.hs"
+            )),
+        )
+        .await;
+        assert_eq!(live_action["status"], "completed", "{live_action:?}");
+        let activation = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady {
+                        actor: resumed,
+                        message,
+                    }) if resumed == actor.identity() => {
+                        break message;
+                    }
+                    Some(_) => {}
+                    None => panic!("resident deployment channel closed before continuation wake"),
+                }
+            }
+        })
+        .await
+        .expect("live action continuation timeout");
+        assert!(activation.contains("typed result"), "{activation}");
+        let resumed_action = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_live_action_resume.hs"
+            )),
+        )
+        .await;
+        assert_eq!(resumed_action["status"], "completed", "{resumed_action:?}");
+
+        let failed_action = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_failed_action.hs"
+            )),
+        )
+        .await;
+        assert_eq!(failed_action["status"], "completed", "{failed_action:?}");
+        let failure_activation = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady {
+                        actor: resumed,
+                        message,
+                    }) if resumed == actor.identity() => {
+                        break message;
+                    }
+                    Some(_) => {}
+                    None => panic!("resident deployment channel closed before failure wake"),
+                }
+            }
+        })
+        .await
+        .expect("failed action continuation timeout");
+        assert!(failure_activation.contains("lifecycle failure"));
+        let resumed_failure = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_failed_action_resume.hs"
+            )),
+        )
+        .await;
         assert_eq!(
-            bound_start.structured_content.as_ref().unwrap()["status"],
-            "committed",
-            "{bound_start:?}"
+            resumed_failure["status"], "completed",
+            "{resumed_failure:?}"
         );
-        let result = server
-            .dispatch_tool(
-                "session_run",
-                serde_json::json!({
-                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_complete.hs"))
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("reuse the effectful binding in the next root Haskell session");
-        assert!(!result.is_error.unwrap_or(false), "{result:?}");
-        assert_eq!(
-            result.structured_content.as_ref().unwrap()["status"],
-            "completed",
-            "{result:?}"
-        );
-        let reopened = server
-            .dispatch_tool(
-                "session_run",
-                serde_json::json!({
-                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_reopen.hs"))
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("force state returned into the next root Haskell session");
-        assert!(
-            !reopened.is_error.unwrap_or(false),
-            "reopened root session lost its live input: {reopened:?}"
-        );
-        assert_eq!(
-            reopened.structured_content.as_ref().unwrap()["status"],
-            "committed",
-            "{reopened:?}"
-        );
+
+        let bound_start = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_start.hs"
+            )),
+        )
+        .await;
+        assert_eq!(bound_start["status"], "committed", "{bound_start:?}");
+        let result = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_complete.hs"
+            )),
+        )
+        .await;
+        assert_eq!(result["status"], "completed", "{result:?}");
+        let reopened = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_reopen.hs"
+            )),
+        )
+        .await;
+        assert_eq!(reopened["status"], "committed", "{reopened:?}");
         let mut worker_prompts = Vec::new();
         let mut recursive_worker = None;
-        for _ in 0..2 {
+        while worker_prompts.len() < 2 {
             let worker = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
                 .await
                 .expect("worker installation timeout")
                 .expect("worker session installation");
             let LocalResidentDeployment::PolicyInstalled(worker) = worker else {
-                panic!("worker retired before session installation");
+                // Earlier action fixtures deliberately create and retire
+                // children. Their lifecycle publications share this ordered
+                // deployment channel and are not worker installations.
+                continue;
             };
             assert_eq!(worker.launch_worktrees.len(), 1);
             worker_prompts.push(worker.initial_user_message.clone().unwrap());
             assert_eq!(
                 worker
                     .policy
-                    .declarations()
+                    .tools()
                     .iter()
-                    .map(|declaration| declaration.name.as_str())
+                    .map(HostedTool::name)
                     .collect::<Vec<_>>(),
-                ["session_run"]
+                ["haskell"]
             );
             if recursive_worker.is_none() {
                 recursive_worker = Some(worker);
@@ -2153,27 +2117,15 @@ mod tests {
             .lock()
             .bind(&worker_tree, &worker_principal, current_time_ms())
             .expect("bind exact worker before it observes submission");
-        let recursive_server = DynamicMcpServer::from_resident_policy(recursive_worker.policy)
-            .expect("recursive worker MCP server");
-        let recursive_result = recursive_server
-            .dispatch_tool(
-                "session_run",
-                serde_json::json!({
-                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/recursive_worker.hs"))
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("run recursive worker session");
-        assert!(
-            !recursive_result.is_error.unwrap_or(false),
-            "{recursive_result:?}"
-        );
+        let recursive_result = dispatch_haskell(
+            recursive_worker.policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/recursive_worker.hs"
+            )),
+        )
+        .await;
         assert_eq!(
-            recursive_result.structured_content.as_ref().unwrap()["status"],
-            "completed",
+            recursive_result["status"], "completed",
             "{recursive_result:?}"
         );
         let mut nested_installation = None;
@@ -2197,56 +2149,25 @@ mod tests {
                 _ => {}
             }
         }
-        let after_child_exit = server
-            .dispatch_tool(
-                "session_run",
-                serde_json::json!({
-                    "items": fixture_items(include_str!("actor_host_fixtures/bundled_devswarm/root_collect_wake.hs"))
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            )
-            .await
-            .expect("force carried root state after one child exits");
-        assert!(
-            !after_child_exit.is_error.unwrap_or(false),
-            "a child exit corrupted the root session input: {after_child_exit:?}"
-        );
+        let after_child_exit = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_collect_wake.hs"
+            )),
+        )
+        .await;
         assert_eq!(
-            after_child_exit.structured_content.as_ref().unwrap()["status"],
-            "completed",
+            after_child_exit["status"], "completed",
             "{after_child_exit:?}"
         );
-        let mut replay_and_ack = None;
-        for (index, item) in fixture_items(include_str!(
-            "actor_host_fixtures/bundled_devswarm/root_replay_ack.hs"
-        ))
-        .into_iter()
-        .enumerate()
-        {
-            let result = server
-                .dispatch_tool(
-                    "session_run",
-                    serde_json::json!({ "items": [item] })
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                )
-                .await
-                .unwrap_or_else(|error| panic!("replay/ack item {index} failed: {error}"));
-            assert!(
-                !result.is_error.unwrap_or(false),
-                "replay/ack item {index} failed: {result:?}"
-            );
-            replay_and_ack = Some(result);
-        }
-        let replay_and_ack = replay_and_ack.expect("non-empty replay/ack fixture");
-        assert_eq!(
-            replay_and_ack.structured_content.as_ref().unwrap()["status"],
-            "completed",
-            "{replay_and_ack:?}"
-        );
+        let replay_and_ack = dispatch_haskell(
+            policy.as_ref(),
+            fixture_items(include_str!(
+                "actor_host_fixtures/bundled_devswarm/root_replay_ack.hs"
+            )),
+        )
+        .await;
+        assert_eq!(replay_and_ack["status"], "completed", "{replay_and_ack:?}");
         let nested = nested_installation.expect("nested session installation");
         assert_eq!(
             nested.initial_user_message.as_deref(),
@@ -2263,6 +2184,6 @@ mod tests {
             .await
             .expect("shutdown root");
         hosted.await.expect("root actor task");
-        assert!(!result.is_error.unwrap_or(false), "{result:?}");
+        assert_eq!(result["status"], "completed", "{result:?}");
     }
 }

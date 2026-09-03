@@ -114,17 +114,41 @@ The `tidepool` binary is an [MCP](https://modelcontextprotocol.io/) server that 
 
 ### 4. Start an actor ensemble with Shoal
 
-`cargo install tidepool` also installs `shoal`. With tmux, Codex, and the GHC
-toolchain available, start the bundled typed DevSwarm policy from any project:
+`cargo install tidepool` also installs `shoal`. Shoal requires the Tidepool
+Codex fork with host dynamic-tool and native queue/archive support. Set
+`TIDEPOOL_INTERACTIVE_CODEX_BIN` to its absolute executable path; this does not
+replace a system `codex` or change `CODEX_HOME`. With tmux and the GHC toolchain
+available, start the bundled typed DevSwarm policy from any project:
 
 ```bash
 shoal init
 ```
 
+The reproducible path is `nix run github:inanna-malick/tidepool#shoal -- init`
+once consuming a published Tidepool revision, or `nix develop .#shoal` while
+working in this checkout. The Shoal wrapper retains the pinned Codex closure at
+`.shoal/runtime/interactive-agent` as a registered indirect Nix GC root; it
+still does not add that binary to `PATH`.
+
+For joint Tidepool/Codex development, keep both checkouts independent and
+override only the flake input:
+
+```bash
+nix develop .#shoal --override-input codex git+file:../codex
+```
+
+The Git-backed local input uses the checkout's committed `HEAD` and excludes
+untracked build artifacts such as `target/`. That shell still selects Codex
+through `TIDEPOOL_INTERACTIVE_CODEX_BIN`; the ordinary `codex` found on `PATH`
+is unchanged.
+
 Shoal creates a `shoal-<project>` tmux session. One host process owns every
 resident Haskell actor; each interactive actor is an ordinary Codex TUI in its
-own pane. Worker actors receive retained managed worktrees; the root remains in
-the source checkout and is instructed to orchestrate rather than implement.
+own pane. Each TUI receives `tidepool_actor.haskell` as a raw-text custom tool
+over an owner-only HTTP/1.1 Unix socket; Haskell source is not nested in JSON
+arguments or sent through MCP. Worker actors receive retained managed
+worktrees; the root remains in the source checkout and is instructed to
+orchestrate rather than implement.
 The fresh root opens ready and idle without spending an inference turn. Its
 conversation identity binds on the first real prompt, after which Shoal can
 deliver lifecycle wakes through Codex's native queue.
@@ -137,6 +161,7 @@ Use `--no-attach` for headless startup; it prints the exact attach, host-log,
 status-file, and teardown commands.
 
 **Environment variables:**
+- `TIDEPOOL_INTERACTIVE_CODEX_BIN` — strict absolute path to the host-tools-capable Codex used only by Shoal
 - `TIDEPOOL_EXTRACT` — path to the `tidepool-extract` binary (falls back to `tidepool-extract` on `$PATH`)
 - `TIDEPOOL_PRELUDE_DIR` — override the Haskell stdlib source root (normally embedded in the binary). Must point at a directory containing `Tidepool/Prelude.hs` — a set-but-invalid value is a hard startup error, not a silent fall-through.
 - `TIDEPOOL_GHC_LIBDIR` — override GHC's lib directory (avoids calling `ghc --print-libdir`)

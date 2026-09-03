@@ -26,7 +26,6 @@ module Tidepool.Actor
   , effectProfile
   , initialization
   , behavior
-  , visibleToChild
   , onShutdown
   , EffectProfile (..)
   , ReadOnlyEffects
@@ -56,7 +55,6 @@ import Tidepool.Actor.Internal
   , effectProfile
   , initialization
   , behavior
-  , visibleToChild
   , onShutdown
   , actorLaunchWorktrees
   , ActorRef (..)
@@ -67,6 +65,7 @@ import Tidepool.Actor.Internal
   )
 import Tidepool.Effects.Core
   ( Actor (..)
+  , ActorEffectProfile (..)
   , ActorKernel (..)
   , ActorLocal (..)
   , ActorTerminalStatus (..)
@@ -112,7 +111,6 @@ startActor definition@ActorDefinition
   , effectProfile = profile
   , initialization = startupAction
   , behavior = install
-  , visibleToChild = exports
   , onShutdown = shutdownAction
   } startup = do
   let cell = newExitCell startup
@@ -126,12 +124,12 @@ startActor definition@ActorDefinition
         case fillExitCell cell result of
           () -> pure ()
   (actorId, incarnation) <- send
-    (ActorStartWith actorLabel entry (profileCode profile) (actorLaunchWorktrees definition) exports)
+    (ActorStartWith actorLabel entry (profileCode profile) (actorLaunchWorktrees definition))
   pure (ActorRef actorId incarnation cell)
 
-profileCode :: EffectProfile protocol effs -> Int
-profileCode ReadWrite = 0
-profileCode ReadOnly = 1
+profileCode :: EffectProfile protocol effs -> ActorEffectProfile
+profileCode ReadWrite = ActorReadWriteProfile
+profileCode ReadOnly = ActorReadOnlyProfile
 
 decodeShutdownReason :: Int -> ShutdownReason
 decodeShutdownReason 0 = ShutdownCompleted

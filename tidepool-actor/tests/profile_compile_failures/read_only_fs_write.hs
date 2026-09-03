@@ -6,7 +6,6 @@ let definition :: ActorDefinition () Maybe ()
       , behavior = \() () ->
           (writeFile "forbidden.txt" "must not typecheck" >> pure ()
             :: Eff (ReadOnlyEffects Maybe) ())
-      , visibleToChild = []
       , onShutdown = const (pure ())
       }
 in definition `seq` pure ()

@@ -3,7 +3,7 @@
 This is the only crate that knows coding-agent backends exist. It owns the
 provider-neutral headless step seam, the separate long-lived interactive seam,
 backend adapters, cycle saga, and model-policy allowlists; worktree allocation,
-actor lifecycle, MCP policy, and effect-handler wiring stay elsewhere.
+actor lifecycle, resident tool policy, and effect-handler wiring stay elsewhere.
 
 - Backend-specific types and names stay under `src/backend/<backend>/`.
   `seam.rs` must not expose or wrap backend protocol types.
@@ -12,7 +12,7 @@ actor lifecycle, MCP policy, and effect-handler wiring stay elsewhere.
   primitive.
 - `InteractiveAgentBackend` owns stock interactive process launch and its
   backend-native push/archive hop. It is not another spelling of the headless
-  step seam, and it does not own actor inbox durability or MCP dispatch.
+  step seam, and it does not own actor inbox durability or resident tool dispatch.
 - Use one shared `SpawnSubstrate` and one movable `CycleSaga` per cycle. Never
   hold the substrate lock across a backend call.
 - One backend instance serves one live cycle. Concurrent cycles must not

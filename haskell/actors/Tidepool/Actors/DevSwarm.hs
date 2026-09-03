@@ -19,7 +19,15 @@
 module Tidepool.Actors.DevSwarm
   ( RootEffects
   , ActorEffects
+  , WorkerEffects
   , rootPolicy
+  , RootActivation (..)
+  , WorkerActivation (..)
+  , AgentAction
+  , ActionFailure (..)
+  , waitOn
+  , continueWith
+  , nextTurn
   , WorkerSpec (..)
   , WorkerHandle (..)
   , AcceptedWorker (..)
@@ -55,6 +63,7 @@ import GHC.Generics (Generic)
 import Prelude
 
 import Tidepool.Actor
+import Tidepool.Agent.Action
 import Tidepool.Agent.Session (agentSession)
 import Tidepool.Aeson (FromJSON, Result (..), ToJSON, Value, fromJSON, toJSON)
 import Tidepool.Aeson.Schema (JsonSchema)
@@ -67,6 +76,24 @@ type RootEffects = '[AgentSession, Actor, Worktree, WorkerKernel CandidateReceip
 
 -- | Canonical workbench alias for the root's actor-local compilation view.
 type ActorEffects = RootEffects
+
+type WorkerEffects = ReadOnlyEffects WorkerProtocol
+
+-- | Stable facts mounted for one root activation. Runtime-owned worker wakes
+-- are a snapshot for this activation; an interrupted action is the typed
+-- reason a previously returned Haskell continuation could not finish.
+data RootActivation = RootActivation
+  { sessionContext :: SessionContext
+  , rootInterruption :: Maybe ActionFailure
+  }
+
+-- | Stable facts mounted for one worker activation. The assignment remains
+-- available after an action failure without being copied into a Developer
+-- message or serialized through the tool transport.
+data WorkerActivation = WorkerActivation
+  { workerAssignment :: Text
+  , workerInterruption :: Maybe ActionFailure
+  }
 
 data WorkerSpec = WorkerSpec
   { key :: Text
@@ -192,12 +219,21 @@ data WorkerAcknowledgement
 data WorkerProtocol result
 
 rootPolicy :: Eff RootEffects a
-rootPolicy = loop
+rootPolicy = loop Nothing Nothing
   where
-    loop = do
+    loop initialUser interruption = do
       context <- takeSessionContext
-      _ <- (agentSession Nothing context :: Eff RootEffects ())
-      loop
+      action <-
+        ( agentSession initialUser (RootActivation context interruption)
+            :: Eff RootEffects (AgentAction RootEffects ())
+        )
+      outcome <- runAgentAction action
+      case outcome of
+        Right () -> loop Nothing Nothing
+        Left failure ->
+          loop
+            (Just "Your returned Haskell action stopped at an actor lifecycle failure. The typed failure is mounted in `sessionInput`; decide the next program explicitly.")
+            (Just failure)
 
 workerDefinition
   :: WorktreeHandle
@@ -210,19 +246,29 @@ workerDefinition tree key =
       , effectProfile = ReadOnly
       , initialization = pure
       , behavior = \_ assignmentText -> do
-          report <-
-            ( agentSession (Just assignmentText) assignmentText
-                :: Eff (ReadOnlyEffects WorkerProtocol) WorkerReport
-            )
+          report <- workerSession (Just assignmentText) (WorkerActivation assignmentText Nothing)
           observed <- observeSubmission (worktreeId tree)
           repository <- case observed of
             Left failure -> error (T.unpack (renderWorktreeError failure))
             Right value -> pure value
           let receipt = CandidateReceipt report repository
           pure receipt
-      , visibleToChild = []
       , onShutdown = const (pure ())
       }
+
+workerSession :: Maybe Text -> WorkerActivation -> Eff WorkerEffects WorkerReport
+workerSession initialUser activation = do
+  action <-
+    ( agentSession initialUser activation
+        :: Eff WorkerEffects (AgentAction WorkerEffects WorkerReport)
+    )
+  outcome <- runAgentAction action
+  case outcome of
+    Right report -> pure report
+    Left failure ->
+      workerSession
+        (Just "Your returned Haskell action stopped at an actor lifecycle failure. The typed failure is mounted in `sessionInput`; decide the next program explicitly.")
+        activation { workerInterruption = Just failure }
 
 startWorker
   :: (Member Actor effs, Member Worktree effs, Member (WorkerKernel CandidateReceipt) effs)

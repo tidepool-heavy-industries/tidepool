@@ -28,7 +28,7 @@ use crate::{
     ExternalApplicationFailure, ExternalFailureDisposition, KernelBehavior, KernelBehaviorError,
     KernelCallFailure, KernelContext, KernelInvocationFailure, KernelMessage, KernelStep,
     LocalActorRef, MailboxValue, ResidentActorRunner, ResidentActorWorkbenchError,
-    ResidentCompletionExecutor, ResidentMcpEndpoint,
+    ResidentCompletionExecutor, ResidentToolEndpoint,
 };
 
 /// A compiled root at the point where ownership moves into its local actor.
@@ -61,7 +61,7 @@ impl<H, O> ResidentActorRoot<H, O> {
 pub struct LocalResidentInstallation {
     pub actor: LocalActorRef,
     pub label: String,
-    pub policy: Arc<dyn ResidentMcpEndpoint>,
+    pub policy: Arc<dyn ResidentToolEndpoint>,
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
 }
@@ -69,6 +69,13 @@ pub struct LocalResidentInstallation {
 #[derive(Clone)]
 pub enum LocalResidentDeployment {
     PolicyInstalled(LocalResidentInstallation),
+    /// A resident program opened another typed session in an already-running
+    /// interactive application. The message is an ordinary User activation;
+    /// the live value itself is mounted as `sessionInput` in Haskell.
+    SessionReady {
+        actor: ActorRef,
+        message: String,
+    },
     ChildExited {
         notice: ChildExitNotice,
         worker_wake: Option<crate::WorkerWake>,
@@ -114,7 +121,7 @@ enum ResidentBoot {
 enum ResidentStanding {
     Boot,
     Receiving(InstalledReceiver),
-    Mcp(crate::resident_mcp::ResidentMcpAwait),
+    Tools(crate::resident_tools::ResidentToolAwait),
     Interactive(crate::interactive_session::ResidentInteractiveAwait),
     Terminal,
 }
@@ -131,6 +138,7 @@ pub struct ResidentKernelBehavior<H, O> {
     launch_worktrees: Vec<String>,
     policy_installed: bool,
     activation_wakes: Option<Vec<crate::WorkerWake>>,
+    pending_program: Option<ResidentOutcome>,
     owns_worker_runtime: bool,
 }
 
@@ -150,6 +158,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees: Vec::new(),
             policy_installed: false,
             activation_wakes: None,
+            pending_program: None,
             owns_worker_runtime: true,
         }
     }
@@ -170,6 +179,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees,
             policy_installed: false,
             activation_wakes: None,
+            pending_program: None,
             owns_worker_runtime: false,
         }
     }
@@ -660,15 +670,15 @@ where
                     self.standing = ResidentStanding::Receiving(receiver);
                     return Ok(KernelStep::Continue(()));
                 }
-                ResidentActorBoundary::McpAwait(awaiting) => {
+                ResidentActorBoundary::ToolAwait(awaiting) => {
                     if !self.policy_installed {
                         let actor = kernel.resolve(context.actor).ok_or_else(|| {
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "local actor was absent from its routing directory".into(),
                             )
                         })?;
-                        let policy: Arc<dyn ResidentMcpEndpoint> =
-                            Arc::new(crate::resident_mcp::install_local_resident_mcp(
+                        let policy: Arc<dyn ResidentToolEndpoint> =
+                            Arc::new(crate::resident_tools::install_local_resident_tools(
                                 actor.clone(),
                                 &awaiting,
                             ));
@@ -682,11 +692,15 @@ where
                         self.publish_installation(installation);
                         self.policy_installed = true;
                     }
-                    self.standing = ResidentStanding::Mcp(awaiting);
+                    self.standing = ResidentStanding::Tools(awaiting);
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::AgentSession(session) => {
                     let (request, hole, input) = session.into_parts();
+                    let activation_message = self
+                        .policy_installed
+                        .then(|| request.initial_user_message.clone())
+                        .flatten();
                     let workbench = self
                         .environment
                         .runner
@@ -705,7 +719,7 @@ where
                                 "local actor was absent from its routing directory".into(),
                             )
                         })?;
-                        let policy: Arc<dyn ResidentMcpEndpoint> =
+                        let policy: Arc<dyn ResidentToolEndpoint> =
                             Arc::new(crate::ResidentInteractivePolicy::local(actor.clone()));
                         let installation = LocalResidentInstallation {
                             actor,
@@ -720,6 +734,14 @@ where
                     self.standing = ResidentStanding::Interactive(
                         crate::interactive_session::ResidentInteractiveAwait { request, hole },
                     );
+                    if let Some(message) = activation_message {
+                        let _ = self.environment.deployments.send(
+                            LocalResidentDeployment::SessionReady {
+                                actor: context.actor,
+                                message,
+                            },
+                        );
+                    }
                     return Ok(KernelStep::Continue(()));
                 }
                 boundary => {
@@ -1008,27 +1030,18 @@ where
                     let outcome = workbench
                         .resume_completion(context.clone(), awaiting.hole, answer)
                         .await?;
-                    let program = self
-                        .stabilize_program(
-                            kernel,
-                            context,
-                            &crate::CallAncestry::begin(context.actor),
-                            outcome,
-                        )
-                        .await?;
+                    if self.pending_program.replace(outcome).is_some() {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor yielded a second continuation before resuming the first".into(),
+                        ));
+                    }
                     let response = workbench_response(
                         WorkbenchRunStatus::Completed,
                         receipts,
                         index + 1,
                         request.items.len(),
                     );
-                    return Ok(match program {
-                        KernelStep::Continue(()) => KernelStep::Continue(response),
-                        KernelStep::Stop { terminal, .. } => KernelStep::Stop {
-                            output: response,
-                            terminal,
-                        },
-                    });
+                    return Ok(KernelStep::ContinueLater(response));
                 }
                 ResidentWorkbenchStep::Running { .. } => {
                     unreachable!("running workbench steps are settled above")
@@ -1108,6 +1121,7 @@ where
             })?;
             Ok(match step {
                 KernelStep::Continue(()) => KernelStep::Continue(reply),
+                KernelStep::ContinueLater(()) => KernelStep::ContinueLater(reply),
                 KernelStep::Stop { terminal, .. } => KernelStep::Stop {
                     output: reply,
                     terminal,
@@ -1116,11 +1130,10 @@ where
         })
     }
 
-    fn mcp<'a>(
+    fn tool<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
-        name: String,
-        arguments: serde_json::Value,
+        invocation: tidepool_tool::ToolInvocation,
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<KernelStep<serde_json::Value>, KernelInvocationFailure>,
@@ -1128,19 +1141,31 @@ where
         Box::pin(async move {
             let context = self.context(kernel.identity());
             let awaiting = match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
-                ResidentStanding::Mcp(awaiting) => awaiting,
+                ResidentStanding::Tools(awaiting) => awaiting,
                 standing => {
                     self.standing = standing;
                     return Err(KernelInvocationFailure::Rejected {
                         actor: context.actor,
-                        detail: "actor has no installed MCP policy".into(),
+                        detail: "actor has no installed tool policy".into(),
                     });
                 }
+            };
+            let tidepool_tool::ToolArguments::Structured(arguments) = invocation.arguments else {
+                self.standing = ResidentStanding::Tools(awaiting);
+                return Err(KernelInvocationFailure::Rejected {
+                    actor: context.actor,
+                    detail: "actor function tool received raw arguments".into(),
+                });
             };
             let mut outcome = self
                 .environment
                 .runner
-                .resume_mcp_invocation(context.clone(), awaiting.continuation, name, arguments)
+                .resume_tool_invocation(
+                    context.clone(),
+                    awaiting.continuation,
+                    invocation.name,
+                    arguments,
+                )
                 .await
                 .map_err(|error| Self::invocation_failure(context.actor, error))?;
             let mut result = None;
@@ -1152,11 +1177,11 @@ where
                     .await
                     .map_err(|error| Self::invocation_failure(context.actor, error))?;
                 match boundary {
-                    ResidentActorBoundary::McpReply(reply) => {
+                    ResidentActorBoundary::ToolReply(reply) => {
                         if result.replace(reply.result).is_some() {
                             return Err(KernelInvocationFailure::Failed {
                                 actor: context.actor,
-                                detail: "actor MCP invocation replied more than once".into(),
+                                detail: "actor tool invocation replied more than once".into(),
                             });
                         }
                         outcome = self
@@ -1166,18 +1191,18 @@ where
                             .await
                             .map_err(|error| Self::invocation_failure(context.actor, error))?;
                     }
-                    ResidentActorBoundary::McpAwait(next) => {
+                    ResidentActorBoundary::ToolAwait(next) => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
                             actor: context.actor,
-                            detail: "actor awaited another MCP invocation without replying".into(),
+                            detail: "actor awaited another tool invocation without replying".into(),
                         })?;
-                        self.standing = ResidentStanding::Mcp(next);
+                        self.standing = ResidentStanding::Tools(next);
                         return Ok(KernelStep::Continue(result));
                     }
                     ResidentActorBoundary::Completed => {
                         let result = result.ok_or_else(|| KernelInvocationFailure::Failed {
                             actor: context.actor,
-                            detail: "actor completed an MCP invocation without replying".into(),
+                            detail: "actor completed a tool invocation without replying".into(),
                         })?;
                         self.standing = ResidentStanding::Terminal;
                         return Ok(KernelStep::Stop {
@@ -1224,6 +1249,29 @@ where
             self.execute_workbench(kernel, &context, request, awaiting)
                 .await
                 .map_err(|error| Self::invocation_failure(context.actor, error))
+        })
+    }
+
+    fn resume<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+    ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
+        Box::pin(async move {
+            let context = self.context(kernel.identity());
+            let outcome = self
+                .pending_program
+                .take()
+                .ok_or_else(|| KernelBehaviorError {
+                    detail: "resident actor resumed without a pending Haskell action".into(),
+                })?;
+            self.stabilize_program(
+                kernel,
+                &context,
+                &crate::CallAncestry::begin(context.actor),
+                outcome,
+            )
+            .await
+            .map_err(Self::failure)
         })
     }
 
