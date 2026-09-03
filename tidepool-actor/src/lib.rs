@@ -20,6 +20,7 @@ mod local_actor;
 mod mailbox;
 mod mount;
 mod profile;
+mod prompt_catalog;
 mod resident_actor;
 mod resident_interactive;
 mod resident_tools;

@@ -16,6 +16,7 @@ mod generated;
 pub mod harness;
 pub mod listen;
 pub mod log;
+mod prompt_catalog;
 pub mod provider;
 pub mod registry;
 pub mod replay;

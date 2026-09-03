@@ -4,6 +4,8 @@
 //! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
+mod prompt_catalog;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -46,6 +48,8 @@ use tidepool_worktree::{
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+
+use self::prompt_catalog::PromptId;
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
 /// mount namespaces make the shared name safe across concurrent actors, while
@@ -1492,16 +1496,15 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
 
 fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLaunchMode) -> String {
     if root {
-        let continuity = if matches!(mode, InteractiveLaunchMode::Resume(_)) {
-            " This is a new actor incarnation attached to a retained conversation. Previous actor handles, workers, pending exits, inbox messages, and resident Haskell state were not restored; old Haskell bindings are dead. Reconcile through the current session before acting on transcript references."
-        } else {
-            ""
-        };
-        format!("You are a Tidepool root actor. You have a live Haskell workbench, not a prewritten actor program: define the typed protocols, actor definitions, and orchestration this task needs as you go. Orchestrate through supervised typed actors instead of implementing changes in the shared source checkout. `tidepool_actor.haskell` is your primary GHCi-style orchestration surface. Its raw payload is a script. Outside `:{{` / `:}}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; a rejected effectful unit does not install its projected bindings or roll back effects already performed. Tool results are compact GHCi-style transcripts: expressions use Haskell rendering, bindings and declarations use short commit notes, and non-renderable values are explicitly opaque. Start API discovery with `:browse`; inspect `Tidepool.Agent.Action` separately when needed. Persistent declarations and live values survive calls, while Rust owns actor lifecycle and repository custody. Conversation messages explain tasks or why execution resumed; typed Haskell state carries identities, correlation, results, and authority. `sessionInput :: Maybe ActionFailure` reports only a failed prior compositional action. Start independent actors before waiting. Prefer ordinary Haskell composition: `complete $ nextTurn $ (,) <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, then reactivates this same context with the live typed result. Use `awaitExit` when failure is domain policy. Use `complete (pure ())` to return to silent/manual readiness. Project-specific worker ledgers and receipt protocols are not part of Shoal's core surface; define them only when the task needs them. Native coding tools remain the review and integration surface.{continuity}")
+        let mut instructions = PromptId::ShoalRoot.body().to_string();
+        if matches!(mode, InteractiveLaunchMode::Resume(_)) {
+            instructions.push_str(PromptId::RecreatedRoot.body());
+        }
+        instructions
     } else if owns_worktree {
-        "You are a Tidepool actor whose process owns a retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message and `sessionInput` are supplied by the Haskell actor definition. Use native coding tools for repository work and `tidepool_actor.haskell` for typed actor composition and completion. Return executable Haskell with `complete action`, producing the exact exit type chosen by that definition. Rust owns lifecycle and repository custody.".into()
+        PromptId::WorktreeAgent.body().into()
     } else {
-        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.haskell` as your primary GHCi-style actor surface. Outside `:{` / `:}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; effects are not rolled back when a unit rejects. Tool results are compact GHCi-style transcripts; non-renderable values are explicitly opaque. Start API discovery with `:browse`. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. Conversation messages carry tasks or wake reasons; typed Haskell state carries identity, correlation, results, and authority. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return executable Haskell with `complete action`; do not claim or attempt source-checkout mutation authority.".into()
+        PromptId::ReadonlyAgent.body().into()
     }
 }
 
@@ -1639,11 +1642,22 @@ mod tests {
 
     #[test]
     fn root_instructions_preserve_idle_and_resume_contracts() {
+        let fresh = developer_instructions(true, false, &InteractiveLaunchMode::Fresh);
         let resumed = developer_instructions(
             true,
             false,
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
+        assert_eq!(fresh, PromptId::ShoalRoot.body());
+        assert_eq!(
+            resumed,
+            format!(
+                "{}{}",
+                PromptId::ShoalRoot.body(),
+                PromptId::RecreatedRoot.body()
+            )
+        );
+        assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);
         assert!(resumed.contains("Previous actor handles"));
         assert!(resumed.contains("were not restored"));
         assert!(resumed.contains("not a prewritten actor program"));
@@ -1686,8 +1700,12 @@ mod tests {
         assert!(actor_workspace_request(false, &two).is_err());
 
         let instructions = developer_instructions(false, false, &InteractiveLaunchMode::Fresh);
+        assert_eq!(instructions, PromptId::ReadonlyAgent.body());
         assert!(instructions.contains("read-only access to the shared source checkout"));
         assert!(instructions.contains("orchestrate children"));
+
+        let worker = developer_instructions(false, true, &InteractiveLaunchMode::Fresh);
+        assert_eq!(worker, PromptId::WorktreeAgent.body());
     }
 
     #[test]

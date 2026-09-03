@@ -8,6 +8,7 @@ use tidepool_runtime::session::{
 };
 use tidepool_tool::{CustomToolDeclaration, HostedTool, ToolArguments, ToolInvocation};
 
+use crate::prompt_catalog::PromptId;
 use crate::resident_tools::{
     ResidentToolClient, ResidentToolEndpoint, ResidentToolError, ResidentToolFuture,
 };
@@ -26,14 +27,21 @@ impl ResidentInteractivePolicy {
 
     fn with_client(client: ResidentToolClient) -> Self {
         Self {
-            tools: vec![HostedTool::Custom(CustomToolDeclaration {
-                name: HASKELL_TOOL.into(),
-                description: "Run a GHCi-style script in this actor's persistent session. Send raw input without JSON or Markdown fences. Outside `:{` / `:}`, each colon-prefixed line is one reserved command and every other nonblank line is one Haskell input unit. Inside `:{` / `:}`, the entire body is one GHC input unit: ordinary declaration groups are valid, effect sequences belong in `do`, and persisting several effect results requires one outer tuple or record pattern binding. Units execute in order and stop at the first rejection; earlier successful units remain committed. A rejected effectful unit does not install its projected bindings and does not roll back effects already performed. Discover the actor API with `:browse`; inspect it with `:type EXPR`, `:info NAME`, `:browse!`, and `:bindings`. `sessionInput` is the stable typed input for this activation. Return executable work with `complete action`; for example, `complete $ nextTurn $ assemble <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, and reactivates this same agent with the typed result.".into(),
-            })]
-            .into(),
+            tools: vec![haskell_tool_declaration()].into(),
             client,
         }
     }
+}
+
+fn haskell_tool_declaration() -> HostedTool {
+    HostedTool::Custom(CustomToolDeclaration {
+        name: HASKELL_TOOL.into(),
+        description: PromptId::HaskellToolDescription.body().into(),
+    })
+}
+
+fn haskell_tool_instructions() -> &'static str {
+    PromptId::HaskellToolInstructions.body()
 }
 
 impl ResidentToolEndpoint for ResidentInteractivePolicy {
@@ -42,9 +50,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     }
 
     fn instructions(&self) -> Option<&str> {
-        Some(
-            "Use tidepool_actor.haskell as the primary actor orchestration surface. Its raw payload is a GHCi-style script, not JSON or Markdown. Outside :{ / :}, each nonblank line is one input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in do, and use one outer tuple or record pattern binding to persist several results. Units run in order and preserve successful prefixes; effects are not rolled back when a unit rejects. Start discovery with :browse; use :type, :info, :browse!, and :bindings for detail. Use native coding tools for repository work.",
-        )
+        Some(haskell_tool_instructions())
     }
 
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolFuture {
@@ -79,5 +85,22 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
             };
             client.dispatch_workbench(request).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosted_tool_surfaces_use_the_catalog_verbatim() {
+        assert_eq!(
+            haskell_tool_declaration().description(),
+            PromptId::HaskellToolDescription.body()
+        );
+        assert_eq!(
+            haskell_tool_instructions(),
+            PromptId::HaskellToolInstructions.body()
+        );
     }
 }
