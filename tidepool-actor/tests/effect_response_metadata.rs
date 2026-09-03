@@ -35,9 +35,8 @@ fn abstract_effect_response_constructors_are_in_the_turn_table() {
 
     let compiled = match run_turn(HaskellTurnRequest {
         turn_text: concat!(
-            "complete $ nextTurn $ AgentAction $ do\n",
-            "  tree <- createWorktree (fromCurrentRepository \"metadata-probe\")\n",
-            "  pure (Right tree)"
+            "complete $ nextTurn $ liftAction $\n",
+            "  createWorktree (fromCurrentRepository \"metadata-probe\")"
         ),
         templates: &templates,
         include: &include_refs,

@@ -13,6 +13,7 @@
 module Tidepool.Agent.Action
   ( AgentAction (..)
   , ActionFailure (..)
+  , liftAction
   , waitOn
   , nextTurn
   ) where
@@ -67,6 +68,10 @@ instance Monad (AgentAction effs) where
     case result of
       Left failure -> pure (Left failure)
       Right value -> runAgentAction (next value)
+
+-- | Lift an ordinary effectful computation into a compositional agent action.
+liftAction :: Eff effs result -> AgentAction effs result
+liftAction = AgentAction . fmap Right
 
 -- | Wait for the successful value of an already-started exact actor.
 --

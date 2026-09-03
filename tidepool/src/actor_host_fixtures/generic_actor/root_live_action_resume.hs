@@ -1,6 +1,6 @@
 :{
 do
-  if sessionInput 20 == (42 :: Int)
+  if sessionInput == (42 :: Int)
     then complete (pure ())
-    else error "composed live actor closure returned the wrong result"
+    else error "composed heterogeneous actor exits returned the wrong result"
 :}

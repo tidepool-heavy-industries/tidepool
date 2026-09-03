@@ -8,12 +8,22 @@
 module Tidepool.Actors.Shoal
   ( ActorEffects
   , module Tidepool.Actor
-  , module Tidepool.Agent.Action
+  , AgentAction
+  , ActionFailure (..)
+  , liftAction
+  , waitOn
+  , nextTurn
   , module Tidepool.Worktree
   ) where
 
 import Tidepool.Actor
 import Tidepool.Agent.Action
+  ( ActionFailure (..)
+  , AgentAction
+  , liftAction
+  , nextTurn
+  , waitOn
+  )
 import Tidepool.Effects.Core (Actor, AgentSession, Worktree)
 import Tidepool.Worktree
 

@@ -15,7 +15,7 @@ import Control.Monad.Freer (Eff)
 import Prelude
 
 import Tidepool.Actor
-import Tidepool.Agent.Action
+import Tidepool.Agent.Action (AgentAction, runAgentAction)
 import Tidepool.Agent.Session (agentSession)
 import Tidepool.Actors.Shoal
 

@@ -1,1 +1,1 @@
-complete $ nextTurn $ AgentAction $ do { createdTree <- createWorktree (fromCurrentRepository "response-metadata"); pure (Right createdTree) }
+complete $ nextTurn $ liftAction $ createWorktree (fromCurrentRepository "response-metadata")
