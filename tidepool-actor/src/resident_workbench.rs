@@ -16,10 +16,11 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, render_turn_compile_error, resident_workbench_templates,
-    run_inspections, run_turn, BlockExecution, GhciInputKind, InspectionQuery, InspectionRequest,
-    MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole, ResidentOutcome,
-    ResidentSession, RootCustody, SessionRunContext, TurnRequest, TurnResult, WorkbenchDiscovery,
+    classify_workbench_item, insert_preamble_imports, render_turn_compile_error,
+    resident_workbench_templates, run_inspections, run_turn, BlockExecution, GhciInputKind,
+    InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentSession, RootCustody, SessionRunContext, SourceImports,
+    TurnClassification, TurnKind, TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
@@ -40,6 +41,7 @@ pub struct ActorWorkbenchSource {
     preamble: Arc<str>,
     base_include: Arc<[PathBuf]>,
     default_browse_module: Option<Arc<str>>,
+    workbench_imports: SourceImports,
 }
 
 impl ActorWorkbenchSource {
@@ -50,12 +52,15 @@ impl ActorWorkbenchSource {
             preamble: insert_preamble_imports(&preamble, "Tidepool.Deliberation").into(),
             base_include: base_include.into(),
             default_browse_module: None,
+            workbench_imports: SourceImports::new(),
         }
     }
 
     #[must_use]
     pub fn with_default_browse_module(mut self, module: impl Into<Arc<str>>) -> Self {
-        self.default_browse_module = Some(module.into());
+        let module = module.into();
+        self.workbench_imports.extend_text(module.as_ref());
+        self.default_browse_module = Some(module);
         self
     }
 }
@@ -710,12 +715,15 @@ where
         result,
         generation,
         declaration_source,
+        declaration_imports,
     } = *compiled;
     match result {
         TurnResult::Decl(receipt) => {
-            let result = match session
-                .define_scoped_in(context.placement.lexical_scope, &[&declaration_source])
-            {
+            let result = match session.define_scoped_with_imports_in(
+                context.placement.lexical_scope,
+                &[&declaration_source],
+                &declaration_imports,
+            ) {
                 Ok(generation) => ResidentWorkbenchStep::Committed(format!(
                     "defined {} at generation {}",
                     if receipt.binders.is_empty() {
@@ -1597,11 +1605,35 @@ struct ReadyBlock {
     result: TurnResult,
     generation: tidepool_repr::Generation,
     declaration_source: String,
+    declaration_imports: SourceImports,
 }
 
 enum CompiledBlock {
     Ready(Box<ReadyBlock>),
     Rejected(String),
+}
+
+fn actor_compile_view<H, O>(
+    session: &ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+) -> Result<crate::ActorCompileView, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let session_view = session
+        .compile_view_in(context.placement.lexical_scope)
+        .ok_or_else(|| {
+            ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
+            ))
+        })?;
+    Ok(context
+        .compile_view(session_view)?
+        .with_workbench_imports(&source.workbench_imports)
+        .with_type_modules(type_modules))
 }
 
 fn compile_block<H, O>(
@@ -1616,21 +1648,21 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let session_view = session
-        .compile_view_in(context.placement.lexical_scope)
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::Resident(ResidentError::Session(
-                tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
-            ))
-        })?;
-    let compile_view = context
-        .compile_view(session_view)?
-        .with_type_modules(type_modules);
+    let compile_view = actor_compile_view(session, context, source, type_modules)?;
     let templates =
         resident_workbench_templates(&source.preamble, effect_stack, &compile_view.turn_imports());
     let include = compile_view.include_paths(&source.base_include);
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let injected = compile_view.injected_module_names();
+    let verdict = match classify_workbench_item(&block.source) {
+        Ok(WorkbenchItem::Declaration(_)) => Some(TurnClassification {
+            kind: TurnKind::Decl,
+            binders: Vec::new(),
+            items: Vec::new(),
+        }),
+        Ok(WorkbenchItem::Haskell(_) | WorkbenchItem::Command(_)) => None,
+        Err(diagnostic) => return Ok(CompiledBlock::Rejected(diagnostic)),
+    };
     tracing::debug!(
         actor_id = context.actor.id.0,
         incarnation = context.actor.incarnation.0,
@@ -1648,14 +1680,15 @@ where
         session_root: compile_view.session_root(),
         inject_modules: &injected,
         gen: compile_view.next_value_generation().0,
-        verdict: None,
+        verdict,
         target: None,
     };
     match run_turn(request) {
         Ok(result) => Ok(CompiledBlock::Ready(Box::new(ReadyBlock {
             result,
             generation: compile_view.next_value_generation(),
-            declaration_source: compile_view.declaration_source(&block.source),
+            declaration_source: block.source.clone(),
+            declaration_imports: compile_view.workbench_imports(),
         }))),
         Err(failure) if classify_compile(&failure.error).class == FailureClass::UserHaskell => {
             let label = format!("<input unit {}>", block.ordinal);
@@ -1738,13 +1771,23 @@ where
         Ok(Some(command)) => command,
         Ok(None) => {
             return Ok(Err(format!(
-            "unknown actor workbench command `:{}` (supported: :type, :info, :browse, :bindings)",
+            "unknown actor workbench command `:{}` (supported: :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :show imports)",
             line.name
         )))
         }
         Err(diagnostic) => return Ok(Err(diagnostic)),
     };
     match command {
+        WorkbenchDiscovery::ShowImports => {
+            let imports = actor_compile_view(session, context, source, &[])?
+                .workbench_imports()
+                .source_lines();
+            Ok(Ok(if imports.is_empty() {
+                "no persistent imports".into()
+            } else {
+                imports.join("\n")
+            }))
+        }
         WorkbenchDiscovery::Bindings => {
             let bindings = session.workbench_bindings_in(context.placement.lexical_scope);
             let queries = bindings
@@ -1828,7 +1871,7 @@ fn inspection_query(
                 .ok_or_else(|| ":browse has no configured actor API module".to_string())?;
             Ok(Some(InspectionQuery::Browse { module, expanded }))
         }
-        Some(WorkbenchDiscovery::Bindings) | None => Ok(None),
+        Some(WorkbenchDiscovery::Bindings | WorkbenchDiscovery::ShowImports) | None => Ok(None),
     }
 }
 
@@ -1860,16 +1903,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let session_view = session
-        .compile_view_in(context.placement.lexical_scope)
-        .ok_or_else(|| {
-            ResidentActorWorkbenchError::Resident(ResidentError::Session(
-                tidepool_runtime::session::SessionError::DeadScope(context.placement.lexical_scope),
-            ))
-        })?;
-    let compile_view = context
-        .compile_view(session_view)?
-        .with_type_modules(type_modules);
+    let compile_view = actor_compile_view(session, context, source, type_modules)?;
     let includes = compile_view.include_paths(&source.base_include);
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = compile_view.injected_module_names();
@@ -1974,6 +2008,10 @@ mod request_tests {
     fn bare_browse_resolves_the_actor_incarnations_configured_api_module() {
         let source = ActorWorkbenchSource::new("module Expr where\n", Vec::new())
             .with_default_browse_module("Tidepool.Actors.Shoal");
+        assert_eq!(
+            source.workbench_imports.source_lines(),
+            ["import Tidepool.Actors.Shoal"]
+        );
         assert_eq!(
             inspection_query(&source, ":browse", GhciInputKind::Command).unwrap(),
             Some(InspectionQuery::Browse {

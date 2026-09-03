@@ -141,6 +141,8 @@ pub enum MetaCommand {
     Info(String),
     /// `:bindings` — list the session's value bindings.
     Bindings,
+    /// `:show imports` — list the imports persisted in the workbench.
+    ShowImports,
     /// `:reset` — clear the declaration log and drop the resident machine.
     Reset,
     /// `:vocab` / `:vocab <module>` — list verb signatures from the user
@@ -216,6 +218,9 @@ impl MetaCommand {
                     MetaCommand::Info(name)
                 }
                 tidepool_runtime::session::WorkbenchDiscovery::Bindings => MetaCommand::Bindings,
+                tidepool_runtime::session::WorkbenchDiscovery::ShowImports => {
+                    MetaCommand::ShowImports
+                }
                 tidepool_runtime::session::WorkbenchDiscovery::Browse {
                     module,
                     expanded: false,
@@ -263,7 +268,7 @@ impl MetaCommand {
                 Ok(MetaCommand::Stub(n, page))
             }
             other => Err(format!(
-                "unknown session command ':{other}' (known: :bindings, :reset, :t, :i, :vocab, :browse, :stub, :program)"
+                "unknown session command ':{other}' (known: :type/:t, :info/:i, :bindings/:b, :show imports, :reset, :program/:prog, :vocab, :browse, :stub)"
             )),
         }
     }
@@ -485,6 +490,14 @@ mod tests {
         assert_eq!(
             MetaCommand::parse(" :bindings ").unwrap(),
             MetaCommand::Bindings
+        );
+        assert_eq!(
+            MetaCommand::parse(":show imports").unwrap(),
+            MetaCommand::ShowImports
+        );
+        assert_eq!(
+            MetaCommand::parse(":show modules").unwrap_err(),
+            ":show does not support `modules` (supported: :show imports)"
         );
         assert_eq!(
             MetaCommand::parse(":t slug \"a b\"").unwrap(),

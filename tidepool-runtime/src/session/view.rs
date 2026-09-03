@@ -14,9 +14,10 @@ use tidepool_repr::{Generation, SessionId, SessionModule};
 /// Ordered external import specifications for model-authored source.
 ///
 /// Entries omit the leading `import`, matching Tidepool's template builders.
-/// This type deliberately does not parse Haskell import syntax. Actor program
-/// images use a structured exact-export facade; this remains the final rendered
-/// source view shared by existing harness and REPL compilation.
+/// Extraction from authored declarations deliberately recognizes only the
+/// established single-line import grammar. Actor program images use a
+/// structured exact-export facade; this remains the final rendered source view
+/// shared by existing harness and REPL compilation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SourceImports {
     specs: Vec<String>,
@@ -47,9 +48,43 @@ impl SourceImports {
         }
     }
 
+    /// Add another ordered import set, preserving the first occurrence of
+    /// every exact specification.
+    pub fn extend(&mut self, other: &Self) {
+        for spec in &other.specs {
+            self.extend_text(spec);
+        }
+    }
+
+    /// Record the ordinary single-line imports present in declaration source.
+    ///
+    /// Declaration rendering and workbench persistence support the same
+    /// practical import grammar: one complete `import ...` specification per
+    /// line. The stored form omits the keyword so it can be fed back through
+    /// turn templates without another representation change.
+    pub fn extend_declaration_source(&mut self, source: &str) {
+        for line in source.lines().map(str::trim) {
+            let Some(rest) = line.strip_prefix("import") else {
+                continue;
+            };
+            if rest.starts_with(char::is_whitespace) {
+                self.extend_text(rest.trim_start());
+            }
+        }
+    }
+
     #[must_use]
     pub fn specs(&self) -> &[String] {
         &self.specs
+    }
+
+    /// Render the persistent workbench view in familiar Haskell syntax.
+    #[must_use]
+    pub fn source_lines(&self) -> Vec<String> {
+        self.specs
+            .iter()
+            .map(|spec| format!("import {spec}"))
+            .collect()
     }
 
     /// Render for a turn-template import hole (without `import` keywords).
@@ -92,6 +127,7 @@ pub struct SessionCompileView {
     session: SessionId,
     lexical_scope: ScopeId,
     root: PathBuf,
+    persistent_imports: SourceImports,
     library: Option<SessionModule>,
     visible_values: Vec<SessionModule>,
     injected_values: Vec<SessionModule>,
@@ -103,6 +139,7 @@ impl SessionCompileView {
         session: SessionId,
         lexical_scope: ScopeId,
         root: PathBuf,
+        persistent_imports: SourceImports,
         library: Option<SessionModule>,
         mut visible_values: Vec<SessionModule>,
         mut injected_values: Vec<SessionModule>,
@@ -114,6 +151,7 @@ impl SessionCompileView {
             session,
             lexical_scope,
             root,
+            persistent_imports,
             library,
             visible_values,
             injected_values,
@@ -134,6 +172,20 @@ impl SessionCompileView {
     #[must_use]
     pub fn session_root(&self) -> &Path {
         &self.root
+    }
+
+    /// User-authored imports that persist at this lexical scope.
+    #[must_use]
+    pub fn persistent_imports(&self) -> &SourceImports {
+        &self.persistent_imports
+    }
+
+    /// Frontend-provided imports followed by user-authored persistent imports.
+    #[must_use]
+    pub fn workbench_imports(&self, external: &SourceImports) -> SourceImports {
+        let mut imports = external.clone();
+        imports.extend(&self.persistent_imports);
+        imports
     }
 
     #[must_use]
@@ -160,7 +212,7 @@ impl SessionCompileView {
     /// modules, ready for a turn template.
     #[must_use]
     pub fn turn_imports(&self, external: &SourceImports) -> String {
-        let mut specs = external.clone();
+        let mut specs = self.workbench_imports(external);
         if let Some(module) = self.library {
             specs.extend_text(&module.module_name());
         }
@@ -205,6 +257,7 @@ mod tests {
             SessionId(4),
             ScopeId::ROOT,
             PathBuf::from("/session"),
+            SourceImports::from_specs(["Data.Set qualified as Set"]),
             Some(SessionModule::lib(Generation(3))),
             vec![SessionModule::val(Generation(5))],
             vec![
@@ -217,11 +270,27 @@ mod tests {
 
         assert_eq!(
             view.turn_imports(&external),
-            "HarnessTypes (Decision (..))\nTidepool.Session.Lib.G3\nTidepool.Session.Val.G5"
+            "HarnessTypes (Decision (..))\nData.Set qualified as Set\nTidepool.Session.Lib.G3\nTidepool.Session.Val.G5"
         );
         assert_eq!(
             view.injected_module_names(),
             ["Tidepool.Session.Val.G2", "Tidepool.Session.Val.G5"]
+        );
+    }
+
+    #[test]
+    fn source_imports_extract_and_render_deterministically() {
+        let mut imports = SourceImports::from_specs(["Tidepool.Actors.Shoal"]);
+        imports.extend_declaration_source(
+            "import qualified Data.Set as Set\nimport Tidepool.Actors.Shoal\nvalue = Set.empty",
+        );
+
+        assert_eq!(
+            imports.source_lines(),
+            [
+                "import Tidepool.Actors.Shoal",
+                "import qualified Data.Set as Set"
+            ]
         );
     }
 }

@@ -411,6 +411,7 @@ pub struct MetaCommandLine {
 pub enum WorkbenchDiscovery {
     Type(String),
     Info(String),
+    ShowImports,
     Browse {
         module: Option<String>,
         expanded: bool,
@@ -450,6 +451,13 @@ impl MetaCommandLine {
         match self.name.as_str() {
             "t" | "type" => required("type").map(WorkbenchDiscovery::Type).map(Some),
             "i" | "info" => required("info").map(WorkbenchDiscovery::Info).map(Some),
+            "show" => match self.arguments.as_str() {
+                "imports" => Ok(Some(WorkbenchDiscovery::ShowImports)),
+                "" => Err(":show requires an argument (supported: :show imports)".into()),
+                unsupported => Err(format!(
+                    ":show does not support `{unsupported}` (supported: :show imports)"
+                )),
+            },
             "browse" | "browse!" => {
                 let expanded = self.name == "browse!";
                 let module = (!self.arguments.is_empty()).then(|| self.arguments.clone());
@@ -816,6 +824,27 @@ mod tests {
                 .discovery()
                 .unwrap(),
             Some(WorkbenchDiscovery::Bindings)
+        );
+        assert_eq!(
+            MetaCommandLine::parse(":show imports")
+                .unwrap()
+                .discovery()
+                .unwrap(),
+            Some(WorkbenchDiscovery::ShowImports)
+        );
+        assert_eq!(
+            MetaCommandLine::parse(":show modules")
+                .unwrap()
+                .discovery()
+                .unwrap_err(),
+            ":show does not support `modules` (supported: :show imports)"
+        );
+        assert_eq!(
+            MetaCommandLine::parse(":show")
+                .unwrap()
+                .discovery()
+                .unwrap_err(),
+            ":show requires an argument (supported: :show imports)"
         );
         assert!(MetaCommandLine::parse(":info")
             .unwrap()

@@ -2176,7 +2176,7 @@ impl Session {
         self.value_outcome_bound_it(rendered, Some(tail.type_display))
     }
 
-    /// Meta-command handler — `:bindings`, `:reset`, `:t <expr>`, `:i <name>`, `:vocab`.
+    /// Meta-command handler for inspection and session operations.
     fn run_meta(&mut self, meta: &MetaCommand) -> TurnOutcome {
         match meta {
             MetaCommand::Bindings => {
@@ -2208,6 +2208,12 @@ impl Session {
                     "valGeneration": self.core.val_gen().0,
                 }))
             }
+            MetaCommand::ShowImports => TurnOutcome::Meta(serde_json::json!({
+                "imports": self
+                    .compile_view()
+                    .persistent_imports()
+                    .source_lines(),
+            })),
             MetaCommand::Reset => {
                 // Rebuild-then-swap: open the new lib FIRST, mutate `self` only
                 // on success. If `SessionLib::open` fails (IO error), the

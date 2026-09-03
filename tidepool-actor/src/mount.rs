@@ -58,6 +58,13 @@ pub struct ActorCompileView {
 }
 
 impl ActorCompileView {
+    /// Add trusted imports supplied by the hosted workbench itself. These are
+    /// source vocabulary, not ambient lexical ancestry.
+    pub(crate) fn with_workbench_imports(mut self, imports: &SourceImports) -> Self {
+        self.external.extend(imports);
+        self
+    }
+
     /// Extend this exact actor view with modules GHC named while describing a
     /// typed suspension. These are compiler-derived type dependencies, not an
     /// authored escape hatch around [`ActorSourceImports`]. Returning another
@@ -76,11 +83,12 @@ impl ActorCompileView {
         self.session.turn_imports(&self.external)
     }
 
-    /// Preserve only explicit actor imports with a declaration. Session
-    /// ancestry is supplied by the declaration plane itself.
+    /// Exact non-session imports needed when persisting a declaration. This
+    /// includes configured vocabulary and compiler-derived type dependencies,
+    /// but excludes generated declaration/value modules used to carry state.
     #[must_use]
-    pub fn declaration_source(&self, body: &str) -> String {
-        self.external.declaration_source(body)
+    pub fn workbench_imports(&self) -> SourceImports {
+        self.session.workbench_imports(&self.external)
     }
 
     #[must_use]

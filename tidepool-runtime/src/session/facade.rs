@@ -220,6 +220,7 @@ fn render_facade(identity: &FacadeIdentity, surface: &ExactExportSurface) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SourceImports;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_repr::Generation;
 
@@ -230,6 +231,7 @@ mod tests {
             SessionId(8),
             ScopeId::ROOT,
             dir.path().to_path_buf(),
+            SourceImports::new(),
             Some(SessionModule::lib(Generation(4))),
             Vec::new(),
             Vec::new(),

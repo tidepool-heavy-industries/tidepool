@@ -21,6 +21,8 @@
 
 use tidepool_repr::{Generation, SessionModule};
 
+use super::SourceImports;
+
 /// A name a declaration turn brings into scope, as classified by GHC.
 ///
 /// `Value` is a function/value binder (`slug`). `Type` is a type/data
@@ -125,9 +127,13 @@ impl ExportItem {
 /// export items GHC says they introduce.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclTurn {
-    /// Raw declaration source as the user wrote it (verbatim — its faithful
-    /// form is its source). May contain several top-level decls.
+    /// Declaration source committed to the generated module. This preserves
+    /// authored text verbatim and may prefix trusted workbench imports needed
+    /// to validate that text. May contain several top-level declarations.
     pub sources: Vec<String>,
+    /// Imports authored in this turn, separate from trusted imports prefixed
+    /// onto `sources` for declaration validation.
+    pub workbench_imports: SourceImports,
     /// The exportable binders this turn introduces (from GHC).
     pub items: Vec<ExportItem>,
     /// Names this turn REMOVES from the decl plane (no replacement). A name is
@@ -782,6 +788,7 @@ mod tests {
     fn turn(src: &str, items: Vec<ExportItem>) -> DeclTurn {
         DeclTurn {
             sources: vec![src.into()],
+            workbench_imports: SourceImports::new(),
             items,
             retracts: Vec::new(),
             parent: None,
@@ -791,6 +798,7 @@ mod tests {
     fn retract_turn(names: &[&str]) -> DeclTurn {
         DeclTurn {
             sources: Vec::new(),
+            workbench_imports: SourceImports::new(),
             items: Vec::new(),
             retracts: names.iter().map(|s| (*s).into()).collect(),
             parent: None,
@@ -1289,6 +1297,7 @@ mod tests {
                                                                // scope that forked off before `b` was defined.
         log.push(DeclTurn {
             sources: vec!["a = 99".into()],
+            workbench_imports: SourceImports::new(),
             items: vec![val("a")],
             retracts: Vec::new(),
             parent: Some(Generation(1)),
@@ -1321,12 +1330,14 @@ mod tests {
         push_chained(&mut log, turn("helper x = x", vec![val("helper")])); // gen 1
         log.push(DeclTurn {
             sources: vec!["helper x = x + 1".into()],
+            workbench_imports: SourceImports::new(),
             items: vec![val("helper")],
             retracts: Vec::new(),
             parent: Some(Generation(1)),
         }); // gen 2 (left sibling)
         log.push(DeclTurn {
             sources: vec!["helper x = x * 2".into()],
+            workbench_imports: SourceImports::new(),
             items: vec![val("helper")],
             retracts: Vec::new(),
             parent: Some(Generation(1)),

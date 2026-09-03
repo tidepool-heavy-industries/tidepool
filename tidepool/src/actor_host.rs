@@ -2005,6 +2005,88 @@ mod tests {
             .all(|tool| matches!(tool, HostedTool::Custom(_))));
         assert!(policy.tools()[0].description().contains("GHCi-style"));
 
+        let discovery = dispatch_haskell_script(
+            policy.as_ref(),
+            include_str!("actor_host_fixtures/generic_actor/workbench_discovery.hs"),
+        )
+        .await;
+        assert_eq!(discovery["status"], "committed", "{discovery:?}");
+        let initial_imports = discovery["items"][0]["output"]
+            .as_str()
+            .expect(":show imports output");
+        assert_eq!(
+            initial_imports.lines().next(),
+            Some("import Tidepool.Actors.Shoal")
+        );
+        let browse = discovery["items"][1]["output"]
+            .as_str()
+            .expect(":browse output");
+        assert!(browse.contains("ActorEffects"), "{browse}");
+        assert_eq!(
+            discovery["items"][2]["status"], "committed",
+            "{discovery:?}"
+        );
+        let later_imports = discovery["items"][4]["output"]
+            .as_str()
+            .expect("later :show imports output");
+        assert_eq!(
+            later_imports,
+            format!("{initial_imports}\nimport qualified Data.Set as Set")
+        );
+        assert_eq!(
+            discovery["items"][5]["status"], "committed",
+            "{discovery:?}"
+        );
+        assert_eq!(
+            discovery["items"][6]["status"], "committed",
+            "{discovery:?}"
+        );
+        assert!(
+            discovery["items"][7]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("emptySet :: Set Int"),
+            "{discovery:?}"
+        );
+
+        let unsupported_show = dispatch_haskell(policy.as_ref(), [":show modules"]).await;
+        assert_eq!(
+            unsupported_show["status"], "rejected",
+            "{unsupported_show:?}"
+        );
+        assert!(
+            unsupported_show["items"][0]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(":show does not support `modules` (supported: :show imports)"),
+            "{unsupported_show:?}"
+        );
+        let discovery_recovery =
+            dispatch_haskell_script(policy.as_ref(), ":show imports\n:type Set.empty\n:bindings")
+                .await;
+        assert_eq!(
+            discovery_recovery["status"], "committed",
+            "{discovery_recovery:?}"
+        );
+        assert!(
+            discovery_recovery["items"][0]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("import qualified Data.Set as Set"),
+            "{discovery_recovery:?}"
+        );
+        assert_eq!(
+            discovery_recovery["items"][1]["status"], "committed",
+            "{discovery_recovery:?}"
+        );
+        assert!(
+            discovery_recovery["items"][2]["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("actorEffectsIdentity ::"),
+            "{discovery_recovery:?}"
+        );
+
         let worktree_response = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(

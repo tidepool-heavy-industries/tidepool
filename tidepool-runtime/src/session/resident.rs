@@ -130,7 +130,7 @@ use tidepool_repr::PrincipalId;
 use super::engine::OutputSink;
 use super::persistent::{PersistentSession, ScopeRetirement};
 use super::turn::{BoundBinder, ValueTier};
-use super::{SessionError, SessionLib};
+use super::{SessionError, SessionLib, SourceImports};
 
 /// Runtime context applied to every entry into a resident session.
 ///
@@ -683,6 +683,18 @@ where
         decls: &[&str],
     ) -> Result<tidepool_repr::Generation, SessionError> {
         self.core.define_scoped_in(scope, decls)
+    }
+
+    /// Commit declarations against frontend-owned imports without recording
+    /// those trusted imports as user-authored workbench state.
+    pub fn define_scoped_with_imports_in(
+        &mut self,
+        scope: ScopeId,
+        decls: &[&str],
+        imports: &SourceImports,
+    ) -> Result<tidepool_repr::Generation, SessionError> {
+        self.core
+            .define_scoped_with_imports_in(scope, decls, imports)
     }
 
     /// The current decl-plane module name (`Tidepool.Session.Lib.G<g>`) a later

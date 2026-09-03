@@ -47,7 +47,10 @@ use tidepool_eval::value::Value;
 use tidepool_repr::{CoreExpr, DataCon, DataConTable, Generation, SessionModule, VarId};
 
 use super::engine::OutputSink;
-use super::{ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib};
+use super::{
+    ExactExportError, ExactExportSurface, SessionCompileView, SessionError, SessionLib,
+    SourceImports,
+};
 use crate::JitError;
 
 /// Cross-thread custody for one completed bind root. The root never moves
@@ -1024,6 +1027,7 @@ impl PersistentSession {
             lib.session_id(),
             scope,
             PathBuf::from(lib.include_dir()),
+            self.workbench_imports_in(scope),
             lib.current_module_in(scope),
             visible_values,
             injected_values,
@@ -1090,16 +1094,49 @@ impl PersistentSession {
         scope: ScopeId,
         decl_texts: &[&str],
     ) -> Result<Generation, SessionError> {
+        self.define_scoped_with_imports_in(scope, decl_texts, &SourceImports::new())
+    }
+
+    /// Scoped declaration commit with frontend-owned persistent imports.
+    /// Trusted imports participate in this declaration but are not recorded as
+    /// user-authored state; callers provide them again for later turns.
+    pub fn define_scoped_with_imports_in(
+        &mut self,
+        scope: ScopeId,
+        decl_texts: &[&str],
+        external: &SourceImports,
+    ) -> Result<Generation, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        let mut persistent_imports = external.clone();
+        persistent_imports.extend(&self.workbench_imports_in(scope));
+        let sources = decl_texts
+            .iter()
+            .map(|source| persistent_imports.declaration_source(source))
+            .collect::<Vec<_>>();
+        let source_refs = sources.iter().map(String::as_str).collect::<Vec<_>>();
         let import_modules = self.current_val_modules_in(scope);
         let inject_modules = self.live_val_modules();
         #[allow(clippy::expect_used, reason = "decl plane present")]
-        self.lib
+        let lib = self.lib.as_ref().expect("decl plane present");
+        let Some(receipt) = lib.declaration_receipt(&source_refs)? else {
+            return Ok(lib.scope_tip(scope));
+        };
+        #[allow(clippy::expect_used, reason = "decl plane present")]
+        let generation = self
+            .lib
             .as_mut()
             .expect("decl plane present")
-            .define_batch_with_vals_in(scope, decl_texts, &import_modules, &inject_modules)
+            .define_batch_with_receipt_and_vals_in(
+                scope,
+                &source_refs,
+                decl_texts,
+                &receipt,
+                &import_modules,
+                &inject_modules,
+            )?;
+        Ok(generation)
     }
 
     /// Retract `name` from the decl plane (its binding migrated to the value
@@ -1303,9 +1340,15 @@ impl PersistentSession {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
+        let persistent_imports = self.workbench_imports_in(scope);
+        let sources = decl_texts
+            .iter()
+            .map(|source| persistent_imports.declaration_source(source))
+            .collect::<Vec<_>>();
+        let source_refs = sources.iter().map(String::as_str).collect::<Vec<_>>();
         #[allow(clippy::expect_used, reason = "decl plane present")]
         let lib = self.lib.as_ref().expect("decl plane present");
-        let Some(receipt) = lib.declaration_receipt(decl_texts)? else {
+        let Some(receipt) = lib.declaration_receipt(&source_refs)? else {
             let generation = lib.scope_tip(scope);
             return Ok(DeclarationPlaneCommit {
                 generation,
@@ -1351,6 +1394,7 @@ impl PersistentSession {
             .expect("decl plane present")
             .define_batch_with_receipt_and_vals_in(
                 scope,
+                &source_refs,
                 decl_texts,
                 &receipt,
                 &import_modules,
@@ -1503,6 +1547,12 @@ impl PersistentSession {
             "retire_scope receipt must be witnessed by the GC root ledger",
         );
         receipt
+    }
+
+    fn workbench_imports_in(&self, scope: ScopeId) -> SourceImports {
+        self.lib
+            .as_ref()
+            .map_or_else(SourceImports::new, |lib| lib.workbench_imports_in(scope))
     }
 }
 

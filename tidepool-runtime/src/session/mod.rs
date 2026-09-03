@@ -348,6 +348,18 @@ impl SessionLib {
         (g.0 > 0).then(|| SessionModule::lib(g))
     }
 
+    /// Persistent imports visible at `scope`, derived from the same ordered
+    /// declaration chain that is transferred during session recovery.
+    #[must_use]
+    pub fn workbench_imports_in(&self, scope: ScopeId) -> SourceImports {
+        let mut imports = SourceImports::new();
+        for generation in self.log.chain_from_root(self.scope_tip(scope)) {
+            let turn = &self.log.turns[(generation.0 - 1) as usize];
+            imports.extend(&turn.workbench_imports);
+        }
+        imports
+    }
+
     /// The `import Tidepool.Session.Lib.G<g>` line a turn should prepend to see
     /// the accumulated declarations, or `None` if the session is empty.
     /// `import_line() == import_line_in(ScopeId::ROOT)`.
@@ -609,6 +621,7 @@ impl SessionLib {
         self.define_batch_with_receipt_and_vals_in(
             scope,
             decl_texts,
+            decl_texts,
             &receipt,
             import_modules,
             inject_modules,
@@ -674,6 +687,7 @@ impl SessionLib {
         &mut self,
         scope: ScopeId,
         decl_texts: &[&str],
+        workbench_import_sources: &[&str],
         receipt: &DeclarationReceipt,
         import_modules: &[String],
         inject_modules: &[String],
@@ -686,12 +700,17 @@ impl SessionLib {
         if sources.is_empty() {
             return Ok(self.scope_tip(scope));
         }
+        let mut workbench_imports = SourceImports::new();
+        for source in workbench_import_sources {
+            workbench_imports.extend_declaration_source(source);
+        }
 
         let tip_before = self.tips.get(&scope).copied();
         let gen = self.push_turn_in(
             scope,
             DeclTurn {
                 sources,
+                workbench_imports,
                 items: receipt.items.clone(),
                 retracts: Vec::new(),
                 parent: None, // set inside push_turn_in from scope's tip
@@ -799,6 +818,7 @@ impl SessionLib {
             scope,
             DeclTurn {
                 sources: Vec::new(),
+                workbench_imports: SourceImports::new(),
                 items: Vec::new(),
                 retracts,
                 parent: None, // set inside push_turn_in from scope's tip
@@ -982,6 +1002,60 @@ mod tests {
         // Siblings seeded from one parent tip start identical and independent.
         lib.seed_scope(ScopeId(2), Generation(3));
         assert_eq!(lib.scope_tip(ScopeId(2)), lib.scope_tip(ScopeId(1)));
+    }
+
+    #[test]
+    fn workbench_imports_follow_the_scoped_declaration_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut lib =
+            SessionLib::open(SessionId(1), dir.path(), ModuleEnv::standalone_default()).unwrap();
+        let root = lib.push_turn_in(
+            ScopeId::ROOT,
+            DeclTurn {
+                sources: vec!["import qualified Data.Set as Set".into()],
+                workbench_imports: SourceImports::from_specs(["qualified Data.Set as Set"]),
+                items: Vec::new(),
+                retracts: Vec::new(),
+                parent: None,
+            },
+        );
+        let child = ScopeId(1);
+        lib.seed_scope(child, root);
+        lib.push_turn_in(
+            child,
+            DeclTurn {
+                sources: vec!["import Data.Proxy (Proxy (..))".into()],
+                workbench_imports: SourceImports::from_specs(["Data.Proxy (Proxy (..))"]),
+                items: Vec::new(),
+                retracts: Vec::new(),
+                parent: None,
+            },
+        );
+        lib.push_turn_in(
+            ScopeId::ROOT,
+            DeclTurn {
+                sources: vec!["import qualified Data.Map.Strict as Map".into()],
+                workbench_imports: SourceImports::from_specs(["qualified Data.Map.Strict as Map"]),
+                items: Vec::new(),
+                retracts: Vec::new(),
+                parent: None,
+            },
+        );
+
+        assert_eq!(
+            lib.workbench_imports_in(child).source_lines(),
+            [
+                "import qualified Data.Set as Set",
+                "import Data.Proxy (Proxy (..))"
+            ]
+        );
+        assert_eq!(
+            lib.workbench_imports_in(ScopeId::ROOT).source_lines(),
+            [
+                "import qualified Data.Set as Set",
+                "import qualified Data.Map.Strict as Map"
+            ]
+        );
     }
 
     #[test]
