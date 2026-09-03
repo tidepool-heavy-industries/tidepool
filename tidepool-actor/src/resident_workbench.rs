@@ -16,9 +16,9 @@ use tidepool_eval::Value;
 use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
-    insert_preamble_imports, resident_workbench_templates, run_inspection, run_turn,
-    BlockExecution, InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock,
-    ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody, RootedValueRef,
+    insert_preamble_imports, resident_workbench_templates, run_inspections, run_turn,
+    BlockExecution, GhciInputKind, InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink,
+    ParsedBlock, ResidentError, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
     SessionRunContext, TurnRequest, TurnResult, ValueTier, WorkbenchDiscovery,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
@@ -39,6 +39,7 @@ fn actor_effect_stack(expected_type: &str) -> String {
 pub struct ActorWorkbenchSource {
     preamble: Arc<str>,
     base_include: Arc<[PathBuf]>,
+    default_browse_module: Option<Arc<str>>,
 }
 
 impl ActorWorkbenchSource {
@@ -48,7 +49,14 @@ impl ActorWorkbenchSource {
         Self {
             preamble: insert_preamble_imports(&preamble, "Tidepool.Deliberation").into(),
             base_include: base_include.into(),
+            default_browse_module: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_default_browse_module(mut self, module: impl Into<Arc<str>>) -> Self {
+        self.default_browse_module = Some(module.into());
+        self
     }
 }
 
@@ -161,7 +169,6 @@ pub(crate) enum ResidentActorBoundary {
     ToolAwait(crate::resident_tools::ResidentToolAwait),
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
-    Worker(crate::worker_runtime::ResidentWorkerRequest),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -193,7 +200,6 @@ impl ResidentActorBoundary {
             Self::ToolAwait(_) => "agent tool await",
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
-            Self::Worker(_) => "worker ledger",
         }
     }
 }
@@ -215,7 +221,6 @@ enum ResidentRequest {
     AgentTools(crate::generated::agent_tools::AgentToolsReq),
     AgentSession(crate::generated::agent_session::AgentSessionReq),
     Deliberate(crate::generated::deliberate::DeliberateReq),
-    WorkerKernel(crate::generated::worker_kernel::WorkerKernelReq),
     Complete(CompleteReq),
 }
 
@@ -256,10 +261,6 @@ impl ResidentRequest {
         try_member!(
             Self::Deliberate,
             crate::generated::deliberate::DeliberateReq
-        );
-        try_member!(
-            Self::WorkerKernel,
-            crate::generated::worker_kernel::WorkerKernelReq
         );
         try_member!(Self::Complete, CompleteReq);
 
@@ -302,7 +303,6 @@ impl ResidentRequest {
             Self::Deliberate(crate::generated::deliberate::DeliberateReq::DeliberateWith(..)) => {
                 "deliberate"
             }
-            Self::WorkerKernel(_) => "worker ledger",
             Self::Complete(CompleteReq::CompleteWith(..)) => "complete",
         }
     }
@@ -597,6 +597,7 @@ where
         &self,
         context: crate::ActorSessionContext,
         block: ParsedBlock,
+        kind: GhciInputKind,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         let expected_type = self.expected_type.clone();
         let type_modules = Arc::clone(&self.type_modules);
@@ -616,7 +617,36 @@ where
                     &expected_type,
                     &type_modules,
                     block,
+                    kind,
                 )
+            })
+            .await
+    }
+
+    pub(crate) fn inspection_query(
+        &self,
+        source: &str,
+        kind: GhciInputKind,
+    ) -> Result<Option<InspectionQuery>, String> {
+        inspection_query(&self.access.source, source, kind)
+    }
+
+    pub(crate) async fn inspect_items(
+        &self,
+        context: crate::ActorSessionContext,
+        queries: Vec<InspectionQuery>,
+    ) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
+        let type_modules = Arc::clone(&self.type_modules);
+        let mut turn_source = self.access.source.clone();
+        turn_source.preamble = format!(
+            "{}{}",
+            turn_source.preamble,
+            tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
+        )
+        .into();
+        self.access
+            .with_machine(context, move |session, context, _| {
+                inspect_actor_batch(session, context, &turn_source, &type_modules, &queries)
             })
             .await
     }
@@ -644,12 +674,13 @@ fn begin_fragment<H, O>(
     expected_type: &str,
     type_modules: &[String],
     block: ParsedBlock,
+    kind: GhciInputKind,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    if block.source.trim_start().starts_with(':') {
+    if kind == GhciInputKind::Command {
         return match run_discovery(session, context, source, type_modules, &block)? {
             Ok(output) => Ok(ResidentWorkbenchStep::Committed(output)),
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
@@ -969,62 +1000,6 @@ where
                         .map(ResidentActorBoundary::Deliberate)
                         .map_err(ResidentActorWorkbenchError::CompletionCapture)
                     }
-                    ResidentRequest::WorkerKernel(request) => {
-                        use crate::generated::worker_kernel::WorkerKernelReq as Request;
-                        use crate::worker_runtime::ResidentWorkerRequest as Captured;
-
-                        let json = |value: &Value| {
-                            tidepool_runtime::value_to_json(value, session.data_con_table(), 0)
-                        };
-                        let request = match request {
-                            Request::WorkerReserveBatchWith(specs) => Captured::ReserveBatch {
-                                specs: json(&specs),
-                                continuation: hole,
-                            },
-                            Request::WorkerAttachWith(handle, _, (id, incarnation)) => {
-                                let custody_realm = RealmId::fresh();
-                                let exit_ref = session
-                                    .live_payload_handle_owned_by(hole.cont_id(), custody_realm)
-                                    .ok_or_else(|| {
-                                        ResidentActorWorkbenchError::ActorProtocol(
-                                            "worker attachment carried no live exit reference"
-                                                .into(),
-                                        )
-                                    })?;
-                                Captured::Attach {
-                                    handle,
-                                    actor: crate::wait::decode_address(id, incarnation)?,
-                                    exit_ref,
-                                    custody_realm,
-                                    continuation: hole,
-                                }
-                            }
-                            Request::WorkerFailStartWith(handle, detail) => Captured::FailStart {
-                                handle,
-                                detail,
-                                continuation: hole,
-                            },
-                            Request::WorkerListWith => Captured::List { continuation: hole },
-                            Request::WorkerInspectWith(handles) => Captured::Inspect {
-                                handles: json(&handles),
-                                continuation: hole,
-                            },
-                            Request::WorkerBorrowExitWith(handle) => Captured::BorrowExit {
-                                handle,
-                                continuation: hole,
-                            },
-                            Request::WorkerAcknowledgeWith(acknowledgements) => {
-                                Captured::Acknowledge {
-                                    acknowledgements: json(&acknowledgements),
-                                    continuation: hole,
-                                }
-                            }
-                            Request::WorkerSessionContextWith => {
-                                Captured::SessionContext { continuation: hole }
-                            }
-                        };
-                        Ok(ResidentActorBoundary::Worker(request))
-                    }
                     invalid => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                         "installed actor program suspended on phase-invalid `{}`",
                         invalid.operation()
@@ -1311,22 +1286,6 @@ where
             .await
     }
 
-    pub(crate) async fn resume_json(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        value: serde_json::Value,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                let answer = value.to_value(session.data_con_table())?;
-                session
-                    .resume(hole, answer)
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await
-    }
-
     pub(crate) async fn resume_tool_invocation(
         &self,
         context: crate::ActorSessionContext,
@@ -1354,24 +1313,6 @@ where
             .with_machine(context, move |session, _, _| {
                 session
                     .resume_handle(hole, value)
-                    .map_err(ResidentActorWorkbenchError::Resident)
-            })
-            .await
-    }
-
-    /// Deliver a value whose root remains owned by a longer-lived runtime
-    /// resource. Collection may borrow the same actor exit reference more
-    /// than once until acknowledgement closes its custody realm.
-    pub(crate) async fn resume_live_borrowed(
-        &self,
-        context: crate::ActorSessionContext,
-        hole: ResidentHole,
-        value: RootedValueRef,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session
-                    .resume_handle_borrowed(hole, value)
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
@@ -1704,8 +1645,21 @@ where
             context.live_payload,
         )
         .map_err(ResidentActorWorkbenchError::Resident)?;
-    let outcome = begin_fragment(session, context, source, expected_type, type_modules, block)
-        .and_then(|step| adapt_agent_step(session, step));
+    let kind = if block.source.trim_start().starts_with(':') {
+        GhciInputKind::Command
+    } else {
+        GhciInputKind::Code
+    };
+    let outcome = begin_fragment(
+        session,
+        context,
+        source,
+        expected_type,
+        type_modules,
+        block,
+        kind,
+    )
+    .and_then(|step| adapt_agent_step(session, step));
     session.close_realm(fragment_realm);
     session
         .set_actor_execution(actor_context, context.effect_policy, context.live_payload)
@@ -1732,9 +1686,9 @@ where
         Ok(Some(command)) => command,
         Ok(None) => {
             return Ok(Err(format!(
-                "unknown actor workbench command `:{}` (supported: :type, :info, :bindings)",
-                line.name
-            )))
+            "unknown actor workbench command `:{}` (supported: :type, :info, :browse, :bindings)",
+            line.name
+        )))
         }
         Err(diagnostic) => return Ok(Err(diagnostic)),
     };
@@ -1777,6 +1731,43 @@ where
             type_modules,
             InspectionQuery::TypeOf(expression),
         ),
+        WorkbenchDiscovery::Browse { module, expanded } => {
+            let module = match module
+                .or_else(|| source.default_browse_module.as_deref().map(str::to_owned))
+            {
+                Some(module) => module,
+                None => return Ok(Err(":browse has no configured actor API module".into())),
+            };
+            inspect_actor(
+                session,
+                context,
+                source,
+                type_modules,
+                InspectionQuery::Browse { module, expanded },
+            )
+        }
+    }
+}
+
+fn inspection_query(
+    source: &ActorWorkbenchSource,
+    raw: &str,
+    kind: GhciInputKind,
+) -> Result<Option<InspectionQuery>, String> {
+    if kind != GhciInputKind::Command {
+        return Ok(None);
+    }
+    let line = MetaCommandLine::parse(raw)?;
+    match line.discovery()? {
+        Some(WorkbenchDiscovery::Type(expression)) => Ok(Some(InspectionQuery::TypeOf(expression))),
+        Some(WorkbenchDiscovery::Info(name)) => Ok(Some(InspectionQuery::Info(name))),
+        Some(WorkbenchDiscovery::Browse { module, expanded }) => {
+            let module = module
+                .or_else(|| source.default_browse_module.as_deref().map(str::to_owned))
+                .ok_or_else(|| ":browse has no configured actor API module".to_string())?;
+            Ok(Some(InspectionQuery::Browse { module, expanded }))
+        }
+        Some(WorkbenchDiscovery::Bindings) | None => Ok(None),
     }
 }
 
@@ -1787,6 +1778,23 @@ fn inspect_actor<H, O>(
     type_modules: &[String],
     query: InspectionQuery,
 ) -> Result<Result<String, String>, ResidentActorWorkbenchError>
+where
+    H: DispatchEffect<O> + Send,
+    O: OutputSink + Sync,
+{
+    let mut results = inspect_actor_batch(session, context, source, type_modules, &[query])?;
+    Ok(results
+        .pop()
+        .unwrap_or_else(|| Err("inspection returned no result".into())))
+}
+
+fn inspect_actor_batch<H, O>(
+    session: &ResidentSession<H, O>,
+    context: &crate::ActorSessionContext,
+    source: &ActorWorkbenchSource,
+    type_modules: &[String],
+    queries: &[InspectionQuery],
+) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
@@ -1805,17 +1813,32 @@ where
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = compile_view.injected_module_names();
     let imports = compile_view.turn_imports();
-    match run_inspection(InspectionRequest {
+    match run_inspections(InspectionRequest {
         preamble: &source.preamble,
         imports: &imports,
         include: &include_refs,
         session_root: compile_view.session_root(),
         inject_modules: &injected,
-        query,
+        queries,
     }) {
-        Ok(result) => Ok(Ok(result.render())),
+        Ok(results) if results.len() == queries.len() => Ok(results
+            .into_iter()
+            .map(|result| match result {
+                tidepool_runtime::session::InspectionResult::NotFound { .. }
+                | tidepool_runtime::session::InspectionResult::ModuleNotFound { .. }
+                | tidepool_runtime::session::InspectionResult::Rejected { .. } => {
+                    Err(result.render())
+                }
+                _ => Ok(result.render()),
+            })
+            .collect()),
+        Ok(results) => Err(ResidentActorWorkbenchError::CompileInfrastructure(format!(
+            "inspection returned {} results for {} queries",
+            results.len(),
+            queries.len()
+        ))),
         Err(error) if classify_compile(&error).class == FailureClass::UserHaskell => {
-            Ok(Err(classify_compile(&error).message))
+            Ok(vec![Err(classify_compile(&error).message)])
         }
         Err(error) => Err(ResidentActorWorkbenchError::Compile(error)),
     }
@@ -1885,6 +1908,30 @@ fn projected_binding_receipt(
 mod request_tests {
     use super::*;
     use tidepool_repr::{DataCon, DataConId, Literal};
+
+    #[test]
+    fn bare_browse_resolves_the_actor_incarnations_configured_api_module() {
+        let source = ActorWorkbenchSource::new("module Expr where\n", Vec::new())
+            .with_default_browse_module("Tidepool.Actors.Shoal");
+        assert_eq!(
+            inspection_query(&source, ":browse", GhciInputKind::Command).unwrap(),
+            Some(InspectionQuery::Browse {
+                module: "Tidepool.Actors.Shoal".into(),
+                expanded: false,
+            })
+        );
+        assert_eq!(
+            inspection_query(&source, ":browse!", GhciInputKind::Command).unwrap(),
+            Some(InspectionQuery::Browse {
+                module: "Tidepool.Actors.Shoal".into(),
+                expanded: true,
+            })
+        );
+        assert_eq!(
+            inspection_query(&source, ":browse", GhciInputKind::Code).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn resident_roster_decodes_complete_nominally() {

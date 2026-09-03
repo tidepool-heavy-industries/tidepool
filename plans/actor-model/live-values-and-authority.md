@@ -166,8 +166,8 @@ grant record. The recipe carried by the definition is correlation data; only
 the Worktree registry and exact actor binding confer authority.
 
 The first concrete recipe binds one owner-selected managed worktree to a fresh
-DevSwarm worker. The owner creates the worktree, retains its handle, closes the
-same value into the worker definition, and decorates the definition through
+actor. The owner creates the worktree, retains its handle, closes the same
+value into the actor definition, and decorates the definition through
 `withWorktree`. After the child installs its tool policy, Shoal validates
 exactly one recipe, binds it to that exact actor incarnation, and uses the
 registered checkout as the external application cwd. Failure before launch
@@ -191,13 +191,12 @@ policy into `startActor`.
 This is launch metadata, not part of the program image. General post-start
 `delegate`/`revoke` operations are deferred until a real protocol needs them.
 
-The worktree's durable ID may seed a V0 model-facing `WorkerHandle`, but that
-handle is correlation only. It neither reconstructs an `ActorRef` nor grants
-worktree access. Exact Haskell state maps it to the current actor reference and
-request; the worktree interpreter separately checks the actor principal and
-active binding. V0 allocates one fresh worktree per worker and forbids rebind,
-so a later reusable-worktree design must add an explicit binding generation
-rather than silently changing what an old worker handle denotes.
+The worktree's durable ID is correlation only. It neither reconstructs an
+`ActorRef` nor grants worktree access. The worktree interpreter separately
+checks the actor principal and active binding. V0 allocates one fresh worktree
+per worktree-backed actor and forbids rebind, so a later reusable-worktree
+design must add an explicit binding generation rather than silently changing
+what an old handle denotes.
 
 ## 7. Mailbox root ownership
 

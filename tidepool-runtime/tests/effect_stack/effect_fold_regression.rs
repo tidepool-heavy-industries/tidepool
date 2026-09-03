@@ -109,7 +109,7 @@ resultFoldPureListWorks = do
 resultShowEffectListWorks :: Eff '[Console] [Int]
 resultShowEffectListWorks = do
   xs <- forM [1, 2, 3 :: Int] (\i -> do { say ""; pure i })
-  say (show xs)
+  say (pack (show xs))
   pure xs
 "#;
 

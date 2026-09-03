@@ -374,24 +374,21 @@ pub fn enable_no_monomorphism_restriction(preamble: &str) -> String {
 /// query binds the expression through an explicit-brace `let`, preserving
 /// arbitrary user layout and quasiquote bytes; an info query needs only a
 /// target-module anchor so GHC produces its resolved reader environment.
-pub fn assemble_inspection_module(
-    preamble: &str,
-    imports: &str,
-    expression: Option<&str>,
-) -> String {
+pub fn assemble_inspection_module(preamble: &str, imports: &str, expressions: &[String]) -> String {
     let preamble = enable_no_monomorphism_restriction(preamble);
     let mut source = insert_preamble_imports(&preamble, imports);
-    match expression {
-        Some(expression) => {
-            source.push_str("\n__user = let {\n __b =\n");
+    if expressions.is_empty() {
+        source
+            .push_str("\n__tidepool_inspection_anchor :: ()\n__tidepool_inspection_anchor = ()\n");
+    } else {
+        for (index, expression) in expressions.iter().enumerate() {
+            source.push_str(&format!("\n__tidepool_inspect_{index} = let {{\n __b =\n"));
             source.push_str(expression);
             if !expression.ends_with('\n') {
                 source.push('\n');
             }
             source.push_str(" } in __b\n");
         }
-        None => source
-            .push_str("\n__tidepool_inspection_anchor :: ()\n__tidepool_inspection_anchor = ()\n"),
     }
     source
 }
@@ -1347,12 +1344,14 @@ mod tests {
         let source = assemble_inspection_module(
             preamble,
             "Tidepool.Prelude\nTidepool.Session.Lib.G7",
-            Some(expression),
+            &[expression.into()],
         );
 
         assert!(source.contains("NoImplicitPrelude, NoMonomorphismRestriction,"));
         assert!(source.contains("import Tidepool.Prelude\nimport Tidepool.Session.Lib.G7\n"));
-        assert!(source.contains(&format!(" __b =\n{expression} }} in __b\n")));
+        assert!(source.contains(&format!(
+            "__tidepool_inspect_0 = let {{\n __b =\n{expression} }} in __b\n"
+        )));
         assert_eq!(source.matches("NoMonomorphismRestriction").count(), 1);
     }
 

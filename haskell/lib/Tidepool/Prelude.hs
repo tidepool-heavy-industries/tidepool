@@ -48,7 +48,7 @@ module Tidepool.Prelude
   , (^), (^^), atan2
   , Functor(..), Applicative(..), Monad(..)
   , (<$>)
-    -- * show (Text-returning shadow)
+    -- * Rendering
   , show
     -- * read (String-based, works on the JIT since native bignum — see
     -- gotcha_registry stale_doc_read_now_works; parseInt/parseDouble are the
@@ -253,7 +253,7 @@ module Tidepool.Prelude
     --   list combinators → Data.List (L.): subsequences, permutations, delete,
     --     insert, union, intersect, stripPrefix, mapAccumR, foldl1',
     --     isSubsequenceOf, genericTake/genericDrop
-    --   rendering/parsing: showsPrec/shows/showString → `show :: a -> Text`;
+    --   rendering/parsing: showsPrec/shows/showString → `show :: a -> String`;
     --     reads/readsPrec → `read` + parseInt/parseIntM/parseDouble/parseDoubleM
     --   IO console/stdin: print/getLine/interact → the Console effect + `input` verb
     --   numeric → base (P.): gcd, lcm, properFraction
@@ -366,13 +366,15 @@ import Witherable (wither, filterA, ordNub)
 -- Total parse (Text.Read). Text-first numeric parsing stays in parseInt/parseDouble.
 import Text.Read (readMaybe)
 
--- | Text-returning show: @show x@ gives @Text@ instead of @String@.
-show :: Render a => a -> Text
-show = Render.render
+-- | Conventional String-returning 'show', backed by the JIT-safe 'Render'
+-- implementation (notably for 'Double').
+show :: Render a => a -> String
+show = T.unpack . Render.render
 
 -- | Polymorphic @pack@ (identity on 'Text', pack on 'String') now lives in
 -- 'Tidepool.Data.Text' so that the qualified @T.pack@ and this unqualified
--- @pack@ are the SAME function — @T.pack (show x)@ is no longer a trap.
+-- @pack@ are the SAME function, so @T.pack (show x)@ remains the ordinary
+-- conversion from rendered 'String' to 'Text'.
 -- Imported + re-exported below; see 'Tidepool.Data.Text.Pack'.
 
 unpack :: Text -> String

@@ -63,7 +63,7 @@ import Language.Haskell.Syntax.Specificity (Specificity (SpecifiedSpec))
 import GHC.Types.Var.Env (mkVarEnv, lookupVarEnv)
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe, isNothing)
-import Data.List (nub, sortOn)
+import Data.List (isPrefixOf, nub, sortOn)
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
 import System.Environment (lookupEnv)
 import System.FilePath (takeBaseName, takeFileName)
@@ -91,6 +91,9 @@ data PipelineResult = PipelineResult
   -- This display string is not parser-faithful: 'ppr' can elide qualifiers or
   -- use Unicode. Cross-turn typechecking must use structured type data.
   , prCapturedType :: Maybe String
+  -- | Rendered types of compiler-only inspection bindings, keyed by their
+  -- generated top-level names. A batch of @:type@ queries shares one compile.
+  , prCapturedTypes :: Map.Map String String
   -- | The GHC 'Type' of the target module's @result@ binding, captured for the
   -- value-binding mode. For @result = do { x <- action;
   -- pure x } :: Eff stack T@ this is the FULL @Eff stack T@; 'stripMonadHead'
@@ -202,7 +205,7 @@ data ModuleFront = ModuleFront
   , mfHscEnv     :: HscEnv
   , mfTcGblEnv   :: TcGblEnv
   , mfDesugared  :: ModGuts
-  , mfUserType   :: Maybe String
+  , mfCapturedTypes :: Map.Map String String
   , mfResultType :: Maybe Type
   }
 
@@ -268,7 +271,7 @@ data GutsMemoEntry = GutsMemoEntry
     -- registration REDONE (cheaply — no recompilation, just 'hscTidy' +
     -- 'mkIfaceTc' over already-computed guts) whenever it is deferred again
     -- in a LATER cycle.
-  , gmeResult     :: (ModGuts, Maybe String, Maybe Type)
+  , gmeResult     :: (ModGuts, Map.Map String String, Maybe Type)
     -- ^ Post-externalize triple, exactly the shape 'results' carries.
   }
 
@@ -413,7 +416,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
               -- before optimization can inline/rename @__user@ away. Types
               -- live on the Id in the typechecked type env; our CBOR drops
               -- them downstream (Translate.hs).
-              mCapTy   = capturedUserType tcGblEnv
+              capturedTypes = capturedTopLevelTypes tcGblEnv
               -- 'cpResultBinders' is the @result@-vs-@__result@ convention:
               -- the one-shot eval wrapper names @result@ while resident-turn
               -- templates use the scaffold-reserved @__result@.
@@ -429,7 +432,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
                            , mfHscEnv     = hscEnv
                            , mfTcGblEnv   = tcGblEnv
                            , mfDesugared  = desugared
-                           , mfUserType   = mCapTy
+                           , mfCapturedTypes = capturedTypes
                            , mfResultType = mResTy }
         -- The per-module back half: the optimized-Core pass, the
         -- variant's post-compile hook (session: HPT registration of a
@@ -446,7 +449,7 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
           liftIO (modifyIORef' moduleMsRef
                     (Map.insertWith (+) (moduleNameString (ms_mod_name (mfSummary mf))) coreMs))
           cpAfterModule plan (mfSummary mf) (mfTcGblEnv mf) (mfHscEnv mf) simplified
-          pure (simplified, (externalizeInternalTops simplified, mfUserType mf, mfResultType mf))
+          pure (simplified, (externalizeInternalTops simplified, mfCapturedTypes mf, mfResultType mf))
     -- Module names do not identify generated content across independent
     -- requests. A memo hit therefore requires both the current source hash
     -- and valid direct home-module imports. Summaries are visited in
@@ -626,8 +629,8 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
     let isTargetMod g = moduleNameString (moduleName (mg_module g)) == targetModName
         fst3 (g, _, _) = g
         allGuts = map fst3 results
-    (targetGuts, depGuts, capturedTy, resultTy) <- case filter (isTargetMod . fst3) results of
-      ((tgt, ty, rty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], ty, rty)
+    (targetGuts, depGuts, capturedTypes, resultTy) <- case filter (isTargetMod . fst3) results of
+      ((tgt, types, rty):_) -> return (tgt, [g | g <- allGuts, mg_module g /= mg_module tgt], types, rty)
       []      -> liftIO $ ioError $ userError $
         pvLabel variant ++ ": target module '" ++ targetModName
         ++ "' not found among compiled modules: "
@@ -656,7 +659,8 @@ runCompileCycle mCache mMemoRef timing sessionT0 variant path = do
       { prBinds  = allBinds
       , prTyCons = allTyCons
       , prHscEnv = cpFinalEnv plan hscFinal
-      , prCapturedType = capturedTy
+      , prCapturedType = Map.lookup evalUserBinder capturedTypes
+      , prCapturedTypes = capturedTypes
       , prResultType   = resultTy
       , prWarnings     = warnings
       , prTargetRdrEnv = targetRdrEnv
@@ -1067,20 +1071,15 @@ sessionVariant scope path = PipelineVariant
     -- them resolves from the HPT entry 'cpBeforeModule' registers immediately
     -- before the importing source module is compiled.
     excludedVal = map renderSessionModule (ssValIfaces scope)
--- | Read the inferred type of the @__user@ binding out of a module's
--- typechecked type env and render it to a (re-injectable) string.
---
--- @__user@ is the binder the eval template wraps the user's expression in
--- (eval_prep.rs); its 'idType' is exactly the type of the eval's top-level
--- expression. We render with the same 'renderWithContext'/'ppr' pattern as
--- 'dumpCore'. 'Nothing' when no such binder exists (non-eval extractions like
--- the test Suite have no @__user@).
-capturedUserType :: TcGblEnv -> Maybe String
-capturedUserType tcg =
-  case [ i | i <- typeEnvIds (tcg_type_env tcg)
-           , occNameString (nameOccName (idName i)) == evalUserBinder ] of
-    (i:_) -> Just (renderWithContext defaultSDocContext (ppr (idType i)))
-    []    -> Nothing
+-- | Capture only compiler-reserved probe binders. Ordinary module bindings do
+-- not belong in pipeline metadata or the resident compile memo.
+capturedTopLevelTypes :: TcGblEnv -> Map.Map String String
+capturedTopLevelTypes tcg = Map.fromList
+  [ (occ, renderWithContext defaultSDocContext (ppr (idType i)))
+  | i <- typeEnvIds (tcg_type_env tcg)
+  , let occ = occNameString (nameOccName (idName i))
+  , occ == evalUserBinder || "__tidepool_inspect_" `isPrefixOf` occ
+  ]
 
 -- | Read the GHC 'Type' (NOT a rendered string) of the named top-level binding
 -- out of a module's typechecked type env. Binding mode uses it to grab

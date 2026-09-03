@@ -27,6 +27,10 @@ library execution route. An epoch/stamp rejection is known unsubmitted and may
 be rebound and re-keyed; after acceptance, a lost response is indeterminate
 and is never replayed.
 
+Ordinary daemon mode exits when its request or RSS rotation bound is reached.
+`--persistent` keeps the daemon endpoint alive and rotates only the pinned GHC
+worker, for a long-lived owner such as one Shoal tmux session.
+
 The spawn counter counts logical extractor invocations, including requests
 served by a resident worker. It is an observability API, not a process-fork
 counter.

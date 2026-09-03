@@ -72,8 +72,8 @@ fn run_verified(code: &str) -> Result<serde_json::Value, String> {
 fn corpus_fold(files: usize, lines_per: usize) -> String {
     format!(
         r#"do
-  let mkText i = T.unlines [ "fn frob" <> show i <> "_" <> show j <> "() {{ let x = " <> show (i * j) <> "; " <> (if (i + j) `mod` 7 == 0 then "unsafe {{ ptr::read(p) }}" else "x + 1") <> " }}" | j <- [1 .. {lines_per} + (i * 37) `mod` 400 :: Int] ]
-  let corpus = [ (show i <> ".rs", mkText i) | i <- [1 .. {files} :: Int] ]
+  let mkText i = T.unlines [ "fn frob" <> pack (show i) <> "_" <> pack (show j) <> "() {{ let x = " <> pack (show (i * j)) <> "; " <> (if (i + j) `mod` 7 == 0 then "unsafe {{ ptr::read(p) }}" else "x + 1") <> " }}" | j <- [1 .. {lines_per} + (i * 37) `mod` 400 :: Int] ]
+  let corpus = [ (pack (show i) <> ".rs", mkText i) | i <- [1 .. {files} :: Int] ]
   let byCrate = Map.fromListWith (<>) [ (T.take 2 k, [(k, t)]) | (k, t) <- corpus ]
   let cnts = Map.map (\fs -> sum [ length (filter (T.isInfixOf "unsafe ") (T.lines t)) | (_, t) <- fs ]) byCrate
   pure (sum (Map.elems cnts))"#
@@ -107,8 +107,8 @@ fn text_fold_field_sized_corpus_verified() {
 fn text_fold_repeated_rounds_verified() {
     let code = r#"do
   rounds <- forM [1 .. 6 :: Int] (\r -> do
-    let mkText i = T.unlines [ "line " <> show (r * 1000 + i) <> " " <> (if (i + j) `mod` 11 == 0 then "unsafe marker" else "plain filler text") | j <- [1 .. 300 + (i * 53) `mod` 500 :: Int] ]
-    let corpus = [ (show i, mkText i) | i <- [1 .. 150 :: Int] ]
+    let mkText i = T.unlines [ "line " <> pack (show (r * 1000 + i)) <> " " <> (if (i + j) `mod` 11 == 0 then "unsafe marker" else "plain filler text") | j <- [1 .. 300 + (i * 53) `mod` 500 :: Int] ]
+    let corpus = [ (pack (show i), mkText i) | i <- [1 .. 150 :: Int] ]
     let byK = Map.fromListWith (<>) [ (T.take 1 k, [(k, t)]) | (k, t) <- corpus ]
     pure (sum (Map.elems (Map.map (\fs -> sum [ length (filter (T.isInfixOf "unsafe") (T.lines t)) | (_, t) <- fs ]) byK))))
   pure (sum rounds)"#;

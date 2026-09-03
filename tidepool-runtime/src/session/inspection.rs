@@ -15,6 +15,7 @@ use super::assemble_inspection_module;
 pub enum InspectionQuery {
     TypeOf(String),
     Info(String),
+    Browse { module: String, expanded: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +42,17 @@ pub enum InspectionResult {
     },
     NotFound {
         query: String,
+    },
+    ModuleNotFound {
+        module: String,
+    },
+    Rejected {
+        diagnostic: String,
+    },
+    Browse {
+        module: String,
+        expanded: bool,
+        entries: Vec<InfoEntry>,
     },
 }
 
@@ -69,6 +81,22 @@ impl InspectionResult {
                 format!("ambiguous name `{query}`; candidates: {candidates}")
             }
             Self::NotFound { query } => format!("unknown name `{query}`"),
+            Self::ModuleNotFound { module } => format!("unknown module `{module}`"),
+            Self::Rejected { diagnostic } => diagnostic.clone(),
+            Self::Browse {
+                module, entries, ..
+            } => {
+                let declarations = entries
+                    .iter()
+                    .map(|entry| entry.display.trim())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if declarations.is_empty() {
+                    format!("-- {module}")
+                } else {
+                    format!("-- {module}\n{declarations}")
+                }
+            }
         }
     }
 }
@@ -79,37 +107,50 @@ pub struct InspectionRequest<'a> {
     pub include: &'a [&'a Path],
     pub session_root: &'a Path,
     pub inject_modules: &'a [String],
-    pub query: InspectionQuery,
+    pub queries: &'a [InspectionQuery],
 }
 
-/// Inspect one expression or name without evaluating it or mutating the
-/// resident session. The compiler sees the same preamble, imports, session
-/// modules, and injected value interfaces as the next ordinary turn.
-pub fn run_inspection(request: InspectionRequest<'_>) -> Result<InspectionResult, CompileError> {
+/// Inspect an ordered batch without evaluating it or mutating the resident
+/// session. Every query sees the same preamble, imports, session modules, and
+/// injected value interfaces as the next ordinary turn. The worker serves the
+/// batch through one request while isolating GHC rejection per query.
+pub fn run_inspections(
+    request: InspectionRequest<'_>,
+) -> Result<Vec<InspectionResult>, CompileError> {
+    if request.queries.is_empty() {
+        return Ok(Vec::new());
+    }
     let temp = TempDir::new()?;
-    let source_path = temp.path().join("Expr.hs");
     let output_path = temp.path().join("inspection.cbor");
-    let expression = match &request.query {
-        InspectionQuery::TypeOf(expression) => Some(expression.as_str()),
-        InspectionQuery::Info(_) => None,
-    };
-    let source = assemble_inspection_module(request.preamble, request.imports, expression);
-    std::fs::write(&source_path, source)?;
 
     let mut command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
     command
-        .input(&source_path)
         .output_dir(temp.path())
         .inspect_out(&output_path)
         .includes(request.include)
         .session_root(request.session_root)
         .inject_vals(request.inject_modules);
-    match &request.query {
-        InspectionQuery::TypeOf(expression) => {
-            command.inspect_type(expression);
-        }
-        InspectionQuery::Info(name) => {
-            command.inspect_info(name);
+    for (index, query) in request.queries.iter().enumerate() {
+        let query_dir = temp.path().join(format!("query-{index}"));
+        std::fs::create_dir(&query_dir)?;
+        let source_path = query_dir.join("Expr.hs");
+        let expressions = match query {
+            InspectionQuery::TypeOf(expression) => std::slice::from_ref(expression),
+            InspectionQuery::Info(_) | InspectionQuery::Browse { .. } => &[],
+        };
+        let source = assemble_inspection_module(request.preamble, request.imports, expressions);
+        std::fs::write(&source_path, source)?;
+        command.input(&source_path);
+        match query {
+            InspectionQuery::TypeOf(expression) => {
+                command.inspect_type(expression);
+            }
+            InspectionQuery::Info(name) => {
+                command.inspect_info(name);
+            }
+            InspectionQuery::Browse { module, expanded } => {
+                command.inspect_browse(module, *expanded);
+            }
         }
     }
 
@@ -131,14 +172,14 @@ pub fn run_inspection(request: InspectionRequest<'_>) -> Result<InspectionResult
             CompileError::Io(error)
         }
     })?;
-    decode_inspection(&bytes)
+    decode_inspections(&bytes)
 }
 
 fn map_spawn(error: SpawnError) -> CompileError {
     CompileError::Io(crate::extract_spawn_error(error.source))
 }
 
-fn decode_inspection(bytes: &[u8]) -> Result<InspectionResult, CompileError> {
+fn decode_inspections(bytes: &[u8]) -> Result<Vec<InspectionResult>, CompileError> {
     let mut reader = std::io::Cursor::new(bytes);
     let value: CborValue = ciborium::de::from_reader(&mut reader)
         .map_err(|error| invalid(format!("malformed CBOR: {error}")))?;
@@ -146,24 +187,31 @@ fn decode_inspection(bytes: &[u8]) -> Result<InspectionResult, CompileError> {
         return Err(invalid("trailing CBOR data"));
     }
     let root = array_len(&value, 2, "receipt")?;
-    if text(&root[0], "version")? != "TPINSP001" {
+    if text(&root[0], "version")? != "TPINSP002" {
         return Err(invalid("unsupported receipt version"));
     }
-    let body = array(&root[1], "body")?;
+    array(&root[1], "results")?
+        .iter()
+        .map(decode_inspection_result)
+        .collect()
+}
+
+fn decode_inspection_result(value: &CborValue) -> Result<InspectionResult, CompileError> {
+    let body = array(value, "body")?;
     let tag = body
         .first()
         .ok_or_else(|| invalid("empty result body"))
         .and_then(|value| text(value, "result tag"))?;
     match tag {
         "Type" => {
-            let body = array_len(&root[1], 3, "Type result")?;
+            let body = array_len(value, 3, "Type result")?;
             Ok(InspectionResult::Type {
                 expression: text(&body[1], "Type expression")?.into(),
                 display: text(&body[2], "Type display")?.into(),
             })
         }
         "Info" => {
-            let body = array_len(&root[1], 3, "Info result")?;
+            let body = array_len(value, 3, "Info result")?;
             let entries = array(&body[2], "Info entries")?
                 .iter()
                 .map(decode_info_entry)
@@ -174,7 +222,7 @@ fn decode_inspection(bytes: &[u8]) -> Result<InspectionResult, CompileError> {
             })
         }
         "Ambiguous" => {
-            let body = array_len(&root[1], 3, "Ambiguous result")?;
+            let body = array_len(value, 3, "Ambiguous result")?;
             let entries = array(&body[2], "Ambiguous entries")?
                 .iter()
                 .map(decode_info_entry)
@@ -185,12 +233,43 @@ fn decode_inspection(bytes: &[u8]) -> Result<InspectionResult, CompileError> {
             })
         }
         "NotFound" => {
-            let body = array_len(&root[1], 2, "NotFound result")?;
+            let body = array_len(value, 2, "NotFound result")?;
             Ok(InspectionResult::NotFound {
                 query: text(&body[1], "NotFound query")?.into(),
             })
         }
+        "ModuleNotFound" => {
+            let body = array_len(value, 2, "ModuleNotFound result")?;
+            Ok(InspectionResult::ModuleNotFound {
+                module: text(&body[1], "ModuleNotFound module")?.into(),
+            })
+        }
+        "Rejected" => {
+            let body = array_len(value, 2, "Rejected result")?;
+            Ok(InspectionResult::Rejected {
+                diagnostic: text(&body[1], "Rejected diagnostic")?.into(),
+            })
+        }
+        "Browse" => {
+            let body = array_len(value, 4, "Browse result")?;
+            let entries = array(&body[3], "Browse entries")?
+                .iter()
+                .map(decode_info_entry)
+                .collect::<Result<_, _>>()?;
+            Ok(InspectionResult::Browse {
+                module: text(&body[1], "Browse module")?.into(),
+                expanded: boolean(&body[2], "Browse expanded")?,
+                entries,
+            })
+        }
         other => Err(invalid(format!("unknown result tag {other:?}"))),
+    }
+}
+
+fn boolean(value: &CborValue, what: &str) -> Result<bool, CompileError> {
+    match value {
+        CborValue::Bool(value) => Ok(*value),
+        _ => Err(invalid(format!("{what} must be boolean"))),
     }
 }
 
@@ -244,6 +323,7 @@ fn invalid(detail: impl Into<String>) -> CompileError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidepool_testing::eval_harness;
 
     fn encoded(value: CborValue) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -253,66 +333,61 @@ mod tests {
 
     #[test]
     fn decodes_every_result_shape() {
-        let ty = CborValue::Array(vec![
-            CborValue::Text("TPINSP001".into()),
+        let receipt = CborValue::Array(vec![
+            CborValue::Text("TPINSP002".into()),
             CborValue::Array(vec![
-                CborValue::Text("Type".into()),
-                CborValue::Text("fmap".into()),
-                CborValue::Text("Functor f => (a -> b) -> f a -> f b".into()),
-            ]),
-        ]);
-        assert!(matches!(
-            decode_inspection(&encoded(ty)).unwrap(),
-            InspectionResult::Type { .. }
-        ));
-
-        let info = CborValue::Array(vec![
-            CborValue::Text("TPINSP001".into()),
-            CborValue::Array(vec![
-                CborValue::Text("Info".into()),
-                CborValue::Text("Maybe".into()),
-                CborValue::Array(vec![CborValue::Array(vec![
+                CborValue::Array(vec![
+                    CborValue::Text("Type".into()),
+                    CborValue::Text("fmap".into()),
+                    CborValue::Text("Functor f => (a -> b) -> f a -> f b".into()),
+                ]),
+                CborValue::Array(vec![
+                    CborValue::Text("Info".into()),
                     CborValue::Text("Maybe".into()),
-                    CborValue::Text("GHC.Internal.Maybe".into()),
-                    CborValue::Text("type".into()),
-                    CborValue::Text("data Maybe a = Nothing | Just a".into()),
-                ])]),
+                    CborValue::Array(vec![CborValue::Array(vec![
+                        CborValue::Text("Maybe".into()),
+                        CborValue::Text("GHC.Internal.Maybe".into()),
+                        CborValue::Text("type".into()),
+                        CborValue::Text("data Maybe a = Nothing | Just a".into()),
+                    ])]),
+                ]),
+                CborValue::Array(vec![
+                    CborValue::Text("Ambiguous".into()),
+                    CborValue::Text("Result".into()),
+                    CborValue::Array(vec![]),
+                ]),
+                CborValue::Array(vec![
+                    CborValue::Text("NotFound".into()),
+                    CborValue::Text("nope".into()),
+                ]),
+                CborValue::Array(vec![
+                    CborValue::Text("Browse".into()),
+                    CborValue::Text("Tidepool.Actors.Shoal".into()),
+                    CborValue::Bool(true),
+                    CborValue::Array(vec![]),
+                ]),
             ]),
         ]);
-        assert!(matches!(
-            decode_inspection(&encoded(info)).unwrap(),
-            InspectionResult::Info { .. }
-        ));
-
-        let ambiguous = CborValue::Array(vec![
-            CborValue::Text("TPINSP001".into()),
-            CborValue::Array(vec![
-                CborValue::Text("Ambiguous".into()),
-                CborValue::Text("Result".into()),
-                CborValue::Array(vec![]),
-            ]),
-        ]);
+        let decoded = decode_inspections(&encoded(receipt)).unwrap();
+        assert!(matches!(decoded[0], InspectionResult::Type { .. }));
+        assert!(matches!(decoded[1], InspectionResult::Info { .. }));
         assert_eq!(
-            decode_inspection(&encoded(ambiguous)).unwrap(),
+            decoded[2],
             InspectionResult::Ambiguous {
                 query: "Result".into(),
                 entries: vec![],
             }
         );
-
-        let missing = CborValue::Array(vec![
-            CborValue::Text("TPINSP001".into()),
-            CborValue::Array(vec![
-                CborValue::Text("NotFound".into()),
-                CborValue::Text("nope".into()),
-            ]),
-        ]);
         assert_eq!(
-            decode_inspection(&encoded(missing)).unwrap(),
+            decoded[3],
             InspectionResult::NotFound {
                 query: "nope".into()
             }
         );
+        assert!(matches!(
+            decoded[4],
+            InspectionResult::Browse { expanded: true, .. }
+        ));
     }
 
     #[test]
@@ -323,22 +398,94 @@ mod tests {
                 CborValue::Array(vec![]),
             ]),
             CborValue::Array(vec![
-                CborValue::Text("TPINSP001".into()),
+                CborValue::Text("TPINSP002".into()),
                 CborValue::Array(vec![CborValue::Text("Other".into())]),
             ]),
             CborValue::Array(vec![CborValue::Text("TPINSP001".into())]),
         ] {
-            assert!(decode_inspection(&encoded(value)).is_err());
+            assert!(decode_inspections(&encoded(value)).is_err());
         }
 
         let mut trailing = encoded(CborValue::Array(vec![
-            CborValue::Text("TPINSP001".into()),
-            CborValue::Array(vec![
+            CborValue::Text("TPINSP002".into()),
+            CborValue::Array(vec![CborValue::Array(vec![
                 CborValue::Text("NotFound".into()),
                 CborValue::Text("x".into()),
-            ]),
+            ])]),
         ]));
         trailing.push(0);
-        assert!(decode_inspection(&trailing).is_err());
+        assert!(decode_inspections(&trailing).is_err());
+    }
+
+    #[test]
+    fn one_inspection_compile_answers_type_info_and_browse_queries() {
+        eval_harness::require_extract();
+        let include = tempfile::tempdir().unwrap();
+        let session = tempfile::tempdir().unwrap();
+        std::fs::write(
+            include.path().join("BrowseFixture.hs"),
+            concat!(
+                "module BrowseFixture (Public(..), Service(..), exportedValue, Maybe(..)) where\n",
+                "import Prelude\n",
+                "import Data.Maybe (Maybe(..))\n",
+                "data Public = First | Second\n",
+                "class Service a where service :: a -> Int\n",
+                "exportedValue :: Int\n",
+                "exportedValue = 42\n",
+            ),
+        )
+        .unwrap();
+        let preamble = concat!(
+            "{-# LANGUAGE NoImplicitPrelude, NoMonomorphismRestriction #-}\n",
+            "module Expr where\n",
+            "import BrowseFixture\n",
+        );
+        let queries = vec![
+            InspectionQuery::TypeOf("exportedValue".into()),
+            InspectionQuery::Info("Public".into()),
+            InspectionQuery::TypeOf("missing + 1".into()),
+            InspectionQuery::Browse {
+                module: "No.Such.Module".into(),
+                expanded: false,
+            },
+            InspectionQuery::Browse {
+                module: "BrowseFixture".into(),
+                expanded: false,
+            },
+            InspectionQuery::Browse {
+                module: "BrowseFixture".into(),
+                expanded: true,
+            },
+        ];
+        let results = run_inspections(InspectionRequest {
+            preamble,
+            imports: "",
+            include: &[include.path()],
+            session_root: session.path(),
+            inject_modules: &[],
+            queries: &queries,
+        })
+        .unwrap();
+
+        assert_eq!(results.len(), queries.len());
+        assert!(results[0].render().contains("exportedValue :: Int"));
+        assert!(results[1].render().contains("data Public"));
+        assert!(matches!(results[2], InspectionResult::Rejected { .. }));
+        assert_eq!(
+            results[3],
+            InspectionResult::ModuleNotFound {
+                module: "No.Such.Module".into()
+            }
+        );
+        let grouped = results[4].render();
+        assert!(grouped.starts_with("-- BrowseFixture\n"));
+        assert!(grouped.contains("data Public"));
+        assert!(grouped.contains("class Service"));
+        assert!(grouped.contains("exportedValue :: Int"));
+        assert!(!grouped.lines().any(|line| line.starts_with("First ::")));
+        let expanded = results[5].render();
+        assert!(expanded.contains("First :: Public"), "{expanded}");
+        assert!(expanded.contains("service ::"), "{expanded}");
+        assert!(expanded.contains("data Maybe"), "{expanded}");
     }
 }

@@ -240,9 +240,11 @@ enum CallContent {
 }
 
 impl CallResponse {
-    fn domain(value: serde_json::Value) -> Self {
-        let text =
-            serde_json::to_string(&value).unwrap_or_else(|_| "{\"status\":\"rejected\"}".into());
+    fn domain(kind: ToolKind, value: serde_json::Value) -> Self {
+        let text = match kind {
+            ToolKind::Custom => workbench_transcript(&value).unwrap_or_else(|| serialize(value)),
+            ToolKind::Function => serialize(value),
+        };
         Self {
             content_items: vec![CallContent::InputText { text }],
             success: true,
@@ -257,6 +259,56 @@ impl CallResponse {
             success: false,
         }
     }
+}
+
+fn serialize(value: serde_json::Value) -> String {
+    serde_json::to_string(&value).unwrap_or_else(|_| "{\"status\":\"rejected\"}".into())
+}
+
+fn workbench_transcript(value: &serde_json::Value) -> Option<String> {
+    let response = value.as_object()?;
+    let status = response.get("status")?.as_str()?;
+    let next_index = response.get("nextIndex")?.as_u64()?;
+    let total = response.get("total")?.as_u64()?;
+    let items = response.get("items")?.as_array()?;
+    let mut transcript = String::new();
+    for item in items {
+        let item = item.as_object()?;
+        item.get("index")?.as_u64()?;
+        item.get("status")?.as_str()?;
+        let output = item.get("output")?.as_str()?;
+        if !transcript.is_empty() && !transcript.ends_with('\n') && !output.is_empty() {
+            transcript.push('\n');
+        }
+        transcript.push_str(output);
+    }
+    let processed = match status {
+        "completed" => next_index,
+        "rejected" => {
+            items
+                .last()
+                .and_then(|item| item.get("index"))
+                .and_then(serde_json::Value::as_u64)?
+                + 1
+        }
+        _ => total,
+    };
+    let not_run = total.saturating_sub(processed);
+    if not_run > 0 {
+        if !transcript.is_empty() && !transcript.ends_with('\n') {
+            transcript.push('\n');
+        }
+        match status {
+            "rejected" => transcript.push_str(&format!(
+                "[stopped after GHCi input unit {processed} of {total}; {not_run} not run]"
+            )),
+            "completed" => transcript.push_str(&format!(
+                "[actor completed after GHCi input unit {processed} of {total}; {not_run} not run]"
+            )),
+            _ => {}
+        }
+    }
+    Some(transcript)
 }
 
 async fn call(
@@ -308,7 +360,7 @@ async fn call(
         }
     };
     match result {
-        Ok(Ok(value)) => Json(CallResponse::domain(value)),
+        Ok(Ok(value)) => Json(CallResponse::domain(kind, value)),
         Ok(Err(error)) => {
             tracing::error!(
                 turn_id = %request.turn_id,
@@ -464,6 +516,54 @@ mod tests {
         assert_eq!(value["dynamicTools"][0]["name"], NAMESPACE);
         assert_eq!(value["dynamicTools"][0]["tools"][0]["type"], "custom");
         assert_eq!(value["dynamicTools"][0]["tools"][0]["name"], "haskell");
+    }
+
+    #[test]
+    fn custom_workbench_receipt_projects_only_ghci_output() {
+        let response = CallResponse::domain(
+            ToolKind::Custom,
+            serde_json::json!({
+                "items": [{
+                    "index": 0,
+                    "output": "sessionInput :: Maybe ActionFailure",
+                    "status": "committed"
+                }, {
+                    "index": 1,
+                    "output": "waitOn :: ActorRef protocol exit -> AgentAction effs exit",
+                    "status": "committed"
+                }],
+                "nextIndex": 2,
+                "status": "committed",
+                "total": 2
+            }),
+        );
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "sessionInput :: Maybe ActionFailure\nwaitOn :: ActorRef protocol exit -> AgentAction effs exit"
+        );
+    }
+
+    #[test]
+    fn custom_workbench_receipt_marks_unrun_suffix_compactly() {
+        let response = CallResponse::domain(
+            ToolKind::Custom,
+            serde_json::json!({
+                "items": [{
+                    "index": 0,
+                    "output": "Not in scope: `missing`",
+                    "status": "rejected"
+                }],
+                "nextIndex": 0,
+                "status": "rejected",
+                "total": 3
+            }),
+        );
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "Not in scope: `missing`\n[stopped after GHCi input unit 1 of 3; 2 not run]"
+        );
     }
 
     #[tokio::test]

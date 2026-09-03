@@ -149,7 +149,7 @@ fn payload_bearing_and_nested_shapes() {
 fn positional_field_is_rejected_at_compile_time() {
     tidepool_testing::eval_harness::require_extract();
     let src = format!(
-        "{HEADER}{DECLS}\ndata P = P Text Int deriving (Generic)\n\nresult :: Text\nresult = show (formShape @P)\n"
+        "{HEADER}{DECLS}\ndata P = P Text Int deriving (Generic)\n\nresult :: String\nresult = show (formShape @P)\n"
     );
     match EvalHarness::new().with_stdlib().compile(&src, "result") {
         Ok(_) => panic!("a positional payload field must not derive a form"),

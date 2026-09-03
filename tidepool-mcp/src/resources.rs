@@ -545,9 +545,9 @@ pub(crate) const QUALIFIED_NAMES: &[(&str, &str)] = &[
     // Text — the `Data.Text` (`T.`) surface.
     ("pack", "`pack` is in the shadow (polymorphic `Pack`); `T.pack` is the same function"),
     // Rendering / parsing — the Text-first shadow spellings.
-    ("showsPrec", "`show :: a -> Text` is the shadow's renderer"),
-    ("shows", "`show :: a -> Text` is the shadow's renderer"),
-    ("showString", "`show :: a -> Text` is the shadow's renderer"),
+    ("showsPrec", "`show :: Render a => a -> String` is the shadow's renderer"),
+    ("shows", "`show :: Render a => a -> String` is the shadow's renderer"),
+    ("showString", "`show :: Render a => a -> String` is the shadow's renderer"),
     ("reads", "`read` is in the shadow; `parseInt`/`parseIntM`/`parseDouble`/`parseDoubleM` are the Text-first parsers"),
     ("readsPrec", "`read` is in the shadow; `parseIntM`/`parseDoubleM` are the Text-first parsers"),
     // IO console/stdin — modelled as effects.

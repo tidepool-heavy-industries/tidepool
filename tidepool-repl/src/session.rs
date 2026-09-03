@@ -2325,20 +2325,24 @@ impl Session {
         let query_source = match &query {
             InspectionQuery::TypeOf(expression) => expression.as_str(),
             InspectionQuery::Info(name) => name.as_str(),
+            InspectionQuery::Browse { module, .. } => module.as_str(),
         };
         let preamble = self.patched_preamble();
         let imports = self.turn_imports(query_source);
         let inject_modules = self.live_val_modules();
         let include = self.turn_include();
-        match tidepool_runtime::session::run_inspection(InspectionRequest {
+        match tidepool_runtime::session::run_inspections(InspectionRequest {
             preamble: &preamble,
             imports: &imports,
             include: &include,
             session_root: self.session_root(),
             inject_modules: &inject_modules,
-            query,
+            queries: std::slice::from_ref(&query),
         }) {
-            Ok(result) => TurnOutcome::Inspection(result.render()),
+            Ok(mut results) => TurnOutcome::Inspection(results.pop().map_or_else(
+                || "inspection returned no result".into(),
+                |result| result.render(),
+            )),
             Err(error) => TurnOutcome::Error(classify_compile(&error).message),
         }
     }

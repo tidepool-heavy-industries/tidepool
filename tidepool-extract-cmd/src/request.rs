@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v4";
-const MAGIC: &[u8; 8] = b"TPREQ004";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v5";
+const MAGIC: &[u8; 8] = b"TPREQ005";
 
 #[derive(Clone, Debug)]
 enum Field {
@@ -27,6 +27,8 @@ enum Field {
     HarnessProfile,
     InspectType(String),
     InspectInfo(String),
+    InspectBrowse(String),
+    InspectBrowseExpanded(String),
     InspectOut(OsString),
 }
 
@@ -92,6 +94,14 @@ impl ExtractRequest {
                 Some("--inspect-info") => request.fields.push(Field::InspectInfo(
                     text_value(&mut args, "--inspect-info")?.into(),
                 )),
+                Some("--inspect-browse") => request.fields.push(Field::InspectBrowse(
+                    text_value(&mut args, "--inspect-browse")?.into(),
+                )),
+                Some("--inspect-browse-expanded") => {
+                    request.fields.push(Field::InspectBrowseExpanded(
+                        text_value(&mut args, "--inspect-browse-expanded")?.into(),
+                    ))
+                }
                 Some("--inspect-out") => request.inspect_out(value(&mut args, "--inspect-out")?),
                 Some(option) if option.starts_with('-') => {
                     return Err(CliError::new(format!("unknown option: {option}")));
@@ -154,6 +164,8 @@ impl ExtractRequest {
                 26 => Field::InspectType(decoder.string()?),
                 27 => Field::InspectInfo(decoder.string()?),
                 28 => Field::InspectOut(decoder.os_string()?),
+                29 => Field::InspectBrowse(decoder.string()?),
+                30 => Field::InspectBrowseExpanded(decoder.string()?),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
             fields.push(field);
@@ -281,6 +293,14 @@ impl ExtractRequest {
         self.fields.push(Field::InspectInfo(name.to_owned()));
     }
 
+    pub(crate) fn inspect_browse(&mut self, module: &str, expanded: bool) {
+        self.fields.push(if expanded {
+            Field::InspectBrowseExpanded(module.to_owned())
+        } else {
+            Field::InspectBrowse(module.to_owned())
+        });
+    }
+
     pub(crate) fn inspect_out(&mut self, value: impl AsRef<OsStr>) {
         self.fields
             .push(Field::InspectOut(value.as_ref().to_owned()));
@@ -320,6 +340,12 @@ impl ExtractRequest {
                 Field::HarnessProfile => flags.push("--harness-profile".into()),
                 Field::InspectType(value) => flag(&mut flags, "--inspect-type", OsStr::new(value)),
                 Field::InspectInfo(value) => flag(&mut flags, "--inspect-info", OsStr::new(value)),
+                Field::InspectBrowse(value) => {
+                    flag(&mut flags, "--inspect-browse", OsStr::new(value))
+                }
+                Field::InspectBrowseExpanded(value) => {
+                    flag(&mut flags, "--inspect-browse-expanded", OsStr::new(value))
+                }
                 Field::InspectOut(value) => flag(&mut flags, "--inspect-out", value),
             }
         }
@@ -427,7 +453,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidWorkerArgv => {
-                f.write_str("worker argv must be exactly --worker-request-v4 PAYLOAD")
+                f.write_str("worker argv must be exactly --worker-request-v5 PAYLOAD")
             }
             Self::NonUtf8Payload => f.write_str("worker request payload is not UTF-8"),
             Self::InvalidHeader => f.write_str("invalid worker request header"),
@@ -501,6 +527,8 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         Field::InspectType(value) => tagged_frame(out, 26, OsStr::new(value)),
         Field::InspectInfo(value) => tagged_frame(out, 27, OsStr::new(value)),
         Field::InspectOut(value) => tagged_frame(out, 28, value),
+        Field::InspectBrowse(value) => tagged_frame(out, 29, OsStr::new(value)),
+        Field::InspectBrowseExpanded(value) => tagged_frame(out, 30, OsStr::new(value)),
     }
 }
 
@@ -614,7 +642,12 @@ mod tests {
     fn worker_argv_rejects_retired_version_markers() {
         let request = ExtractRequest::from_cli(&["Expr.hs".into()]).unwrap();
         let payload = OsString::from(hex(&request.encode()));
-        for flag in ["--worker-request-v1", "--worker-request-v2"] {
+        for flag in [
+            "--worker-request-v1",
+            "--worker-request-v2",
+            "--worker-request-v3",
+            "--worker-request-v4",
+        ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
                 ProtocolError::InvalidWorkerArgv
@@ -624,7 +657,7 @@ mod tests {
 
     #[test]
     fn typed_protocol_rejects_retired_magic_versions() {
-        for magic in [b"TPREQ001", b"TPREQ002"] {
+        for magic in [b"TPREQ001", b"TPREQ002", b"TPREQ003", b"TPREQ004"] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
             assert_eq!(
@@ -660,6 +693,16 @@ mod tests {
             "--bind-gen".into(),
             "7".into(),
             "--harness-profile".into(),
+            "--inspect-type".into(),
+            "fmap".into(),
+            "--inspect-info".into(),
+            "Maybe".into(),
+            "--inspect-browse".into(),
+            "Tidepool.Prelude".into(),
+            "--inspect-browse-expanded".into(),
+            "Tidepool.Actors.Shoal".into(),
+            "--inspect-out".into(),
+            "/tmp/inspection.cbor".into(),
         ];
         let request = ExtractRequest::from_cli(&args).unwrap();
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();

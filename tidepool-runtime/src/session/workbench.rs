@@ -8,6 +8,8 @@
 
 use std::future::Future;
 
+use pest::Parser;
+use pest_derive::Parser;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +17,176 @@ use super::{
     assemble_bind_module, assemble_expression_module, insert_preamble_imports, ExpressionLift,
     TemplateSelector, TurnTemplate, DECL_TEMPLATE_SOURCE,
 };
+
+#[derive(Parser)]
+#[grammar = "session/ghci_input.pest"]
+struct GhciScriptParser;
+
+/// One independently executed unit in a GHCi-style script payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GhciInputUnit {
+    /// One nonblank top-level Haskell input line.
+    Code { source: String, line: usize },
+    /// One reserved, colon-prefixed workbench command.
+    Command {
+        source: String,
+        line: usize,
+        command: MetaCommandLine,
+    },
+    /// One multiline Haskell input delimited by exact `:{` and `:}` lines.
+    Block {
+        source: String,
+        start_line: usize,
+        end_line: usize,
+    },
+}
+
+impl GhciInputUnit {
+    #[must_use]
+    pub fn source(&self) -> &str {
+        match self {
+            Self::Code { source, .. }
+            | Self::Command { source, .. }
+            | Self::Block { source, .. } => source,
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> GhciInputKind {
+        match self {
+            Self::Command { .. } => GhciInputKind::Command,
+            Self::Code { .. } | Self::Block { .. } => GhciInputKind::Code,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhciInputKind {
+    Code,
+    Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GhciInputError {
+    #[error("line {line}: unexpected `:}}` without a matching `:{{`")]
+    UnexpectedBlockClose { line: usize },
+    #[error("line {line}: nested `:{{` is not supported; close the current GHCi input unit first")]
+    NestedBlockOpen { line: usize },
+    #[error("line {line}: unterminated `:{{` GHCi input unit; add a `:}}` line")]
+    UnterminatedBlock { line: usize },
+    #[error("could not parse GHCi input: {0}")]
+    Grammar(String),
+}
+
+/// Parse one custom-tool payload as a small GHCi-style script.
+///
+/// The grammar reserves colon-prefixed lines for workbench commands, treats
+/// every other nonblank line as Haskell, and recognizes `:{` / `:}` as one
+/// multiline Haskell unit. Block contents retain their exact decoded text;
+/// the delimiters themselves do not become Haskell source.
+pub fn parse_ghci_input(source: &str) -> Result<Vec<GhciInputUnit>, GhciInputError> {
+    let script = GhciScriptParser::parse(Rule::script, source)
+        .map_err(|error| GhciInputError::Grammar(error.to_string()))?
+        .next()
+        .ok_or_else(|| GhciInputError::Grammar("parser returned no script".into()))?;
+    let mut units = Vec::new();
+    for pair in script.into_inner() {
+        let line = pair.as_span().start_pos().line_col().0;
+        match pair.as_rule() {
+            Rule::code_unit => {
+                let source = pair
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::code_source)
+                    .ok_or_else(|| GhciInputError::Grammar("code unit contained no source".into()))?
+                    .as_str()
+                    .to_owned();
+                units.push(GhciInputUnit::Code { source, line });
+            }
+            Rule::command_unit => {
+                let command_pair = pair
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::command)
+                    .ok_or_else(|| {
+                        GhciInputError::Grammar("command unit contained no command".into())
+                    })?;
+                let command = meta_command_from_pair(command_pair.clone())?;
+                units.push(GhciInputUnit::Command {
+                    source: command_pair.as_str().to_owned(),
+                    line,
+                    command,
+                });
+            }
+            Rule::multiline_unit => {
+                let mut body = None;
+                let mut end_line = line;
+                for part in pair.into_inner() {
+                    match part.as_rule() {
+                        Rule::block_body => {
+                            if let Some(nested) = part
+                                .clone()
+                                .into_inner()
+                                .find(|row| row.as_rule() == Rule::nested_block_open)
+                            {
+                                return Err(GhciInputError::NestedBlockOpen {
+                                    line: nested.as_span().start_pos().line_col().0,
+                                });
+                            }
+                            body = Some(strip_one_line_ending(part.as_str()).to_owned());
+                        }
+                        Rule::block_close => {
+                            end_line = part.as_span().start_pos().line_col().0;
+                        }
+                        _ => {}
+                    }
+                }
+                units.push(GhciInputUnit::Block {
+                    source: body.unwrap_or_default(),
+                    start_line: line,
+                    end_line,
+                });
+            }
+            Rule::stray_block_close => {
+                return Err(GhciInputError::UnexpectedBlockClose { line });
+            }
+            Rule::unterminated_multiline_unit => {
+                return Err(GhciInputError::UnterminatedBlock { line });
+            }
+            Rule::invalid_colon_unit => {
+                return Err(GhciInputError::Grammar(format!(
+                    "line {line}: colon-prefixed input is reserved for GHCi commands"
+                )));
+            }
+            Rule::EOI => {}
+            _ => unreachable!("script exposes only complete input units"),
+        }
+    }
+    Ok(units)
+}
+
+fn strip_one_line_ending(source: &str) -> &str {
+    source
+        .strip_suffix("\r\n")
+        .or_else(|| source.strip_suffix('\n'))
+        .unwrap_or(source)
+}
+
+fn meta_command_from_pair(
+    pair: pest::iterators::Pair<'_, Rule>,
+) -> Result<MetaCommandLine, GhciInputError> {
+    let mut name = None;
+    let mut arguments = String::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::command_name => name = Some(part.as_str().to_owned()),
+            Rule::command_arguments => arguments = part.as_str().trim().to_owned(),
+            _ => {}
+        }
+    }
+    Ok(MetaCommandLine {
+        name: name.ok_or_else(|| GhciInputError::Grammar("empty workbench command".into()))?,
+        arguments,
+    })
+}
 
 /// Normalize the one extra JSON-string layer some MCP clients apply to a
 /// structured tool argument. Plain strings remain strings unless they parse
@@ -121,6 +293,38 @@ pub struct WorkbenchRequest {
     /// Request the frontend's expanded diagnostic receipt when supported.
     #[serde(default)]
     pub verbose: Option<bool>,
+    /// Parser-owned classification for raw GHCi scripts. Structured callers
+    /// omit it and retain the historical per-item classifier.
+    #[serde(skip)]
+    #[schemars(skip)]
+    input_kinds: Vec<GhciInputKind>,
+}
+
+impl WorkbenchRequest {
+    pub fn from_ghci_input(source: &str) -> Result<Self, GhciInputError> {
+        let units = parse_ghci_input(source)?;
+        Ok(Self {
+            items: units.iter().map(|unit| unit.source().to_owned()).collect(),
+            input: None,
+            verbose: None,
+            input_kinds: units.iter().map(GhciInputUnit::kind).collect(),
+        })
+    }
+
+    #[must_use]
+    pub fn input_kind(&self, index: usize) -> GhciInputKind {
+        self.input_kinds.get(index).copied().unwrap_or_else(|| {
+            if self
+                .items
+                .get(index)
+                .is_some_and(|source| source.trim_start().starts_with(':'))
+            {
+                GhciInputKind::Command
+            } else {
+                GhciInputKind::Code
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -172,24 +376,31 @@ pub struct MetaCommandLine {
 pub enum WorkbenchDiscovery {
     Type(String),
     Info(String),
+    Browse {
+        module: Option<String>,
+        expanded: bool,
+    },
     Bindings,
 }
 
 impl MetaCommandLine {
     /// Parse a command with an optional leading colon.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let command = raw.trim();
-        let command = command.strip_prefix(':').unwrap_or(command).trim();
-        if command.is_empty() {
-            return Err("empty workbench command".to_string());
-        }
-        let (name, arguments) = command
-            .split_once(char::is_whitespace)
-            .map_or((command, ""), |(name, arguments)| (name, arguments.trim()));
-        Ok(Self {
-            name: name.to_string(),
-            arguments: arguments.to_string(),
-        })
+        let trimmed = raw.trim();
+        let normalized = if trimmed.starts_with(':') {
+            trimmed.to_owned()
+        } else {
+            format!(":{trimmed}")
+        };
+        let root = GhciScriptParser::parse(Rule::standalone_command, &normalized)
+            .map_err(|error| format!("invalid workbench command: {error}"))?
+            .next()
+            .ok_or_else(|| "invalid workbench command: parser returned no command".to_string())?;
+        let command = root
+            .into_inner()
+            .find(|pair| pair.as_rule() == Rule::command)
+            .ok_or_else(|| "invalid workbench command: missing command".to_string())?;
+        meta_command_from_pair(command).map_err(|error| error.to_string())
     }
 
     /// Interpret this line when it names the common discovery subset.
@@ -204,6 +415,26 @@ impl MetaCommandLine {
         match self.name.as_str() {
             "t" | "type" => required("type").map(WorkbenchDiscovery::Type).map(Some),
             "i" | "info" => required("info").map(WorkbenchDiscovery::Info).map(Some),
+            "browse" | "browse!" => {
+                let expanded = self.name == "browse!";
+                let module = (!self.arguments.is_empty()).then(|| self.arguments.clone());
+                if module
+                    .as_deref()
+                    .is_some_and(|module| module.starts_with('*'))
+                {
+                    Err(
+                        ":browse *Module is unavailable because actor policy modules are compiled"
+                            .into(),
+                    )
+                } else if module
+                    .as_deref()
+                    .is_some_and(|module| module.split_whitespace().count() != 1)
+                {
+                    Err(":browse accepts at most one module name".into())
+                } else {
+                    Ok(Some(WorkbenchDiscovery::Browse { module, expanded }))
+                }
+            }
             "bindings" | "b" => {
                 if self.arguments.is_empty() {
                     Ok(Some(WorkbenchDiscovery::Bindings))
@@ -517,11 +748,11 @@ mod tests {
     #[test]
     fn discovery_commands_have_one_shared_argument_contract() {
         assert_eq!(
-            MetaCommandLine::parse(":type startWorkers")
+            MetaCommandLine::parse(":type startActor")
                 .unwrap()
                 .discovery()
                 .unwrap(),
-            Some(WorkbenchDiscovery::Type("startWorkers".into()))
+            Some(WorkbenchDiscovery::Type("startActor".into()))
         );
         assert_eq!(
             MetaCommandLine::parse(":bindings")
@@ -534,6 +765,94 @@ mod tests {
             .unwrap()
             .discovery()
             .is_err());
+        assert_eq!(
+            MetaCommandLine::parse(":browse! Tidepool.Actors.Shoal")
+                .unwrap()
+                .discovery()
+                .unwrap(),
+            Some(WorkbenchDiscovery::Browse {
+                module: Some("Tidepool.Actors.Shoal".into()),
+                expanded: true,
+            })
+        );
+        assert!(MetaCommandLine::parse(":browse *Tidepool.Actors.Shoal")
+            .unwrap()
+            .discovery()
+            .is_err());
+    }
+
+    #[test]
+    fn ghci_script_parses_lines_and_exact_multiline_units() {
+        assert_eq!(
+            parse_ghci_input(
+                ":info ActionFailure\r\n\r\n:{\r\ndata Example\r\n  = First\r\n  | 第二\r\n:}\r\n:type Example\r\n"
+            )
+            .unwrap(),
+            vec![
+                GhciInputUnit::Command {
+                    source: ":info ActionFailure".into(),
+                    line: 1,
+                    command: MetaCommandLine {
+                        name: "info".into(),
+                        arguments: "ActionFailure".into(),
+                    },
+                },
+                GhciInputUnit::Block {
+                    source: "data Example\r\n  = First\r\n  | 第二".into(),
+                    start_line: 3,
+                    end_line: 7,
+                },
+                GhciInputUnit::Command {
+                    source: ":type Example".into(),
+                    line: 8,
+                    command: MetaCommandLine {
+                        name: "type".into(),
+                        arguments: "Example".into(),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ghci_script_reports_structural_errors() {
+        assert_eq!(
+            parse_ghci_input(":}\n").unwrap_err(),
+            GhciInputError::UnexpectedBlockClose { line: 1 }
+        );
+        assert_eq!(
+            parse_ghci_input(":{\nx = 1\n").unwrap_err(),
+            GhciInputError::UnterminatedBlock { line: 1 }
+        );
+        assert_eq!(
+            parse_ghci_input(":{\n:{\n:}\n").unwrap_err(),
+            GhciInputError::NestedBlockOpen { line: 2 }
+        );
+        assert!(parse_ghci_input(": not-a-command\n")
+            .unwrap_err()
+            .to_string()
+            .contains("colon-prefixed input is reserved"));
+    }
+
+    #[test]
+    fn ghci_grammar_classification_survives_into_the_workbench_request() {
+        let request = WorkbenchRequest::from_ghci_input(
+            "  value = 42\n:info value\n:{\ntext = \"embedded :} and :{ stay Haskell\"\n:}\n",
+        )
+        .unwrap();
+        assert_eq!(request.items.len(), 3);
+        assert_eq!(request.items[0], "  value = 42");
+        assert_eq!(
+            request.items[2],
+            "text = \"embedded :} and :{ stay Haskell\""
+        );
+        assert_eq!(request.input_kind(0), GhciInputKind::Code);
+        assert_eq!(request.input_kind(1), GhciInputKind::Command);
+        assert_eq!(request.input_kind(2), GhciInputKind::Code);
+        assert!(WorkbenchRequest::from_ghci_input(" \t\n  ")
+            .unwrap()
+            .items
+            .is_empty());
     }
 
     #[test]

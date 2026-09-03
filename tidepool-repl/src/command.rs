@@ -216,6 +216,13 @@ impl MetaCommand {
                     MetaCommand::Info(name)
                 }
                 tidepool_runtime::session::WorkbenchDiscovery::Bindings => MetaCommand::Bindings,
+                tidepool_runtime::session::WorkbenchDiscovery::Browse {
+                    module,
+                    expanded: false,
+                } => MetaCommand::Browse(module),
+                tidepool_runtime::session::WorkbenchDiscovery::Browse {
+                    expanded: true, ..
+                } => return Err(":browse! is available in actor workbenches".into()),
             });
         }
         let head = line.name.as_str();

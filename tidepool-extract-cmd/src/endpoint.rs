@@ -145,7 +145,7 @@ impl Drop for DirectEndpoint {
 
 impl CompilerEndpoint {
     pub(crate) fn bind(cmd: &ExtractCmd) -> Result<Self, SpawnError> {
-        if let Some(socket) = std::env::var_os("TIDEPOOL_EXTRACT_DAEMON_SOCKET") {
+        if let Some(socket) = std::env::var_os(crate::DAEMON_SOCKET_ENV) {
             let socket = PathBuf::from(socket);
             if let Ok(binding) = daemon::preflight(&socket) {
                 return Ok(Self {

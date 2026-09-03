@@ -30,6 +30,8 @@ const GC_ROOT_TIMEOUT: Duration = Duration::from_secs(30);
 const GC_ROOT_ERROR_LIMIT: usize = 16 * 1024;
 const BOUNDARY_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const BOUNDARY_PROBE_ERROR_LIMIT: usize = 16 * 1024;
+const COMPILER_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
+const COMPILER_DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct NewOptions {
     pub path: Option<PathBuf>,
@@ -219,6 +221,35 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     )?;
 
     let executable = current_executable()?;
+    let compiler_socket = run_root.join("compiler.sock");
+    let compiler_bin = tidepool_extract_cmd::resolve_bin()?.path;
+    let compiler_program = compiler_bin
+        .to_str()
+        .ok_or_else(|| runtime_error("compiler executable path is not UTF-8"))?
+        .to_owned();
+    let daemon_launch = tmux
+        .create(&compiler_daemon_launch(
+            &workspace,
+            &compiler_socket,
+            compiler_program,
+        ))
+        .await;
+    if let Err(error) = daemon_launch {
+        write_startup_failure(&status_path, &run_id, &workspace, &session_name, &error)?;
+        return Err(error.into());
+    }
+    if let Err(error) = wait_until_compiler_daemon(&tmux, &compiler_socket).await {
+        write_startup_failure(
+            &status_path,
+            &run_id,
+            &workspace,
+            &session_name,
+            error.as_ref(),
+        )?;
+        let _ = tmux.kill().await;
+        return Err(error);
+    }
+
     let mut args = vec![
         "host".into(),
         "--workspace".into(),
@@ -248,28 +279,25 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         args.extend(["--effort".into(), effort_name(effort).into()]);
     }
     let launch = tmux
-        .create(&TmuxLaunch {
+        .spawn_window(&TmuxLaunch {
             window_name: "Host".into(),
             cwd: workspace.clone(),
             program: executable,
             args,
-            environment: pane_environment(),
+            environment: host_environment(&compiler_socket),
             unset_environment: std::collections::BTreeSet::new(),
         })
         .await;
     if let Err(error) = launch {
-        let failed = RunStatus::new(
-            &run_id,
-            &workspace,
-            &session_name,
-            RunPhase::Failed {
-                error: error.to_string(),
-            },
-        );
-        write_status(&status_path, &failed)?;
+        write_startup_failure(&status_path, &run_id, &workspace, &session_name, &error)?;
+        let _ = tmux.kill().await;
         return Err(error.into());
     }
     println!("log:    {}", log_path.display());
+    println!(
+        "compiler: {} (tmux window Compiler)",
+        compiler_socket.display()
+    );
 
     let interactive = match wait_until_interactive(&tmux, &status_path, &run_id).await {
         Ok(interactive) => interactive,
@@ -303,6 +331,83 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             .await
             .map_err(|failure| Box::new(failure) as Box<dyn std::error::Error>)
     }
+}
+
+fn compiler_daemon_launch(workspace: &Path, socket: &Path, program: String) -> TmuxLaunch {
+    TmuxLaunch {
+        window_name: "Compiler".into(),
+        cwd: workspace.into(),
+        program,
+        args: vec![
+            "--daemon".into(),
+            "--socket".into(),
+            socket.display().to_string(),
+            "--persistent".into(),
+        ],
+        environment: pane_environment(),
+        unset_environment: std::collections::BTreeSet::new(),
+    }
+}
+
+fn host_environment(compiler_socket: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut environment = pane_environment();
+    environment.insert(
+        tidepool_extract_cmd::DAEMON_SOCKET_ENV.into(),
+        compiler_socket.display().to_string(),
+    );
+    environment
+}
+
+fn write_startup_failure(
+    status_path: &Path,
+    run_id: &str,
+    workspace: &Path,
+    session_name: &str,
+    error: &dyn std::fmt::Display,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_status(
+        status_path,
+        &RunStatus::new(
+            run_id,
+            workspace,
+            session_name,
+            RunPhase::Failed {
+                error: error.to_string(),
+            },
+        ),
+    )
+}
+
+async fn wait_until_compiler_daemon(
+    tmux: &TmuxSession,
+    socket: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket.to_owned();
+    tokio::time::timeout(COMPILER_DAEMON_START_TIMEOUT, async {
+        loop {
+            let candidate = socket.clone();
+            let ready = tokio::task::spawn_blocking(move || {
+                tidepool_extract_cmd::preflight_compiler_daemon(&candidate)
+            })
+            .await
+            .map_err(|error| runtime_error(format!("compiler preflight task failed: {error}")))?;
+            if ready.is_ok() {
+                return Ok(());
+            }
+            if !tmux.exists().await? {
+                return Err(runtime_error(
+                    "compiler daemon exited before becoming ready",
+                ));
+            }
+            tokio::time::sleep(COMPILER_DAEMON_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        runtime_error(format!(
+            "compiler daemon did not become ready within {COMPILER_DAEMON_START_TIMEOUT:?}"
+        ))
+    })?
 }
 
 /// Retain the Nix-packaged private interactive-agent closure without placing
@@ -442,12 +547,12 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     let root_launch_mode =
         resolve_root_launch_mode(options.resume_root, &options.root_binding_path).await?;
 
-    let policy_root = crate::haskell_sources::ensure_actor_policy()?;
+    let haskell_root = crate::haskell_sources::ensure_shoal_haskell()?;
     let (readiness_tx, mut readiness_rx) = mpsc::unbounded_channel();
     let run = crate::actor_host::run(
         crate::actor_host::ActorHostConfig {
             workspace: options.workspace.clone(),
-            policy_root,
+            haskell_root,
             run_root: options.run_root.clone(),
             root_binding_path: options.run_root.join("root-binding.json"),
             interactive_agent: options.interactive_agent.clone(),
@@ -547,7 +652,7 @@ async fn preflight(
     workspace: &Path,
 ) -> Result<InteractiveAgentInstallation, Box<dyn std::error::Error>> {
     crate::haskell_sources::ensure_stdlib()?;
-    crate::haskell_sources::ensure_actor_policy()?;
+    crate::haskell_sources::ensure_shoal_haskell()?;
     tidepool_runtime::toolchain::bind_extract_endpoint()?;
 
     // Codex keys its interactive trust decision by the path visible inside
@@ -896,6 +1001,35 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[test]
+    fn compiler_daemon_is_tmux_owned_and_only_the_host_receives_its_socket() {
+        let workspace = Path::new("/tmp/workspace");
+        let socket = Path::new("/tmp/run/compiler.sock");
+        let launch = compiler_daemon_launch(workspace, socket, "/tmp/tidepool-extract".into());
+
+        assert_eq!(launch.window_name, "Compiler");
+        assert_eq!(launch.cwd, workspace);
+        assert_eq!(launch.program, "/tmp/tidepool-extract");
+        assert_eq!(
+            launch.args,
+            [
+                "--daemon",
+                "--socket",
+                "/tmp/run/compiler.sock",
+                "--persistent"
+            ]
+        );
+        assert!(!launch
+            .environment
+            .contains_key(tidepool_extract_cmd::DAEMON_SOCKET_ENV));
+        assert_eq!(
+            host_environment(socket)
+                .get(tidepool_extract_cmd::DAEMON_SOCKET_ENV)
+                .map(String::as_str),
+            Some("/tmp/run/compiler.sock")
+        );
     }
 
     #[test]

@@ -230,9 +230,9 @@ fn works_numeric_json_and_parsing_family() {
             , check "parsedoublem_roundtrips_extreme.e19"
                 -- LOW: digits accumulate as a Double (no Int overflow past
                 -- ~19 digits) — round-trips show at extreme magnitudes.
-                (case parseDoubleM (show (1.0e19 :: Double)) of { Just dC -> dC == (1.0e19 :: Double); Nothing -> False })
+                (case parseDoubleM (pack (show (1.0e19 :: Double))) of { Just dC -> dC == (1.0e19 :: Double); Nothing -> False })
             , check "parsedoublem_roundtrips_extreme.eneg10"
-                (case parseDoubleM (show (1.5e-10 :: Double)) of { Just dD -> dD == (1.5e-10 :: Double); Nothing -> False })
+                (case parseDoubleM (pack (show (1.5e-10 :: Double))) of { Just dD -> dD == (1.5e-10 :: Double); Nothing -> False })
             , check "addutctime_rounds_ms_conversion"
                 -- LOW: addUTCTime rounds (not truncates) the
                 -- seconds->milliseconds conversion, so diffUTCTime

@@ -118,7 +118,7 @@ The `tidepool` binary is an [MCP](https://modelcontextprotocol.io/) server that 
 Codex fork with host dynamic-tool and native queue/archive support. Set
 `TIDEPOOL_INTERACTIVE_CODEX_BIN` to its absolute executable path; this does not
 replace a system `codex` or change `CODEX_HOME`. With tmux and the GHC toolchain
-available, start the bundled typed DevSwarm policy from any project:
+available, start Shoal's generic typed actor workbench from any project:
 
 ```bash
 shoal init
@@ -142,20 +142,26 @@ untracked build artifacts such as `target/`. That shell still selects Codex
 through `TIDEPOOL_INTERACTIVE_CODEX_BIN`; the ordinary `codex` found on `PATH`
 is unchanged.
 
-Shoal creates a `shoal-<project>` tmux session. One host process owns every
-resident Haskell actor; each interactive actor is an ordinary Codex TUI in its
-own pane. Each TUI receives `tidepool_actor.haskell` as a raw-text custom tool
-over an owner-only HTTP/1.1 Unix socket; Haskell source is not nested in JSON
-arguments or sent through MCP. Worker actors receive retained managed
-worktrees; the root remains in the source checkout and is instructed to
-orchestrate rather than implement.
+Shoal creates a `shoal-<project>` tmux session. Its `Compiler` window owns one
+resident GHC daemon for the run; the host waits for the daemon protocol
+handshake before compiling Shoal's private workbench driver or accepting input. The daemon keeps
+its socket stable while rotating its GHC worker at the configured memory and
+request bounds. One host process owns every resident Haskell actor; each
+interactive actor is an ordinary Codex TUI in its own pane. Each TUI receives
+`tidepool_actor.haskell` as a raw-text custom tool over an owner-only HTTP/1.1
+Unix socket; Haskell source is not nested in JSON arguments or sent through
+MCP. Worktree-backed actors receive retained managed worktrees; the root
+remains in the source checkout and writes its orchestration in Haskell rather
+than implementing there directly. Shoal installs no prewritten worker program
+or ledger: its model authors the task's protocols, definitions, and
+composition incrementally in the persistent workbench.
 The fresh root opens ready and idle without spending an inference turn. Its
 conversation identity binds on the first real prompt, after which Shoal can
 deliver lifecycle wakes through Codex's native queue.
 Detach with `Ctrl-b d`. `shoal init --recreate` starts a new actor incarnation
 while retaining the root Codex conversation. It fails if the retained binding
 is unavailable and tells the resumed model explicitly that prior handles,
-workers, inbox rows, exits, and resident state were not restored.
+inbox rows, exits, and resident state were not restored.
 
 Use `--no-attach` for headless startup; it prints the exact attach, host-log,
 status-file, and teardown commands.
@@ -519,7 +525,9 @@ just verify  # Pre-review gate, including fixture freshness
 
 ## Known Limitations
 
-- **`Text`, not `String`:** The JIT evaluates eagerly, making `String` (`[Char]`) expensive. The Prelude standardizes on `Text` — use it everywhere. `show` returns `Text`, `pack` is polymorphic, `error` takes `Text`.
+- **Prefer `Text` for managed data:** The JIT evaluates eagerly, making large
+  `String` (`[Char]`) values expensive. `show` keeps its conventional `String`
+  result, `pack` crosses explicitly into `Text`, and `error` takes `Text`.
 - **Deep recursion in the oracle interpreter:** the tree-walking `tidepool-eval` (the differential-testing oracle, not the serving path) recurses on the host stack and can overflow around ~50 frames. The JIT backend supports TCO and handles deep recursion.
 - **Case traps abort cleanly:** an exhausted case branch (constructor tag mismatch, unexpected value shape) surfaces as a `runtime case trap` diagnostic with a breadcrumb — a poisoned eval result, not a process SIGILL.
 

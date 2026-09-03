@@ -299,7 +299,7 @@ readGlob :: forall effs. Member FsRead effs => Text -> Eff effs [FileRead]
 readGlob = send . FsReadGlob
 -- end helpers[8] --
 
--- helpers[9] (944 bytes) --
+-- helpers[9] (953 bytes) --
 -- | Dry-run `update`: returns an `UpdateOutcome` (the review diff, or the
 -- reason it can't apply), writes NOTHING. Never errors — the conflict comes
 -- back as data so you can branch before committing.
@@ -307,7 +307,7 @@ planUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff
 planUpdate path old new = do
   er <- readFile path
   case er of
-    Left e -> pure (UpdateRejected ("file not found: " <> show e) Nothing)
+    Left e -> pure (UpdateRejected ("file not found: " <> T.pack (show e)) Nothing)
     Right src ->
       let n = if T.null old then 0 else length (T.splitOn old src) - 1
       in if T.null old then pure (UpdateRejected "'old' must be non-empty" Nothing)
@@ -387,7 +387,7 @@ appendFile p t = do
     Right old -> writeFile p (old <> t)
 -- end helpers[1] --
 
--- helpers[2] (1192 bytes) --
+-- helpers[2] (1210 bytes) --
 -- | Exact str-replace, EXACTLY-ONCE. Reports the outcome as an
 -- `UpdateOneOutcome` DATA value (never throws, mirrors `InsertAfterOutcome`):
 -- empty `old`, a missing file, `old` not found, or `old` matching 2+ places
@@ -400,15 +400,15 @@ update path old new
   | otherwise = do
       er <- readFile path
       case er of
-        Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
+        Left e -> pure (UpdateOneRejected ("file not found: " <> T.pack (show e)) Nothing)
         Right src ->
           case length (T.splitOn old src) - 1 of
             0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
             1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
-            n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
+            n -> pure (UpdateOneRejected ("'old' matches " <> T.pack (show n) <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
 -- end helpers[2] --
 
--- helpers[3] (891 bytes) --
+-- helpers[3] (900 bytes) --
 -- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an
 -- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
 -- or zero matches is `UpdateAllRejected` (nothing written); otherwise
@@ -419,7 +419,7 @@ updateAll path old new
   | otherwise = do
       er <- readFile path
       case er of
-        Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
+        Left e -> pure (UpdateAllRejected ("file not found: " <> T.pack (show e)))
         Right src ->
           let n = length (T.splitOn old src) - 1
           in if n == 0
@@ -439,7 +439,7 @@ updateJ v = case (v ^? key "file" . _String, v ^? key "old" . _String, v ^? key 
   _ -> pure (UpdateOneRejected "updateJ: need {file, old, new} strings in input" Nothing)
 -- end helpers[4] --
 
--- helpers[5] (938 bytes) --
+-- helpers[5] (956 bytes) --
 -- | Insert a block after the unique line containing `anchor`. Reports the
 -- outcome as an `InsertAfterOutcome` DATA value (never throws): a missing
 -- file, or an anchor matching zero or 2+ lines, is `InsertAfterRejected`
@@ -448,14 +448,14 @@ insertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text 
 insertAfter path anchor block = do
   er <- readFile path
   case er of
-    Left e -> pure (InsertAfterRejected ("file not found: " <> show e) Nothing)
+    Left e -> pure (InsertAfterRejected ("file not found: " <> T.pack (show e)) Nothing)
     Right src ->
       let ls = lines src
           n = length (filter (isInfixOf anchor) ls)
       in case n of
            1 -> writeFile path (unlines (concatMap (\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))
                   >>= liftEither >> pure InsertAfterApplied
-           _ -> pure (InsertAfterRejected ("anchor matched " <> show n <> " lines in " <> path) (Just n))
+           _ -> pure (InsertAfterRejected ("anchor matched " <> T.pack (show n) <> " lines in " <> path) (Just n))
 -- end helpers[5] --
 
 -- helpers[6] (484 bytes) --
@@ -2468,84 +2468,6 @@ import Tidepool.Agent.Session
 -- end type_params --
 
 -- default_row_args (0 items) --
--- end default_row_args --
-
--- helpers_row_polymorphic --
-true
--- end helpers_row_polymorphic --
-
-=============================== EFFECT: WorkerKernel ===============================
-
--- type_name (12 bytes) --
-WorkerKernel
--- end type_name --
-
--- description (145 bytes) --
-Private interpreter boundary for Rust-owned worker lifecycle and custody. Authored code uses the typed DevSwarm facade, never these constructors.
--- end description --
-
--- prompt_card: None --
-
--- constructors (8 items) --
--- constructors[0] (58 bytes) --
-WorkerReserveBatchWith :: Value -> WorkerKernel exit Value
--- end constructors[0] --
-
--- constructors[1] (81 bytes) --
-WorkerAttachWith :: Text -> ExitRef exit -> (Int, Int) -> WorkerKernel exit Value
--- end constructors[1] --
-
--- constructors[2] (62 bytes) --
-WorkerFailStartWith :: Text -> Text -> WorkerKernel exit Value
--- end constructors[2] --
-
--- constructors[3] (41 bytes) --
-WorkerListWith :: WorkerKernel exit Value
--- end constructors[3] --
-
--- constructors[4] (53 bytes) --
-WorkerInspectWith :: Value -> WorkerKernel exit Value
--- end constructors[4] --
-
--- constructors[5] (64 bytes) --
-WorkerBorrowExitWith :: Text -> WorkerKernel exit (ExitRef exit)
--- end constructors[5] --
-
--- constructors[6] (57 bytes) --
-WorkerAcknowledgeWith :: Value -> WorkerKernel exit Value
--- end constructors[6] --
-
--- constructors[7] (51 bytes) --
-WorkerSessionContextWith :: WorkerKernel exit Value
--- end constructors[7] --
-
--- end constructors --
-
--- type_defs (0 items) --
--- end type_defs --
-
--- extra_imports (1 items) --
--- extra_imports[0] (43 bytes) --
-import Tidepool.Internal.ActorRef (ExitRef)
--- end extra_imports[0] --
-
--- end extra_imports --
-
--- helpers (0 items) --
--- end helpers --
-
--- type_params (1 items) --
--- type_params[0] (4 bytes) --
-exit
--- end type_params[0] --
-
--- end type_params --
-
--- default_row_args (1 items) --
--- default_row_args[0] (5 bytes) --
-Value
--- end default_row_args[0] --
-
 -- end default_row_args --
 
 -- helpers_row_polymorphic --

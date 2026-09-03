@@ -40,7 +40,7 @@ fn test_show_double_literal() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result = show (3.0 :: Double)
 "#);
     assert_eq!(json, serde_json::json!("3.0"));
@@ -51,7 +51,7 @@ fn test_show_double_addition_literals() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result = show (1.0 + 2.0 :: Double)
 "#);
     assert_eq!(json, serde_json::json!("3.0"));
@@ -62,7 +62,7 @@ fn test_show_double_from_case_on_bool() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let a = case True of { True -> 1.0; False -> 0.0 :: Double }
       b = case True of { True -> 2.0; False -> 0.0 :: Double }
@@ -77,7 +77,7 @@ fn test_lens_extract_individual_show() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let v = object ["x" .= True, "y" .= False]
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -113,7 +113,7 @@ fn test_show_sum_of_lens_extracted_doubles() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let v = object ["x" .= True, "y" .= False]
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -129,7 +129,7 @@ fn test_h_conf_pattern() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let v = object ["_understood" .= True, "_confident" .= False, "_unambiguous" .= True]
       b k = case v ^? key k . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -143,16 +143,17 @@ result =
 
 #[test]
 fn test_show_double_on_lens_sum_via_show_double() {
-    // `show` returns Text; `pack` remains as an identity compatibility call.
+    // `show` has the conventional String result while retaining the
+    // JIT-safe Render implementation underneath.
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let v = object ["x" .= True, "y" .= True]
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case v ^? key "y" . _Bool of { Just True -> 2.0; _ -> 0.0 :: Double }
-  in pack (show (a + b))
+  in show (a + b)
 "#);
     assert_eq!(json, serde_json::json!("3.0"));
 }
@@ -166,7 +167,7 @@ fn test_show_double_from_maybe_case() {
     let json = run(r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let a = case Just True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case Nothing of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -186,7 +187,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -206,7 +207,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show a
@@ -246,7 +247,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1; _ -> 0 :: Int }
       b = case mkMaybe False of { Just True -> 1; _ -> 0 :: Int }
@@ -269,7 +270,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -291,7 +292,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1; _ -> 0 :: Int }
       b = case mkMaybe False of { Just True -> 1; _ -> 0 :: Int }
@@ -308,7 +309,7 @@ fn test_dump_core_passing_case() {
         r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let a = case True of { True -> 1.0; False -> 0.0 :: Double }
       b = case True of { True -> 2.0; False -> 0.0 :: Double }
@@ -325,7 +326,7 @@ fn test_dump_core_failing_case() {
         r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let v = object ["x" .= True, "y" .= False]
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -343,7 +344,7 @@ fn test_dump_core_show_a_only() {
         r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result =
   let v = object ["x" .= True]
       a = case v ^? key "x" . _Bool of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -397,7 +398,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
       b = case mkMaybe False of { Just True -> 1.0; _ -> 0.0 :: Double }
@@ -432,7 +433,7 @@ fn test_interpreter_show_double_simple() {
         r#"{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Test where
 import Tidepool.Prelude
-result :: Text
+result :: String
 result = show (1.0 + 2.0 :: Double)
 "#,
     )
@@ -475,7 +476,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1.0; _ -> 0.0 :: Double }
   in show a
@@ -497,7 +498,7 @@ mkMaybe :: Bool -> Maybe Bool
 mkMaybe True = Just True
 mkMaybe False = Nothing
 
-result :: Text
+result :: String
 result =
   let a = case mkMaybe True of { Just True -> 1; _ -> 0 :: Int }
       b = case mkMaybe False of { Just True -> 1; _ -> 0 :: Int }

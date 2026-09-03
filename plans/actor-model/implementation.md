@@ -70,7 +70,7 @@ layer have been deleted.
   machine.
 - Successful exits remain Haskell-owned live cells referenced by `ActorRef`;
   Rust retains immutable terminal metadata, not a duplicate exit payload.
-- The private `ActorKernel`, `WorkerKernel`, readiness, reply, and settlement
+- The private `ActorKernel`, readiness, reply, and settlement
   constructors are absent from ordinary authored exports.
 - Experimental `ReadWrite` and `ReadOnly` profiles select resident Haskell
   rows and constrain spawn attenuation. They are not native Codex or OS
@@ -80,32 +80,6 @@ layer have been deleted.
 - `Complete result` alone occupies the row head as a scoped result delimiter;
   this lets GHC infer the exact return type while ordinary capabilities remain
   `Member`-polymorphic.
-
-### Rust-owned worker custody
-
-- Worker lifecycle is interpreter state, not a Haskell registry snapshot.
-- `startWorkers` reserves the complete input batch before provisioning,
-  returns one ordered typed result per request, and is idempotent by normalized
-  assignment fingerprint.
-- Accepted results contain opaque worker handles directly. Same key plus a
-  different assignment yields a typed conflict; acknowledged keys remain
-  tombstoned for the root incarnation.
-- `sessionInput :: SessionContext` is a stable activation snapshot containing
-  coalesced lifecycle event IDs plus worker handles. An exit during the turn is
-  observed by the next activation; no live-registry query races the authored
-  policy.
-- Collection is nonblocking and replayable. Acknowledgement is a separate,
-  idempotent policy decision recording `IntegratedAs`, `Reviewed`, or
-  `Rejected`.
-- V0 truthfully reports `WorktreeRetained` after acknowledgement. Automatic
-  worktree/ref garbage collection is not implemented and is not implied by
-  logical acknowledgement.
-- Child application launch or premature death fails that exact child and
-  leaves the root alive. Post-terminal application death can only affect
-  cleanup, never rewrite the retained outcome.
-- Worker application installation is held until the root attaches the exact
-  child to its reserved ledger entry, closing the pre-deployment correlation
-  race.
 
 ### Shoal and Git custody
 
@@ -141,8 +115,6 @@ The current boundary is covered at three levels.
 
 ### Pure and component tests
 
-- worker batch reservation order, assignment normalization, idempotent retry,
-  conflicts, replayable collection, acknowledgement, and tombstones;
 - call-cycle ancestry, exact address decoding, terminal encoding, profile
   attenuation, and source/dependency-closure helpers;
 - provider-session serialization, queued lifecycle input, and provider failure;
@@ -168,17 +140,13 @@ The current boundary is covered at three levels.
   live `sessionInput`;
 - the same vertical maps an intentionally failed child into typed
   `ActionFailure` and reactivates the root without losing its session;
-- the bundled DevSwarm starts a batch, forces the returned live state in a
-  later session, receives stable plural wakes, replays collection, and
-  acknowledges results;
 - real Shoal exercises have produced isolated candidate commits with
   runtime-observed clean receipts, direct root-side review, integration, and
   lifecycle-triggered continuation.
 
 Run focused tests while iterating. At a major boundary run formatting, strict
-Clippy on touched crates, the complete `tidepool-actor` suite, the bundled
-DevSwarm vertical, and relevant Shoal CLI/integration tests through the Nix
-development shell.
+Clippy on touched crates, the complete `tidepool-actor` suite, and relevant
+Shoal CLI/integration tests through the Nix development shell.
 
 ## Remaining work
 
@@ -188,25 +156,25 @@ of the Ractor cutover.
 ### Near-term UX and operations
 
 - Generate concise happy-path examples from the exported Haskell surface and
-  distinguish an outer tool-execution cell from a pending worker in the
-  eventual non-JSON frontend. Exact signatures, constructors, binding
+  distinguish outer tool execution from actor lifecycle in the eventual
+  non-JSON frontend. Exact signatures, constructors, binding
   inventory, and ordered partial-commit semantics are already discoverable in
   the shared workbench.
 - Retire the declaration plane's textual `M`-signature generalization once the
   frontend has a type-aware authored-module path. Until then, teach reusable
   declarations with `Member` constraints and do not extend the rewrite with
   more syntax heuristics.
-- Improve concise rendering for worker starts, collections, acknowledgements,
-  and root completion while retaining a verbose structured view.
+- Improve concise rendering for actor starts, exits, and root completion while
+  retaining a verbose structured view.
 - Measure and separately attribute queueing, compilation, worktree creation,
   actor execution, hosted-tool transport, and outer-cell resume latency before changing
   execution architecture.
 - Project direct local-actor lifecycle and execution facts into one neutral,
   bounded event stream. Do not revive the deleted selfharness-to-actor event
   adapter or create mutable scheduler state to support observability.
-- Define explicit retention and garbage-collection policy for acknowledged
-  worktrees, refs, logs, and terminal records. Cleanup failure must remain
-  observable without undoing acknowledgement.
+- Define explicit retention and garbage-collection policy for worktrees, refs,
+  logs, and terminal records. Cleanup failure must remain observable without
+  rewriting actor lifecycle.
 
 ### Deliberately deferred architecture
 
@@ -221,10 +189,10 @@ of the Ractor cutover.
   restart supervision.
 - Security isolation for untrusted native workers. Git worktrees and Codex
   sandbox flags currently express cooperative workspace policy only.
-- More structured worker reports, typed findings/checks, automatic merge
-  policy, and higher-level scaffold/fan-out/fold combinators. Add these when a
-  real workflow demonstrates the useful shape; do not recreate lifecycle
-  state in Haskell.
+- Project-specific reports, typed findings/checks, merge policy, and higher-level
+  scaffold/fan-out/fold combinators. Add these in application libraries when a
+  real workflow demonstrates the useful shape; do not recreate lifecycle state
+  in Haskell or the Shoal host.
 
 ## Completion rule
 

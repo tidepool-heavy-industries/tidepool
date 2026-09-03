@@ -8,13 +8,12 @@
 --
 -- An agent may return ordinary effectful Haskell instead of waiting inside
 -- its tool call. The resident actor runs that value after the tool call has
--- settled. A later 'continueWith' opens a new turn in the same agent context
+-- settled. 'nextTurn' opens a new turn in the same agent context
 -- with the action's typed result mounted as @sessionInput@.
 module Tidepool.Agent.Action
   ( AgentAction (..)
   , ActionFailure (..)
   , waitOn
-  , continueWith
   , nextTurn
   ) where
 
@@ -83,17 +82,6 @@ waitOn ref = AgentAction $ do
     Failed failure -> Left (AwaitedActorFailed (actorFailureSummary failure))
     Cancelled reason -> Left (AwaitedActorCancelled (cancelReasonSummary reason))
 
--- | Open the next turn in the same interactive agent context.
---
--- The input is a live value: closures and user-defined types cross this
--- boundary without serialization.
-continueWith
-  :: forall result input effs
-   . Member AgentSession effs
-  => input
-  -> AgentAction effs result
-continueWith = continueWithSited @result @input 0
-
 -- Extractor substrate. Fully-applied public calls are rewritten with their
 -- concrete GHC-derived input and result types.
 {-# OPAQUE continueWithSited #-}
@@ -130,5 +118,4 @@ nextTurnSited
   => Int
   -> AgentAction effs input
   -> AgentAction effs result
-nextTurnSited site action =
-  action >>= continueWithSited @result @input site
+nextTurnSited site action = action >>= continueWithSited @result @input site

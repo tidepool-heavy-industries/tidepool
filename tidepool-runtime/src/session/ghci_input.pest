@@ -1,0 +1,41 @@
+script = { SOI ~ unit* ~ EOI }
+standalone_command = { SOI ~ horizontal* ~ command ~ horizontal* ~ EOI }
+unit = _{
+    blank_line
+  | final_blank
+  | multiline_unit
+  | unterminated_multiline_unit
+  | stray_block_close
+  | command_unit
+  | code_unit
+  | invalid_colon_unit
+}
+
+blank_line = _{ horizontal* ~ newline }
+final_blank = _{ horizontal+ ~ &EOI }
+
+multiline_unit = { block_open ~ newline ~ block_body ~ block_close ~ line_ending }
+block_body = { block_row* }
+block_row = _{ nested_block_open | code_block_row }
+nested_block_open = { block_open ~ newline }
+code_block_row = _{ !(block_close ~ line_ending) ~ line_text ~ newline }
+unterminated_multiline_unit = { block_open ~ (newline ~ (!EOI ~ ANY)* | &EOI) }
+stray_block_close = { block_close ~ line_ending }
+block_open = { horizontal* ~ ":{" ~ horizontal* }
+block_close = { horizontal* ~ ":}" ~ horizontal* }
+
+command_unit = { horizontal* ~ command ~ horizontal* ~ line_ending }
+command = { ":" ~ command_name ~ command_arguments? }
+command_name = @{ (!horizontal ~ !newline ~ ANY)+ }
+command_arguments = @{ horizontal+ ~ line_text }
+
+code_unit = { code_source ~ line_ending }
+code_source = @{ !(horizontal* ~ ":") ~ horizontal* ~ non_horizontal ~ line_text }
+non_horizontal = _{ !horizontal ~ !newline ~ ANY }
+
+invalid_colon_unit = { horizontal* ~ ":" ~ line_text ~ line_ending }
+
+line_text = _{ (!newline ~ ANY)* }
+line_ending = _{ newline | &EOI }
+newline = _{ "\r\n" | "\n" }
+horizontal = _{ " " | "\t" }

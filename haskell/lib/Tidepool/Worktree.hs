@@ -193,7 +193,7 @@ instance FromJSON GitOid where
 instance JsonSchema InProgressKind where
   jsonSchema _ = object
     [ ("type", String "string")
-    , ("enum", Array (map (String . show) [InProgressMerge, InProgressRebase, InProgressCherryPick, InProgressRevert, InProgressBisect]))
+    , ("enum", Array (map (String . T.pack . show) [InProgressMerge, InProgressRebase, InProgressCherryPick, InProgressRevert, InProgressBisect]))
     ]
 
 instance FromJSON InProgressKind where
@@ -390,11 +390,11 @@ renderWorktreeId (WorktreeId t) = t
 -- Case-match the constructor when you mean to BRANCH on the failure;
 -- this is for receipts and logs.
 renderWorktreeError :: WorktreeError -> Text
-renderWorktreeError (SourceDirty d) = "source repository is dirty: " <> show (length d.staged) <> " staged, " <> show (length d.unstaged) <> " unstaged, " <> show (length d.untracked) <> " untracked"
+renderWorktreeError (SourceDirty d) = "source repository is dirty: " <> T.pack (show (length d.staged)) <> " staged, " <> T.pack (show (length d.unstaged)) <> " unstaged, " <> T.pack (show (length d.untracked)) <> " untracked"
 renderWorktreeError (NotARepository p) = "not a git repository: " <> p
 renderWorktreeError (WorktreeLost i) = "managed worktree " <> renderWorktreeId i <> " is registered but missing on disk"
 renderWorktreeError (DirtySubmoduleUnsupported p) = "dirty submodule is unsupported in v1: " <> p
-renderWorktreeError (SourceOperationInProgress k) = "source repository has an operation in progress: " <> show k
+renderWorktreeError (SourceOperationInProgress k) = "source repository has an operation in progress: " <> T.pack (show k)
 renderWorktreeError (WorktreeBusy i holder) = "worktree " <> renderWorktreeId i <> " is already bound to agent " <> holder
 renderWorktreeError (SubmissionUnstable i) = "worktree " <> renderWorktreeId i <> " kept changing while its submission was observed"
 renderWorktreeError (WorktreeUnauthorized i) = "the executing actor is not authorized for worktree " <> renderWorktreeId i

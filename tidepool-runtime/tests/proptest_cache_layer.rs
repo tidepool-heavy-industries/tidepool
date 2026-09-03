@@ -347,8 +347,10 @@ fn swap_content_preserving_mtime(path: &Path, new_bytes: &[u8]) {
 // ---------------------------------------------------------------------------
 
 fn arb_source_body() -> impl Strategy<Value = String> {
-    // Printable ASCII plus newlines: covers whitespace and comment-looking text.
-    proptest::string::string_regex("[ -~\n]{1,120}").unwrap()
+    // Printable ASCII plus newlines, excluding `#`: line-leading CPP
+    // directives are intentionally uncacheable and therefore outside a
+    // property whose oracle requires the second compile to hit.
+    proptest::string::string_regex(r##"[ -"$-~\n]{1,120}"##).unwrap()
 }
 
 #[derive(Debug, Clone)]
@@ -384,10 +386,16 @@ fn apply_edit(s: &str, edit: &Edit) -> String {
 }
 
 fn arb_edit() -> impl Strategy<Value = Edit> {
+    let cacheable_char = || {
+        prop_oneof![
+            proptest::char::range(' ', '"'),
+            proptest::char::range('$', '~')
+        ]
+    };
     prop_oneof![
-        (any::<usize>(), proptest::char::range(' ', '~')).prop_map(|(i, c)| Edit::Insert(i, c)),
+        (any::<usize>(), cacheable_char()).prop_map(|(i, c)| Edit::Insert(i, c)),
         any::<usize>().prop_map(Edit::Delete),
-        (any::<usize>(), proptest::char::range(' ', '~')).prop_map(|(i, c)| Edit::Replace(i, c)),
+        (any::<usize>(), cacheable_char()).prop_map(|(i, c)| Edit::Replace(i, c)),
     ]
 }
 

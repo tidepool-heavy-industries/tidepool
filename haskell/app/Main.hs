@@ -9,7 +9,7 @@ import qualified Data.Sequence as Seq
 import Control.Exception (evaluate, try, throwIO, SomeException, fromException, toException)
 import Data.List (isPrefixOf, intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, isJust)
-import Control.Monad (foldM, void)
+import Control.Monad (foldM, forM, void)
 import System.Exit (ExitCode(..), exitWith)
 import System.IO (hPutStrLn, stderr, stdin, stdout, hSetBinaryMode, hSetEncoding, utf8)
 
@@ -35,10 +35,10 @@ import Tidepool.GhcPipeline
   , withResidentPipeline )
 import qualified Tidepool.WorkerServer as WorkerServer
 import Tidepool.DiagJson
-  ( ReportOutcome(..), diagsFromSourceError, diagFromException, renderDiagsJson )
+  ( ReportOutcome(..), Diag(..), diagsFromSourceError, diagFromException, renderDiagsJson )
 import Tidepool.ExtractUtil (capitalize)
 import Tidepool.ExtractRequest (WorkerRequest(..), workerRequestFromArgv)
-import Tidepool.Introspection (encodeInspectionResult, runInspection)
+import Tidepool.Introspection (InspectionResult(..), encodeInspectionResults, runInspection)
 import Tidepool.Session
   ( SessionScope(..), scaffoldTargetName, scaffoldOutputBase )
 import Tidepool.SessionArtifacts
@@ -114,7 +114,7 @@ dispatch compiler timing args =
     (file : _)
         -- Classification consumes every input; all other modes use the first.
         | requestClassify args                    -> runClassifyMode timing args
-        | isJust (requestInspection args)         -> runInspectionMode compiler args file
+        | not (null (requestInspections args))    -> runInspectionMode compiler args file
         -- A turn may also carry session fields, so it precedes session dispatch.
         | requestTurn args                        -> runTurnMode compiler args file
         -- Multi-target compilation may also carry a stable-value scope.
@@ -123,19 +123,36 @@ dispatch compiler timing args =
         | otherwise                           -> timePhase timing "total" (processFile compiler timing args file)
 
 runInspectionMode :: Compiler -> WorkerRequest -> FilePath -> IO ExitCode
-runInspectionMode compiler args path = do
+runInspectionMode compiler args _path = do
   res <- try $ do
-    query <- maybe (fail "inspection request is missing its query") pure (requestInspection args)
+    let queries = requestInspections args
     out <- maybe (fail "inspection request is missing its output path") pure (requestInspectOut args)
     let scope = if hasSessionScope args then Just (scopeFromWorkerRequest args) else Nothing
-    compiled <- compiler scope path (requestIncludes args) (requestBuildProductsDir args)
-    result <- runInspection
-      (prHscEnv compiled)
-      (prTargetRdrEnv compiled)
-      (prCapturedType compiled)
-      query
-    BS.writeFile out (encodeInspectionResult result)
+    if length queries /= length (requestFiles args)
+      then fail "inspection request must carry exactly one source per query"
+      else pure ()
+    results <- fmap concat $ forM (zip (requestFiles args) queries) $ \(path, query) -> do
+      compiled <- try (compiler scope path (requestIncludes args) (requestBuildProductsDir args))
+      case compiled of
+        Left exception -> case fromException exception of
+          Just (sourceError :: SourceError) ->
+            pure [InspectionRejected (renderInspectionDiagnostics sourceError)]
+          Nothing -> throwIO exception
+        Right successful -> runInspection
+          (prHscEnv successful)
+          (prTargetRdrEnv successful)
+          (prCapturedTypes successful)
+          [query]
+    BS.writeFile out (encodeInspectionResults results)
   reportDiags res
+
+renderInspectionDiagnostics :: SourceError -> String
+renderInspectionDiagnostics = intercalate "\n" . map render . diagsFromSourceError
+  where
+    render diagnostic = location diagnostic ++ dMessage diagnostic
+    location diagnostic = case dFile diagnostic of
+      Just (file, line, column, _, _) -> file ++ ":" ++ show line ++ ":" ++ show column ++ ": "
+      Nothing -> ""
 
 
 -- | Prepend the harness language profile to a scratch copy of the first input.

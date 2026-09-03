@@ -82,8 +82,8 @@ data Delegate a where
     -> Delegate (Either DelegateError (DelegateRun result))
 
 -- | Where the trusted interpreter should place one delegated agent.  Kept
--- private: a model-authored block chooses among DevSwarm's semantic requests,
--- not among worktree allocation policies.
+-- private: model-authored code supplies a semantic brief, not a worktree
+-- allocation policy.
 data DelegateWorkspace
   = FreshFromCurrent
   | FreshFromWorktree WorktreeHandle

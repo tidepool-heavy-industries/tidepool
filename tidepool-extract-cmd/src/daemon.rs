@@ -256,7 +256,7 @@ pub(crate) fn decode_output<R: Read>(r: &mut R) -> Result<Output, DaemonError> {
 
 pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8, FrontendError> {
     let producer = prepared.producer_identity()?;
-    let mut worker = Worker::spawn(prepared)?;
+    let mut worker = Worker::spawn(&prepared)?;
     let epoch = boot_epoch()?;
     if let Some(parent) = config.socket.parent() {
         fs::create_dir_all(parent).map_err(FrontendError::Io)?;
@@ -323,7 +323,7 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
             let worker_argv = match normalize_worker_argv(argv) {
                 Ok(argv) => argv,
                 Err(_) => {
-                    let _ = write_rejected(&mut connection, "invalid V4 worker request");
+                    let _ = write_rejected(&mut connection, "invalid typed worker request");
                     continue;
                 }
             };
@@ -345,8 +345,18 @@ pub(crate) fn serve(config: DaemonConfig, prepared: PreparedWorker) -> Result<u8
             if served >= rotate_after
                 || worker_rss_mb(worker.child.id()).unwrap_or(0) > rss_ceiling_mb
             {
-                remove_socket(&config.socket)?;
-                break;
+                if config.persistent {
+                    // Long-lived composition roots keep the protocol endpoint
+                    // stable while bounding GHC state. The worker executable
+                    // is boot-pinned by `PreparedWorker`, so replacing only
+                    // this child does not change the endpoint's producer.
+                    worker.shutdown();
+                    worker = Worker::spawn(&prepared)?;
+                    served = 0;
+                } else {
+                    remove_socket(&config.socket)?;
+                    break;
+                }
             }
         }
         Ok(0)
@@ -482,7 +492,7 @@ pub(crate) struct Worker {
 }
 
 impl Worker {
-    pub(crate) fn spawn(prepared: PreparedWorker) -> Result<Self, FrontendError> {
+    pub(crate) fn spawn(prepared: &PreparedWorker) -> Result<Self, FrontendError> {
         let mut command = prepared.command();
         command
             .arg("--worker-loop-v1")
@@ -631,7 +641,7 @@ mod tests {
     fn malformed_typed_worker_request_is_rejected() {
         let malformed = vec![
             crate::request::WORKER_REQUEST_FLAG.into(),
-            "54505245513030340100000009".into(),
+            "54505245513030350100000009".into(),
         ];
         assert!(matches!(
             normalize_worker_argv(malformed),

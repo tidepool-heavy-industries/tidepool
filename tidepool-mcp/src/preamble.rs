@@ -347,7 +347,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     // over it with no extra pragma).
     out.push_str(concat!(
         "class ToWire a where toWire :: a -> Value\n",
-        "instance {-# OVERLAPPABLE #-} Show a => ToWire a where toWire = String . show\n",
+        "instance {-# OVERLAPPABLE #-} Show a => ToWire a where toWire = String . T.pack . show\n",
         "instance ToWire Text where toWire = String\n",
         "instance ToWire Value where toWire = id\n",
         // Bare scalars: delegate to the vendored ToJSON so numbers/bools render
@@ -376,7 +376,10 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     let has_fs = names.contains("FsRead") && names.contains("FsWrite");
 
     out.push_str("-- Pagination\n");
-    out.push_str(concat!("showI :: Int -> Text\n", "showI n = show n\n",));
+    out.push_str(concat!(
+        "showI :: Int -> Text\n",
+        "showI n = T.pack (show n)\n",
+    ));
     // putStrLn: Print effect + char counter in KV (when available)
     if has_console && has_kv {
         out.push_str(concat!(
@@ -474,7 +477,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
         "  Object m -> \"{\" <> T.intercalate \",\" (map (\\(k,v') -> \"\\\"\" <> KM.toText k <> \"\\\":\" <> renderJson v') (KM.toList m)) <> \"}\"\n",
         "  Array xs -> \"[\" <> T.intercalate \",\" (map renderJson xs) <> \"]\"\n",
         "  String t -> \"\\\"\" <> T.concatMap (\\c -> case c of { '\\\\' -> \"\\\\\\\\\"; '\"' -> \"\\\\\\\"\"; '\\n' -> \"\\\\n\"; '\\t' -> \"\\\\t\"; '\\r' -> \"\\\\r\"; _ -> T.singleton c }) t <> \"\\\"\"\n",
-        "  Number n -> show n\n",
+        "  Number n -> T.pack (show n)\n",
         "  Bool b -> if b then \"true\" else \"false\"\n",
         "  Null -> \"null\"\n",
     ));
@@ -627,7 +630,7 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
             "runChecked :: Text -> M Text\n",
             "runChecked cmd = do\n",
             "  p <- run cmd >>= liftEither\n",
-            "  if ok p then pure p.stdout else error (\"command failed (\" <> show p.exitCode <> \"): \" <> p.stderr)\n",
+            "  if ok p then pure p.stdout else error (\"command failed (\" <> T.pack (show p.exitCode) <> \"): \" <> p.stderr)\n",
         ));
         out.push_str(concat!(
             "runAll :: [Text] -> M [Proc]\n",

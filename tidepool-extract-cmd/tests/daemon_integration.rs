@@ -1,7 +1,6 @@
 //! GHC-heavy integration test for the resident compile daemon. One binary and
-//! daemon boot are shared across checks (a)-(d)
-//! run against one daemon; (e) needs its own (it deliberately rotates after
-//! accepting concurrent requests).
+//! daemon boot are shared across most checks. The rotation checks each own a
+//! daemon because they deliberately use a one-request rotation threshold.
 //!
 //! Needs a resolvable `tidepool-extract` binary (`$TIDEPOOL_EXTRACT` or
 //! `PATH`) and a GHC on `PATH` that can load it (see haskell/CLAUDE.md).
@@ -280,6 +279,7 @@ fn daemon_integration() {
     let _ = fs::remove_dir_all(&dir);
 
     check_e_rotation_then_fallback(&bin, &lib);
+    check_i_persistent_rotation_keeps_serving(&bin, &lib);
 }
 
 /// A resident request applies its own build-products directory after daemon
@@ -856,5 +856,41 @@ fn check_e_rotation_then_fallback(bin: &Path, lib: &Path) {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A persistent daemon rotates only its GHC worker, retaining the protocol
+/// endpoint so a long-lived owner never falls back to per-request processes.
+fn check_i_persistent_rotation_keeps_serving(bin: &Path, lib: &Path) {
+    let dir = unique_scratch_dir("persistent-rotate");
+    let socket = unique_socket_path("persistent-rotate");
+    write_fixture(
+        &dir,
+        "Expr.hs",
+        "module Expr where\nimport Tidepool.Prelude\nresult :: Int\nresult = 6\n",
+    );
+
+    let Some(mut daemon) = spawn_daemon(bin, &socket, &["--rotate-after", "1", "--persistent"])
+    else {
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    };
+
+    for output in ["out-i-first", "out-i-second"] {
+        let result = run_via_env_socket(&cmd_for(bin, &dir, output, "Expr.hs", lib), &socket);
+        assert!(
+            result.status.success(),
+            "persistent daemon request failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        tidepool_extract_cmd::preflight_compiler_daemon(&socket)
+            .expect("persistent daemon socket must survive worker rotation");
+        assert!(
+            daemon.child.try_wait().unwrap().is_none(),
+            "persistent daemon exited after rotating its worker"
+        );
+    }
+
+    drop(daemon);
     let _ = fs::remove_dir_all(&dir);
 }

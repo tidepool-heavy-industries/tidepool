@@ -33,7 +33,7 @@ pub mod workbench;
 pub use dialect::{declaration_pragmas, standalone_declaration_pragmas, EVAL_PRAGMAS};
 
 pub use inspection::{
-    run_inspection, InfoEntry, InspectionQuery, InspectionRequest, InspectionResult,
+    run_inspections, InfoEntry, InspectionQuery, InspectionRequest, InspectionResult,
 };
 pub use kernel::{admit_checkout, Aged, SuspendableSession};
 
@@ -66,11 +66,11 @@ pub use view::{SessionCompileView, SourceImports};
 
 pub use workbench::{
     classify_workbench_item, escape_workbench_haskell_string, normalize_workbench_input,
-    resident_workbench_templates, run_block_sequence, workbench_input_binding,
+    parse_ghci_input, resident_workbench_templates, run_block_sequence, workbench_input_binding,
     workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
-    MetaCommandLine, ParsedBlock, WorkSequence, WorkbenchDiscovery, WorkbenchItem,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus,
+    GhciInputError, GhciInputKind, GhciInputUnit, MetaCommandLine, ParsedBlock, WorkSequence,
+    WorkbenchDiscovery, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest,
+    WorkbenchResponse, WorkbenchRunStatus,
 };
 
 pub use turn::{

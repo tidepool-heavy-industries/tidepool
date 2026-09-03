@@ -53,7 +53,7 @@ data Greeting = Greeting { greetTo :: Text }
 loop :: Harness Text
 loop = do
   d <- runLLMTurn @Text \"pick a subject\"
-  pure (greetTo (Greeting d) <> \" says hi to \" <> show (roundTripAnimal Cat))
+  pure (greetTo (Greeting d) <> \" says hi to \" <> pack (show (roundTripAnimal Cat)))
 ";
 
 /// Write `FIXTURE_SOURCE` into a fresh temp dir under its required filename

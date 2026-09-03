@@ -27,8 +27,6 @@ mod resident_workbench;
 mod start;
 mod termination;
 mod wait;
-mod worker_ledger;
-mod worker_runtime;
 
 pub use agent_session::{
     ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
@@ -77,9 +75,3 @@ pub use resident_workbench::{
 pub use start::{ActorEffectProfileWire, ActorStartCaptureError, ResidentActorStart};
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
 pub use wait::{actor_terminal_value, ActorWaitError};
-pub use worker_ledger::{
-    AcceptedWorker, AcknowledgementDisposition, ReservedWorker, WorkerAcknowledgement,
-    WorkerHandle, WorkerInspection, WorkerLedger, WorkerLedgerError, WorkerPhase,
-    WorkerReservation, WorkerSpec, WorkerSpecError, WorkerStartResult, WorkerSummary,
-};
-pub use worker_runtime::WorkerWake;

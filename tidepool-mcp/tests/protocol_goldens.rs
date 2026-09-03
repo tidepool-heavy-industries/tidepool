@@ -65,7 +65,6 @@ fn all_declaration_names_and_order_are_explicit() {
             "ActorLocal",
             "AgentTools",
             "AgentSession",
-            "WorkerKernel",
         ]
     );
 }

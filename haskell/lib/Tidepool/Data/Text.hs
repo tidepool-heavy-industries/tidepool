@@ -54,10 +54,10 @@ import Control.Monad.ST (ST, runST)
 
 -- | Polymorphic @pack@: identity on 'Text', 'Data.Text.pack' on 'String'.
 -- Both the qualified @T.pack@ and the unqualified Prelude @pack@ resolve here,
--- so @T.pack (show x)@ is no longer a trap (@show@ returns 'Text', which @pack@
--- accepts as the identity). Single-method class, no error branches — JIT-safe.
+-- so @T.pack (show x)@ remains the ordinary conversion from the prelude's
+-- 'String'-returning @show@. Single-method class, no error branches — JIT-safe.
 -- (Cost: @T.pack \"literalString\"@ is now ambiguous — write the 'Text' literal
--- directly; @T.pack@ on a 'String' VALUE and on @show@-output both work.)
+-- directly; @T.pack@ on a 'String' value and on @show@ output both work.)
 class Pack a where
   pack :: a -> Text
 

@@ -2,12 +2,12 @@
 //!
 //! The build script walks each complete source tree. This module owns the one
 //! content-addressed materializer used by both the public Tidepool library and
-//! Shoal's bootstrap policy.
+//! Shoal's public surface and private interactive driver.
 
 use std::path::PathBuf;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_stdlib.rs"));
-include!(concat!(env!("OUT_DIR"), "/embedded_actor_policy.rs"));
+include!(concat!(env!("OUT_DIR"), "/embedded_shoal_haskell.rs"));
 
 fn content_hash(entries: &[(&str, &str)]) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -58,13 +58,13 @@ pub fn ensure_stdlib() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(tidepool_runtime::toolchain::locate_stdlib(&fallbacks)?.dir)
 }
 
-/// Resolve the bundled actor policy used by Shoal bootstrap.
-pub fn ensure_actor_policy() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let hash = content_hash(EMBEDDED_ACTOR_POLICY);
+/// Resolve the Haskell modules used by Shoal's interactive workbench.
+pub fn ensure_shoal_haskell() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let hash = content_hash(EMBEDDED_SHOAL_HASKELL);
     materialize(
-        EMBEDDED_ACTOR_POLICY,
+        EMBEDDED_SHOAL_HASKELL,
         tidepool_runtime::paths::cache_dir()
-            .join("actor-policy")
+            .join("shoal-haskell")
             .join(hash),
     )
 }

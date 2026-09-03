@@ -771,7 +771,7 @@ go n = go (n - 1)
 result :: Int
 result =
   let d = fromIntegral (go 3) :: Double
-  in T.length (show d)
+  in T.length (pack (show d))
 "#;
     let val = run(src, "result");
     assert!(
@@ -797,7 +797,7 @@ result :: Int
 result =
   let d = fromIntegral (go 3) :: Double
       v = Number (fromFloatDigits d)
-  in T.length (show v)
+  in T.length (pack (show v))
 "#;
     let val = run(src, "result");
     assert!(
@@ -856,8 +856,8 @@ result :: Int
 result =
   let val = object ["name" .= ("Alice" :: Text), "age" .= (30 :: Int)]
       stubs = [(0 :: Int, val)]
-      stubInfo = Array (map (\(sid, sv) -> object ["id" .= ("stub_" <> show sid), "size" .= toJSON (valSize sv)]) stubs)
-  in T.length (show stubInfo)
+      stubInfo = Array (map (\(sid, sv) -> object ["id" .= ("stub_" <> pack (show sid)), "size" .= toJSON (valSize sv)]) stubs)
+  in T.length (pack (show stubInfo))
 "#;
     let val = run(src, "result");
     assert!(
@@ -883,7 +883,7 @@ result :: Int
 result =
   let n = go 5
       v = Number (fromIntegral n)
-  in T.length (show v)
+  in T.length (pack (show v))
 "#;
     let val = run(src, "result");
     assert!(
@@ -911,7 +911,7 @@ fn show_double_mcp_preamble_context() {
     let src = tidepool_testing::eval_harness::mock::mcp_module(
         r#"
 showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 valSize :: Value -> Int
 valSize v = case v of
@@ -932,9 +932,9 @@ objSz [] acc = acc
 objSz [(k,v)] acc = acc + T.length (KM.toText k) + 4 + valSize v
 objSz ((k,v):rest) acc = objSz rest (acc + T.length (KM.toText k) + 4 + valSize v + 2)
 
--- Eff-wrapped result: the show call is inside the Eff continuation tree.
+-- The show call is inside the compiled continuation tree.
 -- This matches the MCP paginateResult path.
-result :: Text
+result :: String
 result =
   let val = object ["name" .= ("Alice" :: Text), "age" .= (30 :: Int)]
       stubs = [(0 :: Int, val)]
@@ -946,7 +946,7 @@ result =
     if let Value::Con(_, fields) = &val {
         assert!(
             !fields.is_empty(),
-            "show stubInfo should produce non-empty Text"
+            "show stubInfo should produce a non-empty String"
         );
     }
 }
@@ -961,7 +961,7 @@ fn show_double_effectful_paginate() {
     let src = tidepool_testing::eval_harness::mock::mcp_module(
         r#"
 showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 valSize :: Value -> Int
 valSize v = case v of
@@ -1018,7 +1018,7 @@ say t = do
   send (KvSet "__sayChars" (toJSON (cur + T.length t)))
 
 showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 valSize :: Value -> Int
 valSize v = case v of
@@ -1084,7 +1084,7 @@ paginateResult budget val
         [] -> pure truncated
         _ -> do
           let stubInfo = Array (map (\(sid, sv) -> object ["id" .= ("stub_" <> showI sid), "size" .= toJSON (valSize sv)]) stubs)
-          resp <- send (Ask ("truncated: " <> show truncated <> " stubs: " <> show stubInfo))
+          resp <- send (Ask ("truncated: " <> pack (show truncated) <> " stubs: " <> pack (show stubInfo)))
           case resp ^? _String of
             Just s -> case parseIntM (T.drop 5 s) of
               Just sid -> case lookupStub sid stubs of
@@ -1156,7 +1156,7 @@ data Ask a where
 type M = Eff '[Console, KV, Ask]
 
 showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 valSize :: Value -> Int
 valSize v = case v of
@@ -1173,7 +1173,7 @@ paginateResult budget val
   | otherwise = do
       let stubs = [(0 :: Int, val)]
           stubInfo = Array (map (\(sid, sv) -> object ["id" .= ("stub_" <> showI sid), "size" .= toJSON (valSize sv)]) stubs)
-      resp <- send (Ask ("truncated: " <> show val <> " stubs: " <> show stubInfo))
+      resp <- send (Ask ("truncated: " <> pack (show val) <> " stubs: " <> pack (show stubInfo)))
       pure (case resp ^? _String of { Just _ -> val; _ -> val })
 
 result :: M Value

@@ -93,19 +93,14 @@ above that substrate; it does not maintain a second actor scheduler.
   subtree.
 - Model-authored verification should normally run authoritative checks and an
   independent fresh-actor review before acceptance.
-- Worker lifecycle and custody are live Rust interpreter state, not a
-  model-visible registry snapshot threaded between Haskell calls.
-  Haskell invokes typed batch lifecycle effects, receives structured results,
-  and sees an immutable activation context containing correlated lifecycle
-  wakes. Authored policy values remain ordinary immutable Haskell values.
-- A worktree-backed worker submits a typed exit that combines an explicitly
-  model-authored report with one Rust-observed repository state. Collection is
-  repeatable until explicit acknowledgment; transport delivery never consumes
-  the retained `ActorRef` implicitly.
-- V0 result replay and worker correlation last only for the current root
+- Actor lifecycle and custody are live Rust interpreter state, not a
+  model-visible registry snapshot threaded between Haskell calls. Haskell
+  invokes typed actor effects and keeps exact `ActorRef` values as ordinary
+  live values.
+- V0 live values and actor references last only for the current root
   incarnation. `--recreate` starts new actor state and tells the resumed model
-  that every old actor handle, worker binding, and pending result is dead;
-  cross-incarnation recovery is later work.
+  that old bindings and pending results are dead; cross-incarnation recovery is
+  later work.
 
 ## Documents
 

@@ -474,8 +474,8 @@ fn works_prelude_core_family() {
 }
 
 /// `show` precedence (negative-Double parenthesization) and direct
-/// Double rendering. Both compare Haskell `Text` (from
-/// `show`), not outer JSON numeric encoding — safe to bundle despite
+/// Double rendering. Both compare Haskell `String` values (from `show`),
+/// not outer JSON numeric encoding — safe to bundle despite
 /// involving Doubles.
 ///
 /// Absorbed: works_show_negative_double_parens, works_show_double_monomorphic_shadow.
@@ -483,15 +483,15 @@ fn works_prelude_core_family() {
 fn works_show_family() {
     works(
         r#"pure (concat
-            [ check "show_negative_double_parens.nested" (show (Just (-2.5 :: Double)) == ("Just (-2.5)" :: Text))
-            , check "show_negative_double_parens.top" (show (-2.5 :: Double) == ("-2.5" :: Text))
-            , check "show_negative_double_parens.pos" (show (Just (1.5 :: Double)) == ("Just 1.5" :: Text))
-            , check "show_negative_double_parens.int" (show (Just (-1 :: Int)) == ("Just (-1)" :: Text))
-            , check "show_negative_double_parens.list" (show [Just (-2.5 :: Double), Nothing] == ("[Just (-2.5),Nothing]" :: Text))
-            , check "show_double_monomorphic_shadow.pi" (show (3.14 :: Double) == ("3.14" :: Text))
-            , check "show_double_monomorphic_shadow.one" (show (1.0 :: Double) == ("1.0" :: Text))
-            , check "show_double_monomorphic_shadow.big" (show (1.0e10 :: Double) == ("1.0e10" :: Text))
-            , check "show_double_monomorphic_shadow.neg" (show (-2.5 :: Double) == ("-2.5" :: Text))
+            [ check "show_negative_double_parens.nested" (show (Just (-2.5 :: Double)) == ("Just (-2.5)" :: String))
+            , check "show_negative_double_parens.top" (show (-2.5 :: Double) == ("-2.5" :: String))
+            , check "show_negative_double_parens.pos" (show (Just (1.5 :: Double)) == ("Just 1.5" :: String))
+            , check "show_negative_double_parens.int" (show (Just (-1 :: Int)) == ("Just (-1)" :: String))
+            , check "show_negative_double_parens.list" (show [Just (-2.5 :: Double), Nothing] == ("[Just (-2.5),Nothing]" :: String))
+            , check "show_double_monomorphic_shadow.pi" (show (3.14 :: Double) == ("3.14" :: String))
+            , check "show_double_monomorphic_shadow.one" (show (1.0 :: Double) == ("1.0" :: String))
+            , check "show_double_monomorphic_shadow.big" (show (1.0e10 :: Double) == ("1.0e10" :: String))
+            , check "show_double_monomorphic_shadow.neg" (show (-2.5 :: Double) == ("-2.5" :: String))
             ])
          where { check nm ok = if ok then [] else [nm] }"#,
         serde_json::json!([]),

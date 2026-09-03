@@ -161,8 +161,8 @@ or implement scheduling loops.
 ### Self-hosting shape: iterative worktree hylomorphisms
 
 The intended coding-agent organization is an iterative hylomorphism over
-worktrees. This is the core Exomonad-style self-hosting shape, not merely an
-implementation technique for DevSwarm:
+worktrees. This is the core Exomonad-style self-hosting shape, not an
+application-specific worker protocol:
 
 1. **Unfold:** an actor turns a goal or work node into smaller typed actor
    definitions, dependencies, worktree grants, and acceptance contracts.
@@ -270,19 +270,10 @@ result, or join model output to repository facts after actor termination.
 Worktree observation and authorization remain Rust mechanics; Haskell owns the
 workflow product and acceptance decision.
 
-The interactive root projects this live state through an idempotent JSON tool
-surface. Its `WorkerHandle` is correlation, not authority; JSON can be forged,
-so every use is checked against Haskell-owned worker state. V0 may derive the
-handle representation from the worker's fresh `WorktreeId`, but exposes a
-distinct type so later workers with zero, reused, or multiple resources do not
-change the model-facing protocol. The private exact `ActorRef`, execution
-principal, and redeemed grants remain the authority.
-
-Collection is a repeatable observation, never an implicit deletion. A separate
-acknowledgment drops the retained `ActorRef` and leaves a small tombstone for
-the rest of the root incarnation. A dropped response, duplicate request, or
-delayed lifecycle wake therefore returns the same receipt or an explicit
-already-acknowledged result, never an ambiguous not-found result. V0 does not
+The exact `ActorRef`, execution principal, and redeemed grants remain the
+authority. Project-specific JSON handles, retry keys, receipts, and
+acknowledgement policy may be built above that boundary, but Shoal does not
+install them as a second generic actor API. V0 does not
 carry this state across `--recreate`.
 
 ### Surface-selection rule
@@ -314,8 +305,14 @@ model loop:
 - Tidepool-owned provider loops extract fenced `haskell` or `hs` blocks from
   assistant responses.
 - Externally hosted interactive agents invoke the actor-local custom tool
-  `tidepool_actor.haskell`, carrying one raw Haskell item without JSON
-  argument ceremony.
+  `tidepool_actor.haskell`, carrying a raw GHCi-style script without JSON
+  argument ceremony. Colon-prefixed lines are reserved commands, other
+  nonblank lines are Haskell input units, and `:{` / `:}` delimit one
+  multiline GHC input unit. A fenced body uses ordinary Haskell: declaration
+  groups are valid directly, effect sequences use `do`, and one outer tuple or
+  record pattern binding persists multiple results. Pest owns only this
+  framing; GHC remains authoritative for the Haskell inside each unit. Units
+  execute in order and preserve successful prefixes.
 
 Both routes use the same classifier, persistent declaration/binding scope,
 resident machine, actor principal, effect interpreter, and structured

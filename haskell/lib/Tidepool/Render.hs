@@ -8,8 +8,8 @@
 -- still import @render@.  "Tidepool.Prelude" re-exports @Render(render)@, so
 -- MCP eval code gets it through the usual @import Tidepool.Prelude@.
 --
--- The numeric\/'Bool'\/'Char' instances route through @Data.Text.pack . show@,
--- exactly as "Tidepool.Prelude"'s @show@ does; @Double@ uses the stable
+-- The numeric\/'Bool'\/'Char' instances route through @Data.Text.pack . show@;
+-- @Double@ uses the stable
 -- managed-Text intrinsic in "Tidepool.Double".
 module Tidepool.Render (Render(..)) where
 
@@ -68,7 +68,7 @@ instance {-# OVERLAPPABLE #-} Show a => Render a where
   render = renderShow
   {-# INLINE render #-}
 
--- | @Text@-returning 'show', matching "Tidepool.Prelude"'s @show@.
+-- | Render an ordinary 'Show' value as 'Text'.
 renderShow :: Show a => a -> Text
 renderShow = T.pack . P.show
 {-# INLINE renderShow #-}

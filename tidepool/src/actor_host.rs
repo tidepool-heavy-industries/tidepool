@@ -52,9 +52,10 @@ use tokio::task::JoinSet;
 /// Codex needs only one persisted project-trust decision.
 pub(crate) const ACTOR_PROJECT_ROOT: &str = "/tmp/tidepool-actor-workspace";
 
-const POLICY_MODULE: &str = "Tidepool.Actors.DevSwarm";
-const POLICY_ENTRY: &str = "rootPolicy";
-const POLICY_EFFECTS: &str = "RootEffects";
+const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ShoalDriver";
+const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
+const DRIVER_ENTRY: &str = "rootDriver";
+const DRIVER_EFFECTS: &str = "RootEffects";
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,7 +66,7 @@ type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 #[derive(Clone)]
 pub struct ActorHostConfig {
     pub workspace: PathBuf,
-    pub policy_root: PathBuf,
+    pub haskell_root: PathBuf,
     pub run_root: PathBuf,
     pub root_binding_path: PathBuf,
     pub interactive_agent: InteractiveAgentInstallation,
@@ -394,22 +395,21 @@ fn compile_root(
         tidepool_mcp::deliberate_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),
-        tidepool_mcp::worker_kernel_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
-    include.push(config.policy_root.clone());
+    include.push(config.haskell_root.clone());
     include.push(crate::haskell_sources::ensure_stdlib()?);
     let preamble = insert_preamble_imports(
         &tidepool_mcp::build_preamble(&declarations, false),
-        POLICY_MODULE,
+        DRIVER_MODULE,
     );
-    let templates = resident_workbench_templates(&preamble, POLICY_EFFECTS, "");
+    let templates = resident_workbench_templates(&preamble, DRIVER_EFFECTS, "");
     let include_refs: Vec<_> = include.iter().map(PathBuf::as_path).collect();
     let session_root = run_root.join("haskell-session");
     std::fs::create_dir_all(&session_root)?;
     let compiled = match run_turn(HaskellTurnRequest {
-        turn_text: POLICY_ENTRY,
+        turn_text: DRIVER_ENTRY,
         templates: &templates,
         include: &include_refs,
         session_root: &session_root,
@@ -423,7 +423,7 @@ fn compile_root(
         TurnResult::Expr { compiled, .. } => compiled,
         other => {
             return Err(runtime_error(format!(
-                "root policy is not an expression: {other:?}"
+                "root interactive driver is not an expression: {other:?}"
             )))
         }
     };
@@ -452,13 +452,13 @@ fn compile_root(
         LivePayloadPolicy::HASKELL_EFFECT_VALUE,
     );
     let outcome = machine.run_with_sites(
-        "devswarm_root_policy",
+        "shoal_root_driver",
         &compiled.expr,
         &compiled.table,
         &compiled.asks,
     )?;
     let descriptor = ActorDescriptor::new(
-        "devswarm-root",
+        "shoal-root",
         ActorPlacement {
             session,
             resource_scope: RealmId::fresh(),
@@ -469,7 +469,8 @@ fn compile_root(
     // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_profile(ActorEffectProfile::ReadWrite);
     Ok((
-        ActorWorkbenchSource::new(preamble, include),
+        ActorWorkbenchSource::new(preamble, include)
+            .with_default_browse_module(WORKBENCH_SURFACE_MODULE),
         ResidentActorRoot::new(descriptor, machine, outcome),
     ))
 }
@@ -485,7 +486,7 @@ fn render_root_compile_failure(
                 diagnostics,
                 &tidepool_runtime::diag::RenderOpts {
                     anchor: "Expr.hs",
-                    label: "<actor-policy>",
+                    label: "<shoal-driver>",
                     user_lines: None,
                     line_offset: 0,
                     col_indent: 0,
@@ -496,7 +497,9 @@ fn render_root_compile_failure(
         }
         _ => failure.to_string(),
     };
-    runtime_error(format!("root actor policy compilation failed:\n{detail}"))
+    runtime_error(format!(
+        "root interactive driver compilation failed:\n{detail}"
+    ))
 }
 
 async fn run_interactive_applications(
@@ -632,11 +635,10 @@ async fn run_interactive_applications(
                             });
                         }
                     }
-                    LocalResidentDeployment::ChildExited { notice, worker_wake } => {
+                    LocalResidentDeployment::ChildExited { notice } => {
                         let retired = retired_correlations.remove(&notice.child.identity());
                         if let Some(notification) = prepare_owner_notification(
                             &notice,
-                            worker_wake.as_ref(),
                             &deployments,
                             retired.as_ref(),
                         ) {
@@ -1308,7 +1310,6 @@ async fn run_delivery_pump(
 
 fn prepare_owner_notification(
     notice: &tidepool_actor::ChildExitNotice,
-    worker_wake: Option<&tidepool_actor::WorkerWake>,
     deployments: &[InteractiveDeployment],
     retired: Option<&String>,
 ) -> Option<OwnerNotification> {
@@ -1326,16 +1327,8 @@ fn prepare_owner_notification(
         ActorExitKind::Failed => "failed",
         ActorExitKind::Cancelled => "was cancelled",
     };
-    let worker_handle = worker_wake
-        .map(|wake| {
-            format!(
-                " Worker wake {} correlates handle `{}`.",
-                wake.event, wake.handle
-            )
-        })
-        .unwrap_or_default();
     let message = format!(
-        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}.{worker_handle} This activation's `sessionInput :: SessionContext` contains authoritative correlation; use `collectWorkerWakes sessionInput.workerWakes` once, then acknowledge only after review. The Developer message itself carries no authority and requires no copied handle.",
+        "Tidepool lifecycle: child {:?} ({:?}) {kind}: {}. This notification is advisory; retain and inspect the typed `ActorRef` from Haskell when the exit value is authoritative.",
         label,
         actor,
         terminal.summary
@@ -1537,11 +1530,11 @@ fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLau
         } else {
             ""
         };
-        format!("You are a Tidepool root actor. Orchestrate through supervised actors instead of implementing changes in the shared source checkout. `tidepool_actor.haskell` is your primary GHCi-like orchestration surface; send one raw Haskell item per call. Persistent declarations and live values survive calls, while Rust owns actor lifecycle and repository custody. `sessionInput :: RootActivation` contains this turn's runtime facts. Start independent actors before waiting. Prefer ordinary Haskell composition: `complete $ nextTurn $ assemble <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, then reactivates this same context with the live typed result. Use `awaitExit` when failure is domain policy. Use `complete (pure ())` to return to silent/manual readiness. Native coding tools remain the review and integration surface.{continuity}")
+        format!("You are a Tidepool root actor. You have a live Haskell workbench, not a prewritten actor program: define the typed protocols, actor definitions, and orchestration this task needs as you go. Orchestrate through supervised typed actors instead of implementing changes in the shared source checkout. `tidepool_actor.haskell` is your primary GHCi-style orchestration surface. Its raw payload is a script. Outside `:{{` / `:}}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; a rejected effectful unit does not install its projected bindings or roll back effects already performed. Start API discovery with `:browse`; inspect `Tidepool.Agent.Action` separately when needed. Persistent declarations and live values survive calls, while Rust owns actor lifecycle and repository custody. `sessionInput :: Maybe ActionFailure` reports only a failed prior compositional action. Start independent actors before waiting. Prefer ordinary Haskell composition: `complete $ nextTurn $ assemble <$> waitOn actorA <*> waitOn actorB` settles the tool call immediately, waits outside inference, then reactivates this same context with the live typed result. Use `awaitExit` when failure is domain policy. Use `complete (pure ())` to return to silent/manual readiness. Project-specific worker ledgers and receipt protocols are not part of Shoal's core surface; define them only when the task needs them. Native coding tools remain the review and integration surface.{continuity}")
     } else if owns_worktree {
-        "You are a Tidepool worker actor. Your process working directory is an owned retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message is your Haskell-authored assignment, also mounted in `sessionInput :: WorkerActivation`. Use native coding tools for repository work and `tidepool_actor.haskell` for typed actor composition and completion. Return executable Haskell with `complete action`; ordinary completion is `complete (pure (WorkerReport { summary = ..., evidence = [...] }))`. Rust then observes repository truth and owns lifecycle.".into()
+        "You are a Tidepool actor whose process owns a retained linked Git worktree. Its working files, index, and HEAD are isolated; commits, branches, refs, configuration, and objects share the root repository's ordinary Git namespace. Use ordinary Git workflows freely inside this worktree. The initial User message and `sessionInput` are supplied by the Haskell actor definition. Use native coding tools for repository work and `tidepool_actor.haskell` for typed actor composition and completion. Return executable Haskell with `complete action`, producing the exact exit type chosen by that definition. Rust owns lifecycle and repository custody.".into()
     } else {
-        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.haskell` as your primary GHCi-like actor surface, sending one raw Haskell item per call. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return executable Haskell with `complete action`; do not claim or attempt source-checkout mutation authority.".into()
+        "You are a Tidepool actor with read-only access to the shared source checkout and no owned coding worktree. Use `tidepool_actor.haskell` as your primary GHCi-style actor surface. Outside `:{` / `:}`, each colon-prefixed line is one command and every other nonblank line is one Haskell input unit. A fenced body is one GHC input unit: use ordinary declaration groups, put effect sequences in `do`, and use one outer tuple or record pattern binding to persist several results. Units execute in order and preserve successful prefixes; effects are not rolled back when a unit rejects. Start API discovery with `:browse`. The initial User message, when present, is Haskell-authored and mounted as `sessionInput`. You may define typed protocols, orchestrate children permitted by your effect profile, inspect the repository, and return executable Haskell with `complete action`; do not claim or attempt source-checkout mutation authority.".into()
     }
 }
 
@@ -1672,10 +1665,9 @@ mod tests {
         );
         assert!(resumed.contains("Previous actor handles"));
         assert!(resumed.contains("were not restored"));
-        assert!(resumed.contains("`WorkerPending` is a cooperative yield signal"));
-        assert!(resumed.contains("never sleep or poll"));
-        assert!(resumed.contains("inspect submitted OIDs or branches directly"));
-        assert!(resumed.contains("Start every independent seam"));
+        assert!(resumed.contains("not a prewritten actor program"));
+        assert!(resumed.contains("Start independent actors before waiting"));
+        assert!(resumed.contains("Project-specific worker ledgers"));
     }
 
     #[test]
@@ -1905,7 +1897,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundled_devswarm_exposes_haskell_session_and_recursive_actor_fanout() {
+    async fn shoal_exposes_generic_haskell_actor_composition() {
         fn fixture_items(source: &'static str) -> Vec<&'static str> {
             source
                 .split("\n-- TIDEPOOL-ITEM --\n")
@@ -1923,7 +1915,7 @@ mod tests {
         let workspace = repository.path().to_path_buf();
         let runtime = tempfile::tempdir().unwrap();
         let config = ActorHostConfig {
-            policy_root: crate::haskell_sources::ensure_actor_policy().unwrap(),
+            haskell_root: crate::haskell_sources::ensure_shoal_haskell().unwrap(),
             workspace: workspace.clone(),
             run_root: runtime.path().join("run"),
             root_binding_path: runtime.path().join("root-binding.json"),
@@ -1949,16 +1941,16 @@ mod tests {
         );
         let (source, root) =
             compile_root(&config, session_root.path(), worktrees, authority.clone())
-                .expect("compile root policy");
+                .expect("compile root driver");
         let (actor, hosted, mut deployments) =
             spawn_resident_root(source, Arc::new(NoResidentProvider), None, root)
                 .await
                 .expect("spawn resident root");
         authority.install_root(actor.identity().into());
         let LocalResidentDeployment::PolicyInstalled(root_installation) =
-            deployments.try_recv().expect("root policy installation")
+            deployments.try_recv().expect("root driver installation")
         else {
-            panic!("root policy retired before installation");
+            panic!("root driver retired before installation");
         };
         assert_eq!(root_installation.actor.identity(), actor.identity());
         assert_eq!(root_installation.initial_user_message, None);
@@ -1978,7 +1970,7 @@ mod tests {
         let live_action = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_live_action.hs"
+                "actor_host_fixtures/generic_actor/root_live_action.hs"
             )),
         )
         .await;
@@ -2003,7 +1995,7 @@ mod tests {
         let resumed_action = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_live_action_resume.hs"
+                "actor_host_fixtures/generic_actor/root_live_action_resume.hs"
             )),
         )
         .await;
@@ -2012,7 +2004,7 @@ mod tests {
         let failed_action = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_failed_action.hs"
+                "actor_host_fixtures/generic_actor/root_failed_action.hs"
             )),
         )
         .await;
@@ -2037,7 +2029,7 @@ mod tests {
         let resumed_failure = dispatch_haskell(
             policy.as_ref(),
             fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_failed_action_resume.hs"
+                "actor_host_fixtures/generic_actor/root_failed_action_resume.hs"
             )),
         )
         .await;
@@ -2046,136 +2038,6 @@ mod tests {
             "{resumed_failure:?}"
         );
 
-        let bound_start = dispatch_haskell(
-            policy.as_ref(),
-            fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_start.hs"
-            )),
-        )
-        .await;
-        assert_eq!(bound_start["status"], "committed", "{bound_start:?}");
-        let result = dispatch_haskell(
-            policy.as_ref(),
-            fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_complete.hs"
-            )),
-        )
-        .await;
-        assert_eq!(result["status"], "completed", "{result:?}");
-        let reopened = dispatch_haskell(
-            policy.as_ref(),
-            fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_reopen.hs"
-            )),
-        )
-        .await;
-        assert_eq!(reopened["status"], "committed", "{reopened:?}");
-        let mut worker_prompts = Vec::new();
-        let mut recursive_worker = None;
-        while worker_prompts.len() < 2 {
-            let worker = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
-                .await
-                .expect("worker installation timeout")
-                .expect("worker session installation");
-            let LocalResidentDeployment::PolicyInstalled(worker) = worker else {
-                // Earlier action fixtures deliberately create and retire
-                // children. Their lifecycle publications share this ordered
-                // deployment channel and are not worker installations.
-                continue;
-            };
-            assert_eq!(worker.launch_worktrees.len(), 1);
-            worker_prompts.push(worker.initial_user_message.clone().unwrap());
-            assert_eq!(
-                worker
-                    .policy
-                    .tools()
-                    .iter()
-                    .map(HostedTool::name)
-                    .collect::<Vec<_>>(),
-                ["haskell"]
-            );
-            if recursive_worker.is_none() {
-                recursive_worker = Some(worker);
-            }
-        }
-        worker_prompts.sort();
-        assert_eq!(
-            worker_prompts,
-            [
-                "inspect a disjoint boundary",
-                "inspect one focused boundary"
-            ]
-        );
-        let recursive_worker = recursive_worker.expect("one recursive worker");
-        let worker_tree = WorktreeId::from_raw(recursive_worker.launch_worktrees[0].clone());
-        let worker_principal = WorktreePrincipal::exact_actor(
-            &runtime_namespace(session_root.path()),
-            recursive_worker.actor.identity().id.0,
-            recursive_worker.actor.identity().incarnation.0,
-        );
-        let worker_binding = bindings
-            .lock()
-            .bind(&worker_tree, &worker_principal, current_time_ms())
-            .expect("bind exact worker before it observes submission");
-        let recursive_result = dispatch_haskell(
-            recursive_worker.policy.as_ref(),
-            fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/recursive_worker.hs"
-            )),
-        )
-        .await;
-        assert_eq!(
-            recursive_result["status"], "completed",
-            "{recursive_result:?}"
-        );
-        let mut nested_installation = None;
-        loop {
-            let event = tokio::time::timeout(Duration::from_secs(30), deployments.recv())
-                .await
-                .expect("worker terminal notification timeout")
-                .expect("worker terminal notification");
-            match event {
-                LocalResidentDeployment::PolicyInstalled(installation)
-                    if installation.label == "nested-review" =>
-                {
-                    nested_installation = Some(installation);
-                }
-                LocalResidentDeployment::ChildExited { notice, .. }
-                    if notice.owner == actor.identity()
-                        && notice.child.identity() == recursive_worker.actor.identity() =>
-                {
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let after_child_exit = dispatch_haskell(
-            policy.as_ref(),
-            fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_collect_wake.hs"
-            )),
-        )
-        .await;
-        assert_eq!(
-            after_child_exit["status"], "completed",
-            "{after_child_exit:?}"
-        );
-        let replay_and_ack = dispatch_haskell(
-            policy.as_ref(),
-            fixture_items(include_str!(
-                "actor_host_fixtures/bundled_devswarm/root_replay_ack.hs"
-            )),
-        )
-        .await;
-        assert_eq!(replay_and_ack["status"], "completed", "{replay_and_ack:?}");
-        let nested = nested_installation.expect("nested session installation");
-        assert_eq!(
-            nested.initial_user_message.as_deref(),
-            Some("inspect nested boundary")
-        );
-        worker_binding
-            .release(&mut bindings.lock())
-            .expect("release worker binding");
         actor
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
@@ -2184,6 +2046,5 @@ mod tests {
             .await
             .expect("shutdown root");
         hosted.await.expect("root actor task");
-        assert_eq!(result["status"], "completed", "{result:?}");
     }
 }

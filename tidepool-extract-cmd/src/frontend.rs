@@ -174,7 +174,7 @@ fn serve_bound_endpoint() -> Result<u8, FrontendError> {
     let mut stdin = io::stdin().lock();
     let (cwd, argv) = daemon::read_request(&mut stdin)?;
     let worker_argv = daemon::normalize_worker_argv(argv)?;
-    let mut worker = daemon::Worker::spawn(prepared)?;
+    let mut worker = daemon::Worker::spawn(&prepared)?;
     let result = worker.request(&cwd, &worker_argv);
     if let Ok((code, stdout, stderr)) = &result {
         daemon::write_response(io::stdout().lock(), *code, stdout, stderr)?;
@@ -188,6 +188,7 @@ pub(crate) struct DaemonConfig {
     pub rotate_after: Option<u64>,
     pub rss_ceiling_mb: Option<u64>,
     pub watch_stamp: Option<PathBuf>,
+    pub persistent: bool,
 }
 
 fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
@@ -195,6 +196,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
     let mut rotate_after = None;
     let mut rss_ceiling_mb = None;
     let mut watch_stamp = None;
+    let mut persistent = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let option = arg
@@ -205,6 +207,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
             "--rotate-after" => rotate_after = Some(number(&mut args, option)?),
             "--rss-ceiling-mb" => rss_ceiling_mb = Some(number(&mut args, option)?),
             "--watch-stamp" => watch_stamp = Some(PathBuf::from(next(&mut args, option)?)),
+            "--persistent" => persistent = true,
             _ => {
                 return Err(FrontendError::Usage(format!(
                     "unknown daemon option: {option}"
@@ -217,6 +220,7 @@ fn parse_daemon(args: &[OsString]) -> Result<DaemonConfig, FrontendError> {
         rotate_after,
         rss_ceiling_mb,
         watch_stamp,
+        persistent,
     })
 }
 
@@ -291,13 +295,33 @@ mod tests {
     fn typed_worker_payload_must_decode() {
         let error = worker_payload(&[
             WORKER_REQUEST_FLAG.into(),
-            "54505245513030340100000009".into(),
+            "54505245513030350100000009".into(),
         ])
         .unwrap_err();
         assert!(matches!(
             error,
             FrontendError::WorkerProtocol(crate::request::ProtocolError::RetiredFieldTag(9))
         ));
+    }
+
+    #[test]
+    fn persistent_daemon_is_an_explicit_lifecycle_mode() {
+        let config = parse_daemon(&[
+            "--socket".into(),
+            "/tmp/compiler.sock".into(),
+            "--persistent".into(),
+        ])
+        .unwrap();
+        assert!(config.persistent);
+
+        let rotating = parse_daemon(&[
+            "--socket".into(),
+            "/tmp/compiler.sock".into(),
+            "--rotate-after".into(),
+            "1".into(),
+        ])
+        .unwrap();
+        assert!(!rotating.persistent);
     }
 
     #[test]

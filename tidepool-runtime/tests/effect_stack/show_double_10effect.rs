@@ -68,7 +68,7 @@ say t = do
   send (KvSet "__sayChars" (toJSON (cur + T.length t)))
 
 showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 {VALSIZE}
 
@@ -163,7 +163,7 @@ result = do
 fn show_double_10_effects_recursive_valsize() {
     let body = format!(
         r#"showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 {VALSIZE}
 
@@ -208,7 +208,7 @@ kvSet :: Text -> Value -> M ()
 kvSet k v = send (KvSet k v)
 
 showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 valSize :: Value -> Int
 valSize v = case v of
@@ -274,7 +274,7 @@ paginateResult budget val
         [] -> pure truncated
         _ -> do
           let stubInfo = Array (map (\(sid, sv) -> object ["id" .= ("stub_" <> showI sid), "size" .= toJSON (valSize sv)]) stubs)
-          resp <- send (Ask ("[Pagination] truncated: " <> show truncated <> " stubs: " <> show stubInfo))
+          resp <- send (Ask ("[Pagination] truncated: " <> pack (show truncated) <> " stubs: " <> pack (show stubInfo)))
           case resp ^? _String of
             Just s -> case parseIntM (T.drop 5 s) of
               Just sid -> case lookupStub sid stubs of
@@ -309,7 +309,7 @@ result = do
 fn show_double_10_effects_paginate_no_say() {
     let body = format!(
         r#"showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 {VALSIZE}
 
@@ -340,7 +340,7 @@ result = do
 fn show_double_10_effects_inline_paginate() {
     let body = format!(
         r#"showI :: Int -> Text
-showI n = show n
+showI n = pack (show n)
 
 {VALSIZE}
 

@@ -1,6 +1,6 @@
 //! Embed complete Haskell source trees into the installed binaries. Generated
 //! `&[(relative_path, contents)]` tables cover the Tidepool library and Shoal's
-//! actor bootstrap policy without hand-maintained file lists. Only `.hs`
+//! interactive actor surface without hand-maintained file lists. Only `.hs`
 //! sources are included; build artifacts and test-only probes are excluded.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
@@ -36,8 +36,8 @@ fn main() {
     emit_bundle(
         &actor_root,
         "",
-        "EMBEDDED_ACTOR_POLICY",
-        "embedded_actor_policy.rs",
+        "EMBEDDED_SHOAL_HASKELL",
+        "embedded_shoal_haskell.rs",
     );
 }
 

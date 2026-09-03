@@ -72,7 +72,7 @@ see the Effect Protocol PRD linked from `plans/README.md`.
 When adding or modifying functions in `haskell/lib/Tidepool/Prelude.hs`, keep the following in mind:
 
 - **Dictionary polymorphism runs on the JIT**: custom classes, multi-param classes, and GADT type-indexed dispatch all compile and execute — write the polymorphic version by default.
-- **Surface shadows are the exception**: a few functions deliberately differ from base Prelude for runtime integration (for example `round`, and `show :: Render a => a -> Text`), not as a general pattern to follow. See `haskell/CLAUDE.md`'s "Adding new Prelude functions" section for the enforcement mechanism (`tidepool-runtime/tests/jit_surface.rs`).
+- **Surface shadows are the exception**: a few functions deliberately differ from base Prelude for runtime integration (for example `round`, while `show :: Render a => a -> String` retains the conventional result type but uses the stable renderer), not as a general pattern to follow. See `haskell/CLAUDE.md`'s "Adding new Prelude functions" section for the enforcement mechanism (`tidepool-runtime/tests/jit_surface.rs`).
 
 ## Testing Approach
 

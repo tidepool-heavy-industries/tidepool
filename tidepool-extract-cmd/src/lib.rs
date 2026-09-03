@@ -33,9 +33,26 @@ pub use endpoint::{CompilerEndpoint, CompilerIdentity};
 use exec_check::is_readable_executable_file;
 pub use request::{ExtractRequest, ProtocolError};
 
+/// Verify that `socket` is served by a compatible resident compiler daemon.
+///
+/// This performs the daemon protocol preflight rather than merely checking
+/// that a Unix socket path exists. Composition roots use it to gate dependent
+/// process startup without reproducing the compiler endpoint wire protocol.
+pub fn preflight_compiler_daemon(socket: &Path) -> std::io::Result<()> {
+    daemon::preflight(socket).map(|_| ()).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            format!("compiler daemon preflight failed: {error}"),
+        )
+    })
+}
+
 /// The bare binary name, used when `$TIDEPOOL_EXTRACT` is unset (resolved
 /// through `PATH` by the OS at spawn time).
 pub const DEFAULT_BIN: &str = "tidepool-extract";
+
+/// Environment variable selecting a resident compiler daemon socket.
+pub const DAEMON_SOCKET_ENV: &str = "TIDEPOOL_EXTRACT_DAEMON_SOCKET";
 
 /// Process-global count of compiler invocations submitted through a bound
 /// endpoint. Tests asserting on it require process isolation.
@@ -517,6 +534,11 @@ impl ExtractCmd {
     /// Ask the compiler worker for GHC's information about an in-scope name.
     pub fn inspect_info(&mut self, name: &str) -> &mut Self {
         self.request.inspect_info(name);
+        self
+    }
+
+    pub fn inspect_browse(&mut self, module: &str, expanded: bool) -> &mut Self {
+        self.request.inspect_browse(module, expanded);
         self
     }
 

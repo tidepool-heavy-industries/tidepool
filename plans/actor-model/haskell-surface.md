@@ -810,135 +810,31 @@ domain branches. All reusable helpers retain `Member` constraints; only
 `Complete result` is row-headed because it is the scoped result delimiter
 from which GHC infers the session's return type.
 
-### Worktree-backed worker submission
+### Project-specific orchestration
 
-The first DevSwarm policy uses ordinary application types rather than adding a
-generic workflow algebra. Its landed public receipt shape is:
+Shoal does not install a worker ledger, receipt protocol, or prewritten root
+program. Its public Haskell module is a facade over generic actor, action, and
+worktree combinators. The interactive model writes the protocols, definitions,
+values, and orchestration that its current task needs in the persistent
+workbench.
 
-```haskell
-data HeadState
-  = OnBranch { headBranch :: BranchName, headOid :: GitOid }
-  | Detached { headOid :: GitOid }
+A project may build a DevSwarm-style library above this surface: typed reports,
+repository receipts, retry keys, acknowledgement policy, and scaffold/fold
+helpers are all reasonable application vocabulary. They must remain ordinary
+Haskell composition over exact `ActorRef` values and narrow Rust-interpreted
+capabilities, rather than becoming a second lifecycle registry inside Shoal.
 
-data WorkingState = WorkingState
-  { changes   :: DirtySummary
-  , operation :: Maybe InProgressKind
-  }
-
-data SubmissionObservation = SubmissionObservation
-  { worktreeId     :: WorktreeId
-  , baseHead       :: GitOid
-  , submittedHead :: HeadState
-  , workingState   :: WorkingState
-  }
-
-data CandidateReceipt = CandidateReceipt
-  { authoredReport :: WorkerReport
-  , repository     :: SubmissionObservation
-  }
-```
-
-One Worktree operation returns `SubmissionObservation` as a coherent fresh
-read or a typed unstable-observation failure. Authored code must not assemble
-it from separately timed `HEAD`, branch, status, and operation calls.
-`InProgressKind` remains one sum type and gains an `Other Text` case if unknown
-Git state must be surfaced; rendered Git text never drives policy. An
-observation failure makes successful submission unsatisfiable rather than
-inviting the model to supply repository facts.
-
-The worker's actor program closes over its granted `WorktreeHandle`. Its agent
-session returns only `WorkerReport`; trusted Haskell observes the repository
-and completes the actor with `CandidateReceipt`. Dirty work still completes
-normally with a truthful receipt. It is not an immutable integration artifact,
-so the owner normally rejects or revises it in V0.
-
-The interactive root keeps exact `ActorRef` values behind the DevSwarm facade
-and exposes application-level handles and effectful operations:
+The important generic fan-in stays visibly Haskell:
 
 ```haskell
-startWorkers
-  :: Members '[Actor, Worktree, WorkerKernel CandidateReceipt] effs
-  => [WorkerSpec]
-  -> Eff effs [WorkerStartResult]
-
-listWorkers
-  :: Member (WorkerKernel CandidateReceipt) effs
-  => Eff effs [WorkerSummary]
-
-collectWorkerWakes
-  :: Members '[Actor, WorkerKernel CandidateReceipt] effs
-  => [WorkerWake]
-  -> Eff effs [WorkerCollection]
-
-acknowledgeWorkers
-  :: Member (WorkerKernel CandidateReceipt) effs
-  => [WorkerAcknowledgementRequest]
-  -> Eff effs [WorkerAcknowledgement]
+complete $ nextTurn $
+  assemble <$> waitOn implementationActor <*> waitOn reviewActor
 ```
 
-`WorkerKernel` and its constructors are interpreter-private despite appearing
-in these explanatory constraints. Authored code imports the named functions
-and types from `Tidepool.Actors.DevSwarm`; the generated authored-effects
-facade does not export raw kernel requests.
-
-Rust owns the mutable worker ledger. Haskell does not receive or return a
-registry snapshot. Each root activation instead receives a stable
-`sessionInput :: SessionContext`; its plural `workerWakes` are correlation for
-that activation, while collection remains authoritative for the result.
-
-The normal fan-out turn is ordinary Haskell:
-
-```haskell
-(implementation, review) <- do
-  starts <- startWorkers
-    [ worker "implementation" implementationPrompt
-    , worker "review" reviewPrompt
-    ]
-  case map workerHandleOf starts of
-    [Just a, Just b] -> pure (a, b)
-    _ -> error "worker wave was not accepted"
-
-complete ()
-```
-
-On a lifecycle activation:
-
-```haskell
-collections <- collectWorkerWakes sessionInput.workerWakes
-collections
-```
-
-After native review or integration, authored policy explicitly selects the
-handles whose custody it has finished evaluating and calls
-`acknowledgeWorkers`; collection never implies integration. The runtime
-contract is:
-
-- starting a new key creates one worktree and actor and returns an
-  `AcceptedWorker` inside `WorkerAccepted` once actor creation succeeds and deployment is
-  requested;
-- retrying the same key with the same typed request returns the same handle;
-- retrying it with a different normalized assignment returns
-  `WorkerStartConflict`; lookup and comparison happen before any new worktree or
-  grant is allocated;
-- retrying an acknowledged key reports `WorkerStartAcknowledged` and never
-  starts another actor; keys remain reserved for this root incarnation;
-- `collectWorkers` and `collectWorkerWakes` are nonblocking and non-consuming,
-  returning pending, the repeatable exact outcome, already-acknowledged, or
-  unknown; pending is a
-  cooperative yield signal, so the interactive root ends its turn rather than
-  sleeping or polling and Shoal starts a new turn on lifecycle transition;
-- `acknowledgeWorkers` is valid only after collection has observed a terminal
-  result, releases live exit custody, records the disposition, and leaves a
-  tombstone; and
-- `listWorkers` reports observational summaries without returning a mutation
-  token.
-
-The request comparison and fingerprint live in Rust's interpreter-owned
-ledger, never in model-threaded Haskell state or a hash chosen by the model.
-Ordered workbench items commit their successful prefix, so after a later item
-is rejected the model retries only that item and its suffix. Idempotent worker
-operations make an unknown transport outcome safe to retry without pretending
-arbitrary Haskell effects can be rolled back.
+The fixed private Shoal driver only asks the resident model for the next
+`AgentAction`, executes it, and reopens the same workbench when requested. It is
+an interpreter trampoline, not the actor's program. The program is the Haskell
+the model authors incrementally as the computation unfolds.
 
 ## 14. What must leave Haskell
 

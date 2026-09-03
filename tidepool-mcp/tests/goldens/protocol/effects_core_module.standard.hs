@@ -274,16 +274,6 @@ data AgentTools a where
 data AgentSession a where
   AgentSessionWith :: Int -> input -> Maybe Text -> AgentSession output
 
-data WorkerKernel exit a where
-  WorkerReserveBatchWith :: Value -> WorkerKernel exit Value
-  WorkerAttachWith :: Text -> ExitRef exit -> (Int, Int) -> WorkerKernel exit Value
-  WorkerFailStartWith :: Text -> Text -> WorkerKernel exit Value
-  WorkerListWith :: WorkerKernel exit Value
-  WorkerInspectWith :: Value -> WorkerKernel exit Value
-  WorkerBorrowExitWith :: Text -> WorkerKernel exit (ExitRef exit)
-  WorkerAcknowledgeWith :: Value -> WorkerKernel exit Value
-  WorkerSessionContextWith :: WorkerKernel exit Value
-
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
 say :: forall effs. Member Console effs => Text -> Eff effs ()
@@ -379,7 +369,7 @@ planUpdate :: forall effs. Member FsRead effs => FilePath -> Text -> Text -> Eff
 planUpdate path old new = do
   er <- readFile path
   case er of
-    Left e -> pure (UpdateRejected ("file not found: " <> show e) Nothing)
+    Left e -> pure (UpdateRejected ("file not found: " <> T.pack (show e)) Nothing)
     Right src ->
       let n = if T.null old then 0 else length (T.splitOn old src) - 1
       in if T.null old then pure (UpdateRejected "'old' must be non-empty" Nothing)
@@ -418,12 +408,12 @@ update path old new
   | otherwise = do
       er <- readFile path
       case er of
-        Left e -> pure (UpdateOneRejected ("file not found: " <> show e) Nothing)
+        Left e -> pure (UpdateOneRejected ("file not found: " <> T.pack (show e)) Nothing)
         Right src ->
           case length (T.splitOn old src) - 1 of
             0 -> pure (UpdateOneRejected ("'old' not found in " <> path) Nothing)
             1 -> writeFile path (replace old new src) >>= liftEither >> pure UpdateOneApplied
-            n -> pure (UpdateOneRejected ("'old' matches " <> show n <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
+            n -> pure (UpdateOneRejected ("'old' matches " <> T.pack (show n) <> " places in " <> path <> " (add surrounding context to disambiguate)") (Just n))
 -- | Replace EVERY occurrence of `old` with `new`. Reports the outcome as an
 -- `UpdateAllOutcome` DATA value (never throws): empty `old`, a missing file,
 -- or zero matches is `UpdateAllRejected` (nothing written); otherwise
@@ -434,7 +424,7 @@ updateAll path old new
   | otherwise = do
       er <- readFile path
       case er of
-        Left e -> pure (UpdateAllRejected ("file not found: " <> show e))
+        Left e -> pure (UpdateAllRejected ("file not found: " <> T.pack (show e)))
         Right src ->
           let n = length (T.splitOn old src) - 1
           in if n == 0
@@ -457,14 +447,14 @@ insertAfter :: forall effs. Members '[FsRead, FsWrite] effs => FilePath -> Text 
 insertAfter path anchor block = do
   er <- readFile path
   case er of
-    Left e -> pure (InsertAfterRejected ("file not found: " <> show e) Nothing)
+    Left e -> pure (InsertAfterRejected ("file not found: " <> T.pack (show e)) Nothing)
     Right src ->
       let ls = lines src
           n = length (filter (isInfixOf anchor) ls)
       in case n of
            1 -> writeFile path (unlines (concatMap (\l -> if anchor `isInfixOf` l then [l, block] else [l]) ls))
                   >>= liftEither >> pure InsertAfterApplied
-           _ -> pure (InsertAfterRejected ("anchor matched " <> show n <> " lines in " <> path) (Just n))
+           _ -> pure (InsertAfterRejected ("anchor matched " <> T.pack (show n) <> " lines in " <> path) (Just n))
 -- | Compute-check-commit: write only if every named check holds; failures
 -- come back as a `WriteOutcome` (nothing written on failure).
 writeChecked :: forall effs. Member FsWrite effs => FilePath -> [(Text, Bool)] -> Text -> Eff effs WriteOutcome

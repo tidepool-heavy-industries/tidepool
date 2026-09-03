@@ -158,7 +158,7 @@ fn test_derived_prompt_across_effect_boundary() {
         r#"
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items. Classify this."
+  let prompt = "Found " <> pack (show count) <> " items. Classify this."
   say prompt
   r <- classify prompt
   if r == "ok"
@@ -178,7 +178,7 @@ fn test_derived_prompt_across_effect_small_nursery() {
         r#"
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items. Classify this."
+  let prompt = "Found " <> pack (show count) <> " items. Classify this."
   say prompt
   r <- classify prompt
   if r == "ok"
@@ -198,7 +198,7 @@ fn test_list_contents_in_prompt_across_effect() {
         r#"
   items <- getItems
   let first3 = take 3 items
-  let prompt = "Items: " <> show first3 <> " (total: " <> show (length items) <> ")"
+  let prompt = "Items: " <> pack (show first3) <> " (total: " <> pack (show (length items)) <> ")"
   say prompt
   r <- classify prompt
   if r == "ok"
@@ -220,7 +220,7 @@ fn test_literal_prompt_across_effect_works() {
     let result = run_three_effects(
         r#"
   items <- getItems
-  say ("Got " <> show (length items))
+  say ("Got " <> pack (show (length items)))
   r <- classify "Is this an API?"
   pure r
 "#,
@@ -236,7 +236,7 @@ fn test_derived_prompt_say_only_works() {
         r#"
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items."
+  let prompt = "Found " <> pack (show count) <> " items."
   say prompt
   pure prompt
 "#,
@@ -252,8 +252,8 @@ fn test_multiple_derived_prompts() {
         r#"
   items <- getItems
   let n = length items
-  r1 <- classify ("batch 1: " <> show n)
-  r2 <- classify ("batch 2: " <> show n <> " prev=" <> r1)
+  r1 <- classify ("batch 1: " <> pack (show n))
+  r2 <- classify ("batch 2: " <> pack (show n) <> " prev=" <> r1)
   pure (r1 <> "," <> r2)
 "#,
         1 << 20,
@@ -268,7 +268,7 @@ fn test_for_m_classify_with_derived_prompt() {
         r#"
   items <- getItems
   results <- forM (take 3 items) (\item -> do
-    let prompt = "Classify: " <> item <> " (of " <> show (length items) <> ")"
+    let prompt = "Classify: " <> item <> " (of " <> pack (show (length items)) <> ")"
     classify prompt)
   pure results
 "#,
@@ -288,7 +288,7 @@ fn test_classify_then_conditional_say_with_derived_prompt() {
         r#"
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items. Classify this."
+  let prompt = "Found " <> pack (show count) <> " items. Classify this."
   -- Effect B fires (classify), continuation captures prompt for fallback
   r <- classify prompt
   -- Conditional: either return or fire effect C (say) using prompt
@@ -335,7 +335,7 @@ result :: Eff '[DataSource, Classifier, Console] _
 result = do
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items."
+  let prompt = "Found " <> pack (show count) <> " items."
   r <- classify prompt
   -- Unconditionally fire a SECOND effect using prompt
   say (prompt <> " classified as: " <> r)
@@ -411,7 +411,7 @@ result :: Eff '[DataSource, Classifier, Console] _
 result = do
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items."
+  let prompt = "Found " <> pack (show count) <> " items."
   say prompt
   -- Fire classify, then classify AGAIN with a different prompt,
   -- then use both results — deep continuation nesting
@@ -446,7 +446,7 @@ fn test_classify_value_then_conditional_branch() {
         r#"
   items <- getItems
   let count = length items
-  let prompt = "Found " <> show count <> " items."
+  let prompt = "Found " <> pack (show count) <> " items."
   say prompt
   -- classify returns "ok" — simulate llmJson returning JSON
   r <- classify prompt

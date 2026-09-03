@@ -272,14 +272,6 @@ fn agent_session_decl_matches_the_schema_exactly() {
     );
 }
 
-#[test]
-fn worker_kernel_decl_matches_the_schema_exactly() {
-    assert_decl_matches_schema(
-        &tidepool_mcp::worker_kernel_decl(),
-        &tidepool_protocol::effects::worker_kernel::worker_kernel(),
-    );
-}
-
 /// Every effect the schema claims to own must actually be wired into
 /// `tidepool-mcp` — a schema entry with no live decl would prove nothing while
 /// looking like coverage.
@@ -308,7 +300,6 @@ fn every_schema_effect_is_reachable() {
             "ActorLocal",
             "AgentTools",
             "AgentSession",
-            "WorkerKernel",
         ],
         "the migrated set changed — add the new effect's equivalence assertion above"
     );

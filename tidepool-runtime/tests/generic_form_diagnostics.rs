@@ -56,7 +56,7 @@ fn string_field_says_use_text() {
     let decls = r#"
 data Q = Q { name :: String } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -72,7 +72,7 @@ fn list_field_names_the_field() {
     let decls = r#"
 data Q = Q { tags :: [Text], title :: Text } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -85,7 +85,7 @@ fn map_field_names_the_field() {
     let decls = r#"
 data Q = Q { config :: Map Text Text } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -98,7 +98,7 @@ fn function_field_names_the_field() {
     let decls = r#"
 data Q = Q { callback :: Int -> Int } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -113,7 +113,7 @@ fn nested_maybe_offers_both_corrections() {
     let decls = r#"
 data Q = Q { note :: Maybe (Maybe Text) } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -137,7 +137,7 @@ fn recursive_type_is_rejected_at_compile_time() {
     let decls = r#"
 data Tree = Leaf | Node { left :: Tree, right :: Tree } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Tree)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -160,7 +160,7 @@ fn mutually_recursive_types_are_rejected_at_compile_time() {
 data Aa = Aa { toB :: Bb } deriving (Generic)
 data Bb = Bb { toA :: Aa } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Aa)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -182,7 +182,7 @@ fn missing_generic_names_the_field_and_the_type() {
 data Environment = Development | Staging
 data Q = Q { environment :: Environment } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -203,7 +203,7 @@ fn unsupported_leaf_names_the_field_and_the_type() {
 newtype Deadline = Deadline Int
 data Q = Q { deadline :: Deadline } deriving (Generic)
 
-result :: Text
+result :: String
 result = show (formShape @Q)
 "#;
     if let Some(msg) = rejection(decls) {
@@ -221,7 +221,7 @@ fn supported_shapes_still_compile() {
          data Env = Dev | Prod deriving (Generic, FromJSON)\n\
          data Q = Q {{ name :: Text, env :: Env, count :: Int, note :: Maybe Text }}\n\
          \x20 deriving (Generic, FromJSON)\n\n\
-         result :: Text\n\
+         result :: String\n\
          result = show (formShape @Q)\n"
     );
     EvalHarness::new()
