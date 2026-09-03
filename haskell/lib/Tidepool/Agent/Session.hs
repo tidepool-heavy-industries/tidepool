@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
@@ -11,7 +12,11 @@
 -- installed actor program resumes.
 module Tidepool.Agent.Session
   ( agentSession
-  , SessionActivation (..)
+  , SessionActivation
+  , pattern InitialUser
+  , pattern ActionCompleted
+  , pattern ActionFailed
+  , pattern ManualReady
   , agentSessionSited
   ) where
 
@@ -20,17 +25,26 @@ import Data.Text (Text)
 
 import Tidepool.Effects.Core (AgentSession (..))
 
-data SessionActivation
-  = InitialUser
-  | ActionCompleted
-  | ActionFailed
-  | ManualReady
+-- Keep the public vocabulary closed while giving the extractor an unboxed
+-- representation at the generated effect boundary.
+newtype SessionActivation = SessionActivation Int
+
+pattern InitialUser :: SessionActivation
+pattern InitialUser = SessionActivation 0
+
+pattern ActionCompleted :: SessionActivation
+pattern ActionCompleted = SessionActivation 1
+
+pattern ActionFailed :: SessionActivation
+pattern ActionFailed = SessionActivation 2
+
+pattern ManualReady :: SessionActivation
+pattern ManualReady = SessionActivation 3
+
+{-# COMPLETE InitialUser, ActionCompleted, ActionFailed, ManualReady #-}
 
 activationCode :: SessionActivation -> Int
-activationCode InitialUser = 0
-activationCode ActionCompleted = 1
-activationCode ActionFailed = 2
-activationCode ManualReady = 3
+activationCode (SessionActivation code) = code
 
 {-# OPAQUE agentSession #-}
 agentSession

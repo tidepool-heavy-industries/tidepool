@@ -27,7 +27,7 @@ pub struct CompletionExpectation {
 
 impl CompletionExpectation {
     #[must_use]
-    pub fn new(expected_type: impl Into<String>) -> Self {
+    pub(crate) fn new(expected_type: impl Into<String>) -> Self {
         Self {
             expected_type: expected_type.into(),
         }
@@ -36,13 +36,13 @@ impl CompletionExpectation {
     #[must_use]
     pub(crate) fn goal_text(&self) -> String {
         format!(
-            "Current typed Haskell goal: produce `{}`. The authoritative input is mounted as `goalInput` in the resident workbench; complete the goal through its typed completion action.",
+            "Current typed Haskell goal: produce `{}`. The authoritative input is mounted as `goalInput` in the resident workbench. The session-local `complete` accepts exactly that result type; pass it the result value directly.",
             self.expected_type
         )
     }
 
     #[must_use]
-    pub fn expected_type(&self) -> &str {
+    pub(crate) fn expected_type(&self) -> &str {
         &self.expected_type
     }
 }

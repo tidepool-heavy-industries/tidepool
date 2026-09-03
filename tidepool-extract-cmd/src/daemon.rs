@@ -361,7 +361,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             if connection.read_exact(&mut kind).is_err() {
                 continue;
             }
-            if stamp_changed(&config, &boot_stamp)? {
+            if stamp_changed(config, &boot_stamp)? {
                 if &kind == REQUEST {
                     let _ = write_rejected(&mut connection, "watched deployment changed");
                 }
@@ -407,7 +407,7 @@ pub(crate) fn serve(config: &DaemonConfig, prepared: PreparedWorker) -> Result<u
             // The second stamp check is the acceptance fence. If it passes,
             // the acknowledgement is flushed before work begins; every later
             // transport failure is therefore indeterminate and never replayed.
-            if stamp_changed(&config, &boot_stamp)? {
+            if stamp_changed(config, &boot_stamp)? {
                 let _ = write_rejected(&mut connection, "watched deployment changed");
                 remove_socket(&config.socket)?;
                 break;

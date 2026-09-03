@@ -1,5 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
@@ -29,7 +30,7 @@ import Tidepool.Actor
   , awaitExit
   , cancelReasonSummary
   )
-import Tidepool.Agent.Session (SessionActivation (ActionCompleted), agentSessionSited)
+import Tidepool.Agent.Session (pattern ActionCompleted, agentSessionSited)
 import Tidepool.Effects.Core (Actor, AgentSession)
 
 -- | Why a model-authored continuation could not produce its value.

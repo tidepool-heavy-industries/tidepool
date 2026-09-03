@@ -1,9 +1,10 @@
 # Shoal workbench correctness wave
 
-Status: planned. The preceding resident-workbench feedback pass landed as
-`ba336909`; implementation of this wave remains deliberately deferred until
-the plan is committed and a fresh Shoal dogfood root starts from that clean
-base.
+Status: in progress. The resident-workbench feedback, action, prompt,
+observability, discovery, activation, and completion folds have landed through
+`c52a51fd`. The first construction spike exposed a wrong one-shot abstraction
+and is intentionally held. The next boundary is the persistent agent request
+model in the canonical actor-model documents and `SHOAL.md`.
 
 This is the large cleanup following the first live exercises of Shoal's raw
 Haskell hosted tool. It is intentionally one coherent boundary: make the
@@ -44,11 +45,14 @@ The precise spelling must be proven against the extractor and live-value
 machinery, but the intended interaction is approximately:
 
 ```haskell
-filterAgent <- startAgent filterTree filterPrompt filterInput
-activityAgent <- startAgent activityTree activityPrompt activityInput
+filterAgent <- startAgent filterTree filterSpec
+activityAgent <- startAgent activityTree activitySpec
+
+filterReply <- request @FilterReport filterAgent filterPrompt filterInput
+activityReply <- request @ActivityReport activityAgent activityPrompt activityInput
 
 complete $ nextTurn $
-  (,) <$> waitOn filterAgent <*> waitOn activityAgent
+  (,) <$> waitReply filterReply <*> waitReply activityReply
 ```
 
 The default facade should expose:
@@ -56,9 +60,11 @@ The default facade should expose:
 - one typed, worktree-bound Codex-node specification/construction path;
 - one human-readable instance name for each spawned node, distinct from its
   exact runtime identity and from any reusable definition/kind label;
-- an exact typed `AgentRef exit` or equivalently narrow handle;
-- successful compositional waiting through `waitOn`;
-- complete lifecycle observation where Shoal policy genuinely needs it;
+- an exact `AgentRef` naming one long-lived actor incarnation, independent of
+  any request result;
+- ad hoc `request @Result` returning a separate exact `Reply result`;
+- successful compositional reply waiting through `waitReply` and complete
+  lifecycle observation where Shoal policy genuinely needs it;
 - `AgentAction`, `nextTurn`, and a helper for lifting ordinary effects;
 - worktree creation and observation needed to seed and fold nodes;
 - the persistent workbench's completion and inspection vocabulary.
@@ -71,30 +77,85 @@ It should not expose by default:
 - actor-local effect-row implementation details;
 - a worker ledger, receipt registry, or prewritten root program.
 
-`AgentRef` may be a narrow newtype over the exact lower-level `ActorRef`, but
-it must preserve the successful exit type and same-machine live exit cell. It
-must not be a string handle, JSON identity, or second Rust registry entry.
+`AgentRef` may be a narrow newtype over an exact lower-level actor reference,
+but it must not be indexed by one request or terminal result. `Reply result`
+retains the same-machine live settlement cell for one request. Neither handle
+is a string, JSON identity, or second Rust registry entry.
 
-### Construction spike
+### Persistent construction vertical
 
-Before editing the facade, prove one minimal typed constructor end to end:
+Before editing the facade, prove one minimal persistent actor end to end:
 
 1. The parent creates or selects one exact `WorktreeHandle`.
-2. `startAgent` creates one child whose first genuine User message is the
-   supplied prompt and whose typed startup value is mounted as
-   `sessionInput`.
+2. `startAgent` creates one child and waits until its Codex application and
+   persistent workbench are ready; it does not encode a work-result type.
 3. The child receives its own Codex application and raw Haskell tool.
-4. The child completes with an arbitrary inferred Haskell value, including a
-   user-defined type or closure.
-5. The parent observes that exact live value through `waitOn`.
-6. Starting two children before composing their waits runs the child work
-   concurrently; the Haskell `Applicative` remains ordinary composition, not
-   scheduler syntax.
+4. The parent issues `request @Result` with a live typed input; the target sees
+   that input and a monomorphic, activation-local `reply` operation.
+5. The child replies with an arbitrary caller-fixed Haskell value, including a
+   user-defined type or closure, without terminating.
+6. The parent awaits the exact `Reply result`, then sends a request with a
+   different input and result type to the same still-live actor.
+7. Starting two actors and admitting requests before composing reply waits
+   runs the work concurrently; the Haskell `Applicative` remains ordinary
+   composition, not scheduler syntax.
 
-Prefer a small Haskell smart constructor over another Rust protocol. If the
-extractor needs a monomorphic site helper to record the startup and exit
-types, keep it private and `OPAQUE`, following `agentSessionSited` and
-`nextTurnSited`. Do not introduce a reflected effect-row ABI.
+Prefer a small Haskell smart constructor over another Rust protocol. The
+request site uses an explicit first type application, normally
+`request @Result`, and a private `OPAQUE` sited helper records both request
+monotypes and their compiler-derived modules. Do not introduce a reflected
+effect-row ABI.
+
+### Dogfooding-derived review lenses
+
+Use the following findings from the preceding folds when reviewing persistent
+messaging. They are acceptance criteria for the shape, not a request for more
+framework:
+
+- An outer tool success is not an inner Haskell success. Exact multiline GHC
+  output and a positive typed settlement must survive the Codex/Shoal boundary.
+- Pane closure, process intent, request admission, reply settlement, actor exit,
+  and teardown are different facts. Never infer one from another.
+- The actor, Codex context, persistent Haskell scope, managed worktree, and
+  recursive parentage form one long-lived ownership unit. A `Reply result` is
+  a request-local obligation, not a second actor identity.
+- Messages are durably pushed to live actors; tmux is only launch and
+  observability. Human labels never become routing identity.
+- Session-local monomorphic operations and visible `@Result` applications are
+  the preferred model affordance. Low-level generic machinery stays behind an
+  intentional import.
+- Worker reports are claims. The fold owner reviews exact commits, mechanism
+  ownership, generated artifacts, failure paths, and verification receipts.
+- Focused tests belong in concurrent lanes. Matched extractor-backed and broad
+  tests belong at integration folds; their scheduling cost is itself a UX
+  signal.
+- Campaign-local Haskell declarations are the cheap place for experiments.
+  Product APIs require repeated utility, a present consumer, and one clear
+  owner; failed experiments are deleted rather than adapted indefinitely.
+
+These lenses retain Exomonad's proven scaffold/fork/converge rhythm and
+worktree-context-actor triad while using Tidepool's types and live values for
+the communication layer.
+
+### Rebuilt-host canary gate
+
+Before any persistent-messaging implementation lane starts, rebuild/restart
+Shoal with the reviewed integration fold and run a disposable single-worker
+canary. The root declares a concrete `CanaryReport`, creates one managed
+worktree, and starts one real Codex-backed child. That child must:
+
+1. observe an intentional Haskell type error as a complete multiline GHC
+   diagnostic;
+2. recover in the same resident session;
+3. add exactly one line to exactly one disposable file and commit it; and
+4. call the session-local monomorphic `complete` with the exact
+   `CanaryReport` value.
+
+The root then awaits the live typed report and independently verifies the
+commit, one-file/one-line diff, clean worktree, and lifecycle state. Discard the
+canary branch/worktree rather than merging its disposable change. Any reliance
+on an empty wrapper result, pane disappearance, transcript parsing, or manual
+transport recovery blocks the wave and belongs to the interaction owner.
 
 ## 2. Landed baseline from the preceding parallel pass
 
@@ -331,19 +392,21 @@ lower-level module accidentally.
 
 ### Tasks
 
-1. Introduce the minimal typed `AgentRef` and agent specification/spawn shape
-   proven by the construction spike.
+1. Introduce the minimal persistent `AgentRef` and agent specification/spawn
+   shape proven by the construction vertical.
 2. Require an exact managed worktree at the spawn boundary. Worktree creation
    remains explicit so the parent controls base revision and fan-out topology.
-3. Make the first task an ordinary User message. Runtime facts and invariant
-   context remain separate from task content.
+3. Make each request task an ordinary User message. Runtime facts and
+   invariant context remain separate from task content.
 4. Give the node specification a human instance name intended for panes,
    logs, and notices. Duplicate names remain legal and never replace exact
    identity.
 5. Ensure every spawned Shoal child reaches an agent-session/tool boundary and
    therefore receives one Codex application. A successfully returned
-   `AgentRef` must not ambiguously name a headless computation.
-6. Export typed wait/composition and required worktree operations explicitly.
+   `AgentRef` must not ambiguously name a headless computation or one terminal
+   work result.
+6. Export `request @Result`, typed reply observation, explicit shutdown,
+   action composition, and required worktree operations explicitly.
 7. Do not import `Tidepool.Actor` into the facade. Build the agent constructor
    in a private implementation module over the lower-level substrate.
 8. Do not export protocol-mailbox construction merely because the private
@@ -352,18 +415,21 @@ lower-level module accidentally.
 10. Rewrite default `:browse`, tool guidance, and examples around Codex-node
    fan-out/fold rather than pure arithmetic actors.
 
-### Design constraints for `startAgent`
+### Design constraints for persistent agents
 
-- The result type is inferred by GHC at the authored call site.
-- Same-machine exits may contain closures and newly declared types.
-- One exact `AgentRef` retains one immutable terminal value.
+- `AgentRef` is independent of request and terminal result types.
+- The request result type is fixed visibly by GHC at the authored call site.
+- Same-machine replies may contain closures and newly declared types.
+- One exact `Reply result` is single-settlement and separately awaitable.
+- Replying returns the target to readiness; only explicit shutdown terminates
+  the actor.
 - The worktree binding is principal-checked before the child application can
   operate.
 - Startup publication means the typed child and its application deployment
   are usable under the documented readiness contract.
 - A launch failure becomes the exact child's typed lifecycle failure and does
   not kill the root.
-- Retry does not silently create a second child.
+- Retry does not silently create a second child or settle a different request.
 - No JSON schema is required for live same-machine input or output.
 
 ## 8. Diagnostics and observability
@@ -591,21 +657,22 @@ separable extraction boundaries, followed by one cross-context wording review.
 - `AgentAction` helper laws and failure short-circuiting;
 - activation state transitions, deduplication, and stale-delivery refusal;
 - observed-versus-unobserved child-exit wake policy;
-- exact typed agent construction request decoding.
+- exact typed agent construction and ad hoc request decoding.
 
 ### Focused real-GHC tests
 
 - facade names are both browsable and usable in declarations;
 - invalid completion types fail statically and preserve the session;
 - pattern bindings and declaration bindings remain discoverable;
-- a closure-valued child exit survives `waitOn` and `nextTurn`;
-- two agent refs compose applicatively without serializing their values.
+- a closure-valued reply survives `waitReply` and `nextTurn`;
+- two replies compose applicatively without serializing their values;
+- two differently typed requests settle against one still-live actor.
 
 ### Host integration tests without model inference
 
 - a scripted interactive backend proves that `startAgent` binds one worktree,
-  installs one hosted Haskell tool, receives the initial User task, and returns
-  one exact typed exit;
+  installs one hosted Haskell tool, receives successive User requests, and
+  returns exact typed replies without retiring;
 - launch failure terminates only the child and leaves the root workbench live;
 - prompt and mounted input carry one activation id through retry;
 - an awaited normal exit does not create an extra backend activation;
@@ -620,9 +687,11 @@ generic real-GHC Shoal vertical. Then run one token-consuming manual smoke:
 1. `shoal new` in a clean toy repository.
 2. Root uses `:show imports` and `:browse` without discovering phantom names.
 3. Root defines two different custom output types.
-4. Root creates two worktrees and starts two Codex nodes before waiting.
-5. Both children use their raw Haskell tools and commit independent changes.
-6. Root returns an applicative `nextTurn` over both exact refs.
+4. Root creates two worktrees, starts two Codex nodes, and admits typed requests
+   before waiting.
+5. Both children use their raw Haskell tools and reply with independent
+   candidate commits while remaining live.
+6. Root returns an applicative `nextTurn` over both exact replies.
 7. One activation mounts the composed live value with no duplicate lifecycle
    turns.
 8. Root inspects and integrates both Git candidates.
@@ -710,29 +779,35 @@ landed file layout permits:
 |---|---|---|
 | Completion typing | resident workbench compilation/completion boundary | incompatible `Complete` payloads rejected statically without session loss |
 | Activation atomicity | resident actor activation state and host delivery | typed activation ids, matching messages/inputs, and lifecycle deduplication |
-| Codex-node construction spike | private Haskell Shoal implementation plus narrow deployment request | one worktree-bound `startAgent` returning a live typed result |
+| Persistent Codex-node construction | private Haskell Shoal implementation plus narrow deployment request | one worktree-bound long-lived `startAgent`, with request/reply added after the lifecycle prerequisite |
 | Operator diagnostics | structured error classification and correlation tests | actionable dynamic-tool failures without new logging mechanisms |
 
 Completion typing and activation atomicity are correctness-critical. Give each
 candidate an independent review before integration even when focused tests are
 green.
 
-### Wave 3: expose and prove the product surface
+### Wave 3: persistent requests, then expose and prove the product surface
 
-This wave begins only after the construction spike and both correctness lanes
-are integrated:
+This wave begins only after activation and completion are integrated. Persistent
+actor lifecycle and request custody are one serial prerequisite; facade,
+guidance, and recursive-tree proof may then split where their owners are
+disjoint:
 
-1. Scaffold the exact explicit export list for `Tidepool.Actors.Shoal`.
-2. In parallel where disjoint:
+1. Implement long-lived `AgentRef`, `request @Result`, exact `Reply result`
+   settlement, reply observation, and explicit shutdown against the existing
+   actor/mailbox and live-root custody owners.
+2. Prove two differently typed requests against one still-live actor.
+3. Scaffold the exact explicit export list for `Tidepool.Actors.Shoal`.
+4. In parallel where disjoint:
    - finalize the Haskell facade and remove default resident-actor imports;
    - rewrite prompt artifacts and hosted-tool guidance against the real API;
    - build the scripted host/deployment acceptance fixture;
    - update canonical architecture and interaction documentation, deleting
      stale generic-actor claims from the Shoal-specific sections.
-3. Fold the candidates into one base.
-4. Run a fresh cross-boundary review concerned with terminology, dead exports,
+5. Fold the candidates into one base.
+6. Run a fresh cross-boundary review concerned with terminology, dead exports,
    copied prompt text, and duplicate mechanisms.
-5. Run the major-boundary validation and live two-node dogfood smoke.
+7. Run the major-boundary validation and live two-node dogfood smoke.
 
 ### Slot-filling side work
 
@@ -777,12 +852,14 @@ clean:
    delivery and wake policy.
 3. **Workbench discovery** — `:show imports`, scope honesty, and real examples.
 4. **AgentAction ergonomics** — one lift helper and curated representation.
-5. **Shoal Codex-node facade** — `startAgent`, typed `AgentRef`, explicit
-   exports, worktree binding, and removal of lower-level actor construction
-   from default discovery.
-6. **Prompt artifact extraction** — central asset tree and typed compile-time
+5. **Persistent Shoal agent messaging** — long-lived `AgentRef`,
+   `request @Result`, exact `Reply result`, explicit shutdown, and single-owner
+   request/live-root custody.
+6. **Shoal Codex-node facade** — explicit exports, worktree binding, and
+   removal of lower-level actor construction from default discovery.
+7. **Prompt artifact extraction** — central asset tree and typed compile-time
    catalogs, preserving wording and provider roles.
-7. **Integrated cleanup** — prompts/docs, structured diagnostics, deletion of
+8. **Integrated cleanup** — prompts/docs, structured diagnostics, deletion of
    superseded fixtures, and the major-boundary test pass.
 
 Do not keep compatibility aliases for the old Shoal-facing `startActor`
@@ -796,7 +873,11 @@ substrate merely because Shoal no longer advertises it.
 - Distributed actors or serialized live values.
 - Durable restoration of live Haskell values across root recreation.
 - A generic worker ledger, merge queue, or repository receipt protocol.
-- Structural Codex-context fork.
+- Structural Codex-context fork. Explore an explicit split at a chosen parent
+  snapshot, producing fresh child actor identities that inherit the same model
+  context before their tasks diverge. Keep provider-native thread/snapshot
+  forking distinct from transcript replay, and do not implicitly duplicate
+  worktree authority, runtime capabilities, or live Haskell values.
 - Security isolation for mutually untrusted native agents.
 - Replacing the raw dynamic-tool transport with a Codex source-block
   interceptor.

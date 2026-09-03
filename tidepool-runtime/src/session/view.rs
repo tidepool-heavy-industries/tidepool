@@ -135,6 +135,10 @@ pub struct SessionCompileView {
 }
 
 impl SessionCompileView {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the compile view is one immutable snapshot of these independently owned fields"
+    )]
     pub(crate) fn new(
         session: SessionId,
         lexical_scope: ScopeId,

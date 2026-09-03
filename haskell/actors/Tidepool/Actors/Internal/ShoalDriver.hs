@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | Private interactive-runtime trampoline.
 --
@@ -17,7 +18,9 @@ import Prelude
 import Tidepool.Actor
 import Tidepool.Agent.Action (AgentAction, runAgentAction)
 import Tidepool.Agent.Session
-  ( SessionActivation (..)
+  ( pattern ActionFailed
+  , pattern InitialUser
+  , pattern ManualReady
   , agentSession
   )
 import Tidepool.Actors.Shoal

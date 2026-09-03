@@ -59,5 +59,9 @@ mod tests {
                 PromptRole::HostedToolInstructions,
             ]
         );
+        let description = PromptId::HaskellToolDescription.body();
+        assert!(description.contains(":type complete"));
+        assert!(!description.contains("complete action"));
+        assert!(!description.contains("assemble"));
     }
 }

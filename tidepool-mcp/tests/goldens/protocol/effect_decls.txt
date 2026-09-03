@@ -1759,8 +1759,8 @@ DeliberateWith :: Int -> input -> Text -> Deliberate output
 -- end type_defs --
 
 -- extra_imports (1 items) --
--- extra_imports[0] (28 bytes) --
-import Tidepool.Deliberation
+-- extra_imports[0] (41 bytes) --
+import Tidepool.Deliberation (deliberate)
 -- end extra_imports[0] --
 
 -- end extra_imports --

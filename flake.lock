@@ -6,17 +6,17 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1788391616,
-        "narHash": "sha256-41hXH0Vkeo1eLqjyBD08fh1E84QeOqMJLK5R2HnnVDI=",
+        "lastModified": 1788418327,
+        "narHash": "sha256-SsfDuK1G1QeKKqj7IiLI93muEJ8AVhzj9FlahlnKWjc=",
         "owner": "inanna-malick",
         "repo": "codex",
-        "rev": "3c67184039782e8785a19c4ad85631c4aff79b91",
+        "rev": "b8d44e30de8cc2dd777f16ba218f4d248babb435",
         "type": "github"
       },
       "original": {
         "owner": "inanna-malick",
         "repo": "codex",
-        "rev": "3c67184039782e8785a19c4ad85631c4aff79b91",
+        "rev": "b8d44e30de8cc2dd777f16ba218f4d248babb435",
         "type": "github"
       }
     },

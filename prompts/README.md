@@ -22,4 +22,7 @@ Files under `shoal/` retain their existing Codex surfaces and roles:
 - **Diagnostic:** compiler/workbench/provider failures, setup-mode remediation, command errors, and operator-facing status text remain with the mechanism that detects the condition.
 - **Authored task data:** `initial_user_message`, completion tasks, harness prompts, fork briefs, startup values, and operator messages remain User content supplied by Haskell or the operator.
 
-The continuation sentence in `haskell/lib/Tidepool/Agent/Action.hs` remains in place until the activation-atomicity lane gives continuation rendering a Rust owner. The discovery lane is adding `:show imports`; after that API lands, separately review the root and hosted-tool discovery wording and replace the hosted-tool description's already-undefined `assemble` example. Those are wording changes, not part of this byte-preserving extraction.
+Activation messages are rendered by the closed Rust activation reason and carry
+the exact mounted input type. The fixed root and hosted-tool artifacts describe
+the landed `:show imports`, session-local monomorphic `complete`, and ordinary
+Haskell composition surfaces without owning those dynamic facts.

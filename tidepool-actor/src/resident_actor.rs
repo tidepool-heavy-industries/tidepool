@@ -119,16 +119,40 @@ enum ResidentStanding {
     Terminal,
 }
 
-#[derive(Default)]
-struct ObservedChildExits(std::collections::HashSet<ActorRef>);
+#[derive(Clone, Copy)]
+enum ChildExitDisposition {
+    Observed,
+    Processed,
+}
 
-impl ObservedChildExits {
-    fn record(&mut self, child: ActorRef) {
-        self.0.insert(child);
+/// Actor-local disposition journal for exact child incarnations. Processed
+/// entries remain for the owner's lifetime so repeated late polls cannot
+/// recreate a pending observation after the supervisor notice has passed.
+#[derive(Default)]
+struct ChildExitObservations(std::collections::HashMap<ActorRef, ChildExitDisposition>);
+
+impl ChildExitObservations {
+    /// Record a typed observation. Returns whether the supervisor notice was
+    /// already processed, in which case a deferred failure can be discarded.
+    fn observe(&mut self, child: ActorRef) -> bool {
+        match self.0.entry(child) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ChildExitDisposition::Observed);
+                false
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                matches!(entry.get(), ChildExitDisposition::Processed)
+            }
+        }
     }
 
-    fn take(&mut self, child: ActorRef) -> bool {
-        self.0.remove(&child)
+    /// Record supervisor-notice processing. Returns whether the typed program
+    /// had already observed the exit and therefore owns its disposition.
+    fn process(&mut self, child: ActorRef) -> bool {
+        match self.0.insert(child, ChildExitDisposition::Processed) {
+            Some(ChildExitDisposition::Observed) => true,
+            Some(ChildExitDisposition::Processed) | None => false,
+        }
     }
 }
 
@@ -144,12 +168,19 @@ pub struct ResidentKernelBehavior<H, O> {
     launch_worktrees: Vec<String>,
     policy_installed: bool,
     pending_program: Option<ResidentOutcome>,
-    observed_child_exits: ObservedChildExits,
+    child_exit_observations: ChildExitObservations,
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
+    fn record_child_observation(&mut self, child: ActorRef) {
+        if self.child_exit_observations.observe(child) {
+            self.deferred_child_failures
+                .retain(|notice| notice.child.identity() != child);
+        }
+    }
+
     fn prepared(
         descriptor: ActorDescriptor,
         environment: ResidentEnvironment<H, O>,
@@ -165,7 +196,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees: Vec::new(),
             policy_installed: false,
             pending_program: None,
-            observed_child_exits: ObservedChildExits::default(),
+            child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
         }
@@ -187,7 +218,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             launch_worktrees,
             policy_installed: false,
             pending_program: None,
-            observed_child_exits: ObservedChildExits::default(),
+            child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
         }
@@ -462,7 +493,7 @@ where
                         "awaitExit crossed a resident machine boundary".into(),
                     ));
                 }
-                self.observed_child_exits.record(wait.target);
+                self.record_child_observation(wait.target);
                 let terminal = target.terminal().wait().await;
                 self.environment
                     .runner
@@ -480,7 +511,7 @@ where
                     .resume_optional_terminal(context.clone(), poll.continuation, terminal)
                     .await?;
                 if observed {
-                    self.observed_child_exits.record(poll.target);
+                    self.record_child_observation(poll.target);
                 }
                 Ok(outcome)
             }
@@ -596,7 +627,10 @@ where
                     }
                     if activation_reason == crate::ActivationReason::ManualReady {
                         for notice in self.deferred_child_failures.drain(..) {
-                            if !self.observed_child_exits.take(notice.child.identity()) {
+                            if !self
+                                .child_exit_observations
+                                .process(notice.child.identity())
+                            {
                                 let _ = self
                                     .environment
                                     .deployments
@@ -941,9 +975,16 @@ where
                                 ));
                             }
                         };
-                    let outcome = workbench
-                        .resume_completion(context.clone(), awaiting.hole, answer)
-                        .await?;
+                    let outcome = match workbench
+                        .resume_completion(context.clone(), awaiting.hole.clone(), answer)
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            self.standing = ResidentStanding::Interactive(awaiting);
+                            return Err(error);
+                        }
+                    };
                     if self.pending_program.replace(outcome).is_some() {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(
                             "actor yielded a second continuation before resuming the first".into(),
@@ -1237,7 +1278,7 @@ where
         Box::pin(async move {
             let child = notice.child.identity();
             self.publish_retired(child, notice.terminal.clone());
-            if self.observed_child_exits.take(child)
+            if self.child_exit_observations.process(child)
                 || notice.terminal.kind == ActorExitKind::Completed
             {
                 return;
@@ -1314,11 +1355,11 @@ fn workbench_response(
 
 #[cfg(test)]
 mod tests {
-    use super::ObservedChildExits;
+    use super::ChildExitObservations;
     use crate::{ActorId, ActorRef, Incarnation};
 
     #[test]
-    fn child_exit_observation_is_exact_and_consumed_once() {
+    fn child_exit_observation_tracks_exact_processing_order() {
         let observed = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(1),
@@ -1327,12 +1368,20 @@ mod tests {
             id: ActorId(7),
             incarnation: Incarnation(2),
         };
-        let mut exits = ObservedChildExits::default();
+        let mut exits = ChildExitObservations::default();
 
-        exits.record(observed);
+        assert!(!exits.observe(observed));
 
-        assert!(!exits.take(replacement));
-        assert!(exits.take(observed));
-        assert!(!exits.take(observed));
+        assert!(!exits.process(replacement));
+        assert!(exits.process(observed));
+        assert!(!exits.process(observed));
+        assert!(exits.observe(observed));
+
+        let processed_first = ActorRef {
+            id: ActorId(8),
+            incarnation: Incarnation(1),
+        };
+        assert!(!exits.process(processed_first));
+        assert!(exits.observe(processed_first));
     }
 }

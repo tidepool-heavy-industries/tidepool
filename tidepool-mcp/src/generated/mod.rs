@@ -91,6 +91,9 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         ],
     ),
     ("ActorLocal", &["ActorReceiveWith"]),
-    ("AgentTools", &["AgentToolsAwaitWith", "AgentToolsReplyWith"]),
+    (
+        "AgentTools",
+        &["AgentToolsAwaitWith", "AgentToolsReplyWith"],
+    ),
     ("AgentSession", &["AgentSessionWith"]),
 ];

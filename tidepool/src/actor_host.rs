@@ -1606,6 +1606,10 @@ mod tests {
     use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation};
     use tidepool_worktree::WorktreeSpec;
 
+    fn normalized_prompt(prompt: &str) -> String {
+        prompt.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     #[test]
     fn activation_delivery_refuses_duplicates_and_stale_sequences() {
         let actor = ActorRef::first(tidepool_actor::ActorId(7));
@@ -1722,6 +1726,7 @@ mod tests {
             )
         );
         assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);
+        let resumed = normalized_prompt(&resumed);
         assert!(resumed.contains("Previous actor handles"));
         assert!(resumed.contains("were not restored"));
         assert!(resumed.contains("not a prewritten actor program"));
@@ -1729,6 +1734,7 @@ mod tests {
         assert!(resumed.contains("Project-specific worker ledgers"));
         assert!(resumed.contains("compact GHCi-style transcripts"));
         assert!(resumed.contains("typed Haskell state carries identities"));
+        assert!(resumed.contains(":type sessionInput"));
     }
 
     #[test]
@@ -1765,11 +1771,16 @@ mod tests {
 
         let instructions = developer_instructions(false, false, &InteractiveLaunchMode::Fresh);
         assert_eq!(instructions, PromptId::ReadonlyAgent.body());
-        assert!(instructions.contains("read-only access to the shared source checkout"));
-        assert!(instructions.contains("orchestrate children"));
+        let normalized = normalized_prompt(&instructions);
+        assert!(normalized.contains("read-only access to the shared source checkout"));
+        assert!(normalized.contains("orchestrate children"));
 
         let worker = developer_instructions(false, true, &InteractiveLaunchMode::Fresh);
         assert_eq!(worker, PromptId::WorktreeAgent.body());
+        let normalized = normalized_prompt(&worker);
+        assert!(normalized.contains(":type complete"));
+        assert!(normalized.contains("Do not wrap the value in `pure`"));
+        assert!(!normalized.contains("complete action"));
     }
 
     #[test]
@@ -2098,10 +2109,11 @@ mod tests {
         let multiline_activation = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 match deployments.recv().await {
-                    Some(LocalResidentDeployment::SessionReady {
-                        actor: resumed,
-                        message,
-                    }) if resumed == actor.identity() => break message,
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == actor.identity() =>
+                    {
+                        break activation.message
+                    }
                     Some(_) => {}
                     None => panic!(
                         "resident deployment channel closed before multiline completion wake"
@@ -2125,10 +2137,11 @@ mod tests {
         let one_line_activation = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 match deployments.recv().await {
-                    Some(LocalResidentDeployment::SessionReady {
-                        actor: resumed,
-                        message,
-                    }) if resumed == actor.identity() => break message,
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == actor.identity() =>
+                    {
+                        break activation.message
+                    }
                     Some(_) => {}
                     None => {
                         panic!("resident deployment channel closed before one-line completion wake")
