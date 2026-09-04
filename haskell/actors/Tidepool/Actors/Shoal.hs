@@ -19,6 +19,11 @@ module Tidepool.Actors.Shoal
   , ScaffoldEffects
   , IntegrationEffects
   , ActorContext
+  , ActorContextInfo (..)
+  , ActorContextRole (..)
+  , ActorNativeTools (..)
+  , ActorWorkspaceAccess (..)
+  , actorContext
   , AgentLaunch
   , AgentInspection
   , AgentControl
@@ -193,7 +198,15 @@ import Tidepool.Actors.Internal.Agent
   )
 import Tidepool.Actors.Role
 import Tidepool.Actors.Unfold
-import Tidepool.Effects.Core (Actor, Worktree)
+import Tidepool.Effects.Core
+  ( Actor
+  , ActorContextInfo (..)
+  , ActorContextRole (..)
+  , ActorNativeTools (..)
+  , ActorWorkspaceAccess (..)
+  , Worktree
+  , actorContext
+  )
 import Tidepool.Worktree
 
 -- | Capabilities installed for the interactive root incarnation.

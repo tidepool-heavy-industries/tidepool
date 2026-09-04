@@ -686,6 +686,17 @@ where
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         match boundary {
+            ResidentActorBoundary::ActorContext(continuation) => {
+                self.environment
+                    .runner
+                    .resume_actor_context(
+                        context.clone(),
+                        continuation,
+                        self.descriptor.clone(),
+                        self.launch_worktrees.first().cloned(),
+                    )
+                    .await
+            }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
                 continuation,
                 relative,

@@ -208,6 +208,7 @@ pub(crate) struct ResidentAgentAttachment {
 /// downstream orchestration never re-decodes the suspended request.
 pub(crate) enum ResidentActorBoundary {
     Completed,
+    ActorContext(ResidentHole),
     ForkGroup(ForkGroupBoundary),
     Start(crate::ResidentActorStart),
     Outbound(ResidentOutbound),
@@ -263,6 +264,7 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::ActorContext(_) => "actorContext",
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
@@ -293,6 +295,7 @@ impl ResidentActorBoundary {
 /// shape; this sum owns orchestration routing.
 enum ResidentRequest {
     Actor(crate::generated::actor::ActorReq),
+    ActorContext(crate::generated::actor_context::ActorContextReq),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
     AgentTools(crate::generated::agent_tools::AgentToolsReq),
@@ -319,6 +322,10 @@ impl ResidentRequest {
         }
 
         try_member!(Self::Actor, crate::generated::actor::ActorReq);
+        try_member!(
+            Self::ActorContext,
+            crate::generated::actor_context::ActorContextReq
+        );
         try_member!(
             Self::ActorKernel,
             crate::generated::actor_kernel::ActorKernelReq
@@ -348,6 +355,9 @@ impl ResidentRequest {
             Self::Actor(crate::generated::actor::ActorReq::ActorBeginForkGroupWith(..)) => {
                 "begin context-fork group"
             }
+            Self::ActorContext(
+                crate::generated::actor_context::ActorContextReq::ActorContextWith,
+            ) => "actorContext",
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
             Self::Actor(crate::generated::actor::ActorReq::ActorForkWith(..)) => "context fork",
             Self::Actor(crate::generated::actor::ActorReq::ActorCommitForkGroupWith(..)) => {
@@ -1018,6 +1028,9 @@ where
             .with_machine(context, move |session, context, _| {
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
                 match decoded {
+                    ResidentRequest::ActorContext(
+                        crate::generated::actor_context::ActorContextReq::ActorContextWith,
+                    ) => Ok(ResidentActorBoundary::ActorContext(hole)),
                     ResidentRequest::Actor(
                         crate::generated::actor::ActorReq::ActorStartWith(..)
                         | crate::generated::actor::ActorReq::ActorForkWith(..),
@@ -1630,6 +1643,74 @@ where
             .await
     }
 
+    pub(crate) async fn resume_actor_context(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        descriptor: crate::ActorDescriptor,
+        bound_worktree: Option<String>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let table = session.data_con_table();
+                let role = match descriptor.effective_role().role() {
+                    crate::ActorRole::Root => "ContextRoot",
+                    crate::ActorRole::Research => "ContextResearch",
+                    crate::ActorRole::Coding => "ContextCoding",
+                    crate::ActorRole::Scaffolding => "ContextScaffolding",
+                    crate::ActorRole::Integration => "ContextIntegration",
+                    crate::ActorRole::Inherited => "ContextInherited",
+                };
+                let native_tools = match descriptor.effective_role().native_tools() {
+                    crate::NativeToolClass::InspectionOnly => "NativeInspectionOnly",
+                    crate::NativeToolClass::Coding => "NativeCoding",
+                    crate::NativeToolClass::Integration => "NativeIntegration",
+                    crate::NativeToolClass::Inherited => "NativeInherited",
+                };
+                let workspace = match descriptor.effective_role().workspace() {
+                    crate::WorkspaceAccess::None => "WorkspaceNone",
+                    crate::WorkspaceAccess::InspectOnly => "WorkspaceInspectOnly",
+                    crate::WorkspaceAccess::WritableBound => "WorkspaceWritableBound",
+                };
+                let parent = descriptor.context_parent();
+                let descendants = descriptor.effective_role().descendants();
+                let fields = vec![
+                    actor_int(context.actor.id.0)?.to_value(table)?,
+                    actor_int(context.actor.incarnation.0)?.to_value(table)?,
+                    parent
+                        .map(|actor| actor_int(actor.id.0))
+                        .transpose()?
+                        .to_value(table)?,
+                    parent
+                        .map(|actor| actor_int(actor.incarnation.0))
+                        .transpose()?
+                        .to_value(table)?,
+                    descriptor.label().to_owned().to_value(table)?,
+                    actor_context_constructor(table, role, Vec::new())?,
+                    descriptor
+                        .effective_role()
+                        .haskell_effects_alias()
+                        .to_owned()
+                        .to_value(table)?,
+                    actor_context_constructor(table, native_tools, Vec::new())?,
+                    actor_context_constructor(table, workspace, Vec::new())?,
+                    bound_worktree.to_value(table)?,
+                    i64::from(descendants.maximum_depth).to_value(table)?,
+                    i64::from(descendants.maximum_active_children).to_value(table)?,
+                    descriptor
+                        .effective_role()
+                        .prompt_profile()
+                        .to_owned()
+                        .to_value(table)?,
+                ];
+                let answer = actor_context_constructor(table, "ActorContextInfo", fields)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn resume_fork_group(
         &self,
         context: crate::ActorSessionContext,
@@ -1883,6 +1964,26 @@ where
             })
             .await
     }
+}
+
+fn actor_int(value: u64) -> Result<i64, ResidentActorWorkbenchError> {
+    i64::try_from(value).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(
+            "runtime actor identity exceeds Haskell Int".into(),
+        )
+    })
+}
+
+fn actor_context_constructor(
+    table: &DataConTable,
+    name: &str,
+    fields: Vec<Value>,
+) -> Result<Value, tidepool_bridge::BridgeError> {
+    let qualified = format!("Tidepool.Effects.Core.{name}");
+    let constructor = table
+        .get_by_qualified_name(&qualified)
+        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;
+    Ok(Value::Con(constructor, fields))
 }
 
 #[derive(Clone, Copy)]

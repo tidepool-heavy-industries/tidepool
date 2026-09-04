@@ -41,11 +41,11 @@ import Data.Kind (Type)
 
 import Tidepool.Agent.Reply (Replies)
 import Tidepool.Agent.Watch (Watches)
+import Tidepool.Effects.Core (ActorContext)
 
 -- These nominal capabilities are the public residual row. Their operations
 -- are supplied by their owner modules; they are not aliases for the broad
 -- legacy Actor or Worktree effects.
-data ActorContext (a :: Type)
 data AgentLaunch (a :: Type)
 data AgentInspection (a :: Type)
 data AgentControl (a :: Type)

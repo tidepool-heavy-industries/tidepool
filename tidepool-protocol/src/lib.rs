@@ -133,6 +133,7 @@ pub fn runtime_generated_files() -> Vec<GeneratedFile> {
 pub fn actor_generated_files() -> Vec<GeneratedFile> {
     let effects: Vec<_> = vec![
         effects::actor::actor(),
+        effects::actor_context::actor_context(),
         effects::actor_kernel::actor_kernel(),
         effects::actor_local::actor_local(),
         effects::agent_tools::agent_tools(),

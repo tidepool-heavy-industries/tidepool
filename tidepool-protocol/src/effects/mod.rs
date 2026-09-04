@@ -17,6 +17,7 @@ macro_rules! positional_fields {
 }
 
 pub mod actor;
+pub mod actor_context;
 pub mod actor_kernel;
 pub mod actor_local;
 pub mod agent_session;
@@ -64,6 +65,7 @@ pub fn all() -> Vec<Effect> {
         finalize::finalize(),
         green::green(),
         actor::actor(),
+        actor_context::actor_context(),
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
         agent_tools::agent_tools(),
