@@ -275,6 +275,7 @@ fn agent_roster_value(
     table: &DataConTable,
     entry: AgentRosterProjection,
 ) -> Result<Value, ResidentActorWorkbenchError> {
+    let usage = entry.runtime.latest_provider_usage();
     let state = match entry.terminal {
         None => actor_context_constructor(table, "RosterRunning", Vec::new())?,
         Some(terminal) => match terminal.kind {
@@ -320,8 +321,12 @@ fn agent_roster_value(
             actor_int(entry.descriptor.placement().lexical_scope.0)?.to_value(table)?,
             entry.runtime.provider_thread.to_value(table)?,
             entry.runtime.provider_parent_thread.to_value(table)?,
-            entry.runtime.cached_input_tokens.to_value(table)?,
-            entry.runtime.uncached_input_tokens.to_value(table)?,
+            usage
+                .map(|sample| sample.cached_input_tokens)
+                .to_value(table)?,
+            usage
+                .map(|sample| sample.uncached_input_tokens)
+                .to_value(table)?,
         ],
     )?)
 }
@@ -2064,6 +2069,7 @@ where
                 };
                 let parent = descriptor.context_parent();
                 let descendants = descriptor.effective_role().descendants();
+                let usage = runtime.latest_provider_usage();
                 let fields = vec![
                     actor_int(context.actor.id.0)?.to_value(table)?,
                     actor_int(context.actor.incarnation.0)?.to_value(table)?,
@@ -2092,8 +2098,12 @@ where
                     actor_int(context.placement.lexical_scope.0)?.to_value(table)?,
                     runtime.provider_thread.to_value(table)?,
                     runtime.provider_parent_thread.to_value(table)?,
-                    runtime.cached_input_tokens.to_value(table)?,
-                    runtime.uncached_input_tokens.to_value(table)?,
+                    usage
+                        .map(|sample| sample.cached_input_tokens)
+                        .to_value(table)?,
+                    usage
+                        .map(|sample| sample.uncached_input_tokens)
+                        .to_value(table)?,
                     i64::from(descendants.maximum_depth).to_value(table)?,
                     i64::from(descendants.maximum_active_children).to_value(table)?,
                     descriptor

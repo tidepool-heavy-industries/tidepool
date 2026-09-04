@@ -28,6 +28,7 @@ pub struct ProcessMountBoundary {
     read_only_roots: Vec<PathBuf>,
     writable_roots: Vec<PathBuf>,
     read_only_overlays: Vec<(PathBuf, PathBuf)>,
+    writable_overlays: Vec<(PathBuf, PathBuf)>,
 }
 
 impl ProcessMountBoundary {
@@ -74,6 +75,7 @@ impl ProcessMountBoundary {
             read_only_roots,
             writable_roots,
             read_only_overlays: Vec::new(),
+            writable_overlays: Vec::new(),
         })
     }
 
@@ -102,6 +104,24 @@ impl ProcessMountBoundary {
         self.read_only_overlays.push((source, target));
         self.read_only_overlays.sort();
         self.read_only_overlays.dedup();
+        Ok(self)
+    }
+
+    /// Overlay one process-private writable directory at an existing mount
+    /// point beneath the model-visible project root.
+    pub fn with_writable_overlay(
+        mut self,
+        source: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> Result<Self, ProcessBoundaryError> {
+        let source = canonicalize("writable overlay source", source.as_ref())?;
+        let target = target.as_ref().to_path_buf();
+        if !target.is_absolute() || !target.starts_with(&self.project_root) {
+            return Err(ProcessBoundaryError::OverlayOutsideProjectRoot { path: target });
+        }
+        self.writable_overlays.push((source, target));
+        self.writable_overlays.sort();
+        self.writable_overlays.dedup();
         Ok(self)
     }
 
@@ -145,6 +165,13 @@ impl ProcessMountBoundary {
                 target.to_string_lossy().into_owned(),
             ]);
         }
+        for (source, target) in &self.writable_overlays {
+            args.extend([
+                "--bind".into(),
+                source.to_string_lossy().into_owned(),
+                target.to_string_lossy().into_owned(),
+            ]);
+        }
         args.extend([
             "--chdir".into(),
             self.project_root.to_string_lossy().into_owned(),
@@ -181,6 +208,8 @@ pub enum ProcessBoundaryError {
     WritableOutsideProtectedRoot { path: PathBuf },
     #[error("working directory {} is outside the process mount boundary", .path.display())]
     WorkingDirectoryOutsideBoundary { path: PathBuf },
+    #[error("overlay target {} is outside the model-visible project root", .path.display())]
+    OverlayOutsideProjectRoot { path: PathBuf },
 }
 
 #[cfg(test)]
@@ -292,5 +321,48 @@ mod tests {
                 && args[1] == policy.to_string_lossy()
                 && args[2] == target.to_string_lossy()
         }));
+    }
+
+    #[test]
+    fn writable_resource_overlay_is_private_and_applied_last() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let project = root.path().join("project");
+        let resource = root.path().join("resource");
+        let target = project.join(".shoal/build/cargo");
+        for path in [&workspace, &project, &resource, &target] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+
+        let wrapped =
+            ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()])
+                .unwrap()
+                .with_project_root(&project)
+                .unwrap()
+                .with_writable_overlay(&resource, &target)
+                .unwrap()
+                .wrap(
+                    "bwrap",
+                    ProcessInvocation {
+                        program: "true".into(),
+                        args: Vec::new(),
+                    },
+                );
+
+        let workspace_mount = wrapped
+            .args
+            .windows(3)
+            .position(|args| args[1] == workspace.to_string_lossy())
+            .unwrap();
+        let resource_mount = wrapped
+            .args
+            .windows(3)
+            .position(|args| {
+                args[0] == "--bind"
+                    && args[1] == resource.to_string_lossy()
+                    && args[2] == target.to_string_lossy()
+            })
+            .unwrap();
+        assert!(workspace_mount < resource_mount);
     }
 }

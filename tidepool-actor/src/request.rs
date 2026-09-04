@@ -61,6 +61,10 @@ pub struct RequestId(pub u64);
 #[serde(transparent)]
 pub struct WatchId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ActorEventSequence(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResponseFailure {
     TargetUnavailable,
@@ -140,6 +144,16 @@ pub enum WatchTransition {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WatchStateProjection {
+    Pending,
+    Ready,
+    Unavailable {
+        request: RequestId,
+        failure: ResponseFailure,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchObservation {
     Pending,
@@ -150,18 +164,28 @@ pub enum WatchObservation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WatchNotification {
     pub owner: ActorRef,
     pub watch: WatchId,
+    pub label: String,
+    pub previous: WatchStateProjection,
+    pub current: WatchStateProjection,
     pub transition: WatchTransition,
+    pub occurred_at_unix_ms: u64,
+    pub sequence: ActorEventSequence,
+    pub watermark: ActorEventSequence,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestCancellationNotification {
     pub target: ActorRef,
     pub request: RequestId,
+    pub label: String,
     pub reason: CancellationReason,
+    pub occurred_at_unix_ms: u64,
+    pub sequence: ActorEventSequence,
+    pub watermark: ActorEventSequence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +292,7 @@ struct WatchDependency {
 struct RequestStateTable {
     next_request: u64,
     next_watch: u64,
+    next_event_by_actor: HashMap<ActorRef, u64>,
     requests: HashMap<RequestId, RequestRecord>,
     watches: HashMap<WatchId, WatchRecord>,
 }
@@ -602,10 +627,22 @@ impl RequestRegistry {
         }
         let presented = record.target_state == TargetState::Presented;
         record.target_state = TargetState::CancellationRequested { presented, reason };
+        let target = record.target;
+        let label = record.label.clone();
         let notification = presented.then_some(RequestCancellationNotification {
-            target: record.target,
+            target,
             request,
+            label,
             reason,
+            occurred_at_unix_ms: unix_time_ms(),
+            sequence: ActorEventSequence(0),
+            watermark: ActorEventSequence(0),
+        });
+        let notification = notification.map(|mut notification| {
+            let sequence = next_event_sequence(&mut state, target);
+            notification.sequence = sequence;
+            notification.watermark = sequence;
+            notification
         });
         Ok((CancelRequestOutcome::Requested, notification))
     }
@@ -931,6 +968,20 @@ fn is_owner_terminal(state: &OwnerState) -> bool {
     )
 }
 
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn next_event_sequence(state: &mut RequestStateTable, actor: ActorRef) -> ActorEventSequence {
+    let next_event = state.next_event_by_actor.entry(actor).or_default();
+    *next_event = next_event.saturating_add(1);
+    ActorEventSequence(*next_event)
+}
+
 fn authorize_owner(record: &RequestRecord, actor: ActorRef) -> Result<(), ReplyError> {
     if record.owner == actor {
         Ok(())
@@ -1007,11 +1058,35 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                 failure: failure.clone(),
             },
         };
+        let current = match &transition {
+            WatchTransition::Ready => WatchStateProjection::Ready,
+            WatchTransition::Unavailable { request, failure } => {
+                WatchStateProjection::Unavailable {
+                    request: *request,
+                    failure: failure.clone(),
+                }
+            }
+        };
+        let label = watch.label.clone();
+        let owner = watch.owner;
+        let watch = *watch_id;
+        let occurred_at_unix_ms = unix_time_ms();
         notifications.push(WatchNotification {
-            owner: watch.owner,
-            watch: *watch_id,
+            owner,
+            watch,
+            label,
+            previous: WatchStateProjection::Pending,
+            current,
             transition,
+            occurred_at_unix_ms,
+            sequence: ActorEventSequence(0),
+            watermark: ActorEventSequence(0),
         });
+    }
+    for notification in &mut notifications {
+        let sequence = next_event_sequence(state, notification.owner);
+        notification.sequence = sequence;
+        notification.watermark = sequence;
     }
     notifications
 }
@@ -1046,6 +1121,11 @@ mod tests {
         let notifications = registry.finish_reply(right);
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
+        assert_eq!(notifications[0].label, "watch");
+        assert_eq!(notifications[0].previous, WatchStateProjection::Pending);
+        assert_eq!(notifications[0].current, WatchStateProjection::Ready);
+        assert_eq!(notifications[0].sequence, ActorEventSequence(1));
+        assert_eq!(notifications[0].watermark, ActorEventSequence(1));
         assert_eq!(notifications[0].transition, WatchTransition::Ready);
         assert_eq!(registry.finish_reply(right), Vec::new());
         assert_eq!(
@@ -1297,6 +1377,42 @@ mod tests {
             registry.cancel_request(owner, request, CancellationReason::RequesterCancelled),
             Ok((CancelRequestOutcome::AlreadyTerminal, None))
         );
+    }
+
+    #[test]
+    fn cancellation_notifications_carry_target_local_sequence_and_label() {
+        let registry = RequestRegistry::default();
+        let first_owner = actor(1);
+        let second_owner = actor(2);
+        let first_target = actor(3);
+        let second_target = actor(4);
+        let first = registry.reserve_labeled(first_owner, first_target, "first".into());
+        let second = registry.reserve_labeled(second_owner, second_target, "second".into());
+        registry
+            .mark_queued(first_owner, first_target, first)
+            .unwrap();
+        registry
+            .mark_queued(second_owner, second_target, second)
+            .unwrap();
+        registry.present(first_target, first).unwrap();
+        registry.present(second_target, second).unwrap();
+
+        let first_notice = registry
+            .cancel_request(first_owner, first, CancellationReason::RequesterCancelled)
+            .unwrap()
+            .1
+            .unwrap();
+        let second_notice = registry
+            .cancel_request(second_owner, second, CancellationReason::RequesterCancelled)
+            .unwrap()
+            .1
+            .unwrap();
+
+        assert_eq!(first_notice.label, "first");
+        assert_eq!(second_notice.label, "second");
+        assert_eq!(first_notice.sequence, ActorEventSequence(1));
+        assert_eq!(second_notice.sequence, ActorEventSequence(1));
+        assert!(first_notice.occurred_at_unix_ms > 0);
     }
 
     #[test]

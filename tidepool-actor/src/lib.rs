@@ -76,10 +76,11 @@ pub use mount::{
 };
 pub use profile::ActorEffectProfile;
 pub use request::{
-    AbandonResponseOutcome, CancelRequestOutcome, CancellationReason, DeadlineUnit,
-    ForgetResponseOutcome, ForgetWatchOutcome, ReplyError, ReplyObservation,
+    AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
+    DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, ReplyError, ReplyObservation,
     RequestCancellationNotification, RequestDeadline, RequestId, ResponseFailure,
-    ResponseObservation, WatchId, WatchNotification, WatchObservation, WatchTransition,
+    ResponseObservation, WatchId, WatchNotification, WatchObservation, WatchStateProjection,
+    WatchTransition,
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_with_fork_admission, LocalResidentDeployment,
@@ -96,7 +97,10 @@ pub use resident_workbench::{
 pub use role::{
     ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess,
 };
-pub use runtime_observation::{ActorRuntimeObservation, ActorRuntimeObservationHandle};
+pub use runtime_observation::{
+    ActorRuntimeObservation, ActorRuntimeObservationHandle, CacheBoundaryReason,
+    ProviderUsageSample, ProviderUsageScope,
+};
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,
     ResidentActorStart,

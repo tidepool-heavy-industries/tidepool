@@ -414,8 +414,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     None => "running".into(),
                 };
                 let runtime = record.runtime_observation.snapshot();
+                let usage = runtime.latest_provider_usage();
                 format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} role={:?} bound_worktree={:?} provider_thread={:?} cache_input={:?}/{:?} state={}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} role={:?} bound_worktree={:?} provider_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} state={}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
@@ -424,16 +425,19 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     record.descriptor.effective_role().role(),
                     record.bound_worktree,
                     runtime.provider_thread,
-                    runtime.cached_input_tokens,
-                    runtime.uncached_input_tokens,
+                    usage.map(|sample| sample.cached_input_tokens),
+                    usage.map(|sample| sample.uncached_input_tokens),
+                    usage.map(|sample| sample.scope),
+                    usage.and_then(|sample| sample.activation_sequence),
                     state,
                 )
             })
             .collect::<Vec<_>>();
         roster.sort();
         let runtime = self.runtime_observation.snapshot();
+        let usage = runtime.latest_provider_usage();
         let current = format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={:?}\n  watches: pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={:?}\n  watches: pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
@@ -443,8 +447,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             self.descriptor.placement().lexical_scope.0,
             runtime.provider_thread,
             runtime.provider_parent_thread,
-            runtime.cached_input_tokens,
-            runtime.uncached_input_tokens,
+            usage.map(|sample| sample.cached_input_tokens),
+            usage.map(|sample| sample.uncached_input_tokens),
+            usage.map(|sample| sample.scope),
+            usage.map(|sample| sample.cache_boundary),
+            usage.and_then(|sample| sample.activation_sequence),
             self.descriptor.effective_role().role(),
             self.descriptor.effective_role().haskell_effects_type(),
             self.descriptor.effective_role().native_tools(),

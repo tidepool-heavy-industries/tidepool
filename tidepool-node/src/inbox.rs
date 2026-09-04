@@ -119,6 +119,11 @@ where
         lock(&self.state).cursor
     }
 
+    /// Highest sequence durably published for this consumer.
+    pub fn watermark(&self) -> u64 {
+        lock(&self.state).next_sequence.saturating_sub(1)
+    }
+
     /// Monotonically acknowledge delivery through `sequence`.
     ///
     /// Repeating the current ack is idempotent. Skipping intermediate rows is

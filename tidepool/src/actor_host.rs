@@ -62,6 +62,7 @@ use self::prompt_catalog::PromptId;
 /// mount namespaces make the shared name safe across concurrent actors, while
 /// Codex needs only one persisted project-trust decision.
 pub(crate) const ACTOR_PROJECT_ROOT: &str = "/tmp/tidepool-actor-workspace";
+const ACTOR_BUILD_TARGET: &str = ".shoal/build/cargo";
 
 const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ShoalDriver";
 const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
@@ -177,6 +178,54 @@ struct InteractiveDeployment {
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
     runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     fork_parent_thread: Option<BackendThreadId>,
+    build_resource: Option<BuildResourceLease>,
+}
+
+#[derive(Debug)]
+struct BuildResourceLease {
+    path: PathBuf,
+    released: bool,
+}
+
+impl BuildResourceLease {
+    fn allocate(run_id: &str, actor: ActorRef) -> Result<Self, std::io::Error> {
+        let path = tidepool_runtime::paths::actor_build_resource_dir(
+            run_id,
+            actor.id.0,
+            actor.incarnation.0,
+        );
+        std::fs::create_dir_all(&path)?;
+        Ok(Self {
+            path,
+            released: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn release(mut self) -> Result<(), std::io::Error> {
+        match std::fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                self.released = true;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.released = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for BuildResourceLease {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 enum InteractiveConnection {
@@ -221,12 +270,12 @@ enum TypedActorEvent {
         message: String,
     },
     WatchChanged {
-        watch: tidepool_actor::WatchId,
-        transition: tidepool_actor::WatchTransition,
+        #[serde(flatten)]
+        notification: tidepool_actor::WatchNotification,
     },
     RequestCancellation {
-        request: tidepool_actor::RequestId,
-        reason: tidepool_actor::CancellationReason,
+        #[serde(flatten)]
+        notification: tidepool_actor::RequestCancellationNotification,
     },
     CleanupFinished {
         receipt: InteractiveCleanupReceipt,
@@ -244,18 +293,34 @@ impl DurableActorEvent {
         })
     }
 
-    fn render(&self) -> String {
+    fn render(&self, inbox_sequence: u64, inbox_watermark: u64) -> String {
+        let delivery = if inbox_sequence < inbox_watermark {
+            format!("delayed inbox event {inbox_sequence}/{inbox_watermark}; ")
+        } else {
+            format!("inbox event {inbox_sequence}/{inbox_watermark}; ")
+        };
         match self {
             Self::Typed(TypedActorEvent::SessionReady { message, .. }) | Self::Legacy(message) => {
                 message.clone()
             }
-            Self::Typed(TypedActorEvent::WatchChanged { watch, transition }) => format!(
-                "Typed watch {} changed to {transition:?}. Inspect it with `pollWatch`; the handle is authoritative.",
-                watch.0,
+            Self::Typed(TypedActorEvent::WatchChanged { notification }) => format!(
+                "{delivery}typed watch {} {:?} changed from {:?} to {:?} at {} (actor event {}/{}). Inspect it with `pollWatch`; the handle is authoritative.",
+                notification.watch.0,
+                notification.label,
+                notification.previous,
+                notification.current,
+                notification.occurred_at_unix_ms,
+                notification.sequence.0,
+                notification.watermark.0,
             ),
-            Self::Typed(TypedActorEvent::RequestCancellation { request, reason }) => format!(
-                "Typed request {} has cancellation pending ({reason:?}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
-                request.0,
+            Self::Typed(TypedActorEvent::RequestCancellation { notification }) => format!(
+                "{delivery}typed request {} {:?} has cancellation pending ({:?}) at {} (actor event {}/{}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
+                notification.request.0,
+                notification.label,
+                notification.reason,
+                notification.occurred_at_unix_ms,
+                notification.sequence.0,
+                notification.watermark.0,
             ),
             Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
@@ -271,6 +336,7 @@ enum CleanupComponent {
     Delivery,
     Socket,
     WorktreeBinding,
+    BuildResource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1059,6 +1125,7 @@ async fn run_interactive_applications(
                                 }
                                 continue;
                             }
+                            application.runtime_observation.begin_activation(sequence);
                             application.last_activation_sequence = sequence;
                         }
                     }
@@ -1106,8 +1173,7 @@ async fn run_interactive_applications(
                             notification.owner,
                             Arc::clone(&application.inbox),
                             DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
-                                watch: notification.watch,
-                                transition: notification.transition,
+                                notification,
                             }),
                         ));
                     }
@@ -1122,8 +1188,7 @@ async fn run_interactive_applications(
                             notification.target,
                             Arc::clone(&application.inbox),
                             DurableActorEvent::Typed(TypedActorEvent::RequestCancellation {
-                                request: notification.request,
-                                reason: notification.reason,
+                                notification,
                             }),
                         ));
                     }
@@ -1624,18 +1689,36 @@ async fn launch_prepared_interactive_application(
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
-    let build_output = if actor_identity == root || worktree.is_some() {
-        let relative = PathBuf::from(".shoal").join("build").join(format!(
-            "actor-{}-{}",
-            actor_identity.id.0, actor_identity.incarnation.0
-        ));
-        std::fs::create_dir_all(workspace.join(&relative)).map_err(|error| {
+    let build_resource = if native_tool_policy == InteractiveNativeToolPolicy::InspectionOnly {
+        None
+    } else {
+        let run_id = run_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("run");
+        let lease = BuildResourceLease::allocate(run_id, actor_identity).map_err(|error| {
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?;
-        Some(agent_workspace.join(relative))
-    } else {
-        None
+        let mountpoint = workspace.join(ACTOR_BUILD_TARGET);
+        std::fs::create_dir_all(&mountpoint).map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+        process_boundary = process_boundary
+            .with_writable_overlay(lease.path(), agent_workspace.join(ACTOR_BUILD_TARGET))
+            .map_err(|error| {
+                application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+            })?;
+        tracing::info!(
+            actor = ?actor_identity,
+            resource = %lease.path().display(),
+            target = ACTOR_BUILD_TARGET,
+            "actor build resource allocated"
+        );
+        Some(lease)
     };
+    let build_output = build_resource
+        .as_ref()
+        .map(|_| agent_workspace.join(ACTOR_BUILD_TARGET));
     let run_socket_id = run_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -1685,6 +1768,11 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Resume(thread) => Some(thread.clone()),
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
     };
+    runtime_observation.publish_cache_boundary(match &launch_mode {
+        InteractiveLaunchMode::Fresh => tidepool_actor::CacheBoundaryReason::Fresh,
+        InteractiveLaunchMode::Fork(_) => tidepool_actor::CacheBoundaryReason::ForkedPrefix,
+        InteractiveLaunchMode::Resume(_) => tidepool_actor::CacheBoundaryReason::ReattachedThread,
+    });
     let developer_instructions = developer_instructions(&installation.effective_role, &launch_mode);
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
@@ -1806,6 +1894,7 @@ async fn launch_prepared_interactive_application(
             fork_gate,
             runtime_observation,
             fork_parent_thread,
+            build_resource,
         },
         binding: InteractiveBindingRequest {
             path: binding_path,
@@ -1893,10 +1982,15 @@ async fn deliver_pending(
         .await
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
+    let inbox_watermark = inbox.watermark();
     for message in pending {
         let inbox_sequence = message.sequence;
         backend
-            .push(&cwd, thread, &message.payload.render())
+            .push(
+                &cwd,
+                thread,
+                &message.payload.render(inbox_sequence, inbox_watermark),
+            )
             .await
             .map_err(|error| error.to_string())?;
         let ack_inbox = Arc::clone(inbox);
@@ -2031,7 +2125,7 @@ async fn retire_interactive_application(
     binding_terminal: BindingTerminal,
 ) -> InteractiveCleanupReceipt {
     let actor = deployment.actor;
-    let mut components = Vec::with_capacity(5);
+    let mut components = Vec::with_capacity(6);
     let mut delivery = match deployment.connection {
         InteractiveConnection::AwaitingBinding => None,
         InteractiveConnection::Bound {
@@ -2082,6 +2176,22 @@ async fn retire_interactive_application(
                 detail: error.to_string(),
             },
         },
+    });
+    let build_outcome =
+        deployment
+            .build_resource
+            .take()
+            .map_or(CleanupComponentOutcome::Completed, |lease| {
+                match lease.release() {
+                    Ok(()) => CleanupComponentOutcome::Completed,
+                    Err(error) => CleanupComponentOutcome::Failed {
+                        detail: error.to_string(),
+                    },
+                }
+            });
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::BuildResource,
+        outcome: build_outcome,
     });
     let binding_outcome = if let Some(binding) = deployment.worktree_binding.take() {
         let result = match binding_terminal {
@@ -2633,7 +2743,7 @@ mod tests {
             ]),
             false,
             Some(Path::new(
-                "/tmp/tidepool-actor-workspace/.shoal/build/actor-2-1",
+                "/tmp/tidepool-actor-workspace/.shoal/build/cargo",
             )),
         );
         assert_eq!(
@@ -2648,7 +2758,7 @@ mod tests {
         );
         assert_eq!(
             launch.set.get("CARGO_TARGET_DIR").map(String::as_str),
-            Some("/tmp/tidepool-actor-workspace/.shoal/build/actor-2-1")
+            Some("/tmp/tidepool-actor-workspace/.shoal/build/cargo")
         );
         assert_eq!(launch.set.get("PATH").map(String::as_str), Some("/bin"));
         assert!(launch
@@ -2689,8 +2799,20 @@ mod tests {
         assert_eq!(encoded["request"], 7);
 
         let watch = DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
-            watch: tidepool_actor::WatchId(9),
-            transition: tidepool_actor::WatchTransition::Ready,
+            notification: tidepool_actor::WatchNotification {
+                owner: tidepool_actor::ActorRef {
+                    id: tidepool_actor::ActorId(1),
+                    incarnation: tidepool_actor::Incarnation(1),
+                },
+                watch: tidepool_actor::WatchId(9),
+                label: "join".into(),
+                previous: tidepool_actor::WatchStateProjection::Pending,
+                current: tidepool_actor::WatchStateProjection::Ready,
+                transition: tidepool_actor::WatchTransition::Ready,
+                occurred_at_unix_ms: 42,
+                sequence: tidepool_actor::ActorEventSequence(3),
+                watermark: tidepool_actor::ActorEventSequence(3),
+            },
         });
         let encoded = serde_json::to_value(&watch).expect("serialize typed watch event");
         assert_eq!(encoded["type"], "watchChanged");
