@@ -9,6 +9,7 @@
 
 mod descriptor;
 mod external_application;
+mod fork_workspace;
 mod generated;
 mod identity;
 mod interactive_session;
@@ -26,6 +27,7 @@ mod resident_interactive;
 mod resident_tools;
 mod resident_workbench;
 mod role;
+mod runtime_observation;
 mod start;
 mod termination;
 mod typed_request;
@@ -35,6 +37,7 @@ pub use descriptor::ActorDescriptor;
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
+pub use fork_workspace::{ForkWorkspaceAdmission, ForkWorkspaceAdmissionError, ForkWorkspaceSeed};
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
     ActivationId, InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentActivation,
@@ -64,8 +67,8 @@ pub use request::{
     WatchNotification, WatchObservation, WatchTransition,
 };
 pub use resident_actor::{
-    spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
-    ResidentKernelBehavior,
+    spawn_resident_root, spawn_resident_root_with_fork_admission, LocalResidentDeployment,
+    LocalResidentInstallation, ResidentActorRoot, ResidentKernelBehavior,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{
@@ -75,9 +78,13 @@ pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError,
 };
-pub use role::{ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess};
+pub use role::{
+    ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess,
+};
+pub use runtime_observation::{ActorRuntimeObservation, ActorRuntimeObservationHandle};
 pub use start::{
-    ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError, ResidentActorStart,
+    ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,
+    ResidentActorStart,
 };
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};

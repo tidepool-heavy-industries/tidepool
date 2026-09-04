@@ -1,9 +1,12 @@
 //! Cache-preserving actor-fork admission capability.
 
 use crate::hs::HsType;
-use crate::schema::{Arg, Effect, HandlingClass, Polymorphism, RustBinding, Verb};
+use crate::schema::{
+    Arg, Effect, HandlingClass, JsonInstance, Polymorphism, RustBinding, SumVariant, TypeDef,
+    TypeShape, VariantFields, Verb, WireDerives,
+};
 
-use super::agent_launch::{launch_args, launched_actor_type};
+use super::agent_launch::launch_args;
 
 #[must_use]
 pub fn forks() -> Effect {
@@ -20,10 +23,45 @@ pub fn forks() -> Effect {
         default_row_args: &[],
         helpers_row_polymorphic: true,
         extra_imports: &[],
-        type_defs: Vec::new(),
+        type_defs: vec![TypeDef {
+            name: "ActorEffectKey",
+            wire_rust: None,
+            shape: TypeShape::Sum {
+                variants: [
+                    "EffectReplies",
+                    "EffectWatches",
+                    "EffectForks",
+                    "EffectActorContext",
+                    "EffectAgentLaunch",
+                    "EffectAgentInspection",
+                    "EffectAgentControl",
+                    "EffectBoundWorktree",
+                    "EffectWorktreeRegistry",
+                    "EffectWorktreeAllocation",
+                    "EffectWorktreeIntegration",
+                ]
+                .into_iter()
+                .map(|ctor| SumVariant {
+                    ctor,
+                    fields: VariantFields::Positional(Vec::new()),
+                    doc: &[],
+                })
+                .collect(),
+            },
+            json: JsonInstance::None,
+            derives: WireDerives(&[]),
+            domain: None,
+            doc: &["Stable nominal key for one generated model-facing effect."],
+        }],
         foreign_types: &[
             ("ActorLaunchRole", "crate::ActorLaunchRoleWire"),
             ("ActorEffectProfile", "crate::ActorEffectProfileWire"),
+            ("WorktreeSpec", "tidepool_bridge_effects::WtWorktreeSpec"),
+            ("DirtyPolicy", "tidepool_bridge_effects::WtDirtyPolicy"),
+            (
+                "WorktreeHandle",
+                "tidepool_bridge_effects::WtWorktreeHandle",
+            ),
         ],
         errors: None,
         verbs: vec![
@@ -47,23 +85,44 @@ pub fn forks() -> Effect {
                         rust: RustBinding::Derived,
                     },
                 ],
-                ret: HsType::Tuple(vec![
+                ret: fallible(HsType::Tuple(vec![
                     HsType::Int,
                     HsType::Text,
                     HsType::List(Box::new(HsType::Text)),
-                ]),
+                ])),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,
             },
-            Verb {
-                ctor: "ForksStartWith",
-                method: "forks_start_with",
-                args: launch_args(true),
-                ret: launched_actor_type(),
-                errors: None,
-                handling: HandlingClass::Actor,
-                extract: None,
+            {
+                let mut args = launch_args(true);
+                args.push(Arg {
+                    name: "worktreeSpec",
+                    ty: HsType::maybe(HsType::Named("WorktreeSpec")),
+                    rust: RustBinding::Path("Option<tidepool_bridge_effects::WtWorktreeSpec>"),
+                });
+                args.push(Arg {
+                    name: "boundDirtyPolicy",
+                    ty: HsType::Named("DirtyPolicy"),
+                    rust: RustBinding::Path("tidepool_bridge_effects::WtDirtyPolicy"),
+                });
+                args.push(Arg {
+                    name: "effectKeys",
+                    ty: HsType::list(HsType::Named("ActorEffectKey")),
+                    rust: RustBinding::Path("Vec<crate::ActorEffectKeyWire>"),
+                });
+                Verb {
+                    ctor: "ForksStartWith",
+                    method: "forks_start_with",
+                    args,
+                    ret: fallible(HsType::Tuple(vec![
+                        HsType::Tuple(vec![HsType::Int, HsType::Int, HsType::Text]),
+                        HsType::Named("WorktreeHandle"),
+                    ])),
+                    errors: None,
+                    handling: HandlingClass::Actor,
+                    extract: None,
+                }
             },
             group_verb("ForksCommitWith", "forks_commit_with"),
             group_verb("ForksAbortWith", "forks_abort_with"),
@@ -83,9 +142,13 @@ fn group_verb(ctor: &'static str, method: &'static str) -> Verb {
             ty: HsType::Int,
             rust: RustBinding::Derived,
         }],
-        ret: HsType::Unit,
+        ret: fallible(HsType::Unit),
         errors: None,
         handling: HandlingClass::Actor,
         extract: None,
     }
+}
+
+fn fallible(ok: HsType) -> HsType {
+    HsType::either(HsType::Text, ok)
 }

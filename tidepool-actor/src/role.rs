@@ -31,6 +31,39 @@ pub struct DescendantBudget {
     pub maximum_active_children: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActorEffectKey {
+    Replies,
+    Watches,
+    Forks,
+    ActorContext,
+    AgentLaunch,
+    AgentInspection,
+    AgentControl,
+    BoundWorktree,
+    WorktreeRegistry,
+    WorktreeAllocation,
+    WorktreeIntegration,
+}
+
+impl ActorEffectKey {
+    const fn haskell_name(self) -> &'static str {
+        match self {
+            Self::Replies => "Replies",
+            Self::Watches => "Watches",
+            Self::Forks => "Forks",
+            Self::ActorContext => "ActorContext",
+            Self::AgentLaunch => "AgentLaunch",
+            Self::AgentInspection => "AgentInspection",
+            Self::AgentControl => "AgentControl",
+            Self::BoundWorktree => "BoundWorktree",
+            Self::WorktreeRegistry => "WorktreeRegistry",
+            Self::WorktreeAllocation => "WorktreeAllocation",
+            Self::WorktreeIntegration => "WorktreeIntegration",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveRole {
     role: ActorRole,
@@ -38,11 +71,12 @@ pub struct EffectiveRole {
     workspace: WorkspaceAccess,
     descendants: DescendantBudget,
     prompt_profile: &'static str,
+    effect_keys: Vec<ActorEffectKey>,
 }
 
 impl EffectiveRole {
     #[must_use]
-    pub const fn root() -> Self {
+    pub fn root() -> Self {
         Self::new(
             ActorRole::Root,
             NativeToolClass::Coding,
@@ -52,11 +86,24 @@ impl EffectiveRole {
                 maximum_active_children: 32,
             },
             "root-v1",
+            vec![
+                ActorEffectKey::Replies,
+                ActorEffectKey::Watches,
+                ActorEffectKey::Forks,
+                ActorEffectKey::ActorContext,
+                ActorEffectKey::AgentLaunch,
+                ActorEffectKey::AgentInspection,
+                ActorEffectKey::AgentControl,
+                ActorEffectKey::BoundWorktree,
+                ActorEffectKey::WorktreeRegistry,
+                ActorEffectKey::WorktreeAllocation,
+                ActorEffectKey::WorktreeIntegration,
+            ],
         )
     }
 
     #[must_use]
-    pub const fn research() -> Self {
+    pub fn research() -> Self {
         Self::new(
             ActorRole::Research,
             NativeToolClass::InspectionOnly,
@@ -66,11 +113,17 @@ impl EffectiveRole {
                 maximum_active_children: 0,
             },
             "research-v1",
+            vec![
+                ActorEffectKey::Replies,
+                ActorEffectKey::Watches,
+                ActorEffectKey::ActorContext,
+                ActorEffectKey::BoundWorktree,
+            ],
         )
     }
 
     #[must_use]
-    pub const fn coding() -> Self {
+    pub fn coding() -> Self {
         Self::new(
             ActorRole::Coding,
             NativeToolClass::Coding,
@@ -80,22 +133,33 @@ impl EffectiveRole {
                 maximum_active_children: 0,
             },
             "coding-v1",
+            Self::research().effect_keys,
         )
     }
 
     #[must_use]
-    pub const fn scaffolding(descendants: DescendantBudget) -> Self {
+    pub fn scaffolding(descendants: DescendantBudget) -> Self {
         Self::new(
             ActorRole::Scaffolding,
             NativeToolClass::Coding,
             WorkspaceAccess::WritableBound,
             descendants,
             "scaffolding-v1",
+            vec![
+                ActorEffectKey::Replies,
+                ActorEffectKey::Watches,
+                ActorEffectKey::Forks,
+                ActorEffectKey::ActorContext,
+                ActorEffectKey::AgentInspection,
+                ActorEffectKey::AgentControl,
+                ActorEffectKey::BoundWorktree,
+                ActorEffectKey::WorktreeIntegration,
+            ],
         )
     }
 
     #[must_use]
-    pub const fn integration() -> Self {
+    pub fn integration() -> Self {
         Self::new(
             ActorRole::Integration,
             NativeToolClass::Integration,
@@ -105,15 +169,24 @@ impl EffectiveRole {
                 maximum_active_children: 0,
             },
             "integration-v1",
+            vec![
+                ActorEffectKey::Replies,
+                ActorEffectKey::Watches,
+                ActorEffectKey::ActorContext,
+                ActorEffectKey::AgentInspection,
+                ActorEffectKey::BoundWorktree,
+                ActorEffectKey::WorktreeIntegration,
+            ],
         )
     }
 
-    const fn new(
+    fn new(
         role: ActorRole,
         native_tools: NativeToolClass,
         workspace: WorkspaceAccess,
         descendants: DescendantBudget,
         prompt_profile: &'static str,
+        effect_keys: Vec<ActorEffectKey>,
     ) -> Self {
         Self {
             role,
@@ -121,7 +194,14 @@ impl EffectiveRole {
             workspace,
             descendants,
             prompt_profile,
+            effect_keys,
         }
+    }
+
+    #[must_use]
+    pub fn with_effect_keys(mut self, effect_keys: Vec<ActorEffectKey>) -> Self {
+        self.effect_keys = effect_keys;
+        self
     }
 
     #[must_use]
@@ -144,24 +224,54 @@ impl EffectiveRole {
     pub const fn prompt_profile(&self) -> &'static str {
         self.prompt_profile
     }
-
     #[must_use]
-    pub const fn haskell_effects_alias(&self) -> &'static str {
-        match self.role {
-            ActorRole::Root | ActorRole::Inherited => "ActorEffects",
-            ActorRole::Research => "ResearchActorEffects",
-            ActorRole::Coding => "CodingActorEffects",
-            ActorRole::Scaffolding => "ScaffoldActorEffects",
-            ActorRole::Integration => "IntegrationActorEffects",
-        }
+    pub fn effect_keys(&self) -> &[ActorEffectKey] {
+        &self.effect_keys
     }
 
     #[must_use]
-    pub const fn permits_child(&self, child: &Self) -> bool {
+    pub fn haskell_effects_type(&self) -> String {
+        format!(
+            "'[{}]",
+            self.effect_keys
+                .iter()
+                .map(|effect| effect.haskell_name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    #[must_use]
+    pub fn accepts_effect_keys(&self, requested: &[ActorEffectKey]) -> bool {
+        requested
+            .iter()
+            .all(|effect| self.effect_keys.contains(effect))
+    }
+
+    #[must_use]
+    pub fn respects_role_ceiling(&self) -> bool {
+        let ceiling = match self.role {
+            ActorRole::Root | ActorRole::Inherited => Self::root(),
+            ActorRole::Research => Self::research(),
+            ActorRole::Coding => Self::coding(),
+            ActorRole::Scaffolding => Self::scaffolding(self.descendants),
+            ActorRole::Integration => Self::integration(),
+        };
+        ceiling.accepts_effect_keys(&self.effect_keys)
+            && self
+                .effect_keys
+                .iter()
+                .enumerate()
+                .all(|(index, key)| !self.effect_keys[..index].contains(key))
+    }
+
+    #[must_use]
+    pub fn permits_child(&self, child: &Self) -> bool {
         child.descendants.maximum_depth < self.descendants.maximum_depth
             && child.descendants.maximum_active_children <= self.descendants.maximum_active_children
             && native_rank(child.native_tools) <= native_rank(self.native_tools)
             && workspace_rank(child.workspace) <= workspace_rank(self.workspace)
+            && self.accepts_effect_keys(&child.effect_keys)
     }
 }
 
@@ -201,30 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn each_semantic_role_selects_one_model_facing_effect_alias() {
+    fn exact_effect_row_is_rendered_from_stable_keys() {
         assert_eq!(
-            EffectiveRole::root().haskell_effects_alias(),
-            "ActorEffects"
+            EffectiveRole::research().haskell_effects_type(),
+            "'[Replies, Watches, ActorContext, BoundWorktree]"
         );
-        assert_eq!(
-            EffectiveRole::research().haskell_effects_alias(),
-            "ResearchActorEffects"
-        );
-        assert_eq!(
-            EffectiveRole::coding().haskell_effects_alias(),
-            "CodingActorEffects"
-        );
-        assert_eq!(
-            EffectiveRole::scaffolding(DescendantBudget {
-                maximum_depth: 2,
-                maximum_active_children: 4,
-            })
-            .haskell_effects_alias(),
-            "ScaffoldActorEffects"
-        );
-        assert_eq!(
-            EffectiveRole::integration().haskell_effects_alias(),
-            "IntegrationActorEffects"
-        );
+        let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
+        assert_eq!(narrow.haskell_effects_type(), "'[Replies]");
+        assert!(EffectiveRole::root().permits_child(&narrow));
     }
 }

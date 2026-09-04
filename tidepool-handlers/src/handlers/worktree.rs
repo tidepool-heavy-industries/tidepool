@@ -177,6 +177,62 @@ impl ActorWorktreeHandler {
     }
 }
 
+impl ActorWorktreeHandler {
+    /// Reserve exactly one named child workspace as part of an actor-owned
+    /// fork admission transaction. This does not consult or confer the
+    /// caller's general allocation grant.
+    pub fn admit_fork_workspace(
+        &mut self,
+        principal: tidepool_repr::PrincipalId,
+        actor_path: String,
+        spec: Option<WtWorktreeSpec>,
+        bound_dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
+    ) -> Result<WtWorktreeHandle, WorktreeError> {
+        let actor_path = tidepool_repr::ActorPath::parse(&actor_path).map_err(|error| {
+            WorktreeError::WorktreeAuthorityDenied(format!("invalid actor path: {error}"))
+        })?;
+        let spec = match spec {
+            Some(spec) => {
+                let spec = spec_from_wire(spec)?;
+                if !self.authority.is_root(principal) {
+                    match &spec.source {
+                        WorktreeSource::Worktree(tree) if self.authority.owns(principal, tree) => {}
+                        WorktreeSource::Worktree(tree) => {
+                            return Err(WorktreeError::WorktreeUnauthorized(worktree_id_to_wire(
+                                tree,
+                            )));
+                        }
+                        WorktreeSource::CurrentRepository | WorktreeSource::Ref(_) => {
+                            return Err(WorktreeError::WorktreeAuthorityDenied(
+                                "non-root context forks must derive worktrees from their bound checkout"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+                spec
+            }
+            None => {
+                let Some(source) = self.authority.bound_worktree(principal) else {
+                    return Err(WorktreeError::WorktreeAuthorityDenied(
+                        "boundHead requires one active bound worktree".into(),
+                    ));
+                };
+                WorktreeSpec {
+                    source: WorktreeSource::Worktree(source),
+                    label: actor_path.to_string(),
+                    dirty_policy: dirty_policy_from_wire(bound_dirty_policy),
+                }
+            }
+        };
+        self.inner
+            .manager
+            .create_for_actor_path(&spec, &actor_path)
+            .map(|handle| handle_to_wire(&handle))
+            .map_err(error_to_wire)
+    }
+}
+
 macro_rules! actor_worktree_facade {
     ($name:ident) => {
         #[derive(Clone)]
@@ -878,7 +934,7 @@ mod tests {
     // no longer names them — its mechanical conversions are generated — but the
     // tables below still build wire values by hand, which is the point: they
     // assert against literals, not against the conversions under test.
-    use tidepool_bridge_effects::{WtDirtyPolicy, WtGitRef, WtInProgressKind};
+    use tidepool_bridge_effects::{WtDirtyPolicy, WtGitRef, WtInProgressKind, WtWorktreeSource};
     use tidepool_worktree::create::DirtyPolicy;
     use tidepool_worktree::error::InProgressKind;
     use tidepool_worktree::id::{GitOid, GitRef};
@@ -905,6 +961,49 @@ mod tests {
 
         binding.release(&mut bindings.lock()).unwrap();
         assert!(!authority.owns(worker, &tree));
+    }
+
+    #[test]
+    fn fork_admission_allocates_one_exact_named_workspace_without_a_general_grant() {
+        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "seed\n", "seed")
+            .unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let registry = WorktreeRegistry::open(&storage.path().join("registry")).unwrap();
+        let manager = WorktreeManager::new(
+            GitCli::new(),
+            registry,
+            storage.path().join("worktrees"),
+            repository.path(),
+        );
+        let bindings = Arc::new(Mutex::new(
+            BindingTable::open(&storage.path().join("bindings")).unwrap(),
+        ));
+        let authority = ActorWorktreeAuthority::new("run-1", bindings);
+        let root = tidepool_repr::PrincipalId::new(1, 1);
+        authority.install_root(root);
+        let mut handler =
+            ActorWorktreeHandler::new(WorktreeHandler::from_manager(manager), authority);
+
+        let admitted = handler
+            .admit_fork_workspace(
+                root,
+                "campaign/group/leaf".into(),
+                Some(WtWorktreeSpec {
+                    spec_source: WtWorktreeSource::SourceCurrentRepository,
+                    spec_label: "ignored-by-path-projection".into(),
+                    spec_dirty_policy: WtDirtyPolicy::RequireClean,
+                }),
+                WtDirtyPolicy::RequireClean,
+            )
+            .unwrap();
+
+        assert_eq!(
+            admitted.handle_receipt.branch.raw,
+            "shoal/campaign/group/branches/leaf"
+        );
     }
 
     /// `cwd` on every receipt this handler returns is `worktree_root.join(id)`

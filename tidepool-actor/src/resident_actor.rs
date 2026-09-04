@@ -68,6 +68,7 @@ pub struct LocalResidentInstallation {
     pub context_parent: Option<crate::ActorRef>,
     pub fork_group: Option<crate::ForkGroupId>,
     pub fork_gate: Option<crate::ForkGroupGate>,
+    pub runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
 #[derive(Clone)]
@@ -98,6 +99,7 @@ struct ResidentEnvironment<H, O> {
     requests: Arc<RequestRegistry>,
     fork_groups: crate::ForkGroupRegistry,
     actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
+    fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
 }
 
 #[derive(Clone)]
@@ -105,6 +107,7 @@ struct ResidentActorRecord {
     descriptor: ActorDescriptor,
     bound_worktree: Option<String>,
     terminal: Option<ActorTerminal>,
+    runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
 fn actor_is_self_or_descendant(
@@ -136,6 +139,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             requests: Arc::clone(&self.requests),
             fork_groups: self.fork_groups.clone(),
             actors: Arc::clone(&self.actors),
+            fork_workspaces: self.fork_workspaces.clone(),
         }
     }
 }
@@ -245,6 +249,7 @@ pub struct ResidentKernelBehavior<H, O> {
     child_exit_observations: ChildExitObservations,
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
+    runtime_observation: crate::ActorRuntimeObservationHandle,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -274,6 +279,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
+            runtime_observation: crate::ActorRuntimeObservationHandle::default(),
         }
     }
 
@@ -297,6 +303,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
+            runtime_observation: crate::ActorRuntimeObservationHandle::default(),
         }
     }
 
@@ -382,27 +389,37 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     None if !active.is_empty() => format!("handling:{active:?}"),
                     None => "running".into(),
                 };
+                let runtime = record.runtime_observation.snapshot();
                 format!(
-                    "{}@{} label={:?} role={:?} worktree={:?} state={}",
+                    "{}@{} label={:?} role={:?} worktree={:?} provider_thread={:?} cache_input={:?}/{:?} state={}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
                     record.descriptor.effective_role().role(),
                     record.bound_worktree,
+                    runtime.provider_thread,
+                    runtime.cached_input_tokens,
+                    runtime.uncached_input_tokens,
                     state,
                 )
             })
             .collect::<Vec<_>>();
         roster.sort();
+        let runtime = self.runtime_observation.snapshot();
         let current = format!(
-            "actor {}@{} label={:?}: parent={:?}; fork_group={:?}; role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendants={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktree={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}: parent={:?}; fork_group={:?}; haskell_snapshot={}; provider_thread={:?}; provider_parent_thread={:?}; cache_input={:?}/{:?}; role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendants={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktree={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
             self.descriptor.context_parent(),
             self.descriptor.fork_group(),
+            self.descriptor.placement().lexical_scope.0,
+            runtime.provider_thread,
+            runtime.provider_parent_thread,
+            runtime.cached_input_tokens,
+            runtime.uncached_input_tokens,
             self.descriptor.effective_role().role(),
-            self.descriptor.effective_role().haskell_effects_alias(),
+            self.descriptor.effective_role().haskell_effects_type(),
             self.descriptor.effective_role().native_tools(),
             self.descriptor.effective_role().workspace(),
             self.descriptor.effective_role().descendants(),
@@ -505,7 +522,89 @@ where
         context: &ActorSessionContext,
         start: crate::ResidentActorStart,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let (mut descriptor, parent_hole, entry, launch_worktrees, fork_group) = start.into_parts();
+        let (descriptor, parent_hole, entry, launch_worktrees, fork_group, fork_workspace) =
+            start.into_parts();
+        let started = self
+            .try_start_child(
+                kernel,
+                context,
+                descriptor,
+                entry,
+                launch_worktrees,
+                fork_group,
+                fork_workspace,
+            )
+            .await;
+        let (child, allocated_label, admitted_worktree) = match started {
+            Ok(started) => started,
+            Err(error) if fork_group.is_some() => {
+                if let Some(group) = fork_group {
+                    if let Ok(children) = self.environment.fork_groups.abort(group, context.actor) {
+                        for child in children {
+                            if let Some(child) = kernel.resolve(child) {
+                                let _ = child
+                                    .shutdown(ActorTerminal {
+                                        kind: ActorExitKind::Cancelled,
+                                        summary: "fork group admission failed".into(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                return self
+                    .environment
+                    .runner
+                    .resume_fork_failure(context.clone(), parent_hole, error.to_string())
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        match admitted_worktree {
+            Some(worktree) => {
+                self.environment
+                    .runner
+                    .resume_fork_starting_parent(
+                        context.clone(),
+                        parent_hole,
+                        child.identity(),
+                        allocated_label,
+                        worktree,
+                    )
+                    .await
+            }
+            None => {
+                self.environment
+                    .runner
+                    .resume_starting_parent(
+                        context.clone(),
+                        parent_hole,
+                        child.identity(),
+                        allocated_label,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_start_child(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        mut descriptor: ActorDescriptor,
+        entry: RootCustody,
+        mut launch_worktrees: Vec<String>,
+        fork_group: Option<crate::ForkGroupId>,
+        fork_workspace: Option<crate::ForkWorkspaceSeed>,
+    ) -> Result<
+        (
+            LocalActorRef,
+            String,
+            Option<tidepool_bridge_effects::WtWorktreeHandle>,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         if !self
             .descriptor
             .profile()
@@ -515,6 +614,12 @@ where
                 "actor profile {:?} cannot start child profile {:?}",
                 self.descriptor.profile(),
                 descriptor.profile()
+            )));
+        }
+        if !descriptor.effective_role().respects_role_ceiling() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "requested effect row exceeds or duplicates the {:?} role ceiling",
+                descriptor.effective_role().role()
             )));
         }
         if descriptor.effective_role().role() == crate::ActorRole::Scaffolding {
@@ -552,13 +657,37 @@ where
                 "context fork did not name an admission group".into(),
             ));
         }
+        let admitted_worktree = if let Some(seed) = fork_workspace {
+            let admission = self.environment.fork_workspaces.clone().ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "context-fork workspace admission is not installed".into(),
+                )
+            })?;
+            let owner = context.actor;
+            let actor_path = descriptor.label().to_owned();
+            let admitted =
+                tokio::task::spawn_blocking(move || admission.admit(owner, &actor_path, seed))
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Join)?
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "worktree admission for `{}` failed: {}",
+                            descriptor.label(),
+                            error
+                        ))
+                    })?;
+            launch_worktrees = vec![admitted.handle_receipt.tree_id.raw.clone()];
+            Some(admitted)
+        } else {
+            None
+        };
         if descriptor.placement().session != context.placement.session {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "child actor entry crossed a resident machine boundary".into(),
             ));
         }
         let allocated_label = descriptor.label().to_string();
-        let child = match kernel
+        let child = kernel
             .spawn_child(
                 None,
                 Self::child(
@@ -569,37 +698,8 @@ where
                 ),
             )
             .await
-        {
-            Ok(child) => child,
-            Err(error) => {
-                if let Some(group) = fork_group {
-                    if let Ok(children) = self.environment.fork_groups.abort(group, context.actor) {
-                        for child in children {
-                            if let Some(child) = kernel.resolve(child) {
-                                let _ = child
-                                    .shutdown(ActorTerminal {
-                                        kind: ActorExitKind::Cancelled,
-                                        summary: "fork group admission failed".into(),
-                                    })
-                                    .await;
-                            }
-                        }
-                    }
-                }
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    error.to_string(),
-                ));
-            }
-        };
-        self.environment
-            .runner
-            .resume_starting_parent(
-                context.clone(),
-                parent_hole,
-                child.identity(),
-                allocated_label,
-            )
-            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        Ok((child, allocated_label, admitted_worktree))
     }
 
     async fn resolve_outbound(
@@ -658,7 +758,7 @@ where
                     })?;
                 self.environment
                     .runner
-                    .resume_unit(context.clone(), continuation)
+                    .resume_fork_unit(context.clone(), continuation)
                     .await
             }
             ResidentOutbound::Call {
@@ -720,6 +820,7 @@ where
                         continuation,
                         self.descriptor.clone(),
                         self.launch_worktrees.first().cloned(),
+                        self.runtime_observation.snapshot(),
                     )
                     .await
             }
@@ -740,6 +841,7 @@ where
                                     .resolve(*actor)
                                     .and_then(|actor| actor.terminal().get())
                             }),
+                            runtime: record.runtime_observation.snapshot(),
                         },
                     )
                     .collect::<Vec<_>>();
@@ -755,74 +857,81 @@ where
                 group,
                 branches,
             }) => {
-                let group = if relative {
-                    let parent = self.descriptor.actor_path().ok_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            "relative subgroup requires an allocated parent actor path".into(),
+                let admitted = (|| {
+                    let group = if relative {
+                        let parent = self.descriptor.actor_path().ok_or_else(|| {
+                            "relative subgroup requires an allocated parent actor path".to_string()
+                        })?;
+                        let segment = crate::ActorPathSegment::new(group)
+                            .map_err(|error| error.to_string())?;
+                        parent.child(segment).map_err(|error| error.to_string())?
+                    } else {
+                        crate::ActorPath::parse(&group).map_err(|error| error.to_string())?
+                    };
+                    let branches = branches
+                        .into_iter()
+                        .map(crate::ActorPathSegment::new)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| error.to_string())?;
+                    let budget = self.descriptor.effective_role().descendants();
+                    if budget.maximum_depth == 0 {
+                        return Err("this actor role cannot recursively unfold context".into());
+                    }
+                    let group_path = group.to_string();
+                    let (group_id, reservations) = self
+                        .environment
+                        .fork_groups
+                        .begin(
+                            context.actor,
+                            group,
+                            branches,
+                            usize::from(budget.maximum_active_children),
                         )
-                    })?;
-                    let segment = crate::ActorPathSegment::new(group).map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?;
-                    parent.child(segment).map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?
-                } else {
-                    crate::ActorPath::parse(&group).map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?
-                };
-                let branches = branches
-                    .into_iter()
-                    .map(crate::ActorPathSegment::new)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?;
-                let budget = self.descriptor.effective_role().descendants();
-                if budget.maximum_depth == 0 {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "this actor role cannot recursively unfold context".into(),
-                    ));
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((group_id, group_path, reservations))
+                })();
+                match admitted {
+                    Ok((group_id, group_path, reservations)) => {
+                        self.environment
+                            .runner
+                            .resume_fork_group(
+                                context.clone(),
+                                continuation,
+                                group_id,
+                                group_path,
+                                reservations
+                                    .into_iter()
+                                    .map(|reservation| reservation.allocated.to_string())
+                                    .collect(),
+                            )
+                            .await
+                    }
+                    Err(detail) => {
+                        self.environment
+                            .runner
+                            .resume_fork_failure(context.clone(), continuation, detail)
+                            .await
+                    }
                 }
-                let group_path = group.to_string();
-                let (group_id, reservations) = self
-                    .environment
-                    .fork_groups
-                    .begin(
-                        context.actor,
-                        group,
-                        branches,
-                        usize::from(budget.maximum_active_children),
-                    )
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?;
-                self.environment
-                    .runner
-                    .resume_fork_group(
-                        context.clone(),
-                        continuation,
-                        group_id,
-                        group_path,
-                        reservations
-                            .into_iter()
-                            .map(|reservation| reservation.allocated.to_string())
-                            .collect(),
-                    )
-                    .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
                 continuation,
                 group,
             }) => {
-                let mut phase = self
+                let mut phase = match self
                     .environment
                     .fork_groups
                     .request_commit(group, context.actor)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?;
+                {
+                    Ok(phase) => phase,
+                    Err(error) => {
+                        return self
+                            .environment
+                            .runner
+                            .resume_fork_failure(context.clone(), continuation, error.to_string())
+                            .await;
+                    }
+                };
                 loop {
                     let current = *phase.borrow();
                     match current {
@@ -845,36 +954,52 @@ where
                                         .await;
                                 }
                             }
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "fork group {} was aborted while awaiting readiness",
-                                group.0
-                            )));
+                            return self
+                                .environment
+                                .runner
+                                .resume_fork_failure(
+                                    context.clone(),
+                                    continuation,
+                                    format!(
+                                        "fork group {} was aborted while awaiting readiness",
+                                        group.0
+                                    ),
+                                )
+                                .await;
                         }
                         crate::ForkGroupPhase::Staging => {}
                     }
-                    phase.changed().await.map_err(|_| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "fork group {} readiness channel closed",
-                            group.0
-                        ))
-                    })?;
+                    if phase.changed().await.is_err() {
+                        return self
+                            .environment
+                            .runner
+                            .resume_fork_failure(
+                                context.clone(),
+                                continuation,
+                                format!("fork group {} readiness channel closed", group.0),
+                            )
+                            .await;
+                    }
                 }
                 self.environment
                     .runner
-                    .resume_unit(context.clone(), continuation)
+                    .resume_fork_unit(context.clone(), continuation)
                     .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
                 continuation,
                 group,
             }) => {
-                let children = self
-                    .environment
-                    .fork_groups
-                    .abort(group, context.actor)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                    })?;
+                let children = match self.environment.fork_groups.abort(group, context.actor) {
+                    Ok(children) => children,
+                    Err(error) => {
+                        return self
+                            .environment
+                            .runner
+                            .resume_fork_failure(context.clone(), continuation, error.to_string())
+                            .await;
+                    }
+                };
                 for child in children {
                     if let Some(child) = kernel.resolve(child) {
                         let _ = child
@@ -1141,6 +1266,7 @@ where
                             context_parent: self.descriptor.context_parent(),
                             fork_group: self.descriptor.fork_group(),
                             fork_gate,
+                            runtime_observation: self.runtime_observation.clone(),
                         };
                         self.publish_installation(installation);
                         self.policy_installed = true;
@@ -1269,6 +1395,7 @@ where
             context_parent: self.descriptor.context_parent(),
             fork_group: self.descriptor.fork_group(),
             fork_gate,
+            runtime_observation: self.runtime_observation.clone(),
         });
         self.policy_installed = true;
         for notice in self.deferred_child_failures.drain(..) {
@@ -2030,6 +2157,7 @@ where
                     descriptor: self.descriptor.clone(),
                     bound_worktree: self.launch_worktrees.first().cloned(),
                     terminal: None,
+                    runtime_observation: self.runtime_observation.clone(),
                 },
             );
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
@@ -2366,6 +2494,25 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    spawn_resident_root_with_fork_admission(source, root, None).await
+}
+
+pub async fn spawn_resident_root_with_fork_admission<H, O>(
+    source: ActorWorkbenchSource,
+    root: ResidentActorRoot<H, O>,
+    fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+) -> Result<
+    (
+        LocalActorRef,
+        ractor::concurrency::JoinHandle<()>,
+        mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    ),
+    ractor::SpawnErr,
+>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     let (descriptor, machine, outcome) = root.into_parts();
     let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
     let session = descriptor.placement().session;
@@ -2380,6 +2527,7 @@ where
         requests: Arc::new(RequestRegistry::default()),
         fork_groups: crate::ForkGroupRegistry::new(lineage),
         actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        fork_workspaces,
     };
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
     let (actor, task) = crate::spawn_local_actor(None, behavior).await?;

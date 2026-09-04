@@ -27,6 +27,7 @@ module Tidepool.Actors.Role
   , Effects
   , KnownEffect (effectWitness)
   , KnownEffects (knownEffects)
+  , effectKeys
   , Subset
   , CoreEffects
   , ResearchEffects
@@ -51,13 +52,14 @@ import Tidepool.Effects.Core
   , WorktreeAllocation
   , WorktreeIntegration
   , WorktreeRegistry
+  , ActorEffectKey (..)
   )
 
 -- These nominal capabilities are the public residual row. Their operations
 -- are supplied by their owner modules; they are not aliases for the broad
 -- legacy Actor or Worktree effects.
 
-data EffectWitness (effect :: Type -> Type) = EffectWitness
+data EffectWitness (effect :: Type -> Type) = EffectWitness ActorEffectKey
 
 data Effects (effects :: [Type -> Type]) where
   ENil :: Effects '[]
@@ -75,6 +77,10 @@ instance KnownEffects '[] where
 instance (KnownEffect effect, KnownEffects effects) => KnownEffects (effect ': effects) where
   knownEffects = ECons effectWitness knownEffects
 
+effectKeys :: Effects effects -> [ActorEffectKey]
+effectKeys ENil = []
+effectKeys (ECons (EffectWitness key) rest) = key : effectKeys rest
+
 class Contains (effect :: Type -> Type) (effects :: [Type -> Type])
 instance {-# OVERLAPPING #-} Contains effect (effect ': effects)
 instance {-# OVERLAPPABLE #-} Contains effect effects => Contains effect (other ': effects)
@@ -83,17 +89,17 @@ class Subset (child :: [Type -> Type]) (parent :: [Type -> Type])
 instance Subset '[] parent
 instance (Contains effect parent, Subset effects parent) => Subset (effect ': effects) parent
 
-instance KnownEffect Replies where effectWitness = EffectWitness
-instance KnownEffect Watches where effectWitness = EffectWitness
-instance KnownEffect ActorContext where effectWitness = EffectWitness
-instance KnownEffect AgentLaunch where effectWitness = EffectWitness
-instance KnownEffect AgentInspection where effectWitness = EffectWitness
-instance KnownEffect AgentControl where effectWitness = EffectWitness
-instance KnownEffect BoundWorktree where effectWitness = EffectWitness
-instance KnownEffect WorktreeRegistry where effectWitness = EffectWitness
-instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness
-instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness
-instance KnownEffect Forks where effectWitness = EffectWitness
+instance KnownEffect Replies where effectWitness = EffectWitness EffectReplies
+instance KnownEffect Watches where effectWitness = EffectWitness EffectWatches
+instance KnownEffect ActorContext where effectWitness = EffectWitness EffectActorContext
+instance KnownEffect AgentLaunch where effectWitness = EffectWitness EffectAgentLaunch
+instance KnownEffect AgentInspection where effectWitness = EffectWitness EffectAgentInspection
+instance KnownEffect AgentControl where effectWitness = EffectWitness EffectAgentControl
+instance KnownEffect BoundWorktree where effectWitness = EffectWitness EffectBoundWorktree
+instance KnownEffect WorktreeRegistry where effectWitness = EffectWitness EffectWorktreeRegistry
+instance KnownEffect WorktreeAllocation where effectWitness = EffectWitness EffectWorktreeAllocation
+instance KnownEffect WorktreeIntegration where effectWitness = EffectWitness EffectWorktreeIntegration
+instance KnownEffect Forks where effectWitness = EffectWitness EffectForks
 
 type CoreEffects = '[Replies, Watches, ActorContext]
 type ResearchEffects = '[Replies, Watches, ActorContext, BoundWorktree]
@@ -105,7 +111,7 @@ type CodingEffects = '[Replies, Watches, ActorContext, BoundWorktree]
 type ScaffoldEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentInspection, AgentControl, BoundWorktree
-   , WorktreeAllocation, WorktreeIntegration
+   , WorktreeIntegration
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext

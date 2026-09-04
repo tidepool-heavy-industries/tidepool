@@ -16,10 +16,11 @@ use frunk::{hlist, HCons, HNil};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tidepool_actor::{
-    spawn_resident_root, ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement,
-    ActorRef, ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
-    ExternalApplicationFailureClass, ExternalFailureDisposition, LocalActorRef,
-    LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
+    spawn_resident_root_with_fork_admission, ActorDescriptor, ActorEffectProfile, ActorExitKind,
+    ActorPlacement, ActorRef, ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
+    ExternalApplicationFailureClass, ExternalFailureDisposition, ForkWorkspaceAdmission,
+    ForkWorkspaceAdmissionError, ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment,
+    LocalResidentInstallation, ResidentActorRoot,
 };
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
@@ -92,6 +93,45 @@ type ShoalHandlerStack = HCons<
 >;
 type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 
+struct ActorForkWorkspaceAdmission {
+    worktrees: Mutex<ActorWorktreeHandler>,
+}
+
+impl ForkWorkspaceAdmission for ActorForkWorkspaceAdmission {
+    fn admit(
+        &self,
+        owner: ActorRef,
+        actor_path: &str,
+        seed: ForkWorkspaceSeed,
+    ) -> Result<tidepool_bridge_effects::WtWorktreeHandle, ForkWorkspaceAdmissionError> {
+        let (spec, dirty_policy) = match seed {
+            ForkWorkspaceSeed::Explicit(spec) => {
+                let dirty_policy = spec.spec_dirty_policy;
+                (Some(spec), dirty_policy)
+            }
+            ForkWorkspaceSeed::BoundHead(dirty_policy) => (None, dirty_policy),
+        };
+        self.worktrees
+            .lock()
+            .admit_fork_workspace(owner.into(), actor_path.to_owned(), spec, dirty_policy)
+            .map_err(|error| ForkWorkspaceAdmissionError {
+                detail: format!("{error:?}"),
+            })
+    }
+}
+
+fn fork_workspace_admission(
+    worktrees: WorktreeManager,
+    authority: ActorWorktreeAuthority,
+) -> Arc<dyn ForkWorkspaceAdmission> {
+    Arc::new(ActorForkWorkspaceAdmission {
+        worktrees: Mutex::new(ActorWorktreeHandler::new(
+            WorktreeHandler::from_manager(worktrees),
+            authority,
+        )),
+    })
+}
+
 #[derive(Clone)]
 pub struct ActorHostConfig {
     pub workspace: PathBuf,
@@ -133,6 +173,8 @@ struct InteractiveDeployment {
     last_activation_sequence: u64,
     thread: Option<QueueReadyThread>,
     fork_gate: Option<tidepool_actor::ForkGroupGate>,
+    runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
+    fork_parent_thread: Option<BackendThreadId>,
 }
 
 enum InteractiveConnection {
@@ -340,7 +382,10 @@ pub async fn run(
             worktrees.clone(),
             worktree_authority.clone(),
         )?;
-        let (root_actor, mut root_task, deployments) = spawn_resident_root(source, root).await?;
+        let fork_workspaces =
+            fork_workspace_admission(worktrees.clone(), worktree_authority.clone());
+        let (root_actor, mut root_task, deployments) =
+            spawn_resident_root_with_fork_admission(source, root, Some(fork_workspaces)).await?;
         worktree_authority.install_root(root_actor.identity().into());
 
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -933,6 +978,8 @@ async fn run_interactive_applications(
                         }
                         let pane = deployment.pane.clone();
                         let fork_gate = deployment.fork_gate.clone();
+                        let runtime_observation = deployment.runtime_observation.clone();
+                        let fork_parent_thread = deployment.fork_parent_thread.clone();
                         let tmux = tmux.clone();
                         binding_discoveries.spawn(async move {
                             let result = discover_interactive_binding(
@@ -942,6 +989,12 @@ async fn run_interactive_applications(
                                 &pane,
                             )
                             .await;
+                            if let Ok(thread) = &result {
+                                runtime_observation.publish_provider_binding(
+                                    fork_parent_thread.map(|thread| thread.0),
+                                    thread.id().0.clone(),
+                                );
+                            }
                             let result = match (result, fork_gate) {
                                 (Ok(thread), Some(gate)) => {
                                     match gate.mark_ready() {
@@ -1306,6 +1359,7 @@ async fn launch_prepared_interactive_application(
     } = context;
     let actor = installation.actor;
     let fork_gate = installation.fork_gate.clone();
+    let runtime_observation = installation.runtime_observation.clone();
     let actor_identity = actor.identity();
     let workspace = worktree.as_ref().map_or_else(
         || config.workspace.clone(),
@@ -1415,7 +1469,7 @@ async fn launch_prepared_interactive_application(
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?,
     );
-    let launch_mode = if let Some(parent) = fork_parent_thread {
+    let launch_mode = if let Some(parent) = fork_parent_thread.clone() {
         InteractiveLaunchMode::Fork(parent)
     } else if actor_identity == root {
         config.root_launch_mode.clone()
@@ -1546,6 +1600,8 @@ async fn launch_prepared_interactive_application(
             last_activation_sequence: 0,
             thread: None,
             fork_gate,
+            runtime_observation,
+            fork_parent_thread,
         },
         binding: InteractiveBindingRequest {
             path: binding_path,
@@ -2513,9 +2569,16 @@ mod tests {
             authority.clone(),
         )
         .expect("compile root driver");
-        let (actor, hosted, mut deployments) = spawn_resident_root(source, root)
-            .await
-            .expect("spawn resident root");
+        let (actor, hosted, mut deployments) = spawn_resident_root_with_fork_admission(
+            source,
+            root,
+            Some(fork_workspace_admission(
+                worktrees.clone(),
+                authority.clone(),
+            )),
+        )
+        .await
+        .expect("spawn resident root");
         authority.install_root(actor.identity().into());
         let LocalResidentDeployment::PolicyInstalled(root_installation) =
             deployments.try_recv().expect("root driver installation")
@@ -3232,9 +3295,16 @@ mod tests {
             authority.clone(),
         )
         .expect("compile permanent root");
-        let (actor, hosted, mut deployments) = spawn_resident_root(source, root)
-            .await
-            .expect("spawn permanent root");
+        let (actor, hosted, mut deployments) = spawn_resident_root_with_fork_admission(
+            source,
+            root,
+            Some(fork_workspace_admission(
+                worktrees.clone(),
+                authority.clone(),
+            )),
+        )
+        .await
+        .expect("spawn permanent root");
         authority.install_root(actor.identity().into());
         let LocalResidentDeployment::PolicyInstalled(root_installation) = deployments
             .recv()

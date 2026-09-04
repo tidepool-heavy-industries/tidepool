@@ -53,6 +53,12 @@ module Tidepool.Actors.Shoal
   , batch
   , subgroup
   , Branch
+  , RolePolicy
+  , inspectionPolicy
+  , codingPolicy
+  , scaffoldPolicy
+  , integrationPolicy
+  , narrowed
   , ForkRole (..)
   , ForkWorkspaceAccess (..)
   , researching
@@ -68,6 +74,8 @@ module Tidepool.Actors.Shoal
   , BranchReceipt (..)
   , awaitFork
   , awaitSettledFork
+  , UnfoldError (..)
+  , attemptUnfold
   , unfold
   , AgentSpec
   , AgentRef

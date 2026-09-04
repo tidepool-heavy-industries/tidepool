@@ -68,6 +68,7 @@ import Tidepool.Agent.Session
   )
 import Tidepool.Effects.Core
   ( ActorCallStatus (..)
+  , ActorEffectKey
   , ActorEffectProfile (..)
   , ActorKernel (..)
   , ActorLaunchRole (..)
@@ -80,6 +81,8 @@ import Tidepool.Effects.Core
   , Forks (..)
   , WorktreeHandle (..)
   , WorktreeReceipt (..)
+  , WorktreeSpec
+  , DirtyPolicy
   )
 import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
 import Tidepool.Worktree
@@ -202,10 +205,28 @@ startAgent spec = do
 
 -- | Start an agent by forking the caller's active provider and Haskell
 -- snapshots. Public Shoal code reaches this through the applicative unfold DSL.
-startForkedAgent :: Member Forks effs => Int -> Text -> AgentSpec -> Eff effs (AgentRef, Text)
-startForkedAgent forkGroup actorLabel spec = do
-  (actor, allocatedPath) <- launchForkedActor (agentRole spec) forkGroup (agentDefinitionNamed actorLabel spec) ()
-  pure (AgentRef actor (agentWorktree spec), allocatedPath)
+startForkedAgent
+  :: Member Forks effs
+  => Actor.LaunchRole
+  -> Int
+  -> Text
+  -> Maybe WorktreeSpec
+  -> DirtyPolicy
+  -> [ActorEffectKey]
+  -> Eff effs (Either Text (AgentRef, Text, WorktreeHandle))
+startForkedAgent launchRole forkGroup actorLabel worktreeSpec dirtyPolicy effectKeys = do
+  launched <- launchForkedActor
+    launchRole
+    forkGroup
+    (agentDefinitionUnbound actorLabel)
+    ()
+    worktreeSpec
+    dirtyPolicy
+    effectKeys
+  pure $ case launched of
+    Left failure -> Left failure
+    Right (actor, allocatedPath, tree) ->
+      Right (AgentRef actor (Just tree), allocatedPath, tree)
 
 -- | Submit a typed request and return its independently awaitable reply.
 {-# OPAQUE request #-}
@@ -384,14 +405,17 @@ launchForkedActor
   -> Int
   -> Actor.ActorDefinition startup api exit
   -> startup
-  -> Eff effs (Actor.ActorRef api exit, Text)
+  -> Maybe WorktreeSpec
+  -> DirtyPolicy
+  -> [ActorEffectKey]
+  -> Eff effs (Either Text (Actor.ActorRef api exit, Text, WorktreeHandle))
 launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
   { Actor.label = actorLabel
   , Actor.effectProfile = profile
   , Actor.initialization = startupAction
   , Actor.behavior = install
   , Actor.onShutdown = shutdownAction
-  } startup = do
+  } startup worktreeSpec dirtyPolicy effectKeys = do
   let cell = newExitCell startup
       shutdownEntry reasonCode =
         raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
@@ -402,15 +426,21 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
         result <- raiseActorKernel (install startup initial)
         case fillExitCell cell result of
           () -> pure ()
-  (actorId, incarnation, allocatedPath) <- send
+  launched <- send
     (ForksStartWith
       actorLabel
       entry
       forkGroup
       (roleCode launchRole)
       (profileCode profile)
-      (ActorInternal.actorLaunchWorktrees definition))
-  pure (ActorInternal.ActorRef actorId incarnation cell, allocatedPath)
+      (ActorInternal.actorLaunchWorktrees definition)
+      worktreeSpec
+      dirtyPolicy
+      effectKeys)
+  pure $ case launched of
+    Left failure -> Left failure
+    Right ((actorId, incarnation, allocatedPath), tree) ->
+      Right (ActorInternal.ActorRef actorId incarnation cell, allocatedPath, tree)
 
 pollAgentExit
   :: Member AgentInspection effs
@@ -470,7 +500,10 @@ agentDefinition :: AgentSpec -> Actor.ActorDefinition () AgentProtocol ()
 agentDefinition spec = agentDefinitionNamed (agentLabel spec) spec
 
 agentDefinitionNamed :: Text -> AgentSpec -> Actor.ActorDefinition () AgentProtocol ()
-agentDefinitionNamed actorLabel spec = attachWorktree spec definition
+agentDefinitionNamed actorLabel spec = attachWorktree spec (agentDefinitionUnbound actorLabel)
+
+agentDefinitionUnbound :: Text -> Actor.ActorDefinition () AgentProtocol ()
+agentDefinitionUnbound actorLabel = definition
   where
     definition =
       Actor.ActorDefinition

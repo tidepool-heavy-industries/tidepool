@@ -1647,6 +1647,15 @@ implement, not that production support has landed.
     `/run/current-system/sw/bin/zsh -lc 'cargo --version'` before execution with
     the inspection-only rationale. Tail-position enforcement remains for the
     `Forks` effect slice.
+  - 2026-09-04 admission slice: `attemptUnfold` now receives classified
+    begin/branch/shape/commit failures without publishing partial handles.
+    `Forks` reserves each declared workspace through the canonical Worktree
+    owner without granting general allocation, and every branch carries its
+    exact stable effect-key row. Runtime admission checks both the semantic
+    role ceiling and the parent's row; a custom `'[Replies, ActorContext]`
+    researcher compiled while `stopAgent` failed its compile-negative fixture.
+    The remaining Gate 0 item is compiled-provenance rejection of a pure
+    user suffix after `unfold`.
 - [x] Gate 1: add immutable Haskell binding tips and descendant root leases.
   - 2026-09-04: `BindingTable` now captures a flattened immutable inherited
     tip at scope mint, retains each referenced `SessionVarId` through a
@@ -1702,6 +1711,14 @@ implement, not that production support has landed.
     `shoal/<parents>/branches/<leaf>` projection with a focused invariant test.
 - [ ] Gate 7: land prompt profiles, status/metrics, hibernation, and the full
   three-batch dogfood run.
+  - 2026-09-04 observability slice: `actorContext`, `listAgents`, and `:status`
+    now expose the exact Haskell scope snapshot, fork group, provider thread
+    ancestry, and optional cached/uncached input counts. Binding discovery
+    publishes provider lineage before a child clears the atomic readiness
+    gate. Missing backend usage remains `Nothing`, distinct from a measured
+    zero. The current interactive backend has no turn-idle or usage-observation
+    event, so cache measurement and race-free process hibernation remain open
+    rather than being inferred from reply settlement.
 - [ ] Run the final relevant broad checks once, move stable contracts to
   owning crate docs and the glossary, and retire this plan.
 

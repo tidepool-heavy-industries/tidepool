@@ -112,5 +112,28 @@ homogeneousUnfold group leaves =
       (\leaf -> child (researching @Text leaf projectHead ()))
       leaves
 
+recoverableUnfold
+  :: ForkGroupPath
+  -> BranchLabel
+  -> Eff ActorEffects (Either UnfoldError (Forked Text))
+recoverableUnfold group leaf =
+  attemptUnfold group $
+    child (researching @Text leaf projectHead ())
+
+type TinyResearchEffects = '[Replies, ActorContext]
+
+narrowResearch
+  :: ForkGroupPath
+  -> BranchLabel
+  -> Eff ActorEffects (Forked Text)
+narrowResearch group leaf =
+  unfold group $
+    child $
+      narrowed
+        (knownEffects @TinyResearchEffects)
+        (inspectionPolicy projectHead)
+        leaf
+        ()
+
 result :: Int
 result = 42

@@ -132,7 +132,7 @@ impl ActorDescriptor {
             effect_policy: self.effect_policy,
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
-            haskell_effects_alias: self.role.haskell_effects_alias(),
+            haskell_effects_alias: self.role.haskell_effects_type(),
         }
     }
 }

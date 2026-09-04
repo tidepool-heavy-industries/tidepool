@@ -208,6 +208,7 @@ pub(crate) struct AgentRosterProjection {
     pub(crate) descriptor: crate::ActorDescriptor,
     pub(crate) bound_worktree: Option<String>,
     pub(crate) terminal: Option<crate::ActorTerminal>,
+    pub(crate) runtime: crate::ActorRuntimeObservation,
 }
 
 /// One fully captured boundary reached by an installed actor program.
@@ -678,7 +679,7 @@ where
                     session,
                     context,
                     source,
-                    context.haskell_effects_alias,
+                    &context.haskell_effects_alias,
                     &type_modules,
                     &block,
                 )? {
@@ -790,7 +791,7 @@ where
             (Some(response), Some(request)) => response.request_preamble(
                 &turn_source.preamble,
                 request,
-                context.haskell_effects_alias,
+                &context.haskell_effects_alias,
             ),
             (None, None) => turn_source.preamble.to_string(),
             _ => unreachable!("request workbench scope is constructed atomically"),
@@ -839,7 +840,7 @@ where
     let mut source = source.clone();
     source.preamble = match (scope.response, scope.request) {
         (Some(response), Some(request)) => {
-            response.request_preamble(&source.preamble, request, context.haskell_effects_alias)
+            response.request_preamble(&source.preamble, request, &context.haskell_effects_alias)
         }
         (None, None) => source.preamble.to_string(),
         _ => unreachable!("request workbench scope is constructed atomically"),
@@ -855,7 +856,7 @@ where
         session,
         context,
         &source,
-        context.haskell_effects_alias,
+        &context.haskell_effects_alias,
         scope.type_modules,
         &block,
     )? {
@@ -1095,6 +1096,8 @@ where
                         profile,
                         worktrees,
                         None,
+                        None,
+                        None,
                         context.placement.session,
                         context.actor,
                     )
@@ -1107,6 +1110,9 @@ where
                         role,
                         profile,
                         worktrees,
+                        worktree_spec,
+                        bound_dirty_policy,
+                        effect_keys,
                     )) => {
                         let group = u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -1121,6 +1127,11 @@ where
                             profile,
                             worktrees,
                             Some(crate::ForkGroupId(group)),
+                            Some(match worktree_spec {
+                                Some(spec) => crate::ForkWorkspaceSeed::Explicit(spec),
+                                None => crate::ForkWorkspaceSeed::BoundHead(bound_dirty_policy),
+                            }),
+                            Some(effect_keys),
                             context.placement.session,
                             context.actor,
                         )
@@ -1803,6 +1814,7 @@ where
         hole: ResidentHole,
         descriptor: crate::ActorDescriptor,
         bound_worktree: Option<String>,
+        runtime: crate::ActorRuntimeObservation,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, context, _| {
@@ -1843,12 +1855,21 @@ where
                     actor_context_constructor(table, role, Vec::new())?,
                     descriptor
                         .effective_role()
-                        .haskell_effects_alias()
-                        .to_owned()
+                        .haskell_effects_type()
                         .to_value(table)?,
                     actor_context_constructor(table, native_tools, Vec::new())?,
                     actor_context_constructor(table, workspace, Vec::new())?,
                     bound_worktree.to_value(table)?,
+                    descriptor
+                        .fork_group()
+                        .map(|group| actor_int(group.0))
+                        .transpose()?
+                        .to_value(table)?,
+                    actor_int(context.placement.lexical_scope.0)?.to_value(table)?,
+                    runtime.provider_thread.to_value(table)?,
+                    runtime.provider_parent_thread.to_value(table)?,
+                    runtime.cached_input_tokens.to_value(table)?,
+                    runtime.uncached_input_tokens.to_value(table)?,
                     i64::from(descendants.maximum_depth).to_value(table)?,
                     i64::from(descendants.maximum_active_children).to_value(table)?,
                     descriptor
@@ -1912,6 +1933,18 @@ where
                             state,
                             actor_context_constructor(table, role, Vec::new())?,
                             entry.bound_worktree.to_value(table)?,
+                            entry
+                                .descriptor
+                                .fork_group()
+                                .map(|group| actor_int(group.0))
+                                .transpose()?
+                                .to_value(table)?,
+                            actor_int(entry.descriptor.placement().lexical_scope.0)?
+                                .to_value(table)?,
+                            entry.runtime.provider_thread.to_value(table)?,
+                            entry.runtime.provider_parent_thread.to_value(table)?,
+                            entry.runtime.cached_input_tokens.to_value(table)?,
+                            entry.runtime.uncached_input_tokens.to_value(table)?,
                         ],
                     )?);
                 }
@@ -1938,7 +1971,8 @@ where
                         "fork group identity exceeds Haskell Int".into(),
                     )
                 })?;
-                let answer = (group, group_path, paths).to_value(session.data_con_table())?;
+                let answer = Ok::<_, String>((group, group_path, paths))
+                    .to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -2170,6 +2204,63 @@ where
                     allocated_label,
                 )
                     .to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub async fn resume_fork_starting_parent(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        actor: crate::ActorRef,
+        allocated_label: String,
+        worktree: tidepool_bridge_effects::WtWorktreeHandle,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = Ok::<_, String>((
+                    (
+                        actor.id.0 as i64,
+                        actor.incarnation.0 as i64,
+                        allocated_label,
+                    ),
+                    worktree,
+                ))
+                .to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_fork_failure(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        detail: String,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = Err::<(), _>(detail).to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_fork_unit(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = Ok::<(), String>(()).to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

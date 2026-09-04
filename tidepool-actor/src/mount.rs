@@ -133,7 +133,7 @@ pub struct ActorSessionContext {
     pub effect_policy: EffectRunPolicy,
     pub live_payload: LivePayloadPolicy,
     pub source_imports: ActorSourceImports,
-    pub haskell_effects_alias: &'static str,
+    pub haskell_effects_alias: String,
 }
 
 impl ActorSessionContext {

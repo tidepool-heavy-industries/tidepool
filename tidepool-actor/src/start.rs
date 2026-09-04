@@ -33,6 +33,39 @@ pub enum ActorLaunchRoleWire {
     ActorInheritedRole,
 }
 
+#[derive(tidepool_bridge_derive::FromCore)]
+pub enum ActorEffectKeyWire {
+    EffectReplies,
+    EffectWatches,
+    EffectForks,
+    EffectActorContext,
+    EffectAgentLaunch,
+    EffectAgentInspection,
+    EffectAgentControl,
+    EffectBoundWorktree,
+    EffectWorktreeRegistry,
+    EffectWorktreeAllocation,
+    EffectWorktreeIntegration,
+}
+
+impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
+    fn from(value: ActorEffectKeyWire) -> Self {
+        match value {
+            ActorEffectKeyWire::EffectReplies => Self::Replies,
+            ActorEffectKeyWire::EffectWatches => Self::Watches,
+            ActorEffectKeyWire::EffectForks => Self::Forks,
+            ActorEffectKeyWire::EffectActorContext => Self::ActorContext,
+            ActorEffectKeyWire::EffectAgentLaunch => Self::AgentLaunch,
+            ActorEffectKeyWire::EffectAgentInspection => Self::AgentInspection,
+            ActorEffectKeyWire::EffectAgentControl => Self::AgentControl,
+            ActorEffectKeyWire::EffectBoundWorktree => Self::BoundWorktree,
+            ActorEffectKeyWire::EffectWorktreeRegistry => Self::WorktreeRegistry,
+            ActorEffectKeyWire::EffectWorktreeAllocation => Self::WorktreeAllocation,
+            ActorEffectKeyWire::EffectWorktreeIntegration => Self::WorktreeIntegration,
+        }
+    }
+}
+
 /// One parked parent continuation paired with exclusive custody of its child
 /// entry. Compiler provenance travels with the rooted entry itself.
 pub struct ResidentActorStart {
@@ -41,6 +74,7 @@ pub struct ResidentActorStart {
     entry: RootCustody,
     launch_worktrees: Vec<String>,
     fork_group: Option<crate::ForkGroupId>,
+    fork_workspace: Option<crate::ForkWorkspaceSeed>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +150,8 @@ impl ResidentActorStart {
             profile,
             launch_worktrees,
             fork_group,
+            None,
+            None,
             session_id,
             parent_actor,
         )
@@ -130,6 +166,8 @@ impl ResidentActorStart {
         profile: ActorEffectProfileWire,
         launch_worktrees: Vec<String>,
         fork_group: Option<crate::ForkGroupId>,
+        fork_workspace: Option<crate::ForkWorkspaceSeed>,
+        effect_keys: Option<Vec<ActorEffectKeyWire>>,
         session_id: tidepool_repr::SessionId,
         parent_actor: crate::ActorRef,
     ) -> Result<Self, ActorStartCaptureError>
@@ -173,6 +211,12 @@ impl ResidentActorStart {
                 }
             }
         };
+        let effective_role = match effect_keys {
+            Some(keys) => {
+                effective_role.with_effect_keys(keys.into_iter().map(Into::into).collect())
+            }
+            None => effective_role,
+        };
         let mut descriptor = ActorDescriptor::new(
             label,
             crate::ActorPlacement {
@@ -196,6 +240,7 @@ impl ResidentActorStart {
             entry,
             launch_worktrees,
             fork_group,
+            fork_workspace,
         })
     }
 
@@ -208,6 +253,7 @@ impl ResidentActorStart {
         RootCustody,
         Vec<String>,
         Option<crate::ForkGroupId>,
+        Option<crate::ForkWorkspaceSeed>,
     ) {
         (
             self.descriptor,
@@ -215,6 +261,7 @@ impl ResidentActorStart {
             self.entry,
             self.launch_worktrees,
             self.fork_group,
+            self.fork_workspace,
         )
     }
 }
