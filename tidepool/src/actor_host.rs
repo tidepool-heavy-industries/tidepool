@@ -1480,8 +1480,7 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Resume(thread) => Some(thread.clone()),
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
     };
-    let developer_instructions =
-        developer_instructions(installation.effective_role.role(), &launch_mode);
+    let developer_instructions = developer_instructions(&installation.effective_role, &launch_mode);
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: config.model.clone(),
@@ -1944,15 +1943,19 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
     }
 }
 
-fn developer_instructions(role: tidepool_actor::ActorRole, mode: &InteractiveLaunchMode) -> String {
+fn developer_instructions(
+    effective_role: &tidepool_actor::EffectiveRole,
+    mode: &InteractiveLaunchMode,
+) -> String {
+    let role = effective_role.role();
     if role == tidepool_actor::ActorRole::Root {
         let mut instructions = PromptId::ShoalRoot.body().to_string();
         if matches!(mode, InteractiveLaunchMode::Resume(_)) {
             instructions.push_str(PromptId::RecreatedRoot.body());
         }
-        instructions
+        append_effective_role(instructions, effective_role)
     } else {
-        match role {
+        let instructions = match role {
             tidepool_actor::ActorRole::Research => PromptId::ReadonlyAgent.body().into(),
             tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Inherited => {
                 PromptId::WorktreeAgent.body().into()
@@ -1960,8 +1963,24 @@ fn developer_instructions(role: tidepool_actor::ActorRole, mode: &InteractiveLau
             tidepool_actor::ActorRole::Scaffolding => PromptId::ScaffoldingAgent.body().into(),
             tidepool_actor::ActorRole::Integration => PromptId::IntegrationAgent.body().into(),
             tidepool_actor::ActorRole::Root => unreachable!("root handled above"),
-        }
+        };
+        append_effective_role(instructions, effective_role)
     }
+}
+
+fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
+    let descendants = role.descendants();
+    instructions.push_str(&format!(
+        "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
+        role.prompt_profile(),
+        role.role(),
+        role.haskell_effects_type(),
+        role.native_tools(),
+        role.workspace(),
+        descendants.maximum_depth,
+        descendants.maximum_active_children,
+    ));
+    instructions
 }
 
 fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
@@ -2145,25 +2164,26 @@ mod tests {
 
     #[test]
     fn root_instructions_preserve_idle_and_resume_contracts() {
-        let fresh = developer_instructions(
-            tidepool_actor::ActorRole::Root,
-            &InteractiveLaunchMode::Fresh,
-        );
+        let role = tidepool_actor::EffectiveRole::root();
+        let fresh = developer_instructions(&role, &InteractiveLaunchMode::Fresh);
         let resumed = developer_instructions(
-            tidepool_actor::ActorRole::Root,
+            &role,
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
-        assert_eq!(fresh, PromptId::ShoalRoot.body());
-        assert_eq!(
-            resumed,
-            format!(
-                "{}{}",
-                PromptId::ShoalRoot.body(),
-                PromptId::RecreatedRoot.body()
-            )
-        );
+        assert!(fresh.starts_with(PromptId::ShoalRoot.body()));
+        assert!(!fresh.contains(PromptId::RecreatedRoot.body()));
+        assert!(resumed.starts_with(PromptId::ShoalRoot.body()));
         assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);
         assert!(normalized_prompt(&resumed).contains("Previous actor handles"));
+        let root_effects = role.haskell_effects_type();
+        for projection in [
+            role.prompt_profile(),
+            root_effects.as_str(),
+            "native_tools=Coding",
+            "workspace=WritableBound",
+        ] {
+            assert!(fresh.contains(projection), "missing {projection}: {fresh}");
+        }
     }
 
     #[tokio::test]
@@ -2239,33 +2259,33 @@ mod tests {
         assert!(actor_workspace_request(true, &one).is_err());
         assert!(actor_workspace_request(false, &two).is_err());
 
-        let instructions = developer_instructions(
-            tidepool_actor::ActorRole::Research,
-            &InteractiveLaunchMode::Fresh,
-        );
-        assert_eq!(instructions, PromptId::ReadonlyAgent.body());
+        let research = tidepool_actor::EffectiveRole::research();
+        let instructions = developer_instructions(&research, &InteractiveLaunchMode::Fresh);
+        assert!(instructions.starts_with(PromptId::ReadonlyAgent.body()));
         let normalized = normalized_prompt(&instructions);
         assert!(normalized.contains("Do not run builds, tests, formatters"));
+        assert!(instructions.contains("native_tools=InspectionOnly"));
+        assert!(instructions.contains(&research.haskell_effects_type()));
 
         let worker = developer_instructions(
-            tidepool_actor::ActorRole::Coding,
+            &tidepool_actor::EffectiveRole::coding(),
             &InteractiveLaunchMode::Fresh,
         );
-        assert_eq!(worker, PromptId::WorktreeAgent.body());
-        assert_eq!(
-            developer_instructions(
-                tidepool_actor::ActorRole::Scaffolding,
-                &InteractiveLaunchMode::Fork(BackendThreadId("parent".into())),
-            ),
-            PromptId::ScaffoldingAgent.body()
+        assert!(worker.starts_with(PromptId::WorktreeAgent.body()));
+        let scaffold = developer_instructions(
+            &tidepool_actor::EffectiveRole::scaffolding(tidepool_actor::DescendantBudget {
+                maximum_depth: 2,
+                maximum_active_children: 3,
+            }),
+            &InteractiveLaunchMode::Fork(BackendThreadId("parent".into())),
         );
-        assert_eq!(
-            developer_instructions(
-                tidepool_actor::ActorRole::Integration,
-                &InteractiveLaunchMode::Fresh,
-            ),
-            PromptId::IntegrationAgent.body()
+        assert!(scaffold.starts_with(PromptId::ScaffoldingAgent.body()));
+        assert!(scaffold.contains("descendant_depth=2; active_children=3"));
+        let integration = developer_instructions(
+            &tidepool_actor::EffectiveRole::integration(),
+            &InteractiveLaunchMode::Fresh,
         );
+        assert!(integration.starts_with(PromptId::IntegrationAgent.body()));
     }
 
     #[test]
