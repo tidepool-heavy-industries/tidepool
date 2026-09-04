@@ -9,6 +9,8 @@ pub fn worktree_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)",
+            "WorktreeCreateForActorPath :: WorktreeSpec -> Text -> Worktree (Either WorktreeError WorktreeHandle)",
+            "WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",

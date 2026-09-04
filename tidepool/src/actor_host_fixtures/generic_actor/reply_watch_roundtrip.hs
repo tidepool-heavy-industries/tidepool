@@ -1,9 +1,11 @@
 data ReplyReport = ReplyReport Int deriving (Show, Eq)
 -- TIDEPOOL-ITEM --
-worker <- startAgent (readonlyAgent "reply-watch-worker")
+data EchoReport = EchoReport Text deriving (Show, Eq)
 -- TIDEPOOL-ITEM --
-response <- request @ReplyReport worker "Increment the typed input." (41 :: Int)
+sharedDelta <- pure (1 :: Int)
 -- TIDEPOOL-ITEM --
-initially <- pollResponse response
+workers <- unfold (batch (case campaignLabel "reply-watch" of { Right value -> value; Left _ -> error "fixture campaign" }) (case forkGroupLabel "roundtrip" of { Right value -> value; Left _ -> error "fixture group" })) ((,) <$> child (researching @ReplyReport (case branchLabel "worker" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead (41 :: Int)) <*> child (researching @EchoReport (case branchLabel "witness" of { Right value -> value; Left _ -> error "fixture branch" }) projectHead ("cache" :: Text)))
 -- TIDEPOOL-ITEM --
-readiness <- watch (awaitResponse response)
+initially <- (,) <$> pollResponse (forkedResponse (fst workers)) <*> pollResponse (forkedResponse (snd workers))
+-- TIDEPOOL-ITEM --
+readiness <- watch (case watchLabel "both-ready" of { Right value -> value; Left _ -> error "fixture watch" }) ((,) <$> awaitResponse (forkedResponse (fst workers)) <*> awaitResponse (forkedResponse (snd workers)))

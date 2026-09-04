@@ -14,7 +14,11 @@ module Tidepool.Actors.Internal.Agent
   , Reply
   , codingAgent
   , readonlyAgent
+  , readonlyWorktreeAgent
+  , scaffoldingAgent
+  , integrationAgent
   , startAgent
+  , startForkedAgent
   , request
   , requestSited
   , stopAgent
@@ -29,6 +33,7 @@ import qualified Tidepool.Actor.Internal as ActorInternal
 import Tidepool.Agent.Reply.Internal
   ( Reply
   , Replies
+  , RequestLabel (..)
   , RequestId (..)
   , Response
   , fillResponse
@@ -37,6 +42,7 @@ import Tidepool.Agent.Reply.Internal
   , replyRequestId
   , submitRequest
   , ResponseResult (..)
+  , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   )
 import Tidepool.Agent.Session
@@ -55,6 +61,9 @@ import Tidepool.Worktree
 data AgentSpec
   = CodingAgent WorktreeHandle
   | ReadonlyAgent Text
+  | ReadonlyWorktreeAgent WorktreeHandle
+  | ScaffoldingAgent WorktreeHandle
+  | IntegrationAgent WorktreeHandle
 
 data AgentRef = AgentRef
   (Actor.ActorRef AgentProtocol ())
@@ -74,11 +83,27 @@ codingAgent = CodingAgent
 readonlyAgent :: Text -> AgentSpec
 readonlyAgent = ReadonlyAgent
 
+readonlyWorktreeAgent :: WorktreeHandle -> AgentSpec
+readonlyWorktreeAgent = ReadonlyWorktreeAgent
+
+scaffoldingAgent :: WorktreeHandle -> AgentSpec
+scaffoldingAgent = ScaffoldingAgent
+
+integrationAgent :: WorktreeHandle -> AgentSpec
+integrationAgent = IntegrationAgent
+
 -- | Start one persistent Codex identity. Requests do not terminate it.
 startAgent :: Member Actor effs => AgentSpec -> Eff effs AgentRef
 startAgent spec = do
   actor <- Actor.startActor (agentDefinition spec) ()
   pure (AgentRef actor (agentWorktree spec))
+
+-- | Start an agent by forking the caller's active provider and Haskell
+-- snapshots. Public Shoal code reaches this through the applicative unfold DSL.
+startForkedAgent :: Member Actor effs => Int -> Text -> AgentSpec -> Eff effs (AgentRef, Text)
+startForkedAgent forkGroup actorLabel spec = do
+  (actor, allocatedPath) <- Actor.startActorFork (agentRole spec) forkGroup (agentDefinitionNamed actorLabel spec) ()
+  pure (AgentRef actor (agentWorktree spec), allocatedPath)
 
 -- | Submit a typed request and return its independently awaitable reply.
 {-# OPAQUE request #-}
@@ -86,7 +111,7 @@ request
   :: forall result input effs
    . Member Replies effs
   => AgentRef
-  -> Text
+  -> RequestLabel
   -> input
   -> Eff effs (Response result)
 request = requestSited @result @input 0
@@ -99,19 +124,19 @@ requestSited
    . Member Replies effs
   => Int
   -> AgentRef
-  -> Text
+  -> RequestLabel
   -> input
   -> Eff effs (Response result)
-requestSited site (AgentRef target targetWorktree) prompt input = do
-  requestId <- reserveRequest (actorAddress target)
+requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedLabel) input = do
+  requestId <- reserveRequest label (actorAddress target)
   let (response, reply) = newRequestHandles input requestId
   submitRequest
     requestId
     (actorAddress target)
-    (RunRequest (runRequest targetWorktree response reply))
+    (RunRequest (runRequest (actorAddress target) targetWorktree response reply))
   pure response
   where
-    runRequest targetTree response replyHandle = do
+    runRequest (targetActorId, targetIncarnation) targetTree response replyHandle = do
       let requestId = case replyRequestId replyHandle of
             RequestId value -> value
       start <- case targetTree of
@@ -119,16 +144,21 @@ requestSited site (AgentRef target targetWorktree) prompt input = do
         Just tree -> Just <$> worktreeHead tree
       result <-
         requestSessionSited @result @input
-          site requestId (Just prompt) input
+          site requestId (Just ("Continue request `" <> renderedLabel <> "` using the shared context and mounted sessionInput.")) input
       evidence <- case (targetTree, start) of
         (Nothing, _) -> pure NoBoundWorktree
         (Just tree, Just startHead) -> do
           observed <- observeSubmission (worktreeId tree)
           pure $ case observed of
             Left failure -> WorktreeObservationFailed failure
-            Right submission -> WorktreeObserved startHead submission
+            Right submission -> WorktreeObserved (handleReceipt tree) startHead submission
         (Just _, Nothing) -> error "bound worktree was not sampled"
-      case fillResponse response (ResponseResult result evidence) of
+      let execution = ExecutionReceipt
+            { executionRequest = RequestId requestId
+            , executionActorId = targetActorId
+            , executionActorIncarnation = targetIncarnation
+            }
+      case fillResponse response (ResponseResult result execution evidence) of
         () -> pure ()
 
 -- | Ask an agent to retire after all earlier mailbox requests settle.
@@ -138,13 +168,19 @@ stopAgent (AgentRef target _) = Actor.cast target StopAgent
 agentWorktree :: AgentSpec -> Maybe WorktreeHandle
 agentWorktree (CodingAgent tree) = Just tree
 agentWorktree (ReadonlyAgent _) = Nothing
+agentWorktree (ReadonlyWorktreeAgent tree) = Just tree
+agentWorktree (ScaffoldingAgent tree) = Just tree
+agentWorktree (IntegrationAgent tree) = Just tree
 
 agentDefinition :: AgentSpec -> Actor.ActorDefinition () AgentProtocol ()
-agentDefinition spec = attachWorktree spec definition
+agentDefinition spec = agentDefinitionNamed (agentLabel spec) spec
+
+agentDefinitionNamed :: Text -> AgentSpec -> Actor.ActorDefinition () AgentProtocol ()
+agentDefinitionNamed actorLabel spec = attachWorktree spec definition
   where
     definition =
       Actor.ActorDefinition
-        { Actor.label = agentLabel spec
+        { Actor.label = actorLabel
         , Actor.effectProfile = Actor.ReadOnly
         , Actor.initialization = \() -> attachAgent Nothing
         , Actor.behavior = \() () -> agentLoop
@@ -171,6 +207,12 @@ agentLabel :: AgentSpec -> Text
 agentLabel (CodingAgent tree) =
   "coding/" <> renderBranchName (branch (handleReceipt tree))
 agentLabel (ReadonlyAgent label) = label
+agentLabel (ReadonlyWorktreeAgent tree) =
+  "research/" <> renderBranchName (branch (handleReceipt tree))
+agentLabel (ScaffoldingAgent tree) =
+  "scaffolding/" <> renderBranchName (branch (handleReceipt tree))
+agentLabel (IntegrationAgent tree) =
+  "integration/" <> renderBranchName (branch (handleReceipt tree))
 
 attachWorktree
   :: AgentSpec
@@ -178,3 +220,13 @@ attachWorktree
   -> Actor.ActorDefinition () AgentProtocol ()
 attachWorktree (CodingAgent tree) = withWorktree tree
 attachWorktree (ReadonlyAgent _) = id
+attachWorktree (ReadonlyWorktreeAgent tree) = withWorktree tree
+attachWorktree (ScaffoldingAgent tree) = withWorktree tree
+attachWorktree (IntegrationAgent tree) = withWorktree tree
+
+agentRole :: AgentSpec -> Actor.LaunchRole
+agentRole (ReadonlyAgent _) = Actor.ResearchRole
+agentRole (ReadonlyWorktreeAgent _) = Actor.ResearchRole
+agentRole (CodingAgent _) = Actor.CodingRole
+agentRole (ScaffoldingAgent _) = Actor.ScaffoldingRole
+agentRole (IntegrationAgent _) = Actor.IntegrationRole

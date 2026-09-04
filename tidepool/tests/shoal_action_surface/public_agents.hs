@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 
 module ShoalPublicAgents where
 
@@ -15,14 +16,14 @@ startReview = startAgent . readonlyAgent
 
 submit
   :: AgentRef
-  -> Text
+  -> RequestLabel
   -> input
   -> Eff ActorEffects (Response result)
 submit = request
 
 submitWithOnlyReplies
   :: AgentRef
-  -> Text
+  -> RequestLabel
   -> input
   -> Eff '[Replies] (Response result)
 submitWithOnlyReplies = request
@@ -34,13 +35,35 @@ compose
 compose left right = (,) <$> awaitResponse left <*> awaitResponse right
 
 watchBoth
-  :: Response left
+  :: WatchLabel
+  -> Response left
   -> Response right
   -> Eff ActorEffects (Watch (left, right))
-watchBoth left right = watch (compose left right)
+watchBoth label left right = watch label (compose left right)
 
 stop :: AgentRef -> Eff ActorEffects ()
 stop = stopAgent
+
+heterogeneousUnfold
+  :: ForkGroupPath
+  -> BranchLabel
+  -> BranchLabel
+  -> Eff ActorEffects (Forked Text, Forked Int)
+heterogeneousUnfold group textLeaf intLeaf =
+  unfold group $
+    (,)
+      <$> child (researching @Text textLeaf projectHead ())
+      <*> child (coding @Int intLeaf projectHead ())
+
+homogeneousUnfold
+  :: ForkGroupPath
+  -> [BranchLabel]
+  -> Eff ActorEffects [Forked Text]
+homogeneousUnfold group leaves =
+  unfold group $
+    traverse
+      (\leaf -> child (researching @Text leaf projectHead ()))
+      leaves
 
 result :: Int
 result = 42

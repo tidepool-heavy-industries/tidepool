@@ -180,6 +180,8 @@ instance ToJSON WorktreeError where
 
 data Worktree a where
   WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)
+  WorktreeCreateForActorPath :: WorktreeSpec -> Text -> Worktree (Either WorktreeError WorktreeHandle)
+  WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either WorktreeError WorktreeHandle)
   WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)
   WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
   WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
@@ -246,11 +248,16 @@ data Green a where
   AsyncStatusWith :: Int -> Green Int
   AsyncCancelWith :: Int -> Green ()
 
+data ActorLaunchRole = ActorRootRole | ActorResearchRole | ActorCodingRole | ActorScaffoldingRole | ActorIntegrationRole | ActorInheritedRole deriving (Show, Eq)
 data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)
 data Actor a where
-  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorEffectProfile -> [Text] -> Actor (Int, Int)
+  ActorBeginForkGroupWith :: Bool -> Text -> [Text] -> Actor (Int, Text, [Text])
+  ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Actor (Int, Int, Text)
+  ActorForkWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Actor (Int, Int, Text)
+  ActorCommitForkGroupWith :: Int -> Actor ()
+  ActorAbortForkGroupWith :: Int -> Actor ()
   ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
   ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
   ActorCallWith :: (Int, Int) -> protocol result -> Actor result

@@ -1922,6 +1922,7 @@ translate expr =
           , Just (dictArgs, valueArgs) <- splitTrailingArgs (vsValueArity spec) args -> do
         let answerTy = case vsAnswerSource spec of
               FirstTypeArgument -> ty
+              TypeArgument index -> siteTys !! index
               AppliedResultType -> Core.exprType expr
         stableTy <- checkSiteType spec answerTy
         stableInputs <- mapM (checkSiteInputType spec siteTys) (vsInputTypeArgs spec)

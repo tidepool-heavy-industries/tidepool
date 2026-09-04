@@ -67,10 +67,15 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     (
         "Actor",
         &[
+            "ActorLaunchRole",
             "ActorEffectProfile",
             "ActorTerminalStatus",
             "ActorCallStatus",
+            "ActorBeginForkGroupWith",
             "ActorStartWith",
+            "ActorForkWith",
+            "ActorCommitForkGroupWith",
+            "ActorAbortForkGroupWith",
             "ActorWaitWith",
             "ActorPollWith",
             "ActorCallWith",

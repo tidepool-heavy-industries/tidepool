@@ -1,11 +1,15 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Engine-private typed readiness subscriptions.
 module Tidepool.Agent.Watch.Internal
   ( Await
   , Watch
   , WatchId (..)
+  , WatchLabel (..)
+  , WatchLabelError (..)
+  , watchLabel
   , Watches (..)
   , WatchFailure (..)
   , WatchState (..)
@@ -18,6 +22,9 @@ module Tidepool.Agent.Watch.Internal
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Data.Char (isAsciiLower, isDigit)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Prelude
 
 import Tidepool.Agent.Reply.Internal
@@ -46,6 +53,26 @@ instance Applicative Await where
 newtype WatchId = WatchId Int
   deriving (Show, Eq, Ord)
 
+newtype WatchLabel = WatchLabel Text
+  deriving (Show, Eq, Ord)
+
+data WatchLabelError
+  = EmptyWatchLabel
+  | InvalidWatchLabel Text
+  | WatchLabelTooLong Text
+  deriving (Show, Eq)
+
+watchLabel :: Text -> Either WatchLabelError WatchLabel
+watchLabel value
+  | Text.null value = Left EmptyWatchLabel
+  | Text.length value > 48 = Left (WatchLabelTooLong value)
+  | Text.head value == '-' || Text.last value == '-' = Left (InvalidWatchLabel value)
+  | "--" `Text.isInfixOf` value = Left (InvalidWatchLabel value)
+  | Text.all valid value = Right (WatchLabel value)
+  | otherwise = Left (InvalidWatchLabel value)
+  where
+    valid character = isAsciiLower character || isDigit character || character == '-'
+
 data Watch result = Watch WatchId (Await result)
 
 instance Show (Watch result) where
@@ -69,7 +96,7 @@ data RawWatchObservation
   | RawWatchRejected ReplyError
 
 data Watches a where
-  RegisterWatchWith :: [Int] -> Watches Int
+  RegisterWatchWith :: Text -> [Int] -> Watches Int
   ObserveWatchWith :: Int -> Watches RawWatchObservation
 
 awaitSettled :: Response result -> Await (ResponseResult result)
@@ -83,9 +110,9 @@ awaitValue = fmap responseValue . awaitSettled
 awaitResponse :: Response result -> Await result
 awaitResponse = awaitValue
 
-watch :: Member Watches effs => Await result -> Eff effs (Watch result)
-watch awaiting@(Await dependencies _) = do
-  watchId <- send (RegisterWatchWith (map unRequestId dependencies))
+watch :: Member Watches effs => WatchLabel -> Await result -> Eff effs (Watch result)
+watch (WatchLabel label) awaiting@(Await dependencies _) = do
+  watchId <- send (RegisterWatchWith label (map unRequestId dependencies))
   pure (Watch (WatchId watchId) awaiting)
 
 pollWatch

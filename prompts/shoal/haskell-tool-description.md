@@ -14,6 +14,6 @@ Discover the actor API with `:browse`; inspect it with `:type EXPR`,
 `:info NAME`, `:browse!`, and `:bindings`. Request-activated agents receive a
 stable typed `sessionInput`, a typed `sessionReply`, and `respond`; root
 applications do not. Ordinary model-response termination ends the current
-turn. Register a `watch` when a response becoming ready should durably
+turn. Register a labeled `watch` when a response becoming ready should durably
 reactivate the application; typed handles and polling remain authoritative.
 `:status` reports the actor standing and response/watch queues.

@@ -1,15 +1,20 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 -- | Engine-private representation of persistent-agent requests and replies.
 module Tidepool.Agent.Reply.Internal
   ( RequestId (..)
+  , RequestLabel (..)
+  , RequestLabelError (..)
+  , requestLabel
   , Response (..)
   , Reply (..)
   , Replies (..)
   , ReplyError (..)
   , ResponseFailure (..)
   , ResponseResult (..)
+  , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
   , RawResponseObservation (..)
@@ -26,7 +31,9 @@ module Tidepool.Agent.Reply.Internal
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Data.Char (isAsciiLower, isDigit)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Void (Void)
 import Prelude
 
@@ -36,10 +43,30 @@ import Tidepool.Internal.ExitCell
   , newExitCell
   , readExitCell
   )
-import Tidepool.Effects.Core (GitOid, SubmissionObservation, WorktreeError)
+import Tidepool.Effects.Core (GitOid, SubmissionObservation, WorktreeError, WorktreeReceipt)
 
 newtype RequestId = RequestId Int
   deriving (Show, Eq, Ord)
+
+newtype RequestLabel = RequestLabel Text
+  deriving (Show, Eq, Ord)
+
+data RequestLabelError
+  = EmptyRequestLabel
+  | InvalidRequestLabel Text
+  | RequestLabelTooLong Text
+  deriving (Show, Eq)
+
+requestLabel :: Text -> Either RequestLabelError RequestLabel
+requestLabel value
+  | Text.null value = Left EmptyRequestLabel
+  | Text.length value > 48 = Left (RequestLabelTooLong value)
+  | Text.head value == '-' || Text.last value == '-' = Left (InvalidRequestLabel value)
+  | "--" `Text.isInfixOf` value = Left (InvalidRequestLabel value)
+  | Text.all valid value = Right (RequestLabel value)
+  | otherwise = Left (InvalidRequestLabel value)
+  where
+    valid character = isAsciiLower character || isDigit character || character == '-'
 
 data Response result where
   Response :: RequestId -> ExitCell pending (ResponseResult result) -> Response result
@@ -69,12 +96,20 @@ data ResponseFailure
 
 data WorktreeEvidence
   = NoBoundWorktree
-  | WorktreeObserved GitOid SubmissionObservation
+  | WorktreeObserved WorktreeReceipt GitOid SubmissionObservation
   | WorktreeObservationFailed WorktreeError
+  deriving (Show, Eq)
+
+data ExecutionReceipt = ExecutionReceipt
+  { executionRequest :: RequestId
+  , executionActorId :: Int
+  , executionActorIncarnation :: Int
+  }
   deriving (Show, Eq)
 
 data ResponseResult result = ResponseResult
   { responseValue :: result
+  , responseExecution :: ExecutionReceipt
   , responseWorktree :: WorktreeEvidence
   }
   deriving (Show, Eq)
@@ -92,14 +127,14 @@ data RawResponseObservation
   | RawResponseRejected ReplyError
 
 data Replies a where
-  ReserveRequestWith :: (Int, Int) -> Replies Int
+  ReserveRequestWith :: Text -> (Int, Int) -> Replies Int
   SubmitRequestWith :: Int -> request -> (Int, Int) -> Replies ()
   AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
 
-reserveRequest :: Member Replies effs => (Int, Int) -> Eff effs RequestId
-reserveRequest target = RequestId <$> send (ReserveRequestWith target)
+reserveRequest :: Member Replies effs => RequestLabel -> (Int, Int) -> Eff effs RequestId
+reserveRequest (RequestLabel label) target = RequestId <$> send (ReserveRequestWith label target)
 
 submitRequest
   :: Member Replies effs

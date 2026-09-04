@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
 use crate::request::RequestRegistry;
 use crate::resident_workbench::{
-    ResidentActorBoundary, ResidentActorStartupStep, ResidentKernelBoundary,
+    ForkGroupBoundary, ResidentActorBoundary, ResidentActorStartupStep, ResidentKernelBoundary,
     ResidentWorkbenchFragment, ResidentWorkbenchStep,
 };
 use crate::{
@@ -65,6 +65,9 @@ pub struct LocalResidentInstallation {
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
     pub effective_role: crate::EffectiveRole,
+    pub context_parent: Option<crate::ActorRef>,
+    pub fork_group: Option<crate::ForkGroupId>,
+    pub fork_gate: Option<crate::ForkGroupGate>,
 }
 
 #[derive(Clone)]
@@ -93,6 +96,7 @@ struct ResidentEnvironment<H, O> {
     deployments: mpsc::UnboundedSender<LocalResidentDeployment>,
     retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
     requests: Arc<RequestRegistry>,
+    fork_groups: crate::ForkGroupRegistry,
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -102,6 +106,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             deployments: self.deployments.clone(),
             retired: Arc::clone(&self.retired),
             requests: Arc::clone(&self.requests),
+            fork_groups: self.fork_groups.clone(),
         }
     }
 }
@@ -296,6 +301,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     }
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
+        self.environment.fork_groups.retire_actor(actor);
         if self.environment.retired.lock().insert(actor) {
             let _ = self
                 .environment
@@ -328,16 +334,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let requests = self.environment.requests.status_for(actor);
         format!(
-            "actor {}@{} label={:?}: role={:?}; native_tools={:?}; workspace={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktrees={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}: parent={:?}; fork_group={:?}; role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendants={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktree={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
+            self.descriptor.context_parent(),
+            self.descriptor.fork_group(),
             self.descriptor.effective_role().role(),
+            self.descriptor.effective_role().haskell_effects_alias(),
             self.descriptor.effective_role().native_tools(),
             self.descriptor.effective_role().workspace(),
+            self.descriptor.effective_role().descendants(),
             self.descriptor.effective_role().prompt_profile(),
             if self.policy_installed { "attached" } else { "detached" },
-            self.launch_worktrees,
+            self.launch_worktrees.first(),
             requests.pending_responses,
             requests.ready_responses,
             requests.unavailable_responses,
@@ -417,7 +427,7 @@ where
         context: &ActorSessionContext,
         start: crate::ResidentActorStart,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let (descriptor, parent_hole, entry, launch_worktrees) = start.into_parts();
+        let (mut descriptor, parent_hole, entry, launch_worktrees, fork_group) = start.into_parts();
         if !self
             .descriptor
             .profile()
@@ -429,12 +439,48 @@ where
                 descriptor.profile()
             )));
         }
+        if descriptor.effective_role().role() == crate::ActorRole::Scaffolding {
+            let parent_budget = self.descriptor.effective_role().descendants();
+            descriptor = descriptor.with_effective_role(crate::EffectiveRole::scaffolding(
+                crate::DescendantBudget {
+                    maximum_depth: parent_budget.maximum_depth.saturating_sub(1),
+                    maximum_active_children: parent_budget.maximum_active_children,
+                },
+            ));
+        }
+        if descriptor.context_parent().is_some()
+            && !self
+                .descriptor
+                .effective_role()
+                .permits_child(descriptor.effective_role())
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                "actor role {:?} cannot context-fork child role {:?}",
+                self.descriptor.effective_role().role(),
+                descriptor.effective_role().role()
+            )));
+        }
+        if let Some(group) = fork_group {
+            let requested = crate::ActorPath::parse(descriptor.label())
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+            let allocated = self
+                .environment
+                .fork_groups
+                .claim(group, context.actor, &requested)
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+            descriptor = descriptor.with_actor_path(allocated);
+        } else if descriptor.context_parent().is_some() {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "context fork did not name an admission group".into(),
+            ));
+        }
         if descriptor.placement().session != context.placement.session {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "child actor entry crossed a resident machine boundary".into(),
             ));
         }
-        let child = kernel
+        let allocated_label = descriptor.label().to_string();
+        let child = match kernel
             .spawn_child(
                 None,
                 Self::child(
@@ -445,10 +491,36 @@ where
                 ),
             )
             .await
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(group) = fork_group {
+                    if let Ok(children) = self.environment.fork_groups.abort(group, context.actor) {
+                        for child in children {
+                            if let Some(child) = kernel.resolve(child) {
+                                let _ = child
+                                    .shutdown(ActorTerminal {
+                                        kind: ActorExitKind::Cancelled,
+                                        summary: "fork group admission failed".into(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    error.to_string(),
+                ));
+            }
+        };
         self.environment
             .runner
-            .resume_starting_parent(context.clone(), parent_hole, child.identity())
+            .resume_starting_parent(
+                context.clone(),
+                parent_hole,
+                child.identity(),
+                allocated_label,
+            )
             .await
     }
 
@@ -562,6 +634,147 @@ where
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         match boundary {
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
+                continuation,
+                relative,
+                group,
+                branches,
+            }) => {
+                let group = if relative {
+                    let parent = self.descriptor.actor_path().ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "relative subgroup requires an allocated parent actor path".into(),
+                        )
+                    })?;
+                    let segment = crate::ActorPathSegment::new(group).map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                    parent.child(segment).map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?
+                } else {
+                    crate::ActorPath::parse(&group).map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?
+                };
+                let branches = branches
+                    .into_iter()
+                    .map(crate::ActorPathSegment::new)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                let budget = self.descriptor.effective_role().descendants();
+                if budget.maximum_depth == 0 {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "this actor role cannot recursively unfold context".into(),
+                    ));
+                }
+                let group_path = group.to_string();
+                let (group_id, reservations) = self
+                    .environment
+                    .fork_groups
+                    .begin(
+                        context.actor,
+                        group,
+                        branches,
+                        usize::from(budget.maximum_active_children),
+                    )
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                self.environment
+                    .runner
+                    .resume_fork_group(
+                        context.clone(),
+                        continuation,
+                        group_id,
+                        group_path,
+                        reservations
+                            .into_iter()
+                            .map(|reservation| reservation.allocated.to_string())
+                            .collect(),
+                    )
+                    .await
+            }
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Commit {
+                continuation,
+                group,
+            }) => {
+                let mut phase = self
+                    .environment
+                    .fork_groups
+                    .request_commit(group, context.actor)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                loop {
+                    let current = *phase.borrow();
+                    match current {
+                        crate::ForkGroupPhase::Ready | crate::ForkGroupPhase::Committed => break,
+                        crate::ForkGroupPhase::Aborted => {
+                            let children = self
+                                .environment
+                                .fork_groups
+                                .cleanup_failed(group, context.actor)
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                                })?;
+                            for child in children {
+                                if let Some(child) = kernel.resolve(child) {
+                                    let _ = child
+                                        .shutdown(ActorTerminal {
+                                            kind: ActorExitKind::Cancelled,
+                                            summary: "fork group admission failed".into(),
+                                        })
+                                        .await;
+                                }
+                            }
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "fork group {} was aborted while awaiting readiness",
+                                group.0
+                            )));
+                        }
+                        crate::ForkGroupPhase::Staging => {}
+                    }
+                    phase.changed().await.map_err(|_| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "fork group {} readiness channel closed",
+                            group.0
+                        ))
+                    })?;
+                }
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
+                continuation,
+                group,
+            }) => {
+                let children = self
+                    .environment
+                    .fork_groups
+                    .abort(group, context.actor)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                for child in children {
+                    if let Some(child) = kernel.resolve(child) {
+                        let _ = child
+                            .shutdown(ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: "fork group admission aborted".into(),
+                            })
+                            .await;
+                    }
+                }
+                self.environment
+                    .runner
+                    .resume_unit(context.clone(), continuation)
+                    .await
+            }
             ResidentActorBoundary::Start(start) => self.start_child(kernel, context, start).await,
             ResidentActorBoundary::Outbound(outbound) => {
                 self.resolve_outbound(kernel, context, ancestry, outbound)
@@ -606,10 +819,16 @@ where
                 Ok(outcome)
             }
             ResidentActorBoundary::RequestReservation(reservation) => {
-                let request = self
-                    .environment
-                    .requests
-                    .reserve(context.actor, reservation.target);
+                crate::ActorPathSegment::new(&reservation.label).map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "invalid request label: {error}"
+                    ))
+                })?;
+                let request = self.environment.requests.reserve_labeled(
+                    context.actor,
+                    reservation.target,
+                    reservation.label,
+                );
                 self.environment
                     .runner
                     .resume_int(context.clone(), reservation.continuation, request.0)
@@ -683,10 +902,19 @@ where
                     .await
             }
             ResidentActorBoundary::WatchRegistration(registration) => {
+                crate::ActorPathSegment::new(&registration.label).map_err(|error| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "invalid watch label: {error}"
+                    ))
+                })?;
                 let (watch, notifications) = self
                     .environment
                     .requests
-                    .register_watch(context.actor, registration.dependencies)
+                    .register_watch_labeled(
+                        context.actor,
+                        registration.label,
+                        registration.dependencies,
+                    )
                     .map_err(|error| {
                         ResidentActorWorkbenchError::ActorProtocol(format!(
                             "watch registration was rejected: {error:?}"
@@ -752,6 +980,14 @@ where
                                 actor.clone(),
                                 &awaiting,
                             ));
+                        let fork_gate = self
+                            .descriptor
+                            .fork_group()
+                            .map(|group| self.environment.fork_groups.gate(group, context.actor))
+                            .transpose()
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                            })?;
                         let installation = LocalResidentInstallation {
                             actor,
                             label: self.descriptor.label().to_owned(),
@@ -759,6 +995,9 @@ where
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
+                            context_parent: self.descriptor.context_parent(),
+                            fork_group: self.descriptor.fork_group(),
+                            fork_gate,
                         };
                         self.publish_installation(installation);
                         self.policy_installed = true;
@@ -871,6 +1110,12 @@ where
         })?;
         let policy: Arc<dyn ResidentToolEndpoint> =
             Arc::new(crate::ResidentInteractivePolicy::local(actor.clone()));
+        let fork_gate = self
+            .descriptor
+            .fork_group()
+            .map(|group| self.environment.fork_groups.gate(group, context.actor))
+            .transpose()
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         self.publish_installation(LocalResidentInstallation {
             actor,
             label: self.descriptor.label().to_owned(),
@@ -878,6 +1123,9 @@ where
             initial_user_message,
             launch_worktrees: self.launch_worktrees.clone(),
             effective_role: self.descriptor.effective_role().clone(),
+            context_parent: self.descriptor.context_parent(),
+            fork_group: self.descriptor.fork_group(),
+            fork_gate,
         });
         self.policy_installed = true;
         for notice in self.deferred_child_failures.drain(..) {
@@ -1218,6 +1466,18 @@ where
                         .runner
                         .capture_boundary(context.clone(), *next, context.placement.resource_scope)
                         .await?;
+                    if self.environment.fork_groups.has_ready(context.actor) {
+                        self.abort_unpublished_groups(
+                            kernel,
+                            context.actor,
+                            "effectful work followed a committed unfold",
+                        )
+                        .await;
+                        return Ok(ResidentWorkbenchStep::Rejected(
+                            "unfold must be in tail position; no effect may follow its admission commit"
+                                .into(),
+                        ));
+                    }
                     if let ResidentActorBoundary::ReplyAttempt(attempt) = boundary {
                         match self
                             .environment
@@ -1364,27 +1624,114 @@ where
                 total: request.items.len(),
                 source,
             };
-            let mut step = workbench
+            let mut step = match workbench
                 .begin_item(context.clone(), block, request.input_kind(index))
                 .await
-                .map_err(|source| {
-                    workbench_failure(&receipts, index, request.items.len(), source)
-                })?;
+            {
+                Ok(step) => step,
+                Err(source) => {
+                    self.abort_unpublished_groups(
+                        kernel,
+                        context.actor,
+                        "Haskell workbench failed during unfold admission",
+                    )
+                    .await;
+                    return Err(workbench_failure(
+                        &receipts,
+                        index,
+                        request.items.len(),
+                        source,
+                    ));
+                }
+            };
             if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
-                step = self
+                step = match self
                     .settle_fragment_effects(kernel, context, &workbench, fragment, *outcome)
                     .await
-                    .map_err(|source| {
-                        workbench_failure(&receipts, index, request.items.len(), source)
-                    })?;
+                {
+                    Ok(step) => step,
+                    Err(source) => {
+                        self.abort_unpublished_groups(
+                            kernel,
+                            context.actor,
+                            "Haskell workbench failed during unfold admission",
+                        )
+                        .await;
+                        return Err(workbench_failure(
+                            &receipts,
+                            index,
+                            request.items.len(),
+                            source,
+                        ));
+                    }
+                };
             }
             match step {
-                ResidentWorkbenchStep::Committed(output) => receipts.push(WorkbenchItemReceipt {
-                    index,
-                    status: WorkbenchItemStatus::Committed,
-                    output,
-                }),
+                ResidentWorkbenchStep::Committed(output) => {
+                    if self.environment.fork_groups.has_ready(context.actor) {
+                        if index + 1 != request.items.len() {
+                            self.abort_unpublished_groups(
+                                kernel,
+                                context.actor,
+                                "unfold was not the final Haskell input unit",
+                            )
+                            .await;
+                            receipts.push(WorkbenchItemReceipt {
+                                index,
+                                status: WorkbenchItemStatus::Rejected,
+                                output: "unfold must be the final executable input unit in its hosted Haskell call".into(),
+                            });
+                            return Ok(KernelStep::Continue(workbench_response(
+                                WorkbenchRunStatus::Rejected,
+                                receipts,
+                                index,
+                                request.items.len(),
+                            )));
+                        }
+                        self.environment
+                            .fork_groups
+                            .publish_ready(context.actor)
+                            .map_err(|source| {
+                                workbench_failure(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
+                                )
+                            })?;
+                    } else if self.environment.fork_groups.has_unpublished(context.actor) {
+                        self.abort_unpublished_groups(
+                            kernel,
+                            context.actor,
+                            "Haskell input ended before unfold admission committed",
+                        )
+                        .await;
+                        receipts.push(WorkbenchItemReceipt {
+                            index,
+                            status: WorkbenchItemStatus::Rejected,
+                            output: "unfold admission ended without committing every fork group"
+                                .into(),
+                        });
+                        return Ok(KernelStep::Continue(workbench_response(
+                            WorkbenchRunStatus::Rejected,
+                            receipts,
+                            index,
+                            request.items.len(),
+                        )));
+                    }
+                    receipts.push(WorkbenchItemReceipt {
+                        index,
+                        status: WorkbenchItemStatus::Committed,
+                        output,
+                    });
+                }
                 ResidentWorkbenchStep::Rejected(output) => {
+                    self.abort_unpublished_groups(
+                        kernel,
+                        context.actor,
+                        "Haskell input rejected during unfold admission",
+                    )
+                    .await;
                     receipts.push(WorkbenchItemReceipt {
                         index,
                         status: WorkbenchItemStatus::Rejected,
@@ -1401,6 +1748,22 @@ where
                     request: request_id,
                     result,
                 } => {
+                    if self.environment.fork_groups.has_unpublished(context.actor) {
+                        self.abort_unpublished_groups(
+                            kernel,
+                            context.actor,
+                            "request reply interrupted unfold admission",
+                        )
+                        .await;
+                        return Err(workbench_failure(
+                            &receipts,
+                            index,
+                            request.items.len(),
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "an actor cannot reply while an unfold group is unpublished".into(),
+                            ),
+                        ));
+                    }
                     let awaiting =
                         match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
                             ResidentStanding::Interactive(awaiting)
@@ -1481,6 +1844,24 @@ where
             request.items.len(),
             request.items.len(),
         )))
+    }
+
+    async fn abort_unpublished_groups(
+        &self,
+        kernel: &KernelContext,
+        owner: ActorRef,
+        summary: &str,
+    ) {
+        for child in self.environment.fork_groups.abort_unpublished(owner) {
+            if let Some(child) = kernel.resolve(child) {
+                let _ = child
+                    .shutdown(ActorTerminal {
+                        kind: ActorExitKind::Cancelled,
+                        summary: summary.into(),
+                    })
+                    .await;
+            }
+        }
     }
 }
 
@@ -1840,11 +2221,13 @@ where
     debug_assert!(machines.insert_idle(session, machine).is_none());
     let runner = ResidentActorRunner::new(machines, source);
     let (deployments, receiver) = mpsc::unbounded_channel();
+    let lineage = crate::ActorLineageRegistry::default();
     let environment = ResidentEnvironment {
         runner,
         deployments,
         retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
         requests: Arc::new(RequestRegistry::default()),
+        fork_groups: crate::ForkGroupRegistry::new(lineage),
     };
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
     let (actor, task) = crate::spawn_local_actor(None, behavior).await?;

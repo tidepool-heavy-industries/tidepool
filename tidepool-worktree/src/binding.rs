@@ -210,6 +210,17 @@ pub struct BindingTable {
 }
 
 impl BindingTable {
+    /// The exact worktree currently owned by `agent`, if any. Actor admission
+    /// uses this to resolve the typed `boundHead` placement without exposing
+    /// filesystem paths or asking Haskell to rediscover custody.
+    pub fn active_for_agent(&self, agent: &AgentRef) -> Option<&WorktreeId> {
+        self.bindings
+            .iter()
+            .rev()
+            .find(|binding| binding.agent() == agent && binding.state() == BindingState::Active)
+            .map(Binding::worktree)
+    }
+
     /// Open (creating if absent) a binding table rooted at `root`, loading
     /// every persisted binding into memory.
     ///

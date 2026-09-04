@@ -13,12 +13,24 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum ActorReq {
+    ActorBeginForkGroupWith(bool, String, Vec<String>),
     ActorStartWith(
         String,
         tidepool_eval::value::Value,
+        crate::ActorLaunchRoleWire,
         crate::ActorEffectProfileWire,
         Vec<String>,
     ),
+    ActorForkWith(
+        String,
+        tidepool_eval::value::Value,
+        i64,
+        crate::ActorLaunchRoleWire,
+        crate::ActorEffectProfileWire,
+        Vec<String>,
+    ),
+    ActorCommitForkGroupWith(i64),
+    ActorAbortForkGroupWith(i64),
     ActorWaitWith((i64, i64)),
     ActorPollWith((i64, i64)),
     ActorCallWith((i64, i64), tidepool_eval::value::Value),

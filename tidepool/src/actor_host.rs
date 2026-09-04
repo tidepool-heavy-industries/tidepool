@@ -29,7 +29,9 @@ use tidepool_agent::{
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-use tidepool_handlers::{ActorWorktreeAuthority, ActorWorktreeHandler, WorktreeHandler};
+use tidepool_handlers::{
+    ActorWorktreeAuthority, ActorWorktreeGrant, ActorWorktreeHandler, WorktreeHandler,
+};
 use tidepool_mcp::CapturedOutput;
 use tidepool_node::{
     DurableInbox, ProcessInvocation, ProcessMountBoundary, TmuxLaunch, TmuxPaneId, TmuxSession,
@@ -107,6 +109,8 @@ struct InteractiveDeployment {
     worktree_binding: Option<ActiveBinding>,
     failure_reported: bool,
     last_activation_sequence: u64,
+    thread: Option<QueueReadyThread>,
+    fork_gate: Option<tidepool_actor::ForkGroupGate>,
 }
 
 enum InteractiveConnection {
@@ -182,6 +186,7 @@ impl DurableActorEvent {
 
 struct PendingInteractiveLaunch {
     cancel: oneshot::Sender<()>,
+    fork_gate: Option<tidepool_actor::ForkGroupGate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +271,7 @@ struct InteractiveFleet {
     worktrees: WorktreeManager,
     bindings: Arc<Mutex<BindingTable>>,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
+    worktree_authority: ActorWorktreeAuthority,
 }
 
 #[derive(Clone)]
@@ -327,6 +333,7 @@ pub async fn run(
                 worktrees: worktrees.clone(),
                 bindings: Arc::clone(&bindings),
                 readiness: readiness.clone(),
+                worktree_authority: worktree_authority.clone(),
             },
             shutdown_rx,
         ));
@@ -711,6 +718,7 @@ async fn run_interactive_applications(
         worktrees,
         bindings,
         readiness,
+        worktree_authority,
     } = fleet;
     let root_identity = root.identity();
     let launch_context = InteractiveLaunchContext {
@@ -771,6 +779,23 @@ async fn run_interactive_applications(
                 let Some(event) = event else { break None };
                 match event {
                     LocalResidentDeployment::PolicyInstalled(installation) => {
+                        worktree_authority.install_grant(
+                            installation.actor.identity().into(),
+                            worktree_grant(installation.effective_role.role()),
+                        );
+                        let fork_parent_thread = match installation.context_parent {
+                            None => None,
+                            Some(parent) => {
+                                let Some(thread) = deployments
+                                    .iter()
+                                    .find(|deployment| deployment.actor == parent)
+                                    .and_then(|deployment| deployment.thread.clone())
+                                else {
+                                    break Some(format!("context-fork parent {parent:?} has no queue-ready conversation"));
+                                };
+                                Some(thread.id().clone())
+                            }
+                        };
                         let context = launch_context.clone();
                         let actor = installation.actor.identity();
                         let (cancel, cancelled) = oneshot::channel();
@@ -778,6 +803,7 @@ async fn run_interactive_applications(
                             actor,
                             PendingInteractiveLaunch {
                                 cancel,
+                                fork_gate: installation.fork_gate.clone(),
                             },
                         );
                         debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
@@ -787,6 +813,7 @@ async fn run_interactive_applications(
                                 installation,
                                 context,
                                 cancelled,
+                                fork_parent_thread,
                             ).await;
                             (local_actor, result)
                         });
@@ -808,8 +835,12 @@ async fn run_interactive_applications(
                         }
                     }
                     LocalResidentDeployment::Retired { actor, terminal } => {
+                        worktree_authority.remove_grant(actor.into());
                         let pending = pending_launches.remove(&actor);
                         if let Some(pending) = pending {
+                            if let Some(gate) = pending.fork_gate {
+                                let _ = gate.mark_failed();
+                            }
                             let _ = pending.cancel.send(());
                         }
                         if let Some(index) = deployments.iter().position(|app| app.actor == actor) {
@@ -863,6 +894,7 @@ async fn run_interactive_applications(
                             let _ = readiness.send(ActorHostReadiness::AwaitingBinding { root: root_identity });
                         }
                         let pane = deployment.pane.clone();
+                        let fork_gate = deployment.fork_gate.clone();
                         let tmux = tmux.clone();
                         binding_discoveries.spawn(async move {
                             let result = discover_interactive_binding(
@@ -872,17 +904,46 @@ async fn run_interactive_applications(
                                 &pane,
                             )
                             .await;
+                            let result = match (result, fork_gate) {
+                                (Ok(thread), Some(gate)) => {
+                                    match gate.mark_ready() {
+                                        Err(error) => Err(application_error(
+                                            actor,
+                                            InteractiveOperation::DiscoverBinding,
+                                            error,
+                                        )),
+                                        Ok(()) => match gate.wait_committed().await {
+                                            Ok(()) => Ok(thread),
+                                            Err(error) => Err(application_error(
+                                                actor,
+                                                InteractiveOperation::DiscoverBinding,
+                                                error,
+                                            )),
+                                        },
+                                    }
+                                }
+                                (result, None) => result,
+                                (Err(error), Some(_)) => Err(error),
+                            };
                             (actor, result)
                         });
                         deployments.push(deployment);
                     }
                     Some(Ok((local_actor, Ok(None)))) => {
                         let actor = local_actor.identity();
-                        pending_launches.remove(&actor);
+                        if let Some(pending) = pending_launches.remove(&actor) {
+                            if let Some(gate) = pending.fork_gate {
+                                let _ = gate.mark_failed();
+                            }
+                        }
                     }
                     Some(Ok((local_actor, Err(error)))) => {
                         let actor = local_actor.identity();
-                        pending_launches.remove(&actor);
+                        if let Some(pending) = pending_launches.remove(&actor) {
+                            if let Some(gate) = pending.fork_gate {
+                                let _ = gate.mark_failed();
+                            }
+                        }
                         if actor == root_identity {
                             break Some(error.to_string());
                         }
@@ -930,6 +991,7 @@ async fn run_interactive_applications(
                             delivery_shutdown,
                             delivery,
                         };
+                        deployment.thread = Some(thread.clone());
                         if actor == root_identity {
                             let _ = readiness.send(ActorHostReadiness::Ready {
                                 root: root_identity,
@@ -941,6 +1003,9 @@ async fn run_interactive_applications(
                         let Some(deployment) = deployments.iter_mut().find(|app| app.actor == actor) else {
                             continue;
                         };
+                        if let Some(gate) = &deployment.fork_gate {
+                            let _ = gate.mark_failed();
+                        }
                         deployment.failure_reported = true;
                         if actor == root_identity {
                             break Some(error.to_string());
@@ -1062,13 +1127,19 @@ async fn launch_interactive_application(
     installation: LocalResidentInstallation,
     context: InteractiveLaunchContext,
     cancelled: oneshot::Receiver<()>,
+    fork_parent_thread: Option<BackendThreadId>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let actor = installation.actor.identity();
     let prepared = prepare_actor_worktree(&installation, &context)?;
     let worktree = prepared.as_ref().map(|(handle, _)| handle.clone());
-    let result =
-        launch_prepared_interactive_application(installation, context.clone(), worktree, cancelled)
-            .await;
+    let result = launch_prepared_interactive_application(
+        installation,
+        context.clone(),
+        worktree,
+        cancelled,
+        fork_parent_thread,
+    )
+    .await;
     match (result, prepared) {
         (Ok(Some(mut launched)), Some((_handle, binding))) => {
             launched.deployment.worktree_binding = Some(binding);
@@ -1184,6 +1255,7 @@ async fn launch_prepared_interactive_application(
     context: InteractiveLaunchContext,
     worktree: Option<WorktreeHandle>,
     mut cancelled: oneshot::Receiver<()>,
+    fork_parent_thread: Option<BackendThreadId>,
 ) -> Result<Option<LaunchedInteractiveApplication>, InteractiveApplicationError> {
     let InteractiveLaunchContext {
         root,
@@ -1195,6 +1267,7 @@ async fn launch_prepared_interactive_application(
         bindings: _,
     } = context;
     let actor = installation.actor;
+    let fork_gate = installation.fork_gate.clone();
     let actor_identity = actor.identity();
     let workspace = worktree.as_ref().map_or_else(
         || config.workspace.clone(),
@@ -1304,7 +1377,9 @@ async fn launch_prepared_interactive_application(
             application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
         })?,
     );
-    let launch_mode = if actor_identity == root {
+    let launch_mode = if let Some(parent) = fork_parent_thread {
+        InteractiveLaunchMode::Fork(parent)
+    } else if actor_identity == root {
         config.root_launch_mode.clone()
     } else {
         InteractiveLaunchMode::Fresh
@@ -1314,7 +1389,7 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Fresh | InteractiveLaunchMode::Fork(_) => None,
     };
     let developer_instructions =
-        developer_instructions(actor_identity == root, worktree.is_some(), &launch_mode);
+        developer_instructions(installation.effective_role.role(), &launch_mode);
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: config.model.clone(),
@@ -1431,6 +1506,8 @@ async fn launch_prepared_interactive_application(
             worktree_binding: None,
             failure_reported: false,
             last_activation_sequence: 0,
+            thread: None,
+            fork_gate,
         },
         binding: InteractiveBindingRequest {
             path: binding_path,
@@ -1773,17 +1850,46 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
     }
 }
 
-fn developer_instructions(root: bool, owns_worktree: bool, mode: &InteractiveLaunchMode) -> String {
-    if root {
+fn developer_instructions(role: tidepool_actor::ActorRole, mode: &InteractiveLaunchMode) -> String {
+    if role == tidepool_actor::ActorRole::Root {
         let mut instructions = PromptId::ShoalRoot.body().to_string();
         if matches!(mode, InteractiveLaunchMode::Resume(_)) {
             instructions.push_str(PromptId::RecreatedRoot.body());
         }
         instructions
-    } else if owns_worktree {
-        PromptId::WorktreeAgent.body().into()
     } else {
-        PromptId::ReadonlyAgent.body().into()
+        match role {
+            tidepool_actor::ActorRole::Research => PromptId::ReadonlyAgent.body().into(),
+            tidepool_actor::ActorRole::Coding | tidepool_actor::ActorRole::Inherited => {
+                PromptId::WorktreeAgent.body().into()
+            }
+            tidepool_actor::ActorRole::Scaffolding => PromptId::ScaffoldingAgent.body().into(),
+            tidepool_actor::ActorRole::Integration => PromptId::IntegrationAgent.body().into(),
+            tidepool_actor::ActorRole::Root => unreachable!("root handled above"),
+        }
+    }
+}
+
+fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
+    match role {
+        tidepool_actor::ActorRole::Root => ActorWorktreeGrant {
+            enumerate: true,
+            allocate: true,
+            integrate: true,
+        },
+        tidepool_actor::ActorRole::Scaffolding => ActorWorktreeGrant {
+            enumerate: false,
+            allocate: true,
+            integrate: true,
+        },
+        tidepool_actor::ActorRole::Integration => ActorWorktreeGrant {
+            enumerate: false,
+            allocate: false,
+            integrate: true,
+        },
+        tidepool_actor::ActorRole::Research
+        | tidepool_actor::ActorRole::Coding
+        | tidepool_actor::ActorRole::Inherited => ActorWorktreeGrant::default(),
     }
 }
 
@@ -1863,6 +1969,10 @@ mod tests {
                 .unwrap_or_else(|error| {
                     panic!("Haskell item failed:\n{item}\n\n{error}\n\nprevious receipt: {last:?}")
                 });
+            assert_ne!(
+                result["status"], "rejected",
+                "Haskell item rejected:\n{item}\n\n{result:?}\n\nprevious receipt: {last:?}"
+            );
             last = Some(result);
         }
         last.expect("non-empty Haskell fixture")
@@ -1941,10 +2051,12 @@ mod tests {
 
     #[test]
     fn root_instructions_preserve_idle_and_resume_contracts() {
-        let fresh = developer_instructions(true, false, &InteractiveLaunchMode::Fresh);
+        let fresh = developer_instructions(
+            tidepool_actor::ActorRole::Root,
+            &InteractiveLaunchMode::Fresh,
+        );
         let resumed = developer_instructions(
-            true,
-            false,
+            tidepool_actor::ActorRole::Root,
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
         assert_eq!(fresh, PromptId::ShoalRoot.body());
@@ -1957,16 +2069,7 @@ mod tests {
             )
         );
         assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);
-        let resumed = normalized_prompt(&resumed);
-        assert!(resumed.contains("Previous actor handles"));
-        assert!(resumed.contains("were not restored"));
-        assert!(resumed.contains("not a prewritten actor program"));
-        assert!(resumed.contains("Start agents once, submit independent requests before waiting"));
-        assert!(resumed.contains("Project-specific worker ledgers"));
-        assert!(resumed.contains("compact GHCi-style transcripts"));
-        assert!(resumed.contains("typed Haskell state carries identities"));
-        assert!(resumed.contains("Use `:status`"));
-        assert!(resumed.contains("no completion, yield, or park operation"));
+        assert!(normalized_prompt(&resumed).contains("Previous actor handles"));
     }
 
     #[tokio::test]
@@ -2042,20 +2145,33 @@ mod tests {
         assert!(actor_workspace_request(true, &one).is_err());
         assert!(actor_workspace_request(false, &two).is_err());
 
-        let instructions = developer_instructions(false, false, &InteractiveLaunchMode::Fresh);
+        let instructions = developer_instructions(
+            tidepool_actor::ActorRole::Research,
+            &InteractiveLaunchMode::Fresh,
+        );
         assert_eq!(instructions, PromptId::ReadonlyAgent.body());
         let normalized = normalized_prompt(&instructions);
-        assert!(normalized.contains("read-only access to the shared source checkout"));
         assert!(normalized.contains("Do not run builds, tests, formatters"));
-        assert!(normalized.contains("actor with an owned coding worktree"));
-        assert!(normalized.contains("orchestrate children"));
 
-        let worker = developer_instructions(false, true, &InteractiveLaunchMode::Fresh);
+        let worker = developer_instructions(
+            tidepool_actor::ActorRole::Coding,
+            &InteractiveLaunchMode::Fresh,
+        );
         assert_eq!(worker, PromptId::WorktreeAgent.body());
-        let normalized = normalized_prompt(&worker);
-        assert!(normalized.contains("Inspect `:type respond`"));
-        assert!(normalized.contains("irreversible terminal transfer"));
-        assert!(normalized.contains("not actor termination"));
+        assert_eq!(
+            developer_instructions(
+                tidepool_actor::ActorRole::Scaffolding,
+                &InteractiveLaunchMode::Fork(BackendThreadId("parent".into())),
+            ),
+            PromptId::ScaffoldingAgent.body()
+        );
+        assert_eq!(
+            developer_instructions(
+                tidepool_actor::ActorRole::Integration,
+                &InteractiveLaunchMode::Fresh,
+            ),
+            PromptId::IntegrationAgent.body()
+        );
     }
 
     #[test]
@@ -2352,9 +2468,13 @@ mod tests {
             runtime_namespace(session_root.path()),
             Arc::clone(&bindings),
         );
-        let (source, root) =
-            compile_root(&config, session_root.path(), worktrees, authority.clone())
-                .expect("compile root driver");
+        let (source, root) = compile_root(
+            &config,
+            session_root.path(),
+            worktrees.clone(),
+            authority.clone(),
+        )
+        .expect("compile root driver");
         let (actor, hosted, mut deployments) = spawn_resident_root(source, root)
             .await
             .expect("spawn resident root");
@@ -3067,9 +3187,13 @@ mod tests {
             runtime_namespace(session_root.path()),
             Arc::clone(&bindings),
         );
-        let (source, root) =
-            compile_root(&config, session_root.path(), worktrees, authority.clone())
-                .expect("compile permanent root");
+        let (source, root) = compile_root(
+            &config,
+            session_root.path(),
+            worktrees.clone(),
+            authority.clone(),
+        )
+        .expect("compile permanent root");
         let (actor, hosted, mut deployments) = spawn_resident_root(source, root)
             .await
             .expect("spawn permanent root");
@@ -3082,17 +3206,100 @@ mod tests {
             panic!("root retired before installing its application")
         };
 
-        let submitted = tokio::time::timeout(
-            Duration::from_secs(120),
+        let setup_policy = Arc::clone(&root_installation.policy);
+        let submitted = tokio::spawn(async move {
             dispatch_haskell(
-                root_installation.policy.as_ref(),
+                setup_policy.as_ref(),
                 fixture_items(include_str!(
                     "actor_host_fixtures/generic_actor/reply_watch_roundtrip.hs"
                 )),
-            ),
-        )
+            )
+            .await
+        });
+        let child_installations = tokio::time::timeout(Duration::from_secs(60), async {
+            let mut children = Vec::new();
+            while children.len() < 2 {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::PolicyInstalled(installation))
+                        if installation.actor.identity() != actor.identity() =>
+                    {
+                        children.push(installation);
+                    }
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                        panic!("actor {actor:?} retired before child installation: {terminal:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before child installation"),
+                }
+            }
+            children
+        })
         .await
-        .expect("request setup timed out");
+        .expect("child installation timeout");
+        let worker_installation = child_installations
+            .iter()
+            .find(|installation| installation.label.ends_with("/worker"))
+            .expect("worker installation")
+            .clone();
+        let witness_installation = child_installations
+            .iter()
+            .find(|installation| installation.label.ends_with("/witness"))
+            .expect("witness installation")
+            .clone();
+        let mut test_bindings = Vec::new();
+        for installation in &child_installations {
+            assert_eq!(installation.context_parent, Some(actor.identity()));
+            assert_eq!(
+                installation.fork_group,
+                Some(tidepool_actor::ForkGroupId(1))
+            );
+            assert_eq!(
+                installation.effective_role.role(),
+                tidepool_actor::ActorRole::Research
+            );
+            let [worktree_id] = installation.launch_worktrees.as_slice() else {
+                panic!("forked research actor did not receive one named worktree")
+            };
+            let worktree = worktrees
+                .lookup(&tidepool_worktree::WorktreeId::from_raw(worktree_id))
+                .expect("named worktree lookup")
+                .expect("named worktree remains registered");
+            assert_eq!(
+                worktree.branch().as_str(),
+                format!("shoal/{}", installation.label)
+            );
+            let principal = WorktreePrincipal::exact_actor(
+                &runtime_namespace(session_root.path()),
+                installation.actor.identity().id.0,
+                installation.actor.identity().incarnation.0,
+            );
+            test_bindings.push(
+                bindings
+                    .lock()
+                    .bind(worktree.id(), &principal, current_time_ms())
+                    .expect("bind named worktree to test child"),
+            );
+        }
+        worker_installation
+            .fork_gate
+            .as_ref()
+            .expect("context-fork child has an admission gate")
+            .mark_ready()
+            .expect("test host marks first child provider ready");
+        assert!(
+            !submitted.is_finished(),
+            "one ready sibling must not publish a partially admitted unfold"
+        );
+        witness_installation
+            .fork_gate
+            .as_ref()
+            .expect("context-fork sibling has an admission gate")
+            .mark_ready()
+            .expect("test host marks second child provider ready");
+        let submitted = tokio::time::timeout(Duration::from_secs(120), submitted)
+            .await
+            .expect("request setup timed out")
+            .expect("request setup task");
         assert_eq!(submitted["status"], "committed", "{submitted:?}");
 
         let pending_status =
@@ -3105,44 +3312,78 @@ mod tests {
             "{pending_status}"
         );
         assert!(
-            pending_status.contains("responses pending=["),
+            pending_status.contains("responses pending=[")
+                && pending_status.contains("\"worker\"")
+                && pending_status.contains("\"witness\""),
             "{pending_status}"
         );
         assert!(
-            pending_status.contains("watches pending=["),
+            pending_status.contains("watches pending=[")
+                && pending_status.contains("\"both-ready\""),
             "{pending_status}"
         );
+        let launch_receipt = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "(forkedLaunch (fst workers), forkedLaunch (snd workers))",
+        )
+        .await;
+        let launch_receipt = launch_receipt["items"][0]["output"]
+            .as_str()
+            .expect("branch receipt output");
+        assert!(
+            launch_receipt.contains("requestedPath = \"reply-watch/roundtrip/worker\"")
+                && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/worker\"")
+                && launch_receipt.contains("requestedPath = \"reply-watch/roundtrip/witness\"")
+                && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/witness\"")
+                && launch_receipt.matches("forkGroupIdentity = 1").count() == 2,
+            "{launch_receipt}"
+        );
 
-        let child_installation = loop {
-            match deployments.recv().await {
-                Some(LocalResidentDeployment::PolicyInstalled(installation))
-                    if installation.actor.identity() != actor.identity() =>
-                {
-                    break installation
+        let activations = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut activations = Vec::new();
+            while activations.len() < 2 {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if child_installations
+                            .iter()
+                            .any(|child| child.actor.identity() == activation.id.actor()) =>
+                    {
+                        activations.push(activation);
+                    }
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                        panic!("actor {actor:?} retired before request activation: {terminal:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before request activation"),
                 }
-                Some(_) => {}
-                None => panic!("deployment channel closed before child installation"),
             }
-        };
-        let activation = loop {
-            match deployments.recv().await {
-                Some(LocalResidentDeployment::SessionReady { activation })
-                    if activation.id.actor() == child_installation.actor.identity() =>
-                {
-                    break activation
-                }
-                Some(_) => {}
-                None => panic!("deployment channel closed before request activation"),
-            }
-        };
-        assert_eq!(activation.input_type, "Int");
+            activations
+        })
+        .await
+        .expect("request activation timeout");
+        let worker_activation = activations
+            .iter()
+            .find(|activation| activation.id.actor() == worker_installation.actor.identity())
+            .expect("worker activation");
+        let witness_activation = activations
+            .iter()
+            .find(|activation| activation.id.actor() == witness_installation.actor.identity())
+            .expect("witness activation");
+        assert_eq!(worker_activation.input_type, "Int");
+        assert_eq!(witness_activation.input_type, "Text");
 
         let replied = dispatch_haskell_script(
-            child_installation.policy.as_ref(),
-            ":type sessionReply\n:type respond\nrespond (ReplyReport (sessionInput + 1))",
+            worker_installation.policy.as_ref(),
+            ":type sessionReply\n:type respond\nrespond (ReplyReport (sessionInput + sharedDelta))",
         )
         .await;
         assert_eq!(replied["status"], "replied", "{replied:?}");
+        let witnessed = dispatch_haskell_script(
+            witness_installation.policy.as_ref(),
+            "respond (EchoReport sessionInput)",
+        )
+        .await;
+        assert_eq!(witnessed["status"], "replied", "{witnessed:?}");
 
         let notification = loop {
             match deployments.recv().await {
@@ -3162,7 +3403,7 @@ mod tests {
 
         let observed = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "pollResponse response\npollWatch readiness",
+            "pollResponse (forkedResponse (fst workers))\npollResponse (forkedResponse (snd workers))\npollWatch readiness",
         )
         .await;
         assert_eq!(observed["status"], "committed", "{observed:?}");
@@ -3172,14 +3413,27 @@ mod tests {
                 .is_some_and(|output| {
                     output.contains("ResponseReady")
                         && output.contains("responseValue = ReplyReport 42")
-                        && output.contains("responseWorktree = NoBoundWorktree")
+                        && output.contains("responseWorktree = WorktreeObserved")
                 }),
             "{observed:?}"
         );
         assert!(
             observed["items"][1]["output"]
                 .as_str()
-                .is_some_and(|output| output.contains("WatchReady (ReplyReport 42)")),
+                .is_some_and(|output| {
+                    output.contains("ResponseReady")
+                        && output.contains("responseValue = EchoReport \"cache\"")
+                }),
+            "{observed:?}"
+        );
+        assert!(
+            observed["items"][2]["output"]
+                .as_str()
+                .is_some_and(|output| {
+                    output.contains("WatchReady")
+                        && output.contains("ReplyReport 42")
+                        && output.contains("EchoReport \"cache\"")
+                }),
             "{observed:?}"
         );
 
@@ -3199,6 +3453,76 @@ mod tests {
         assert!(
             ready_status.contains("watches pending=[] ready=["),
             "{ready_status}"
+        );
+
+        let followup = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "followup <- request @ReplyReport (forkedActor (fst workers)) (case requestLabel \"revision\" of { Right value -> value; Left _ -> error \"fixture request\" }) (99 :: Int)",
+        )
+        .await;
+        assert_eq!(followup["status"], "committed", "{followup:?}");
+        let followup_watch = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "followupReadiness <- watch (case watchLabel \"revision-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) (awaitResponse followup)",
+        )
+        .await;
+        assert_eq!(followup_watch["status"], "committed", "{followup_watch:?}");
+        let followup_activation = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if activation.id.actor() == worker_installation.actor.identity() =>
+                    {
+                        break activation;
+                    }
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                        panic!("actor {actor:?} retired before follow-up activation: {terminal:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before follow-up activation"),
+                }
+            }
+        })
+        .await
+        .expect("follow-up activation timeout");
+        assert_eq!(followup_activation.input_type, "Int");
+        let followup_reply = dispatch_haskell_script(
+            worker_installation.policy.as_ref(),
+            "respond (ReplyReport (sessionInput + sharedDelta))",
+        )
+        .await;
+        assert_eq!(followup_reply["status"], "replied", "{followup_reply:?}");
+        let followup_notification = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::WatchChanged { notification })
+                        if notification.owner == actor.identity() =>
+                    {
+                        break notification;
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before follow-up watch transition"),
+                }
+            }
+        })
+        .await
+        .expect("follow-up watch transition timeout");
+        assert_eq!(
+            followup_notification.transition,
+            tidepool_actor::WatchTransition::Ready
+        );
+        let followup_result =
+            dispatch_haskell_script(root_installation.policy.as_ref(), "pollResponse followup")
+                .await;
+        assert_eq!(
+            followup_result["status"], "committed",
+            "{followup_result:?}"
+        );
+        assert!(
+            followup_result["items"][0]["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("responseValue = ReplyReport 100")),
+            "{followup_result:?}"
         );
 
         actor

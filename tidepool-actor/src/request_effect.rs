@@ -12,7 +12,7 @@ use crate::{
 #[allow(dead_code, clippy::enum_variant_names)]
 pub(crate) enum RepliesReq {
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    ReserveRequestWith((i64, i64)),
+    ReserveRequestWith(String, (i64, i64)),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     SubmitRequestWith(i64, Value, (i64, i64)),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
@@ -26,7 +26,7 @@ pub(crate) enum RepliesReq {
 #[derive(tidepool_bridge_derive::FromCore)]
 pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
-    RegisterWatchWith(Vec<i64>),
+    RegisterWatchWith(String, Vec<i64>),
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
 }
@@ -34,6 +34,7 @@ pub(crate) enum WatchesReq {
 pub(crate) struct RequestReservation {
     pub continuation: ResidentHole,
     pub target: ActorRef,
+    pub label: String,
 }
 
 pub(crate) struct RequestSubmission {
@@ -58,6 +59,7 @@ pub(crate) struct ResponsePoll {
 pub(crate) struct WatchRegistration {
     pub continuation: ResidentHole,
     pub dependencies: Vec<RequestId>,
+    pub label: String,
 }
 
 pub(crate) struct WatchPoll {

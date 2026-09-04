@@ -52,6 +52,7 @@ data VerbSpec = VerbSpec
 -- higher-level action combinator can instead return that value directly.
 data SiteAnswerSource
   = FirstTypeArgument
+  | TypeArgument Int
   | AppliedResultType
   deriving (Eq, Show)
 
@@ -78,6 +79,18 @@ sitedVerbs =
       "forkCataSited" "Tidepool.Fork" 2 2 True True []
   , verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" 2 3 False True [1]
+  , VerbSpec
+      { vsName = "child"
+      , vsModule = "Tidepool.Actors.Unfold"
+      , vsSitedName = "childSited"
+      , vsSitedModule = "Tidepool.Actors.Unfold"
+      , vsTypeArgs = 4
+      , vsValueArity = 1
+      , vsListAnswer = False
+      , vsMisShapeIsError = True
+      , vsInputTypeArgs = [2]
+      , vsAnswerSource = TypeArgument 0
+      }
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" 1 1 False True []
   , verb "serve" "Tidepool.Actor"

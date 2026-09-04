@@ -7,6 +7,10 @@
 -- DevSwarm belong in separately loaded application modules.
 module Tidepool.Actors.Shoal
   ( ActorEffects
+  , ResearchActorEffects
+  , CodingActorEffects
+  , ScaffoldActorEffects
+  , IntegrationActorEffects
   , CoreEffects
   , ResearchEffects
   , ResearchCoordinatorEffects
@@ -26,6 +30,36 @@ module Tidepool.Actors.Shoal
   , KnownEffect (effectWitness)
   , KnownEffects (knownEffects)
   , Subset
+  , CampaignLabel
+  , ForkGroupLabel
+  , BranchLabel
+  , ForkGroupPath
+  , NameError (..)
+  , WorktreeSeed
+  , projectHead
+  , boundHead
+  , existingWorktree
+  , atRef
+  , snapshotDirty
+  , campaignLabel
+  , forkGroupLabel
+  , branchLabel
+  , batch
+  , subgroup
+  , Branch
+  , researching
+  , coding
+  , scaffolding
+  , integrating
+  , Unfold
+  , child
+  , Forked
+  , forkedActor
+  , forkedResponse
+  , forkedLaunch
+  , BranchReceipt (..)
+  , awaitFork
+  , unfold
   , AgentSpec
   , AgentRef
   , Response
@@ -36,10 +70,14 @@ module Tidepool.Actors.Shoal
   , request
   , stopAgent
   , RequestId
+  , RequestLabel
+  , RequestLabelError (..)
+  , requestLabel
   , Replies
   , ReplyError (..)
   , ResponseFailure (..)
   , ResponseResult (..)
+  , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
   , requestId
@@ -48,6 +86,9 @@ module Tidepool.Actors.Shoal
   , pollResponse
   , Await
   , Watch
+  , WatchLabel
+  , WatchLabelError (..)
+  , watchLabel
   , Watches
   , WatchFailure (..)
   , WatchState (..)
@@ -104,6 +145,7 @@ import Tidepool.Actors.Internal.Agent
   , stopAgent
   )
 import Tidepool.Actors.Role
+import Tidepool.Actors.Unfold
 import Tidepool.Effects.Core (Actor, Worktree)
 import Tidepool.Worktree
 
@@ -111,4 +153,14 @@ import Tidepool.Worktree
 --
 -- Naming the row makes the workbench's inferred types readable; it does not
 -- prescribe any actor protocol, declarations, state machine, or program.
-type ActorEffects = '[Replies, Watches, Actor, Worktree]
+type ActorEffects =
+  '[ Replies, Watches, Forks, ActorContext
+   , AgentLaunch, AgentInspection, AgentControl
+   , BoundWorktree, WorktreeRegistry, WorktreeAllocation
+   , WorktreeIntegration, Actor, Worktree
+   ]
+
+type ResearchActorEffects = ResearchEffects
+type CodingActorEffects = CodingEffects
+type ScaffoldActorEffects = Actor ': Worktree ': ScaffoldEffects
+type IntegrationActorEffects = Worktree ': IntegrationEffects

@@ -850,6 +850,46 @@ fn verbs() -> Vec<Verb> {
             extract: None,
         },
         Verb {
+            ctor: "WorktreeCreateForActorPath",
+            method: "worktree_create_for_actor_path",
+            args: vec![
+                Arg {
+                    name: "spec",
+                    ty: HsType::Named("WorktreeSpec"),
+                    rust: RustBinding::Bridged("WtWorktreeSpec"),
+                },
+                Arg {
+                    name: "actorPath",
+                    ty: HsType::Text,
+                    rust: RustBinding::Derived,
+                },
+            ],
+            ret: handle.clone(),
+            errors: Some("WorktreeError"),
+            handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
+            extract: None,
+        },
+        Verb {
+            ctor: "WorktreeCreateFromBoundForActorPath",
+            method: "worktree_create_from_bound_for_actor_path",
+            args: vec![
+                Arg {
+                    name: "dirtyPolicy",
+                    ty: HsType::Named("DirtyPolicy"),
+                    rust: RustBinding::Bridged("WtDirtyPolicy"),
+                },
+                Arg {
+                    name: "actorPath",
+                    ty: HsType::Text,
+                    rust: RustBinding::Derived,
+                },
+            ],
+            ret: handle.clone(),
+            errors: Some("WorktreeError"),
+            handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
+            extract: None,
+        },
+        Verb {
             ctor: "WorktreeLookup",
             method: "worktree_lookup",
             args: vec![tree_id_arg()],

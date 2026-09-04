@@ -11,4 +11,5 @@ Start discovery with `:browse`; use `:type`, `:info`, `:browse!`, and
 `:bindings` for detail, and `:status` for runtime-owned actor/request state.
 Request scopes mount typed `sessionInput`, `sessionReply`, and `respond`; roots
 do not. Ending a model response ends the turn—there is no Haskell completion,
-yield, or park operation. Use native coding tools for repository work.
+yield, or park operation. Requests and watches use validated readable labels;
+typed handles remain authoritative. Use native coding tools for repository work.

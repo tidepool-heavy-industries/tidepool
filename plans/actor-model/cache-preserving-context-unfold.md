@@ -1650,13 +1650,38 @@ implement, not that production support has landed.
     sides of a parent/child tip. Runtime declaration-scope and root-retirement
     suites passed in the repository Nix toolchain; `tidepool-actor --lib`
     passed against the new compile view.
-- [ ] Gate 2: add campaign/actor-path allocation, granular residual effects,
+- [x] Gate 2: add campaign/actor-path allocation, granular residual effects,
   typed row witnesses, and one authoritative effective-role projection.
-- [ ] Gate 3: attach authoritative per-request execution and worktree evidence
+  - 2026-09-04: `ActorPath` is the single validated allocator input and exact
+    `shoal/<path>` Git projection. `KnownEffects`/`Subset`, semantic branch
+    constructors, role-specific workbench aliases, native-tool class,
+    workspace access, prompt profile, and descendant policy all project from
+    one accepted `EffectiveRole`. Actor/protocol invariants and the public
+    Shoal compile fixture passed.
+- [x] Gate 3: attach authoritative per-request execution and worktree evidence
   to requester-side response results.
-- [ ] Gate 4: land one cache-preserving persistent child with typed follow-up.
-- [ ] Gate 5: land heterogeneous applicative batch admission, rollback, and
+  - 2026-09-04: every `ResponseResult a` now carries the exact request/actor
+    execution receipt and either no worktree, an observation failure, or the
+    bound worktree receipt plus request-start HEAD and stable submitted
+    observation. The settlement path fills that Haskell cell before publishing
+    response/watch readiness; the provider-boundary integration test observed
+    the envelope repeatedly.
+- [x] Gate 4: land one cache-preserving persistent child with typed follow-up.
+  - 2026-09-04: the actor-host integration test forks the active parent thread
+    and immutable Haskell tip, reads a parent-declared type and bound value,
+    replies, remains attached, and accepts a second differently labeled typed
+    request against the same actor incarnation.
+- [x] Gate 5: land heterogeneous applicative batch admission, rollback, and
   result reconstruction without JSON or unchecked casts.
+  - 2026-09-04: `Unfold` is a Haskell-owned free applicative with no `Monad`;
+    its two-pass interpreter constructs all children before publishing any
+    request and reconstructs a heterogeneous pair of typed handles. One
+    actor-owned fork-group ledger reserves the whole sibling name set, gates
+    publication on every provider queue-ready signal and the final Haskell
+    commit, and releases paths/stops unpublished children on rejection or
+    failure. Unit tests cover barrier/abort/collision behavior; the public
+    compile fixture covers heterogeneous and homogeneous traversal; the
+    provider-boundary test covers a two-type fan-in watch.
 - [ ] Gate 6: land recursive scaffold/unfold/watch/fold from one clean named
   Git seed.
 - [ ] Gate 7: land prompt profiles, status/metrics, hibernation, and the full

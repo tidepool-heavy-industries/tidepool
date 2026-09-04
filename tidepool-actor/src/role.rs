@@ -146,6 +146,17 @@ impl EffectiveRole {
     }
 
     #[must_use]
+    pub const fn haskell_effects_alias(&self) -> &'static str {
+        match self.role {
+            ActorRole::Root | ActorRole::Inherited => "ActorEffects",
+            ActorRole::Research => "ResearchActorEffects",
+            ActorRole::Coding => "CodingActorEffects",
+            ActorRole::Scaffolding => "ScaffoldActorEffects",
+            ActorRole::Integration => "IntegrationActorEffects",
+        }
+    }
+
+    #[must_use]
     pub const fn permits_child(&self, child: &Self) -> bool {
         child.descendants.maximum_depth < self.descendants.maximum_depth
             && child.descendants.maximum_active_children <= self.descendants.maximum_active_children
@@ -187,5 +198,33 @@ mod tests {
         assert!(scaffold.permits_child(&EffectiveRole::coding()));
         assert!(!EffectiveRole::research().permits_child(&EffectiveRole::coding()));
         assert!(!EffectiveRole::coding().permits_child(&EffectiveRole::research()));
+    }
+
+    #[test]
+    fn each_semantic_role_selects_one_model_facing_effect_alias() {
+        assert_eq!(
+            EffectiveRole::root().haskell_effects_alias(),
+            "ActorEffects"
+        );
+        assert_eq!(
+            EffectiveRole::research().haskell_effects_alias(),
+            "ResearchActorEffects"
+        );
+        assert_eq!(
+            EffectiveRole::coding().haskell_effects_alias(),
+            "CodingActorEffects"
+        );
+        assert_eq!(
+            EffectiveRole::scaffolding(DescendantBudget {
+                maximum_depth: 2,
+                maximum_active_children: 4,
+            })
+            .haskell_effects_alias(),
+            "ScaffoldActorEffects"
+        );
+        assert_eq!(
+            EffectiveRole::integration().haskell_effects_alias(),
+            "IntegrationActorEffects"
+        );
     }
 }

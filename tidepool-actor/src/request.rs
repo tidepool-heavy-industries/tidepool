@@ -77,6 +77,7 @@ enum RequestState {
 struct RequestRecord {
     owner: ActorRef,
     target: ActorRef,
+    label: String,
     state: RequestState,
 }
 
@@ -92,6 +93,7 @@ enum WatchState {
 
 struct WatchRecord {
     owner: ActorRef,
+    label: String,
     dependencies: Vec<RequestId>,
     state: WatchState,
 }
@@ -113,12 +115,12 @@ pub(crate) struct RequestRegistry {
 }
 
 pub(crate) struct ActorRequestStatus {
-    pub pending_responses: Vec<RequestId>,
-    pub ready_responses: Vec<RequestId>,
-    pub unavailable_responses: Vec<RequestId>,
-    pub pending_watches: Vec<WatchId>,
-    pub ready_watches: Vec<WatchId>,
-    pub unavailable_watches: Vec<WatchId>,
+    pub pending_responses: Vec<(RequestId, String)>,
+    pub ready_responses: Vec<(RequestId, String)>,
+    pub unavailable_responses: Vec<(RequestId, String)>,
+    pub pending_watches: Vec<(WatchId, String)>,
+    pub ready_watches: Vec<(WatchId, String)>,
+    pub unavailable_watches: Vec<(WatchId, String)>,
 }
 
 impl RequestRegistry {
@@ -137,12 +139,18 @@ impl RequestRegistry {
                 continue;
             }
             match record.state {
-                RequestState::Ready => status.ready_responses.push(*request),
-                RequestState::Unavailable(_) => status.unavailable_responses.push(*request),
+                RequestState::Ready => status
+                    .ready_responses
+                    .push((*request, record.label.clone())),
+                RequestState::Unavailable(_) => status
+                    .unavailable_responses
+                    .push((*request, record.label.clone())),
                 RequestState::Reserved
                 | RequestState::Queued
                 | RequestState::Presented
-                | RequestState::Settling => status.pending_responses.push(*request),
+                | RequestState::Settling => status
+                    .pending_responses
+                    .push((*request, record.label.clone())),
             }
         }
         for (watch, record) in &state.watches {
@@ -150,9 +158,11 @@ impl RequestRegistry {
                 continue;
             }
             match record.state {
-                WatchState::Pending => status.pending_watches.push(*watch),
-                WatchState::Ready => status.ready_watches.push(*watch),
-                WatchState::Unavailable { .. } => status.unavailable_watches.push(*watch),
+                WatchState::Pending => status.pending_watches.push((*watch, record.label.clone())),
+                WatchState::Ready => status.ready_watches.push((*watch, record.label.clone())),
+                WatchState::Unavailable { .. } => status
+                    .unavailable_watches
+                    .push((*watch, record.label.clone())),
             }
         }
         status.pending_responses.sort_unstable();
@@ -164,7 +174,17 @@ impl RequestRegistry {
         status
     }
 
+    #[cfg(test)]
     pub(crate) fn reserve(&self, owner: ActorRef, target: ActorRef) -> RequestId {
+        self.reserve_labeled(owner, target, "request".into())
+    }
+
+    pub(crate) fn reserve_labeled(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        label: String,
+    ) -> RequestId {
         let mut state = self.state.lock();
         state.next_request = state.next_request.saturating_add(1);
         let id = RequestId(state.next_request);
@@ -173,6 +193,7 @@ impl RequestRegistry {
             RequestRecord {
                 owner,
                 target,
+                label,
                 state: RequestState::Reserved,
             },
         );
@@ -285,9 +306,19 @@ impl RequestRegistry {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn register_watch(
         &self,
         owner: ActorRef,
+        dependencies: Vec<RequestId>,
+    ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
+        self.register_watch_labeled(owner, "watch".into(), dependencies)
+    }
+
+    pub(crate) fn register_watch_labeled(
+        &self,
+        owner: ActorRef,
+        label: String,
         dependencies: Vec<RequestId>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
@@ -301,6 +332,7 @@ impl RequestRegistry {
             id,
             WatchRecord {
                 owner,
+                label,
                 dependencies,
                 state: WatchState::Pending,
             },

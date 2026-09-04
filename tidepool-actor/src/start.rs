@@ -23,6 +23,16 @@ pub enum ActorEffectProfileWire {
     ActorReadOnlyProfile,
 }
 
+#[derive(tidepool_bridge_derive::FromCore)]
+pub enum ActorLaunchRoleWire {
+    ActorRootRole,
+    ActorResearchRole,
+    ActorCodingRole,
+    ActorScaffoldingRole,
+    ActorIntegrationRole,
+    ActorInheritedRole,
+}
+
 /// One parked parent continuation paired with exclusive custody of its child
 /// entry. Compiler provenance travels with the rooted entry itself.
 pub struct ResidentActorStart {
@@ -30,6 +40,7 @@ pub struct ResidentActorStart {
     parent_hole: ResidentHole,
     entry: RootCustody,
     launch_worktrees: Vec<String>,
+    fork_group: Option<crate::ForkGroupId>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +67,10 @@ pub enum ActorStartCaptureError {
     AmbiguousIncarnation { head: String, modules: Vec<String> },
     #[error("actor start has no live declaration plane")]
     NoCompileView,
+    #[error("context fork parent lexical scope is no longer live")]
+    ParentScopeRetired,
+    #[error("context fork carried invalid group id {0}")]
+    InvalidForkGroup(i64),
 }
 
 impl ResidentActorStart {
@@ -69,16 +84,31 @@ impl ResidentActorStart {
         request: &Value,
         table: &DataConTable,
         session_id: tidepool_repr::SessionId,
+        parent_actor: crate::ActorRef,
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
-        let ActorReq::ActorStartWith(label, _entry_projection, profile, launch_worktrees) =
-            ActorReq::from_value(request, table)?
-        else {
-            return Err(ActorStartCaptureError::UnexpectedRequest);
-        };
+        let (label, role, profile, launch_worktrees, fork_group) =
+            match ActorReq::from_value(request, table)? {
+                ActorReq::ActorStartWith(label, _, role, profile, worktrees) => {
+                    (label, role, profile, worktrees, None)
+                }
+                ActorReq::ActorForkWith(label, _, group, role, profile, worktrees) => {
+                    let group = u64::try_from(group)
+                        .map_err(|_| ActorStartCaptureError::InvalidForkGroup(group))?;
+                    (
+                        label,
+                        role,
+                        profile,
+                        worktrees,
+                        Some(crate::ForkGroupId(group)),
+                    )
+                }
+                _ => return Err(ActorStartCaptureError::UnexpectedRequest),
+            };
+        let context_fork = fork_group.is_some();
         let child_realm = RealmId::fresh();
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)
@@ -88,8 +118,33 @@ impl ResidentActorStart {
             ActorEffectProfileWire::ActorReadOnlyProfile => crate::ActorEffectProfile::ReadOnly,
         };
         let facade = materialize_entry_facade(session, &entry)?;
-        let lexical_scope = session.mint_isolated_scope();
-        let descriptor = ActorDescriptor::new(
+        let lexical_scope = if context_fork {
+            session
+                .mint_scope(session.run_context().lexical_scope)
+                .ok_or(ActorStartCaptureError::ParentScopeRetired)?
+        } else {
+            session.mint_isolated_scope()
+        };
+        let effective_role = match role {
+            ActorLaunchRoleWire::ActorRootRole => crate::EffectiveRole::root(),
+            ActorLaunchRoleWire::ActorResearchRole => crate::EffectiveRole::research(),
+            ActorLaunchRoleWire::ActorCodingRole => crate::EffectiveRole::coding(),
+            ActorLaunchRoleWire::ActorScaffoldingRole => {
+                crate::EffectiveRole::scaffolding(crate::DescendantBudget {
+                    maximum_depth: 0,
+                    maximum_active_children: 0,
+                })
+            }
+            ActorLaunchRoleWire::ActorIntegrationRole => crate::EffectiveRole::integration(),
+            ActorLaunchRoleWire::ActorInheritedRole => {
+                if launch_worktrees.is_empty() {
+                    crate::EffectiveRole::research()
+                } else {
+                    crate::EffectiveRole::coding()
+                }
+            }
+        };
+        let mut descriptor = ActorDescriptor::new(
             label,
             crate::ActorPlacement {
                 session: session_id,
@@ -98,27 +153,39 @@ impl ResidentActorStart {
             },
         )
         .with_profile(profile)
-        .with_effective_role(if launch_worktrees.is_empty() {
-            crate::EffectiveRole::research()
-        } else {
-            crate::EffectiveRole::coding()
-        })
+        .with_effective_role(effective_role)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
+        if context_fork {
+            descriptor = descriptor.with_context_parent(parent_actor);
+        }
+        if let Some(group) = fork_group {
+            descriptor = descriptor.with_fork_group(group);
+        }
         Ok(Self {
             descriptor,
             parent_hole,
             entry,
             launch_worktrees,
+            fork_group,
         })
     }
 
     /// Consume the capture into the exact parent obligation and child entry.
-    pub fn into_parts(self) -> (ActorDescriptor, ResidentHole, RootCustody, Vec<String>) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ActorDescriptor,
+        ResidentHole,
+        RootCustody,
+        Vec<String>,
+        Option<crate::ForkGroupId>,
+    ) {
         (
             self.descriptor,
             self.parent_hole,
             self.entry,
             self.launch_worktrees,
+            self.fork_group,
         )
     }
 }

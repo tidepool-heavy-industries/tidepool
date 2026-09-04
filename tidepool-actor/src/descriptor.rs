@@ -15,6 +15,9 @@ pub struct ActorDescriptor {
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
     role: EffectiveRole,
+    context_parent: Option<ActorRef>,
+    actor_path: Option<tidepool_repr::ActorPath>,
+    fork_group: Option<crate::ForkGroupId>,
 }
 
 impl ActorDescriptor {
@@ -28,6 +31,9 @@ impl ActorDescriptor {
             placement,
             source_imports: ActorSourceImports::default(),
             role: EffectiveRole::coding(),
+            context_parent: None,
+            actor_path: None,
+            fork_group: None,
         }
     }
 
@@ -49,6 +55,40 @@ impl ActorDescriptor {
     #[must_use]
     pub fn with_effective_role(mut self, role: EffectiveRole) -> Self {
         self.role = role;
+        self
+    }
+
+    #[must_use]
+    pub fn context_parent(&self) -> Option<ActorRef> {
+        self.context_parent
+    }
+
+    #[must_use]
+    pub fn with_context_parent(mut self, parent: ActorRef) -> Self {
+        self.context_parent = Some(parent);
+        self
+    }
+
+    #[must_use]
+    pub fn actor_path(&self) -> Option<&tidepool_repr::ActorPath> {
+        self.actor_path.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_actor_path(mut self, path: tidepool_repr::ActorPath) -> Self {
+        self.label = path.to_string();
+        self.actor_path = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn fork_group(&self) -> Option<crate::ForkGroupId> {
+        self.fork_group
+    }
+
+    #[must_use]
+    pub fn with_fork_group(mut self, group: crate::ForkGroupId) -> Self {
+        self.fork_group = Some(group);
         self
     }
 
@@ -92,6 +132,7 @@ impl ActorDescriptor {
             effect_policy: self.effect_policy,
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
+            haskell_effects_alias: self.role.haskell_effects_alias(),
         }
     }
 }

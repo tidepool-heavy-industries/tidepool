@@ -45,7 +45,10 @@ pub use kernel::{
     KernelInvocationReply, KernelMessage, KernelWorkbenchFailure, KernelWorkbenchReply,
     LocalActorRef,
 };
-pub use lineage::{ActorLineageRegistry, ActorPathReservation};
+pub use lineage::{
+    ActorLineageRegistry, ActorPathReservation, ForkGroupError, ForkGroupGate, ForkGroupId,
+    ForkGroupPhase, ForkGroupRegistry,
+};
 pub use local_actor::{
     spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
     KernelStep, LocalActor, LocalActorArguments, LocalActorDirectory, LocalActorState,
@@ -73,7 +76,9 @@ pub use resident_workbench::{
     ResidentActorWorkbenchError,
 };
 pub use role::{ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess};
-pub use start::{ActorEffectProfileWire, ActorStartCaptureError, ResidentActorStart};
+pub use start::{
+    ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError, ResidentActorStart,
+};
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};

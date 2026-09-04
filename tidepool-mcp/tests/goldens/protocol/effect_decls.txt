@@ -1374,34 +1374,42 @@ Managed git worktrees: create an isolated worktree from a clean source (or, expl
 
 -- prompt_card: None --
 
--- constructors (7 items) --
+-- constructors (9 items) --
 -- constructors[0] (80 bytes) --
 WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[0] --
 
--- constructors[1] (78 bytes) --
-WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)
+-- constructors[1] (100 bytes) --
+WorktreeCreateForActorPath :: WorktreeSpec -> Text -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[1] --
 
--- constructors[2] (65 bytes) --
-WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
+-- constructors[2] (108 bytes) --
+WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[2] --
 
--- constructors[3] (76 bytes) --
-WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
+-- constructors[3] (78 bytes) --
+WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[3] --
 
--- constructors[4] (70 bytes) --
-WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
+-- constructors[4] (65 bytes) --
+WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
 -- end constructors[4] --
 
--- constructors[5] (96 bytes) --
-WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
+-- constructors[5] (76 bytes) --
+WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
 -- end constructors[5] --
 
--- constructors[6] (101 bytes) --
-WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- constructors[6] (70 bytes) --
+WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
 -- end constructors[6] --
+
+-- constructors[7] (96 bytes) --
+WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
+-- end constructors[7] --
+
+-- constructors[8] (101 bytes) --
+WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- end constructors[8] --
 
 -- end constructors --
 
@@ -2184,45 +2192,65 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 `Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits.
 -- end prompt_card.0 --
 
--- constructors (6 items) --
--- constructors[0] (103 bytes) --
-ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorEffectProfile -> [Text] -> Actor (Int, Int)
+-- constructors (10 items) --
+-- constructors[0] (78 bytes) --
+ActorBeginForkGroupWith :: Bool -> Text -> [Text] -> Actor (Int, Text, [Text])
 -- end constructors[0] --
 
--- constructors[1] (56 bytes) --
-ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
+-- constructors[1] (128 bytes) --
+ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Actor (Int, Int, Text)
 -- end constructors[1] --
 
--- constructors[2] (64 bytes) --
-ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
+-- constructors[2] (134 bytes) --
+ActorForkWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Actor (Int, Int, Text)
 -- end constructors[2] --
 
--- constructors[3] (62 bytes) --
-ActorCallWith :: (Int, Int) -> protocol result -> Actor result
+-- constructors[3] (43 bytes) --
+ActorCommitForkGroupWith :: Int -> Actor ()
 -- end constructors[3] --
 
--- constructors[4] (70 bytes) --
-ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus
+-- constructors[4] (42 bytes) --
+ActorAbortForkGroupWith :: Int -> Actor ()
 -- end constructors[4] --
 
--- constructors[5] (54 bytes) --
-ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- constructors[5] (56 bytes) --
+ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
 -- end constructors[5] --
+
+-- constructors[6] (64 bytes) --
+ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
+-- end constructors[6] --
+
+-- constructors[7] (62 bytes) --
+ActorCallWith :: (Int, Int) -> protocol result -> Actor result
+-- end constructors[7] --
+
+-- constructors[8] (70 bytes) --
+ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus
+-- end constructors[8] --
+
+-- constructors[9] (54 bytes) --
+ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- end constructors[9] --
 
 -- end constructors --
 
--- type_defs (3 items) --
--- type_defs[0] (90 bytes) --
-data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
+-- type_defs (4 items) --
+-- type_defs[0] (161 bytes) --
+data ActorLaunchRole = ActorRootRole | ActorResearchRole | ActorCodingRole | ActorScaffoldingRole | ActorIntegrationRole | ActorInheritedRole deriving (Show, Eq)
 -- end type_defs[0] --
 
--- type_defs[1] (120 bytes) --
-data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
+-- type_defs[1] (90 bytes) --
+data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
 -- end type_defs[1] --
 
--- type_defs[2] (84 bytes) --
-data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)
+-- type_defs[2] (120 bytes) --
+data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 -- end type_defs[2] --
+
+-- type_defs[3] (84 bytes) --
+data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)
+-- end type_defs[3] --
 
 -- end type_defs --
 

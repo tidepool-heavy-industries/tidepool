@@ -4,15 +4,19 @@ pub(super) enum PromptId {
     RecreatedRoot,
     WorktreeAgent,
     ReadonlyAgent,
+    ScaffoldingAgent,
+    IntegrationAgent,
 }
 
 impl PromptId {
     #[cfg(test)]
-    pub(super) const ALL: [Self; 4] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::ShoalRoot,
         Self::RecreatedRoot,
         Self::WorktreeAgent,
         Self::ReadonlyAgent,
+        Self::ScaffoldingAgent,
+        Self::IntegrationAgent,
     ];
 
     pub(super) fn artifact(self) -> PromptArtifact {
@@ -21,6 +25,12 @@ impl PromptId {
             Self::RecreatedRoot => include_str!("../../../prompts/shoal/recreated-root.md"),
             Self::WorktreeAgent => include_str!("../../../prompts/shoal/worktree-agent.md"),
             Self::ReadonlyAgent => include_str!("../../../prompts/shoal/readonly-agent.md"),
+            Self::ScaffoldingAgent => {
+                include_str!("../../../prompts/shoal/scaffolding-agent.md")
+            }
+            Self::IntegrationAgent => {
+                include_str!("../../../prompts/shoal/integration-agent.md")
+            }
         };
         PromptArtifact {
             id: self,

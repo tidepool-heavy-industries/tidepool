@@ -1,0 +1,352 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+-- | Cache-preserving context forks described as an applicative layer.
+module Tidepool.Actors.Unfold
+  ( CampaignLabel
+  , ForkGroupLabel
+  , BranchLabel
+  , ForkGroupPath
+  , NameError (..)
+  , WorktreeSeed
+  , projectHead
+  , boundHead
+  , existingWorktree
+  , atRef
+  , snapshotDirty
+  , campaignLabel
+  , forkGroupLabel
+  , branchLabel
+  , batch
+  , subgroup
+  , Branch
+  , researching
+  , coding
+  , scaffolding
+  , integrating
+  , Unfold
+  , child
+  , childSited
+  , Forked
+  , forkedActor
+  , forkedResponse
+  , forkedLaunch
+  , BranchReceipt (..)
+  , awaitFork
+  , unfold
+  ) where
+
+import Control.Monad.Freer (Eff, Member, send)
+import Data.Char (isAsciiLower, isDigit)
+import Data.Kind (Type)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Prelude
+
+import Tidepool.Agent.Reply (Replies, Response, ResponseResult)
+import Tidepool.Agent.Reply.Internal (RequestLabel (..))
+import Tidepool.Agent.Watch (Await, awaitSettled)
+import qualified Tidepool.Actor as ActorRuntime
+import Tidepool.Actors.Internal.Agent
+  ( AgentRef
+  , AgentSpec
+  , codingAgent
+  , scaffoldingAgent
+  , integrationAgent
+  , readonlyWorktreeAgent
+  , requestSited
+  , startForkedAgent
+  )
+import Tidepool.Actors.Role
+  ( CodingEffects
+  , Forks
+  , IntegrationEffects
+  , KnownEffects
+  , ResearchEffects
+  , ScaffoldEffects
+  , Subset
+  )
+import Tidepool.Effects.Core
+  ( Actor
+  , DirtyPolicy (..)
+  , GitRef
+  , Worktree (WorktreeCreateForActorPath, WorktreeCreateFromBoundForActorPath)
+  , WorktreeError
+  , WorktreeHandle
+  , WorktreeSource (..)
+  , WorktreeSpec (..)
+  )
+import Tidepool.Worktree (renderWorktreeError, worktreeId)
+
+newtype CampaignLabel = CampaignLabel Text
+newtype ForkGroupLabel = ForkGroupLabel Text
+newtype BranchLabel = BranchLabel Text
+data ForkGroupPath = ForkGroupPath Bool Text
+
+data NameError
+  = EmptyName
+  | InvalidKebabName Text
+  | NameTooLong Text
+  deriving (Show, Eq)
+
+campaignLabel :: Text -> Either NameError CampaignLabel
+campaignLabel = fmap CampaignLabel . validateSegment
+
+forkGroupLabel :: Text -> Either NameError ForkGroupLabel
+forkGroupLabel = fmap ForkGroupLabel . validateSegment
+
+branchLabel :: Text -> Either NameError BranchLabel
+branchLabel = fmap BranchLabel . validateSegment
+
+batch :: CampaignLabel -> ForkGroupLabel -> ForkGroupPath
+batch (CampaignLabel campaignName) (ForkGroupLabel groupName) =
+  ForkGroupPath False (campaignName <> "/" <> groupName)
+
+subgroup :: ForkGroupLabel -> ForkGroupPath
+subgroup (ForkGroupLabel groupName) = ForkGroupPath True groupName
+
+validateSegment :: Text -> Either NameError Text
+validateSegment value
+  | Text.null value = Left EmptyName
+  | Text.length value > 48 = Left (NameTooLong value)
+  | Text.head value == '-' || Text.last value == '-' = Left (InvalidKebabName value)
+  | "--" `Text.isInfixOf` value = Left (InvalidKebabName value)
+  | Text.all valid value = Right value
+  | otherwise = Left (InvalidKebabName value)
+  where
+    valid character = isAsciiLower character || isDigit character || character == '-'
+
+data WorktreeSeed
+  = WorktreeSeed WorktreeSource DirtyPolicy
+  | BoundHeadSeed DirtyPolicy
+
+projectHead :: WorktreeSeed
+projectHead = WorktreeSeed SourceCurrentRepository RequireClean
+
+boundHead :: WorktreeSeed
+boundHead = BoundHeadSeed RequireClean
+
+existingWorktree :: WorktreeHandle -> WorktreeSeed
+existingWorktree tree = WorktreeSeed (SourceWorktree (worktreeId tree)) RequireClean
+
+atRef :: GitRef -> WorktreeSeed
+atRef ref = WorktreeSeed (SourceRef ref) RequireClean
+
+snapshotDirty :: WorktreeSeed -> WorktreeSeed
+snapshotDirty (WorktreeSeed source _) = WorktreeSeed source AllowDirtySnapshot
+snapshotDirty (BoundHeadSeed _) = BoundHeadSeed AllowDirtySnapshot
+
+data BranchRole = ResearchBranch | CodingBranch | ScaffoldingBranch | IntegrationBranch
+
+data Branch (childEffects :: [Type -> Type]) input result where
+  Branch
+    :: BranchLabel
+    -> BranchRole
+    -> WorktreeSeed
+    -> input
+    -> Branch childEffects input result
+
+researching
+  :: forall result input
+   . BranchLabel
+  -> WorktreeSeed
+  -> input
+  -> Branch ResearchEffects input result
+researching label seed input = Branch label ResearchBranch seed input
+
+coding
+  :: forall result input
+   . BranchLabel
+  -> WorktreeSeed
+  -> input
+  -> Branch CodingEffects input result
+coding label seed input = Branch label CodingBranch seed input
+
+scaffolding
+  :: forall result input
+   . BranchLabel
+  -> WorktreeSeed
+  -> input
+  -> Branch ScaffoldEffects input result
+scaffolding label seed input =
+  Branch label ScaffoldingBranch seed input
+
+integrating
+  :: forall result input
+   . BranchLabel
+  -> WorktreeSeed
+  -> input
+  -> Branch IntegrationEffects input result
+integrating label seed input =
+  Branch label IntegrationBranch seed input
+
+data BranchReceipt = BranchReceipt
+  { requestedPath :: Text
+  , allocatedPath :: Text
+  , forkGroupIdentity :: Int
+  }
+  deriving (Show, Eq)
+
+awaitFork :: Forked result -> Await (ResponseResult result)
+awaitFork = awaitSettled . forkedResponse
+
+data Forked result = Forked
+  { forkedActor :: AgentRef
+  , forkedResponse :: Response result
+  , forkedLaunch :: BranchReceipt
+  }
+
+data Unfold (parent :: [Type -> Type]) result where
+  PureU :: result -> Unfold parent result
+  BranchU :: Int -> Branch child input result -> Unfold parent (Forked result)
+  ApU :: Unfold parent (a -> result) -> Unfold parent a -> Unfold parent result
+
+-- The intermediate tree preserves the caller's heterogeneous applicative
+-- shape while separating actor construction from request publication. No
+-- branch can receive its assignment until every sibling actor exists.
+data Started (parent :: [Type -> Type]) result where
+  StartedPure :: result -> Started parent result
+  StartedBranch
+    :: Int
+    -> Int
+    -> ForkGroupPath
+    -> Branch child input result
+    -> AgentRef
+    -> Text
+    -> Started parent (Forked result)
+  StartedAp
+    :: Started parent (a -> result)
+    -> Started parent a
+    -> Started parent result
+
+instance Functor (Unfold parent) where
+  fmap function plan = PureU function <*> plan
+
+instance Applicative (Unfold parent) where
+  pure = PureU
+  (<*>) = ApU
+
+{-# OPAQUE child #-}
+child
+  :: forall result child input parent
+   . (KnownEffects child, Subset child parent)
+  => Branch child input result
+  -> Unfold parent (Forked result)
+child = childSited 0
+
+{-# OPAQUE childSited #-}
+childSited
+  :: forall result child input parent
+   . (KnownEffects child, Subset child parent)
+  => Int
+  -> Branch child input result
+  -> Unfold parent (Forked result)
+childSited = BranchU
+
+-- | Interpret one independent applicative layer. Actor construction is a
+-- complete first pass and request publication is a complete second pass; the
+-- runtime batch owner adds rollback and provider-readiness gating around this
+-- same Haskell-owned result tree.
+unfold
+  :: forall parent result
+   . (Member Forks parent, Member Actor parent, Member Replies parent, Member Worktree parent)
+  => ForkGroupPath
+  -> Unfold parent result
+  -> Eff parent result
+unfold (ForkGroupPath relative groupName) plan = do
+  (groupId, resolvedGroup, allocated) <- ActorRuntime.beginActorForkGroup relative groupName (branchNames plan)
+  let group = ForkGroupPath False resolvedGroup
+  (started, remaining) <- start groupId group plan allocated
+  case remaining of
+    [] -> do
+      result <- activate started
+      ActorRuntime.commitActorForkGroup groupId
+      pure result
+    _ -> error "unfold: runtime returned more branch paths than requested"
+  where
+    start
+      :: Int
+      -> ForkGroupPath
+      -> Unfold parent a
+      -> [Text]
+      -> Eff parent (Started parent a, [Text])
+    start _ _ (PureU value) paths = pure (StartedPure value, paths)
+    start groupId path (BranchU site branchPlan) paths = case paths of
+      [] -> error "unfold: runtime returned fewer branch paths than requested"
+      allocated : rest -> do
+        (actor, confirmed) <- startBranch groupId allocated branchPlan
+        pure (StartedBranch site groupId path branchPlan actor confirmed, rest)
+    start groupId path (ApU functions arguments) paths = do
+      (startedFunctions, afterFunctions) <- start groupId path functions paths
+      (startedArguments, remaining) <- start groupId path arguments afterFunctions
+      pure (StartedAp startedFunctions startedArguments, remaining)
+
+    activate :: Started parent a -> Eff parent a
+    activate (StartedPure value) = pure value
+    activate (StartedBranch site groupId path branchPlan actor allocated) =
+      requestBranch site groupId path branchPlan actor allocated
+    activate (StartedAp functions arguments) =
+      activate functions <*> activate arguments
+
+    branchNames :: Unfold parent a -> [Text]
+    branchNames (PureU _) = []
+    branchNames (BranchU _ (Branch (BranchLabel leaf) _ _ _)) = [leaf]
+    branchNames (ApU functions arguments) =
+      branchNames functions <> branchNames arguments
+
+startBranch
+  :: forall effects child input result
+   . (Member Actor effects, Member Worktree effects)
+  => Int
+  -> Text
+  -> Branch child input result
+  -> Eff effects (AgentRef, Text)
+startBranch groupId allocated (Branch _ role seed _) = do
+  created <- createNamedWorktree allocated seed
+  case created of
+    Left failure -> do
+      ActorRuntime.abortActorForkGroup groupId
+      error (Text.unpack ("unfold worktree admission failed: " <> renderWorktreeError failure))
+    Right tree ->
+      startForkedAgent groupId allocated (agentFor role tree)
+
+createNamedWorktree
+  :: Member Worktree effects
+  => Text
+  -> WorktreeSeed
+  -> Eff effects (Either WorktreeError WorktreeHandle)
+createNamedWorktree allocated (WorktreeSeed source dirtyPolicy) =
+  send (WorktreeCreateForActorPath (WorktreeSpec source allocated dirtyPolicy) allocated)
+createNamedWorktree allocated (BoundHeadSeed dirtyPolicy) =
+  send (WorktreeCreateFromBoundForActorPath dirtyPolicy allocated)
+
+agentFor :: BranchRole -> WorktreeHandle -> AgentSpec
+agentFor ResearchBranch = readonlyWorktreeAgent
+agentFor CodingBranch = codingAgent
+agentFor ScaffoldingBranch = scaffoldingAgent
+agentFor IntegrationBranch = integrationAgent
+
+requestBranch
+  :: forall effects child input result
+   . Member Replies effects
+  => Int
+  -> Int
+  -> ForkGroupPath
+  -> Branch child input result
+  -> AgentRef
+  -> Text
+  -> Eff effects (Forked result)
+requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) _ _ input) actor allocated = do
+  let requested = group <> "/" <> leaf
+  response <- requestSited @result @input site actor (RequestLabel leaf) input
+  pure Forked
+    { forkedActor = actor
+    , forkedResponse = response
+    , forkedLaunch = BranchReceipt requested allocated groupId
+    }

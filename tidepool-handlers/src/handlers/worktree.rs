@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -88,6 +89,14 @@ pub struct ActorWorktreeAuthority {
     runtime: Arc<str>,
     bindings: Arc<Mutex<BindingTable>>,
     root: Arc<RwLock<Option<tidepool_repr::PrincipalId>>>,
+    grants: Arc<RwLock<HashMap<tidepool_repr::PrincipalId, ActorWorktreeGrant>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ActorWorktreeGrant {
+    pub enumerate: bool,
+    pub allocate: bool,
+    pub integrate: bool,
 }
 
 impl ActorWorktreeAuthority {
@@ -97,11 +106,20 @@ impl ActorWorktreeAuthority {
             runtime: runtime.into(),
             bindings,
             root: Arc::new(RwLock::new(None)),
+            grants: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn install_root(&self, principal: tidepool_repr::PrincipalId) {
         *self.root.write() = Some(principal);
+    }
+
+    pub fn install_grant(&self, principal: tidepool_repr::PrincipalId, grant: ActorWorktreeGrant) {
+        self.grants.write().insert(principal, grant);
+    }
+
+    pub fn remove_grant(&self, principal: tidepool_repr::PrincipalId) {
+        self.grants.write().remove(&principal);
     }
 
     fn is_root(&self, principal: tidepool_repr::PrincipalId) -> bool {
@@ -123,6 +141,23 @@ impl ActorWorktreeAuthority {
             .lock()
             .current(tree)
             .is_some_and(|binding| binding.agent() == &expected)
+    }
+
+    fn grant(&self, principal: tidepool_repr::PrincipalId) -> ActorWorktreeGrant {
+        self.grants
+            .read()
+            .get(&principal)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn bound_worktree(&self, principal: tidepool_repr::PrincipalId) -> Option<WorktreeId> {
+        let agent = WorktreePrincipal::exact_actor(
+            &self.runtime,
+            principal.identity,
+            principal.incarnation,
+        );
+        self.bindings.lock().active_for_agent(&agent).cloned()
     }
 }
 
@@ -157,12 +192,59 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
         }
 
+        let grant = self.authority.grant(principal);
         let permitted_tree = match &req {
             WorktreeReq::WorktreeLookup(id)
             | WorktreeReq::WorktreeBranchOf(id)
             | WorktreeReq::WorktreeHeadOf(id)
             | WorktreeReq::WorktreeObserveSubmission(id) => Some(id),
+            WorktreeReq::WorktreeCreateForActorPath(spec, path) if grant.allocate => {
+                return cx.respond(
+                    self.inner
+                        .worktree_create_for_actor_path(spec.clone(), path.clone()),
+                );
+            }
+            WorktreeReq::WorktreeCreateFromBoundForActorPath(dirty_policy, path)
+                if grant.allocate =>
+            {
+                let Some(source) = self.authority.bound_worktree(principal) else {
+                    return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
+                        "boundHead requires one active bound worktree".into(),
+                    )));
+                };
+                let spec = WorktreeSpec {
+                    source: WorktreeSource::Worktree(source),
+                    label: path.clone(),
+                    dirty_policy: dirty_policy_from_wire(*dirty_policy),
+                };
+                let actor_path = match tidepool_repr::ActorPath::parse(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
+                            format!("invalid actor path: {error}"),
+                        )));
+                    }
+                };
+                let result = self
+                    .inner
+                    .manager
+                    .create_for_actor_path(&spec, &actor_path)
+                    .map(|handle| handle_to_wire(&handle))
+                    .map_err(error_to_wire);
+                return cx.respond(result);
+            }
+            WorktreeReq::WorktreeCreate(_) if grant.allocate => {
+                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
+            }
+            WorktreeReq::WorktreeList if grant.enumerate => {
+                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
+            }
+            WorktreeReq::WorktreeMergeInto(..) if grant.integrate => {
+                return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
+            }
             WorktreeReq::WorktreeCreate(_)
+            | WorktreeReq::WorktreeCreateForActorPath(..)
+            | WorktreeReq::WorktreeCreateFromBoundForActorPath(..)
             | WorktreeReq::WorktreeList
             | WorktreeReq::WorktreeMergeInto(..) => None,
         };
@@ -451,6 +533,32 @@ impl WorktreeHandler {
         let domain_spec = spec_from_wire(spec)?;
         let handle = self.manager.create(&domain_spec).map_err(error_to_wire)?;
         Ok(handle_to_wire(&handle))
+    }
+
+    pub(crate) fn worktree_create_for_actor_path(
+        &mut self,
+        spec: WtWorktreeSpec,
+        actor_path: String,
+    ) -> Result<WtWorktreeHandle, WorktreeError> {
+        let domain_spec = spec_from_wire(spec)?;
+        let actor_path = tidepool_repr::ActorPath::parse(&actor_path).map_err(|error| {
+            WorktreeError::WorktreeAuthorityDenied(format!("invalid actor path: {error}"))
+        })?;
+        let handle = self
+            .manager
+            .create_for_actor_path(&domain_spec, &actor_path)
+            .map_err(error_to_wire)?;
+        Ok(handle_to_wire(&handle))
+    }
+
+    pub(crate) fn worktree_create_from_bound_for_actor_path(
+        &mut self,
+        _dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
+        _actor_path: String,
+    ) -> Result<WtWorktreeHandle, WorktreeError> {
+        Err(WorktreeError::WorktreeAuthorityDenied(
+            "boundHead is available only through an actor-scoped Worktree interpreter".into(),
+        ))
     }
 
     /// `Ok(None)` from `WorktreeManager::lookup` (the id was NEVER

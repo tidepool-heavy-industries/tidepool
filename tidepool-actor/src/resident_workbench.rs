@@ -34,16 +34,22 @@ use crate::{ActorCompileViewError, ResponseExpectation};
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
 impl ResponseExpectation {
-    fn request_preamble(&self, preamble: &str, request: crate::RequestId) -> String {
+    fn request_preamble(
+        &self,
+        preamble: &str,
+        request: crate::RequestId,
+        effects_alias: &str,
+    ) -> String {
         let mut preamble = insert_preamble_imports(
             preamble,
             "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
         );
         preamble = insert_preamble_imports(&preamble, "qualified Data.Void as TidepoolVoid");
         preamble.push_str(&format!(
-            "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\nrespond :: ({0}) -> Eff ActorEffects TidepoolVoid.Void\nrespond = TidepoolReplies.reply sessionReply\n",
+            "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\nrespond :: ({0}) -> Eff {2} TidepoolVoid.Void\nrespond = TidepoolReplies.reply sessionReply\n",
             self.expected_type(),
             request.0,
+            effects_alias,
         ));
         preamble
     }
@@ -202,6 +208,7 @@ pub(crate) struct ResidentAgentAttachment {
 /// downstream orchestration never re-decodes the suspended request.
 pub(crate) enum ResidentActorBoundary {
     Completed,
+    ForkGroup(ForkGroupBoundary),
     Start(crate::ResidentActorStart),
     Outbound(ResidentOutbound),
     Wait(ResidentWaitRequest),
@@ -217,6 +224,23 @@ pub(crate) enum ResidentActorBoundary {
     ResponsePoll(ResponsePoll),
     WatchRegistration(WatchRegistration),
     WatchPoll(WatchPoll),
+}
+
+pub(crate) enum ForkGroupBoundary {
+    Begin {
+        continuation: ResidentHole,
+        relative: bool,
+        group: String,
+        branches: Vec<String>,
+    },
+    Commit {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
+    Abort {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -238,6 +262,9 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
+            Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
+            Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
+            Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
             Self::Start(_) => "startActor",
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
@@ -316,7 +343,17 @@ impl ResidentRequest {
 
     fn operation(&self) -> &'static str {
         match self {
+            Self::Actor(crate::generated::actor::ActorReq::ActorBeginForkGroupWith(..)) => {
+                "begin context-fork group"
+            }
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
+            Self::Actor(crate::generated::actor::ActorReq::ActorForkWith(..)) => "context fork",
+            Self::Actor(crate::generated::actor::ActorReq::ActorCommitForkGroupWith(..)) => {
+                "commit context-fork group"
+            }
+            Self::Actor(crate::generated::actor::ActorReq::ActorAbortForkGroupWith(..)) => {
+                "abort context-fork group"
+            }
             Self::Actor(crate::generated::actor::ActorReq::ActorWaitWith(..)) => "awaitExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorPollWith(..)) => "pollExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
@@ -580,7 +617,7 @@ where
                     session,
                     context,
                     source,
-                    "ActorEffects",
+                    context.haskell_effects_alias,
                     &type_modules,
                     &block,
                 )? {
@@ -689,9 +726,11 @@ where
         let type_modules = Arc::clone(&self.type_modules);
         let mut turn_source = self.access.source.clone();
         let preamble = match (&self.response, self.request) {
-            (Some(response), Some(request)) => {
-                response.request_preamble(&turn_source.preamble, request)
-            }
+            (Some(response), Some(request)) => response.request_preamble(
+                &turn_source.preamble,
+                request,
+                context.haskell_effects_alias,
+            ),
             (None, None) => turn_source.preamble.to_string(),
             _ => unreachable!("request workbench scope is constructed atomically"),
         };
@@ -738,7 +777,9 @@ where
 {
     let mut source = source.clone();
     source.preamble = match (scope.response, scope.request) {
-        (Some(response), Some(request)) => response.request_preamble(&source.preamble, request),
+        (Some(response), Some(request)) => {
+            response.request_preamble(&source.preamble, request, context.haskell_effects_alias)
+        }
         (None, None) => source.preamble.to_string(),
         _ => unreachable!("request workbench scope is constructed atomically"),
     }
@@ -753,7 +794,7 @@ where
         session,
         context,
         &source,
-        "ActorEffects",
+        context.haskell_effects_alias,
         scope.type_modules,
         &block,
     )? {
@@ -974,9 +1015,10 @@ where
             .with_machine(context, move |session, context, _| {
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
                 match decoded {
-                    ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorStartWith(
-                        ..,
-                    )) => {
+                    ResidentRequest::Actor(
+                        crate::generated::actor::ActorReq::ActorStartWith(..)
+                        | crate::generated::actor::ActorReq::ActorForkWith(..),
+                    ) => {
                         let table = session.data_con_table().clone();
                         crate::ResidentActorStart::capture(
                             session,
@@ -984,10 +1026,45 @@ where
                             &request,
                             &table,
                             context.placement.session,
+                            context.actor,
                         )
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
+                    ResidentRequest::Actor(
+                        crate::generated::actor::ActorReq::ActorBeginForkGroupWith(
+                            relative,
+                            group,
+                            branches,
+                        ),
+                    ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
+                        continuation: hole,
+                        relative,
+                        group,
+                        branches,
+                    })),
+                    ResidentRequest::Actor(
+                        crate::generated::actor::ActorReq::ActorCommitForkGroupWith(group),
+                    ) => Ok(ResidentActorBoundary::ForkGroup(
+                        ForkGroupBoundary::Commit {
+                            continuation: hole,
+                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "invalid fork group id {group}"
+                                ))
+                            })?),
+                        },
+                    )),
+                    ResidentRequest::Actor(
+                        crate::generated::actor::ActorReq::ActorAbortForkGroupWith(group),
+                    ) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
+                        continuation: hole,
+                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "invalid fork group id {group}"
+                            ))
+                        })?),
+                    })),
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorCallWith(
                         target,
                         _,
@@ -1094,10 +1171,11 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
-                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(address)) => Ok(
+                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(label, address)) => Ok(
                         ResidentActorBoundary::RequestReservation(RequestReservation {
                             continuation: hole,
                             target: crate::wait::decode_address(address.0, address.1)?,
+                            label,
                         }),
                     ),
                     ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
@@ -1160,7 +1238,10 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                         }))
                     }
-                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(dependencies)) => {
+                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(
+                        label,
+                        dependencies,
+                    )) => {
                         let dependencies = dependencies
                             .into_iter()
                             .map(crate::request_effect::request_id)
@@ -1169,6 +1250,7 @@ where
                             WatchRegistration {
                                 continuation: hole,
                                 dependencies,
+                                label,
                             },
                         ))
                     }
@@ -1523,6 +1605,29 @@ where
             .await
     }
 
+    pub(crate) async fn resume_fork_group(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        group: crate::ForkGroupId,
+        group_path: String,
+        paths: Vec<String>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let group = i64::try_from(group.0).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "fork group identity exceeds Haskell Int".into(),
+                    )
+                })?;
+                let answer = (group, group_path, paths).to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn resume_reply_rejection(
         &self,
         context: crate::ActorSessionContext,
@@ -1720,10 +1825,15 @@ where
         context: crate::ActorSessionContext,
         hole: ResidentHole,
         actor: crate::ActorRef,
+        allocated_label: String,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
-                let answer = (actor.id.0 as i64, actor.incarnation.0 as i64)
+                let answer = (
+                    actor.id.0 as i64,
+                    actor.incarnation.0 as i64,
+                    allocated_label,
+                )
                     .to_value(session.data_con_table())?;
                 session
                     .resume(hole, answer)
