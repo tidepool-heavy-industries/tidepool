@@ -36,21 +36,31 @@ Start by inspecting the actual environment:
 ```haskell
 :browse
 :bindings
+:status
 :type sessionInput
 ```
 
 Use `:type` and `:info` when a name or constructor is unclear. `:show imports`
 reports the effective module environment. The supported meta-command set is
-intentionally smaller than full GHCi.
+intentionally smaller than full GHCi. `:status` emphasizes active work,
+`:status!` includes terminal history, `:lineage` isolates ancestry, and
+`:trace` adds exact prompt/cache samples and identifiers.
 
-The workbench executes input units in order. A rejected unit stops the suffix;
-earlier successful declarations and bindings remain committed. Effects already
-performed by the rejected unit are not rolled back. Put a declaration group or
-one effect sequence inside `:{` / `:}` and persist several results with one
-outer tuple or record binding.
+The workbench executes input units in order. A failed observational command
+such as `:type`, `:info`, or `:browse` is a local `Diagnostic`, so later
+independent observations still run. A rejected Haskell/effectful unit stops the
+suffix and marks it `NotRun`; earlier successful declarations and bindings
+remain committed. Effects already performed by the rejected unit are not
+rolled back. Put a declaration group or one effect sequence inside `:{` / `:}`
+and persist several results with one outer tuple or record binding.
 
-Compiler diagnostics are part of the interaction interface. A rejected input
-reports the exact failing unit and cause, including completed prefix receipts.
+Compiler diagnostics are part of the interaction interface. Interactive
+compilation keeps warnings as warnings rather than promoting incomplete
+patterns to errors. A projected pattern that actually fails is a typed unit
+rejection, not host death. Every item receipt reports its structured status,
+warnings, and `installedBindings`, so clients need not scrape `[bound x]` text
+to determine the committed lexical prefix. A rejected input reports the exact
+failing unit and cause, including completed prefix receipts.
 Host routing, invocation, encoding, and panic failures are distinct errors and
 retain their underlying cause. Empty wrapper output is never evidence that a
 Haskell action completed.
@@ -232,6 +242,11 @@ acknowledgement makes cancellation terminal, so work cannot continue invisibly
 after a caller has been told it stopped. `abandonResponse` instead releases the
 owner's interest without stopping target execution.
 
+No deadline is the default. When work really must be bounded, use dimensional
+time such as `after (seconds 30)` or `after (minutes 10)`. Bare millisecond
+integers are not part of the public request or unfold surface; status preserves
+the authored unit and shows absolute and remaining time.
+
 `Watch` provides typed readiness composition without becoming lifecycle
 control or an executable program returned from a turn:
 
@@ -271,6 +286,10 @@ still referenced by a watch; `forgetAgent` refuses a running actor or one still
 named by request/watch metadata; and `cleanupForkGroup` refuses while a child
 is active. These operations remove observation/routing metadata only after the
 typed receipts say it is safe. They do not delete worktrees or Git history.
+For a complete retained fork tree, `planCleanup` derives a read-only,
+deepest-first plan and `executeCleanup` returns one receipt per attempted
+forget, stop, and group step. Repeating the plan is safe, failures remain
+local, and cleanup never removes commits, branches, worktrees, or user files.
 
 Integrate incrementally. Once a candidate is clean, independently inspect its
 exact diff and verification evidence, then land it if it is coherent. Do not
@@ -288,20 +307,16 @@ a meaningful integration boundary.
 
 ## Current sharp edges
 
-- An abnormally terminated root is recreated as a new actor incarnation while
-  the Shoal host remains alive. Conversation survives, but previous Haskell
-  bindings, actor references, response handles, worktree authority bindings,
-  pending exits, and mounted live values do not. Reconcile through current Git
-  and runtime state rather than transcript references.
+- An abnormally terminated root is recreated as a successor actor incarnation
+  while the Shoal host remains alive. The provider conversation survives and
+  accepted pure root declaration source is replayed through GHC from a
+  versioned, content-hashed manifest. Arbitrary values, closures, lenses,
+  responses, watches, replies, and old handles are intentionally not
+  serialized or revived. Use `:recovery` for the exact replay/loss report and
+  `:bindings` for successor truth before acting on transcript references.
 - Linked worktrees share Git objects and configuration but not working files,
   indexes, or `HEAD`. Use the repository's matched extractor/toolchain path;
   stale inherited endpoints can otherwise compile a different checkout.
-- During the first live code canary, Cargo output directories below the
-  worker's mounted workspace disappeared during compilation. An explicit
-  target outside that workspace survived. This has not yet been reproduced in
-  a small repository; use the `shoal-console` canary below to determine whether
-  the owner is actor workspace mounting, Codex command sandboxing, or the
-  disposable Tidepool mirror rather than adding another target-path policy.
 - A running Shoal process does not hot-reload Haskell, prompts, or runtime
   code. `just shoal-console` builds the current checkout, including uncommitted
   source, but an already-launched root keeps the snapshot embedded in its
@@ -316,7 +331,10 @@ explicit refusal-bearing retention cleanup, labeled applicative watches,
 typed request and branch deadlines, typed stop and truthful lifecycle
 observation, role-specific effect rows, atomic cache-preserving unfold,
 recursive scaffold and fold, server-filtered managed worktree queries, and
-runtime `:status`/`actorContext` facts. Supervisor lineage is recorded for every
+runtime `:status`/`actorContext` facts, activation-scoped provider usage,
+versioned prompt fingerprints, structured workbench item receipts, typed
+campaign snapshots and cleanup, source-checkout integration custody, and
+honest source-only root recovery. Supervisor lineage is recorded for every
 child; context-parent lineage is additionally recorded only for actual context
 forks.
 The old blocking answerer API remains available under
@@ -324,8 +342,10 @@ The old blocking answerer API remains available under
 
 Provider lineage, Haskell snapshot identity, fork group, exact effect row, and
 cached/uncached input counts read from the conversation's durable Codex rollout
-are observable. Missing provider usage is represented as `Nothing`, never a
-fabricated zero. Tidepool deliberately
+are observable. Each usage sample records its measurement scope, activation,
+cache-boundary reason, prompt profile/catalog version, and fingerprint of the
+effective developer plus hosted-tool prompt. Missing provider usage is
+represented as `Nothing`, never a fabricated zero. Tidepool deliberately
 keeps an idle actor's backend attached today: reply settlement is not proof of
 provider turn-idleness, and eager teardown would weaken inexpensive follow-up
 and multi-wave orchestration. Process hibernation is an optional future
@@ -365,11 +385,9 @@ worker through replies and watches:
 5. Verify each focused test independently, inspect the exact Git diff/commits,
    call `stopAgent`, and require an orderly retirement with no retry or
    missing-rollout log entry.
-6. Check whether the console worker's normal Cargo target survives across both
-   requests. If it disappears, reproduce with the smallest pair of commands
-   and trace the existing workspace-mount and Codex sandbox owners. If it does
-   not reproduce, record that the earlier failure was specific to the
-   disposable Tidepool mirror rather than generalizing a workaround.
+6. Confirm the coding actor retains its lifetime-owned Cargo target across both
+   requests and that a research actor is refused before starting any build,
+   test, formatter, generator, installer, or other artifact-producing command.
 7. Stop the disposable tmux session and discard its managed canary worktree;
    do not merge the test-only changes.
 

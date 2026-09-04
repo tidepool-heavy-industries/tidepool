@@ -387,7 +387,24 @@ pub struct WorkbenchResponse {
 pub struct WorkbenchBinding {
     pub name: String,
     pub type_display: Option<String>,
+    pub kind: WorkbenchBindingKind,
     type_query: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkbenchBindingKind {
+    Declaration,
+    MaterializedValue,
+}
+
+impl WorkbenchBindingKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Declaration => "declaration",
+            Self::MaterializedValue => "live value",
+        }
+    }
 }
 
 impl WorkbenchBinding {
@@ -395,6 +412,7 @@ impl WorkbenchBinding {
         Self {
             name,
             type_display: None,
+            kind: WorkbenchBindingKind::Declaration,
             type_query: Some(type_query),
         }
     }
@@ -403,6 +421,7 @@ impl WorkbenchBinding {
         Self {
             name,
             type_display,
+            kind: WorkbenchBindingKind::MaterializedValue,
             type_query: None,
         }
     }

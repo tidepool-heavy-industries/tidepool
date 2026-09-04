@@ -72,8 +72,9 @@ pub use workbench::{
     parse_ghci_input, resident_workbench_templates, run_block_sequence, workbench_input_binding,
     workbench_json_to_haskell, BlockExecution, BlockSequenceOutcome, CommittedBlock,
     GhciInputError, GhciInputKind, GhciInputUnit, MetaCommandLine, ParsedBlock, WorkSequence,
-    WorkbenchBinding, WorkbenchDiscovery, WorkbenchItem, WorkbenchItemReceipt, WorkbenchItemStatus,
-    WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    WorkbenchBinding, WorkbenchBindingKind, WorkbenchDiscovery, WorkbenchItem,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus,
 };
 
 pub use turn::{

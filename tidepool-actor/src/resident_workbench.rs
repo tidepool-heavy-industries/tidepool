@@ -3304,14 +3304,16 @@ where
                 .into_iter()
                 .map(|binding| {
                     let needs_inspection = binding.type_query().is_some();
-                    match binding.type_display {
+                    let kind = binding.kind.label();
+                    let rendered = match binding.type_display {
                         Some(type_display) => format!("{} :: {type_display}", binding.name),
                         None if needs_inspection => inspected
                             .next()
                             .and_then(Result::ok)
                             .unwrap_or_else(|| format!("{} :: <type unavailable>", binding.name)),
                         None => format!("{} :: <type unavailable>", binding.name),
-                    }
+                    };
+                    format!("{rendered} [{kind}]")
                 })
                 .collect::<Vec<_>>();
             Ok(Ok(if lines.is_empty() {

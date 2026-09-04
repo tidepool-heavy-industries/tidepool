@@ -34,7 +34,7 @@ module Tidepool.Actors.Shoal
   , WorktreeIntegration
   , Forks
   , Effects
-  , KnownEffect (effectWitness)
+  , KnownEffect
   , KnownEffects (knownEffects)
   , Subset
   , CampaignLabel
