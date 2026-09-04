@@ -44,6 +44,7 @@ pub enum WorktreeReq {
     WorktreeCreateForActorPath(tidepool_bridge_effects::WtWorktreeSpec, String),
     WorktreeCreateFromBoundForActorPath(tidepool_bridge_effects::WtDirtyPolicy, String),
     WorktreeLookup(tidepool_bridge_effects::WtWorktreeId),
+    WorktreeBound,
     WorktreeList,
     WorktreeBranchOf(tidepool_bridge_effects::WtWorktreeId),
     WorktreeHeadOf(tidepool_bridge_effects::WtWorktreeId),
@@ -78,6 +79,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
                 cx.respond(self.worktree_create_from_bound_for_actor_path(dirty_policy, actor_path))
             }
             WorktreeReq::WorktreeLookup(tree_id) => cx.respond(self.worktree_lookup(tree_id)),
+            WorktreeReq::WorktreeBound => cx.respond(self.worktree_bound()),
             WorktreeReq::WorktreeList => cx.respond(self.worktree_list()),
             WorktreeReq::WorktreeBranchOf(tree_id) => cx.respond(self.worktree_branch_of(tree_id)),
             WorktreeReq::WorktreeHeadOf(tree_id) => cx.respond(self.worktree_head_of(tree_id)),

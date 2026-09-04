@@ -1374,7 +1374,7 @@ Managed git worktrees: create an isolated worktree from a clean source (or, expl
 
 -- prompt_card: None --
 
--- constructors (9 items) --
+-- constructors (10 items) --
 -- constructors[0] (80 bytes) --
 WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[0] --
@@ -1391,25 +1391,29 @@ WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either W
 WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[3] --
 
--- constructors[4] (65 bytes) --
-WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
+-- constructors[4] (63 bytes) --
+WorktreeBound :: Worktree (Either WorktreeError WorktreeHandle)
 -- end constructors[4] --
 
--- constructors[5] (76 bytes) --
-WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
+-- constructors[5] (65 bytes) --
+WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
 -- end constructors[5] --
 
--- constructors[6] (70 bytes) --
-WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
+-- constructors[6] (76 bytes) --
+WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
 -- end constructors[6] --
 
--- constructors[7] (96 bytes) --
-WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
+-- constructors[7] (70 bytes) --
+WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
 -- end constructors[7] --
 
--- constructors[8] (101 bytes) --
-WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- constructors[8] (96 bytes) --
+WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
 -- end constructors[8] --
+
+-- constructors[9] (101 bytes) --
+WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+-- end constructors[9] --
 
 -- end constructors --
 
@@ -1538,7 +1542,7 @@ import Tidepool.Worktree
 
 -- end extra_imports --
 
--- helpers (6 items) --
+-- helpers (7 items) --
 -- helpers[0] (347 bytes) --
 -- | Create a managed worktree. `Left (SourceDirty summary)` when the
 -- source is dirty and the spec did not opt in; case-match the error
@@ -1555,21 +1559,28 @@ lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (E
 lookupWorktree = send . WorktreeLookup
 -- end helpers[1] --
 
--- helpers[2] (273 bytes) --
+-- helpers[2] (267 bytes) --
+-- | Observe the managed worktree bound to the executing actor.
+-- This is custody lookup, not ambient current-directory inference.
+boundWorktree :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError WorktreeHandle)
+boundWorktree = send WorktreeBound
+-- end helpers[2] --
+
+-- helpers[3] (273 bytes) --
 -- | Every registered worktree, present or lost. A lost tree is listed
 -- with `present = False` rather than failing the whole listing.
 listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])
 listWorktrees = send WorktreeList
--- end helpers[2] --
+-- end helpers[3] --
 
--- helpers[3] (206 bytes) --
+-- helpers[4] (206 bytes) --
 -- | The durable identity of a managed worktree. Pure: the handle
 -- already carries its receipt, so this reads no git state.
 worktreeId :: WorktreeHandle -> WorktreeId
 worktreeId h = h.handleReceipt.treeId
--- end helpers[3] --
+-- end helpers[4] --
 
--- helpers[4] (759 bytes) --
+-- helpers[5] (759 bytes) --
 -- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`
 -- — never a fast-forward, so a landed merge always carries a genuine merge
 -- commit. On conflict, the conflicting paths are read and the merge is
@@ -1580,15 +1591,15 @@ worktreeId h = h.handleReceipt.treeId
 -- and conflicted.
 mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)
 mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)
--- end helpers[4] --
+-- end helpers[5] --
 
--- helpers[5] (377 bytes) --
+-- helpers[6] (377 bytes) --
 -- | Observe a candidate checkout through one bounded Worktree operation.
 -- This reports submitted HEAD, dirty state, and in-progress operation
 -- together; it does not seal or mutate the checkout.
 observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)
 observeSubmission = send . WorktreeObserveSubmission
--- end helpers[5] --
+-- end helpers[6] --
 
 -- end helpers --
 

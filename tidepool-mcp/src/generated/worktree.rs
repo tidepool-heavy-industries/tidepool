@@ -12,6 +12,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "WorktreeCreateForActorPath :: WorktreeSpec -> Text -> Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)",
+            "WorktreeBound :: Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",
             "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)",
@@ -51,6 +52,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
         helpers: &[
             "-- | Create a managed worktree. `Left (SourceDirty summary)` when the\n-- source is dirty and the spec did not opt in; case-match the error\n-- rather than unwrapping if you mean to handle it.\ncreateWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)\ncreateWorktree = send . WorktreeCreate",
             "-- | Look a retained worktree up by durable id. Survives restart:\n-- resolution reads on-disk registry state, not process memory.\n-- `Left (WorktreeLost i)` when it is registered but gone from disk.\nlookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)\nlookupWorktree = send . WorktreeLookup",
+            "-- | Observe the managed worktree bound to the executing actor.\n-- This is custody lookup, not ambient current-directory inference.\nboundWorktree :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError WorktreeHandle)\nboundWorktree = send WorktreeBound",
             "-- | Every registered worktree, present or lost. A lost tree is listed\n-- with `present = False` rather than failing the whole listing.\nlistWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])\nlistWorktrees = send WorktreeList",
             "-- | The durable identity of a managed worktree. Pure: the handle\n-- already carries its receipt, so this reads no git state.\nworktreeId :: WorktreeHandle -> WorktreeId\nworktreeId h = h.handleReceipt.treeId",
             "-- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`\n-- — never a fast-forward, so a landed merge always carries a genuine merge\n-- commit. On conflict, the conflicting paths are read and the merge is\n-- ABORTED before this returns: the worktree is left clean either way,\n-- success or conflict. `Left (GitFailure r)` is a `git` invocation that\n-- never entered a merge at all (an unknown branch, a locked index) —\n-- distinct from `Right (Conflict paths)`, a merge that genuinely started\n-- and conflicted.\nmergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)\nmergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)",

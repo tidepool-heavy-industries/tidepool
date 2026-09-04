@@ -111,7 +111,22 @@ impl ActorPath {
 
     #[must_use]
     pub fn git_branch(&self) -> String {
-        format!("shoal/{self}")
+        let (leaf, parents) = self
+            .0
+            .split_last()
+            .expect("validated actor paths are nonempty");
+        if parents.is_empty() {
+            format!("shoal/branches/{leaf}")
+        } else {
+            format!(
+                "shoal/{}/branches/{leaf}",
+                parents
+                    .iter()
+                    .map(ActorPathSegment::as_str)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        }
     }
 }
 
@@ -159,7 +174,24 @@ mod tests {
         assert_eq!(path.to_string(), "context-unfold/runtime/binding-snapshot");
         assert_eq!(
             path.git_branch(),
-            "shoal/context-unfold/runtime/binding-snapshot"
+            "shoal/context-unfold/runtime/branches/binding-snapshot"
         );
+    }
+
+    #[test]
+    fn parent_and_descendant_branches_never_form_a_git_ref_prefix() {
+        let parent = ActorPath::parse("context-unfold/runtime/scaffold").unwrap();
+        let child = ActorPath::parse("context-unfold/runtime/scaffold/leaves/parser").unwrap();
+        assert_eq!(
+            parent.git_branch(),
+            "shoal/context-unfold/runtime/branches/scaffold"
+        );
+        assert_eq!(
+            child.git_branch(),
+            "shoal/context-unfold/runtime/scaffold/leaves/branches/parser"
+        );
+        assert!(!child
+            .git_branch()
+            .starts_with(&format!("{}/", parent.git_branch())));
     }
 }

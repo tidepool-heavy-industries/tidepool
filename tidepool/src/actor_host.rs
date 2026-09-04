@@ -3218,7 +3218,7 @@ mod tests {
         });
         let child_installations = tokio::time::timeout(Duration::from_secs(60), async {
             let mut children = Vec::new();
-            while children.len() < 2 {
+            while children.len() < 3 {
                 match deployments.recv().await {
                     Some(LocalResidentDeployment::PolicyInstalled(installation))
                         if installation.actor.identity() != actor.identity() =>
@@ -3246,6 +3246,11 @@ mod tests {
             .find(|installation| installation.label.ends_with("/witness"))
             .expect("witness installation")
             .clone();
+        let scaffold_installation = child_installations
+            .iter()
+            .find(|installation| installation.label.ends_with("/scaffold"))
+            .expect("scaffold installation")
+            .clone();
         let mut test_bindings = Vec::new();
         for installation in &child_installations {
             assert_eq!(installation.context_parent, Some(actor.identity()));
@@ -3253,9 +3258,15 @@ mod tests {
                 installation.fork_group,
                 Some(tidepool_actor::ForkGroupId(1))
             );
-            assert_eq!(
-                installation.effective_role.role(),
+            let expected_role = if installation.label.ends_with("/scaffold") {
+                tidepool_actor::ActorRole::Scaffolding
+            } else {
                 tidepool_actor::ActorRole::Research
+            };
+            assert_eq!(installation.effective_role.role(), expected_role);
+            authority.install_grant(
+                installation.actor.identity().into(),
+                worktree_grant(expected_role),
             );
             let [worktree_id] = installation.launch_worktrees.as_slice() else {
                 panic!("forked research actor did not receive one named worktree")
@@ -3266,7 +3277,9 @@ mod tests {
                 .expect("named worktree remains registered");
             assert_eq!(
                 worktree.branch().as_str(),
-                format!("shoal/{}", installation.label)
+                tidepool_repr::ActorPath::parse(&installation.label)
+                    .expect("allocated actor path")
+                    .git_branch()
             );
             let principal = WorktreePrincipal::exact_actor(
                 &runtime_namespace(session_root.path()),
@@ -3296,6 +3309,12 @@ mod tests {
             .expect("context-fork sibling has an admission gate")
             .mark_ready()
             .expect("test host marks second child provider ready");
+        scaffold_installation
+            .fork_gate
+            .as_ref()
+            .expect("context-fork scaffold has an admission gate")
+            .mark_ready()
+            .expect("test host marks scaffold provider ready");
         let submitted = tokio::time::timeout(Duration::from_secs(120), submitted)
             .await
             .expect("request setup timed out")
@@ -3324,7 +3343,7 @@ mod tests {
         );
         let launch_receipt = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "(forkedLaunch (fst workers), forkedLaunch (snd workers))",
+            "(forkedLaunch (first3 workers), forkedLaunch (second3 workers), forkedLaunch (third3 workers))",
         )
         .await;
         let launch_receipt = launch_receipt["items"][0]["output"]
@@ -3335,13 +3354,20 @@ mod tests {
                 && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/worker\"")
                 && launch_receipt.contains("requestedPath = \"reply-watch/roundtrip/witness\"")
                 && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/witness\"")
-                && launch_receipt.matches("forkGroupIdentity = 1").count() == 2,
+                && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/scaffold\"")
+                && launch_receipt.matches("forkGroupIdentity = 1").count() == 3,
             "{launch_receipt}"
         );
+        let scaffold_watch = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "scaffoldReadiness <- watch (case watchLabel \"scaffold-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) (awaitFork (third3 workers))",
+        )
+        .await;
+        assert_eq!(scaffold_watch["status"], "committed", "{scaffold_watch:?}");
 
         let activations = tokio::time::timeout(Duration::from_secs(10), async {
             let mut activations = Vec::new();
-            while activations.len() < 2 {
+            while activations.len() < 3 {
                 match deployments.recv().await {
                     Some(LocalResidentDeployment::SessionReady { activation })
                         if child_installations
@@ -3369,8 +3395,13 @@ mod tests {
             .iter()
             .find(|activation| activation.id.actor() == witness_installation.actor.identity())
             .expect("witness activation");
+        let scaffold_activation = activations
+            .iter()
+            .find(|activation| activation.id.actor() == scaffold_installation.actor.identity())
+            .expect("scaffold activation");
         assert_eq!(worker_activation.input_type, "Int");
         assert_eq!(witness_activation.input_type, "Text");
+        assert_eq!(scaffold_activation.input_type, "Text");
 
         let replied = dispatch_haskell_script(
             worker_installation.policy.as_ref(),
@@ -3403,7 +3434,7 @@ mod tests {
 
         let observed = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "pollResponse (forkedResponse (fst workers))\npollResponse (forkedResponse (snd workers))\npollWatch readiness",
+            "pollResponse (forkedResponse (first3 workers))\npollResponse (forkedResponse (second3 workers))\npollWatch readiness",
         )
         .await;
         assert_eq!(observed["status"], "committed", "{observed:?}");
@@ -3442,22 +3473,14 @@ mod tests {
         let ready_status = ready_status["items"][0]["output"]
             .as_str()
             .expect("status output");
-        assert!(
-            ready_status.contains("responses pending=[]"),
-            "{ready_status}"
-        );
-        assert!(
-            ready_status.contains("responses pending=[] ready=["),
-            "{ready_status}"
-        );
-        assert!(
-            ready_status.contains("watches pending=[] ready=["),
-            "{ready_status}"
-        );
+        assert!(ready_status.contains("\"scaffold\""), "{ready_status}");
+        assert!(ready_status.contains("\"worker\""), "{ready_status}");
+        assert!(ready_status.contains("\"witness\""), "{ready_status}");
+        assert!(ready_status.contains("\"both-ready\""), "{ready_status}");
 
         let followup = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "followup <- request @ReplyReport (forkedActor (fst workers)) (case requestLabel \"revision\" of { Right value -> value; Left _ -> error \"fixture request\" }) (99 :: Int)",
+            "followup <- request @ReplyReport (forkedActor (first3 workers)) (case requestLabel \"revision\" of { Right value -> value; Left _ -> error \"fixture request\" }) (99 :: Int)",
         )
         .await;
         assert_eq!(followup["status"], "committed", "{followup:?}");
@@ -3524,6 +3547,235 @@ mod tests {
                 .is_some_and(|output| output.contains("responseValue = ReplyReport 100")),
             "{followup_result:?}"
         );
+
+        let scaffold_policy = Arc::clone(&scaffold_installation.policy);
+        let nested_submitted = tokio::spawn(async move {
+            dispatch_haskell_script(
+                scaffold_policy.as_ref(),
+                "nested <- unfold (subgroup (case forkGroupLabel \"leaves\" of { Right value -> value; Left _ -> error \"fixture subgroup\" })) ((,) <$> child (coding @ReplyReport (case branchLabel \"implementation\" of { Right value -> value; Left _ -> error \"fixture leaf\" }) boundHead (7 :: Int)) <*> child (coding @EchoReport (case branchLabel \"verification\" of { Right value -> value; Left _ -> error \"fixture leaf\" }) boundHead (\"nested\" :: Text)))",
+            )
+            .await
+        });
+        let nested_installations = tokio::time::timeout(Duration::from_secs(60), async {
+            let mut children = Vec::new();
+            while children.len() < 2 {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::PolicyInstalled(installation))
+                        if installation.context_parent
+                            == Some(scaffold_installation.actor.identity()) =>
+                    {
+                        children.push(installation);
+                    }
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                        panic!("nested actor {actor:?} retired during admission: {terminal:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed during nested admission"),
+                }
+            }
+            children
+        })
+        .await
+        .expect("nested child installation timeout");
+        let implementation = nested_installations
+            .iter()
+            .find(|installation| installation.label.ends_with("/implementation"))
+            .expect("nested implementation installation")
+            .clone();
+        let verification = nested_installations
+            .iter()
+            .find(|installation| installation.label.ends_with("/verification"))
+            .expect("nested verification installation")
+            .clone();
+        let scaffold_tree_id = tidepool_worktree::WorktreeId::from_raw(
+            scaffold_installation.launch_worktrees[0].clone(),
+        );
+        let scaffold_tree = worktrees
+            .lookup(&scaffold_tree_id)
+            .expect("scaffold lookup")
+            .expect("scaffold worktree retained");
+        let scaffold_head = worktrees
+            .git()
+            .try_run(scaffold_tree.cwd(), &["rev-parse", "HEAD"])
+            .expect("scaffold head")
+            .trimmed()
+            .to_string();
+        for installation in &nested_installations {
+            assert_eq!(
+                installation.effective_role.role(),
+                tidepool_actor::ActorRole::Coding
+            );
+            let worktree_id =
+                tidepool_worktree::WorktreeId::from_raw(installation.launch_worktrees[0].clone());
+            let worktree = worktrees
+                .lookup(&worktree_id)
+                .expect("nested worktree lookup")
+                .expect("nested worktree retained");
+            assert_eq!(worktree.source_head().as_str(), scaffold_head);
+            assert_eq!(
+                worktree.branch().as_str(),
+                tidepool_repr::ActorPath::parse(&installation.label)
+                    .expect("allocated nested actor path")
+                    .git_branch()
+            );
+            let principal = WorktreePrincipal::exact_actor(
+                &runtime_namespace(session_root.path()),
+                installation.actor.identity().id.0,
+                installation.actor.identity().incarnation.0,
+            );
+            test_bindings.push(
+                bindings
+                    .lock()
+                    .bind(worktree.id(), &principal, current_time_ms())
+                    .expect("bind nested worktree"),
+            );
+            installation
+                .fork_gate
+                .as_ref()
+                .expect("nested fork gate")
+                .mark_ready()
+                .expect("mark nested provider ready");
+        }
+        let nested_submitted = tokio::time::timeout(Duration::from_secs(120), nested_submitted)
+            .await
+            .expect("nested unfold timed out")
+            .expect("nested unfold task");
+        assert_eq!(
+            nested_submitted["status"], "committed",
+            "{nested_submitted:?}"
+        );
+        let nested_watch = dispatch_haskell_script(
+            scaffold_installation.policy.as_ref(),
+            "nestedReady <- watch (case watchLabel \"leaves-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) ((,) <$> awaitFork (fst nested) <*> awaitFork (snd nested))",
+        )
+        .await;
+        assert_eq!(nested_watch["status"], "committed", "{nested_watch:?}");
+
+        let nested_activations = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut activations = Vec::new();
+            while activations.len() < 2 {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::SessionReady { activation })
+                        if nested_installations
+                            .iter()
+                            .any(|child| child.actor.identity() == activation.id.actor()) =>
+                    {
+                        activations.push(activation);
+                    }
+                    Some(LocalResidentDeployment::Retired { actor, terminal }) => {
+                        panic!("nested actor {actor:?} retired before activation: {terminal:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before nested activation"),
+                }
+            }
+            activations
+        })
+        .await
+        .expect("nested activation timeout");
+        assert!(nested_activations.iter().any(|activation| {
+            activation.id.actor() == implementation.actor.identity()
+                && activation.input_type == "Int"
+        }));
+        assert!(nested_activations.iter().any(|activation| {
+            activation.id.actor() == verification.actor.identity()
+                && activation.input_type == "Text"
+        }));
+
+        for (installation, path, contents) in [
+            (&implementation, "implementation.txt", "implemented\n"),
+            (&verification, "verification.txt", "verified\n"),
+        ] {
+            let tree = worktrees
+                .lookup(&tidepool_worktree::WorktreeId::from_raw(
+                    installation.launch_worktrees[0].clone(),
+                ))
+                .expect("lookup nested commit tree")
+                .expect("nested commit tree retained");
+            std::fs::write(tree.cwd().join(path), contents).expect("write nested candidate");
+            worktrees
+                .git()
+                .try_run(tree.cwd(), &["add", path])
+                .expect("stage nested candidate");
+            worktrees
+                .git()
+                .try_run(tree.cwd(), &["commit", "-m", path])
+                .expect("commit nested candidate");
+        }
+        let implementation_reply = dispatch_haskell_script(
+            implementation.policy.as_ref(),
+            "respond (ReplyReport (sessionInput + sharedDelta))",
+        )
+        .await;
+        assert_eq!(
+            implementation_reply["status"], "replied",
+            "{implementation_reply:?}"
+        );
+        let verification_reply = dispatch_haskell_script(
+            verification.policy.as_ref(),
+            "respond (EchoReport sessionInput)",
+        )
+        .await;
+        assert_eq!(
+            verification_reply["status"], "replied",
+            "{verification_reply:?}"
+        );
+        let nested_notification = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::WatchChanged { notification })
+                        if notification.owner == scaffold_installation.actor.identity() =>
+                    {
+                        break notification;
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before nested watch wake"),
+                }
+            }
+        })
+        .await
+        .expect("nested watch wake timeout");
+        assert_eq!(
+            nested_notification.transition,
+            tidepool_actor::WatchTransition::Ready
+        );
+
+        let folded = dispatch_haskell_script(
+            scaffold_installation.policy.as_ref(),
+            ":{\nreceiptOf :: ResponseResult a -> WorktreeReceipt\nreceiptOf result = case responseWorktree result of { WorktreeObserved receipt _ _ -> receipt; _ -> error \"expected worktree evidence\" }\n:}\nnestedObserved <- pollWatch nestedReady\nlet nestedResults = case nestedObserved of { WatchReady values -> values; _ -> error \"expected ready nested watch\" }\ntargetResult <- boundWorktree\nlet targetTree = case targetResult of { Right value -> value; Left _ -> error \"expected bound scaffold tree\" }\nmergeImplementation <- mergeBranchInto (worktreeId targetTree) (branch (receiptOf (fst nestedResults))) \"merge nested implementation\"\nmergeVerification <- mergeBranchInto (worktreeId targetTree) (branch (receiptOf (snd nestedResults))) \"merge nested verification\"\nrespond (ScaffoldReport \"folded\")",
+        )
+        .await;
+        assert_eq!(folded["status"], "replied", "{folded:?}");
+        assert!(scaffold_tree.cwd().join("implementation.txt").is_file());
+        assert!(scaffold_tree.cwd().join("verification.txt").is_file());
+
+        let scaffold_notification = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::WatchChanged { notification })
+                        if notification.owner == actor.identity() =>
+                    {
+                        break notification
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before scaffold watch wake"),
+                }
+            }
+        })
+        .await
+        .expect("scaffold watch wake timeout");
+        assert_eq!(
+            scaffold_notification.transition,
+            tidepool_actor::WatchTransition::Ready
+        );
+        let scaffold_result = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "pollWatch scaffoldReadiness",
+        )
+        .await;
+        assert!(scaffold_result["items"][0]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("ScaffoldReport \"folded\"")));
 
         actor
             .shutdown(ActorTerminal {

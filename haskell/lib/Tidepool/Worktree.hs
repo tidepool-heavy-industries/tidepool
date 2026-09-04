@@ -95,6 +95,7 @@ module Tidepool.Worktree
     -- * Creation and lookup
   , createWorktree
   , lookupWorktree
+  , boundWorktree
   , listWorktrees
 
     -- * Handles
@@ -157,6 +158,7 @@ import Tidepool.Effects
   , WorktreeSpec (..)
   , WorktreeSummary (..)
   , createWorktree
+  , boundWorktree
   , liftEither
   , listWorktrees
   , lookupWorktree

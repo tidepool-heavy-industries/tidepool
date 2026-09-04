@@ -194,6 +194,24 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
 
         let grant = self.authority.grant(principal);
         let permitted_tree = match &req {
+            WorktreeReq::WorktreeBound => {
+                let Some(id) = self.authority.bound_worktree(principal) else {
+                    return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
+                        "this actor has no active bound worktree".into(),
+                    )));
+                };
+                let result = self
+                    .inner
+                    .manager
+                    .lookup(&id)
+                    .map_err(error_to_wire)
+                    .and_then(|handle| {
+                        handle
+                            .map(|handle| handle_to_wire(&handle))
+                            .ok_or_else(|| never_registered(&worktree_id_to_wire(&id)))
+                    });
+                return cx.respond(result);
+            }
             WorktreeReq::WorktreeLookup(id)
             | WorktreeReq::WorktreeBranchOf(id)
             | WorktreeReq::WorktreeHeadOf(id)
@@ -578,6 +596,12 @@ impl WorktreeHandler {
             Some(handle) => Ok(handle_to_wire(&handle)),
             None => Err(never_registered(&tree_id)),
         }
+    }
+
+    pub(crate) fn worktree_bound(&mut self) -> Result<WtWorktreeHandle, WorktreeError> {
+        Err(WorktreeError::WorktreeAuthorityDenied(
+            "boundWorktree is available only through an actor-scoped Worktree interpreter".into(),
+        ))
     }
 
     pub(crate) fn worktree_list(&mut self) -> Result<Vec<WtWorktreeSummary>, WorktreeError> {

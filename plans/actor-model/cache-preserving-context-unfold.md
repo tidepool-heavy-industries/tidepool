@@ -177,7 +177,7 @@ The runtime projects that path consistently:
 
 ```text
 actor label:  context-unfold/implementation/runtime/leaves/binding-snapshot
-Git branch:   refs/heads/shoal/context-unfold/implementation/runtime/leaves/binding-snapshot
+Git branch:   refs/heads/shoal/context-unfold/implementation/runtime/leaves/branches/binding-snapshot
 status label: context-unfold/implementation/runtime/leaves/binding-snapshot
 cwd alias:    /tmp/tidepool-actor-workspace
 authority:    ActorId(17)@1, WorktreeId(42)
@@ -187,6 +187,13 @@ The readable path is presentation and provenance, not identity or authority.
 Exact-incarnation actor and worktree IDs remain in receipts and checks, but
 they appear after the name rather than replacing it with a hash-shaped UI.
 Internal storage directories and provider thread IDs may remain opaque.
+
+Git refs insert one fixed `branches` namespace immediately before the actor
+leaf: actor path `a/b/c` projects to `refs/heads/shoal/a/b/branches/c`. This
+small structural marker is necessary because Git cannot store both
+`refs/heads/shoal/a/b` and a descendant beneath that ref; it lets a persistent
+actor acquire descendants later without renaming the parent's branch. The
+actor/status path remains the unadorned semantic lineage.
 
 Use distinct validated types for a root `CampaignLabel`, an unfold
 `ForkGroupLabel`, a leaf `BranchLabel`, and the assembled `ActorPath`. A small
@@ -969,9 +976,9 @@ effects and descendant budget needed to act as an interior node. Branches are
 named, for example:
 
 ```text
-shoal/context-unfold/implementation/replies
-shoal/context-unfold/implementation/worktree-evidence
-shoal/context-unfold/implementation/runtime
+shoal/context-unfold/implementation/branches/replies
+shoal/context-unfold/implementation/branches/worktree-evidence
+shoal/context-unfold/implementation/branches/runtime
 ```
 
 ### Inside the runtime child: scaffold, recursively unfold, then fold
@@ -1059,8 +1066,8 @@ Both grandchildren start at the exact scaffold commit. Their names extend the
 actual execution lineage:
 
 ```text
-shoal/context-unfold/implementation/runtime/leaves/binding-snapshot
-shoal/context-unfold/implementation/runtime/leaves/atomic-admission
+shoal/context-unfold/implementation/runtime/leaves/branches/binding-snapshot
+shoal/context-unfold/implementation/runtime/leaves/branches/atomic-admission
 ```
 
 The runtime actor ends this model round without settling `sessionReply`. Its original
@@ -1460,7 +1467,7 @@ Continue branch semantics from the shared unfold call.
 The unfold result binding is parent-only and is not present in your Haskell scope.
 Role: inspection-only researcher.
 Available Haskell effects: ResearchEffects.
-Workspace: inspect-only, branch shoal/context-unfold/discovery/semantics,
+Workspace: inspect-only, branch shoal/context-unfold/discovery/branches/semantics,
            /tmp/tidepool-actor-workspace, WorktreeId ..., head ...
 Build/test/formatter/generator/package commands are unavailable.
 Descendant allowance: depth 1, at most 3 total, at most 2 active.
@@ -1682,8 +1689,17 @@ implement, not that production support has landed.
     failure. Unit tests cover barrier/abort/collision behavior; the public
     compile fixture covers heterogeneous and homogeneous traversal; the
     provider-boundary test covers a two-type fan-in watch.
-- [ ] Gate 6: land recursive scaffold/unfold/watch/fold from one clean named
+- [x] Gate 6: land recursive scaffold/unfold/watch/fold from one clean named
   Git seed.
+  - 2026-09-04: the provider/extractor-backed semantic fixture admitted one
+    scaffolding actor beside two heterogeneous leaves, kept its original reply
+    pending, then recursively unfolded two coding children from the scaffold's
+    exact clean bound HEAD. Both grandchildren committed distinct deltas,
+    returned authoritative worktree evidence, and folded through a labeled
+    watch; the scaffold resolved its bound target, merged both named branches,
+    and settled a typed result upward. The run exposed Git's parent-ref/file
+    collision and established the prefix-safe
+    `shoal/<parents>/branches/<leaf>` projection with a focused invariant test.
 - [ ] Gate 7: land prompt profiles, status/metrics, hibernation, and the full
   three-batch dogfood run.
 - [ ] Run the final relevant broad checks once, move stable contracts to
@@ -1865,7 +1881,8 @@ Admission allocates in this order:
 4. identify repeated sibling requests in applicative order;
 5. reserve candidate actor paths under the actor registry lock;
 6. ask `tidepool-worktree` through its existing `GitCli`/registry path whether
-   each required `refs/heads/shoal/<actor-path>` can be created;
+   each required prefix-safe `refs/heads/shoal/<parents>/branches/<leaf>` can
+   be created;
 7. on a retained/external collision, retry the colliding segment or repeated
    sibling set with the lowest available numeric suffix; and
 8. record requested and allocated campaign/actor paths, actor ID, worktree ID,
@@ -2000,8 +2017,9 @@ the exact invariant and evidence rather than silently weakening the surface.
 ### Slice 2 — granular interactive effects and role projection
 
 - Replace independent sanitized agent/worktree labels for new launches with
-  validated hierarchical `ActorPath` allocation and exact `shoal/<path>` Git
-  projection; preserve historical receipts and refs as-is.
+  validated hierarchical `ActorPath` allocation and the exact prefix-safe
+  `shoal/<parents>/branches/<leaf>` Git projection; preserve historical
+  receipts and refs as-is.
 - Introduce `ActorContext`, `AgentLaunch`, `AgentInspection`, `AgentControl`,
   `BoundWorktree`, `WorktreeRegistry`, `WorktreeAllocation`, and
   `WorktreeIntegration` facades over existing owners.

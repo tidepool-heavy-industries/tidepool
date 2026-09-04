@@ -183,6 +183,7 @@ data Worktree a where
   WorktreeCreateForActorPath :: WorktreeSpec -> Text -> Worktree (Either WorktreeError WorktreeHandle)
   WorktreeCreateFromBoundForActorPath :: DirtyPolicy -> Text -> Worktree (Either WorktreeError WorktreeHandle)
   WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)
+  WorktreeBound :: Worktree (Either WorktreeError WorktreeHandle)
   WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])
   WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
   WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
@@ -664,6 +665,10 @@ createWorktree = send . WorktreeCreate
 -- `Left (WorktreeLost i)` when it is registered but gone from disk.
 lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)
 lookupWorktree = send . WorktreeLookup
+-- | Observe the managed worktree bound to the executing actor.
+-- This is custody lookup, not ambient current-directory inference.
+boundWorktree :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError WorktreeHandle)
+boundWorktree = send WorktreeBound
 -- | Every registered worktree, present or lost. A lost tree is listed
 -- with `present = False` rather than failing the whole listing.
 listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])

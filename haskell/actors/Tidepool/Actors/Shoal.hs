@@ -104,6 +104,7 @@ module Tidepool.Actors.Shoal
   , allowDirtySnapshot
   , createWorktree
   , lookupWorktree
+  , boundWorktree
   , listWorktrees
   , WorktreeHandle
   , WorktreeId (..)

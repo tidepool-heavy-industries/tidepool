@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use tidepool_repr::ActorPath;
 use tidepool_worktree::git::inspect;
 use tidepool_worktree::testing::{fingerprint, TestRepo};
 use tidepool_worktree::{
@@ -94,6 +95,41 @@ fn clean_creation_from_current_repository_leaves_source_untouched() {
     assert_eq!(
         inspect::git_common_dir(&git, handle.cwd()).expect("resolve shared Git metadata"),
         repo.path().join(".git")
+    );
+}
+
+#[test]
+fn actor_and_descendant_branches_coexist_in_git_namespace() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("base.txt", "base", "base")
+        .expect("commit base");
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+
+    let parent_path = ActorPath::parse("campaign/runtime/scaffold").expect("parent path");
+    let child_path =
+        ActorPath::parse("campaign/runtime/scaffold/leaves/parser").expect("child path");
+    let parent = manager
+        .create_for_actor_path(
+            &WorktreeSpec::from_current_repository(parent_path.to_string()),
+            &parent_path,
+        )
+        .expect("create parent actor worktree");
+    let child = manager
+        .create_for_actor_path(
+            &WorktreeSpec::from_worktree(parent.id().clone(), child_path.to_string()),
+            &child_path,
+        )
+        .expect("create descendant actor worktree");
+
+    assert_eq!(
+        parent.branch().as_str(),
+        "shoal/campaign/runtime/branches/scaffold"
+    );
+    assert_eq!(
+        child.branch().as_str(),
+        "shoal/campaign/runtime/scaffold/leaves/branches/parser"
     );
 }
 
