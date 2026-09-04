@@ -21,6 +21,7 @@ module Tidepool.Actors.Internal.Agent
   , startForkedAgent
   , request
   , requestSited
+  , StopOutcome (..)
   , stopAgent
   ) where
 
@@ -30,6 +31,7 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Internal as ActorInternal
+import Tidepool.Actors.Role (AgentControl, AgentLaunch)
 import Tidepool.Agent.Reply.Internal
   ( Reply
   , Replies
@@ -93,7 +95,7 @@ integrationAgent :: WorktreeHandle -> AgentSpec
 integrationAgent = IntegrationAgent
 
 -- | Start one persistent Codex identity. Requests do not terminate it.
-startAgent :: Member Actor effs => AgentSpec -> Eff effs AgentRef
+startAgent :: (Member AgentLaunch effs, Member Actor effs) => AgentSpec -> Eff effs AgentRef
 startAgent spec = do
   actor <- Actor.startActor (agentDefinition spec) ()
   pure (AgentRef actor (agentWorktree spec))
@@ -161,9 +163,37 @@ requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedL
       case fillResponse response (ResponseResult result execution evidence) of
         () -> pure ()
 
+-- | Observable result of asking one exact actor incarnation to retire.
+--
+-- A stop request is cooperative and mailbox ordered. 'StopRequested' means
+-- the target accepted that request; lifecycle observation may still briefly
+-- report it as running. Repeating the operation after terminal publication is
+-- harmless and returns 'AlreadyStopped'.
+data StopOutcome
+  = StopRequested
+  | AlreadyStopped (Actor.ActorExit ())
+  | StopFailed Text
+  deriving (Show, Eq)
+
 -- | Ask an agent to retire after all earlier mailbox requests settle.
-stopAgent :: Member Actor effs => AgentRef -> Eff effs ()
-stopAgent (AgentRef target _) = Actor.cast target StopAgent
+-- The typed receipt makes retries and already-terminal handles explicit.
+stopAgent
+  :: (Member AgentControl effs, Member Actor effs)
+  => AgentRef
+  -> Eff effs StopOutcome
+stopAgent (AgentRef target _) = do
+  before <- Actor.pollExit target
+  case before of
+    Just terminal -> pure (AlreadyStopped terminal)
+    Nothing -> do
+      requested <- ActorInternal.tryCallUnit target StopAgent
+      case requested of
+        Right () -> pure StopRequested
+        Left failure -> do
+          after <- Actor.pollExit target
+          pure $ case after of
+            Just terminal -> AlreadyStopped terminal
+            Nothing -> StopFailed failure
 
 agentWorktree :: AgentSpec -> Maybe WorktreeHandle
 agentWorktree (CodingAgent tree) = Just tree

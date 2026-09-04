@@ -31,17 +31,17 @@ submitWithOnlyReplies = request
 compose
   :: Response left
   -> Response right
-  -> Await (left, right)
+  -> Await (ResponseResult left, ResponseResult right)
 compose left right = (,) <$> awaitResponse left <*> awaitResponse right
 
 watchBoth
   :: WatchLabel
   -> Response left
   -> Response right
-  -> Eff ActorEffects (Watch (left, right))
+  -> Eff ActorEffects (Watch (ResponseResult left, ResponseResult right))
 watchBoth label left right = watch label (compose left right)
 
-stop :: AgentRef -> Eff ActorEffects ()
+stop :: AgentRef -> Eff ActorEffects StopOutcome
 stop = stopAgent
 
 heterogeneousUnfold

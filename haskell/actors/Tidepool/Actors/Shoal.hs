@@ -69,6 +69,7 @@ module Tidepool.Actors.Shoal
   , readonlyAgent
   , startAgent
   , request
+  , StopOutcome (..)
   , stopAgent
   , RequestId
   , RequestLabel
@@ -145,6 +146,7 @@ import Tidepool.Actors.Internal.Agent
   , codingAgent
   , readonlyAgent
   , request
+  , StopOutcome (..)
   , startAgent
   , stopAgent
   )
