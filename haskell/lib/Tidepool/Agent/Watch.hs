@@ -10,6 +10,7 @@ module Tidepool.Agent.Watch
   , Watches
   , WatchFailure (..)
   , WatchState (..)
+  , Settlement (..)
   , awaitResponse
   , awaitValue
   , awaitSettled
@@ -25,6 +26,7 @@ import Tidepool.Agent.Watch.Internal
   , Watches
   , WatchFailure (..)
   , WatchState (..)
+  , Settlement (..)
   , awaitResponse
   , awaitValue
   , awaitSettled

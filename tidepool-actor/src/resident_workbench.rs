@@ -1244,7 +1244,10 @@ where
                     )) => {
                         let dependencies = dependencies
                             .into_iter()
-                            .map(crate::request_effect::request_id)
+                            .map(|(request, allow_failure)| {
+                                crate::request_effect::request_id(request)
+                                    .map(|request| (request, allow_failure))
+                            })
                             .collect::<Result<Vec<_>, _>>()?;
                         Ok(ResidentActorBoundary::WatchRegistration(
                             WatchRegistration {

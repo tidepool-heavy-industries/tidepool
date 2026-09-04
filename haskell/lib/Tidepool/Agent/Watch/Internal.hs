@@ -13,6 +13,7 @@ module Tidepool.Agent.Watch.Internal
   , Watches (..)
   , WatchFailure (..)
   , WatchState (..)
+  , Settlement (..)
   , RawWatchObservation (..)
   , awaitResponse
   , awaitValue
@@ -37,7 +38,9 @@ import Tidepool.Agent.Reply.Internal
   , responseRequestId
   )
 
-data Await result = Await [RequestId] (() -> Maybe result)
+data AwaitDependency = AwaitDependency RequestId Bool
+
+data Await result = Await [AwaitDependency] ([(RequestId, ResponseFailure)] -> Maybe result)
 
 instance Functor Await where
   fmap f (Await dependencies observe) =
@@ -48,7 +51,7 @@ instance Applicative Await where
   Await leftDependencies observeFunction <*> Await rightDependencies observeArgument =
     Await
       (deduplicate (leftDependencies <> rightDependencies))
-      (\() -> observeFunction () <*> observeArgument ())
+      (\failures -> observeFunction failures <*> observeArgument failures)
 
 newtype WatchId = WatchId Int
   deriving (Show, Eq, Ord)
@@ -91,28 +94,38 @@ data WatchState result
 
 data RawWatchObservation
   = RawWatchPending
-  | RawWatchReady
+  | RawWatchReady [(Int, ResponseFailure)]
   | RawWatchUnavailable RequestId ResponseFailure
   | RawWatchRejected ReplyError
 
 data Watches a where
-  RegisterWatchWith :: Text -> [Int] -> Watches Int
+  RegisterWatchWith :: Text -> [(Int, Bool)] -> Watches Int
   ObserveWatchWith :: Int -> Watches RawWatchObservation
 
-awaitSettled :: Response result -> Await (ResponseResult result)
-awaitSettled response =
-  Await [responseRequestId response] (const (readResponse response))
+data Settlement result
+  = ReplyAvailable (ResponseResult result)
+  | ReplyUnavailable ResponseFailure
+  deriving (Show, Eq)
+
+awaitResponse :: Response result -> Await (ResponseResult result)
+awaitResponse response =
+  Await [AwaitDependency (responseRequestId response) False] (const (readResponse response))
 
 awaitValue :: Response result -> Await result
-awaitValue = fmap responseValue . awaitSettled
+awaitValue = fmap responseValue . awaitResponse
 
--- | Compatibility spelling for callers interested only in the authored value.
-awaitResponse :: Response result -> Await result
-awaitResponse = awaitValue
+awaitSettled :: Response result -> Await (Settlement result)
+awaitSettled response =
+  Await [AwaitDependency request True] $ \failures ->
+    case readResponse response of
+      Just result -> Just (ReplyAvailable result)
+      Nothing -> ReplyUnavailable <$> lookup request failures
+  where
+    request = responseRequestId response
 
 watch :: Member Watches effs => WatchLabel -> Await result -> Eff effs (Watch result)
 watch (WatchLabel label) awaiting@(Await dependencies _) = do
-  watchId <- send (RegisterWatchWith label (map unRequestId dependencies))
+  watchId <- send (RegisterWatchWith label (map rawDependency dependencies))
   pure (Watch (WatchId watchId) awaiting)
 
 pollWatch
@@ -123,20 +136,21 @@ pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
   observation <- send (ObserveWatchWith watchId)
   pure $ case observation of
     RawWatchPending -> WatchPending
-    RawWatchReady ->
-      case observe () of
+    RawWatchReady rawFailures ->
+      case observe (map (\(request, failure) -> (RequestId request, failure)) rawFailures) of
         Just result -> WatchReady result
         Nothing -> error "Tidepool watch became ready before every response cell was filled"
     RawWatchUnavailable request failure ->
       WatchUnavailable (WatchDependencyUnavailable request failure)
     RawWatchRejected failure -> WatchUnavailable (WatchRejected failure)
 
-unRequestId :: RequestId -> Int
-unRequestId (RequestId request) = request
+rawDependency :: AwaitDependency -> (Int, Bool)
+rawDependency (AwaitDependency (RequestId request) allowFailure) = (request, allowFailure)
 
-deduplicate :: [RequestId] -> [RequestId]
+deduplicate :: [AwaitDependency] -> [AwaitDependency]
 deduplicate = foldr add []
   where
-    add request requests
-      | request `elem` requests = requests
-      | otherwise = request : requests
+    add dependency [] = [dependency]
+    add (AwaitDependency request allowFailure) (AwaitDependency other otherAllows : rest)
+      | request == other = AwaitDependency request (allowFailure && otherAllows) : rest
+      | otherwise = AwaitDependency other otherAllows : add (AwaitDependency request allowFailure) rest

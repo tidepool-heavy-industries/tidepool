@@ -3360,7 +3360,7 @@ mod tests {
         );
         let scaffold_watch = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "scaffoldReadiness <- watch (case watchLabel \"scaffold-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) (awaitFork (third3 workers))",
+            "scaffoldReadiness <- watch (case watchLabel \"scaffold-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) (awaitSettledFork (third3 workers))",
         )
         .await;
         assert_eq!(scaffold_watch["status"], "committed", "{scaffold_watch:?}");
@@ -3775,7 +3775,9 @@ mod tests {
         .await;
         assert!(scaffold_result["items"][0]["output"]
             .as_str()
-            .is_some_and(|output| output.contains("ScaffoldReport \"folded\"")));
+            .is_some_and(|output| {
+                output.contains("ReplyAvailable") && output.contains("ScaffoldReport \"folded\"")
+            }));
 
         actor
             .shutdown(ActorTerminal {

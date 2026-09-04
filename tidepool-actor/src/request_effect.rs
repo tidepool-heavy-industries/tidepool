@@ -26,7 +26,7 @@ pub(crate) enum RepliesReq {
 #[derive(tidepool_bridge_derive::FromCore)]
 pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
-    RegisterWatchWith(String, Vec<i64>),
+    RegisterWatchWith(String, Vec<(i64, bool)>),
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
 }
@@ -58,7 +58,7 @@ pub(crate) struct ResponsePoll {
 
 pub(crate) struct WatchRegistration {
     pub continuation: ResidentHole,
-    pub dependencies: Vec<RequestId>,
+    pub dependencies: Vec<(RequestId, bool)>,
     pub label: String,
 }
 
@@ -145,11 +145,22 @@ pub(crate) fn watch_observation_value(
             "RawWatchPending",
             Vec::new(),
         ),
-        Ok(WatchObservation::Ready) => constructor(
+        Ok(WatchObservation::Ready(failures)) => constructor(
             table,
             "Tidepool.Agent.Watch.Internal",
             "RawWatchReady",
-            Vec::new(),
+            vec![failures
+                .into_iter()
+                .map(|(request, failure)| {
+                    Ok((
+                        i64::try_from(request.0).map_err(|_| {
+                            BridgeError::UnsupportedType("request id exceeds Int".into())
+                        })?,
+                        response_failure_value(failure, table)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, BridgeError>>()?
+                .to_value(table)?],
         ),
         Ok(WatchObservation::Unavailable { request, failure }) => constructor(
             table,

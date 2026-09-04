@@ -59,6 +59,7 @@ module Tidepool.Actors.Shoal
   , forkedLaunch
   , BranchReceipt (..)
   , awaitFork
+  , awaitSettledFork
   , unfold
   , AgentSpec
   , AgentRef
@@ -92,6 +93,7 @@ module Tidepool.Actors.Shoal
   , Watches
   , WatchFailure (..)
   , WatchState (..)
+  , Settlement (..)
   , awaitResponse
   , awaitValue
   , awaitSettled

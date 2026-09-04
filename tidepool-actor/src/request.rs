@@ -50,7 +50,7 @@ pub enum WatchTransition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchObservation {
     Pending,
-    Ready,
+    Ready(Vec<(RequestId, ResponseFailure)>),
     Unavailable {
         request: RequestId,
         failure: ResponseFailure,
@@ -94,8 +94,14 @@ enum WatchState {
 struct WatchRecord {
     owner: ActorRef,
     label: String,
-    dependencies: Vec<RequestId>,
+    dependencies: Vec<WatchDependency>,
     state: WatchState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchDependency {
+    request: RequestId,
+    allow_failure: bool,
 }
 
 #[derive(Default)]
@@ -312,17 +318,24 @@ impl RequestRegistry {
         owner: ActorRef,
         dependencies: Vec<RequestId>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
-        self.register_watch_labeled(owner, "watch".into(), dependencies)
+        self.register_watch_labeled(
+            owner,
+            "watch".into(),
+            dependencies
+                .into_iter()
+                .map(|request| (request, false))
+                .collect(),
+        )
     }
 
     pub(crate) fn register_watch_labeled(
         &self,
         owner: ActorRef,
         label: String,
-        dependencies: Vec<RequestId>,
+        dependencies: Vec<(RequestId, bool)>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
-        for request in &dependencies {
+        for (request, _) in &dependencies {
             let record = state.requests.get(request).ok_or(ReplyError::Stale)?;
             authorize_owner(record, owner)?;
         }
@@ -333,7 +346,13 @@ impl RequestRegistry {
             WatchRecord {
                 owner,
                 label,
-                dependencies,
+                dependencies: dependencies
+                    .into_iter()
+                    .map(|(request, allow_failure)| WatchDependency {
+                        request,
+                        allow_failure,
+                    })
+                    .collect(),
                 state: WatchState::Pending,
             },
         );
@@ -353,7 +372,21 @@ impl RequestRegistry {
         }
         Ok(match &record.state {
             WatchState::Pending => WatchObservation::Pending,
-            WatchState::Ready => WatchObservation::Ready,
+            WatchState::Ready => WatchObservation::Ready(
+                record
+                    .dependencies
+                    .iter()
+                    .filter_map(|dependency| {
+                        let request = state.requests.get(&dependency.request)?;
+                        match &request.state {
+                            RequestState::Unavailable(failure) => {
+                                Some((dependency.request, failure.clone()))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            ),
             WatchState::Unavailable { request, failure } => WatchObservation::Unavailable {
                 request: *request,
                 failure: failure.clone(),
@@ -440,13 +473,15 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
         if watch.state != WatchState::Pending {
             continue;
         }
-        let transition = watch.dependencies.iter().find_map(|request| {
-            let record = state.requests.get(request)?;
+        let transition = watch.dependencies.iter().find_map(|dependency| {
+            let record = state.requests.get(&dependency.request)?;
             match &record.state {
-                RequestState::Unavailable(failure) => Some(WatchTransition::Unavailable {
-                    request: *request,
-                    failure: failure.clone(),
-                }),
+                RequestState::Unavailable(failure) if !dependency.allow_failure => {
+                    Some(WatchTransition::Unavailable {
+                        request: dependency.request,
+                        failure: failure.clone(),
+                    })
+                }
                 _ => None,
             }
         });
@@ -454,11 +489,15 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
             watch
                 .dependencies
                 .iter()
-                .all(|request| {
+                .all(|dependency| {
                     state
                         .requests
-                        .get(request)
-                        .is_some_and(|record| record.state == RequestState::Ready)
+                        .get(&dependency.request)
+                        .is_some_and(|record| match record.state {
+                            RequestState::Ready => true,
+                            RequestState::Unavailable(_) => dependency.allow_failure,
+                            _ => false,
+                        })
                 })
                 .then_some(WatchTransition::Ready)
         });
@@ -519,7 +558,7 @@ mod tests {
         );
         assert_eq!(
             registry.observe_watch(owner, watch),
-            Ok(WatchObservation::Ready)
+            Ok(WatchObservation::Ready(Vec::new()))
         );
     }
 
@@ -584,6 +623,44 @@ mod tests {
             Ok(ResponseObservation::Unavailable(
                 ResponseFailure::TargetFailed("boom".into())
             ))
+        );
+    }
+
+    #[test]
+    fn collect_all_watch_becomes_ready_with_typed_failures() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let failed_target = actor(2);
+        let ready_target = actor(3);
+        let failed = registry.reserve(owner, failed_target);
+        let ready = registry.reserve(owner, ready_target);
+        registry.mark_queued(owner, failed_target, failed).unwrap();
+        registry.mark_queued(owner, ready_target, ready).unwrap();
+        registry.present(ready_target, ready).unwrap();
+        let (watch, initial) = registry
+            .register_watch_labeled(
+                owner,
+                "collect-all".into(),
+                vec![(failed, true), (ready, true)],
+            )
+            .unwrap();
+        assert!(initial.is_empty());
+
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "boom".into(),
+        };
+        assert!(registry.actor_stopped(failed_target, &terminal).is_empty());
+        registry.begin_reply(ready_target, ready).unwrap();
+        let notifications = registry.finish_reply(ready);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        assert_eq!(
+            registry.observe_watch(owner, watch),
+            Ok(WatchObservation::Ready(vec![(
+                failed,
+                ResponseFailure::TargetFailed("boom".into())
+            )]))
         );
     }
 

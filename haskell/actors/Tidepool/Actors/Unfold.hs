@@ -39,6 +39,7 @@ module Tidepool.Actors.Unfold
   , forkedLaunch
   , BranchReceipt (..)
   , awaitFork
+  , awaitSettledFork
   , unfold
   ) where
 
@@ -51,7 +52,7 @@ import Prelude
 
 import Tidepool.Agent.Reply (Replies, Response, ResponseResult)
 import Tidepool.Agent.Reply.Internal (RequestLabel (..))
-import Tidepool.Agent.Watch (Await, awaitSettled)
+import Tidepool.Agent.Watch (Await, Settlement, awaitResponse, awaitSettled)
 import qualified Tidepool.Actor as ActorRuntime
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
@@ -194,7 +195,10 @@ data BranchReceipt = BranchReceipt
   deriving (Show, Eq)
 
 awaitFork :: Forked result -> Await (ResponseResult result)
-awaitFork = awaitSettled . forkedResponse
+awaitFork = awaitResponse . forkedResponse
+
+awaitSettledFork :: Forked result -> Await (Settlement result)
+awaitSettledFork = awaitSettled . forkedResponse
 
 data Forked result = Forked
   { forkedActor :: AgentRef
