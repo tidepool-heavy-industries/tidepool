@@ -14,4 +14,5 @@ use tidepool_bridge_derive::FromCore;
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum AgentInspectionReq {
     AgentInspectWith((i64, i64)),
+    AgentListWith,
 }

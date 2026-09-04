@@ -203,6 +203,13 @@ pub(crate) struct ResidentAgentAttachment {
     pub(crate) initial_user_message: Option<String>,
 }
 
+pub(crate) struct AgentRosterProjection {
+    pub(crate) actor: crate::ActorRef,
+    pub(crate) descriptor: crate::ActorDescriptor,
+    pub(crate) bound_worktree: Option<String>,
+    pub(crate) terminal: Option<crate::ActorTerminal>,
+}
+
 /// One fully captured boundary reached by an installed actor program.
 /// Variants own every linear runtime value needed to service that boundary;
 /// downstream orchestration never re-decodes the suspended request.
@@ -219,6 +226,7 @@ pub(crate) enum ResidentActorBoundary {
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
     AgentAttachment(ResidentAgentAttachment),
+    AgentList(ResidentHole),
     RequestReservation(RequestReservation),
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
@@ -279,6 +287,7 @@ impl ResidentActorBoundary {
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
             Self::AgentAttachment(_) => "agent attachment",
+            Self::AgentList(_) => "listAgents",
             Self::RequestReservation(_) => "request",
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
@@ -381,6 +390,9 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(..),
             ) => "observeAgent",
+            Self::AgentInspection(
+                crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
+            ) => "listAgents",
             Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
                 ..,
             )) => "startAgent",
@@ -1157,6 +1169,9 @@ where
                             continuation: hole,
                         },
                     )),
+                    ResidentRequest::AgentInspection(
+                        crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
+                    ) => Ok(ResidentActorBoundary::AgentList(hole)),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlTryCallWith(
                             target,
@@ -1850,6 +1865,64 @@ where
             .await
     }
 
+    pub(crate) async fn resume_agent_roster(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        roster: Vec<AgentRosterProjection>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let mut entries = Vec::with_capacity(roster.len());
+                for entry in roster {
+                    let state = match entry.terminal {
+                        None => actor_context_constructor(table, "RosterRunning", Vec::new())?,
+                        Some(terminal) => match terminal.kind {
+                            crate::ActorExitKind::Completed => {
+                                actor_context_constructor(table, "RosterStopped", Vec::new())?
+                            }
+                            crate::ActorExitKind::Failed => actor_context_constructor(
+                                table,
+                                "RosterFailed",
+                                vec![terminal.summary.to_value(table)?],
+                            )?,
+                            crate::ActorExitKind::Cancelled => actor_context_constructor(
+                                table,
+                                "RosterCancelled",
+                                vec![terminal.summary.to_value(table)?],
+                            )?,
+                        },
+                    };
+                    let role = match entry.descriptor.effective_role().role() {
+                        crate::ActorRole::Root => "ContextRoot",
+                        crate::ActorRole::Research => "ContextResearch",
+                        crate::ActorRole::Coding => "ContextCoding",
+                        crate::ActorRole::Scaffolding => "ContextScaffolding",
+                        crate::ActorRole::Integration => "ContextIntegration",
+                        crate::ActorRole::Inherited => "ContextInherited",
+                    };
+                    entries.push(actor_context_constructor(
+                        table,
+                        "AgentRosterEntry",
+                        vec![
+                            actor_int(entry.actor.id.0)?.to_value(table)?,
+                            actor_int(entry.actor.incarnation.0)?.to_value(table)?,
+                            entry.descriptor.label().to_owned().to_value(table)?,
+                            state,
+                            actor_context_constructor(table, role, Vec::new())?,
+                            entry.bound_worktree.to_value(table)?,
+                        ],
+                    )?);
+                }
+                let answer = core_list(table, entries)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
     pub(crate) async fn resume_fork_group(
         &self,
         context: crate::ActorSessionContext,
@@ -2123,6 +2196,22 @@ fn actor_context_constructor(
         .get_by_qualified_name(&qualified)
         .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;
     Ok(Value::Con(constructor, fields))
+}
+
+fn core_list(
+    table: &DataConTable,
+    values: Vec<Value>,
+) -> Result<Value, tidepool_bridge::BridgeError> {
+    let nil = tidepool_bridge::get_resilient(table, "[]", 0)
+        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName("[]".into()))?;
+    let cons = tidepool_bridge::get_resilient(table, ":", 2)
+        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(":".into()))?;
+    Ok(values
+        .into_iter()
+        .rev()
+        .fold(Value::Con(nil, Vec::new()), |tail, head| {
+            Value::Con(cons, vec![head, tail])
+        }))
 }
 
 #[derive(Clone, Copy)]

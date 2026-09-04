@@ -35,6 +35,7 @@ module Tidepool.Actors.Internal.Agent
   , agentIdentity
   , agentBoundWorktree
   , observeAgent
+  , listAgents
   , StopOutcome (..)
   , stopAgent
   ) where
@@ -74,6 +75,8 @@ import Tidepool.Effects.Core
   , AgentControl (..)
   , AgentInspection (..)
   , AgentLaunch (..)
+  , AgentRosterEntry (..)
+  , AgentRosterState (..)
   , Forks (..)
   , WorktreeHandle (..)
   , WorktreeReceipt (..)
@@ -137,6 +140,9 @@ observeAgent agent@(AgentRef target tree) = do
         Just (Actor.Cancelled reason) -> AgentCancelled (Actor.cancelReasonSummary reason)
     , observedWorktree = tree
     }
+
+listAgents :: Member AgentInspection effs => Eff effs [AgentRosterEntry]
+listAgents = send AgentListWith
 
 data AgentProtocol result where
   RunRequest

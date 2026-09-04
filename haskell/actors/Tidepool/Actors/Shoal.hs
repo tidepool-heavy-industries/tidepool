@@ -76,6 +76,9 @@ module Tidepool.Actors.Shoal
   , agentIdentity
   , agentBoundWorktree
   , observeAgent
+  , AgentRosterEntry (..)
+  , AgentRosterState (..)
+  , listAgents
   , Response
   , Reply
   , codingAgent
@@ -183,6 +186,7 @@ import Tidepool.Actors.Internal.Agent
   , agentBoundWorktree
   , agentIdentity
   , observeAgent
+  , listAgents
   , readonlyAgent
   , request
   , RequestDeadline
@@ -203,6 +207,8 @@ import Tidepool.Effects.Core
   , ActorContextRole (..)
   , ActorNativeTools (..)
   , ActorWorkspaceAccess (..)
+  , AgentRosterEntry (..)
+  , AgentRosterState (..)
   , Worktree
   , actorContext
   )

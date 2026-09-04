@@ -9,8 +9,12 @@ pub fn agent_inspection_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "AgentInspectWith :: (Int, Int) -> AgentInspection (Maybe ActorTerminalStatus)",
+            "AgentListWith :: AgentInspection [AgentRosterEntry]",
         ],
-        type_defs: &[],
+        type_defs: &[
+            "data AgentRosterState = RosterRunning | RosterStopped | RosterFailed Text | RosterCancelled Text deriving (Show, Eq)",
+            "data AgentRosterEntry = AgentRosterEntry { rosterActorId :: Int, rosterActorIncarnation :: Int, rosterLabel :: Text, rosterState :: AgentRosterState, rosterRole :: ActorContextRole, rosterBoundWorktree :: Maybe Text } deriving (Show, Eq)",
+        ],
         extra_imports: &[],
         helpers: &[],
         type_params: &[],

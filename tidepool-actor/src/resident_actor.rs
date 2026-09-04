@@ -104,6 +104,27 @@ struct ResidentEnvironment<H, O> {
 struct ResidentActorRecord {
     descriptor: ActorDescriptor,
     bound_worktree: Option<String>,
+    terminal: Option<ActorTerminal>,
+}
+
+fn actor_is_self_or_descendant(
+    owner: ActorRef,
+    candidate: ActorRef,
+    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
+) -> bool {
+    let mut cursor = candidate;
+    loop {
+        if cursor == owner {
+            return true;
+        }
+        let Some(parent) = records
+            .get(&cursor)
+            .and_then(|record| record.descriptor.context_parent())
+        else {
+            return false;
+        };
+        cursor = parent;
+    }
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -310,6 +331,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     fn publish_retired(&self, actor: ActorRef, terminal: ActorTerminal) {
         self.environment.fork_groups.retire_actor(actor);
+        if let Some(record) = self.environment.actors.lock().get_mut(&actor) {
+            record.terminal = Some(terminal.clone());
+        }
         if self.environment.retired.lock().insert(actor) {
             let _ = self
                 .environment
@@ -347,9 +371,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .lock()
             .iter()
             .map(|(identity, record)| {
-                let terminal = kernel
-                    .resolve(*identity)
-                    .and_then(|actor| actor.terminal().get());
+                let terminal = record.terminal.clone().or_else(|| {
+                    kernel
+                        .resolve(*identity)
+                        .and_then(|actor| actor.terminal().get())
+                });
                 let active = self.environment.requests.active_for_target(*identity);
                 let state = match terminal {
                     Some(ref terminal) => format!("terminal:{:?}", terminal.kind),
@@ -695,6 +721,32 @@ where
                         self.descriptor.clone(),
                         self.launch_worktrees.first().cloned(),
                     )
+                    .await
+            }
+            ResidentActorBoundary::AgentList(continuation) => {
+                let records = self.environment.actors.lock().clone();
+                let mut roster = records
+                    .iter()
+                    .filter(|(actor, _)| {
+                        actor_is_self_or_descendant(context.actor, **actor, &records)
+                    })
+                    .map(
+                        |(actor, record)| crate::resident_workbench::AgentRosterProjection {
+                            actor: *actor,
+                            descriptor: record.descriptor.clone(),
+                            bound_worktree: record.bound_worktree.clone(),
+                            terminal: record.terminal.clone().or_else(|| {
+                                kernel
+                                    .resolve(*actor)
+                                    .and_then(|actor| actor.terminal().get())
+                            }),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                roster.sort_by_key(|entry| (entry.actor.id, entry.actor.incarnation));
+                self.environment
+                    .runner
+                    .resume_agent_roster(context.clone(), continuation, roster)
                     .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
@@ -1977,6 +2029,7 @@ where
                 ResidentActorRecord {
                     descriptor: self.descriptor.clone(),
                     bound_worktree: self.launch_worktrees.first().cloned(),
+                    terminal: None,
                 },
             );
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
