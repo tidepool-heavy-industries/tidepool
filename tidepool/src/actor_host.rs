@@ -3341,6 +3341,13 @@ mod tests {
                 && pending_status.contains("\"both-ready\""),
             "{pending_status}"
         );
+        assert!(
+            pending_status.contains("actors=[")
+                && pending_status.contains("role=Research")
+                && pending_status.contains("role=Scaffolding")
+                && pending_status.contains("worktree=Some("),
+            "{pending_status}"
+        );
         let launch_receipt = dispatch_haskell_script(
             root_installation.policy.as_ref(),
             "(forkedLaunch (first3 workers), forkedLaunch (second3 workers), forkedLaunch (third3 workers))",

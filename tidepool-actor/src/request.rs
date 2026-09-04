@@ -136,6 +136,24 @@ pub(crate) struct ActorRequestStatus {
 }
 
 impl RequestRegistry {
+    pub(crate) fn active_for_target(&self, target: ActorRef) -> Vec<(RequestId, String)> {
+        let state = self.state.lock();
+        let mut active = state
+            .requests
+            .iter()
+            .filter_map(|(request, record)| {
+                (record.target == target
+                    && matches!(
+                        record.state,
+                        RequestState::Queued | RequestState::Presented | RequestState::Settling
+                    ))
+                .then(|| (*request, record.label.clone()))
+            })
+            .collect::<Vec<_>>();
+        active.sort_unstable();
+        active
+    }
+
     pub(crate) fn status_for(&self, owner: ActorRef) -> ActorRequestStatus {
         let state = self.state.lock();
         let mut status = ActorRequestStatus {

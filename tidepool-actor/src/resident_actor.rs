@@ -97,6 +97,13 @@ struct ResidentEnvironment<H, O> {
     retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
     requests: Arc<RequestRegistry>,
     fork_groups: crate::ForkGroupRegistry,
+    actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
+}
+
+#[derive(Clone)]
+struct ResidentActorRecord {
+    descriptor: ActorDescriptor,
+    bound_worktree: Option<String>,
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
@@ -107,6 +114,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             retired: Arc::clone(&self.retired),
             requests: Arc::clone(&self.requests),
             fork_groups: self.fork_groups.clone(),
+            actors: Arc::clone(&self.actors),
         }
     }
 }
@@ -322,7 +330,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
-    fn status_text(&self, actor: ActorRef) -> String {
+    fn status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
         let (standing, current_request) = match &self.standing {
             ResidentStanding::Boot => ("booting", None),
             ResidentStanding::Receiving(_) => ("receiving", None),
@@ -333,7 +341,34 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             ResidentStanding::Terminal => ("terminal", None),
         };
         let requests = self.environment.requests.status_for(actor);
-        format!(
+        let mut roster = self
+            .environment
+            .actors
+            .lock()
+            .iter()
+            .map(|(identity, record)| {
+                let terminal = kernel
+                    .resolve(*identity)
+                    .and_then(|actor| actor.terminal().get());
+                let active = self.environment.requests.active_for_target(*identity);
+                let state = match terminal {
+                    Some(ref terminal) => format!("terminal:{:?}", terminal.kind),
+                    None if !active.is_empty() => format!("handling:{active:?}"),
+                    None => "running".into(),
+                };
+                format!(
+                    "{}@{} label={:?} role={:?} worktree={:?} state={}",
+                    identity.id.0,
+                    identity.incarnation.0,
+                    record.descriptor.label(),
+                    record.descriptor.effective_role().role(),
+                    record.bound_worktree,
+                    state,
+                )
+            })
+            .collect::<Vec<_>>();
+        roster.sort();
+        let current = format!(
             "actor {}@{} label={:?}: parent={:?}; fork_group={:?}; role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendants={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktree={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
@@ -354,7 +389,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             requests.pending_watches,
             requests.ready_watches,
             requests.unavailable_watches,
-        )
+        );
+        format!("{current}; actors=[{}]", roster.join(", "))
     }
 }
 
@@ -1610,7 +1646,7 @@ where
                 receipts.push(WorkbenchItemReceipt {
                     index,
                     status: WorkbenchItemStatus::Committed,
-                    output: self.status_text(context.actor),
+                    output: self.status_text(kernel, context.actor),
                 });
                 index += 1;
                 continue;
@@ -1925,6 +1961,13 @@ where
         Box::pin(async move {
             let context = self.context(kernel.identity());
             kernel.install_session_context(context.clone())?;
+            self.environment.actors.lock().insert(
+                context.actor,
+                ResidentActorRecord {
+                    descriptor: self.descriptor.clone(),
+                    bound_worktree: self.launch_worktrees.first().cloned(),
+                },
+            );
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "resident actor boot was consumed twice".into(),
             })?;
@@ -2272,6 +2315,7 @@ where
         retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
         requests: Arc::new(RequestRegistry::default()),
         fork_groups: crate::ForkGroupRegistry::new(lineage),
+        actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
     let (actor, task) = crate::spawn_local_actor(None, behavior).await?;
