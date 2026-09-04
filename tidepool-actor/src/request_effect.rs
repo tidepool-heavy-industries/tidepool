@@ -360,6 +360,9 @@ fn response_failure_value(
         ResponseFailure::Abandoned => ("ResponseAbandoned", Vec::new()),
         ResponseFailure::Cancelled => ("ResponseCancelled", Vec::new()),
         ResponseFailure::DeadlineExceeded => ("ResponseDeadlineExceeded", Vec::new()),
+        ResponseFailure::SettlementFailed(detail) => {
+            ("ResponseSettlementFailed", vec![detail.to_value(table)?])
+        }
     };
     constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
 }

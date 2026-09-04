@@ -2287,7 +2287,12 @@ where
                             }
                             ResidentStanding::Interactive(awaiting) => {
                                 self.standing = ResidentStanding::Interactive(awaiting);
-                                self.environment.requests.rollback_reply(request_id);
+                                let notifications =
+                                    self.environment.requests.fail_reply_settlement(
+                                        request_id,
+                                        "reply did not match the active request",
+                                    );
+                                self.publish_watch_notifications(notifications);
                                 return Err(workbench_failure(
                                     &receipts,
                                     index,
@@ -2299,7 +2304,12 @@ where
                             }
                             standing => {
                                 self.standing = standing;
-                                self.environment.requests.rollback_reply(request_id);
+                                let notifications =
+                                    self.environment.requests.fail_reply_settlement(
+                                        request_id,
+                                        "reply lost its request continuation",
+                                    );
+                                self.publish_watch_notifications(notifications);
                                 return Err(workbench_failure(
                                     &receipts,
                                     index,
@@ -2317,7 +2327,11 @@ where
                         Ok(outcome) => outcome,
                         Err(error) => {
                             self.standing = ResidentStanding::Interactive(awaiting);
-                            self.environment.requests.rollback_reply(request_id);
+                            let notifications = self.environment.requests.fail_reply_settlement(
+                                request_id,
+                                format!("request continuation failed: {error}"),
+                            );
+                            self.publish_watch_notifications(notifications);
                             return Err(workbench_failure(
                                 &receipts,
                                 index,
@@ -2326,10 +2340,12 @@ where
                             ));
                         }
                     };
-                    if self.pending_program.replace(outcome).is_some()
-                        || self.pending_reply.replace(request_id).is_some()
-                    {
-                        self.environment.requests.rollback_reply(request_id);
+                    if self.pending_program.is_some() || self.pending_reply.is_some() {
+                        let notifications = self.environment.requests.fail_reply_settlement(
+                            request_id,
+                            "actor settled a second reply before resuming the first",
+                        );
+                        self.publish_watch_notifications(notifications);
                         return Err(workbench_failure(
                             &receipts,
                             index,
@@ -2339,6 +2355,8 @@ where
                             ),
                         ));
                     }
+                    self.pending_program = Some(outcome);
+                    self.pending_reply = Some(request_id);
                     return Ok(KernelStep::ContinueLater(workbench_response(
                         WorkbenchRunStatus::Replied,
                         receipts,
@@ -2767,7 +2785,11 @@ where
                 }
                 Err(error) => {
                     if let Some(request) = self.pending_reply.take() {
-                        self.environment.requests.rollback_reply(request);
+                        let notifications = self.environment.requests.fail_reply_settlement(
+                            request,
+                            format!("reply continuation failed after acceptance: {error}"),
+                        );
+                        self.publish_watch_notifications(notifications);
                     }
                     if let Some(request) = self.pending_cancellation.take() {
                         self.environment

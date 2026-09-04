@@ -22,6 +22,7 @@ pub enum ResponseFailure {
     Abandoned,
     Cancelled,
     DeadlineExceeded,
+    SettlementFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,13 +392,22 @@ impl RequestRegistry {
         reevaluate_watches(&mut state)
     }
 
-    pub(crate) fn rollback_reply(&self, request: RequestId) {
+    pub(crate) fn fail_reply_settlement(
+        &self,
+        request: RequestId,
+        detail: impl Into<String>,
+    ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         if let Some(record) = state.requests.get_mut(&request) {
             if record.target_state == TargetState::Settling {
-                record.target_state = TargetState::Presented;
+                record.target_state = TargetState::Closed;
+                if record.owner_state == OwnerState::Observing {
+                    record.owner_state =
+                        OwnerState::Unavailable(ResponseFailure::SettlementFailed(detail.into()));
+                }
             }
         }
+        reevaluate_watches(&mut state)
     }
 
     pub(crate) fn observe_response(
@@ -921,6 +931,43 @@ mod tests {
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(notifications[0].transition, WatchTransition::Ready);
+    }
+
+    #[test]
+    fn accepted_reply_failure_is_terminal_and_wakes_watch_once() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, initial) = registry.register_watch(owner, vec![request]).unwrap();
+        assert!(initial.is_empty());
+
+        registry.begin_reply(target, request).unwrap();
+        let notifications = registry.fail_reply_settlement(request, "continuation trapped");
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        assert_eq!(
+            notifications[0].transition,
+            WatchTransition::Unavailable {
+                request,
+                failure: ResponseFailure::SettlementFailed("continuation trapped".into()),
+            }
+        );
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::SettlementFailed("continuation trapped".into())
+            ))
+        );
+        assert_eq!(
+            registry.begin_reply(target, request),
+            Err(ReplyError::AlreadySettled)
+        );
+        assert!(registry
+            .fail_reply_settlement(request, "second failure")
+            .is_empty());
     }
 
     #[test]

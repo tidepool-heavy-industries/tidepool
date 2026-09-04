@@ -104,6 +104,7 @@ data ResponseFailure
   | ResponseAbandoned
   | ResponseCancelled
   | ResponseDeadlineExceeded
+  | ResponseSettlementFailed Text
   | ResponseRejected ReplyError
   deriving (Show, Eq)
 
