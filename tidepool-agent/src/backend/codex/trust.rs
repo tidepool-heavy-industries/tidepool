@@ -40,6 +40,16 @@ fn trust_project_in_home(codex_home: &Path, project_root: &Path) -> Result<(), A
     directory
         .lock()
         .map_err(|error| unavailable("lock Codex config directory", error))?;
+    let rules_dir = codex_home.join("rules");
+    std::fs::create_dir_all(&rules_dir).map_err(|error| {
+        unavailable(
+            format!(
+                "prepare interactive policy directory {}",
+                rules_dir.display()
+            ),
+            error,
+        )
+    })?;
 
     let config_path = codex_home.join("config.toml");
     let source = match std::fs::read_to_string(&config_path) {
@@ -130,6 +140,7 @@ mod tests {
         let twice = std::fs::read_to_string(&config).unwrap();
 
         assert_eq!(once, twice);
+        assert!(home.path().join("rules").is_dir());
         assert!(once.contains("# keep this comment"));
         assert!(once.contains("model = \"gpt-test\""));
         let parsed = DocumentMut::from_str(&once).unwrap();

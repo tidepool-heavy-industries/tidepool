@@ -24,7 +24,8 @@ use tidepool_actor::{
 use tidepool_agent::{
     native_interactive_backend, read_interactive_binding, BackendThreadId, InteractiveAgentBackend,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveLaunchMode,
-    InteractiveNativeSandbox, QueueReadyThread, ReasoningEffort,
+    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
+    QueueReadyThread, ReasoningEffort,
 };
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
@@ -1198,6 +1199,13 @@ async fn launch_prepared_interactive_application(
         || config.workspace.clone(),
         |handle| handle.cwd().to_path_buf(),
     );
+    let actor_root = run_root.join(format!(
+        "{}-{}",
+        actor_identity.id.0, actor_identity.incarnation.0
+    ));
+    std::fs::create_dir_all(&actor_root).map_err(|error| {
+        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+    })?;
     let git_common_dir =
         tidepool_worktree::git::inspect::git_common_dir(worktrees.git(), &workspace).map_err(
             |error| application_error(actor_identity, InteractiveOperation::PrepareRuntime, error),
@@ -1209,7 +1217,17 @@ async fn launch_prepared_interactive_application(
         &git_common_dir,
     );
     let agent_workspace = PathBuf::from(ACTOR_PROJECT_ROOT);
-    let process_boundary = ProcessMountBoundary::new(
+    let native_tool_policy = if actor_identity != root && worktree.is_none() {
+        InteractiveNativeToolPolicy::InspectionOnly
+    } else {
+        InteractiveNativeToolPolicy::Standard
+    };
+    let policy_mounts = backend
+        .prepare_native_tool_policy(native_tool_policy, &actor_root.join("native-policy"))
+        .map_err(|error| {
+            application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+        })?;
+    let mut process_boundary = ProcessMountBoundary::new(
         &workspace,
         [
             config.workspace.clone(),
@@ -1222,16 +1240,16 @@ async fn launch_prepared_interactive_application(
     .map_err(|error| {
         application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
     })?;
+    for InteractivePolicyMount { source, target } in policy_mounts {
+        process_boundary = process_boundary
+            .with_read_only_overlay(source, target)
+            .map_err(|error| {
+                application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
+            })?;
+    }
     if cancelled.try_recv().is_ok() {
         return Ok(None);
     }
-    let actor_root = run_root.join(format!(
-        "{}-{}",
-        actor_identity.id.0, actor_identity.incarnation.0
-    ));
-    std::fs::create_dir_all(&actor_root).map_err(|error| {
-        application_error(actor_identity, InteractiveOperation::PrepareRuntime, error)
-    })?;
     let build_output = if actor_identity == root || worktree.is_some() {
         let relative = PathBuf::from(".shoal").join("build").join(format!(
             "actor-{}-{}",
@@ -2139,6 +2157,14 @@ mod tests {
     }
 
     impl InteractiveAgentBackend for ScriptedPush {
+        fn prepare_native_tool_policy(
+            &self,
+            _policy: InteractiveNativeToolPolicy,
+            _staging_root: &Path,
+        ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+            Ok(Vec::new())
+        }
+
         fn render(
             &self,
             _spec: &InteractiveAgentSpec,

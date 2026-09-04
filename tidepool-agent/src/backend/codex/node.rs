@@ -18,13 +18,47 @@ use tokio::process::Command;
 use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
-    InteractiveNativeSandbox, QueueReadyThread, ReasoningEffort,
+    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
+    QueueReadyThread, ReasoningEffort,
 };
 
 const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const CLI_DEADLINE: Duration = Duration::from_secs(30);
 const CAPTURE_LIMIT: usize = 64 * 1024;
+const INSPECTION_POLICY_FILE: &str = "tidepool-inspection.rules";
+const INSPECTION_POLICY: &str = r#"
+prefix_rule(
+    pattern = [["cargo", "rustc", "rustdoc", "rustfmt", "cabal", "stack", "ghc", "ghci", "hpack", "make", "gmake", "ninja", "cmake", "meson", "just", "gradle", "mvn", "ant"]],
+    decision = "forbidden",
+    justification = "Inspection-only actors inspect existing evidence. Delegate builds and artifact production to a coding actor.",
+)
+prefix_rule(
+    pattern = ["nix", ["build", "develop", "shell", "run"]],
+    decision = "forbidden",
+    justification = "Inspection-only actors do not enter build environments. Delegate validation to a coding actor.",
+)
+prefix_rule(
+    pattern = [["npm", "npx", "yarn", "pnpm", "bun", "deno"], ["run", "test", "build", "install", "add", "exec", "fmt"]],
+    decision = "forbidden",
+    justification = "Inspection-only actors do not run package, build, test, generator, or formatter commands.",
+)
+prefix_rule(
+    pattern = ["go", ["build", "test", "generate", "install", "run"]],
+    decision = "forbidden",
+    justification = "Inspection-only actors do not build, test, generate, install, or run project programs.",
+)
+prefix_rule(
+    pattern = [["pytest", "tox", "nox", "prettier", "black", "ruff", "clang-format", "goimports"]],
+    decision = "forbidden",
+    justification = "Inspection-only actors do not run tests, formatters, or generators.",
+)
+prefix_rule(
+    pattern = ["git", ["add", "am", "apply", "cherry-pick", "commit", "merge", "rebase", "reset", "restore", "switch"]],
+    decision = "forbidden",
+    justification = "Inspection-only actors may inspect Git but must delegate repository mutation to a coding actor.",
+)
+"#;
 pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 2;
 
 /// Resolve and behaviorally verify the interactive Codex executable.
@@ -196,6 +230,14 @@ impl CodexInteractiveBackend {
 }
 
 impl InteractiveAgentBackend for CodexInteractiveBackend {
+    fn prepare_native_tool_policy(
+        &self,
+        policy: InteractiveNativeToolPolicy,
+        staging_root: &Path,
+    ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+        prepare_native_tool_policy(policy, staging_root)
+    }
+
     fn render(
         &self,
         spec: &InteractiveAgentSpec,
@@ -224,6 +266,57 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     ) -> InteractiveFuture<'a, ()> {
         Box::pin(archive_thread(&self.installation, Path::new(cwd), thread))
     }
+}
+
+fn prepare_native_tool_policy(
+    policy: InteractiveNativeToolPolicy,
+    staging_root: &Path,
+) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+    prepare_native_tool_policy_in_home(policy, staging_root, &super::isolation::codex_home())
+}
+
+fn prepare_native_tool_policy_in_home(
+    policy: InteractiveNativeToolPolicy,
+    staging_root: &Path,
+    codex_home: &Path,
+) -> Result<Vec<InteractivePolicyMount>, AgentBackendError> {
+    if policy == InteractiveNativeToolPolicy::Standard {
+        return Ok(Vec::new());
+    }
+
+    let codex_rules = codex_home.join("rules");
+    let staged_rules = staging_root.join("codex-rules");
+    std::fs::create_dir_all(&staged_rules)
+        .map_err(|error| unavailable("create inspection policy staging directory", error))?;
+    let entries = std::fs::read_dir(&codex_rules).map_err(|error| {
+        unavailable(
+            &format!("read Codex policy directory {}", codex_rules.display()),
+            error,
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| unavailable("read Codex policy entry", error))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rules") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| unavailable("inspect Codex policy entry", error))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        std::fs::copy(&path, staged_rules.join(entry.file_name())).map_err(|error| {
+            unavailable(&format!("stage Codex policy {}", path.display()), error)
+        })?;
+    }
+    std::fs::write(staged_rules.join(INSPECTION_POLICY_FILE), INSPECTION_POLICY)
+        .map_err(|error| unavailable("write inspection-only command policy", error))?;
+
+    Ok(vec![InteractivePolicyMount {
+        source: staged_rules,
+        target: codex_rules,
+    }])
 }
 
 fn command_for(
@@ -693,6 +786,44 @@ mod tests {
             command_for(&installation(), &spec),
             Err(AgentBackendError::ProtocolRejected { .. })
         ));
+    }
+
+    #[test]
+    fn inspection_policy_preserves_user_rules_and_adds_build_denials() {
+        let root = tempfile::tempdir().unwrap();
+        let codex_home = root.path().join("codex-home");
+        let rules = codex_home.join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("operator.rules"),
+            "prefix_rule(pattern=[\"rg\"], decision=\"allow\")\n",
+        )
+        .unwrap();
+
+        let mounts = prepare_native_tool_policy_in_home(
+            InteractiveNativeToolPolicy::InspectionOnly,
+            &root.path().join("actor-policy"),
+            &codex_home,
+        )
+        .unwrap();
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].target, rules);
+        assert!(mounts[0].source.join("operator.rules").is_file());
+        let policy =
+            std::fs::read_to_string(mounts[0].source.join(INSPECTION_POLICY_FILE)).unwrap();
+        for expected in ["cargo", "nix", "pytest", "git", "forbidden"] {
+            assert!(policy.contains(expected));
+        }
+
+        let standard = prepare_native_tool_policy_in_home(
+            InteractiveNativeToolPolicy::Standard,
+            &root.path().join("unused"),
+            &codex_home,
+        )
+        .unwrap();
+        assert!(standard.is_empty());
+        assert!(!root.path().join("unused").exists());
     }
 
     #[test]

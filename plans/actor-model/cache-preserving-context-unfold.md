@@ -1,6 +1,6 @@
 # Cache-preserving context unfold and typed result fold
 
-Status: accepted and interaction-pressure-tested; implementation not started.
+Status: accepted and interaction-pressure-tested; implementation in progress.
 This plan is the canonical design and linear handoff for context-preserving
 forks of interactive agent applications. It refines the older process-fork-
 shaped sketches in
@@ -1627,6 +1627,19 @@ implement, not that production support has landed.
 - [ ] Gate 0: prove the exact active-provider-call fork boundary, measurable
   prefix-cache reuse, tail-position rejection, and enforced inspection-only
   native policy.
+  - 2026-09-04 provider canary: forked Codex thread
+    `01a06b3a-6c67-7d91-a4f3-5fc8eb981b96` while its parent was suspended in
+    an active shell call. The child observed the request, assistant preamble,
+    and in-progress command, but neither the command result nor a post-result
+    marker. Usage reported 11,264 cached of 16,107 input tokens.
+  - 2026-09-04 policy slice: inspection-only interactive actors now receive a
+    process-private Codex execution-policy overlay. Focused adapter and mount
+    tests passed; `codex execpolicy check` classified `cargo`, `nix develop`,
+    and `git commit` as forbidden while leaving `rg` and `git status`
+    unmatched. A live Codex process inside the same Bubblewrap overlay rejected
+    `/run/current-system/sw/bin/zsh -lc 'cargo --version'` before execution with
+    the inspection-only rationale. Tail-position enforcement remains for the
+    `Forks` effect slice.
 - [ ] Gate 1: add immutable Haskell binding tips and descendant root leases.
 - [ ] Gate 2: add campaign/actor-path allocation, granular residual effects,
   typed row witnesses, and one authoritative effective-role projection.

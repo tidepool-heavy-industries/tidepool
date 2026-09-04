@@ -27,6 +27,7 @@ pub struct ProcessMountBoundary {
     project_root: PathBuf,
     read_only_roots: Vec<PathBuf>,
     writable_roots: Vec<PathBuf>,
+    read_only_overlays: Vec<(PathBuf, PathBuf)>,
 }
 
 impl ProcessMountBoundary {
@@ -72,6 +73,7 @@ impl ProcessMountBoundary {
             cwd,
             read_only_roots,
             writable_roots,
+            read_only_overlays: Vec::new(),
         })
     }
 
@@ -82,6 +84,24 @@ impl ProcessMountBoundary {
         project_root: impl AsRef<Path>,
     ) -> Result<Self, ProcessBoundaryError> {
         self.project_root = canonicalize("model-visible project root", project_root.as_ref())?;
+        Ok(self)
+    }
+
+    /// Overlay one process-private directory at an existing host directory.
+    ///
+    /// This is used for launch policy assembled outside the checkout. The
+    /// source and target are both resolved before launch, and the overlay is
+    /// read-only inside the actor mount namespace.
+    pub fn with_read_only_overlay(
+        mut self,
+        source: impl AsRef<Path>,
+        target: impl AsRef<Path>,
+    ) -> Result<Self, ProcessBoundaryError> {
+        let source = canonicalize("read-only overlay source", source.as_ref())?;
+        let target = canonicalize("read-only overlay target", target.as_ref())?;
+        self.read_only_overlays.push((source, target));
+        self.read_only_overlays.sort();
+        self.read_only_overlays.dedup();
         Ok(self)
     }
 
@@ -117,6 +137,13 @@ impl ProcessMountBoundary {
             args.push(if writable { "--bind" } else { "--ro-bind" }.into());
             args.push(self.cwd.to_string_lossy().into_owned());
             args.push(self.project_root.to_string_lossy().into_owned());
+        }
+        for (source, target) in &self.read_only_overlays {
+            args.extend([
+                "--ro-bind".into(),
+                source.to_string_lossy().into_owned(),
+                target.to_string_lossy().into_owned(),
+            ]);
         }
         args.extend([
             "--chdir".into(),
@@ -236,5 +263,34 @@ mod tests {
             .args
             .windows(2)
             .any(|args| { args[0] == "--chdir" && args[1] == project_root.to_string_lossy() }));
+    }
+
+    #[test]
+    fn process_private_policy_overlay_is_applied_after_workspace_mounts() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let policy = root.path().join("policy");
+        let target = root.path().join("target");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&policy).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+
+        let wrapped = ProcessMountBoundary::new(&workspace, [workspace.clone()], Vec::new())
+            .unwrap()
+            .with_read_only_overlay(&policy, &target)
+            .unwrap()
+            .wrap(
+                "bwrap",
+                ProcessInvocation {
+                    program: "true".into(),
+                    args: Vec::new(),
+                },
+            );
+
+        assert!(wrapped.args.windows(3).any(|args| {
+            args[0] == "--ro-bind"
+                && args[1] == policy.to_string_lossy()
+                && args[2] == target.to_string_lossy()
+        }));
     }
 }

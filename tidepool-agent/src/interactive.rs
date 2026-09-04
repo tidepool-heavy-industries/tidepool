@@ -85,6 +85,24 @@ pub enum InteractiveNativeSandbox {
     HostMountBoundary,
 }
 
+/// Native command policy selected by the actor's effective role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractiveNativeToolPolicy {
+    /// Ordinary coding and orchestration tools are available.
+    Standard,
+    /// Source inspection remains available, while common build and artifact
+    /// producers are rejected by the backend before process execution.
+    InspectionOnly,
+}
+
+/// One backend-owned policy directory to mount over its ordinary config
+/// directory for a single interactive process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractivePolicyMount {
+    pub source: PathBuf,
+    pub target: PathBuf,
+}
+
 /// A backend-rendered interactive process invocation.
 ///
 /// Process ownership stays with the deployment adapter (tmux for Shoal). The
@@ -119,6 +137,16 @@ pub struct InteractiveAgentSpec {
 /// command construction; `push` is only the final backend hop to an
 /// already-bound exact conversation.
 pub trait InteractiveAgentBackend: Send + Sync {
+    /// Materialize backend-native command policy under `staging_root`.
+    ///
+    /// The deployment owner installs returned directories as read-only mount
+    /// overlays for this process only. The standard policy needs no overlay.
+    fn prepare_native_tool_policy(
+        &self,
+        policy: InteractiveNativeToolPolicy,
+        staging_root: &Path,
+    ) -> Result<Vec<InteractivePolicyMount>, AgentBackendError>;
+
     fn render(
         &self,
         spec: &InteractiveAgentSpec,
