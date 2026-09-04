@@ -21,6 +21,14 @@ module Tidepool.Actors.Internal.Agent
   , startForkedAgent
   , request
   , requestSited
+  , RequestOptions
+  , RequestDeadline
+  , requestOptions
+  , requestDeadline
+  , withRequestGuidance
+  , withRequestDeadline
+  , requestWith
+  , requestWithSited
   , AgentState (..)
   , AgentObservation (..)
   , agentIdentity
@@ -122,6 +130,33 @@ data AgentProtocol result where
     -> AgentProtocol ()
   StopAgent :: AgentProtocol ()
 
+newtype RequestDeadline = RequestDeadline Int
+  deriving (Show, Eq, Ord)
+
+data RequestOptions input = RequestOptions
+  { requestOptionsLabel :: RequestLabel
+  , requestOptionsInput :: input
+  , requestOptionsGuidance :: Maybe Text
+  , requestOptionsDeadline :: Maybe RequestDeadline
+  }
+  deriving (Show, Eq)
+
+requestOptions :: RequestLabel -> input -> RequestOptions input
+requestOptions label input = RequestOptions label input Nothing Nothing
+
+requestDeadline :: Int -> Either Text RequestDeadline
+requestDeadline milliseconds
+  | milliseconds <= 0 = Left "request deadline must be a positive number of milliseconds"
+  | otherwise = Right (RequestDeadline milliseconds)
+
+withRequestGuidance :: Text -> RequestOptions input -> RequestOptions input
+withRequestGuidance guidance options =
+  options { requestOptionsGuidance = Just guidance }
+
+withRequestDeadline :: RequestDeadline -> RequestOptions input -> RequestOptions input
+withRequestDeadline deadline options =
+  options { requestOptionsDeadline = Just deadline }
+
 -- | Configure a long-lived coding agent around one managed worktree.
 codingAgent :: WorktreeHandle -> AgentSpec
 codingAgent = CodingAgent
@@ -175,12 +210,56 @@ requestSited
   -> input
   -> Eff effs (Response result)
 requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedLabel) input = do
+  requestConfiguredSited site target targetWorktree label Nothing Nothing input
+
+{-# OPAQUE requestWith #-}
+requestWith
+  :: forall result input effs
+   . Member Replies effs
+  => AgentRef
+  -> RequestOptions input
+  -> Eff effs (Response result)
+requestWith = requestWithSited @result @input 0
+
+{-# OPAQUE requestWithSited #-}
+requestWithSited
+  :: forall result input effs
+   . Member Replies effs
+  => Int
+  -> AgentRef
+  -> RequestOptions input
+  -> Eff effs (Response result)
+requestWithSited site (AgentRef target targetWorktree) options =
+  requestConfiguredSited
+    site
+    target
+    targetWorktree
+    (requestOptionsLabel options)
+    (requestOptionsGuidance options)
+    (case requestOptionsDeadline options of
+      Nothing -> Nothing
+      Just (RequestDeadline milliseconds) -> Just milliseconds)
+    (requestOptionsInput options)
+
+requestConfiguredSited
+  :: forall result input effs
+   . Member Replies effs
+  => Int
+  -> Actor.ActorRef AgentProtocol ()
+  -> Maybe WorktreeHandle
+  -> RequestLabel
+  -> Maybe Text
+  -> Maybe Int
+  -> input
+  -> Eff effs (Response result)
+requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLabel) guidance deadline input = do
   requestId <- reserveRequest label (actorAddress target)
   let (response, reply) = newRequestHandles input requestId
   submitRequest
     requestId
     (actorAddress target)
     (RunRequest (runRequest (actorAddress target) targetWorktree response reply))
+    deadline
   pure response
   where
     runRequest (targetActorId, targetIncarnation) targetTree response replyHandle = do
@@ -191,7 +270,7 @@ requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedL
         Just tree -> Just <$> worktreeHead tree
       result <-
         requestSessionSited @result @input
-          site requestId (Just ("Continue request `" <> renderedLabel <> "` using the shared context and mounted sessionInput.")) input
+          site requestId (Just (activationGuidance renderedLabel guidance)) input
       evidence <- case (targetTree, start) of
         (Nothing, _) -> pure NoBoundWorktree
         (Just tree, Just startHead) -> do
@@ -207,6 +286,12 @@ requestSited site (AgentRef target targetWorktree) label@(RequestLabel renderedL
             }
       case fillResponse response (ResponseResult result execution evidence) of
         () -> pure ()
+
+activationGuidance :: Text -> Maybe Text -> Text
+activationGuidance label Nothing =
+  "Continue request `" <> label <> "` using the shared context and mounted sessionInput."
+activationGuidance label (Just guidance) =
+  "Continue request `" <> label <> "` using the shared context and mounted sessionInput. Additional guidance: " <> guidance
 
 -- | Observable result of asking one exact actor incarnation to retire.
 --

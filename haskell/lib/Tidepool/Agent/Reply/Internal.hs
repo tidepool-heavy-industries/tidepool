@@ -136,7 +136,7 @@ data RawResponseObservation
 
 data Replies a where
   ReserveRequestWith :: Text -> (Int, Int) -> Replies Int
-  SubmitRequestWith :: Int -> request -> (Int, Int) -> Replies ()
+  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Int -> Replies ()
   AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
@@ -150,9 +150,10 @@ submitRequest
   => RequestId
   -> (Int, Int)
   -> request
+  -> Maybe Int
   -> Eff effs ()
-submitRequest (RequestId request) target requestPayload =
-  send (SubmitRequestWith request requestPayload target)
+submitRequest (RequestId request) target requestPayload deadlineMilliseconds =
+  send (SubmitRequestWith request requestPayload target deadlineMilliseconds)
 
 newRequestHandles :: pending -> RequestId -> (Response result, Reply result)
 newRequestHandles pending request =

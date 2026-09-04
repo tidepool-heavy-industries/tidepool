@@ -363,6 +363,22 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    fn schedule_request_deadline(
+        &self,
+        owner: ActorRef,
+        request: crate::RequestId,
+        deadline: std::time::Duration,
+    ) {
+        let requests = Arc::clone(&self.environment.requests);
+        let deployments = self.environment.deployments.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(deadline).await;
+            for notification in requests.deadline_response(owner, request) {
+                let _ = deployments.send(LocalResidentDeployment::WatchChanged { notification });
+            }
+        });
+    }
+
     async fn perform_call(
         &self,
         kernel: &KernelContext,
@@ -835,6 +851,7 @@ where
                     .await
             }
             ResidentActorBoundary::RequestSubmission(submission) => {
+                let request_deadline = submission.deadline;
                 let target = kernel.resolve(submission.target);
                 let target_context = kernel.session_context(submission.target);
                 let deliverable = target.as_ref().zip(target_context.as_ref()).filter(
@@ -875,20 +892,30 @@ where
                             .mark_target_unavailable(context.actor, submission.request);
                         self.publish_watch_notifications(notifications);
                     }
-                    self.environment
+                    let outcome = self
+                        .environment
                         .runner
                         .resume_unit(context.clone(), submission.continuation)
-                        .await
+                        .await;
+                    if let Some(deadline) = request_deadline {
+                        self.schedule_request_deadline(context.actor, submission.request, deadline);
+                    }
+                    outcome
                 } else {
                     let notifications = self
                         .environment
                         .requests
                         .mark_target_unavailable(context.actor, submission.request);
                     self.publish_watch_notifications(notifications);
-                    self.environment
+                    let outcome = self
+                        .environment
                         .runner
                         .resume_unit(context.clone(), submission.continuation)
-                        .await
+                        .await;
+                    if let Some(deadline) = request_deadline {
+                        self.schedule_request_deadline(context.actor, submission.request, deadline);
+                    }
+                    outcome
                 }
             }
             ResidentActorBoundary::ResponsePoll(poll) => {

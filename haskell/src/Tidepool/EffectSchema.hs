@@ -79,6 +79,8 @@ sitedVerbs =
       "forkCataSited" "Tidepool.Fork" 2 2 True True []
   , verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" 2 3 False True [1]
+  , verb "requestWith" "Tidepool.Actors.Internal.Agent"
+      "requestWithSited" "Tidepool.Actors.Internal.Agent" 2 2 False True [1]
   , VerbSpec
       { vsName = "child"
       , vsModule = "Tidepool.Actors.Unfold"

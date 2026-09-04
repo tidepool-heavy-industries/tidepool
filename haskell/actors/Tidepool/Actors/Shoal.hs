@@ -76,6 +76,13 @@ module Tidepool.Actors.Shoal
   , readonlyAgent
   , startAgent
   , request
+  , RequestOptions
+  , RequestDeadline
+  , requestOptions
+  , requestDeadline
+  , withRequestGuidance
+  , withRequestDeadline
+  , requestWith
   , StopOutcome (..)
   , stopAgent
   , RequestId
@@ -160,9 +167,16 @@ import Tidepool.Actors.Internal.Agent
   , observeAgent
   , readonlyAgent
   , request
+  , RequestDeadline
+  , RequestOptions
+  , requestDeadline
+  , requestOptions
+  , requestWith
   , StopOutcome (..)
   , startAgent
   , stopAgent
+  , withRequestDeadline
+  , withRequestGuidance
   )
 import Tidepool.Actors.Role
 import Tidepool.Actors.Unfold

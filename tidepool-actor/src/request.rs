@@ -334,6 +334,16 @@ impl RequestRegistry {
         Ok((CancelResponseOutcome::CancelledNow, notifications))
     }
 
+    pub(crate) fn deadline_response(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+    ) -> Vec<WatchNotification> {
+        self.transition_request(owner, request, |record| {
+            record.state = RequestState::Unavailable(ResponseFailure::DeadlineExceeded);
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn register_watch(
         &self,
@@ -708,6 +718,31 @@ mod tests {
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Unavailable(ResponseFailure::Cancelled))
         );
+        assert_eq!(
+            registry.cancel_response(owner, request),
+            Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()))
+        );
+    }
+
+    #[test]
+    fn response_deadline_uses_the_same_single_terminal_transition() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        let notifications = registry.deadline_response(owner, request);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(
+                ResponseFailure::DeadlineExceeded
+            ))
+        );
+        assert!(registry.deadline_response(owner, request).is_empty());
         assert_eq!(
             registry.cancel_response(owner, request),
             Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()))

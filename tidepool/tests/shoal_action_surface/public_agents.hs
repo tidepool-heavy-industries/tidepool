@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
 module ShoalPublicAgents where
@@ -27,6 +28,18 @@ submitWithOnlyReplies
   -> input
   -> Eff '[Replies] (Response result)
 submitWithOnlyReplies = request
+
+submitConfigured
+  :: AgentRef
+  -> RequestLabel
+  -> RequestDeadline
+  -> input
+  -> Eff ActorEffects (Response result)
+submitConfigured actor label deadline input =
+  requestWith actor $
+    withRequestDeadline deadline $
+      withRequestGuidance "inspect the typed input before acting" $
+        requestOptions label input
 
 compose
   :: Response left

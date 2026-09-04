@@ -1185,6 +1185,7 @@ where
                         request_id,
                         _,
                         address,
+                        deadline_milliseconds,
                     )) => {
                         let custody = session
                             .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
@@ -1202,6 +1203,18 @@ where
                                     context.placement.session,
                                     custody,
                                 ),
+                                deadline: deadline_milliseconds
+                                    .map(|milliseconds| {
+                                        u64::try_from(milliseconds)
+                                            .map(std::time::Duration::from_millis)
+                                    })
+                                    .transpose()
+                                    .map_err(|_| {
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            "request deadline must be a positive millisecond count"
+                                                .into(),
+                                        )
+                                    })?,
                             },
                         ))
                     }

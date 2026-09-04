@@ -14,7 +14,7 @@ pub(crate) enum RepliesReq {
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     ReserveRequestWith(String, (i64, i64)),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    SubmitRequestWith(i64, Value, (i64, i64)),
+    SubmitRequestWith(i64, Value, (i64, i64), Option<i64>),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     AttemptReplyWith(i64, Value),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
@@ -44,6 +44,7 @@ pub(crate) struct RequestSubmission {
     pub request: RequestId,
     pub target: ActorRef,
     pub message: crate::MailboxValue,
+    pub deadline: Option<std::time::Duration>,
 }
 
 pub(crate) struct ReplyAttempt {
