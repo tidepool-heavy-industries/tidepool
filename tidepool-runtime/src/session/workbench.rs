@@ -431,6 +431,7 @@ pub enum WorkbenchDiscovery {
         expanded: bool,
     },
     Bindings,
+    Recovery,
     Doc(String),
 }
 
@@ -500,6 +501,13 @@ impl MetaCommandLine {
                     Err(":bindings does not accept arguments".into())
                 }
             }
+            "recovery" => {
+                if self.arguments.is_empty() {
+                    Ok(Some(WorkbenchDiscovery::Recovery))
+                } else {
+                    Err(":recovery does not accept arguments".into())
+                }
+            }
             "doc" => required("doc").map(WorkbenchDiscovery::Doc).map(Some),
             _ => Ok(None),
         }
@@ -528,6 +536,7 @@ impl MetaCommandLine {
                 | "browse!"
                 | "bindings"
                 | "b"
+                | "recovery"
                 | "doc"
         )
     }
@@ -869,6 +878,13 @@ mod tests {
             Some(WorkbenchDiscovery::Bindings)
         );
         assert_eq!(
+            MetaCommandLine::parse(":recovery")
+                .unwrap()
+                .discovery()
+                .unwrap(),
+            Some(WorkbenchDiscovery::Recovery)
+        );
+        assert_eq!(
             MetaCommandLine::parse(":show imports")
                 .unwrap()
                 .discovery()
@@ -912,6 +928,7 @@ mod tests {
             ":info missing",
             ":browse Missing",
             ":bindings",
+            ":recovery",
             ":show modules",
             ":status",
             ":doc request",

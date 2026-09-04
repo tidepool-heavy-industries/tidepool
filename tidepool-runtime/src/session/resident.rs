@@ -1398,6 +1398,21 @@ where
         bindings.into_values().collect()
     }
 
+    /// Source-only declaration recovery facts for this machine incarnation.
+    /// Live values and handles are intentionally absent because they cannot
+    /// survive machine replacement.
+    #[must_use]
+    pub fn declaration_recovery_report(&self) -> Option<&super::DeclarationRecoveryReport> {
+        self.core.lib().declaration_recovery_report()
+    }
+
+    /// A manifest publication failure that happened after a successful
+    /// declaration commit, if durability has not recovered since.
+    #[must_use]
+    pub fn recovery_manifest_warning(&self) -> Option<&str> {
+        self.core.lib().recovery_manifest_warning()
+    }
+
     /// How many names `scope`'s OWN frame binds (accounting class 3, per
     /// scope — inherited names are not counted, only locally-bound ones).
     /// Returns to 0 when the scope retires.

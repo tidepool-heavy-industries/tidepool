@@ -1,5 +1,7 @@
 
 This is a new actor incarnation attached to a retained conversation. Previous
 actor handles, workers, pending exits, inbox messages, and resident Haskell
-state were not restored; old Haskell bindings are dead. Reconcile through the
-current session before acting on transcript references.
+values were not restored; old handles and materialized bindings are dead. Pure
+root declaration source was replayed through GHC where possible. Use
+`:recovery` for the exact replay/loss report and `:bindings` for the successor's
+current lexical state before acting on transcript references.

@@ -22,6 +22,7 @@ pub mod facade;
 pub mod inspection;
 pub mod kernel;
 pub mod persistent;
+mod recovery;
 pub mod registry;
 pub mod render;
 pub mod resident;
@@ -41,6 +42,8 @@ pub use persistent::{
     DeclarationPlaneCommit, MachineLease, MaterializationSetCommit, PersistentSession,
     ScopeRetirement, ValuePlaneCommit,
 };
+
+pub use recovery::{DeclarationRecoveryReport, LostDeclaration, ReplayedDeclaration};
 
 pub use registry::{
     Checkout, CheckoutError, CheckoutReceipt, SessionRegistry, SingleSlot, Slot, SlotKind,
@@ -215,6 +218,12 @@ pub enum SessionError {
     /// declaration; a caller bug in the mount seam's two-step idiom.
     #[error("no live binding for `{name}` in scope {scope:?} (the mount seam's placeholder bind must run first, under the same name)")]
     UnknownBinding { scope: ScopeId, name: String },
+    /// A durable source-recovery manifest was unreadable, from a future or
+    /// retired schema, corrupt, or could not be published. This artifact is
+    /// never silently reset: it is the authoritative record of which source
+    /// may be replayed without repeating effects.
+    #[error("declaration recovery manifest {}: {detail}", path.display())]
+    RecoveryManifest { path: PathBuf, detail: String },
 }
 
 /// A resident session's declaration library. Owns the ordered decl log, the
@@ -254,6 +263,15 @@ pub struct SessionLib {
     /// its descendants, never sideways or upward; the regression is pinned by
     /// `session_decl_scope_tree.rs`.
     tips: HashMap<ScopeId, Generation>,
+    /// Optional durable root-declaration manifest. It records source and
+    /// retractions only; live values and scoped child state never enter it.
+    recovery_manifest_path: Option<PathBuf>,
+    recovery_turns: Vec<recovery::RecoveryTurn>,
+    /// Persistence happens after a declaration has semantically committed.
+    /// A write failure is observable here rather than returned as if retrying
+    /// the declaration were safe.
+    recovery_manifest_warning: Option<String>,
+    recovery_report: Option<DeclarationRecoveryReport>,
 }
 
 impl SessionLib {
@@ -277,7 +295,100 @@ impl SessionLib {
             // what keeps `scope_tip`'s miss case meaning "empty" rather than
             // "whatever was pushed last anywhere" — see the field docs.
             tips: HashMap::from([(ScopeId::ROOT, Generation(0))]),
+            recovery_manifest_path: None,
+            recovery_turns: Vec::new(),
+            recovery_manifest_warning: None,
+            recovery_report: None,
         })
+    }
+
+    /// Reconstruct replayable root declarations from `path`, then attach that
+    /// path for future source commits. Replay uses the ordinary GHC admission
+    /// path and never repeats effects. Turns that depended on resident values,
+    /// and declarations that no longer type-check without such a turn, are
+    /// reported as lost rather than fabricated.
+    pub fn attach_recovery_manifest(
+        &mut self,
+        path: impl Into<PathBuf>,
+    ) -> Result<DeclarationRecoveryReport, SessionError> {
+        let path = path.into();
+        let manifest = recovery::read(&path)?;
+        let mut report = DeclarationRecoveryReport {
+            source_session: manifest.as_ref().map(|manifest| manifest.source_session),
+            successor_session: self.id.0,
+            replayed: Vec::new(),
+            lost: Vec::new(),
+        };
+
+        if let Some(manifest) = manifest {
+            for turn in &manifest.turns {
+                if !turn.replayable {
+                    report.lost.push(LostDeclaration {
+                        origin_session: turn.origin_session,
+                        source_generation: turn.generation,
+                        source_hash: turn.source_hash.clone(),
+                        sources: turn.sources.clone(),
+                        reason: "declaration depended on resident values from the lost machine"
+                            .into(),
+                    });
+                    continue;
+                }
+
+                if !turn.sources.is_empty() {
+                    let sources: Vec<_> = turn.sources.iter().map(String::as_str).collect();
+                    match self.define_batch(&sources) {
+                        Ok(generation) => report.replayed.push(ReplayedDeclaration {
+                            origin_session: turn.origin_session,
+                            source_generation: turn.generation,
+                            successor_generation: generation.0,
+                            source_hash: turn.source_hash.clone(),
+                        }),
+                        Err(error) => {
+                            report.lost.push(LostDeclaration {
+                                origin_session: turn.origin_session,
+                                source_generation: turn.generation,
+                                source_hash: turn.source_hash.clone(),
+                                sources: turn.sources.clone(),
+                                reason: error.to_string(),
+                            });
+                            continue;
+                        }
+                    }
+                }
+                if !turn.retracts.is_empty() {
+                    if let Err(error) = self.retract_many_in(ScopeId::ROOT, &turn.retracts) {
+                        report.lost.push(LostDeclaration {
+                            origin_session: turn.origin_session,
+                            source_generation: turn.generation,
+                            source_hash: turn.source_hash.clone(),
+                            sources: Vec::new(),
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+            }
+            self.recovery_turns = manifest.turns;
+        }
+        self.recovery_manifest_path = Some(path);
+        self.recovery_report = Some(report.clone());
+        Ok(report)
+    }
+
+    /// Last failure to publish source recovery state after a successful
+    /// semantic declaration commit. Retrying the original declaration would
+    /// be wrong; callers can surface this health fact and keep the session
+    /// usable.
+    #[must_use]
+    pub fn recovery_manifest_warning(&self) -> Option<&str> {
+        self.recovery_manifest_warning.as_deref()
+    }
+
+    /// Recovery facts for the current session incarnation, when a durable
+    /// manifest has been attached. These are metadata about source replay,
+    /// never reconstructed Haskell values.
+    #[must_use]
+    pub fn declaration_recovery_report(&self) -> Option<&DeclarationRecoveryReport> {
+        self.recovery_report.as_ref()
     }
 
     /// Add include dirs used when extracting binders and validating candidate
@@ -709,7 +820,7 @@ impl SessionLib {
         let gen = self.push_turn_in(
             scope,
             DeclTurn {
-                sources,
+                sources: sources.clone(),
                 workbench_imports,
                 items: receipt.items.clone(),
                 retracts: Vec::new(),
@@ -737,6 +848,15 @@ impl SessionLib {
             return Err(e);
         }
 
+        if scope == ScopeId::ROOT {
+            self.record_recovery_turn(recovery::RecoveryTurn::new(
+                self.id.0,
+                gen.0,
+                sources,
+                Vec::new(),
+                import_modules.is_empty() && inject_modules.is_empty(),
+            ));
+        }
         Ok(gen)
     }
 
@@ -820,7 +940,7 @@ impl SessionLib {
                 sources: Vec::new(),
                 workbench_imports: SourceImports::new(),
                 items: Vec::new(),
-                retracts,
+                retracts: retracts.clone(),
                 parent: None, // set inside push_turn_in from scope's tip
             },
         );
@@ -830,7 +950,31 @@ impl SessionLib {
             self.restore_tip(scope, tip_before);
             return Err(e);
         }
+        if scope == ScopeId::ROOT {
+            self.record_recovery_turn(recovery::RecoveryTurn::new(
+                self.id.0,
+                gen.0,
+                Vec::new(),
+                retracts,
+                true,
+            ));
+        }
         Ok(())
+    }
+
+    fn record_recovery_turn(&mut self, turn: recovery::RecoveryTurn) {
+        let Some(path) = self.recovery_manifest_path.as_ref() else {
+            return;
+        };
+        self.recovery_turns.push(turn);
+        match recovery::write(path, self.id.0, &self.recovery_turns) {
+            Ok(()) => self.recovery_manifest_warning = None,
+            Err(error) => {
+                let warning = error.to_string();
+                tracing::warn!(path = %path.display(), error = %warning, "could not publish declaration recovery manifest after semantic commit");
+                self.recovery_manifest_warning = Some(warning);
+            }
+        }
     }
 
     /// Validate that the candidate gen module compiles and type-checks by running

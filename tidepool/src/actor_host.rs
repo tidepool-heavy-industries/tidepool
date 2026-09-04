@@ -888,7 +888,7 @@ fn compile_root(
     };
 
     let session = fresh_session_id();
-    let library = SessionLib::open(
+    let mut library = SessionLib::open(
         session,
         &session_root,
         tidepool_mcp::session_decl_module_env_hiding(
@@ -899,6 +899,15 @@ fn compile_root(
         ),
     )?
     .with_validation_include(include.clone());
+    let recovery_report =
+        library.attach_recovery_manifest(config.run_root.join("root-declarations.json"))?;
+    tracing::info!(
+        source_session = ?recovery_report.source_session,
+        successor_session = recovery_report.successor_session,
+        replayed = recovery_report.replayed.len(),
+        lost = recovery_report.lost.len(),
+        "attached Shoal root declaration recovery manifest"
+    );
     let worktree_handler =
         ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
     let mut machine = ResidentSession::bootstrap(

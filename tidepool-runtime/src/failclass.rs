@@ -65,6 +65,11 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         SessionError::UnknownBinding { .. } => {
             FailureEnvelope::new(FailureClass::Runtime, Phase::Run, err.to_string())
         }
+        // The declaration source is valid; its durable recovery artifact is
+        // missing, corrupt, or incompatible with this runtime.
+        SessionError::RecoveryManifest { .. } => {
+            FailureEnvelope::new(FailureClass::Infra, Phase::Run, err.to_string())
+        }
     }
 }
 

@@ -3257,7 +3257,7 @@ where
         Ok(Some(command)) => command,
         Ok(None) => {
             return Ok(Err(format!(
-            "unknown actor workbench command `:{}` (supported: :status, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :show imports, :doc)",
+            "unknown actor workbench command `:{}` (supported: :status, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :recovery, :show imports, :doc)",
             line.name
         )))
         }
@@ -3306,6 +3306,39 @@ where
             } else {
                 lines.join("\n")
             }))
+        }
+        WorkbenchDiscovery::Recovery => {
+            let Some(report) = session.declaration_recovery_report() else {
+                return Ok(Ok("declaration recovery is not configured".into()));
+            };
+            let warning = session
+                .recovery_manifest_warning()
+                .map(|warning| format!("; manifest_warning={warning}"))
+                .unwrap_or_default();
+            let mut lines = vec![format!(
+                "declaration recovery: source_session={:?}; successor_session={}; replayed={}; lost={}{}",
+                report.source_session,
+                report.successor_session,
+                report.replayed.len(),
+                report.lost.len(),
+                warning,
+            )];
+            lines.extend(report.replayed.iter().map(|item| {
+                format!(
+                    "replayed session {} generation {} -> {} source_hash={}",
+                    item.origin_session,
+                    item.source_generation,
+                    item.successor_generation,
+                    item.source_hash
+                )
+            }));
+            lines.extend(report.lost.iter().map(|item| {
+                format!(
+                    "lost session {} generation {} source_hash={} reason={}",
+                    item.origin_session, item.source_generation, item.source_hash, item.reason
+                )
+            }));
+            Ok(Ok(lines.join("\n")))
         }
         WorkbenchDiscovery::Doc(topic) => Ok(crate::prompt_catalog::workbench_doc(&topic)
             .map(str::trim)
@@ -3362,6 +3395,7 @@ fn inspection_query(
         }
         Some(
             WorkbenchDiscovery::Bindings
+            | WorkbenchDiscovery::Recovery
             | WorkbenchDiscovery::ShowImports
             | WorkbenchDiscovery::Doc(_),
         )
