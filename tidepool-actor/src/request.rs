@@ -227,7 +227,6 @@ pub(crate) struct ActiveRequestDeadline {
 }
 
 impl ActiveRequestDeadline {
-    #[must_use]
     pub(crate) fn start(authored: RequestDeadline) -> Result<Self, String> {
         let duration = authored.duration();
         let due_wall = std::time::SystemTime::now()

@@ -13,7 +13,7 @@
     ["agent_mode_encoding", "bignum_native", "bridged_records_extract", "cache_tests", "captured_real_core", "case_trap_graceful", "constructors_of_type", "cross_mode_existing", "cross_mode_targeted", "cross_mode_tests", "eager_list_responses", "extract_poison_diagnostic", "flinch_katas", "gc_and_errors", "gc_stress_text_fold"],
     ["prelude_coverage", "generic_deriving_337", "generic_form_diagnostics", "generic_recursive_sums", "generic_form_wire", "generic_form_roundtrip"],
     ["jit_surface", "resident_session", "nullary_sum_generic_deriving", "patch_crosscheck_differential", "multi_module_datacon", "harness_profile_generic_surface", "realm_varid_pinning", "nested_mapm_tag255"],
-    ["user_library", "show_double_lens_sigill", "run_llm_turn_sidecar", "session_scope_retirement", "sweep_repoint_smoke", "session_decl_scope_tree", "session_table_qualified_identity", "session_decl_accum"],
+    ["user_library", "show_double_lens_sigill", "run_llm_turn_sidecar", "session_scope_retirement", "sweep_repoint_smoke", "session_decl_scope_tree", "session_decl_recovery", "session_table_qualified_identity", "session_decl_accum"],
     ["text_filter_gc", "vendor_text_functions", "stdlib_regressions_02_medium", "stdlib_regressions_02", "test_error_msg", "validator_reject"],
     ["build_products_dir_differential", "compile_fail", "exact_export_facade", "green_thread_representation", "managed_exit_cell", "tenure_resume_gc_repro", "word64_primops_random_probe"],
     ["cancel"],

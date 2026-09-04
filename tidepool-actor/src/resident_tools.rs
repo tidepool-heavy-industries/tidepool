@@ -172,39 +172,6 @@ impl ResidentToolClient {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn call_key(call_id: &str) -> WorkbenchCallKey {
-        ToolInvocationContext {
-            thread_id: "thread".into(),
-            turn_id: "turn".into(),
-            call_id: call_id.into(),
-            namespace: Some("actor".into()),
-        }
-        .into()
-    }
-
-    #[test]
-    fn execution_identity_is_exact_to_actor_and_hosted_call() {
-        let actor = crate::ActorRef::first(crate::ActorId(7));
-        let original = execution_id(actor, &call_key("call-1"));
-        assert_eq!(original, execution_id(actor, &call_key("call-1")));
-        assert_ne!(original, execution_id(actor, &call_key("call-2")));
-        assert_ne!(
-            original,
-            execution_id(
-                crate::ActorRef {
-                    id: actor.id,
-                    incarnation: crate::Incarnation(2),
-                },
-                &call_key("call-1")
-            )
-        );
-    }
-}
-
 impl ResidentToolPolicy {
     #[must_use]
     pub fn tools(&self) -> &[HostedTool] {
@@ -265,5 +232,38 @@ pub(crate) fn install_local_resident_tools(
             .into(),
         instructions: (!awaiting.synopsis.is_empty()).then(|| awaiting.synopsis.clone()),
         client: ResidentToolClient::local(actor),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call_key(call_id: &str) -> WorkbenchCallKey {
+        ToolInvocationContext {
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: call_id.into(),
+            namespace: Some("actor".into()),
+        }
+        .into()
+    }
+
+    #[test]
+    fn execution_identity_is_exact_to_actor_and_hosted_call() {
+        let actor = crate::ActorRef::first(crate::ActorId(7));
+        let original = execution_id(actor, &call_key("call-1"));
+        assert_eq!(original, execution_id(actor, &call_key("call-1")));
+        assert_ne!(original, execution_id(actor, &call_key("call-2")));
+        assert_ne!(
+            original,
+            execution_id(
+                crate::ActorRef {
+                    id: actor.id,
+                    incarnation: crate::Incarnation(2),
+                },
+                &call_key("call-1")
+            )
+        );
     }
 }

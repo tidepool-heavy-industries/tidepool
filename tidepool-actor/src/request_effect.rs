@@ -9,6 +9,10 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromCore)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names are the stable Haskell Duration constructors"
+)]
 pub(crate) enum RequestDuration {
     DurationMilliseconds(i64),
     DurationSeconds(i64),
@@ -151,31 +155,6 @@ pub(crate) fn watch_id(raw: i64) -> Result<WatchId, BridgeError> {
     u64::try_from(raw)
         .map(WatchId)
         .map_err(|_| BridgeError::UnsupportedType(format!("invalid watch id {raw}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RequestDuration;
-    use crate::DeadlineUnit;
-
-    #[test]
-    fn request_duration_preserves_authored_units_and_checks_conversion() {
-        let seconds = RequestDuration::DurationSeconds(600)
-            .checked()
-            .expect("ten minute deadline");
-        assert_eq!(seconds.value, 600);
-        assert_eq!(seconds.unit, DeadlineUnit::Seconds);
-        assert_eq!(seconds.milliseconds, 600_000);
-
-        let immediate = RequestDuration::DurationMilliseconds(0)
-            .checked()
-            .expect("explicit immediate deadline");
-        assert_eq!(immediate.milliseconds, 0);
-        assert!(RequestDuration::DurationMinutes(-1).checked().is_err());
-        assert!(RequestDuration::DurationMinutes(i64::MAX)
-            .checked()
-            .is_err());
-    }
 }
 
 pub(crate) fn reply_error_value(
@@ -433,4 +412,29 @@ fn constructor(
         .get_by_qualified_name(&qualified)
         .ok_or(BridgeError::UnknownDataConName(qualified))?;
     Ok(Value::Con(constructor, fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestDuration;
+    use crate::DeadlineUnit;
+
+    #[test]
+    fn request_duration_preserves_authored_units_and_checks_conversion() {
+        let seconds = RequestDuration::DurationSeconds(600)
+            .checked()
+            .expect("ten minute deadline");
+        assert_eq!(seconds.value, 600);
+        assert_eq!(seconds.unit, DeadlineUnit::Seconds);
+        assert_eq!(seconds.milliseconds, 600_000);
+
+        let immediate = RequestDuration::DurationMilliseconds(0)
+            .checked()
+            .expect("explicit immediate deadline");
+        assert_eq!(immediate.milliseconds, 0);
+        assert!(RequestDuration::DurationMinutes(-1).checked().is_err());
+        assert!(RequestDuration::DurationMinutes(i64::MAX)
+            .checked()
+            .is_err());
+    }
 }

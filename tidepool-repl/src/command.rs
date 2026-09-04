@@ -228,6 +228,12 @@ impl MetaCommand {
                 tidepool_runtime::session::WorkbenchDiscovery::Browse {
                     expanded: true, ..
                 } => return Err(":browse! is available in actor workbenches".into()),
+                tidepool_runtime::session::WorkbenchDiscovery::Recovery => {
+                    return Err(":recovery is available in actor workbenches".into())
+                }
+                tidepool_runtime::session::WorkbenchDiscovery::Doc(_) => {
+                    return Err(":doc is available in actor workbenches".into())
+                }
             });
         }
         let head = line.name.as_str();

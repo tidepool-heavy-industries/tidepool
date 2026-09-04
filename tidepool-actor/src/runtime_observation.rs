@@ -11,8 +11,9 @@ use parking_lot::RwLock;
 
 const MAX_PROVIDER_SAMPLES: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ActorActivationKind {
+    #[default]
     RootStarted,
     RequestActivated {
         request: crate::RequestId,
@@ -23,22 +24,17 @@ pub enum ActorActivationKind {
     },
 }
 
-impl Default for ActorActivationKind {
-    fn default() -> Self {
-        Self::RootStarted
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderUsageScope {
     LastProviderResponse,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheBoundaryReason {
     Fresh,
     ForkedPrefix,
     ReattachedThread,
+    #[default]
     ProviderUnknown,
 }
 
@@ -70,12 +66,6 @@ pub enum ActorWorkbenchPosture {
 pub enum ActorWorkbenchTransfer {
     Reply,
     CancellationAcknowledgement,
-}
-
-impl Default for CacheBoundaryReason {
-    fn default() -> Self {
-        Self::ProviderUnknown
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

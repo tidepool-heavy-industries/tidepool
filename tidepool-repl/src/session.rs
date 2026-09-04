@@ -3691,50 +3691,46 @@ mod reset_tests {
     }
 }
 
-/// Part 2 of the one-spawn-turn classification-equivalence corpus: proves a
-/// [`tidepool_runtime::session::TurnTemplate`] rendered via
-/// `render_template` produces BYTE-IDENTICAL output to this module's own
-/// `wrap_*_source` builders for the same turn — the assertion that makes
-/// "run_turn makes the same decision" mean something concrete. Lives here
-/// (rather than as an integration test) because `wrap_bind_source` /
-/// `wrap_multi_bind_source` / `begin_user_module` are private to this module.
+/// Keep the REPL wrappers and resident templates on the same canonical bind
+/// assembler. This tests the two production consumers without duplicating the
+/// generated Haskell string in the test.
 #[cfg(test)]
 mod turn_template_byte_identity_tests {
-    use super::{begin_user_module, wrap_bind_source, wrap_multi_bind_source};
-    use tidepool_runtime::session::{render_template, TemplateSelector, TurnTemplate};
+    use super::{wrap_bind_source, wrap_multi_bind_source};
+    use tidepool_runtime::session::{
+        assemble_bind_module, render_template, TemplateSelector, TurnTemplate,
+    };
 
     const PREAMBLE: &str = "{-# LANGUAGE NoImplicitPrelude #-}\nmodule Expr where\nimport Tidepool.Prelude\ndefault (Int, Double, Text)\n";
     const EFFECT_STACK: &str = "'[Console]";
 
-    /// Mirrors `wrap_bind_source`'s shape exactly: one `{{TURN_STMT}}`
-    /// placement splice, `pure {{BINDERS}}` BARE (no parens — a single
-    /// binder is spliced as its bare name, exactly as `wrap_bind_source`
-    /// does via `pure {binder}`).
     fn single_bind_template() -> TurnTemplate {
-        let mut source = begin_user_module(PREAMBLE, "", None);
-        source.push_str(&format!("__result :: Eff {EFFECT_STACK} _\n"));
-        source.push_str("__result = do {\n");
-        source.push_str("{{TURN_STMT}}");
-        source.push_str(" ; pure {{BINDERS}}\n }\n");
         TurnTemplate {
             kind: TemplateSelector::Bind,
-            source,
+            source: assemble_bind_module(
+                PREAMBLE,
+                "",
+                "__result",
+                EFFECT_STACK,
+                "{{TURN_STMT}}",
+                "{{BINDERS}}",
+                false,
+            ),
         }
     }
 
-    /// Mirrors `wrap_multi_bind_source`'s shape: the bound names are yielded
-    /// as a PARENTHESIZED tuple (`pure (a, b)`), not bare — `wrap_multi_bind_source`
-    /// bakes the parens into its own `tuple_expr`, so the template bakes them
-    /// around `{{BINDERS}}` too.
     fn multi_bind_template() -> TurnTemplate {
-        let mut source = begin_user_module(PREAMBLE, "", None);
-        source.push_str(&format!("__result :: Eff {EFFECT_STACK} _\n"));
-        source.push_str("__result = do {\n");
-        source.push_str("{{TURN_STMT}}");
-        source.push_str(" ; pure ({{BINDERS}})\n }\n");
         TurnTemplate {
             kind: TemplateSelector::Bind,
-            source,
+            source: assemble_bind_module(
+                PREAMBLE,
+                "",
+                "__result",
+                EFFECT_STACK,
+                "{{TURN_STMT}}",
+                "({{BINDERS}})",
+                false,
+            ),
         }
     }
 

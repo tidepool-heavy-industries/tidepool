@@ -267,6 +267,13 @@ fn settle_prepared_operations(
     }
 }
 
+struct WorkbenchUnitExecution<'a> {
+    execution: Option<&'a WorkbenchExecutionId>,
+    input_unit_index: usize,
+    total: usize,
+    operations: &'a mut Vec<WorkbenchOperationReceipt>,
+}
+
 #[derive(Clone, Copy)]
 enum ChildExitDisposition {
     Observed,
@@ -2464,17 +2471,14 @@ where
         workbench: &crate::ResidentActorWorkbench<H, O>,
         mut fragment: ResidentWorkbenchFragment,
         mut outcome: ResidentOutcome,
-        execution: Option<&WorkbenchExecutionId>,
-        input_unit_index: usize,
-        total: usize,
-        operations: &mut Vec<WorkbenchOperationReceipt>,
+        unit: WorkbenchUnitExecution<'_>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         let mut effect_ordinal = 0;
         loop {
             self.runtime_observation.publish_workbench_posture(
                 crate::ActorWorkbenchPosture::RunningUnit {
-                    input_unit_index,
-                    total,
+                    input_unit_index: unit.input_unit_index,
+                    total: unit.total,
                 },
             );
             match workbench
@@ -2493,8 +2497,8 @@ where
                     let effect = boundary.operation().to_owned();
                     self.runtime_observation.publish_workbench_posture(
                         crate::ActorWorkbenchPosture::AwaitingEffect {
-                            input_unit_index,
-                            total,
+                            input_unit_index: unit.input_unit_index,
+                            total: unit.total,
                             effect: effect.clone(),
                         },
                     );
@@ -2503,13 +2507,13 @@ where
                     effect_ordinal += 1;
                     if self.environment.fork_groups.has_ready(context.actor) {
                         settle_prepared_operations(
-                            operations,
+                            unit.operations,
                             WorkbenchOperationDisposition::Rejected,
                         );
                         record_workbench_operation(
-                            operations,
-                            execution,
-                            input_unit_index,
+                            unit.operations,
+                            unit.execution,
+                            unit.input_unit_index,
                             ordinal,
                             &effect,
                             WorkbenchOperationDisposition::Rejected,
@@ -2533,9 +2537,9 @@ where
                         {
                             Ok(()) => {
                                 record_workbench_operation(
-                                    operations,
-                                    execution,
-                                    input_unit_index,
+                                    unit.operations,
+                                    unit.execution,
+                                    unit.input_unit_index,
                                     ordinal,
                                     &effect,
                                     WorkbenchOperationDisposition::Committed,
@@ -2547,9 +2551,9 @@ where
                             }
                             Err(error) if attempt.recoverable => {
                                 record_workbench_operation(
-                                    operations,
-                                    execution,
-                                    input_unit_index,
+                                    unit.operations,
+                                    unit.execution,
+                                    unit.input_unit_index,
                                     ordinal,
                                     &effect,
                                     WorkbenchOperationDisposition::Rejected,
@@ -2569,9 +2573,9 @@ where
                             }
                             Err(error) => {
                                 record_workbench_operation(
-                                    operations,
-                                    execution,
-                                    input_unit_index,
+                                    unit.operations,
+                                    unit.execution,
+                                    unit.input_unit_index,
                                     ordinal,
                                     &effect,
                                     WorkbenchOperationDisposition::Rejected,
@@ -2592,9 +2596,9 @@ where
                                 ) {
                                 Ok(_) => {
                                     record_workbench_operation(
-                                        operations,
-                                        execution,
-                                        input_unit_index,
+                                        unit.operations,
+                                        unit.execution,
+                                        unit.input_unit_index,
                                         ordinal,
                                         &effect,
                                         WorkbenchOperationDisposition::Committed,
@@ -2605,9 +2609,9 @@ where
                                 }
                                 Err(error) if acknowledgement.recoverable => {
                                     record_workbench_operation(
-                                        operations,
-                                        execution,
-                                        input_unit_index,
+                                        unit.operations,
+                                        unit.execution,
+                                        unit.input_unit_index,
                                         ordinal,
                                         &effect,
                                         WorkbenchOperationDisposition::Rejected,
@@ -2626,9 +2630,9 @@ where
                                 }
                                 Err(error) => {
                                     record_workbench_operation(
-                                        operations,
-                                        execution,
-                                        input_unit_index,
+                                        unit.operations,
+                                        unit.execution,
+                                        unit.input_unit_index,
                                         ordinal,
                                         &effect,
                                         WorkbenchOperationDisposition::Rejected,
@@ -2651,9 +2655,9 @@ where
                             {
                                 Ok(outcome) => {
                                     record_workbench_operation(
-                                        operations,
-                                        execution,
-                                        input_unit_index,
+                                        unit.operations,
+                                        unit.execution,
+                                        unit.input_unit_index,
                                         ordinal,
                                         &effect,
                                         if commits_with_unit {
@@ -2666,9 +2670,9 @@ where
                                 }
                                 Err(error) => {
                                     record_workbench_operation(
-                                        operations,
-                                        execution,
-                                        input_unit_index,
+                                        unit.operations,
+                                        unit.execution,
+                                        unit.input_unit_index,
                                         ordinal,
                                         &effect,
                                         WorkbenchOperationDisposition::Unknown,
@@ -2847,10 +2851,12 @@ where
                         &workbench,
                         fragment,
                         *outcome,
-                        execution.as_ref(),
-                        index,
-                        request.items.len(),
-                        &mut unit_operations,
+                        WorkbenchUnitExecution {
+                            execution: execution.as_ref(),
+                            input_unit_index: index,
+                            total: request.items.len(),
+                            operations: &mut unit_operations,
+                        },
                     )
                     .await
                 {
