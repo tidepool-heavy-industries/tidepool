@@ -63,6 +63,13 @@ inspect = observeAgent
 cancel :: Response result -> Eff '[Replies] CancelOutcome
 cancel = cancelResponse
 
+recentCampaignTrees :: Int -> Eff ActorEffects (Either WorktreeError [WorktreeSummary])
+recentCampaignTrees timestamp =
+  queryWorktrees $
+    createdAfter timestamp $
+      withBranchPrefix "shoal/context-unfold/" $
+        withWorktreePresence PresentWorktrees allManagedWorktrees
+
 launchFacts
   :: Forked result
   -> (Int, Int, ForkRole, ForkWorkspaceAccess, WorktreeReceipt)

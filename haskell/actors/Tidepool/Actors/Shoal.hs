@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE MonoLocalBinds #-}
 
 -- | The generic Haskell vocabulary available to an interactive Shoal actor.
 --
@@ -125,6 +126,13 @@ module Tidepool.Actors.Shoal
   , lookupWorktree
   , boundWorktree
   , listWorktrees
+  , WorktreePresence (..)
+  , WorktreeQuery
+  , allManagedWorktrees
+  , withWorktreePresence
+  , withBranchPrefix
+  , createdAfter
+  , queryWorktrees
   , WorktreeHandle
   , WorktreeId (..)
   , BranchName
@@ -151,6 +159,11 @@ module Tidepool.Actors.Shoal
   , renderBranchName
   , renderGitOid
   ) where
+
+import Control.Monad.Freer (Eff, Member)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Prelude
 
 import Tidepool.Agent.Reply
 import Tidepool.Agent.Watch
@@ -198,3 +211,53 @@ type ResearchActorEffects = ResearchEffects
 type CodingActorEffects = CodingEffects
 type ScaffoldActorEffects = Actor ': Worktree ': ScaffoldEffects
 type IntegrationActorEffects = Worktree ': IntegrationEffects
+
+data WorktreePresence
+  = PresentWorktrees
+  | MissingWorktrees
+  deriving (Show, Eq)
+
+data WorktreeQuery = WorktreeQuery
+  { queryPresence :: Maybe WorktreePresence
+  , queryBranchPrefix :: Maybe Text
+  , queryCreatedAfter :: Maybe Int
+  }
+  deriving (Show, Eq)
+
+allManagedWorktrees :: WorktreeQuery
+allManagedWorktrees = WorktreeQuery Nothing Nothing Nothing
+
+withWorktreePresence :: WorktreePresence -> WorktreeQuery -> WorktreeQuery
+withWorktreePresence presence query = query { queryPresence = Just presence }
+
+withBranchPrefix :: Text -> WorktreeQuery -> WorktreeQuery
+withBranchPrefix prefix query = query { queryBranchPrefix = Just prefix }
+
+createdAfter :: Int -> WorktreeQuery -> WorktreeQuery
+createdAfter timestamp query = query { queryCreatedAfter = Just timestamp }
+
+-- | Filter the canonical durable registry result without replacing its Git
+-- receipts with another repository model.
+queryWorktrees
+  :: (Member WorktreeRegistry effs, Member Worktree effs)
+  => WorktreeQuery
+  -> Eff effs (Either WorktreeError [WorktreeSummary])
+queryWorktrees query = fmap (fmap (filter matches)) listWorktrees
+  where
+    matches summary =
+      matchesPresence summary
+        && matchesBranch summary
+        && matchesCreatedAt summary
+
+    matchesPresence summary = case queryPresence query of
+      Nothing -> True
+      Just PresentWorktrees -> present summary
+      Just MissingWorktrees -> not (present summary)
+
+    matchesBranch summary = case queryBranchPrefix query of
+      Nothing -> True
+      Just prefix -> prefix `Text.isPrefixOf` renderBranchName (branch (summaryReceipt summary))
+
+    matchesCreatedAt summary = case queryCreatedAfter query of
+      Nothing -> True
+      Just timestamp -> createdAt (summaryReceipt summary) > timestamp
