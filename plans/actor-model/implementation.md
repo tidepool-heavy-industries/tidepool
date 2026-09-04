@@ -6,6 +6,11 @@ and activation contract is specified in
 Older `Complete`/`AgentAction` sections in the adjacent long-form plans are a
 superseded design record, not the executable surface.
 
+The accepted next surface and its staged implementation are specified by
+[cache-preserving context unfold](cache-preserving-context-unfold.md). That
+plan supersedes older interactive `forkActors` sketches while preserving the
+landed reply/watch contract described here.
+
 Backward compatibility is not a constraint for internal actor APIs. Preserve
 serialized and externally consumed formats only through an explicit migration
 decision.
@@ -89,6 +94,28 @@ decision.
   generated transcript.
 
 ## Remaining work
+
+### Cache-preserving context unfold
+
+- Execute the active-hosted-call/provider-cache and inspection-only-policy
+  feasibility proofs before exposing a fork API.
+- Add immutable persistent-binding tips and root leases so the Haskell value
+  environment really freezes with the already-versioned declarations.
+- Replace the coarse public `Actor`/`Worktree` row with role-meaningful effects
+  and one typed effective-policy projection.
+- Give new forked actors one validated hierarchical path projected into actor
+  labels, `shoal/<path>` Git branches, status, requests, watches, and receipts;
+  opaque IDs remain authority keys rather than the swarm's visual vocabulary.
+- Attach authoritative per-request worktree changes to requester-side results,
+  then land one persistent context-forked child before the heterogeneous
+  applicative batch.
+- Implement atomic `Unfold`, distinct leaf-coding and recursive-scaffolding
+  roles, shared descendant budgets, prompt-role projection, and provider cache
+  observability in the gate order owned by the context-unfold plan. Its
+  [worked three-batch interaction](cache-preserving-context-unfold.md#worked-interaction-a-recursive-three-batch-campaign)
+  fixes the target UX; its
+  [linear implementation handoff](cache-preserving-context-unfold.md#linear-implementation-handoff)
+  is the execution checklist for the next sustained implementation session.
 
 ### Supervisor policy
 

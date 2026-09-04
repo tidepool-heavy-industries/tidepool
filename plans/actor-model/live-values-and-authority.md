@@ -1,5 +1,11 @@
 # Live values and authority
 
+The canonical interactive context-fork surface is now
+[cache-preserving context unfold](cache-preserving-context-unfold.md). It
+shares an immutable declaration/binding snapshot into new persistent actor
+activations; it does not clone the parent's public control continuation. The
+value/authority rules below remain the substrate for that design.
+
 ## 1. Core rule
 
 > Values may move; authority must be granted.
@@ -96,6 +102,11 @@ every explicit capability operation is observational; it may still create
 supplied writer `ActorRef`. Preventing that would be an information-flow
 policy, not capability attenuation, and is outside this contract.
 
+That two-name lattice records the landed lower-level `startActor` experiment.
+Interactive context unfold replaces it at the model surface with granular
+effect rows and one `EffectiveRole` projection; each resulting incarnation
+still fixes one row, and runtime authority still attenuates monotonically.
+
 The common authorization behavior should be registered callers rather than a
 blanket prohibition on copying the surrounding value. A failed operation
 produces structured failure state such as unauthorized caller, revoked
@@ -128,19 +139,20 @@ No first implementation should attempt to inspect every object reachable from
 a closure and reject the closure because one leaf might be restricted. The
 operation on that leaf remains guarded.
 
-### Control continuation versus continuation references
+### Shared values versus actor-linear references
 
-Fork clones the actor's control continuation. It does not grant children the
-runtime-issued references reachable from that continuation. Pending-call
-handles, joins, reply obligations, and parked-request references remain valid
-in the parent and become invalid for child principals.
+Interactive unfold copies the parent's immutable Haskell value view, not its
+control continuation. It does not grant children the runtime-issued references
+reachable from that snapshot. Pending-call handles, joins, reply obligations,
+and parked-request references remain valid in the parent and become invalid
+for child principals.
 
 Rust enforces this in the actor interpreter. It does not remove bindings,
 rewrite closures, or alter Haskell types. A child receives a Developer message
 describing invalid references after the shared provider prefix; actual use
-fails with `InvalidAfterFork`. As with every unsatisfiable effect, that abandons
-a disposable workbench fragment or terminates an installed actor-program
-continuation.
+fails with `InvalidAfterFork`. As with every unsatisfiable effect, that rejects
+a disposable workbench fragment or terminates an installed headless actor-
+program continuation.
 
 `call` remains single-result; fork never changes reply cardinality implicitly.
 
@@ -243,12 +255,14 @@ reachability.
   against the receiving actor's stack.
 - A function specialized to a concrete stack may move as a value, but GHC only
   permits applying it where that concrete row unifies.
-- A forked continuation runs through the child's new interpreter instance
-  under the child's principal and grants.
+- A shared row-polymorphic value used by an unfolded child runs through that
+  child's interpreter instance under the child's principal and grants.
 
-Rust never interprets union tags as handler positions and does not maintain a
-second effect-row ABI. The actor interpreter authorizes nominal request
-constructors at use time; Haskell row compatibility remains Haskell's job.
+Rust does not infer row compatibility or authority from union positions. One
+generated residual-row witness keeps the child facade and interpreter routing
+aligned; it is descriptive, while the actor interpreter authorizes nominal
+request constructors at use time. Haskell row compatibility remains Haskell's
+job, and there is no independently maintained second effect-row ABI.
 
 ## 9. Same-machine boundary
 
@@ -278,7 +292,8 @@ The authority layer is not complete until tests demonstrate all of these:
 7. A live-value call across a machine boundary is rejected before execution.
 8. An old incarnation cannot use a grant issued to its predecessor.
 9. A transferred snapshot remains valid after its source actor retires.
-10. A forked continuation dispatches nominal requests through the child's
-    interpreter and is subject to the child's principal and grants.
+10. A shared effectful value invoked by an unfolded child dispatches nominal
+    requests through the child's interpreter and is subject to the child's
+    principal and grants.
 11. Pre-fork continuation references remain valid in the parent and fail in
     children without any Haskell binding rewrite.

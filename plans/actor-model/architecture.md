@@ -5,6 +5,10 @@ The `Complete`/interactive `AgentAction` portions later in this document are a
 superseded design record; the current contract is
 [persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md)
 and the current inventory is [implementation status](implementation.md).
+The older process-fork-shaped `forkActors` discussion is refined by
+[cache-preserving context unfold](cache-preserving-context-unfold.md), which
+is canonical for interactive application forks, effect-list narrowing, and
+the model-facing unfold/fold surface.
 
 ## 1. The unit of execution
 
@@ -201,11 +205,13 @@ contract or launch a stronger successor.
 
 Git is the durable work substrate for coding actors, not their communication
 protocol. A granted worktree isolates a branch; a commit is a reviewable
-product that can travel in a typed exit; and joins are explicit integration
-decisions. Live actor messages still carry richer values, definitions,
-handles, and evidence. The actor ownership tree, planning tree, and Git
-branch tree may correspond for a particular job but are not required to be
-identical.
+product observed beside a typed response; and joins are explicit integration
+decisions. Live actor messages still carry richer values, definitions, and
+handles. Context-unfolded actors with managed checkouts, including inspection-
+only researchers, project one readable hierarchical path into their actor
+labels and `shoal/<path>` Git branches by default, while exact IDs remain
+authority keys. Actors deliberately launched without a worktree need not have
+a Git node.
 
 Folds are hierarchical. A leaf can fold edits into one commit, a subsystem
 can fold several commits into a coherent branch, and a root can fold subsystem
@@ -609,7 +615,7 @@ The context relationships are deliberately distinct:
 | Operation | Model/Haskell context | Use |
 |---|---|---|
 | `request` | Same target actor, accumulating Codex conversation and Haskell environment | Give an existing agent another typed task |
-| `forkActors` | Exact shared conversation, environment, and control prefix, then divergence | Explore several context-rich alternatives with prefix-cache reuse |
+| `unfold` | Exact provider prefix through one hosted call plus one immutable Haskell declaration/binding snapshot; new child activations | Continue several independent typed plans with shared understanding and prefix-cache reuse |
 | `startAgent` | Fresh Codex conversation and explicit worktree binding | Obtain an independent coding agent or fresh judgment |
 | `startActor` | No implicit model context; explicit Haskell definition | Build a lower-level headless actor |
 
@@ -618,10 +624,10 @@ speculative branches, and one-shot jobs remain ordinary Haskell compositions.
 
 The initial runtime has two construction operations, not a matrix of modes:
 
-| Origin | Model context | Haskell environment | Control continuation | Use |
+| Origin | Model context | Haskell environment | Child execution | Use |
 |---|---|---|---|---|
 | spawn | New conversation | Sealed base environment plus the definition's internally captured program image | Typed startup program | Independent actor or fresh judgment |
-| fork | Exact shared transcript prefix | Exact shared program snapshot | Cloned at the fork point | Cheap parallel reasoning with full memory and provider-cache reuse |
+| unfold | Exact shared transcript through the active hosted call | Frozen declarations and binding tip, followed by a new child-local scope | New persistent actor request activation; no copied parent continuation | Cheap parallel continuation with full memory and provider-cache reuse |
 
 Starting the same `ActorDefinition` again is ordinary spawn, not a third
 construction mode. Resuming an existing actor is scheduling, not
@@ -630,12 +636,12 @@ Haskell library patterns plus capability grants, not runtime presets. Every
 new actor receives a new identity, mailbox, runtime resource scope, and
 supervision entry.
 
-Spawn creates one actor. Structural fork may fan out several children from one
+Spawn creates one actor. Context unfold may fan out several children from one
 atomic fork point; in that operation alone, handles are published only after
-every requested child is ready. If one forked child fails before publication,
-Rust terminates the other unpublished branches and settles the fork as failed.
-Ordinary Haskell may start several independent actors without a second generic
-batch-construction API.
+every requested child is ready. If one child fails before publication, Rust
+terminates the other unpublished branches and settles admission as failed.
+Ordinary Haskell may start several independent fresh actors without a second
+generic batch-construction API.
 
 `startActor` is the sole ordinary prompted constructor. Its typed startup value
 is distinct from the actor's mailbox protocol. Models pass an
@@ -647,7 +653,8 @@ grants, realm, incarnation, and lifecycle phase; it never reflects or compares
 row order. A later trusted Haskell intent-to-kernel split may strengthen the
 static boundary without changing this public construction path.
 
-Each definition selects one named effect profile. Initially:
+The landed lower-level definition path selects one experimental named effect
+profile. Initially:
 
 ```text
 ReadWrite -> ReadWrite | ReadOnly
@@ -668,10 +675,16 @@ still includes actor creation and messaging, may use a granted
 to its own Haskell environment and model conversation remain ordinary local
 execution, so `ReadOnly` does not disable self-extension.
 
+The interactive context-unfold surface replaces that two-name profile as its
+model-facing role language with granular effect rows plus one runtime
+`EffectiveRole` projection. Each resulting incarnation still has one fixed
+row; this paragraph remains the landed low-level `startActor` behavior, not a
+constraint that an unfolded child preserve its parent's row.
+
 Startup runs one concrete `startup -> Eff actorEffs initial` action in the new
 child's workbench under that actor interpreter. It is ordinary Haskell and does
 not implicitly open a model session. When initialization returns, the trusted
-wrapper requires readiness and refuses `receive` and `forkActors` before that point. A
+wrapper requires readiness and refuses `receive` before that point. A
 pure authored function combines `startup` and `initial` into the installed
 `Eff actorEffs exit` continuation. This removes
 the need for separate `prepare`/`StartupM` mechanisms and for a public
@@ -680,13 +693,11 @@ the need for separate `prepare`/`StartupM` mechanisms and for a public
 The installed continuation is not a callback registry or Rust-owned handler
 table. `ActorLocal` is a normal indexed effect whose public algebra includes
 `receive`; Rust interprets its nominal requests under the current actor
-context. `forkActors` deliberately
-composes it with the outward `Actor` capability: the former supplies the
-current protocol and exit indexes, while the latter expresses actor creation.
-Generated export curation hides substrate vocabulary, but imports are not the
-enforcement mechanism. GHC uses the indexes to tie the program to the eventual
-`ActorRef`; Rust handles nominal requests under the current principal without
-reflecting those types.
+context. Generated export curation hides substrate vocabulary, but imports are
+not the enforcement mechanism. GHC uses the indexes to tie the program to the
+eventual `ActorRef`; Rust handles nominal requests under the current principal
+without reflecting those types. Interactive `unfold` is a separate persistent-
+application construction path and does not clone this installed continuation.
 
 The program may finish directly, suspend on ordinary effects, or consume one
 application message through `receive`. `receive` runs a rank-2 Haskell handler
@@ -743,6 +754,14 @@ Starting a definition is not ambient inheritance.
 
 ### Fork
 
+For interactive agent applications, the canonical public contract is now
+[cache-preserving context unfold](cache-preserving-context-unfold.md). It
+supersedes this section's public process-style continuation wrapper and its
+requirement to preserve the exact effect profile: the parent receives typed
+persistent handles, children begin new request activations, and each child's
+effect list may narrow. The immutable provider/Haskell snapshot and
+authority-separation requirements below remain prerequisites.
+
 A fork structurally shares two immutable prefixes:
 
 ```text
@@ -758,43 +777,36 @@ context-cache behavior remains available. The Haskell snapshot must include
 live bindings as well as declarations; otherwise the copied transcript could
 refer to names that do not exist in the child.
 
-The provider prefix, Haskell snapshot, and control continuation form one atomic
-fork point. If the fork occurs while executing a response's Haskell blocks,
-the shared transcript already includes that assistant response and each branch
-continues from the exact cloned Haskell control point. Rust must not pair a
-transcript that mentions a successful definition with the earlier program
-snapshot, append execution receipts for work that did not occur in that
-branch, or mutate a frozen `ContextRef` during later compaction.
+The provider prefix and Haskell snapshot form one atomic fork point at the
+active hosted `unfold` call. Every child sees that complete call and all branch
+plans but excludes the parent-only tool result. Rust must not pair a transcript
+that mentions a successful definition with an earlier program snapshot,
+append execution receipts for work that did not occur in that branch, or
+mutate a frozen context/binding tip during later compaction.
 
-Fork also clones the actor's control continuation. The low-level operation has
-a parent/child result analogous to process fork. The ordinary `forkActors`
-wrapper consumes that distinction internally: the parent receives child
-handles, while each child runs a typed `seed -> Eff effs exit` branch supplied
-at the fork point through its new `ActorLocal protocol` interpreter. Returning
-from that branch completes the child; it never falls through into the parent's
-post-fork continuation. The parent receives no handle until that child signals
-readiness.
+Interactive unfold does **not** clone a public Haskell control continuation or
+return a process-style parent/child discriminator. The parent-side effect
+returns the applicative shape of typed persistent handles. Each child starts a
+normal request activation under a new actor identity, typed input/reply scope,
+mailbox, narrowed facade, role, and workspace. Ending the child's model turn
+does not complete that request or actor; its reply may remain pending across
+later watch-driven activations.
 
-Runtime-issued references to other continuations are different from the
-control continuation being cloned. Reply obligations, pending-call handles,
+Runtime-issued linear references present in the copied value snapshot do not
+carry their parent's authority. Reply obligations, pending-call handles,
 joins, and parked-request references remain parent-owned and fail with a typed
-`InvalidAfterFork` failure if copied child code uses them. Rust does
-not rewrite or delete Haskell bindings. It enforces the rule in the actor interpreter and
+`InvalidAfterFork` failure if child code uses them. Rust does not rewrite or
+delete Haskell bindings. It enforces the rule in the actor interpreter and
 appends a Developer message at the first legal provider boundary after the
-shared prefix and cloned Haskell segment, describing which runtime references
-are invalid.
+shared prefix, describing which runtime references are invalid.
 
 Capabilities apply their own fork policy. Structural sharing of a closure does
-not automatically register the child as an allowed caller. The child receives
-its own interpreter instance; handler state and grants are shared, cloned,
-rebound, or withheld by each Rust component's fork policy. There is no parallel
-runtime effect-row ABI: GHC owns row compatibility, while the interpreter owns
-nominal request authorization.
-
-Structural fork preserves the source actor's named effect profile exactly,
-because it clones that actor's compiled continuation. Profile attenuation is a
-fresh-spawn choice; fork does not recompile the continuation against another
-row.
+not automatically register the child as an allowed caller. The child's model-
+facing effect row may be a statically proved subset of the parent row, while
+each Rust handler independently rebinds or attenuates concrete grants under
+the new principal. Parent reply/watch/continuation authority is withheld even
+if an opaque handle remains present in copied memory. GHC owns row
+compatibility; the interpreter owns nominal resource authorization.
 
 For model-authored compilation, the actor's exact entry facade exports a
 Haskell `ActorEffects` alias and `ActorM = Eff ActorEffects`. Turn templates
@@ -872,7 +884,7 @@ Snapshots are immutable. A successful declaration or binding creates a new
 tip. Forks point at an existing tip, and later definitions diverge. Tidepool's
 declaration plane already freezes a parent's generation when a child scope is
 minted. Its current value plane does not: lookup still walks mutable ancestor
-frames. Structural fork must add an immutable binding snapshot with root leases
+frames. Context unfold must add an immutable binding snapshot with root leases
 before claiming the same property for live values; ordinary scope ancestry is
 not that snapshot.
 
@@ -994,15 +1006,17 @@ ultimate owner of every external resource.
 9. Actor scheduling never creates a second machine-session ownership
    mechanism or bypasses checkout fencing.
 10. JSON serialization is never required for same-machine actor communication.
-11. Fork points pair one immutable conversation prefix, Haskell snapshot, and
-    cloned control continuation.
+11. Interactive unfold points pair one immutable conversation prefix and
+    Haskell declaration/binding snapshot; each child gets a new request
+    activation, never a cloned parent control continuation.
 12. Resident Haskell external actions are reachable only through interpreted
     effects and checked capabilities; its model-facing environment exposes no
     ambient `IO`, FFI, or unsafe escape hatch that bypasses the execution
     principal. Attached native agents have a separate process policy.
-13. One actor incarnation has one fixed Haskell effect vocabulary and one
-    actor-local effect profile. Rust routes by nominal request identity,
-    never by union position or a duplicated effect-row ABI.
+13. One actor incarnation has one fixed residual Haskell effect row and one
+    effective role. One generated row witness aligns the facade and handler;
+    Rust routes and authorizes nominal requests without inferring authority
+    from union positions or maintaining a second effect-row ABI.
 14. Every child exit remains available through exact typed observation and
    produces one informational native wake for a live agent-backed owner; it
    never kills the owner implicitly.
@@ -1013,17 +1027,15 @@ ultimate owner of every external resource.
 18. Successful exit values live in the shared Haskell cell carried by exact
     `ActorRef` values; the Rust registry retains terminal metadata, never a
     second live-value root.
-19. A spawn edge may preserve or attenuate its owner's named effect profile,
-    never amplify it. Profile membership limits expressible operation classes;
-    principals, grants, and opaque handles independently authorize resources.
+19. An actor-construction edge may preserve or attenuate its owner's permitted
+    residual effect row and effective role, never amplify either. Static
+    membership limits expressible operation classes; principals, grants, and
+    opaque handles independently authorize resources.
 20. One worktree-backed worker has one owner-selected fresh worktree and one
     principal-checked binding; Shoal never allocates a competing implicit tree.
 21. A candidate receipt distinguishes model-authored claims from one coherent
     Rust-observed repository state and calls its commit `submittedHead`, not
     `finalHead`.
-22. A hosted-tool call that returns an executable `AgentAction` settles before
-    the action runs; later actor waits and model reactivation are owned by the
-    resident actor, not by an open transport request.
 22. Collection is repeatable until explicit acknowledgment. Host-tool response loss
     cannot silently drop the Haskell `ActorRef` that retains the typed exit.
 23. External child-application failure reaches lifecycle only through the

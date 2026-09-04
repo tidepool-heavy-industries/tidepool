@@ -13,7 +13,10 @@ charter / glossary and the plan file is deleted (git is the archive).
   checked capabilities, program-image reuse, fresh and cache-preserving fork
   construction, and a staged migration away from global
   `State`/`render`/`loop` orchestration. Its current request/activation contract
-  is [persistent applications, typed replies, and watches](actor-model/persistent-applications-replies-and-watches.md).
+  is [persistent applications, typed replies, and watches](actor-model/persistent-applications-replies-and-watches.md),
+  and the canonical root plan, implementation handoff, and todo checklist for the
+  accepted next interaction surface is
+  [cache-preserving context unfold](actor-model/cache-preserving-context-unfold.md).
 - [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
   `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
   candidate/review/revision interpreter. The current runnable slice uses a

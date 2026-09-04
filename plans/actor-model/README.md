@@ -4,6 +4,13 @@ Status: active and incremental. The canonical landed-versus-pending inventory
 and next delivery stage are in
 [the implementation status](implementation.md#landed-architecture).
 
+The root document for the next major feature is
+[cache-preserving context unfold](cache-preserving-context-unfold.md). It owns
+the accepted LLM interaction, recursive worked campaign, architecture
+boundaries, linear implementation handoff, and persistent implementation checklist.
+The other files in this directory are substrate contracts or superseded design
+records, not competing unfold plans.
+
 ## Thesis
 
 Tidepool should be an actor runtime whose actors are typed Haskell programs
@@ -30,7 +37,7 @@ The useful slogan is:
 "Extend itself" may mean persistent declarations or editing and reloading an
 agent-backed actor's Haskell policy. Codex reaches the workbench through one
 actor-local, GHCi-shaped hosted tool carrying raw Haskell. The persistent heap,
-interpreter, and typed completion contract stay under Tidepool ownership.
+interpreter, and typed request/reply contract stay under Tidepool ownership.
 
 At the system level, those actors form an adaptive unfold/execute/fold loop
 over worktrees. The organization may begin as a detailed plan, a partial
@@ -83,17 +90,26 @@ above that substrate; it does not maintain a second actor scheduler.
   readiness composition without becoming model-turn continuations or
   executable values returned through completion. A data-dependent `Monad`
   waits for a proven consumer because it adds continuation custody.
-- Fresh spawn deploys an explicit program into a fresh context. Structural
-  fork clones one exact model/Haskell/control point and applies registered
-  capability and actor-linear-reference policy.
+- Fresh spawn deploys an explicit program into a fresh context. Interactive
+  context unfold clones the exact provider prefix through one hosted Haskell
+  call, shares an immutable Haskell environment snapshot, narrows the child
+  effect list and runtime authority, and returns persistent typed actor
+  handles. The accepted contract is
+  [cache-preserving context unfold](cache-preserving-context-unfold.md).
+- Fork groups and workers form one readable hierarchical path projected into
+  actor labels, `shoal/<path>` Git branches, status, and receipts. Opaque actor
+  and worktree IDs remain exact authority/correlation keys, not the primary
+  way a model navigates its swarm.
 - `startActor` publishes only a ready exact reference. Exact calls
   never invent results or substitute actors; failure-prone jobs use
   `startActor`/`awaitExit` supervision and explicit Haskell control flow.
 - A private sealed deployment hides an actor definition's concrete Haskell
   row. V0 runs one stack per actor and Rust authorizes nominal requests under
   the actor's principal and grants. Authored libraries remain
-  `Member`-polymorphic; a later Haskell intent-to-kernel split must not require
-  a reflected row ABI in Rust.
+  `Member`-polymorphic. Context unfold adds one generated typed residual-row
+  witness to align a narrowed child facade with its handler surface; it does
+  not create a separately maintained reflected-row ABI or make row membership
+  runtime authority.
 - One admitted request remains current across any number of model turns until
   typed settlement, cancellation, deadline, or target termination. Shorter
   machine checkouts serialize its Haskell run segments. Durable activation
@@ -130,13 +146,17 @@ restating it unless an acceptance test needs the detail.
    the reply/watch plan and field guide.
 4. [Implementation plan](implementation.md) owns current status, delivery
    order, acceptance criteria, and retirement work.
-5. [Shoal workbench correctness wave](shoal-workbench-correctness-wave.md)
+5. [Shoal workbench correctness plan](shoal-workbench-correctness-wave.md)
    records the superseded completion-era migration baseline and the still-live
    GHCi/workbench findings.
 6. [Persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md)
-   supersedes that wave's root-completion and interactive `AgentAction`
+   supersedes that plan's root-completion and interactive `AgentAction`
    direction after live Shoal Console use, and owns the current
    request/activation contract.
+7. [Cache-preserving context unfold](cache-preserving-context-unfold.md)
+   specifies the accepted next interaction surface: an applicative fork plan,
+   narrowed child roles, persistent handles, authoritative per-response
+   worktree evidence, and a later typed fold through `Await` and `Watch`.
 
 ## Vocabulary
 

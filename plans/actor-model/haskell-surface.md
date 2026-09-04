@@ -4,6 +4,10 @@ Status: the sections describing `Complete`, `AgentAction`, `nextTurn`, and
 `waitReply` are a superseded design record. The executable Shoal surface is
 summarized below and specified by
 [persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md).
+The accepted next fork surface is
+[cache-preserving context unfold](cache-preserving-context-unfold.md); it
+supersedes this document's older `forkActors` continuation wrapper for
+interactive applications.
 
 ## 1. Design target
 
@@ -731,6 +735,11 @@ transcript and full Haskell snapshot. That is useful for cheap exploration but
 not a substitute for an independent reviewer.
 
 ## 10. Structured continuation fork
+
+This section is retained as the older authored-program sketch. Interactive
+agent applications instead use the applicative, handle-returning, effect-list-
+narrowing contract in
+[cache-preserving context unfold](cache-preserving-context-unfold.md).
 
 The canonical fork contract is in [architecture.md](architecture.md#fork).
 The small public wrapper is conceptually:
