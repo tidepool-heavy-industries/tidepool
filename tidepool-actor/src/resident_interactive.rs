@@ -78,6 +78,8 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                             output: error.to_string(),
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
+                            operations: Vec::new(),
+                            terminal_transfer: None,
                         }],
                         next_index: 0,
                         total: 1,

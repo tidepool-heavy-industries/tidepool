@@ -10,6 +10,9 @@ observational commands are local diagnostics; a rejected Haskell or effectful
 unit stops the suffix. Earlier successful units remain committed. A rejected
 effectful unit does not install its projected bindings and does not roll back
 effects already performed.
+Structured item receipts identify installed bindings, completed effect
+operations, and accepted terminal transfers; use them instead of inferring
+completion from prose or elapsed time.
 
 Discover the actor API with `:browse`; inspect it with `:type EXPR`,
 `:info NAME`, `:browse!`, and `:bindings`; use `:doc topics` for executable

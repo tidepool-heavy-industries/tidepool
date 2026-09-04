@@ -2515,7 +2515,7 @@ mod tests {
         AgentBackendError, InteractiveAgentCommand, InteractiveAgentSpec, InteractiveFuture,
     };
     use tidepool_testing::eval_harness;
-    use tidepool_tool::{ToolArguments, ToolInvocation};
+    use tidepool_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
     use tidepool_worktree::WorktreeSpec;
 
     fn normalized_prompt(prompt: &str) -> String {
@@ -2539,9 +2539,15 @@ mod tests {
     ) -> serde_json::Value {
         let mut last = None;
         for item in items {
+            let call_id = uuid::Uuid::new_v4().simple().to_string();
             let result = endpoint
                 .dispatch_boxed(ToolInvocation {
-                    context: None,
+                    context: Some(ToolInvocationContext {
+                        thread_id: "actor-host-vertical".into(),
+                        turn_id: call_id.clone(),
+                        call_id,
+                        namespace: Some("haskell".into()),
+                    }),
                     name: tidepool_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(item.into()),
                 })
@@ -2562,9 +2568,15 @@ mod tests {
         endpoint: &dyn tidepool_actor::ResidentToolEndpoint,
         script: &str,
     ) -> serde_json::Value {
+        let call_id = uuid::Uuid::new_v4().simple().to_string();
         endpoint
             .dispatch_boxed(ToolInvocation {
-                context: None,
+                context: Some(ToolInvocationContext {
+                    thread_id: "actor-host-vertical".into(),
+                    turn_id: call_id.clone(),
+                    call_id,
+                    namespace: Some("haskell".into()),
+                }),
                 name: tidepool_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(script.into()),
             })
@@ -3301,6 +3313,11 @@ mod tests {
             .expect("request setup timed out")
             .expect("request setup task");
         assert_eq!(submitted["status"], "committed", "{submitted:?}");
+        assert!(submitted["items"].as_array().is_some_and(|items| items
+            .iter()
+            .any(|item| item["operations"]
+                .as_array()
+                .is_some_and(|operations| !operations.is_empty()))));
 
         let pending_status =
             dispatch_haskell_script(root_installation.policy.as_ref(), ":status").await;
@@ -3394,6 +3411,15 @@ mod tests {
         )
         .await;
         assert_eq!(replied["status"], "replied", "{replied:?}");
+        assert_eq!(
+            replied["items"][2]["terminalTransfer"], "replyAccepted",
+            "{replied:?}"
+        );
+        assert!(replied["items"][2]["operations"]
+            .as_array()
+            .is_some_and(|operations| operations.iter().any(|operation| {
+                operation["effect"] == "reply" && operation["disposition"] == "committed"
+            })));
         let witnessed = dispatch_haskell_script(
             witness_installation.policy.as_ref(),
             "respond (EchoReport sessionInput)",

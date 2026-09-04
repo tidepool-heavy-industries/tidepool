@@ -8,6 +8,9 @@ Units run in order and preserve successful prefixes. A failed observational
 command such as `:type` or `:info` is a local diagnostic and later independent
 observations still run. A rejected Haskell/effectful unit stops the suffix;
 effects already performed are not rolled back.
+Item receipts expose installed bindings, effect operation IDs/dispositions,
+and accepted terminal transfers. An exact transport retry returns its retained
+receipt; writing the same source in a new hosted call is new intent.
 
 Start discovery with `:browse`; use `:type`, `:info`, `:browse!`, and
 `:bindings` for detail, `:recovery` after a successor starts, and `:status` for

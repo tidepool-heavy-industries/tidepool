@@ -640,6 +640,10 @@ impl ResidentKernelBoundary {
 }
 
 impl ResidentActorBoundary {
+    pub(crate) fn commits_with_workbench_unit(&self) -> bool {
+        matches!(self, Self::ForkGroup(ForkGroupBoundary::Commit { .. }))
+    }
+
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",

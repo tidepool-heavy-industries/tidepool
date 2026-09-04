@@ -298,6 +298,14 @@ pub struct WorkbenchRequest {
     #[serde(skip)]
     #[schemars(skip)]
     input_kinds: Vec<GhciInputKind>,
+    /// Runtime-minted identity for one exact hosted tool call.
+    ///
+    /// This is not accepted from JSON. The transport owner derives it from
+    /// authenticated call coordinates before actor dispatch, allowing the
+    /// actor to return a committed receipt when that exact call is retried.
+    #[serde(skip)]
+    #[schemars(skip)]
+    execution_id: Option<WorkbenchExecutionId>,
 }
 
 impl WorkbenchRequest {
@@ -308,7 +316,19 @@ impl WorkbenchRequest {
             input: None,
             verbose: None,
             input_kinds: units.iter().map(GhciInputUnit::kind).collect(),
+            execution_id: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_execution_id(mut self, execution_id: WorkbenchExecutionId) -> Self {
+        self.execution_id = Some(execution_id);
+        self
+    }
+
+    #[must_use]
+    pub fn execution_id(&self) -> Option<&WorkbenchExecutionId> {
+        self.execution_id.as_ref()
     }
 
     #[must_use]
@@ -335,6 +355,83 @@ impl WorkbenchRequest {
     }
 }
 
+/// Opaque, stable identity of one authenticated hosted workbench call.
+///
+/// The transport hashes structured execution coordinates into this value; no
+/// behavior parses the rendered digest back into authority or control flow.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct WorkbenchExecutionId(String);
+
+impl WorkbenchExecutionId {
+    #[must_use]
+    pub fn from_digest(digest: [u8; 16]) -> Self {
+        Self(format!("exec-{}", hex_bytes(&digest)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WorkbenchExecutionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut rendered = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        rendered.push(HEX[usize::from(byte >> 4)] as char);
+        rendered.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    rendered
+}
+
+/// Stable coordinate of one effect boundary within a hosted input unit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchOperationId {
+    pub execution: WorkbenchExecutionId,
+    pub input_unit_index: usize,
+    pub effect_ordinal: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchOperationDisposition {
+    /// The owner reserved state whose publication is coupled to the input
+    /// unit's commit boundary (currently an applicative unfold frontier).
+    Prepared,
+    Committed,
+    Rejected,
+    /// The effect owner failed after dispatch without proving whether its
+    /// mutation crossed the commit point. Retrying the enclosing hosted call
+    /// returns this receipt rather than guessing and running the unit again.
+    Unknown,
+}
+
+/// One effect boundary observed while evaluating an input unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchOperationReceipt {
+    pub id: WorkbenchOperationId,
+    /// Open effect rows make the operation vocabulary extensible. This name
+    /// is diagnostic metadata only and never drives behavior.
+    pub effect: String,
+    pub disposition: WorkbenchOperationDisposition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkbenchTerminalTransfer {
+    ReplyAccepted,
+    CancellationAcknowledged,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkbenchItemStatus {
@@ -357,6 +454,13 @@ pub struct WorkbenchItemReceipt {
     /// strings such as `[bound x]` or declaration summaries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub installed_bindings: Vec<String>,
+    /// Effect boundaries completed before this unit returned or failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<WorkbenchOperationReceipt>,
+    /// Accepted terminal transfer, when this unit intentionally cannot return
+    /// a Haskell value to its caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_transfer: Option<WorkbenchTerminalTransfer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -1087,32 +1191,40 @@ mod tests {
 
     #[test]
     fn response_statuses_are_closed_schema_backed_values() {
+        let execution = WorkbenchExecutionId::from_digest([3; 16]);
         let response = WorkbenchResponse {
-            status: WorkbenchRunStatus::Completed,
+            status: WorkbenchRunStatus::Replied,
             items: vec![WorkbenchItemReceipt {
                 index: 0,
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
                 warnings: Vec::new(),
                 installed_bindings: vec!["answer".into()],
+                operations: vec![WorkbenchOperationReceipt {
+                    id: WorkbenchOperationId {
+                        execution,
+                        input_unit_index: 0,
+                        effect_ordinal: 0,
+                    },
+                    effect: "reply".into(),
+                    disposition: WorkbenchOperationDisposition::Committed,
+                }],
+                terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
             }],
             next_index: 1,
             total: 1,
         };
+        let encoded = serde_json::to_value(response).unwrap();
+        assert_eq!(encoded["status"], "replied");
+        assert_eq!(encoded["items"][0]["status"], "committed");
+        assert_eq!(encoded["items"][0]["installedBindings"][0], "answer");
+        assert_eq!(encoded["items"][0]["operations"][0]["effect"], "reply");
         assert_eq!(
-            serde_json::to_value(response).unwrap(),
-            serde_json::json!({
-                "status": "completed",
-                "items": [{
-                    "index": 0,
-                    "status": "committed",
-                    "output": "bound `answer`",
-                    "installedBindings": ["answer"]
-                }],
-                "nextIndex": 1,
-                "total": 1
-            })
+            encoded["items"][0]["operations"][0]["disposition"],
+            "committed"
         );
+        assert_eq!(encoded["items"][0]["terminalTransfer"], "replyAccepted");
+        assert_eq!(encoded["nextIndex"], 1);
     }
 
     #[tokio::test]

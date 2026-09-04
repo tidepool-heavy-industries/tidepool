@@ -89,7 +89,7 @@ pub enum KernelInvocationFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelWorkbenchFailure {
     pub actor: ActorRef,
-    pub completed: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    pub receipts: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
     pub failed_index: usize,
     pub total: usize,
     pub detail: String,
@@ -105,9 +105,9 @@ impl std::fmt::Display for KernelWorkbenchFailure {
             self.total,
             self.detail
         )?;
-        if !self.completed.is_empty() {
-            formatter.write_str("\ncompleted prefix:")?;
-            for receipt in &self.completed {
+        if !self.receipts.is_empty() {
+            formatter.write_str("\ninput receipts before failure:")?;
+            for receipt in &self.receipts {
                 write!(
                     formatter,
                     "\ninput unit {} ({:?}): {}",
@@ -115,6 +115,17 @@ impl std::fmt::Display for KernelWorkbenchFailure {
                     receipt.status,
                     receipt.output
                 )?;
+                for operation in &receipt.operations {
+                    write!(
+                        formatter,
+                        "\n  operation {}:{}:{} {:?} ({})",
+                        operation.id.execution,
+                        operation.id.input_unit_index + 1,
+                        operation.id.effect_ordinal + 1,
+                        operation.disposition,
+                        operation.effect,
+                    )?;
+                }
             }
         }
         Ok(())
@@ -338,12 +349,14 @@ mod tests {
     fn workbench_failure_keeps_committed_prefix_and_exact_cause() {
         let failure = KernelWorkbenchFailure {
             actor: ActorRef::first(crate::ActorId(7)),
-            completed: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+            receipts: vec![tidepool_runtime::session::WorkbenchItemReceipt {
                 index: 0,
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: "defined spotTaskText at generation 2".into(),
                 warnings: Vec::new(),
                 installed_bindings: vec!["spotTaskText".into()],
+                operations: Vec::new(),
+                terminal_transfer: None,
             }],
             failed_index: 1,
             total: 3,
@@ -352,7 +365,7 @@ mod tests {
         };
         assert_eq!(
             failure.to_string(),
-            "actor ActorRef { id: ActorId(7), incarnation: Incarnation(1) } workbench input unit 2 of 3 failed: actor protocol violation: unsupported resident actor request `MissingEffect`\ncompleted prefix:\ninput unit 1 (Committed): defined spotTaskText at generation 2"
+            "actor ActorRef { id: ActorId(7), incarnation: Incarnation(1) } workbench input unit 2 of 3 failed: actor protocol violation: unsupported resident actor request `MissingEffect`\ninput receipts before failure:\ninput unit 1 (Committed): defined spotTaskText at generation 2"
         );
     }
 }

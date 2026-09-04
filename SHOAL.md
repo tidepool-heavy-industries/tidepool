@@ -58,9 +58,19 @@ Compiler diagnostics are part of the interaction interface. Interactive
 compilation keeps warnings as warnings rather than promoting incomplete
 patterns to errors. A projected pattern that actually fails is a typed unit
 rejection, not host death. Every item receipt reports its structured status,
-warnings, and `installedBindings`, so clients need not scrape `[bound x]` text
-to determine the committed lexical prefix. A rejected input reports the exact
-failing unit and cause, including completed prefix receipts.
+warnings, `installedBindings`, and any effect `operations`, so clients need
+not scrape transcript text to determine the committed prefix. Each operation
+carries an opaque execution coordinate and typed disposition;
+`terminalTransfer` marks an accepted reply or cancellation boundary that
+intentionally does not return to Haskell. A rejected input reports the exact
+failing unit and cause, including effects completed earlier in that unit.
+
+The runtime derives execution identity from the authenticated hosted tool
+call. Retrying that exact call against the same live actor returns its retained
+receipt without rerunning Haskell or effects; the same source in a new call is
+new intent. An `unknown` operation disposition means the owner could not prove
+whether a failed effect crossed its commit point, so the enclosing call is not
+silently replayed.
 Host routing, invocation, encoding, and panic failures are distinct errors and
 retain their underlying cause. Empty wrapper output is never evidence that a
 Haskell action completed.

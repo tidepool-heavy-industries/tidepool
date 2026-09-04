@@ -12,8 +12,9 @@ use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_runtime::session::{
     OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
-    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse,
-    WorkbenchRunStatus,
+    WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchOperationDisposition,
+    WorkbenchOperationId, WorkbenchOperationReceipt, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus, WorkbenchTerminalTransfer,
 };
 use tokio::sync::mpsc;
 
@@ -162,7 +163,7 @@ enum ResidentStanding {
 }
 
 struct WorkbenchExecutionFailure {
-    completed: Vec<WorkbenchItemReceipt>,
+    receipts: Vec<WorkbenchItemReceipt>,
     failed_index: usize,
     total: usize,
     source: ResidentActorWorkbenchError,
@@ -198,10 +199,71 @@ fn workbench_failure(
     source: ResidentActorWorkbenchError,
 ) -> WorkbenchExecutionFailure {
     WorkbenchExecutionFailure {
-        completed: completed.to_vec(),
+        receipts: completed.to_vec(),
         failed_index,
         total,
         source,
+    }
+}
+
+fn workbench_failure_after_operations(
+    completed: &[WorkbenchItemReceipt],
+    failed_index: usize,
+    total: usize,
+    source: ResidentActorWorkbenchError,
+    mut operations: Vec<WorkbenchOperationReceipt>,
+) -> WorkbenchExecutionFailure {
+    settle_prepared_operations(&mut operations, WorkbenchOperationDisposition::Unknown);
+    let mut receipts = completed.to_vec();
+    if !operations.is_empty() {
+        receipts.push(WorkbenchItemReceipt {
+            index: failed_index,
+            status: WorkbenchItemStatus::Rejected,
+            output: source.to_string(),
+            warnings: Vec::new(),
+            installed_bindings: Vec::new(),
+            operations,
+            terminal_transfer: None,
+        });
+    }
+    WorkbenchExecutionFailure {
+        receipts,
+        failed_index,
+        total,
+        source,
+    }
+}
+
+fn record_workbench_operation(
+    operations: &mut Vec<WorkbenchOperationReceipt>,
+    execution: Option<&WorkbenchExecutionId>,
+    input_unit_index: usize,
+    effect_ordinal: usize,
+    effect: &str,
+    disposition: WorkbenchOperationDisposition,
+) {
+    let Some(execution) = execution else {
+        return;
+    };
+    operations.push(WorkbenchOperationReceipt {
+        id: WorkbenchOperationId {
+            execution: execution.clone(),
+            input_unit_index,
+            effect_ordinal,
+        },
+        effect: effect.to_owned(),
+        disposition,
+    });
+}
+
+fn settle_prepared_operations(
+    operations: &mut [WorkbenchOperationReceipt],
+    disposition: WorkbenchOperationDisposition,
+) {
+    for operation in operations {
+        if operation.disposition == WorkbenchOperationDisposition::Prepared {
+            operation.disposition = disposition;
+        }
     }
 }
 
@@ -260,6 +322,44 @@ pub struct ResidentKernelBehavior<H, O> {
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
     runtime_observation: crate::ActorRuntimeObservationHandle,
+    completed_workbenches: CompletedWorkbenchExecutions,
+}
+
+#[derive(Clone)]
+struct CompletedWorkbenchExecution {
+    request: WorkbenchRequest,
+    reply: crate::KernelWorkbenchReply,
+}
+
+#[derive(Default)]
+struct CompletedWorkbenchExecutions(
+    std::collections::HashMap<WorkbenchExecutionId, CompletedWorkbenchExecution>,
+);
+
+impl CompletedWorkbenchExecutions {
+    fn lookup(
+        &self,
+        execution: &WorkbenchExecutionId,
+        request: &WorkbenchRequest,
+    ) -> Result<Option<crate::KernelWorkbenchReply>, ()> {
+        let Some(completed) = self.0.get(execution) else {
+            return Ok(None);
+        };
+        if completed.request != *request {
+            return Err(());
+        }
+        Ok(Some(completed.reply.clone()))
+    }
+
+    fn record(
+        &mut self,
+        execution: WorkbenchExecutionId,
+        request: WorkbenchRequest,
+        reply: crate::KernelWorkbenchReply,
+    ) {
+        self.0
+            .insert(execution, CompletedWorkbenchExecution { request, reply });
+    }
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
@@ -291,6 +391,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
+            completed_workbenches: CompletedWorkbenchExecutions::default(),
         }
     }
 
@@ -316,6 +417,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
             runtime_observation: crate::ActorRuntimeObservationHandle::default(),
+            completed_workbenches: CompletedWorkbenchExecutions::default(),
         }
     }
 
@@ -2360,7 +2462,11 @@ where
         workbench: &crate::ResidentActorWorkbench<H, O>,
         mut fragment: ResidentWorkbenchFragment,
         mut outcome: ResidentOutcome,
+        execution: Option<&WorkbenchExecutionId>,
+        input_unit_index: usize,
+        operations: &mut Vec<WorkbenchOperationReceipt>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        let mut effect_ordinal = 0;
         loop {
             match workbench
                 .settle_item(context.clone(), fragment, outcome)
@@ -2375,7 +2481,23 @@ where
                         .runner
                         .capture_boundary(context.clone(), *next, context.placement.resource_scope)
                         .await?;
+                    let effect = boundary.operation().to_owned();
+                    let commits_with_unit = boundary.commits_with_workbench_unit();
+                    let ordinal = effect_ordinal;
+                    effect_ordinal += 1;
                     if self.environment.fork_groups.has_ready(context.actor) {
+                        settle_prepared_operations(
+                            operations,
+                            WorkbenchOperationDisposition::Rejected,
+                        );
+                        record_workbench_operation(
+                            operations,
+                            execution,
+                            input_unit_index,
+                            ordinal,
+                            &effect,
+                            WorkbenchOperationDisposition::Rejected,
+                        );
                         self.abort_unpublished_groups(
                             kernel,
                             context.actor,
@@ -2394,12 +2516,28 @@ where
                             .begin_reply(context.actor, attempt.request)
                         {
                             Ok(()) => {
+                                record_workbench_operation(
+                                    operations,
+                                    execution,
+                                    input_unit_index,
+                                    ordinal,
+                                    &effect,
+                                    WorkbenchOperationDisposition::Committed,
+                                );
                                 return Ok(ResidentWorkbenchStep::Replied {
                                     request: attempt.request,
                                     result: attempt.result,
                                 });
                             }
                             Err(error) if attempt.recoverable => {
+                                record_workbench_operation(
+                                    operations,
+                                    execution,
+                                    input_unit_index,
+                                    ordinal,
+                                    &effect,
+                                    WorkbenchOperationDisposition::Rejected,
+                                );
                                 drop(attempt.result);
                                 outcome = self
                                     .environment
@@ -2414,6 +2552,14 @@ where
                                 continue;
                             }
                             Err(error) => {
+                                record_workbench_operation(
+                                    operations,
+                                    execution,
+                                    input_unit_index,
+                                    ordinal,
+                                    &effect,
+                                    WorkbenchOperationDisposition::Rejected,
+                                );
                                 drop(attempt.result);
                                 return Ok(ResidentWorkbenchStep::Rejected(format!(
                                     "reply rejected: {error:?}"
@@ -2429,11 +2575,27 @@ where
                                     acknowledgement.request,
                                 ) {
                                 Ok(_) => {
+                                    record_workbench_operation(
+                                        operations,
+                                        execution,
+                                        input_unit_index,
+                                        ordinal,
+                                        &effect,
+                                        WorkbenchOperationDisposition::Committed,
+                                    );
                                     return Ok(ResidentWorkbenchStep::CancellationAcknowledged {
                                         request: acknowledgement.request,
                                     });
                                 }
                                 Err(error) if acknowledgement.recoverable => {
+                                    record_workbench_operation(
+                                        operations,
+                                        execution,
+                                        input_unit_index,
+                                        ordinal,
+                                        &effect,
+                                        WorkbenchOperationDisposition::Rejected,
+                                    );
                                     outcome = self
                                         .environment
                                         .runner
@@ -2447,6 +2609,14 @@ where
                                     continue;
                                 }
                                 Err(error) => {
+                                    record_workbench_operation(
+                                        operations,
+                                        execution,
+                                        input_unit_index,
+                                        ordinal,
+                                        &effect,
+                                        WorkbenchOperationDisposition::Rejected,
+                                    );
                                     return Ok(ResidentWorkbenchStep::Rejected(format!(
                                         "cancellation acknowledgement rejected: {error:?}"
                                     )));
@@ -2454,14 +2624,42 @@ where
                             }
                         }
                         boundary => {
-                            outcome = self
+                            outcome = match self
                                 .resolve_effect(
                                     kernel,
                                     context,
                                     &crate::CallAncestry::begin(context.actor),
                                     boundary,
                                 )
-                                .await?;
+                                .await
+                            {
+                                Ok(outcome) => {
+                                    record_workbench_operation(
+                                        operations,
+                                        execution,
+                                        input_unit_index,
+                                        ordinal,
+                                        &effect,
+                                        if commits_with_unit {
+                                            WorkbenchOperationDisposition::Prepared
+                                        } else {
+                                            WorkbenchOperationDisposition::Committed
+                                        },
+                                    );
+                                    outcome
+                                }
+                                Err(error) => {
+                                    record_workbench_operation(
+                                        operations,
+                                        execution,
+                                        input_unit_index,
+                                        ordinal,
+                                        &effect,
+                                        WorkbenchOperationDisposition::Unknown,
+                                    );
+                                    return Err(error);
+                                }
+                            };
                         }
                     }
                     fragment = next_fragment;
@@ -2477,6 +2675,7 @@ where
         context: &ActorSessionContext,
         request: WorkbenchRequest,
     ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
+        let execution = request.execution_id().cloned();
         let workbench = match &self.standing {
             ResidentStanding::Interactive(awaiting) => self.environment.runner.workbench(
                 awaiting.request.response.clone(),
@@ -2521,6 +2720,8 @@ where
                     output: self.status_text(kernel, context.actor, status_view),
                     warnings: Vec::new(),
                     installed_bindings: Vec::new(),
+                    operations: Vec::new(),
+                    terminal_transfer: None,
                 });
                 index += 1;
                 continue;
@@ -2535,6 +2736,8 @@ where
                         output: output.clone(),
                         warnings: Vec::new(),
                         installed_bindings: Vec::new(),
+                        operations: Vec::new(),
+                        terminal_transfer: None,
                     });
                     index += 1;
                     continue;
@@ -2567,6 +2770,8 @@ where
                             output,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
+                            operations: Vec::new(),
+                            terminal_transfer: None,
                         }),
                         Err(output) => {
                             receipts.push(WorkbenchItemReceipt {
@@ -2575,6 +2780,8 @@ where
                                 output,
                                 warnings: Vec::new(),
                                 installed_bindings: Vec::new(),
+                                operations: Vec::new(),
+                                terminal_transfer: None,
                             });
                         }
                     }
@@ -2584,6 +2791,7 @@ where
             }
 
             let source = request.items[index].clone();
+            let mut unit_operations = Vec::new();
             let block = ParsedBlock {
                 ordinal: index + 1,
                 total: request.items.len(),
@@ -2611,7 +2819,16 @@ where
             };
             if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
                 step = match self
-                    .settle_fragment_effects(kernel, context, &workbench, fragment, *outcome)
+                    .settle_fragment_effects(
+                        kernel,
+                        context,
+                        &workbench,
+                        fragment,
+                        *outcome,
+                        execution.as_ref(),
+                        index,
+                        &mut unit_operations,
+                    )
                     .await
                 {
                     Ok(step) => step,
@@ -2622,11 +2839,12 @@ where
                             "Haskell workbench failed during unfold admission",
                         )
                         .await;
-                        return Err(workbench_failure(
+                        return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
                             source,
+                            unit_operations,
                         ));
                     }
                 };
@@ -2645,12 +2863,18 @@ where
                                 "unfold was not the final Haskell input unit",
                             )
                             .await;
+                            settle_prepared_operations(
+                                &mut unit_operations,
+                                WorkbenchOperationDisposition::Rejected,
+                            );
                             receipts.push(WorkbenchItemReceipt {
                                 index,
                                 status: WorkbenchItemStatus::Rejected,
                                 output: "unfold must be the final executable input unit in its hosted Haskell call".into(),
                                 warnings: Vec::new(),
                                 installed_bindings: Vec::new(),
+                                operations: unit_operations,
+                                terminal_transfer: None,
                             });
                             return Ok(KernelStep::Continue(workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -2659,17 +2883,25 @@ where
                                 request.items.len(),
                             )));
                         }
-                        self.environment
-                            .fork_groups
-                            .publish_ready(context.actor)
-                            .map_err(|source| {
-                                workbench_failure(
-                                    &receipts,
-                                    index,
-                                    request.items.len(),
-                                    ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
-                                )
-                            })?;
+                        if let Err(source) =
+                            self.environment.fork_groups.publish_ready(context.actor)
+                        {
+                            settle_prepared_operations(
+                                &mut unit_operations,
+                                WorkbenchOperationDisposition::Unknown,
+                            );
+                            return Err(workbench_failure_after_operations(
+                                &receipts,
+                                index,
+                                request.items.len(),
+                                ResidentActorWorkbenchError::ActorProtocol(source.to_string()),
+                                unit_operations,
+                            ));
+                        }
+                        settle_prepared_operations(
+                            &mut unit_operations,
+                            WorkbenchOperationDisposition::Committed,
+                        );
                     } else if self.environment.fork_groups.has_unpublished(context.actor) {
                         self.abort_unpublished_groups(
                             kernel,
@@ -2677,6 +2909,10 @@ where
                             "Haskell input ended before unfold admission committed",
                         )
                         .await;
+                        settle_prepared_operations(
+                            &mut unit_operations,
+                            WorkbenchOperationDisposition::Rejected,
+                        );
                         receipts.push(WorkbenchItemReceipt {
                             index,
                             status: WorkbenchItemStatus::Rejected,
@@ -2684,6 +2920,8 @@ where
                                 .into(),
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
+                            operations: unit_operations,
+                            terminal_transfer: None,
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
@@ -2698,9 +2936,15 @@ where
                         output,
                         warnings,
                         installed_bindings,
+                        operations: unit_operations,
+                        terminal_transfer: None,
                     });
                 }
                 ResidentWorkbenchStep::Rejected(output) => {
+                    settle_prepared_operations(
+                        &mut unit_operations,
+                        WorkbenchOperationDisposition::Rejected,
+                    );
                     if request.item_is_observational(index) {
                         receipts.push(WorkbenchItemReceipt {
                             index,
@@ -2708,6 +2952,8 @@ where
                             output,
                             warnings: Vec::new(),
                             installed_bindings: Vec::new(),
+                            operations: unit_operations,
+                            terminal_transfer: None,
                         });
                         index += 1;
                         continue;
@@ -2724,6 +2970,8 @@ where
                         output,
                         warnings: Vec::new(),
                         installed_bindings: Vec::new(),
+                        operations: unit_operations,
+                        terminal_transfer: None,
                     });
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Rejected,
@@ -2743,13 +2991,14 @@ where
                             "request reply interrupted unfold admission",
                         )
                         .await;
-                        return Err(workbench_failure(
+                        return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "an actor cannot reply while an unfold group is unpublished".into(),
                             ),
+                            unit_operations,
                         ));
                     }
                     let awaiting =
@@ -2767,13 +3016,14 @@ where
                                         "reply did not match the active request",
                                     );
                                 self.publish_watch_notifications(notifications);
-                                return Err(workbench_failure(
+                                return Err(workbench_failure_after_operations(
                                     &receipts,
                                     index,
                                     request.items.len(),
                                     ResidentActorWorkbenchError::ActorProtocol(
                                         "reply did not match the active request".into(),
                                     ),
+                                    unit_operations,
                                 ));
                             }
                             standing => {
@@ -2784,13 +3034,14 @@ where
                                         "reply lost its request continuation",
                                     );
                                 self.publish_watch_notifications(notifications);
-                                return Err(workbench_failure(
+                                return Err(workbench_failure_after_operations(
                                     &receipts,
                                     index,
                                     request.items.len(),
                                     ResidentActorWorkbenchError::ActorProtocol(
                                         "reply lost its request continuation".into(),
                                     ),
+                                    unit_operations,
                                 ));
                             }
                         };
@@ -2806,11 +3057,12 @@ where
                                 format!("request continuation failed: {error}"),
                             );
                             self.publish_watch_notifications(notifications);
-                            return Err(workbench_failure(
+                            return Err(workbench_failure_after_operations(
                                 &receipts,
                                 index,
                                 request.items.len(),
                                 error,
+                                unit_operations,
                             ));
                         }
                     };
@@ -2820,17 +3072,27 @@ where
                             "actor settled a second reply before resuming the first",
                         );
                         self.publish_watch_notifications(notifications);
-                        return Err(workbench_failure(
+                        return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "actor settled a second reply before resuming the first".into(),
                             ),
+                            unit_operations,
                         ));
                     }
                     self.pending_program = Some(outcome);
                     self.pending_reply = Some(request_id);
+                    receipts.push(WorkbenchItemReceipt {
+                        index,
+                        status: WorkbenchItemStatus::Committed,
+                        output: String::new(),
+                        warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
+                        operations: unit_operations,
+                        terminal_transfer: Some(WorkbenchTerminalTransfer::ReplyAccepted),
+                    });
                     return Ok(KernelStep::ContinueLater(workbench_response(
                         WorkbenchRunStatus::Replied,
                         receipts,
@@ -2851,7 +3113,7 @@ where
                         self.environment
                             .requests
                             .rollback_cancellation_acknowledgement(request_id);
-                        return Err(workbench_failure(
+                        return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
@@ -2859,6 +3121,7 @@ where
                                 "an actor cannot acknowledge cancellation while an unfold group is unpublished"
                                     .into(),
                             ),
+                            unit_operations,
                         ));
                     }
                     if self.pending_program.is_some()
@@ -2868,13 +3131,14 @@ where
                         self.environment
                             .requests
                             .rollback_cancellation_acknowledgement(request_id);
-                        return Err(workbench_failure(
+                        return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "actor settled a second request before resuming the first".into(),
                             ),
+                            unit_operations,
                         ));
                     }
                     let awaiting =
@@ -2889,13 +3153,14 @@ where
                                 self.environment
                                     .requests
                                     .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure(
+                                return Err(workbench_failure_after_operations(
                                     &receipts,
                                     index,
                                     request.items.len(),
                                     ResidentActorWorkbenchError::ActorProtocol(
                                         "cancellation did not match the active request".into(),
                                     ),
+                                    unit_operations,
                                 ));
                             }
                             standing => {
@@ -2903,13 +3168,14 @@ where
                                 self.environment
                                     .requests
                                     .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure(
+                                return Err(workbench_failure_after_operations(
                                     &receipts,
                                     index,
                                     request.items.len(),
                                     ResidentActorWorkbenchError::ActorProtocol(
                                         "cancellation lost its active request".into(),
                                     ),
+                                    unit_operations,
                                 ));
                             }
                         };
@@ -2918,13 +3184,14 @@ where
                         self.environment
                             .requests
                             .rollback_cancellation_acknowledgement(request_id);
-                        return Err(workbench_failure(
+                        return Err(workbench_failure_after_operations(
                             &receipts,
                             index,
                             request.items.len(),
                             ResidentActorWorkbenchError::ActorProtocol(
                                 "cancellation lost its mailbox continuation".into(),
                             ),
+                            unit_operations,
                         ));
                     };
                     let outcome = match self
@@ -2944,17 +3211,29 @@ where
                             self.environment
                                 .requests
                                 .rollback_cancellation_acknowledgement(request_id);
-                            return Err(workbench_failure(
+                            return Err(workbench_failure_after_operations(
                                 &receipts,
                                 index,
                                 request.items.len(),
                                 error,
+                                unit_operations,
                             ));
                         }
                     };
                     drop(awaiting);
                     self.pending_program = Some(outcome);
                     self.pending_cancellation = Some(request_id);
+                    receipts.push(WorkbenchItemReceipt {
+                        index,
+                        status: WorkbenchItemStatus::Committed,
+                        output: String::new(),
+                        warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
+                        operations: unit_operations,
+                        terminal_transfer: Some(
+                            WorkbenchTerminalTransfer::CancellationAcknowledged,
+                        ),
+                    });
                     return Ok(KernelStep::ContinueLater(workbench_response(
                         WorkbenchRunStatus::RequestCancelled,
                         receipts,
@@ -3196,6 +3475,22 @@ where
                     detail: "actor has no active Haskell application workbench".into(),
                 });
             }
+            let execution = request.execution_id().cloned();
+            if let Some(execution) = &execution {
+                match self.completed_workbenches.lookup(execution, &request) {
+                    Err(()) => {
+                        return Err(KernelInvocationFailure::Rejected {
+                            actor: context.actor,
+                            detail:
+                                "one hosted call identity was retried with different Haskell input"
+                                    .into(),
+                        });
+                    }
+                    Ok(Some(reply)) => return reply.map(KernelStep::Continue),
+                    Ok(None) => {}
+                }
+            }
+            let retained_request = execution.as_ref().map(|_| request.clone());
             let result = self.execute_workbench(kernel, &context, request).await;
             let rejected = match &result {
                 Err(_) => true,
@@ -3212,15 +3507,29 @@ where
                     tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
                 }
             }
-            result.map_err(|failure| {
+            let result = result.map_err(|failure| {
                 KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
                     actor: context.actor,
-                    completed: failure.completed,
+                    receipts: failure.receipts,
                     failed_index: failure.failed_index,
                     total: failure.total,
                     detail: failure.source.to_string(),
                 })
-            })
+            });
+            if let (Some(execution), Some(request)) = (execution, retained_request) {
+                let reply = match &result {
+                    Ok(
+                        KernelStep::Continue(response)
+                        | KernelStep::ContinueLater(response)
+                        | KernelStep::Stop {
+                            output: response, ..
+                        },
+                    ) => Ok(response.clone()),
+                    Err(error) => Err(error.clone()),
+                };
+                self.completed_workbenches.record(execution, request, reply);
+            }
+            result
         })
     }
 
@@ -3473,6 +3782,8 @@ fn workbench_response(
         output: String::new(),
         warnings: Vec::new(),
         installed_bindings: Vec::new(),
+        operations: Vec::new(),
+        terminal_transfer: None,
     }));
     WorkbenchResponse {
         status,
@@ -3484,10 +3795,15 @@ fn workbench_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{workbench_response, ChildExitObservations};
+    use super::{
+        workbench_failure_after_operations, workbench_response, ChildExitObservations,
+        CompletedWorkbenchExecutions,
+    };
     use crate::{ActorId, ActorRef, Incarnation};
     use tidepool_runtime::session::{
-        WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRunStatus,
+        WorkbenchExecutionId, WorkbenchItemReceipt, WorkbenchItemStatus,
+        WorkbenchOperationDisposition, WorkbenchOperationId, WorkbenchOperationReceipt,
+        WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
     };
 
     #[test]
@@ -3527,6 +3843,8 @@ mod tests {
                 output: "bad effect".into(),
                 warnings: Vec::new(),
                 installed_bindings: Vec::new(),
+                operations: Vec::new(),
+                terminal_transfer: None,
             }],
             0,
             3,
@@ -3534,5 +3852,55 @@ mod tests {
         assert_eq!(response.items.len(), 3);
         assert_eq!(response.items[1].status, WorkbenchItemStatus::NotRun);
         assert_eq!(response.items[2].status, WorkbenchItemStatus::NotRun);
+    }
+
+    #[test]
+    fn actor_owned_workbench_retry_returns_only_the_exact_committed_call() {
+        let execution = WorkbenchExecutionId::from_digest([7; 16]);
+        let request = WorkbenchRequest::from_ghci_input("effectfulAction")
+            .unwrap()
+            .with_execution_id(execution.clone());
+        let reply = Ok(WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            items: Vec::new(),
+            next_index: 1,
+            total: 1,
+        });
+        let mut completed = CompletedWorkbenchExecutions::default();
+        completed.record(execution.clone(), request.clone(), reply.clone());
+
+        assert_eq!(completed.lookup(&execution, &request), Ok(Some(reply)));
+        let different = WorkbenchRequest::from_ghci_input("differentAction")
+            .unwrap()
+            .with_execution_id(execution.clone());
+        assert_eq!(completed.lookup(&execution, &different), Err(()));
+        assert_eq!(
+            completed.lookup(&WorkbenchExecutionId::from_digest([8; 16]), &request),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn prepared_operations_never_escape_a_failed_unit() {
+        let execution = WorkbenchExecutionId::from_digest([9; 16]);
+        let failure = workbench_failure_after_operations(
+            &[],
+            0,
+            1,
+            crate::ResidentActorWorkbenchError::ActorProtocol("publish failed".into()),
+            vec![WorkbenchOperationReceipt {
+                id: WorkbenchOperationId {
+                    execution,
+                    input_unit_index: 0,
+                    effect_ordinal: 0,
+                },
+                effect: "commit context-fork group".into(),
+                disposition: WorkbenchOperationDisposition::Prepared,
+            }],
+        );
+        assert_eq!(
+            failure.receipts[0].operations[0].disposition,
+            WorkbenchOperationDisposition::Unknown
+        );
     }
 }
