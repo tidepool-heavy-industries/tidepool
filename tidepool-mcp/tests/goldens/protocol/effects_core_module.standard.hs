@@ -153,7 +153,8 @@ data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, 
 data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)
 data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)
 data WorktreeSummary = WorktreeSummary { summaryReceipt :: WorktreeReceipt, present :: Bool } deriving (Show, Eq)
-data MergeOutcome = Merged GitOid | Conflict [Text] deriving (Show, Eq)
+data MergeRequest = MergeRequest { mergeSourceHead :: GitOid, mergeSourceBranch :: Maybe BranchName, mergeTargetWorktree :: WorktreeId, mergeMessage :: Text } deriving (Show, Eq)
+data MergeOutcome = AlreadyContained GitOid GitOid | FastForwarded GitOid GitOid GitOid | CreatedMergeCommit GitOid GitOid GitOid | ManualGitRequired GitOid GitOid Text [Text] deriving (Show, Eq)
 instance ToJSON WorktreeId where toJSON (WorktreeId t) = toJSON t
 instance ToJSON GitOid where toJSON (GitOid t) = toJSON t
 instance ToJSON GitRef where toJSON (GitRef t) = toJSON t
@@ -188,7 +189,7 @@ data Worktree a where
   WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)
   WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)
   WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)
-  WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)
+  WorktreeTryMerge :: MergeRequest -> Worktree (Either WorktreeError MergeOutcome)
 
 data EventId = EventId Int deriving (Show, Eq)
 data SubscriptionId = SubscriptionId Int deriving (Show, Eq)
@@ -677,16 +678,13 @@ listWorktrees = send WorktreeList
 -- already carries its receipt, so this reads no git state.
 worktreeId :: WorktreeHandle -> WorktreeId
 worktreeId h = h.handleReceipt.treeId
--- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`
--- — never a fast-forward, so a landed merge always carries a genuine merge
--- commit. On conflict, the conflicting paths are read and the merge is
--- ABORTED before this returns: the worktree is left clean either way,
--- success or conflict. `Left (GitFailure r)` is a `git` invocation that
--- never entered a merge at all (an unknown branch, a locked index) —
--- distinct from `Right (Conflict paths)`, a merge that genuinely started
--- and conflicted.
-mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)
-mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)
+-- | Attempt the ordinary merge named by a `MergeRequest`.
+-- The exact source commit is authoritative; an optional source branch is checked
+-- for drift. Straight-line history fast-forwards, divergent history creates a
+-- merge commit, and conflicts return `ManualGitRequired` only after aborting and
+-- proving the target returned to its starting HEAD and operation state.
+tryMerge :: forall effs. Member Worktree effs => MergeRequest -> Eff effs (Either WorktreeError MergeOutcome)
+tryMerge = send . WorktreeTryMerge
 -- | Observe a candidate checkout through one bounded Worktree operation.
 -- This reports submitted HEAD, dirty state, and in-progress operation
 -- together; it does not seal or mutate the checkout.

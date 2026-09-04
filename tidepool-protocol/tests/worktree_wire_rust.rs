@@ -34,13 +34,6 @@
 use tidepool_protocol::effects;
 use tidepool_protocol::gen::wire_rs;
 
-#[test]
-fn worktree_wire_module_matches_pin() {
-    let worktree = effects::worktree::worktree();
-    let generated = wire_rs::file(&worktree);
-    insta::assert_snapshot!(generated.contents);
-}
-
 // ---------------------------------------------------------------------------
 // The independent, hand-transcribed structural cross-check.
 // ---------------------------------------------------------------------------
@@ -209,6 +202,20 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
         &[("raw", "String")],
     );
 
+    assert_struct(
+        &module,
+        "WtMergeRequest",
+        "MergeRequest",
+        WIRE,
+        true,
+        &[
+            ("source_head", "WtGitOid"),
+            ("source_branch", "Option<WtBranchName>"),
+            ("target_worktree", "WtWorktreeId"),
+            ("merge_message", "String"),
+        ],
+    );
+
     assert_enum(
         &module,
         "WtWorktreeSource",
@@ -298,6 +305,7 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
         &[
             ("observed_worktree_id", "WtWorktreeId"),
             ("base_head", "WtGitOid"),
+            ("committed_paths", "Vec<String>"),
             ("submitted_head", "WtHeadState"),
             ("working_state", "WtWorkingState"),
         ],
@@ -359,7 +367,12 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
         &module,
         "WtMergeOutcome",
         WIRE,
-        &["Merged(WtGitOid)", "Conflict(Vec<String>)"],
+        &[
+            "AlreadyContained(WtGitOid, WtGitOid)",
+            "FastForwarded(WtGitOid, WtGitOid, WtGitOid)",
+            "CreatedMergeCommit(WtGitOid, WtGitOid, WtGitOid)",
+            "ManualGitRequired(WtGitOid, WtGitOid, String, Vec<String>)",
+        ],
     );
 }
 

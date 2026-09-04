@@ -20,7 +20,7 @@ and administrative metadata share the source repository's namespace.
   `UnknownChange` rather than inventing attribution.
 - Subscriptions start at the journal's current end. The durable journal is for
   traceability and diagnosis, not handler replay.
-- Do not add general workflow verbs. `merge_branch_into` is the one typed
+- Do not add general workflow verbs. `try_merge` is the one typed
   merge/abort boundary; conflict resolution stays authored policy.
 - Test git behavior against real temporary repositories, never a mocked git.
   This crate is GHC-free and suitable for focused ordinary Cargo tests.

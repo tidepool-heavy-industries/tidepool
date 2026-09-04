@@ -118,7 +118,8 @@ module Tidepool.Actors.Shoal
   , worktreeHead
   , observeSubmission
   , MergeOutcome (..)
-  , mergeBranchInto
+  , MergeRequest (..)
+  , tryMerge
   , WorktreeReceipt (..)
   , WorktreeSummary (..)
   , WorktreeError (..)

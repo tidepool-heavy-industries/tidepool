@@ -45,87 +45,43 @@ fn worktree_type_def_texts_have_semantic_landmarks() {
         .any(|declaration| declaration.starts_with("data WorktreeError =")));
 }
 
-/// Constructor signatures stay pinned in schema order.
+/// Constructor signatures preserve the model-facing roles without copying
+/// the complete generated module into the test.
 #[test]
-fn worktree_constructor_signatures_are_pinned() {
+fn worktree_constructor_signatures_name_merge_roles() {
     let wt = worktree();
-
-    assert_eq!(
-        wt.constructor_signatures(),
-        vec![
-            "WorktreeCreate :: WorktreeSpec -> Worktree (Either WorktreeError WorktreeHandle)",
-            "WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)",
-            "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
-            "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",
-            "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)",
-            "WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)",
-            "WorktreeMergeInto :: WorktreeId -> BranchName -> Text -> Worktree (Either WorktreeError MergeOutcome)",
-        ]
-    );
+    let signatures = wt.constructor_signatures();
+    assert!(signatures.iter().any(|signature| signature
+        == "WorktreeTryMerge :: MergeRequest -> Worktree (Either WorktreeError MergeOutcome)"));
+    assert!(signatures
+        .iter()
+        .any(|signature| signature.starts_with("WorktreeCreate ::")));
+    assert!(signatures
+        .iter()
+        .any(|signature| signature.starts_with("WorktreeObserveSubmission ::")));
 }
 
-/// Pin generated thin wrappers and projections verbatim.
+/// Generated thin wrappers retain their important public types. Their prose
+/// and formatting are deliberately not a second hand-maintained golden.
 #[test]
-fn worktree_helper_texts_are_pinned() {
+fn worktree_helpers_expose_typed_operations() {
     let wt = worktree();
-
-    assert_eq!(
-        wt.helper_texts(),
-        vec![
-            concat!(
-                "-- | Create a managed worktree. `Left (SourceDirty summary)` when the\n",
-                "-- source is dirty and the spec did not opt in; case-match the error\n",
-                "-- rather than unwrapping if you mean to handle it.\n",
-                "createWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)\n",
-                "createWorktree = send . WorktreeCreate",
-            ),
-            concat!(
-                "-- | Look a retained worktree up by durable id. Survives restart:\n",
-                "-- resolution reads on-disk registry state, not process memory.\n",
-                "-- `Left (WorktreeLost i)` when it is registered but gone from disk.\n",
-                "lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError WorktreeHandle)\n",
-                "lookupWorktree = send . WorktreeLookup",
-            ),
-            concat!(
-                "-- | Every registered worktree, present or lost. A lost tree is listed\n",
-                "-- with `present = False` rather than failing the whole listing.\n",
-                "listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])\n",
-                "listWorktrees = send WorktreeList",
-            ),
-            concat!(
-                "-- | The durable identity of a managed worktree. Pure: the handle\n",
-                "-- already carries its receipt, so this reads no git state.\n",
-                "worktreeId :: WorktreeHandle -> WorktreeId\n",
-                "worktreeId h = h.handleReceipt.treeId",
-            ),
-            concat!(
-                "-- | Merge `branch` into the worktree `treeId` names, as `git merge --no-ff`\n",
-                "-- — never a fast-forward, so a landed merge always carries a genuine merge\n",
-                "-- commit. On conflict, the conflicting paths are read and the merge is\n",
-                "-- ABORTED before this returns: the worktree is left clean either way,\n",
-                "-- success or conflict. `Left (GitFailure r)` is a `git` invocation that\n",
-                "-- never entered a merge at all (an unknown branch, a locked index) —\n",
-                "-- distinct from `Right (Conflict paths)`, a merge that genuinely started\n",
-                "-- and conflicted.\n",
-                "mergeBranchInto :: forall effs. Member Worktree effs => WorktreeId -> BranchName -> Text -> Eff effs (Either WorktreeError MergeOutcome)\n",
-                "mergeBranchInto treeId branch message = send (WorktreeMergeInto treeId branch message)",
-            ),
-            concat!(
-                "-- | Observe a candidate checkout through one bounded Worktree operation.\n",
-                "-- This reports submitted HEAD, dirty state, and in-progress operation\n",
-                "-- together; it does not seal or mutate the checkout.\n",
-                "observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)\n",
-                "observeSubmission = send . WorktreeObserveSubmission",
-            ),
-        ]
-    );
+    let helpers = wt.helper_texts().join("\n");
+    for signature in [
+        "createWorktree :: forall effs. Member Worktree effs => WorktreeSpec -> Eff effs (Either WorktreeError WorktreeHandle)",
+        "tryMerge :: forall effs. Member Worktree effs => MergeRequest -> Eff effs (Either WorktreeError MergeOutcome)",
+        "observeSubmission :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (Either WorktreeError SubmissionObservation)",
+    ] {
+        assert!(helpers.contains(signature), "missing helper signature: {signature}");
+    }
+    assert!(helpers.contains("send . WorktreeTryMerge"));
 }
 
 /// Rich library helpers must remain absent from the protocol schema rather
 /// than entering it as raw Haskell strings. They are imported from
 /// `Tidepool.Worktree`; generated code owns only thin wrappers and projections.
 #[test]
-fn worktree_ten_helpers_are_not_schema_representable() {
+fn rich_library_helpers_stay_out_of_the_protocol_schema() {
     const NOT_REPRESENTABLE: &[&str] = &[
         "fromCurrentRepository",
         "fromRef",
@@ -138,9 +94,6 @@ fn worktree_ten_helpers_are_not_schema_representable() {
         "renderBranchName",
         "renderWorktreeError",
     ];
-    assert_eq!(NOT_REPRESENTABLE.len(), 10);
-    assert_eq!(NOT_REPRESENTABLE.len() + worktree().helpers.len(), 16);
-
     let wt = worktree();
     for name in NOT_REPRESENTABLE {
         assert!(

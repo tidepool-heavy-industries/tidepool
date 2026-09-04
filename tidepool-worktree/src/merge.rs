@@ -8,8 +8,8 @@
 //! cherry-pick, and conflict RESOLUTION belong to coding agents with their
 //! native tools, and Tidepool only observes what the repository became). It
 //! is one narrowly-typed primitive for the coordination fold specifically.
-//! It IS exposed as a `Worktree` effect verb (`WorktreeMergeInto` /
-//! `mergeBranchInto`, generated from `tidepool-protocol`'s schema) — the
+//! It IS exposed as a `Worktree` effect verb (`WorktreeTryMerge` /
+//! `tryMerge`, generated from `tidepool-protocol`'s schema) — the
 //! consolidation is deliberate, not a widening of the boundary: two authored
 //! Haskell reimplementations of exactly this primitive
 //! (`harness-dogfooding/dev-tree/Harness.hs`'s `mergeChild` and
@@ -25,8 +25,8 @@
 //! at each authored call site.
 //!
 //! Every outcome is DATA. A conflict never leaves the target worktree
-//! mid-merge: [`merge_branch_into`] runs `git merge --abort` before
-//! returning [`MergeOutcome::Conflict`], so the caller always finds a clean
+//! mid-merge: [`try_merge`] runs `git merge --abort` before returning
+//! [`MergeOutcome::ManualGitRequired`], so the caller always finds a clean
 //! tree either way. A merge failure that is not a real conflict (an unknown
 //! branch, for instance) surfaces as `Err(WorktreeError::GitFailure(_))`,
 //! the crate's ordinary git-failure shape — never a panic, never a
@@ -38,29 +38,40 @@ use crate::error::{InProgressKind, WorktreeError};
 use crate::git::{inspect, GitCli};
 use crate::id::{BranchName, GitOid};
 
-/// The result of merging one branch into a target worktree. A `git`
+/// The result of merging one exact commit into a target worktree. A `git`
 /// invocation failure that is NOT this — an unknown branch, a locked index,
 /// anything that never entered a merge at all — is `Err(WorktreeError::
 /// GitFailure(_))` instead; this type only ever describes a merge that
 /// actually started.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergeOutcome {
-    /// The merge landed a new commit. `commit` is the target's `HEAD` after
-    /// the merge — a real merge commit (`--no-ff` is always passed, so a
-    /// fast-forward never silently loses the "this was a merge" fact).
-    Merged { commit: GitOid },
-    /// The merge conflicted. `paths` are the repository-relative paths git
-    /// reported unmerged (`diff --name-only --diff-filter=U`), read BEFORE
-    /// the abort. The target worktree is guaranteed clean by the time this
-    /// is returned — no `MERGE_HEAD`, no partial index state — because the
-    /// abort runs before this outcome is constructed, never after.
-    Conflict { paths: Vec<String> },
+    AlreadyContained {
+        source: GitOid,
+        target: GitOid,
+    },
+    FastForwarded {
+        source: GitOid,
+        before: GitOid,
+        after: GitOid,
+    },
+    CreatedMergeCommit {
+        source: GitOid,
+        before: GitOid,
+        commit: GitOid,
+    },
+    /// The conservative operation could not finish automatically. Any merge
+    /// that started has been aborted; `target` is both the starting and final
+    /// target HEAD when this value is returned.
+    ManualGitRequired {
+        source: GitOid,
+        target: GitOid,
+        reason: String,
+        paths: Vec<String>,
+    },
 }
 
-/// Merge `branch` into the worktree at `target_cwd`, as one `git merge
-/// --no-ff` — never a fast-forward, so the result always carries a genuine
-/// merge commit when it lands one, which is what lets a caller build a
-/// legible bottom-up history rather than a silently-rebased one.
+/// Merge `source` into the worktree at `target_cwd`. A direct descendant
+/// fast-forwards; divergent histories use one explicit merge commit.
 ///
 /// On conflict, `git diff --name-only --diff-filter=U` is read and THEN
 /// `git merge --abort` runs — abort-before-return is the whole of "never a
@@ -71,20 +82,64 @@ pub enum MergeOutcome {
 /// branch name, for instance) is not a conflict at all — it never started a
 /// merge to abort — and surfaces as `Err(WorktreeError::GitFailure(_))`
 /// carrying the full invocation receipt.
-pub fn merge_branch_into(
+pub fn try_merge(
     git: &GitCli,
     target_cwd: &Path,
-    branch: &BranchName,
+    source: &GitOid,
+    source_branch: Option<&BranchName>,
     message: &str,
 ) -> Result<MergeOutcome, WorktreeError> {
+    let target = GitOid::from_raw(git.try_run(target_cwd, &["rev-parse", "HEAD"])?.trimmed());
+
+    git.try_run(
+        target_cwd,
+        &["cat-file", "-e", &format!("{}^{{commit}}", source.as_str())],
+    )?;
+    if let Some(branch) = source_branch {
+        let observed = GitOid::from_raw(
+            git.try_run(target_cwd, &["rev-parse", branch.as_str()])?
+                .trimmed(),
+        );
+        if &observed != source {
+            return Ok(MergeOutcome::ManualGitRequired {
+                source: source.clone(),
+                target,
+                reason: format!(
+                    "source branch `{}` moved to {}; expected {}",
+                    branch.as_str(),
+                    observed.as_str(),
+                    source.as_str()
+                ),
+                paths: Vec::new(),
+            });
+        }
+    }
+
+    if is_ancestor(git, target_cwd, source, &target)? {
+        return Ok(MergeOutcome::AlreadyContained {
+            source: source.clone(),
+            target,
+        });
+    }
+    if is_ancestor(git, target_cwd, &target, source)? {
+        git.try_run(target_cwd, &["merge", "--ff-only", source.as_str()])?;
+        let after = head(git, target_cwd)?;
+        return Ok(MergeOutcome::FastForwarded {
+            source: source.clone(),
+            before: target,
+            after,
+        });
+    }
+
     let receipt = match git.run(
         target_cwd,
-        &["merge", "--no-ff", "-m", message, branch.as_str()],
+        &["merge", "--no-ff", "-m", message, source.as_str()],
     ) {
         Ok(_) => {
-            let out = git.try_run(target_cwd, &["rev-parse", "HEAD"])?;
-            return Ok(MergeOutcome::Merged {
-                commit: GitOid::from_raw(out.trimmed()),
+            return Ok(MergeOutcome::CreatedMergeCommit {
+                source: source.clone(),
+                before: target,
+                commit: head(git, target_cwd)?,
             });
         }
         Err(receipt) => receipt,
@@ -112,5 +167,42 @@ pub fn merge_branch_into(
     // enumerate them", not a claim that nothing conflicted.
     git.try_run(target_cwd, &["merge", "--abort"])?;
 
-    Ok(MergeOutcome::Conflict { paths })
+    let restored = head(git, target_cwd)?;
+    if restored != target || inspect::in_progress(git, target_cwd)?.is_some() {
+        return Err(WorktreeError::GitFailure(receipt));
+    }
+
+    Ok(MergeOutcome::ManualGitRequired {
+        source: source.clone(),
+        target,
+        reason: "merge conflict; target was restored to its starting state".into(),
+        paths,
+    })
+}
+
+fn head(git: &GitCli, cwd: &Path) -> Result<GitOid, WorktreeError> {
+    Ok(GitOid::from_raw(
+        git.try_run(cwd, &["rev-parse", "HEAD"])?.trimmed(),
+    ))
+}
+
+fn is_ancestor(
+    git: &GitCli,
+    cwd: &Path,
+    possible_ancestor: &GitOid,
+    descendant: &GitOid,
+) -> Result<bool, WorktreeError> {
+    match git.run(
+        cwd,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            possible_ancestor.as_str(),
+            descendant.as_str(),
+        ],
+    ) {
+        Ok(_) => Ok(true),
+        Err(receipt) if receipt.exit_code == Some(1) => Ok(false),
+        Err(receipt) => Err(WorktreeError::GitFailure(receipt)),
+    }
 }

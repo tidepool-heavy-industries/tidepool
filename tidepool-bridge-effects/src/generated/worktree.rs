@@ -183,20 +183,35 @@ pub struct WtWorktreeSummary {
     pub present: bool,
 }
 
+/// A conservative merge request with named source and target roles.
+/// The exact source OID prevents a retained child branch moving between review and fold.
+#[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
+#[core(name = "MergeRequest")]
+pub struct WtMergeRequest {
+    /// The exact observed source commit; this, not the branch label, is merged.
+    pub source_head: WtGitOid,
+    /// Optional readable provenance. If present, it must still resolve to sourceHead.
+    pub source_branch: Option<WtBranchName>,
+    /// The managed worktree whose checked-out branch receives the merge.
+    pub target_worktree: WtWorktreeId,
+    pub merge_message: String,
+}
+
 /// Haskell `MergeOutcome` — the result of merging one branch into a target
-/// worktree via `mergeBranchInto`. A `git` invocation failure that never
+/// worktree via `tryMerge`. A `git` invocation failure that never
 /// entered a merge at all (an unknown branch, a locked index) is NOT this —
 /// it surfaces as `Left (GitFailure _)` instead; this type only ever describes
 /// a merge that actually started.
 #[derive(ToCore, FromCore, Clone, Debug, PartialEq, Eq)]
 pub enum WtMergeOutcome {
-    /// The merge landed a new commit — the target's `HEAD` afterward. Always a
-    /// genuine merge commit (`--no-ff`), never a fast-forward.
-    Merged(WtGitOid),
-    /// The merge conflicted. The paths are what git reported unmerged, read
-    /// BEFORE the abort; the target worktree is guaranteed clean by the time
-    /// this is returned — the abort always runs first.
-    Conflict(Vec<String>),
+    /// The source was already reachable from the target; no mutation occurred.
+    AlreadyContained(WtGitOid, WtGitOid),
+    /// The target moved directly from before to the source commit.
+    FastForwarded(WtGitOid, WtGitOid, WtGitOid),
+    /// Divergent histories produced a new merge commit.
+    CreatedMergeCommit(WtGitOid, WtGitOid, WtGitOid),
+    /// Automatic integration stopped cleanly. The target is restored; use ordinary Git.
+    ManualGitRequired(WtGitOid, WtGitOid, String, Vec<String>),
 }
 
 impl WtWorktreeId {

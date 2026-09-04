@@ -634,10 +634,10 @@ One conservative typed convenience is still worthwhile for the common fold:
 
 ```haskell
 data MergeRequest = MergeRequest
-  { sourceHead     :: GitOid
-  , sourceBranch   :: Maybe BranchName
-  , targetWorktree :: WorktreeId
-  , message        :: Text
+  { mergeSourceHead     :: GitOid
+  , mergeSourceBranch   :: Maybe BranchName
+  , mergeTargetWorktree :: WorktreeId
+  , mergeMessage        :: Text
   }
 
 tryMerge

@@ -6,8 +6,8 @@ use parking_lot::{Mutex, RwLock};
 
 use tidepool_bridge_effects::{
     WireError, WtBranchName, WtDirtySummary, WtGitFailureReceipt, WtGitOid, WtHeadState,
-    WtMergeOutcome, WtSubmissionObservation, WtWorkingState, WtWorktreeHandle, WtWorktreeId,
-    WtWorktreeReceipt, WtWorktreeSource, WtWorktreeSpec, WtWorktreeSummary,
+    WtMergeOutcome, WtMergeRequest, WtSubmissionObservation, WtWorkingState, WtWorktreeHandle,
+    WtWorktreeId, WtWorktreeReceipt, WtWorktreeSource, WtWorktreeSpec, WtWorktreeSummary,
 };
 use tidepool_worktree::create::{WorktreeHandle, WorktreeManager, WorktreeSource, WorktreeSpec};
 use tidepool_worktree::error::{
@@ -15,7 +15,7 @@ use tidepool_worktree::error::{
 };
 use tidepool_worktree::git::GitCli;
 use tidepool_worktree::id::{BranchName, WorktreeId};
-use tidepool_worktree::merge::{merge_branch_into, MergeOutcome};
+use tidepool_worktree::merge::{try_merge, MergeOutcome};
 #[cfg(test)]
 use tidepool_worktree::registry::{WorktreeOrigin, WorktreeRecordStatus};
 use tidepool_worktree::registry::{WorktreeReceipt, WorktreeRegistry, WorktreeSummary};
@@ -257,14 +257,14 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             WorktreeReq::WorktreeList if grant.enumerate => {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
-            WorktreeReq::WorktreeMergeInto(..) if grant.integrate => {
+            WorktreeReq::WorktreeTryMerge(..) if grant.integrate => {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
             WorktreeReq::WorktreeCreate(_)
             | WorktreeReq::WorktreeCreateForActorPath(..)
             | WorktreeReq::WorktreeCreateFromBoundForActorPath(..)
             | WorktreeReq::WorktreeList
-            | WorktreeReq::WorktreeMergeInto(..) => None,
+            | WorktreeReq::WorktreeTryMerge(..) => None,
         };
         if let Some(wire_id) = permitted_tree {
             let id = match worktree_id_from_wire(wire_id) {
@@ -439,8 +439,38 @@ fn summary_to_wire(s: &WorktreeSummary) -> WtWorktreeSummary {
 
 fn merge_outcome_to_wire(o: MergeOutcome) -> WtMergeOutcome {
     match o {
-        MergeOutcome::Merged { commit } => WtMergeOutcome::Merged(git_oid_to_wire(&commit)),
-        MergeOutcome::Conflict { paths } => WtMergeOutcome::Conflict(paths),
+        MergeOutcome::AlreadyContained { source, target } => {
+            WtMergeOutcome::AlreadyContained(git_oid_to_wire(&source), git_oid_to_wire(&target))
+        }
+        MergeOutcome::FastForwarded {
+            source,
+            before,
+            after,
+        } => WtMergeOutcome::FastForwarded(
+            git_oid_to_wire(&source),
+            git_oid_to_wire(&before),
+            git_oid_to_wire(&after),
+        ),
+        MergeOutcome::CreatedMergeCommit {
+            source,
+            before,
+            commit,
+        } => WtMergeOutcome::CreatedMergeCommit(
+            git_oid_to_wire(&source),
+            git_oid_to_wire(&before),
+            git_oid_to_wire(&commit),
+        ),
+        MergeOutcome::ManualGitRequired {
+            source,
+            target,
+            reason,
+            paths,
+        } => WtMergeOutcome::ManualGitRequired(
+            git_oid_to_wire(&source),
+            git_oid_to_wire(&target),
+            reason,
+            paths,
+        ),
     }
 }
 
@@ -682,25 +712,30 @@ impl WorktreeHandler {
 
     /// The one narrow, deliberate workflow primitive (see
     /// `tidepool-worktree/src/merge.rs`): merge `branch` into the worktree
-    /// `tree_id` names, through `tidepool_worktree::merge::merge_branch_into`
+    /// `target_worktree` names, through `tidepool_worktree::merge::try_merge`
     /// — the same typed conflict-vs-failure classification and abort-before-
     /// return discipline every caller gets, instead of each authored harness
     /// re-deriving it over raw `Exec`.
-    pub(crate) fn worktree_merge_into(
+    pub(crate) fn worktree_try_merge(
         &mut self,
-        tree_id: WtWorktreeId,
-        branch: WtBranchName,
-        message: String,
+        request: WtMergeRequest,
     ) -> Result<WtMergeOutcome, WorktreeError> {
-        let id = worktree_id_from_wire(&tree_id)?;
+        let id = worktree_id_from_wire(&request.target_worktree)?;
         let handle = self
             .manager
             .lookup(&id)
             .map_err(error_to_wire)?
-            .ok_or_else(|| never_registered(&tree_id))?;
-        let domain_branch = branch_name_from_wire(&branch);
-        let outcome = merge_branch_into(self.manager.git(), handle.cwd(), &domain_branch, &message)
-            .map_err(error_to_wire)?;
+            .ok_or_else(|| never_registered(&request.target_worktree))?;
+        let source = tidepool_worktree::GitOid::from_raw(request.source_head.raw);
+        let source_branch = request.source_branch.as_ref().map(branch_name_from_wire);
+        let outcome = try_merge(
+            self.manager.git(),
+            handle.cwd(),
+            &source,
+            source_branch.as_ref(),
+            &request.merge_message,
+        )
+        .map_err(error_to_wire)?;
         Ok(merge_outcome_to_wire(outcome))
     }
 }

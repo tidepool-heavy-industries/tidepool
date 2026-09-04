@@ -76,4 +76,4 @@ pub(crate) fn in_progress_kind_to_wire(in_progress_kind: InProgressKind) -> WtIn
 
 // WorktreeSummary::into_wire — HAND-WRITTEN, not generated: delegates to the hand-written receipt conversion
 
-// MergeOutcome::into_wire — HAND-WRITTEN, not generated: `Merged` wraps its `GitOid` through `git_oid_to_wire`; `Conflict` clones its path `Vec` — both need a conversion beyond a bare variant rename
+// MergeOutcome::into_wire — HAND-WRITTEN, not generated: each outcome wraps domain Git OIDs and the manual handoff also clones its path Vec

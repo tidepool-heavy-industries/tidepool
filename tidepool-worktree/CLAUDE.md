@@ -44,17 +44,18 @@ repository became. Adding a workflow verb beyond the one exception is a
 design regression, not a convenience.
 
 **The narrow exception is `merge.rs`, exposed as a `Worktree` verb.** It
-provides one typed primitive to merge a branch into a target worktree,
+provides one typed primitive to merge an exact reviewed commit into a target worktree,
 abort-and-report on conflict, and never leave a half-merged tree.
-`merge::merge_branch_into` operates through the same
+`merge::try_merge` operates through the same
 `GitCli` call site as everything else here, with
-`MergeOutcome::{Merged,Conflict}` as its typed result (a non-conflict
+topology-specific `MergeOutcome` values as its typed result (a non-conflict
 failure stays the ordinary `WorktreeError::GitFailure`). It IS exposed as a
-`Worktree` effect verb — `WorktreeMergeInto` / Haskell `mergeBranchInto`,
+`Worktree` effect verb — `WorktreeTryMerge` / Haskell `tryMerge`,
 generated from `tidepool-protocol`'s schema like every other Worktree verb —
 `merge.rs` is the shared definition of merge, conflict classification, and
 abort. Conflict resolution and operations it does not cover remain authored
-policy. The branch must already exist in the target repository. Managed actor
+policy. The source commit must already exist in the target repository; an
+optional readable branch is checked for drift before mutation. Managed actor
 worktrees share the source repository's normal object and ref namespace, so a
 completed candidate branch is directly reviewable and foldable without a
 publication or import operation. Haskell callers reach operations outside

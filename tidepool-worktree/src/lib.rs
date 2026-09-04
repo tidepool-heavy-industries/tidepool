@@ -52,7 +52,7 @@ pub use git::{GitCli, GitOutput};
 pub use id::{BranchName, EventId, GitOid, GitRef, SubscriptionId, WorktreeId};
 pub use journal::{EventJournal, ObservationBatch};
 pub use label::{sanitize_agent_label, sanitize_branch_label};
-pub use merge::{merge_branch_into, MergeOutcome};
+pub use merge::{try_merge, MergeOutcome};
 pub use monitor::{
     CommitReceipt, HeadChangeKind, HeadChangeReceipt, Observed, RepositoryEvent, WorktreeMonitor,
     DEFAULT_POLL_INTERVAL_MS,

@@ -10,7 +10,7 @@
 -- 'Tidepool.Shell.runInTry', NOT defined here; see the note below on why),
 -- and Tidepool observes the result through 'Tidepool.Event'.
 --
--- 'mergeBranchInto' is the ONE deliberate exception (the recursive
+-- 'tryMerge' is the ONE deliberate exception (the recursive
 -- companion's worktree-coordination fold): merge one branch into a target worktree,
 -- typed and classified once — conflict vs. a git failure that never entered a
 -- merge at all — instead of every authored harness re-deriving that
@@ -113,8 +113,9 @@ module Tidepool.Worktree
   , withWorktree
 
     -- * Merging (the one narrow, deliberate workflow primitive)
+  , MergeRequest (..)
   , MergeOutcome (..)
-  , mergeBranchInto
+  , tryMerge
 
     -- * Receipts and failures
   , WorktreeReceipt (..)
@@ -145,6 +146,7 @@ import Tidepool.Effects
   , GitOid (..)
   , GitRef
   , InProgressKind (..)
+  , MergeRequest (..)
   , MergeOutcome (..)
   , HeadState (..)
   , WorkingState (..)
@@ -162,7 +164,7 @@ import Tidepool.Effects
   , liftEither
   , listWorktrees
   , lookupWorktree
-  , mergeBranchInto
+  , tryMerge
   , observeSubmission
   , worktreeId
   )
@@ -375,9 +377,9 @@ withWorktree tree = withLaunchWorktree (renderWorktreeId (worktreeId tree))
 -- | Build a 'BranchName' from a plain rendered branch name — for the case
 -- (the recursive companion's fold, in particular) where a node's own domain
 -- model only carries branch identity as 'Text' and needs it back as the typed
--- argument 'mergeBranchInto' takes. Infallible, same as the wire boundary's
--- own conversion: a malformed name still just fails at 'mergeBranchInto' as
--- an ordinary git failure, not a validation error here.
+-- provenance field in a 'MergeRequest'. Infallible, same as the wire
+-- boundary's own conversion: Git remains the authority for whether that name
+-- resolves to the request's exact source commit.
 mkBranchName :: Text -> BranchName
 mkBranchName = BranchName
 
