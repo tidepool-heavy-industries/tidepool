@@ -32,7 +32,7 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use tidepool_codegen::binding_table::{BindingEntry, BindingTable};
+use tidepool_codegen::binding_table::{BindingEntry, BindingTable, BindingTipId};
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::{CancelHandle, FuncId, JitEffectMachine};
 use tidepool_codegen::old_space::RootSlot;
@@ -1181,21 +1181,25 @@ impl PersistentSession {
     /// (never minted, or already retired) — a scope is never born under a dead
     /// ancestor.
     ///
-    /// This is also where the DECL plane learns the new scope's inherited
-    /// environment: `PersistentSession` owns the one [`ScopeTree`], so it is
-    /// the only place that knows a scope's parent, and `SessionLib` keys its
-    /// tips by [`ScopeId`] without owning the tree. Seeding the child from its
-    /// parent's tip HERE is what makes "children read parent declarations"
-    /// true at the moment of minting rather than at first use — the
-    /// difference matters exactly when a sibling pushes a turn in between,
-    /// which would otherwise leak into this scope.
+    /// This is also where both planes freeze the new scope's inherited
+    /// environment. The declaration plane captures its parent's generation;
+    /// the binding plane captures an immutable name-to-value tip with root
+    /// leases. Capturing both here prevents parent or sibling progress between
+    /// mint and first use from leaking into the child.
     pub fn mint_scope(&mut self, parent: ScopeId) -> Option<ScopeId> {
         let child = self.scopes.mint_child(parent)?;
         if let Some(lib) = self.lib.as_mut() {
             let inherited = lib.scope_tip(parent);
             lib.seed_scope(child, inherited);
         }
+        self.bindings.seed_scope(&self.scopes, parent, child);
         Some(child)
+    }
+
+    /// The immutable inherited value-binding tip captured for `scope`.
+    #[must_use]
+    pub fn binding_tip_id(&self, scope: ScopeId) -> Option<BindingTipId> {
+        self.bindings.tip_id(scope)
     }
 
     /// Mint a fresh lexical root with an empty declaration and value view.

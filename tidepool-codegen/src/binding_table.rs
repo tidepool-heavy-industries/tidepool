@@ -20,7 +20,7 @@
 //! Haskell extract (`Translate.stableVarId`) and stored here verbatim (see
 //! [`SessionVarId`]).
 //!
-//! ## Scope frames
+//! ## Scope frames and immutable tips
 //!
 //! The shadowing layer is one frame PER SCOPE ([`ScopeId`]), not one map for
 //! the session: `current: ScopeId → (name → newest id)`. `live` stays FLAT and
@@ -28,6 +28,11 @@
 //! id-keyed read ([`BindingTable::get`], [`BindingTable::seed_external_env`],
 //! [`BindingTable::live_modules`]) therefore resolves a scoped binding with no
 //! change at all.
+//!
+//! A newly minted inheriting scope captures a flattened immutable tip of the
+//! values visible from its parent. Later parent rebindings cannot leak into
+//! the child. The child retains those entries through root leases and writes
+//! new bindings only to its own mutable frame.
 //!
 //! Every no-arg method means [`ScopeId::ROOT`], the flat session, and keeps its
 //! exact pre-C2 behavior: `bind(e) == bind_in(ROOT, e)`, `resolve(n) ==
@@ -38,13 +43,26 @@
 //! which is what keeps its `unsafe impl Send` justification a claim about
 //! `RootSlot` addresses alone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tidepool_repr::{BindingName, SessionModule, SessionVarId, VarId};
 
 use crate::emit::ExternalEnv;
 use crate::old_space::RootSlot;
 use crate::scope::{ScopeId, ScopeTree};
+
+/// Identity of one immutable value-binding view captured for a child scope.
+///
+/// IDs are monotonic within a resident session and never reused. The ID is
+/// presentation/provenance; `SessionVarId` remains the binding authority.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BindingTipId(pub u64);
+
+#[derive(Debug)]
+struct BindingTip {
+    id: BindingTipId,
+    visible: HashMap<BindingName, SessionVarId>,
+}
 
 /// The strict-force-vs-store-as-is distinction at the type level (domain §4).
 ///
@@ -116,7 +134,6 @@ pub struct BindingEntry {
 /// and without the parent gaining the name. `live` is deliberately NOT keyed
 /// by scope — a `SessionVarId` is globally unique, and an already-compiled
 /// fragment resolves by id regardless of which frame minted it.
-#[derive(Default)]
 pub struct BindingTable {
     /// Shadowing layer, one frame per scope: scope → (name → newest gen's id).
     /// A scope with no bindings has no frame (absent, not empty).
@@ -124,6 +141,30 @@ pub struct BindingTable {
     /// Append-only-by-id store of every live binding (old gens retained),
     /// flat and globally keyed across every scope.
     live: HashMap<SessionVarId, BindingEntry>,
+    /// Immutable, flattened inherited view captured when a scope is minted.
+    tips: HashMap<ScopeId, BindingTip>,
+    /// Names deliberately hidden by this scope's declaration plane.
+    hidden: HashMap<ScopeId, HashSet<BindingName>>,
+    /// Number of live binding tips retaining each value root.
+    tip_leases: HashMap<SessionVarId, usize>,
+    /// Entries whose owning scope retired while a binding tip still leased
+    /// them. They leave `live` only when the final tip releases its lease.
+    retired_owners: HashSet<SessionVarId>,
+    next_tip: u64,
+}
+
+impl Default for BindingTable {
+    fn default() -> Self {
+        Self {
+            current: HashMap::new(),
+            live: HashMap::new(),
+            tips: HashMap::new(),
+            hidden: HashMap::new(),
+            tip_leases: HashMap::new(),
+            retired_owners: HashSet::new(),
+            next_tip: 1,
+        }
+    }
 }
 
 // SAFETY: a `BindingTable` is only `!Send` because a `BindingEntry`'s
@@ -188,6 +229,9 @@ impl BindingTable {
             .and_then(|cur_id| self.live.get(cur_id))
             .is_some_and(|cur| cur.module.gen().0 > entry.module.gen().0);
         if !newer_current_exists {
+            if let Some(hidden) = self.hidden.get_mut(&scope) {
+                hidden.remove(&entry.name);
+            }
             self.current
                 .entry(scope)
                 .or_default()
@@ -210,8 +254,16 @@ impl BindingTable {
     /// only.  A declaration committed in a child scope must not make an
     /// ancestor's materialized binding disappear from the ancestor's view.
     pub fn remove_current_in(&mut self, scope: ScopeId, name: &str) {
+        let name = BindingName(name.to_string());
         if let Some(frame) = self.current.get_mut(&scope) {
-            frame.remove(&BindingName(name.to_string()));
+            frame.remove(&name);
+        }
+        if self
+            .tips
+            .get(&scope)
+            .is_some_and(|tip| tip.visible.contains_key(&name))
+        {
+            self.hidden.entry(scope).or_default().insert(name);
         }
     }
 
@@ -229,7 +281,11 @@ impl BindingTable {
     /// Returns the evicted entry (so the caller can read its [`RootSlot`]), or
     /// `None` if `id` was not live.
     pub fn remove_live(&mut self, id: SessionVarId) -> Option<BindingEntry> {
+        if self.tip_leases.get(&id).copied().unwrap_or(0) > 0 {
+            return None;
+        }
         let entry = self.live.remove(&id)?;
+        self.retired_owners.remove(&id);
         if let Some(frame) = self.current.get_mut(&entry.scope) {
             // Only if the frame still names THIS id: a newer same-name gen in
             // the same frame has already repointed it, and a shadowed older
@@ -250,6 +306,7 @@ impl BindingTable {
     /// untouched. Descendant frames are the caller's job, in the deepest-first
     /// order [`ScopeTree::retire`] hands back.
     pub fn drain_scope(&mut self, scope: ScopeId) -> Vec<BindingEntry> {
+        let mut released = self.release_tip(scope);
         let mut ids: Vec<SessionVarId> = self
             .live
             .iter()
@@ -258,9 +315,70 @@ impl BindingTable {
             .collect();
         ids.sort_by_key(|id| id.raw());
         self.current.remove(&scope);
-        ids.into_iter()
-            .filter_map(|id| self.live.remove(&id))
-            .collect()
+        self.hidden.remove(&scope);
+        for id in ids {
+            if self.tip_leases.get(&id).copied().unwrap_or(0) > 0 {
+                self.retired_owners.insert(id);
+            } else if let Some(entry) = self.live.remove(&id) {
+                released.push(entry);
+            }
+        }
+        released.sort_by_key(|entry| entry.id.raw());
+        released
+    }
+
+    /// Freeze the value bindings visible from `parent` as `child`'s immutable
+    /// inherited view. Each distinct referenced value receives one root lease
+    /// owned by the child tip.
+    pub fn seed_scope(
+        &mut self,
+        tree: &ScopeTree,
+        parent: ScopeId,
+        child: ScopeId,
+    ) -> BindingTipId {
+        if let Some(tip) = self.tips.get(&child) {
+            return tip.id;
+        }
+        let visible: HashMap<BindingName, SessionVarId> = self
+            .iter_current_in(tree, parent)
+            .into_iter()
+            .map(|(name, entry)| (name.clone(), entry.id))
+            .collect();
+        for id in visible.values().copied().collect::<HashSet<_>>() {
+            *self.tip_leases.entry(id).or_default() += 1;
+        }
+        let id = BindingTipId(self.next_tip);
+        self.next_tip += 1;
+        self.tips.insert(child, BindingTip { id, visible });
+        id
+    }
+
+    /// The immutable inherited-view identity for `scope`, when it has one.
+    #[must_use]
+    pub fn tip_id(&self, scope: ScopeId) -> Option<BindingTipId> {
+        self.tips.get(&scope).map(|tip| tip.id)
+    }
+
+    fn release_tip(&mut self, scope: ScopeId) -> Vec<BindingEntry> {
+        let Some(tip) = self.tips.remove(&scope) else {
+            return Vec::new();
+        };
+        let mut released = Vec::new();
+        for id in tip.visible.values().copied().collect::<HashSet<_>>() {
+            let Some(count) = self.tip_leases.get_mut(&id) else {
+                continue;
+            };
+            *count -= 1;
+            if *count == 0 {
+                self.tip_leases.remove(&id);
+                if self.retired_owners.remove(&id) {
+                    if let Some(entry) = self.live.remove(&id) {
+                        released.push(entry);
+                    }
+                }
+            }
+        }
+        released
     }
 
     /// Resolve a name to its CURRENT binding (newest gen) in the ROOT frame,
@@ -275,11 +393,10 @@ impl BindingTable {
         self.live.get(id)
     }
 
-    /// Scoped [`Self::resolve`]: walk `scope → parent → … → lexical root` and
-    /// take the FIRST frame that has `name` — children read parent bindings,
-    /// a local bind shadows an inherited one, and a sibling's frame is never
-    /// on the walk. `resolve(n) == resolve_in(tree, ScopeId::ROOT, n)` for any
-    /// tree.
+    /// Scoped [`Self::resolve`]. A seeded scope reads its own mutable frame,
+    /// then the immutable inherited tip captured at mint time. Unseeded
+    /// scopes retain the legacy upward walk for low-level callers; production
+    /// scope minting always seeds a tip.
     ///
     /// `None` for a retired or never-minted `scope` (its lookup chain is
     /// empty) — a stale scope reference resolves nothing rather than silently
@@ -292,6 +409,23 @@ impl BindingTable {
         name: &str,
     ) -> Option<&BindingEntry> {
         let key = BindingName(name.to_string());
+        if self.tips.contains_key(&scope) {
+            if let Some(id) = self.current.get(&scope).and_then(|frame| frame.get(&key)) {
+                return self.live.get(id);
+            }
+            if self
+                .hidden
+                .get(&scope)
+                .is_some_and(|hidden| hidden.contains(&key))
+            {
+                return None;
+            }
+            return self
+                .tips
+                .get(&scope)
+                .and_then(|tip| tip.visible.get(&key))
+                .and_then(|id| self.live.get(id));
+        }
         for s in tree.lookup_chain(scope) {
             if let Some(id) = self.current.get(&s).and_then(|frame| frame.get(&key)) {
                 return self.live.get(id);
@@ -325,9 +459,9 @@ impl BindingTable {
             })
     }
 
-    /// The VISIBLE ENVIRONMENT at `scope`: the upward walk with child frames
-    /// shadowing parent ones — each name once, bound to the nearest frame that
-    /// has it. `iter_current_in(tree, ScopeId::ROOT)` is exactly
+    /// The visible environment at `scope`: its local mutable frame over its
+    /// immutable inherited tip. Unseeded scopes use the legacy upward walk.
+    /// `iter_current_in(tree, ScopeId::ROOT)` is exactly
     /// [`Self::iter_current`]'s set.
     ///
     /// A `Vec` rather than an iterator because the shadowing dedup is stateful;
@@ -339,6 +473,31 @@ impl BindingTable {
         tree: &ScopeTree,
         scope: ScopeId,
     ) -> Vec<(&BindingName, &BindingEntry)> {
+        if !tree.is_live(scope) {
+            return Vec::new();
+        }
+        if let Some(tip) = self.tips.get(&scope) {
+            let hidden = self.hidden.get(&scope);
+            let mut seen: Vec<(&BindingName, &BindingEntry)> = self
+                .current
+                .get(&scope)
+                .into_iter()
+                .flat_map(|frame| frame.iter())
+                .filter_map(|(name, id)| self.live.get(id).map(|entry| (name, entry)))
+                .collect();
+            for (name, id) in &tip.visible {
+                if seen.iter().any(|(local, _)| *local == name)
+                    || hidden.is_some_and(|hidden| hidden.contains(name))
+                {
+                    continue;
+                }
+                if let Some(entry) = self.live.get(id) {
+                    seen.push((name, entry));
+                }
+            }
+            seen.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+            return seen;
+        }
         let mut seen: Vec<(&BindingName, &BindingEntry)> = Vec::new();
         for s in tree.lookup_chain(scope) {
             let Some(frame) = self.current.get(&s) else {
@@ -589,6 +748,81 @@ mod tests {
             id,
             "the walk goes all the way up, not one hop"
         );
+    }
+
+    #[test]
+    fn seeded_child_tip_is_immutable_across_parent_progress() {
+        let mut old: *mut u8 = std::ptr::null_mut();
+        let mut new: *mut u8 = std::ptr::null_mut();
+        let mut added: *mut u8 = std::ptr::null_mut();
+        let mut tree = ScopeTree::new();
+        let mut bindings = BindingTable::new();
+        let old_id = bindings.bind(entry("x", 1, (0xFE << 56) | 1, fake_slot(&mut old)));
+        let child = tree.mint_child(ScopeId::ROOT).expect("root is live");
+        let tip = bindings.seed_scope(&tree, ScopeId::ROOT, child);
+
+        bindings.bind(entry("x", 2, (0xFE << 56) | 2, fake_slot(&mut new)));
+        bindings.bind(entry("later", 3, (0xFE << 56) | 3, fake_slot(&mut added)));
+
+        assert_eq!(bindings.tip_id(child), Some(tip));
+        assert_eq!(bindings.resolve_in(&tree, child, "x").unwrap().id, old_id);
+        assert!(bindings.resolve_in(&tree, child, "later").is_none());
+        assert_ne!(bindings.resolve("x").unwrap().id, old_id);
+    }
+
+    #[test]
+    fn sibling_tips_share_the_fork_view_but_not_later_local_bindings() {
+        let mut root_value: *mut u8 = std::ptr::null_mut();
+        let mut left_value: *mut u8 = std::ptr::null_mut();
+        let mut tree = ScopeTree::new();
+        let mut bindings = BindingTable::new();
+        let root_id = bindings.bind(entry(
+            "shared",
+            1,
+            (0xFE << 56) | 1,
+            fake_slot(&mut root_value),
+        ));
+        let left = tree.mint_child(ScopeId::ROOT).unwrap();
+        let right = tree.mint_child(ScopeId::ROOT).unwrap();
+        bindings.seed_scope(&tree, ScopeId::ROOT, left);
+        bindings.seed_scope(&tree, ScopeId::ROOT, right);
+        bindings.bind_in(
+            left,
+            entry("local", 2, (0xFE << 56) | 2, fake_slot(&mut left_value)),
+        );
+
+        assert_eq!(
+            bindings.resolve_in(&tree, left, "shared").unwrap().id,
+            root_id
+        );
+        assert_eq!(
+            bindings.resolve_in(&tree, right, "shared").unwrap().id,
+            root_id
+        );
+        assert!(bindings.resolve_in(&tree, right, "local").is_none());
+    }
+
+    #[test]
+    fn retiring_an_owner_defers_root_release_until_the_last_tip_lease() {
+        let mut value: *mut u8 = std::ptr::null_mut();
+        let mut tree = ScopeTree::new();
+        let owner = tree.mint_child(ScopeId::ROOT).unwrap();
+        let child = tree.mint_child(owner).unwrap();
+        let mut bindings = BindingTable::new();
+        let id = bindings.bind_in(
+            owner,
+            entry("leased", 1, (0xFE << 56) | 1, fake_slot(&mut value)),
+        );
+        bindings.seed_scope(&tree, owner, child);
+
+        assert!(bindings.drain_scope(owner).is_empty());
+        assert_eq!(bindings.resolve_in(&tree, child, "leased").unwrap().id, id);
+        assert!(bindings.get(id).is_some());
+
+        let released = bindings.drain_scope(child);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].id, id);
+        assert!(bindings.get(id).is_none());
     }
 
     /// SIBLINGS SHADOW FREELY AND NEVER COLLIDE: two sibling frames binding

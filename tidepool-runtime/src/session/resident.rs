@@ -1343,15 +1343,24 @@ where
         self.core.mint_scope(parent)
     }
 
+    /// Immutable value-binding snapshot captured when `scope` was minted.
+    #[must_use]
+    pub fn binding_tip_id(
+        &self,
+        scope: ScopeId,
+    ) -> Option<tidepool_codegen::binding_table::BindingTipId> {
+        self.core.binding_tip_id(scope)
+    }
+
     /// Mint a fresh actor lexical root with no ambient declaration or value
     /// ancestry. Program visibility must be supplied through exact imports.
     pub fn mint_isolated_scope(&mut self) -> ScopeId {
         self.core.mint_isolated_scope()
     }
 
-    /// The value-plane names VISIBLE at `scope` — its own frame plus every
-    /// ancestor's, nearest frame winning. `binding_names_in(ScopeId::ROOT)` is
-    /// [`Self::binding_names`]'s set (sorted).
+    /// The value-plane names visible at `scope`: its own mutable frame over
+    /// the immutable inherited tip captured when the scope was minted.
+    /// `binding_names_in(ScopeId::ROOT)` is [`Self::binding_names`]'s set.
     pub fn binding_names_in(&self, scope: ScopeId) -> Vec<String> {
         self.core
             .bindings()

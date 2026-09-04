@@ -1640,7 +1640,16 @@ implement, not that production support has landed.
     `/run/current-system/sw/bin/zsh -lc 'cargo --version'` before execution with
     the inspection-only rationale. Tail-position enforcement remains for the
     `Forks` effect slice.
-- [ ] Gate 1: add immutable Haskell binding tips and descendant root leases.
+- [x] Gate 1: add immutable Haskell binding tips and descendant root leases.
+  - 2026-09-04: `BindingTable` now captures a flattened immutable inherited
+    tip at scope mint, retains each referenced `SessionVarId` through a
+    counted root lease, and defers release of retired-owner entries until the
+    final tip disappears. Focused binding tests cover parent progress,
+    sibling isolation, and deferred release. The JIT
+    `binding_tip_lazy_sharing` test forces one shared tenured thunk from both
+    sides of a parent/child tip. Runtime declaration-scope and root-retirement
+    suites passed in the repository Nix toolchain; `tidepool-actor --lib`
+    passed against the new compile view.
 - [ ] Gate 2: add campaign/actor-path allocation, granular residual effects,
   typed row witnesses, and one authoritative effective-role projection.
 - [ ] Gate 3: attach authoritative per-request execution and worktree evidence
