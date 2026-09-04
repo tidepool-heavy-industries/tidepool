@@ -11,6 +11,24 @@ use parking_lot::RwLock;
 
 const MAX_PROVIDER_SAMPLES: usize = 32;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorActivationKind {
+    RootStarted,
+    RequestActivated {
+        request: crate::RequestId,
+        activation_sequence: u64,
+    },
+    EventsActivated {
+        inbox_sequences: Vec<u64>,
+    },
+}
+
+impl Default for ActorActivationKind {
+    fn default() -> Self {
+        Self::RootStarted
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderUsageScope {
     LastProviderResponse,
@@ -45,6 +63,8 @@ pub struct ActorRuntimeObservation {
     pub provider_thread: Option<String>,
     pub provider_parent_thread: Option<String>,
     pub current_activation_sequence: Option<u64>,
+    pub activation_kind: ActorActivationKind,
+    pub event_watermark: u64,
     pub cache_boundary: CacheBoundaryReason,
     pub provider_usage: Vec<ProviderUsageSample>,
 }
@@ -75,6 +95,21 @@ impl ActorRuntimeObservationHandle {
 
     pub fn begin_activation(&self, sequence: u64) {
         self.inner.write().current_activation_sequence = Some(sequence);
+    }
+
+    pub fn publish_request_activation(&self, request: crate::RequestId, sequence: u64) {
+        let mut observation = self.inner.write();
+        observation.current_activation_sequence = Some(sequence);
+        observation.activation_kind = ActorActivationKind::RequestActivated {
+            request,
+            activation_sequence: sequence,
+        };
+    }
+
+    pub fn publish_event_activation(&self, inbox_sequences: Vec<u64>, watermark: u64) {
+        let mut observation = self.inner.write();
+        observation.event_watermark = watermark;
+        observation.activation_kind = ActorActivationKind::EventsActivated { inbox_sequences };
     }
 
     pub fn publish_cache_boundary(&self, cache_boundary: CacheBoundaryReason) {
@@ -151,6 +186,32 @@ mod tests {
         assert_eq!(
             snapshot.provider_usage[1].scope,
             ProviderUsageScope::LastProviderResponse
+        );
+    }
+
+    #[test]
+    fn activation_kind_tracks_typed_request_and_batched_events() {
+        let observation = ActorRuntimeObservationHandle::default();
+        assert_eq!(
+            observation.snapshot().activation_kind,
+            ActorActivationKind::RootStarted
+        );
+        observation.publish_request_activation(crate::RequestId(7), 3);
+        assert_eq!(
+            observation.snapshot().activation_kind,
+            ActorActivationKind::RequestActivated {
+                request: crate::RequestId(7),
+                activation_sequence: 3,
+            }
+        );
+        observation.publish_event_activation(vec![11, 12], 14);
+        let snapshot = observation.snapshot();
+        assert_eq!(snapshot.event_watermark, 14);
+        assert_eq!(
+            snapshot.activation_kind,
+            ActorActivationKind::EventsActivated {
+                inbox_sequences: vec![11, 12]
+            }
         );
     }
 }

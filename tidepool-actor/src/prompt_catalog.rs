@@ -41,6 +41,23 @@ pub(crate) struct PromptArtifact {
     pub(crate) body: &'static str,
 }
 
+pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
+    match topic {
+        "request" | "requests" => Ok(include_str!("../../prompts/shoal/docs/request.md")),
+        "unfold" | "fork" | "forks" => Ok(include_str!("../../prompts/shoal/docs/unfold.md")),
+        "watch" | "watches" | "poll" => Ok(include_str!("../../prompts/shoal/docs/watch.md")),
+        "deadline" | "deadlines" | "duration" => {
+            Ok(include_str!("../../prompts/shoal/docs/deadline.md"))
+        }
+        "help" | "topics" => {
+            Ok("Shoal topics: request, unfold, watch, deadline. Use `:doc <topic>`.")
+        }
+        other => Err(format!(
+            "unknown Shoal documentation topic `{other}`; use `:doc topics`"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +81,7 @@ mod tests {
         assert!(description.contains("`:status`"));
         assert!(description.contains("Ordinary model-response termination"));
         assert!(!description.contains("assemble"));
+        assert!(workbench_doc("unfold").unwrap().contains("Forked a"));
+        assert!(workbench_doc("missing").is_err());
     }
 }

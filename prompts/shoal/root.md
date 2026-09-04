@@ -22,6 +22,7 @@ and repository custody.
 
 Use `:status` for readable actor lineage, effective role/effects, bound
 worktree, and labeled pending/ready responses and watches.
+Use `:doc topics` for short executable orchestration examples.
 
 Conversation messages explain tasks or why execution resumed; typed Haskell
 state carries identities, correlation, results, and authority. The root is a

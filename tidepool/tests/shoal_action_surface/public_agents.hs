@@ -66,6 +66,26 @@ inspectAll = listAgents
 inspectSelf :: Eff ActorEffects ActorContextInfo
 inspectSelf = actorContext
 
+inspectFork
+  :: Forked result
+  -> Eff ActorEffects (ForkObservation result)
+inspectFork = observeFork
+
+inspectCampaign
+  :: Forked result
+  -> Eff ActorEffects CampaignSnapshot
+inspectCampaign = observeCampaign . forkGroupHandle
+
+cacheFacts
+  :: AgentRosterEntry
+  -> (Maybe ProviderUsageScope, Maybe CacheBoundaryReason, Int)
+cacheFacts entry =
+  (rosterUsageScope entry, rosterCacheBoundary entry, rosterEventWatermark entry)
+
+activationFacts :: ActorContextInfo -> (ActivationKind, Int)
+activationFacts context =
+  (contextActivationKind context, contextEventWatermark context)
+
 currentTree :: Eff CodingActorEffects (Either WorktreeError WorktreeHandle)
 currentTree = boundWorktree
 

@@ -276,6 +276,29 @@ fn agent_roster_value(
     entry: AgentRosterProjection,
 ) -> Result<Value, ResidentActorWorkbenchError> {
     let usage = entry.runtime.latest_provider_usage();
+    let supervisor = entry.descriptor.supervisor_parent();
+    let context_parent = entry.descriptor.context_parent();
+    let usage_scope = usage
+        .map(|sample| match sample.scope {
+            crate::ProviderUsageScope::LastProviderResponse => {
+                actor_context_constructor(table, "UsageLastProviderResponse", Vec::new())
+            }
+        })
+        .transpose()?;
+    let cache_boundary = usage
+        .map(|sample| {
+            actor_context_constructor(
+                table,
+                match sample.cache_boundary {
+                    crate::CacheBoundaryReason::Fresh => "CacheFresh",
+                    crate::CacheBoundaryReason::ForkedPrefix => "CacheForkedPrefix",
+                    crate::CacheBoundaryReason::ReattachedThread => "CacheReattachedThread",
+                    crate::CacheBoundaryReason::ProviderUnknown => "CacheProviderUnknown",
+                },
+                Vec::new(),
+            )
+        })
+        .transpose()?;
     let state = match entry.terminal {
         None => actor_context_constructor(table, "RosterRunning", Vec::new())?,
         Some(terminal) => match terminal.kind {
@@ -309,6 +332,22 @@ fn agent_roster_value(
             actor_int(entry.actor.id.0)?.to_value(table)?,
             actor_int(entry.actor.incarnation.0)?.to_value(table)?,
             entry.descriptor.label().to_owned().to_value(table)?,
+            supervisor
+                .map(|actor| actor_int(actor.id.0))
+                .transpose()?
+                .to_value(table)?,
+            supervisor
+                .map(|actor| actor_int(actor.incarnation.0))
+                .transpose()?
+                .to_value(table)?,
+            context_parent
+                .map(|actor| actor_int(actor.id.0))
+                .transpose()?
+                .to_value(table)?,
+            context_parent
+                .map(|actor| actor_int(actor.incarnation.0))
+                .transpose()?
+                .to_value(table)?,
             state,
             actor_context_constructor(table, role, Vec::new())?,
             entry.bound_worktree.to_value(table)?,
@@ -327,6 +366,18 @@ fn agent_roster_value(
             usage
                 .map(|sample| sample.uncached_input_tokens)
                 .to_value(table)?,
+            usage
+                .and_then(|sample| sample.activation_sequence)
+                .map(actor_int)
+                .transpose()?
+                .to_value(table)?,
+            usage
+                .map(|sample| actor_int(sample.observed_at_unix_ms))
+                .transpose()?
+                .to_value(table)?,
+            usage_scope.to_value(table)?,
+            cache_boundary.to_value(table)?,
+            actor_int(entry.runtime.event_watermark)?.to_value(table)?,
         ],
     )?)
 }
@@ -2070,6 +2121,34 @@ where
                 let parent = descriptor.context_parent();
                 let descendants = descriptor.effective_role().descendants();
                 let usage = runtime.latest_provider_usage();
+                let activation_kind = match &runtime.activation_kind {
+                    crate::ActorActivationKind::RootStarted => {
+                        actor_context_constructor(table, "ActivationRootStarted", Vec::new())?
+                    }
+                    crate::ActorActivationKind::RequestActivated {
+                        request,
+                        activation_sequence,
+                    } => actor_context_constructor(
+                        table,
+                        "ActivationRequest",
+                        vec![
+                            actor_int(request.0)?.to_value(table)?,
+                            actor_int(*activation_sequence)?.to_value(table)?,
+                        ],
+                    )?,
+                    crate::ActorActivationKind::EventsActivated { inbox_sequences } => {
+                        actor_context_constructor(
+                            table,
+                            "ActivationEvents",
+                            vec![inbox_sequences
+                                .iter()
+                                .copied()
+                                .map(actor_int)
+                                .collect::<Result<Vec<_>, _>>()?
+                                .to_value(table)?],
+                        )?
+                    }
+                };
                 let fields = vec![
                     actor_int(context.actor.id.0)?.to_value(table)?,
                     actor_int(context.actor.incarnation.0)?.to_value(table)?,
@@ -2096,6 +2175,8 @@ where
                         .transpose()?
                         .to_value(table)?,
                     actor_int(context.placement.lexical_scope.0)?.to_value(table)?,
+                    activation_kind,
+                    actor_int(runtime.event_watermark)?.to_value(table)?,
                     runtime.provider_thread.to_value(table)?,
                     runtime.provider_parent_thread.to_value(table)?,
                     usage
@@ -2902,7 +2983,7 @@ where
         Ok(Some(command)) => command,
         Ok(None) => {
             return Ok(Err(format!(
-            "unknown actor workbench command `:{}` (supported: :status, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :show imports)",
+            "unknown actor workbench command `:{}` (supported: :status, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :show imports, :doc)",
             line.name
         )))
         }
@@ -2952,6 +3033,9 @@ where
                 lines.join("\n")
             }))
         }
+        WorkbenchDiscovery::Doc(topic) => Ok(crate::prompt_catalog::workbench_doc(&topic)
+            .map(str::trim)
+            .map(str::to_owned)),
         WorkbenchDiscovery::Info(name) => inspect_actor(
             session,
             context,
@@ -3002,7 +3086,12 @@ fn inspection_query(
                 .ok_or_else(|| ":browse has no configured actor API module".to_string())?;
             Ok(Some(InspectionQuery::Browse { module, expanded }))
         }
-        Some(WorkbenchDiscovery::Bindings | WorkbenchDiscovery::ShowImports) | None => Ok(None),
+        Some(
+            WorkbenchDiscovery::Bindings
+            | WorkbenchDiscovery::ShowImports
+            | WorkbenchDiscovery::Doc(_),
+        )
+        | None => Ok(None),
     }
 }
 

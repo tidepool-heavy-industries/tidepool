@@ -20,6 +20,7 @@ module Tidepool.Actors.Shoal
   , IntegrationEffects
   , ActorContext
   , ActorContextInfo (..)
+  , ActivationKind (..)
   , ActorContextRole (..)
   , ActorNativeTools (..)
   , ActorWorkspaceAccess (..)
@@ -82,6 +83,10 @@ module Tidepool.Actors.Shoal
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
+  , ForkObservation (..)
+  , observeFork
+  , CampaignSnapshot (..)
+  , observeCampaign
   , ForkGroupCleanupOutcome (..)
   , cleanupForkGroup
   , awaitFork
@@ -98,6 +103,8 @@ module Tidepool.Actors.Shoal
   , observeAgent
   , AgentRosterEntry (..)
   , AgentRosterState (..)
+  , ProviderUsageScope (..)
+  , CacheBoundaryReason (..)
   , listAgents
   , AgentForgetOutcome (..)
   , forgetAgent
@@ -253,11 +260,14 @@ import Tidepool.Actors.Worktree hiding (queryWorktrees)
 import qualified Tidepool.Actors.Worktree as WorktreeActor
 import Tidepool.Effects.Core
   ( ActorContextInfo (..)
+  , ActivationKind (..)
   , ActorContextRole (..)
   , ActorNativeTools (..)
   , ActorWorkspaceAccess (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
+  , ProviderUsageScope (..)
+  , CacheBoundaryReason (..)
   , actorContext
   )
 import Tidepool.Worktree hiding

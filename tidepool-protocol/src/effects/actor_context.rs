@@ -89,6 +89,35 @@ fn type_defs() -> Vec<TypeDef> {
             ],
         ),
         TypeDef {
+            name: "ActivationKind",
+            wire_rust: None,
+            shape: TypeShape::Sum {
+                variants: vec![
+                    SumVariant {
+                        ctor: "ActivationRootStarted",
+                        fields: VariantFields::Positional(Vec::new()),
+                        doc: &[],
+                    },
+                    SumVariant {
+                        ctor: "ActivationRequest",
+                        fields: VariantFields::Positional(vec![HsType::Int, HsType::Int]),
+                        doc: &[],
+                    },
+                    SumVariant {
+                        ctor: "ActivationEvents",
+                        fields: VariantFields::Positional(vec![HsType::List(Box::new(
+                            HsType::Int,
+                        ))]),
+                        doc: &[],
+                    },
+                ],
+            },
+            json: JsonInstance::None,
+            derives: NO_WIRE,
+            domain: None,
+            doc: &["Why the current external application turn was activated."],
+        },
+        TypeDef {
             name: "ActorContextInfo",
             wire_rust: None,
             shape: TypeShape::Record {
@@ -108,6 +137,8 @@ fn type_defs() -> Vec<TypeDef> {
                     field("contextBoundWorktree", HsType::maybe(HsType::Text)),
                     field("contextForkGroup", HsType::maybe(HsType::Int)),
                     field("contextHaskellSnapshot", HsType::Int),
+                    field("contextActivationKind", HsType::Named("ActivationKind")),
+                    field("contextEventWatermark", HsType::Int),
                     field("contextProviderThread", HsType::maybe(HsType::Text)),
                     field("contextProviderParentThread", HsType::maybe(HsType::Text)),
                     field("contextCachedInputTokens", HsType::maybe(HsType::Int)),

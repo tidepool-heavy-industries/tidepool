@@ -437,7 +437,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let runtime = self.runtime_observation.snapshot();
         let usage = runtime.latest_provider_usage();
         let current = format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={:?}\n  watches: pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={:?}\n  watches: pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
@@ -452,6 +452,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             usage.map(|sample| sample.scope),
             usage.map(|sample| sample.cache_boundary),
             usage.and_then(|sample| sample.activation_sequence),
+            runtime.activation_kind,
+            runtime.event_watermark,
             self.descriptor.effective_role().role(),
             self.descriptor.effective_role().haskell_effects_type(),
             self.descriptor.effective_role().native_tools(),
@@ -1536,6 +1538,18 @@ where
                 request,
                 hole,
             });
+        let active_request = match &self.standing {
+            ResidentStanding::Interactive(awaiting) => awaiting.request.request,
+            _ => unreachable!(),
+        };
+        self.runtime_observation.publish_request_activation(
+            active_request,
+            if already_installed {
+                self.next_activation_sequence
+            } else {
+                0
+            },
+        );
         if already_installed {
             let activation = crate::ResidentActivation::mounted(
                 context.actor,

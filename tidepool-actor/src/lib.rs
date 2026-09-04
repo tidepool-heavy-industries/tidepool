@@ -98,8 +98,8 @@ pub use role::{
     ActorEffectKey, ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess,
 };
 pub use runtime_observation::{
-    ActorRuntimeObservation, ActorRuntimeObservationHandle, CacheBoundaryReason,
-    ProviderUsageSample, ProviderUsageScope,
+    ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
+    CacheBoundaryReason, ProviderUsageSample, ProviderUsageScope,
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorLaunchRoleWire, ActorStartCaptureError,

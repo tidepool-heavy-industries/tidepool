@@ -11,7 +11,8 @@ effectful unit does not install its projected bindings and does not roll back
 effects already performed.
 
 Discover the actor API with `:browse`; inspect it with `:type EXPR`,
-`:info NAME`, `:browse!`, and `:bindings`. Request-activated agents receive a
+`:info NAME`, `:browse!`, and `:bindings`; use `:doc topics` for executable
+Shoal patterns. Request-activated agents receive a
 stable typed `sessionInput`, a typed `sessionReply`, and `respond`; root
 applications do not. Ordinary model-response termination ends the current
 turn. Register a labeled `watch` when a response becoming ready should durably

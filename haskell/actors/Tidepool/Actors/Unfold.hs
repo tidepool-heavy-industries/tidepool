@@ -56,6 +56,10 @@ module Tidepool.Actors.Unfold
   , ForkGroupHandle
   , forkGroupHandle
   , forkGroupGitBranchPrefix
+  , ForkObservation (..)
+  , observeFork
+  , CampaignSnapshot (..)
+  , observeCampaign
   , ForkGroupCleanupOutcome (..)
   , cleanupForkGroup
   , awaitFork
@@ -80,6 +84,8 @@ import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , RequestDeadline
   , agentIdentity
+  , listAgents
+  , lookupAgent
   , requestOptions
   , requestWithSited
   , startForkedAgent
@@ -99,12 +105,14 @@ import Tidepool.Actors.Role
   )
 import Tidepool.Effects.Core
   ( DirtyPolicy (..)
+  , AgentRosterEntry (..)
   , GitRef
   , WorktreeHandle (..)
   , WorktreeReceipt
   , WorktreeSource (..)
   , Forks (..)
   , ForkGroupCleanupOutcome (..)
+  , AgentInspection
   , WorktreeSpec (..)
   )
 import Tidepool.Worktree (worktreeId)
@@ -292,6 +300,10 @@ data BranchReceipt = BranchReceipt
   , launchedRole :: ForkRole
   , launchedWorkspaceAccess :: ForkWorkspaceAccess
   , launchedWorktree :: WorktreeReceipt
+  , launchedSupervisor :: Maybe (Int, Int)
+  , launchedContextParent :: Maybe (Int, Int)
+  , launchedProviderParent :: Maybe Text
+  , launchedHaskellSnapshot :: Maybe Int
   }
   deriving (Show, Eq)
 
@@ -309,6 +321,44 @@ data Forked result = Forked
 
 data ForkGroupHandle = ForkGroupHandle Int ActorPath
   deriving (Show, Eq)
+
+data ForkObservation result = ForkObservation
+  { observedFork :: Forked result
+  , observedLaunch :: BranchReceipt
+  , observedActor :: Maybe AgentRosterEntry
+  }
+
+observeFork
+  :: Member AgentInspection effs
+  => Forked result
+  -> Eff effs (ForkObservation result)
+observeFork worker = do
+  actor <- lookupAgent (forkedActor worker)
+  pure ForkObservation
+    { observedFork = worker
+    , observedLaunch = forkedLaunch worker
+    , observedActor = actor
+    }
+
+data CampaignSnapshot = CampaignSnapshot
+  { campaignRoot :: ActorPath
+  , campaignRoster :: [AgentRosterEntry]
+  }
+  deriving (Show, Eq)
+
+observeCampaign
+  :: Member AgentInspection effs
+  => ForkGroupHandle
+  -> Eff effs CampaignSnapshot
+observeCampaign (ForkGroupHandle _ root@(ActorPath path)) = do
+  roster <- listAgents
+  let descendant entry =
+        rosterLabel entry == path
+          || (path <> "/") `Text.isPrefixOf` rosterLabel entry
+  pure CampaignSnapshot
+    { campaignRoot = root
+    , campaignRoster = filter descendant roster
+    }
 
 forkGroupHandle :: Forked result -> ForkGroupHandle
 forkGroupHandle worker =
@@ -386,7 +436,7 @@ data UnfoldError
 -- same Haskell-owned result tree.
 attemptUnfold
   :: forall parent result
-   . (Member Forks parent, Member Replies parent)
+   . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent (Either UnfoldError result)
@@ -452,7 +502,7 @@ attemptUnfold (ForkGroupPath relative groupName) plan = do
 
 unfold
   :: forall parent result
-   . (Member Forks parent, Member Replies parent)
+   . (Member Forks parent, Member Replies parent, Member AgentInspection parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent result
@@ -495,7 +545,7 @@ launchRoleFor IntegrationFork = Actor.IntegrationRole
 
 requestBranch
   :: forall effects child input result
-   . Member Replies effects
+   . (Member Replies effects, Member AgentInspection effects)
   => Int
   -> Int
   -> ForkGroupPath
@@ -515,6 +565,8 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) ro
         Nothing -> guidedOptions
         Just deadline -> withRequestDeadline deadline guidedOptions
   response <- requestWithSited @result @input site actor finalOptions
+  observed <- lookupAgent actor
+  let pair maybeId maybeInc = (,) <$> maybeId <*> maybeInc
   pure Forked
     { forkedActor = actor
     , forkedResponse = response
@@ -528,6 +580,12 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) ro
         , launchedRole = role
         , launchedWorkspaceAccess = accessFor role
         , launchedWorktree = handleReceipt tree
+        , launchedSupervisor = observed >>= \entry ->
+            pair (rosterSupervisorId entry) (rosterSupervisorIncarnation entry)
+        , launchedContextParent = observed >>= \entry ->
+            pair (rosterContextParentId entry) (rosterContextParentIncarnation entry)
+        , launchedProviderParent = observed >>= rosterProviderParentThread
+        , launchedHaskellSnapshot = rosterHaskellSnapshot <$> observed
         }
     }
 

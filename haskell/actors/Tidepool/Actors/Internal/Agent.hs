@@ -39,6 +39,7 @@ module Tidepool.Actors.Internal.Agent
   , agentIdentity
   , agentBoundWorktree
   , observeAgent
+  , lookupAgent
   , listAgents
   , AgentForgetOutcome (..)
   , forgetAgent
@@ -157,6 +158,12 @@ observeAgent agent@(AgentRef target tree) = do
     , observedState = maybe AgentUnavailable rosterAgentState roster
     , observedWorktree = tree
     }
+
+lookupAgent
+  :: Member AgentInspection effs
+  => AgentRef
+  -> Eff effs (Maybe AgentRosterEntry)
+lookupAgent (AgentRef target _) = inspectAgent target
 
 rosterAgentState :: AgentRosterEntry -> AgentState
 rosterAgentState entry = case rosterState entry of

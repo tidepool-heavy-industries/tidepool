@@ -9,6 +9,7 @@ back when a unit rejects.
 
 Start discovery with `:browse`; use `:type`, `:info`, `:browse!`, and
 `:bindings` for detail, and `:status` for runtime-owned actor/request state.
+Use `:doc topics` for short executable examples.
 Request scopes mount typed `sessionInput`, `sessionReply`, and `respond`; roots
 do not. Ending a model response ends the turn—there is no Haskell completion,
 yield, or park operation. Requests and watches use validated readable labels;

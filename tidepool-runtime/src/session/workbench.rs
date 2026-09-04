@@ -431,6 +431,7 @@ pub enum WorkbenchDiscovery {
         expanded: bool,
     },
     Bindings,
+    Doc(String),
 }
 
 impl MetaCommandLine {
@@ -499,6 +500,7 @@ impl MetaCommandLine {
                     Err(":bindings does not accept arguments".into())
                 }
             }
+            "doc" => required("doc").map(WorkbenchDiscovery::Doc).map(Some),
             _ => Ok(None),
         }
     }

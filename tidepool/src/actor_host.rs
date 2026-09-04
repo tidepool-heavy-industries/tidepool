@@ -1125,7 +1125,9 @@ async fn run_interactive_applications(
                                 }
                                 continue;
                             }
-                            application.runtime_observation.begin_activation(sequence);
+                            application
+                                .runtime_observation
+                                .publish_request_activation(activation.request, sequence);
                             application.last_activation_sequence = sequence;
                         }
                     }
@@ -1975,6 +1977,7 @@ async fn deliver_pending(
     thread: &QueueReadyThread,
     backend: &dyn InteractiveAgentBackend,
     workspace: &Path,
+    runtime_observation: &tidepool_actor::ActorRuntimeObservationHandle,
 ) -> Result<(), String> {
     let cwd = workspace.to_string_lossy();
     let pending_inbox = Arc::clone(inbox);
@@ -1982,28 +1985,56 @@ async fn deliver_pending(
         .await
         .map_err(|error| format!("inbox reader task: {error}"))?
         .map_err(|error| error.to_string())?;
+    let Some(last) = pending.last() else {
+        return Ok(());
+    };
     let inbox_watermark = inbox.watermark();
-    for message in pending {
-        let inbox_sequence = message.sequence;
-        backend
-            .push(
-                &cwd,
-                thread,
-                &message.payload.render(inbox_sequence, inbox_watermark),
+    let inbox_sequence = last.sequence;
+    let activation = pending
+        .iter()
+        .rev()
+        .find_map(|message| match &message.payload {
+            DurableActorEvent::Typed(TypedActorEvent::SessionReady {
+                sequence, request, ..
+            }) => Some((*request, *sequence)),
+            _ => None,
+        });
+    let event_sequences = pending
+        .iter()
+        .filter(|message| {
+            !matches!(
+                message.payload,
+                DurableActorEvent::Typed(TypedActorEvent::SessionReady { .. })
             )
-            .await
-            .map_err(|error| error.to_string())?;
-        let ack_inbox = Arc::clone(inbox);
-        tokio::task::spawn_blocking(move || ack_inbox.acknowledge(message.sequence))
-            .await
-            .map_err(|error| format!("inbox acknowledgement task: {error}"))?
-            .map_err(|error| error.to_string())?;
-        tracing::info!(
-            actor = ?actor,
-            inbox_sequence,
-            "actor activation delivered"
-        );
+        })
+        .map(|message| message.sequence)
+        .collect::<Vec<_>>();
+    let rendered = pending
+        .iter()
+        .map(|message| message.payload.render(message.sequence, inbox_watermark))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    backend
+        .push(&cwd, thread, &rendered)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Some((request, sequence)) = activation {
+        runtime_observation.publish_request_activation(request, sequence);
+    } else {
+        runtime_observation.publish_event_activation(event_sequences, inbox_watermark);
     }
+    let ack_inbox = Arc::clone(inbox);
+    tokio::task::spawn_blocking(move || ack_inbox.acknowledge(inbox_sequence))
+        .await
+        .map_err(|error| format!("inbox acknowledgement task: {error}"))?
+        .map_err(|error| error.to_string())?;
+    tracing::info!(
+        actor = ?actor,
+        inbox_sequence,
+        inbox_watermark,
+        event_count = pending.len(),
+        "actor activation batch delivered"
+    );
     Ok(())
 }
 
@@ -2023,7 +2054,14 @@ async fn run_delivery_pump(
         tokio::select! {
             _ = &mut shutdown => return,
             _ = health.tick() => {
-                let result = deliver_pending(actor, &inbox, &thread, backend.as_ref(), &workspace).await;
+                let result = deliver_pending(
+                    actor,
+                    &inbox,
+                    &thread,
+                    backend.as_ref(),
+                    &workspace,
+                    &runtime_observation,
+                ).await;
                 match result {
                     Ok(()) => {
                         if last_error.take().is_some() {
@@ -2895,24 +2933,38 @@ mod tests {
             .await
             .unwrap();
         let actor = ActorRef::first(tidepool_actor::ActorId(7));
+        let observation = tidepool_actor::ActorRuntimeObservationHandle::default();
 
         assert!(
-            deliver_pending(actor, &inbox, &thread, &backend, root.path())
+            deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation,)
                 .await
                 .is_err()
         );
         assert_eq!(inbox.pending().expect("pending after refusal").len(), 1);
+        assert_eq!(
+            observation.snapshot().activation_kind,
+            tidepool_actor::ActorActivationKind::RootStarted
+        );
+        inbox
+            .publish(DurableActorEvent::Legacy("second event".into()))
+            .expect("publish second event");
 
         backend
             .fail
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        deliver_pending(actor, &inbox, &thread, &backend, root.path())
+        deliver_pending(actor, &inbox, &thread, &backend, root.path(), &observation)
             .await
             .expect("retry accepted");
         assert!(inbox.pending().expect("acked inbox").is_empty());
         assert_eq!(
             *backend.messages.lock().unwrap(),
-            ["child completed", "child completed"]
+            ["child completed", "child completed\n\nsecond event"]
+        );
+        assert_eq!(
+            observation.snapshot().activation_kind,
+            tidepool_actor::ActorActivationKind::EventsActivated {
+                inbox_sequences: vec![1, 2]
+            }
         );
     }
 
