@@ -2024,8 +2024,8 @@ mod tests {
         assert_eq!(instructions, PromptId::ReadonlyAgent.body());
         let normalized = normalized_prompt(&instructions);
         assert!(normalized.contains("read-only access to the shared source checkout"));
-        assert!(normalized.contains("generated build artifacts"));
-        assert!(normalized.contains("writable directory outside it"));
+        assert!(normalized.contains("Do not run builds, tests, formatters"));
+        assert!(normalized.contains("actor with an owned coding worktree"));
         assert!(normalized.contains("orchestrate children"));
 
         let worker = developer_instructions(false, true, &InteractiveLaunchMode::Fresh);
