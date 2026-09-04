@@ -106,6 +106,13 @@ pub struct TmuxSession {
     socket: Option<String>,
 }
 
+/// Runtime-owned liveness of one exact pane retained for exit diagnosis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxPaneStatus {
+    pub dead: bool,
+    pub exit_status: Option<i32>,
+}
+
 impl TmuxSession {
     pub fn new(name: impl Into<String>) -> Result<Self, TmuxNodeError> {
         Ok(Self {
@@ -233,6 +240,103 @@ impl TmuxSession {
             });
         }
         TmuxPaneId::parse(String::from_utf8_lossy(&output.stdout).trim())
+    }
+
+    /// Keep the exact pane after its process exits so the owner can observe
+    /// the exit status and capture its final diagnostic output.
+    pub async fn retain_pane_on_exit(&self, pane: &TmuxPaneId) -> Result<(), TmuxNodeError> {
+        if !self.contains_pane(pane).await? {
+            return Err(TmuxNodeError::PaneNotOwned(pane.as_str().into()));
+        }
+        let output = self
+            .command()
+            .args([
+                "set-option",
+                "-p",
+                "-t",
+                pane.as_str(),
+                "remain-on-exit",
+                "on",
+            ])
+            .output()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "set-option remain-on-exit",
+                source,
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(TmuxNodeError::Command {
+                operation: "set-option remain-on-exit",
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+
+    /// Observe an exact pane. `None` means it no longer belongs to this
+    /// session; a retained dead pane carries the child process exit status.
+    pub async fn pane_status(
+        &self,
+        pane: &TmuxPaneId,
+    ) -> Result<Option<TmuxPaneStatus>, TmuxNodeError> {
+        if !self.contains_pane(pane).await? {
+            return Ok(None);
+        }
+        let output = self
+            .command()
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                pane.as_str(),
+                "#{pane_dead}|#{pane_dead_status}",
+            ])
+            .output()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "display-message pane status",
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(TmuxNodeError::Command {
+                operation: "display-message pane status",
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        parse_pane_status(String::from_utf8_lossy(&output.stdout).trim()).map(Some)
+    }
+
+    /// Capture the retained pane's bounded visible history for a failure log.
+    pub async fn capture_pane(
+        &self,
+        pane: &TmuxPaneId,
+        history_lines: usize,
+    ) -> Result<String, TmuxNodeError> {
+        if !self.contains_pane(pane).await? {
+            return Err(TmuxNodeError::PaneNotOwned(pane.as_str().into()));
+        }
+        let start = format!("-{}", history_lines.max(1));
+        let output = self
+            .command()
+            .args(["capture-pane", "-p", "-t", pane.as_str(), "-S", &start])
+            .output()
+            .await
+            .map_err(|source| TmuxNodeError::Io {
+                operation: "capture-pane",
+                source,
+            })?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(TmuxNodeError::Command {
+                operation: "capture-pane",
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
     }
 
     /// Select the window containing an exact pane owned by this session.
@@ -427,6 +531,27 @@ fn valid_environment_name(name: &str) -> bool {
         && !name.as_bytes()[0].is_ascii_digit()
 }
 
+fn parse_pane_status(value: &str) -> Result<TmuxPaneStatus, TmuxNodeError> {
+    let (dead, exit_status) = value
+        .split_once('|')
+        .ok_or_else(|| TmuxNodeError::InvalidPaneStatus(value.into()))?;
+    let dead = match dead {
+        "0" => false,
+        "1" => true,
+        _ => return Err(TmuxNodeError::InvalidPaneStatus(value.into())),
+    };
+    let exit_status = if exit_status.is_empty() {
+        None
+    } else {
+        Some(
+            exit_status
+                .parse()
+                .map_err(|_| TmuxNodeError::InvalidPaneStatus(value.into()))?,
+        )
+    };
+    Ok(TmuxPaneStatus { dead, exit_status })
+}
+
 fn render_shell_command(launch: &TmuxLaunch) -> String {
     let unsets = launch
         .unset_environment
@@ -460,6 +585,8 @@ pub enum TmuxNodeError {
     InvalidSessionName(String),
     #[error("invalid tmux pane id {0:?}")]
     InvalidPaneId(String),
+    #[error("invalid tmux pane status {0:?}")]
+    InvalidPaneStatus(String),
     #[error("tmux pane {0:?} does not belong to the owned session")]
     PaneNotOwned(String),
     #[error("tmux launch program is empty or contains NUL")]
@@ -531,6 +658,25 @@ mod tests {
             args.last().unwrap(),
             "'env' '-u' 'STALE_TOOL' '--' '/tmp/tidepool node' 'host' 'apostrophe'\\''s'"
         );
+    }
+
+    #[test]
+    fn pane_status_is_closed_and_preserves_exit_status() {
+        assert_eq!(
+            parse_pane_status("0|").unwrap(),
+            TmuxPaneStatus {
+                dead: false,
+                exit_status: None,
+            }
+        );
+        assert_eq!(
+            parse_pane_status("1|17").unwrap(),
+            TmuxPaneStatus {
+                dead: true,
+                exit_status: Some(17),
+            }
+        );
+        assert!(parse_pane_status("maybe|17").is_err());
     }
 
     #[test]
@@ -630,6 +776,39 @@ mod tests {
         ));
         session.kill_pane(&foreign_pane).await.unwrap();
         assert!(neighbor.list_panes().await.unwrap().contains(&foreign_pane));
+
+        let mut diagnostic_launch = launch.clone();
+        diagnostic_launch.window_name = "FailedActor".into();
+        diagnostic_launch.program = "sh".into();
+        diagnostic_launch.args = vec![
+            "-c".into(),
+            "sleep 1; printf 'actor launch diagnostic\\n'; exit 17".into(),
+        ];
+        let diagnostic_pane = session.spawn_window(&diagnostic_launch).await.unwrap();
+        session.retain_pane_on_exit(&diagnostic_pane).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            let status = session
+                .pane_status(&diagnostic_pane)
+                .await
+                .unwrap()
+                .unwrap();
+            if status.dead {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "diagnostic pane did not exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        assert_eq!(status.exit_status, Some(17));
+        assert!(session
+            .capture_pane(&diagnostic_pane, 20)
+            .await
+            .unwrap()
+            .contains("actor launch diagnostic"));
+        session.kill_pane(&diagnostic_pane).await.unwrap();
 
         session.kill().await.unwrap();
         assert!(!session.exists().await.unwrap());

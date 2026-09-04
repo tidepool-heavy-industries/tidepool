@@ -10,4 +10,6 @@ pub use inbox::{DurableEnvelope, DurableInbox, InboxError};
 pub use process_boundary::{
     ProcessBoundaryError, ProcessInvocation, ProcessMountBoundary, BUBBLEWRAP_PROGRAM,
 };
-pub use tmux::{TmuxLaunch, TmuxNodeError, TmuxPaneId, TmuxSession, TmuxSessionName};
+pub use tmux::{
+    TmuxLaunch, TmuxNodeError, TmuxPaneId, TmuxPaneStatus, TmuxSession, TmuxSessionName,
+};

@@ -1881,6 +1881,15 @@ async fn launch_prepared_interactive_application(
         }
     };
 
+    if let Err(error) = tmux.retain_pane_on_exit(&pane).await {
+        abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
+        return Err(application_error(
+            actor_identity,
+            InteractiveOperation::LaunchProcess,
+            format!("cannot retain actor pane for exit diagnosis: {error}"),
+        ));
+    }
+
     if actor_identity == root {
         if let Err(error) = tmux.select_window_for_pane(&pane).await {
             abandon_interactive_application(&tmux, &pane, service, &socket_root).await;
@@ -2360,14 +2369,29 @@ async fn discover_interactive_binding(
                 }
             }
             _ = pane_health.tick() => {
-                let panes = tmux.list_panes().await.map_err(|error| {
+                let status = tmux.pane_status(pane).await.map_err(|error| {
                     application_error(actor, InteractiveOperation::DiscoverBinding, error)
                 })?;
-                if !panes.contains(pane) {
+                if status.as_ref().is_none_or(|status| status.dead) {
+                    let exit_status = status.and_then(|status| status.exit_status);
+                    let output = tmux
+                        .capture_pane(pane, 120)
+                        .await
+                        .unwrap_or_else(|error| format!("<pane output unavailable: {error}>"));
+                    let detail = if output.is_empty() {
+                        format!(
+                            "interactive application exited before conversation binding; exit_status={exit_status:?}"
+                        )
+                    } else {
+                        format!(
+                            "interactive application exited before conversation binding; exit_status={exit_status:?}; pane_output={output:?}"
+                        )
+                    };
+                    tracing::error!(?actor, ?exit_status, pane_output = %output, "interactive application exited before binding");
                     return Err(application_error(
                         actor,
                         InteractiveOperation::DiscoverBinding,
-                        "interactive application exited before conversation binding",
+                        detail,
                     ));
                 }
             }
