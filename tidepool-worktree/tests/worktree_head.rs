@@ -137,6 +137,7 @@ fn worktree_head_reflects_movement_the_monitor_never_reconciled() {
         "worktree_head must see HEAD movement the monitor never reconciled"
     );
 
+    drop(monitor);
     let unread_journal =
         EventJournal::open(journal_dir.path().join("events.jsonl")).expect("reopen journal");
     assert!(
