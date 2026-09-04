@@ -166,7 +166,7 @@ pub(crate) struct ResidentWorkbenchFragment {
 }
 
 enum WorkbenchDisplay {
-    Binding(String),
+    Binding(Vec<String>),
     Haskell,
     Opaque,
 }
@@ -182,6 +182,7 @@ pub(crate) enum ResidentWorkbenchStep {
     Committed {
         output: String,
         warnings: Vec<String>,
+        installed_bindings: Vec<String>,
     },
     Rejected(String),
     Running {
@@ -1253,6 +1254,7 @@ where
             Ok(output) => Ok(ResidentWorkbenchStep::Committed {
                 output,
                 warnings: Vec::new(),
+                installed_bindings: Vec::new(),
             }),
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
         };
@@ -1294,6 +1296,7 @@ where
                         generation.0
                     ),
                     warnings: Vec::new(),
+                    installed_bindings: receipt.binders.clone(),
                 },
                 Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
                     ResidentWorkbenchStep::Rejected(failure.render_for_input(
@@ -1347,7 +1350,7 @@ where
             let display = if names.is_empty() {
                 WorkbenchDisplay::Opaque
             } else {
-                WorkbenchDisplay::Binding(names.join(", "))
+                WorkbenchDisplay::Binding(names)
             };
             start_fragment_settlement(session, context, display, warnings, outcome)
         }
@@ -1411,8 +1414,12 @@ where
     match outcome {
         ResidentOutcome::Completed { output, result } => {
             fragment.output.extend(output);
+            let installed_bindings = match &fragment.display {
+                WorkbenchDisplay::Binding(names) => names.clone(),
+                WorkbenchDisplay::Haskell | WorkbenchDisplay::Opaque => Vec::new(),
+            };
             let receipt = match fragment.display {
-                WorkbenchDisplay::Binding(name) => format!("[bound {name}]"),
+                WorkbenchDisplay::Binding(names) => format!("[bound {}]", names.join(", ")),
                 WorkbenchDisplay::Haskell => {
                     haskell_display(&result).unwrap_or_else(|| "<rendering unavailable>".into())
                 }
@@ -1426,17 +1433,23 @@ where
             Ok(ResidentWorkbenchStep::Committed {
                 output: transcript,
                 warnings: fragment.warnings,
+                installed_bindings,
             })
         }
         ResidentOutcome::BindingsCommitted { output } => {
             let bound_name = match &fragment.display {
-                WorkbenchDisplay::Binding(name) => Some(name.as_str()),
+                WorkbenchDisplay::Binding(names) => Some(names.join(", ")),
                 WorkbenchDisplay::Haskell | WorkbenchDisplay::Opaque => None,
             };
-            let receipt = projected_binding_receipt(bound_name, &output)?;
+            let receipt = projected_binding_receipt(bound_name.as_deref(), &output)?;
+            let installed_bindings = match fragment.display {
+                WorkbenchDisplay::Binding(names) => names,
+                WorkbenchDisplay::Haskell | WorkbenchDisplay::Opaque => Vec::new(),
+            };
             Ok(ResidentWorkbenchStep::Committed {
                 output: receipt,
                 warnings: fragment.warnings,
+                installed_bindings,
             })
         }
         ResidentOutcome::Suspended {

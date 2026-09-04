@@ -237,6 +237,7 @@ mod tests {
                 status: WorkbenchItemStatus::Committed,
                 output: output.into(),
                 warnings: Vec::new(),
+                installed_bindings: Vec::new(),
             }],
             next_index: 1,
             total: 1,

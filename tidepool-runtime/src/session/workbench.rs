@@ -352,6 +352,11 @@ pub struct WorkbenchItemReceipt {
     pub output: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Names installed into the persistent lexical environment by this unit.
+    /// This is authoritative metadata; clients need not scrape transcript
+    /// strings such as `[bound x]` or declaration summaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub installed_bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -1070,6 +1075,7 @@ mod tests {
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
                 warnings: Vec::new(),
+                installed_bindings: vec!["answer".into()],
             }],
             next_index: 1,
             total: 1,
@@ -1081,7 +1087,8 @@ mod tests {
                 "items": [{
                     "index": 0,
                     "status": "committed",
-                    "output": "bound `answer`"
+                    "output": "bound `answer`",
+                    "installedBindings": ["answer"]
                 }],
                 "nextIndex": 1,
                 "total": 1

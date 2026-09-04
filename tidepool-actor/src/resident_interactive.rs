@@ -77,6 +77,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                             status: WorkbenchItemStatus::Rejected,
                             output: error.to_string(),
                             warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
                         }],
                         next_index: 0,
                         total: 1,

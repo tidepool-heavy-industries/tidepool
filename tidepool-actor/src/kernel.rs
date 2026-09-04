@@ -331,6 +331,7 @@ mod tests {
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: "defined spotTaskText at generation 2".into(),
                 warnings: Vec::new(),
+                installed_bindings: vec!["spotTaskText".into()],
             }],
             failed_index: 1,
             total: 3,

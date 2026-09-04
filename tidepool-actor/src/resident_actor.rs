@@ -2520,6 +2520,7 @@ where
                     status: WorkbenchItemStatus::Committed,
                     output: self.status_text(kernel, context.actor, status_view),
                     warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
                 });
                 index += 1;
                 continue;
@@ -2533,6 +2534,7 @@ where
                         status: WorkbenchItemStatus::Diagnostic,
                         output: output.clone(),
                         warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
                     });
                     index += 1;
                     continue;
@@ -2564,6 +2566,7 @@ where
                             status: WorkbenchItemStatus::Committed,
                             output,
                             warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
                         }),
                         Err(output) => {
                             receipts.push(WorkbenchItemReceipt {
@@ -2571,6 +2574,7 @@ where
                                 status: WorkbenchItemStatus::Diagnostic,
                                 output,
                                 warnings: Vec::new(),
+                                installed_bindings: Vec::new(),
                             });
                         }
                     }
@@ -2628,7 +2632,11 @@ where
                 };
             }
             match step {
-                ResidentWorkbenchStep::Committed { output, warnings } => {
+                ResidentWorkbenchStep::Committed {
+                    output,
+                    warnings,
+                    installed_bindings,
+                } => {
                     if self.environment.fork_groups.has_ready(context.actor) {
                         if index + 1 != request.items.len() {
                             self.abort_unpublished_groups(
@@ -2642,6 +2650,7 @@ where
                                 status: WorkbenchItemStatus::Rejected,
                                 output: "unfold must be the final executable input unit in its hosted Haskell call".into(),
                                 warnings: Vec::new(),
+                                installed_bindings: Vec::new(),
                             });
                             return Ok(KernelStep::Continue(workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -2674,6 +2683,7 @@ where
                             output: "unfold admission ended without committing every fork group"
                                 .into(),
                             warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
@@ -2687,6 +2697,7 @@ where
                         status: WorkbenchItemStatus::Committed,
                         output,
                         warnings,
+                        installed_bindings,
                     });
                 }
                 ResidentWorkbenchStep::Rejected(output) => {
@@ -2696,6 +2707,7 @@ where
                             status: WorkbenchItemStatus::Diagnostic,
                             output,
                             warnings: Vec::new(),
+                            installed_bindings: Vec::new(),
                         });
                         index += 1;
                         continue;
@@ -2711,6 +2723,7 @@ where
                         status: WorkbenchItemStatus::Rejected,
                         output,
                         warnings: Vec::new(),
+                        installed_bindings: Vec::new(),
                     });
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Rejected,
@@ -3436,6 +3449,7 @@ fn workbench_response(
         status: WorkbenchItemStatus::NotRun,
         output: String::new(),
         warnings: Vec::new(),
+        installed_bindings: Vec::new(),
     }));
     WorkbenchResponse {
         status,
@@ -3489,6 +3503,7 @@ mod tests {
                 status: WorkbenchItemStatus::Rejected,
                 output: "bad effect".into(),
                 warnings: Vec::new(),
+                installed_bindings: Vec::new(),
             }],
             0,
             3,
