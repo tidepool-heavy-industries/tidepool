@@ -223,6 +223,8 @@ pub enum JitErrorClass {
     Overflow,
     /// Haskell `error` (with or without a message).
     UserError,
+    /// A GHC-generated partial pattern failed.
+    PatternMatch,
     /// Haskell `undefined` forced.
     Undefined,
     /// Application of a null function pointer.
@@ -270,6 +272,8 @@ pub enum EvalErrorClass {
     UnboundJoin,
     /// Haskell `error`.
     UserError,
+    /// A GHC-generated partial pattern failed.
+    PatternMatch,
     /// Haskell `undefined`.
     Undefined,
     /// `deep_force` hit the recursion depth limit.
@@ -317,6 +321,7 @@ fn classify_runtime(e: &RuntimeError) -> JitErrorClass {
         RuntimeError::DivisionByZero => JitErrorClass::DivisionByZero,
         RuntimeError::Overflow => JitErrorClass::Overflow,
         RuntimeError::UserError | RuntimeError::UserErrorMsg(_) => JitErrorClass::UserError,
+        RuntimeError::PatternMatchFailure(_) => JitErrorClass::PatternMatch,
         RuntimeError::Undefined => JitErrorClass::Undefined,
         RuntimeError::CaseTrap => JitErrorClass::CaseTrap,
         RuntimeError::BadPointer => JitErrorClass::BadPointer,
@@ -349,6 +354,7 @@ pub fn classify_eval(e: &EvalError) -> EvalErrorClass {
         EvalError::NotAFunction => EvalErrorClass::NotAFunction,
         EvalError::UnboundJoin(_) => EvalErrorClass::UnboundJoin,
         EvalError::UserError => EvalErrorClass::UserError,
+        EvalError::PatternMatchFailure => EvalErrorClass::PatternMatch,
         EvalError::Undefined => EvalErrorClass::Undefined,
         EvalError::DepthLimit => EvalErrorClass::DepthLimit,
         // A leaked `Jump`-in-flight control signal is itself the internal

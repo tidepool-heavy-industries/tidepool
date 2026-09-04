@@ -30,7 +30,7 @@ import GHC.Driver.Session
       , Opt_WarnIncompletePatterns
       , Opt_WarnIncompleteUniPatterns
       )
-  , wopt_set, wopt_set_fatal
+  , wopt_set
   , PackageFlag(..), PackageArg(..), ModRenaming(..) )
 import GHC.Unit.Module.ModGuts (ModGuts(..), CgGuts(..))
 import GHC.Core (CoreBind, CoreExpr, Bind(..), Expr(..), Alt(..))
@@ -1277,11 +1277,13 @@ externalVarModules known = go
 --     "(Some bindings suppressed …)" stub) the relevant-bindings list.
 canonicalizeDFlags :: DynFlags -> DynFlags
 canonicalizeDFlags dflags =
-  -- Config-class code must fail during compilation: a missing record field
-  -- became a lazy runtime crash on 2026-08-25 instead of failing loud here.
-  promoteConfigSafetyWarning Opt_WarnMissingFields $
-  promoteConfigSafetyWarning Opt_WarnIncompletePatterns $
-  promoteConfigSafetyWarning Opt_WarnIncompleteUniPatterns $
+  -- Keep common partial-pattern and missing-field diagnostics visible without
+  -- rejecting otherwise valid Haskell. This pipeline also serves the stateful
+  -- workbench, where warnings must not discard an input unit or prevent its
+  -- bindings from becoming available to later turns.
+  enableDiagnosticWarning Opt_WarnMissingFields $
+  enableDiagnosticWarning Opt_WarnIncompletePatterns $
+  enableDiagnosticWarning Opt_WarnIncompleteUniPatterns $
   -- Trim machine-channel noise: typed-hole "Valid hole fits include …" lists
   -- are enormous (dozens of candidates) and useless to an LLM caller; the
   -- "Perhaps you meant …" similar-name hints are a separate mechanism and stay.
@@ -1308,9 +1310,8 @@ canonicalizeDFlags dflags =
         }) Opt_FullLaziness) Opt_CprAnal)
         Opt_ExposeAllUnfoldings) Opt_ExposeOverloadedUnfoldings
 
-promoteConfigSafetyWarning :: WarningFlag -> DynFlags -> DynFlags
-promoteConfigSafetyWarning warning =
-  (`wopt_set_fatal` warning) . (`wopt_set` warning)
+enableDiagnosticWarning :: WarningFlag -> DynFlags -> DynFlags
+enableDiagnosticWarning warning = (`wopt_set` warning)
 
 -- | Give internal top-level simplifier floats stable module-qualified names.
 --

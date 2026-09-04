@@ -316,6 +316,7 @@ pub fn turn_user_code_offset(source: &str) -> Option<(usize, usize)> {
         "__user = let {\n __b =\n",
         "__probe = let {\n __b =\n",
         "__workbenchValue = let {\n __value =\n",
+        "__workbenchValue = __tidepoolInEffectRow $ let {\n __value =\n",
     ] {
         if let Some(position) = source.find(marker) {
             return Some((source[..position + marker.len()].matches('\n').count(), 0));
@@ -484,8 +485,8 @@ pub fn assemble_inspection_module(preamble: &str, imports: &str, expressions: &[
 /// Assemble a "bind-shaped" session-turn module by concatenating, in order:
 /// `preamble_with_imports` (imports already inserted — see
 /// [`insert_preamble_imports`]), the `-- [user]\n` marker, caller-supplied
-/// `extra` (a value binding, helper decls, or nothing), the `<target> :: Eff
-/// <effect_stack> _` signature, the `<target> = do { ... }` opener, `stmt`
+/// `extra` (a value binding, helper decls, or nothing), the `<target> = do {
+/// ... }` binding, `stmt`
 /// (already placement-normalized via [`place_turn_stmt`], or a literal
 /// `{{TURN_STMT}}` marker for a caller building a [`TurnTemplate`]), and the
 /// ` ; pure <tail> }` closer — optionally wrapped in `runDelegate( ... )` at
@@ -509,17 +510,24 @@ pub fn assemble_bind_module(
     let mut out = preamble_with_imports.to_string();
     out.push_str("-- [user]\n");
     out.push_str(extra);
-    out.push_str(&format!("{target} :: Eff {effect_stack} _\n"));
     if delegate_wrap {
-        out.push_str(&format!("{target} = runDelegate (do {{\n"));
+        out.push_str(&format!(
+            "__tidepoolInEffectRow :: Eff {effect_stack} value -> Eff {effect_stack} value\n\
+             __tidepoolInEffectRow = id\n\
+             {target} = __tidepoolInEffectRow (runDelegate (do {{\n"
+        ));
     } else {
         out.push_str(&format!("{target} = do {{\n"));
     }
     out.push_str(stmt);
     if delegate_wrap {
-        out.push_str(&format!(" ; pure {tail}\n }})\n"));
+        out.push_str(&format!(" ; pure {tail}\n }}))\n"));
     } else {
-        out.push_str(&format!(" ; pure {tail}\n }}\n"));
+        // Pin only the effect row. Let GHC infer the result type so generated
+        // workbench scaffolding cannot manufacture a partial-signature warning.
+        out.push_str(&format!(
+            " ; _ <- (pure () :: Eff {effect_stack} ())\n ; pure {tail}\n }}\n"
+        ));
     }
     out
 }
@@ -578,6 +586,10 @@ fn assemble_expression_module_with_result(
     } else {
         preamble_with_imports.to_string()
     };
+    out.push_str(&format!(
+        "__tidepoolInEffectRow :: Eff {effect_stack} value -> Eff {effect_stack} value\n\
+         __tidepoolInEffectRow = id\n"
+    ));
     if matches!(lift, ExpressionLift::Pure) {
         out.push_str(concat!(
             "\nclass TidepoolPureWorkbenchValue value\n",
@@ -592,23 +604,19 @@ fn assemble_expression_module_with_result(
     out.push_str("-- [user]\n");
     if matches!(lift, ExpressionLift::Effectful) {
         // Give GHC the actor's exact row while it infers the user expression.
-        // Without this local signature, the let-bound expression is
-        // generalized before `__result` constrains it; result-indexed scoped
-        // effects such as `Complete (AgentAction ActorEffects ())` then lose
-        // the very context needed to infer their inner live action type.
-        out.push_str(&format!("__workbenchValue :: Eff {effect_stack} _\n"));
+        // Without this pin, the let-bound expression is
+        // generalized before `__result` constrains it; polymorphic `Member`
+        // actions then lose the exact workbench row needed for inference.
+        out.push_str("__workbenchValue = __tidepoolInEffectRow $ let {\n __value =\n");
     }
     if matches!(lift, ExpressionLift::Pure) {
         out.push_str("__workbenchValue = let {\n __value = __tidepoolPureWorkbenchValue $ ");
-    } else {
-        out.push_str("__workbenchValue = let {\n __value =\n");
     }
     out.push_str(expression);
     if !expression.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(" } in __value\n");
-    out.push_str(&format!("{target} :: Eff {effect_stack} _\n"));
     let body = match (lift, result) {
         (ExpressionLift::Effectful, ExpressionResult::Raw) => "__workbenchValue",
         (ExpressionLift::Pure, ExpressionResult::Raw) => "pure __workbenchValue",
@@ -626,7 +634,7 @@ fn assemble_expression_module_with_result(
         }
     };
     out.push_str(target);
-    out.push_str(" = ");
+    out.push_str(" = __tidepoolInEffectRow $ ");
     out.push_str(body);
     out.push('\n');
     out
@@ -1500,7 +1508,7 @@ mod tests {
 
     #[test]
     fn effectful_expression_is_inferred_under_the_exact_workbench_row() {
-        let row = "(Complete (AgentAction ActorEffects ()) ': ActorEffects)";
+        let row = "ActorEffects";
         let effectful = assemble_expression_module(
             "module Expr where\n",
             "__result",
@@ -1509,8 +1517,10 @@ mod tests {
             ExpressionLift::Effectful,
         );
         assert!(effectful.contains(&format!(
-            "__workbenchValue :: Eff {row} _\n__workbenchValue ="
+            "__tidepoolInEffectRow :: Eff {row} value -> Eff {row} value"
         )));
+        assert!(effectful.contains("__workbenchValue = __tidepoolInEffectRow $"));
+        assert!(!effectful.contains(&format!("Eff {row} _")));
 
         let pure = assemble_expression_module(
             "module Expr where\n",
@@ -1519,12 +1529,12 @@ mod tests {
             "42",
             ExpressionLift::Pure,
         );
-        assert!(!pure.contains("__workbenchValue ::"));
+        assert!(!pure.contains(&format!("Eff {row} _")));
     }
 
     #[test]
     fn display_expression_keeps_value_and_uses_qualified_private_rendering() {
-        let row = "(Complete Text ': ActorEffects)";
+        let row = "ActorEffects";
         let source = assemble_display_expression_module(
             "module Expr where\n",
             "__result",
@@ -1537,10 +1547,10 @@ mod tests {
         assert!(source.contains("pure (__value, T.pack (show __value))"));
         assert!(!source.contains("pure (__value, pack (show __value))"));
         assert_eq!(source.matches("effectfulValue").count(), 1);
-        assert_eq!(
-            turn_user_code_line_range(&source, "effectfulValue"),
-            Some((6, 6))
-        );
+        let (start, end) = turn_user_code_line_range(&source, "effectfulValue")
+            .expect("the generated module should locate the submitted expression");
+        assert_eq!(start, end);
+        assert_eq!(source.lines().nth(start - 1), Some("effectfulValue"));
 
         let pure = assemble_display_expression_module(
             "module Expr where\n",

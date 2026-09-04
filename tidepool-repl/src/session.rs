@@ -50,8 +50,9 @@ use tidepool_runtime::{
 };
 
 use crate::command::{
-    BlockItem, BlockItemResult, BlockValue, BoundComponent, DeclarationMetadata, ExprText,
-    ItemKind, MetaCommand, ResponseShape, SessionCommand, TurnOutcome,
+    bound_result, multi_bound_result, BlockItem, BlockItemResult, BlockValue, BoundComponent,
+    DeclarationMetadata, ExprText, ItemKind, MetaCommand, ResponseShape, SessionCommand,
+    TurnOutcome,
 };
 
 /// Default session nursery: 64 MiB (matches the eval runtime default).
@@ -244,6 +245,7 @@ struct BindTail {
     tier: ValueTier,
     type_display: String,
     defining_expr: String,
+    warnings: Vec<String>,
 }
 
 /// [`Session::run_multi_bind`]'s tail: the value-binding generation and the
@@ -253,6 +255,7 @@ struct MultiBindTail {
     g: Generation,
     binders: Vec<BoundBinder>,
     defining_expr: String,
+    warnings: Vec<String>,
 }
 
 /// [`Session::run_reference_fragment`]'s tail: the caller-resolved inner type
@@ -1286,6 +1289,7 @@ impl Session {
                 Some(TurnOutcome::Bound {
                     name: name.to_string(),
                     type_display,
+                    warnings: Vec::new(),
                 })
             }
             Err(e) => Some(TurnOutcome::Error(session_fail(&e, "bind compile error"))),
@@ -1700,6 +1704,7 @@ impl Session {
             tier: binder.tier,
             type_display: binder.type_display,
             defining_expr: turn_text.to_string(),
+            warnings: turn.compiled.warnings.warnings.clone(),
         };
 
         let outcome = self.core.bind_funcid(
@@ -1733,6 +1738,7 @@ impl Session {
         TurnOutcome::Bound {
             name: tail.name,
             type_display: tail.type_display,
+            warnings: tail.warnings,
         }
     }
 
@@ -1888,6 +1894,7 @@ impl Session {
             g,
             binders: turn.binders,
             defining_expr: turn_text.to_string(),
+            warnings: turn.compiled.warnings.warnings.clone(),
         };
 
         // bind_funcid_projected deep-forces the whole tuple first (GC-safe:
@@ -1932,7 +1939,10 @@ impl Session {
         for binding in receipt.bindings {
             self.pure_binds.remove(&binding.name);
         }
-        TurnOutcome::MultiBound { components }
+        TurnOutcome::MultiBound {
+            components,
+            warnings: tail.warnings,
+        }
     }
 
     /// Run a compiled reference fragment on the resident machine, resolving any
@@ -2503,7 +2513,7 @@ impl Session {
         // template, target `result`) is the WRONG shape here — it's compiled
         // through the shared turn boundary. Reuse
         // `wrap_probe_source` instead: it already compiles to a properly
-        // `Eff`-typed `__result :: Eff {effect_stack} _` binding (forcing the
+        // exact-row `__result` binding (forcing the
         // same freer-simple constructor requirement this bootstrap exists
         // for), just via an extra `__probe`/`__t` monadic peel we don't need
         // the result of — only the compiled table and expression are read below.
@@ -2882,7 +2892,6 @@ fn wrap_bind_discard_source(
 /// bind statement and yields a tuple of all bound names. For `(a, b) <- action`
 /// with `names = ["a", "b"]` this emits:
 /// ```haskell
-/// __result :: Eff <stack> _
 /// __result = do
 ///   (a, b) <- action
 ///   pure (a, b)
@@ -2926,8 +2935,10 @@ fn wrap_bare_it_monadic(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
-    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-    out.push_str("__result = do {\n it <- __user ; pure (it, toWire it)\n }\n");
+    out.push_str("__result = do {\n it <- __user");
+    out.push_str(&format!(
+        " ; _ <- (pure () :: Eff {effect_stack} ()) ; pure (it, toWire it)\n }}\n"
+    ));
     out
 }
 
@@ -2947,8 +2958,10 @@ fn wrap_bare_it_pure(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__user", expr_text);
     out.push('\n');
-    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
-    out.push_str("__result = do {\n let { it = __user } ; pure (it, toWire it)\n }\n");
+    out.push_str("__result = do {\n let { it = __user }");
+    out.push_str(&format!(
+        " ; _ <- (pure () :: Eff {effect_stack} ()) ; pure (it, toWire it)\n }}\n"
+    ));
     out
 }
 
@@ -2992,9 +3005,9 @@ fn wrap_probe_source(
     let mut out = begin_user_module(preamble, imports, input);
     push_verbatim_binding(&mut out, "__probe", expr_text);
     out.push('\n');
-    out.push_str(&format!("__result :: Eff {effect_stack} _\n"));
     out.push_str("__result = do\n");
     out.push_str("  __t <- __probe\n");
+    out.push_str(&format!("  _ <- (pure () :: Eff {effect_stack} ())\n"));
     out.push_str("  pure __t\n");
     out
 }
@@ -3033,14 +3046,15 @@ fn pure_bind_to_decl(expr_text: &str, name: &str) -> Option<String> {
 /// (see `run_block` — `obj.remove("value")` after the loop).
 fn slim_item_result(outcome: &TurnOutcome) -> serde_json::Value {
     match outcome {
-        TurnOutcome::Bound { name, type_display } => serde_json::json!({
-            "bound": name,
-            "type": type_display,
-        }),
-        TurnOutcome::MultiBound { components } => serde_json::json!({
-            "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
-            "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
-        }),
+        TurnOutcome::Bound {
+            name,
+            type_display,
+            warnings,
+        } => bound_result(name, type_display, warnings),
+        TurnOutcome::MultiBound {
+            components,
+            warnings,
+        } => multi_bound_result(components, warnings),
         TurnOutcome::Defined { declarations, .. } => {
             let metadata: Vec<serde_json::Value> = declarations
                 .iter()
@@ -3302,6 +3316,7 @@ mod slim_tests {
         let bound = TurnOutcome::Bound {
             name: "vs".into(),
             type_display: "[Text]".into(),
+            warnings: Vec::new(),
         };
         let r = slim_item_result(&bound);
         assert_eq!(r["bound"], "vs");

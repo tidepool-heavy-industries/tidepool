@@ -23,6 +23,10 @@ pub enum RuntimeError {
     Overflow,
     #[error("Haskell error called")]
     UserError,
+    /// GHC's generated failure path for a refutable binding, incomplete case,
+    /// or incomplete guarded equation.
+    #[error("pattern match failure: {0}")]
+    PatternMatchFailure(String),
     #[error("Haskell undefined forced")]
     Undefined,
     #[error("case trap: scrutinee constructor not among case alternatives (tag mismatch; diagnostics on server stderr)")]
@@ -76,6 +80,7 @@ pub enum RuntimeErrorKind {
     UserError = 2,
     Undefined = 3,
     TypeMetadata = 4,
+    PatternMatch = 5,
 }
 
 impl RuntimeErrorKind {
@@ -87,6 +92,7 @@ impl RuntimeErrorKind {
             1 => Self::Overflow,
             3 => Self::Undefined,
             4 => Self::TypeMetadata,
+            5 => Self::PatternMatch,
             // includes 2 (UserError) and any out-of-range discriminant
             _ => Self::UserError,
         }
@@ -100,6 +106,7 @@ impl RuntimeErrorKind {
             Self::UserError => "UserError",
             Self::Undefined => "Undefined",
             Self::TypeMetadata => "TypeMetadata",
+            Self::PatternMatch => "PatternMatch",
         }
     }
 
@@ -111,6 +118,9 @@ impl RuntimeErrorKind {
             Self::UserError => RuntimeError::UserError,
             Self::Undefined => RuntimeError::Undefined,
             Self::TypeMetadata => RuntimeError::TypeMetadata,
+            Self::PatternMatch => {
+                RuntimeError::PatternMatchFailure("pattern did not match".to_string())
+            }
         }
     }
 }
@@ -328,7 +338,8 @@ pub extern "C" fn unresolved_var_trap(var_id: u64) -> *mut u8 {
 /// Records the error and returns the poison pointer instead of null. The
 /// effect machine checks for a pending error after JIT returns and converts
 /// to Yield::Error.
-/// kind: 0 = divZeroError, 1 = overflowError, 2 = UserError, 3 = Undefined
+/// kind: 0 = divZeroError, 1 = overflowError, 2 = UserError, 3 = Undefined,
+/// 4 = TypeMetadata, 5 = PatternMatch
 pub extern "C" fn runtime_error(kind: u64) -> *mut u8 {
     let rk = RuntimeErrorKind::from_u64(kind);
     let msg = format!("[JIT] runtime_error called: kind={} ({})", kind, rk.name());
@@ -361,6 +372,11 @@ pub extern "C" fn runtime_error_with_msg(kind: u64, msg_ptr: *const u8, msg_len:
     push_diagnostic(diag);
     let err = match rk {
         RuntimeErrorKind::UserError if !msg.is_empty() => RuntimeError::UserErrorMsg(msg),
+        RuntimeErrorKind::PatternMatch => RuntimeError::PatternMatchFailure(if msg.is_empty() {
+            "pattern did not match".to_string()
+        } else {
+            msg
+        }),
         // A kind-4 poison only ever carries a message when codegen resolved
         // its identity slot against meta.cbor's `poisoned` table
         // (`error_poison_ptr_lazy_named`), and that message IS the qualified

@@ -100,6 +100,8 @@ pub enum SentinelKind {
     UserError,
     /// `3` — Haskell `undefined`.
     Undefined,
+    /// `5` — GHC-generated failure for a refutable or incomplete pattern.
+    PatternMatch,
 }
 
 impl SentinelKind {
@@ -112,6 +114,7 @@ impl SentinelKind {
             1 => SentinelKind::Overflow,
             2 => SentinelKind::UserError,
             3 => SentinelKind::Undefined,
+            5 => SentinelKind::PatternMatch,
             _ => SentinelKind::UserError,
         }
     }
@@ -161,6 +164,9 @@ pub enum EvalError {
     /// Haskell `error "..."` called
     #[error("Haskell error called")]
     UserError,
+    /// A GHC-generated partial pattern failed when forced.
+    #[error("pattern match failure")]
+    PatternMatchFailure,
     /// Haskell `undefined` forced
     #[error("Haskell undefined forced")]
     Undefined,

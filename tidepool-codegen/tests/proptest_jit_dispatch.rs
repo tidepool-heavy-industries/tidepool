@@ -505,6 +505,7 @@ fn runtime_err_class(e: &RuntimeError) -> (u8, i64) {
         | RuntimeError::Overflow
         | RuntimeError::UserError
         | RuntimeError::UserErrorMsg(_)
+        | RuntimeError::PatternMatchFailure(_)
         | RuntimeError::Undefined
         | RuntimeError::BadPointer
         | RuntimeError::TypeMetadata

@@ -550,6 +550,7 @@ fn eval_step(
                     },
                     SentinelKind::UserError => EvalError::UserError,
                     SentinelKind::Undefined => EvalError::Undefined,
+                    SentinelKind::PatternMatch => EvalError::PatternMatchFailure,
                 });
             }
             let val = env.get(v).cloned().ok_or(EvalError::UnboundVar(*v))?;

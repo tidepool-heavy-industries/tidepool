@@ -18,8 +18,6 @@ module Tidepool.Translate
   , mapBang
   , targetBindingHasIO
   , UnresolvedVar(..)
-  , errorSentinelVar
-  , poisonSentinelSlot
   , stabilizeLocalUniques
   ) where
 
@@ -146,14 +144,35 @@ emitNode n = do
   put s { tsNodes = tsNodes s |> n }
   return idx
 
+-- | Closed set of run-time failures encoded in an error-sentinel 'VarId'.
+-- Keep 'errorSentinelCode', Rust's @RuntimeErrorKind@, and the tree evaluator's
+-- @SentinelKind@ in lockstep.
+data ErrorSentinelKind
+  = SentinelDivByZero
+  | SentinelOverflow
+  | SentinelUserError
+  | SentinelUndefined
+  | SentinelTypeMetadata
+  | SentinelPatternMatch
+  deriving (Eq, Show)
+
+errorSentinelCode :: ErrorSentinelKind -> Word64
+errorSentinelCode SentinelDivByZero    = 0
+errorSentinelCode SentinelOverflow     = 1
+errorSentinelCode SentinelUserError    = 2
+errorSentinelCode SentinelUndefined    = 3
+errorSentinelCode SentinelTypeMetadata = 4
+errorSentinelCode SentinelPatternMatch = 5
+
 -- | Encode an error-sentinel VarId: tag @0x45@ ('E') in the high
 -- byte, a 48-bit identity @slot@ in the middle bits, the sentinel @kind@ in
 -- the LOW byte. Slotless sentinels (@slot = 0@ — every kind but the
 -- unresolved-external poison) are byte-identical to the pre-slot encoding, so
 -- readers that compare the whole word keep matching. The Rust decoder is
 -- @VarId::sentinel@ (@tidepool-repr/src/types.rs@).
-errorSentinelVar :: Word64 -> Word64 -> Word64
-errorSentinelVar slot kind = 0x4500000000000000 .|. (slot `shiftL` 8) .|. kind
+errorSentinelVar :: Word64 -> ErrorSentinelKind -> Word64
+errorSentinelVar slot kind =
+  0x4500000000000000 .|. (slot `shiftL` 8) .|. errorSentinelCode kind
 
 -- | Inverse of 'errorSentinelVar' for the unresolved-external poison
 -- (kind 4): the identity slot a poison node carries, or 'Nothing' for any
@@ -161,7 +180,7 @@ errorSentinelVar slot kind = 0x4500000000000000 .|. (slot `shiftL` 8) .|. kind
 poisonSentinelSlot :: Word64 -> Maybe Word64
 poisonSentinelSlot v
   | v `shiftR` 56 == 0x45
-  , v .&. 0xFF == 4
+  , v .&. 0xFF == errorSentinelCode SentinelTypeMetadata
   , let slot = (v `shiftR` 8) .&. 0xFFFFFFFFFFFF
   , slot /= 0
   = Just slot
@@ -1551,9 +1570,12 @@ translate expr =
             emitNode $ NCon consId [charIdx, acc]
           ) suffixIdx (reverse (utf8CodepointsOf bytes))
 
-    -- Intercept error calls to preserve message string
-    Var v | isErrorVar v -> do
-      hIdx <- emitNode $ NVar (errorSentinelVar 0 2)
+    -- Intercept bottoming calls to preserve both their typed failure kind and
+    -- message. In particular, GHC's partial-pattern workers are not generic
+    -- user `error` calls: the Rust boundary handles them as recoverable
+    -- PatternMatchFailure values.
+    Var v | Just kind <- errorSentinelKind v -> do
+      hIdx <- emitNode $ NVar (errorSentinelVar 0 kind)
       let findMsg [] = Nothing
           findMsg (a:as) = case extractErrorMessage a of
                              Just bs -> Just bs
@@ -2030,15 +2052,12 @@ emitOp name args = emitNode $ NPrimOp name args
 translateHead :: CoreExpr -> TransM Int
 translateHead = \case
   Var v
-    | isRuntimeErrorVar v -> do
-        let kind = if occNameString (nameOccName (idName v)) == "divZeroError" then 0 else 1
-        emitNode $ NVar (errorSentinelVar 0 kind)  -- tag 'E' for error
-    | isErrorVar v -> emitNode $ NVar (errorSentinelVar 0 2)  -- tag 'E', kind 2 (error)
-    | isUndefinedVar v -> emitNode $ NVar (errorSentinelVar 0 3)  -- tag 'E', kind 3 (undefined)
+    | Just kind <- errorSentinelKind v ->
+        emitNode $ NVar (errorSentinelVar 0 kind)
     | isRealWorldVar v ->
         emitNode $ NLit (LEInt 0)  -- realWorld# state token → dummy literal
     | isTypeMetadataVar v ->
-        emitNode $ NVar (errorSentinelVar 0 4)  -- tag 'E', kind 4 (type metadata)
+        emitNode $ NVar (errorSentinelVar 0 SentinelTypeMetadata)
     | isNospecVar v -> do
         -- GHC.Magic.nospec is the identity; bare / zero-value-arg occurrence
         -- (the applied form is desugared in the App handler). Emit `\x -> x`.
@@ -2054,7 +2073,7 @@ translateHead = \case
             -- name through meta.cbor's @poisoned@ table. Kind stays 4, so
             -- every existing kind-4 reader still matches.
             slot <- poisonSlotFor (varId v)
-            emitNode $ NVar (errorSentinelVar slot 4)
+            emitNode $ NVar (errorSentinelVar slot SentinelTypeMetadata)
           else emitNode $ NVar (varId v)
   Lit l -> emitNode $ NLit (mapLit l)
   Lam b body
@@ -2576,6 +2595,29 @@ isErrorVar v =
           || name == "divZeroError" || name == "overflowError"
           || name == "underflowError" || name == "ratioZeroDenominatorError"))
 
+-- | Typed classification of GHC/base bottoming workers. Partial-pattern
+-- failures stay distinct from an explicit user 'error', so the runtime can
+-- recover the workbench without discarding why evaluation stopped.
+errorSentinelKind :: Id -> Maybe ErrorSentinelKind
+errorSentinelKind v
+  | name == "divZeroError" = Just SentinelDivByZero
+  | name == "overflowError" = Just SentinelOverflow
+  | isPatternMatchErrorVar v = Just SentinelPatternMatch
+  | isUndefinedVar v = Just SentinelUndefined
+  | isErrorVar v = Just SentinelUserError
+  | otherwise = Nothing
+  where
+    name = occNameString (nameOccName (idName v))
+
+isPatternMatchErrorVar :: Id -> Bool
+isPatternMatchErrorVar v =
+  fromGhcBase && name `elem` ["patError", "irrefutPatError", "nonExhaustiveGuardsError"]
+  where
+    name = occNameString (nameOccName (idName v))
+    fromGhcBase = case nameModule_maybe (idName v) of
+      Just m  -> take 4 (moduleNameString (moduleName m)) == "GHC."
+      Nothing -> False
+
 isUndefinedVar :: Id -> Bool
 isUndefinedVar v = occNameString (nameOccName (idName v)) == "undefined"
 
@@ -2612,12 +2654,7 @@ mapFfiCall pprName
 -- tag-'E' UserError Var. The JIT lowers it to a poison closure that only raises
 -- when forced/applied, so it is harmless in dead branches.
 emitFfiPoison :: TransM Int
-emitFfiPoison = emitNode $ NVar (errorSentinelVar 0 2)
-
-isRuntimeErrorVar :: Id -> Bool
-isRuntimeErrorVar v =
-  let name = occNameString (nameOccName (idName v))
-  in name == "divZeroError" || name == "overflowError"
+emitFfiPoison = emitNode $ NVar (errorSentinelVar 0 SentinelUserError)
 
 isUnsafeEqualityProofVar :: Id -> Bool
 isUnsafeEqualityProofVar v =

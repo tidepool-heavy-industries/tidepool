@@ -307,11 +307,20 @@ pub enum TurnOutcome {
     },
     /// A bind item bound a value to the live heap (`x <- e` / `let x = e`);
     /// `name` is now referenceable by later turns, with the captured `type_display`.
-    Bound { name: String, type_display: String },
+    Bound {
+        name: String,
+        type_display: String,
+        /// Advisory GHC diagnostics produced by this binding's compile.
+        warnings: Vec<String>,
+    },
     /// A bind item bound multiple values from a flat-tuple pattern
     /// (`(a, b) <- e` / `let (x, y) = e`). Each component is independently
     /// referenceable and GC-rooted.
-    MultiBound { components: Vec<BoundComponent> },
+    MultiBound {
+        components: Vec<BoundComponent>,
+        /// Advisory GHC diagnostics produced by this binding's compile.
+        warnings: Vec<String>,
+    },
     /// A declaration item accumulated a decl; the session advanced to
     /// `generation` and `Tidepool.Session.Lib.G<generation>` now in scope.
     /// `head` is the declared identifier (for slim result display).
@@ -362,16 +371,15 @@ impl TurnOutcome {
                 }
                 obj.to_string()
             }
-            TurnOutcome::Bound { name, type_display } => serde_json::json!({
-                "bound": name,
-                "type": type_display,
-            })
-            .to_string(),
-            TurnOutcome::MultiBound { components } => serde_json::json!({
-                "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
-                "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
-            })
-            .to_string(),
+            TurnOutcome::Bound {
+                name,
+                type_display,
+                warnings,
+            } => bound_result(name, type_display, warnings).to_string(),
+            TurnOutcome::MultiBound {
+                components,
+                warnings,
+            } => multi_bound_result(components, warnings).to_string(),
             TurnOutcome::Defined {
                 generation,
                 module,
@@ -476,6 +484,37 @@ impl TurnOutcome {
             TurnOutcome::Block { items, .. } => items.last().is_some_and(|i| !i.ok),
             _ => false,
         }
+    }
+}
+
+pub(crate) fn bound_result(
+    name: &str,
+    type_display: &str,
+    warnings: &[String],
+) -> serde_json::Value {
+    let mut result = serde_json::json!({
+        "bound": name,
+        "type": type_display,
+    });
+    insert_warnings(&mut result, warnings);
+    result
+}
+
+pub(crate) fn multi_bound_result(
+    components: &[BoundComponent],
+    warnings: &[String],
+) -> serde_json::Value {
+    let mut result = serde_json::json!({
+        "bound": components.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        "types": components.iter().map(|c| &c.type_display).collect::<Vec<_>>(),
+    });
+    insert_warnings(&mut result, warnings);
+    result
+}
+
+fn insert_warnings(result: &mut serde_json::Value, warnings: &[String]) {
+    if !warnings.is_empty() {
+        result["warnings"] = serde_json::json!(warnings);
     }
 }
 
