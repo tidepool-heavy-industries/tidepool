@@ -15,7 +15,7 @@
 //! compile's decl list means UNDECLARED there, so calling it is a GHC "not in
 //! scope" error, a stronger wall than a solvable-elsewhere type mismatch.
 //!
-//! The answerer forks via its OWN `Fork` effect (`Tidepool.Fork`'s
+//! The answerer forks via its OWN `Fork` effect (`Tidepool.Answerer.Fork`'s
 //! `fork`/`forkAll` head-swap to `forkSited`/`forkAllSited`), not through
 //! `RunLLMTurn` — so `runLLMTurn` is NOT in its row (a bare `runLLMTurn` call
 //! there is a compile error). A forked CHILD compiles against a fork-free leaf
@@ -206,7 +206,7 @@ fn fork_child_leaf_row_cannot_fork() {
     let forked = compile_against(
         leaf.clone(),
         "(forkAll @Int [\"pick a number\"] :: M [Int])",
-        "Tidepool.Fork (forkAll)",
+        "Tidepool.Answerer.Fork (forkAll)",
     );
     let err = match forked {
         Ok(_) => panic!(
@@ -297,7 +297,7 @@ fn noteraw_and_getstatejson_compile_in_the_answerer_stack() {
     );
 }
 
-/// `forkAll @T` (`Tidepool.Fork`) compiles against the answerer stack — the
+/// `forkAll @T` (`Tidepool.Answerer.Fork`) compiles against the answerer stack — the
 /// primitive the answerer's framing advertises for parallel sub-answerer
 /// delegation. It head-swaps to the `Fork` GADT's `forkAllSited`, which is
 /// exactly what `Fork` is in the row for. (The singular `fork` sibling rides
@@ -309,7 +309,7 @@ fn fork_all_compiles_in_the_answerer_stack() {
     let result = compile_against(
         typed_request_agent_decls(),
         "(forkAll @Int [\"pick a number\"] :: M [Int])",
-        "Tidepool.Fork (forkAll)",
+        "Tidepool.Answerer.Fork (forkAll)",
     );
     assert!(
         result.is_ok(),

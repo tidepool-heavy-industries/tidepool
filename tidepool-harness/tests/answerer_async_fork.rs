@@ -89,7 +89,7 @@ fn reply(content: &str) -> RecordedReply {
 // strips the next line's leading spaces, which silently destroys do-block
 // indentation (a GHC parse error that sends every test down the corrective
 // path; caught live on this file's first run).
-const ASYNC_FORK_BLOCK: &str = "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  ha <- async (fork @Int \"pick a\")\n  hb <- async (fork @Int \"pick b\")\n  a <- wait ha\n  b <- wait hb\n  (finalize @Decision (Decision { action = show (a * 10 + b), rationale = \"async fork composition\", confidence = Medium }) :: M ())\n```";
+const ASYNC_FORK_BLOCK: &str = "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  ha <- async (fork @Int \"pick a\")\n  hb <- async (fork @Int \"pick b\")\n  a <- wait ha\n  b <- wait hb\n  (finalize @Decision (Decision { action = show (a * 10 + b), rationale = \"async fork composition\", confidence = Medium }) :: M ())\n```";
 
 // Fork children are full pump windows (fork-subsumes-split step 1): they
 // answer with a REAL `finalize @Int`, pinned by the fork site's contract.
@@ -296,7 +296,7 @@ async fn async_fork_overlap_two_children_drive_concurrently() {
 /// action `show (c + s)` reads 13 only if wave 1's fold reached the code
 /// after wave 2.)
 // Same single-line-literal discipline as ASYNC_FORK_BLOCK (see its note).
-const TWO_WAVE_BLOCK: &str = "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  ha <- async (fork @Int \"pick a\")\n  hb <- async (fork @Int \"pick b\")\n  a <- wait ha\n  b <- wait hb\n  let s = a + b\n  hc <- async (fork @Int (\"wave two, given \" <> show s))\n  c <- wait hc\n  (finalize @Decision (Decision { action = show (c + s), rationale = \"two waves\", confidence = Medium }) :: M ())\n```";
+const TWO_WAVE_BLOCK: &str = "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  ha <- async (fork @Int \"pick a\")\n  hb <- async (fork @Int \"pick b\")\n  a <- wait ha\n  b <- wait hb\n  let s = a + b\n  hc <- async (fork @Int (\"wave two, given \" <> show s))\n  c <- wait hc\n  (finalize @Decision (Decision { action = show (c + s), rationale = \"two waves\", confidence = Medium }) :: M ())\n```";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_waves_of_fork_fold_fork_carry_results_across_waves() {
@@ -361,12 +361,12 @@ async fn fork_child_that_forks_is_depth_refused_and_recovers() {
     let replies = vec![
         // 1. Parent: one direct fork, answer derived from the child's value.
         reply(
-            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  (finalize @Decision (Decision { action = show a, rationale = \"one child\", confidence = Medium }) :: M ())\n```",
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  (finalize @Decision (Decision { action = show a, rationale = \"one child\", confidence = Medium }) :: M ())\n```",
         ),
         // 2. The child's FIRST attempt: tries to fork a grandchild. This
         //    compiles (Fork is in the row) and must be refused at servicing.
         reply(
-            "```haskell\nimport Tidepool.Fork (fork)\n\ndo\n  b <- fork @Int \"grandchild\"\n  (finalize @Int (b + 1) :: M ())\n```",
+            "```haskell\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  b <- fork @Int \"grandchild\"\n  (finalize @Int (b + 1) :: M ())\n```",
         ),
         // 3. The child's recovery after the depth-refusal corrective.
         finalize_int_reply(7),
@@ -412,11 +412,11 @@ async fn two_level_fork_chain_succeeds_at_default_caps() {
 
     let replies = vec![
         reply(
-            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  (finalize @Decision (Decision { action = show a, rationale = \"chain\", confidence = Medium }) :: M ())\n```",
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  (finalize @Decision (Decision { action = show a, rationale = \"chain\", confidence = Medium }) :: M ())\n```",
         ),
         // The child forks a grandchild and derives its own answer from it.
         reply(
-            "```haskell\nimport Tidepool.Fork (fork)\n\ndo\n  b <- fork @Int \"grandchild\"\n  (finalize @Int (b + 1) :: M ())\n```",
+            "```haskell\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  b <- fork @Int \"grandchild\"\n  (finalize @Int (b + 1) :: M ())\n```",
         ),
         finalize_int_reply(5),
     ];
@@ -452,7 +452,7 @@ async fn second_fork_past_subtree_cap_refuses_with_tree_wide_corrective() {
 
     let replies = vec![
         reply(
-            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  b <- fork @Int \"pick b\"\n  (finalize @Decision (Decision { action = show (a + b), rationale = \"two\", confidence = Medium }) :: M ())\n```",
+            "```haskell\nimport HarnessTypes (Decision (..), Confidence (..))\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  a <- fork @Int \"pick a\"\n  b <- fork @Int \"pick b\"\n  (finalize @Decision (Decision { action = show (a + b), rationale = \"two\", confidence = Medium }) :: M ())\n```",
         ),
         finalize_int_reply(1),
         reply(
@@ -1087,7 +1087,7 @@ async fn fork_child_asks_route_to_its_own_derived_gate_and_finalizes() {
         // extra model round (same shape `acceptance_fork.rs`'s parent turn
         // uses for `forkAll` + `finalize`).
         code(
-            "import Tidepool.Fork (fork)\n\n\
+            "import Tidepool.Answerer.Fork (fork)\n\n\
              do\n\
              \x20 n <- fork @Int \"explore\"\n\
              \x20 finalize @Int n :: M ()",

@@ -59,7 +59,7 @@
 --
 -- This module is reachable only in rows containing @Green@, and is
 -- auto-imported whenever @Green@ is in the row.  It has nothing to do with
--- "Tidepool.Fork", which is the answerer's unrelated fanout-to-sub-answerers
+-- "Tidepool.Answerer.Fork", which is the answerer's unrelated fanout-to-sub-answerers
 -- surface — though the two COMPOSE: @'async' (fork \@T brief)@ parks the
 -- fork in a thread of its own, so several forks can be outstanding before
 -- the first 'wait'.

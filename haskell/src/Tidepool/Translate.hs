@@ -2006,7 +2006,7 @@ translate expr =
               ++ "variables cannot be extracted)."
 
     -- Any OTHER shape at a forkMap/forkCata head sharing only the
-    -- OCCURRENCE name with the real Tidepool.Fork combinator (e.g. a user's
+    -- OCCURRENCE name with the real Tidepool.Answerer.Fork combinator (e.g. a user's
     -- own project-local helper) is deliberately NOT special-cased here,
     -- mirroring the runLLMTurn/runLLMTurnFork/runLLMTurnFanout arm above:
     -- no catch-all error, just fall through to ordinary Var/App

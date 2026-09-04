@@ -117,7 +117,7 @@ pub(crate) fn typed_request_agent_framing_suffix(
          `wait`:\n\
          \n\
          ```haskell\n\
-         import Tidepool.Fork (fork)\n\
+         import Tidepool.Answerer.Fork (fork)\n\
          \n\
          do\n\
          \x20\x20ha <- async (fork @Plan \"design the schema\")\n\
@@ -190,8 +190,8 @@ impl SelfHarnessDriver {
         // `contains(ty)` branch above.
         if Self::error_names_unimported_fork(error) {
             return Some(
-                "\n\nNOTE: `fork`/`forkAll` come from `Tidepool.Fork` — add \
-                 `import Tidepool.Fork` to this block's imports."
+                "\n\nNOTE: `fork`/`forkAll` come from `Tidepool.Answerer.Fork` — add \
+                 `import Tidepool.Answerer.Fork` to this block's imports."
                     .to_string(),
             );
         }

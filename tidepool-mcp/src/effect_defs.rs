@@ -302,7 +302,7 @@ macro_rules! extra_imports_for {
         &["import Tidepool.Kv"]
     };
     // Fork was migrated to the `tidepool-protocol` schema; its
-    // `extra_imports` (`import Tidepool.Fork` — `fork`/`forkAll`/`forkMap`/
+    // `extra_imports` (`import Tidepool.Answerer.Fork` — `fork`/`forkAll`/`forkMap`/
     // `forkCata` build on `Fork`'s own `forkSited`/`forkAllSited`) is schema
     // data now, emitted straight into its generated decl. See
     // `tidepool-protocol/src/effects/fork.rs`.
@@ -1760,7 +1760,7 @@ mod tests {
 
     /// The Fork effect's generated decl: two constructors (`ForkWith`/
     /// `ForkAllWith`) carrying a site id, and the `forkSited`/`forkAllSited`
-    /// executing helpers `Tidepool.Fork`'s stubs head-swap to.
+    /// executing helpers `Tidepool.Answerer.Fork`'s stubs head-swap to.
     #[test]
     fn generated_fork_decl_shape() {
         let d = crate::fork_decl();

@@ -1453,7 +1453,7 @@ fn works_stdlib_quoter_survives_extract() {
 // NullDispatcher); bundling would change dispatch interleaving. ---
 
 // ---------------------------------------------------------------------------
-// Tidepool.Fork (Wave C) — forkFilter compiles and runs on the JIT.
+// Tidepool.Answerer.Fork (Wave C) — forkFilter compiles and runs on the JIT.
 //
 // `forkMap`/`forkCata` (a CALLER-chosen answer type `b`) are NOT shipped:
 // extract statically rejects a `runLLMTurnFanout` occurrence whose
@@ -1464,7 +1464,7 @@ fn works_stdlib_quoter_survives_extract() {
 // extract ever sees the Core — empirically, neither `{-# INLINE #-}` nor an
 // explicit `{-# SPECIALIZE #-}` at the call site makes that happen in this
 // pipeline (`TIDEPOOL_DUMP_CLOSED` shows the call site still applying the
-// generic, un-inlined top-level binding). See `Tidepool.Fork`'s module
+// generic, un-inlined top-level binding). See `Tidepool.Answerer.Fork`'s module
 // haddock for the full finding. `forkFilter` has no such requirement — its
 // fanout always answers a fixed `Bool` — so it's the one combinator that
 // composes over `runLLMTurnFanout` cleanly.
@@ -1483,7 +1483,7 @@ fn eval_with_dispatch<H: DispatchEffect<()>>(
     // `standard_decls()` no longer carries `Fork` (vestigial-subsystems
     // review §4 — the ordinary session engine never services it); the two
     // callers of this helper (`works_fork`, `works_fork_map`) genuinely
-    // exercise `Tidepool.Fork`'s JIT dispatch, so widen the roster here,
+    // exercise `Tidepool.Answerer.Fork`'s JIT dispatch, so widen the roster here,
     // explicitly, the same way the harness's `agent_decls` does — see
     // `fork_decls`.
     let decls = fork_decls();
@@ -1525,7 +1525,7 @@ impl DispatchEffect<()> for BoolListOnce {
     }
 }
 
-/// `forkFilter` (`Tidepool.Fork`, Wave C) runs on the JIT: answers a REAL
+/// `forkFilter` (`Tidepool.Answerer.Fork`, Wave C) runs on the JIT: answers a REAL
 /// `runLLMTurnFanout` dispatch (not a NullDispatcher stub), keeping only
 /// the elements whose scripted verdict is `True`, in original order.
 #[test]
@@ -1534,7 +1534,7 @@ fn works_fork() {
         answer: vec![true, false, true, false],
     };
     let got = eval_with_dispatch(
-        "Tidepool.Fork",
+        "Tidepool.Answerer.Fork",
         "do { ys <- forkFilter (\\x -> T.pack (show (x :: Int))) [1, 2, 3, 4 :: Int]; \
          pure (toJSON (ys :: [Int])) }",
         &mut filter_d,
@@ -1562,10 +1562,10 @@ impl DispatchEffect<()> for IntListOnce {
     }
 }
 
-/// `forkMap` (`Tidepool.Fork`, combinator-sites widen) runs end to end on the
+/// `forkMap` (`Tidepool.Answerer.Fork`, combinator-sites widen) runs end to end on the
 /// JIT: a CALLER-chosen answer type (`@Int`, not forkFilter's fixed `Bool`)
 /// reaches a REAL `runLLMTurnFanout`-shaped dispatch — the mechanism
-/// `Tidepool.Fork`'s module haddock and `works_fork`'s doc comment describe
+/// `Tidepool.Answerer.Fork`'s module haddock and `works_fork`'s doc comment describe
 /// as the previously-blocked wall, closed by the combinator-sites extract
 /// pass.
 #[test]
@@ -1574,7 +1574,7 @@ fn works_fork_map() {
         answer: vec![10, 20, 30, 40],
     };
     let got = eval_with_dispatch(
-        "Tidepool.Fork",
+        "Tidepool.Answerer.Fork",
         "do { ys <- forkMap @Int (\\x -> T.pack (show (x :: Int))) [1, 2, 3, 4 :: Int]; \
          pure (toJSON (ys :: [Int])) }",
         &mut map_d,

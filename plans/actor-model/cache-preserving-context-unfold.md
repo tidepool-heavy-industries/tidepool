@@ -96,10 +96,12 @@ explicit typed fold later.
     request/watch prefix. Opaque IDs remain authoritative, but operators and
     models normally see names such as `context-unfold/runtime/mailbox`; stable
     numeric suffixes resolve collisions.
-12. **`unfold` ends its hosted Haskell call.** The provider sees the complete
-    tool-call payload before its Haskell units execute. The unfolding unit must
-    therefore be the final executable unit in that call; parent-only watch or
-    integration code belongs in the next call after handles return.
+12. **`unfold` ends the effectful part of its hosted Haskell call.** The
+    provider sees the complete tool-call payload before its Haskell units
+    execute. The unfolding unit must therefore be the final executable unit in
+    that call and no effect may follow its admission commit. A harmless pure
+    projection of the returned shape may finish that same unit; parent-only
+    watch or integration effects belong in the next call after handles return.
 
 ## One exact split boundary
 
@@ -132,10 +134,11 @@ operator intends it to share.
 
 Because the provider item contains the complete tool input, there is no honest
 sub-call transcript boundary after one Haskell statement. The workbench must
-reject an `unfold` followed by another executable input unit, or an `unfold`
-nested inside a larger action with a post-unfold suffix, before admission. It
-may allow declarations and bindings that execute before the final unfolding
-unit; those are precisely the shared vocabulary the children should inherit.
+reject an `unfold` followed by another executable input unit and reject any
+effect boundary reached after admission commits. It may allow declarations and
+bindings before the final unfolding unit, plus pure projection of the returned
+handle shape afterward. Those operations cannot publish work or change
+custody, and their source was already part of the shared provider prefix.
 The parent receives handles as that tool result, then uses a new Haskell call
 to register watches or continue its fold.
 
@@ -289,12 +292,12 @@ successful units, or promote an exhaustiveness warning into a compile error.
 Effects completed by the rejected unit remain completed, so examples should
 bind an effect result first and project it in a later unit when retry matters.
 
-In the interactive workbench, successful `unfold` must occur in tail position
-of the final input unit. The only continuation after its effect site is the
-trusted wrapper that materializes the returned binding and closes the hosted
-tool call. Reject a user-authored `do` suffix before admission using compiled
-effect-site/provenance information, not a string search for the name
-`unfold`.
+In the interactive workbench, successful `unfold` must commit the final effect
+boundary of the final input unit. The runtime rejects a later effect before it
+can run and aborts the unpublished group; the input driver rejects any later
+unit. Pure result reshaping is intentionally allowed: forbidding it would add
+compiler ceremony without protecting a provider, custody, or scheduling
+invariant.
 
 The applicative tree gives the interpreter every independent leaf before any
 assignment starts. It can therefore:
@@ -1496,8 +1499,8 @@ rendering of an entire generated prompt.
 
 One unfold is admitted in this order:
 
-1. Prove the `unfold` effect is tail-positioned in the hosted call's final
-   executable input unit.
+1. Prove the `unfold` commit is the final effect boundary in the hosted call's
+   final executable input unit.
 2. Evaluate the pure applicative plan and assign stable branch IDs.
 3. Freeze the provider prefix at the active hosted Haskell call.
 4. Freeze the declaration generation and persistent binding tip; lease every
@@ -1631,8 +1634,8 @@ implement, not that production support has landed.
   named Git lineage, and a fresh-review boundary.
 - [x] Record one canonical root plan, owner map, hard blockers, semantic-test
   policy, and linear low-effort handoff.
-- [ ] Gate 0: prove the exact active-provider-call fork boundary, measurable
-  prefix-cache reuse, tail-position rejection, and enforced inspection-only
+- [x] Gate 0: prove the exact active-provider-call fork boundary, measurable
+  prefix-cache reuse, final-effect/final-unit rejection, and enforced inspection-only
   native policy.
   - 2026-09-04 provider canary: forked Codex thread
     `01a06b3a-6c67-7d91-a4f3-5fc8eb981b96` while its parent was suspended in
@@ -1654,8 +1657,10 @@ implement, not that production support has landed.
     exact stable effect-key row. Runtime admission checks both the semantic
     role ceiling and the parent's row; a custom `'[Replies, ActorContext]`
     researcher compiled while `stopAgent` failed its compile-negative fixture.
-    The remaining Gate 0 item is compiled-provenance rejection of a pure
-    user suffix after `unfold`.
+    Runtime admission now rejects any later effect boundary, and the workbench
+    rejects a later executable input unit before publication. Pure projection
+    in the same unit is deliberately permitted because it cannot alter
+    provider prefix, custody, or scheduling state.
 - [x] Gate 1: add immutable Haskell binding tips and descendant root leases.
   - 2026-09-04: `BindingTable` now captures a flattened immutable inherited
     tip at scope mint, retains each referenced `SessionVarId` through a
@@ -2065,9 +2070,9 @@ the exact invariant and evidence rather than silently weakening the surface.
 ### Slice 4 — one context-forked persistent child
 
 - Add the internal `Forks` effect request and actor fork-group state.
-- Require the interactive unfold site to be the tail effect of the hosted
-  call's final executable Haskell unit; reject parent-authored suffixes before
-  reserving anything.
+- Require the interactive unfold commit to be the final effect of the hosted
+  call's final executable Haskell unit. Reject later effects before they run
+  and later units before publication; allow pure result projection.
 - Reuse the provider's native fork launch mode with an exact active-call
   boundary rather than transcript reconstruction.
 - Fork one immutable Haskell snapshot, mount one typed input/reply scope, apply
@@ -2098,8 +2103,10 @@ the exact invariant and evidence rather than silently weakening the surface.
 
 ### Slice 7 — retirement and dogfood
 
-- Delete or rename the old blocking `Tidepool.Fork`/`forkAll`/`forkCata`
-  surface so it cannot be confused with persistent actor unfold.
+- Rename the old blocking surface to
+  `Tidepool.Answerer.Fork` so `forkAll`/`forkCata` remain available to the
+  noninteractive answerer harness without being confused with persistent
+  actor unfold.
 - Update older architecture sections that require exact effect-profile or
   public continuation cloning.
 - Run a real campaign with heterogeneous coding and research children,

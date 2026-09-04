@@ -98,7 +98,7 @@ fn finalize_text_reply(text: &str) -> RecordedReply {
 // NOTE: single-line literal with explicit \n — a `\` line-continuation
 // strips the next line's leading spaces, which silently destroys do-block
 // indentation (answerer_async_fork.rs learned this live).
-const FORKING_ROOT_BLOCK: &str = "```haskell\nimport Tidepool.Fork (fork)\n\ndo\n  ha <- async (fork @Text \"gather the alpha fact\")\n  hb <- async (fork @Text \"gather the beta fact\")\n  a <- wait ha\n  b <- wait hb\n  (finalize @Text (a <> \" | \" <> b) :: M ())\n```";
+const FORKING_ROOT_BLOCK: &str = "```haskell\nimport Tidepool.Answerer.Fork (fork)\n\ndo\n  ha <- async (fork @Text \"gather the alpha fact\")\n  hb <- async (fork @Text \"gather the beta fact\")\n  a <- wait ha\n  b <- wait hb\n  (finalize @Text (a <> \" | \" <> b) :: M ())\n```";
 
 /// A gate that answers the seed-question form once, then refuses: the
 /// collapsed loop presents exactly ONE form on a fresh boot (the seed gate)

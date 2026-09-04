@@ -1337,7 +1337,7 @@ impl SelfHarnessDriver {
     }
 
     /// Drain a `SuspensionRouting::Fork` suspension on the per-loop answerer
-    /// (`forkAll`/`fork` via `Tidepool.Fork`): resume it by driving each
+    /// (`forkAll`/`fork` via `Tidepool.Answerer.Fork`): resume it by driving each
     /// child to completion on the full pump row via
     /// [`Self::drive_fork_child_agent_session`] (fork-subsumes-split step 1 — a
     /// child can `askUser`, `fork` again, and go multi-round; it is not the

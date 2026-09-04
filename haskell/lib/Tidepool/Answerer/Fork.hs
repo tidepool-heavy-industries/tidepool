@@ -1,9 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Recursion-scheme fork combinators: the agent-facing parallel surface is
--- park-at-fork plus recursion-scheme combinators over the 'Fork' effect —
--- scheme traverses, forked answerers judge.
+-- | Blocking recursion-scheme combinators for the noninteractive answerer
+-- harness. These park one authored program on the legacy 'Fork' effect until
+-- its sub-answerers return. Persistent Shoal actors instead use the
+-- applicative @Tidepool.Actors.Unfold@ surface; keeping this module under the
+-- @Answerer@ namespace makes the two lifecycle contracts explicit.
 --
 -- 'forkMap'\/'forkCata' need a CALLER-chosen answer type @b@, which
 -- 'forkFilter' (always 'Bool') never did. Extract's @Tidepool.Translate@
@@ -25,7 +27,7 @@
 -- a bottom value, forced (as ordinary 'Int' JSON payload data) the instant
 -- this path is ever actually reached, so it still fails loudly rather than
 -- silently doing the wrong thing.
-module Tidepool.Fork
+module Tidepool.Answerer.Fork
   ( forkFilter
   , fork
   , forkAll

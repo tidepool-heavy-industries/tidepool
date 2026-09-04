@@ -452,13 +452,13 @@ fn runllmturn_source(hole: &str, helpers: &str) -> String {
 // ---------------------------------------------------------------------------
 // forkMap (combinator-sites widen): the same extract-level recognition
 // mechanism, generalized to a library combinator with a CALLER-chosen
-// answer type. See Tidepool.Fork's module haddock for why this needed a
+// answer type. See Tidepool.Answerer.Fork's module haddock for why this needed a
 // new mechanism (forkFilter's fixed-Bool answer never did) and
 // Tidepool.Translate's forkMap/forkCata case arm for the implementation.
 // ---------------------------------------------------------------------------
 
-/// Same as `try_compile_runllmturn`, but imports `Tidepool.Fork` so
-/// `forkMap`/`forkCata` are in scope. `Tidepool.Fork` rides the `Fork`
+/// Same as `try_compile_runllmturn`, but imports `Tidepool.Answerer.Fork` so
+/// `forkMap`/`forkCata` are in scope. `Tidepool.Answerer.Fork` rides the `Fork`
 /// effect (not `RunLLMTurn`); `standard_decls()` no longer declares `Fork`
 /// (vestigial-subsystems review §4 — the ordinary session engine never
 /// services it), so this widens the roster explicitly (tag 11, same as
@@ -477,8 +477,15 @@ fn try_compile_forkmap(hole: &str, helpers: &str) -> Result<(), String> {
     let pre = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
     let code = format!("do\n  _ <- {hole}\n  pure (toJSON (0 :: Int))\n");
-    let src =
-        tidepool_mcp::template_haskell(&pre, &stack, &code, "Tidepool.Fork", helpers, None, None);
+    let src = tidepool_mcp::template_haskell(
+        &pre,
+        &stack,
+        &code,
+        "Tidepool.Answerer.Fork",
+        helpers,
+        None,
+        None,
+    );
     let effects_dirs = tidepool_mcp::ensure_effects_module(&decls)
         .expect("write effects module")
         .include_paths();
@@ -520,7 +527,7 @@ fn forkmap_sidecar_entry_matches_bare_fanout_shape() {
         &pre,
         &stack,
         code,
-        "Tidepool.Fork",
+        "Tidepool.Answerer.Fork",
         "data Verdict = Approve | Reject deriving (Show)",
         None,
         None,
@@ -578,10 +585,10 @@ fn forkmap_rejects_partial_application() {
 }
 
 // ---------------------------------------------------------------------------
-// fork (Tidepool.Fork's singleton sibling of forkAll): same extract-level
+// fork (Tidepool.Answerer.Fork's singleton sibling of forkAll): same extract-level
 // recognition mechanism as forkAll, but head-swapped to forkSited (the Fork
 // effect) so its sidecar type is recorded BARE (`T`, not `[T]`) — see
-// Tidepool.Translate's isForkVar arm and Tidepool.Fork's `fork` haddock.
+// Tidepool.Translate's isForkVar arm and Tidepool.Answerer.Fork's `fork` haddock.
 // ---------------------------------------------------------------------------
 
 /// A `fork @Verdict "brief"` call site's asks.json entry records the BARE
@@ -599,7 +606,7 @@ fn fork_sidecar_entry_records_bare_answer_type() {
         &pre,
         &stack,
         code,
-        "Tidepool.Fork",
+        "Tidepool.Answerer.Fork",
         "data Verdict = Approve | Reject deriving (Show)",
         None,
         None,
@@ -632,7 +639,7 @@ fn forkall_sidecar_entry_still_records_list_answer_type() {
         &pre,
         &stack,
         code,
-        "Tidepool.Fork",
+        "Tidepool.Answerer.Fork",
         "data Verdict = Approve | Reject deriving (Show)",
         None,
         None,

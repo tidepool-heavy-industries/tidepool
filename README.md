@@ -408,7 +408,7 @@ The `tidepool` binary provides these effect handlers:
 | **Time** | `TimeNow` — UTC clock (epoch millis; `getCurrentTime`, ISO-8601 helpers) |
 | **Ask** | `AskWith :: Text -> Value -> Ask Value` — suspend and ask the calling LLM a schema-validated question |
 | **RunLLMTurn** | `RunLLMTurnWith`, `RunLLMTurnFreezeWith` — interposed, like `Ask`: `runLLMTurn`/`runLLMTurnFork`/`runLLMTurnFanout` open a clean-context model sub-turn and deliver a typed answer; `freezeContext` snapshots the calling context for later branching |
-| **Fork** | `ForkWith`, `ForkAllWith` — `fork @T brief`/`forkAll @T briefs` delegate to one or more sub-answerers, each producing a typed `T`; the resident harness supports recursively forked child sessions within configured budgets |
+| **Fork** | `ForkWith`, `ForkAllWith` — the noninteractive answerer API lives under `Tidepool.Answerer.Fork`; `fork @T brief`/`forkAll @T briefs` block for typed sub-answers inside the resident self-harness. Persistent Shoal actors use the applicative `Tidepool.Actors.Unfold` surface instead. |
 
 > **`--debug` flag**: Run `tidepool --debug` to enable the **Meta** effect (`MetaConstructors`, `MetaLookupCon`, `MetaPrimOps`, `MetaEffects`, `MetaDiagnostics`, `MetaVersion`, `MetaHelp`) for runtime introspection. For git operations, use `run "git ..."` via the Exec effect.
 

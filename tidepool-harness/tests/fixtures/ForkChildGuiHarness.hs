@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | Test fixture for fork-subsumes-split step 3's GUI lane: an ordinary
--- 'runLLMTurn' hole whose answerer forks ONE child ('Tidepool.Fork.fork').
+-- 'runLLMTurn' hole whose answerer forks ONE child ('Tidepool.Answerer.Fork.fork').
 -- The child asks the operator one question, then finalizes; the parent
 -- resumes (in the SAME compiled block — no extra model round) and finalizes
 -- with the child's typed answer. Unlike

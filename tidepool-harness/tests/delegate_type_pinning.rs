@@ -175,7 +175,7 @@ fn plain_finalize_still_compiles_under_the_wrap() {
 /// turn module itself — `Fork`'s `fork`/`forkAll` are now IN
 /// `extra_imports_for!`'s auto-import table (poke-round finding 1 fix, same
 /// row-gating as `AskUser`'s `Tidepool.Form`), so a block reaching for bare
-/// `fork` needs no explicit `Tidepool.Fork` line here; `code_imports` remains
+/// `fork` needs no explicit `Tidepool.Answerer.Fork` line here; `code_imports` remains
 /// for genuinely author-side modules a block names itself (`HarnessTypes`'s
 /// own sibling types, say). Kept separate from the contract's OWN
 /// `HarnessTypes` import (always the author module for `finalize_ty` here, so
@@ -225,10 +225,10 @@ fn compile_delegating_answerer_turn(
 /// compile against the narrow row with `Finalize` genuinely pinned to
 /// `Decision`, not the bare default `Void`.
 ///
-/// `code` calls `fork` BARE — no `import Tidepool.Fork` in `code_imports` —
+/// `code` calls `fork` BARE — no `import Tidepool.Answerer.Fork` in `code_imports` —
 /// which is the production shape: the collapsed companion's own blocks never
 /// name that import either, and `fork`/`forkAll` (the surface verbs of
-/// `Tidepool.Fork`) are auto-imported same as `AskUser`'s `Tidepool.Form` —
+/// `Tidepool.Answerer.Fork`) are auto-imported same as `AskUser`'s `Tidepool.Form` —
 /// the absence of that import here is the pin.
 #[test]
 fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_with_pinned_contract()
@@ -244,7 +244,7 @@ fn answerer_turn_combining_fork_and_delegate_compiles_against_the_narrow_row_wit
     let result = compile_delegating_answerer_turn(code, "HarnessTypes", "Decision");
     assert!(
         result.is_ok(),
-        "an answerer window combining BARE fork (no explicit Tidepool.Fork \
+        "an answerer window combining BARE fork (no explicit Tidepool.Answerer.Fork \
          import) and delegate must compile against the narrow delegating row \
          with Finalize pinned to the hole's real contract type — fork/forkAll \
          must be auto-imported same as AskUser's Tidepool.Form, got: {:?}",

@@ -1169,7 +1169,7 @@ mod tests {
 
     /// A `Not in scope: fork`/`forkAll` GHC diagnostic — the exact shape a
     /// model hits when it reaches for `fork`/`forkAll` without importing
-    /// `Tidepool.Fork` — must be recognized so the corrective-retry loop can
+    /// `Tidepool.Answerer.Fork` — must be recognized so the corrective-retry loop can
     /// name the fix, and the internal head-swap targets `forkSited`/
     /// `forkAllSited` must NOT trip the same check (a model should never be
     /// naming those directly, and a false-positive hint there would be

@@ -134,6 +134,10 @@ the next request with its accumulated conversation and declarations intact.
 
 The low-level `Tidepool.Actor` API remains available through an intentional
 advanced import. It is not imported or re-exported by the default facade.
+The older blocking sub-answerer combinators now live under
+`Tidepool.Answerer.Fork`; they serve the noninteractive self-harness and are
+not the persistent-actor fork surface. Shoal context forks are described with
+the applicative `Tidepool.Actors.Unfold` API exported by the default facade.
 
 ## Replies, watches, and model turns
 

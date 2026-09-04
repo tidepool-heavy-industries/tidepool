@@ -1,9 +1,9 @@
 //! The `Fork` suspension.
 //!
-//! `Tidepool.Fork`'s `fork @T brief` / `forkAll @T briefs` — the SEND-and-join
+//! `Tidepool.Answerer.Fork`'s `fork @T brief` / `forkAll @T briefs` — the SEND-and-join
 //! child-agent-session fork, spawn-and-gather rather than `RunLLMTurn`'s
 //! suspend-and-resume. Polymorphic response type, bound at the invocation
-//! site: `fork`/`forkAll`/`forkMap`/`forkCata` (`Tidepool.Fork`, authored
+//! site: `fork`/`forkAll`/`forkMap`/`forkCata` (`Tidepool.Answerer.Fork`, authored
 //! library code, not generated here) are OPAQUE stubs the extractor head-swaps
 //! to `forkSited`/`forkAllSited` — this effect's own two helpers — substituting
 //! a fresh per-call-site literal `Int` for the `0` placeholder in their bodies
@@ -44,7 +44,7 @@ pub fn fork() -> Effect {
             "Spawn parallel sub-answerers and gather their typed answers. ",
             "`fork \\@T brief` forks ONE child that answers a single `T`; ",
             "`forkAll \\@T briefs` forks one child per brief, answered together ",
-            "as `[T]` in order (`import Tidepool.Fork`). A forked child answers ",
+            "as `[T]` in order (`import Tidepool.Answerer.Fork`). A forked child answers ",
             "its own brief and may fork further, within driver-enforced depth ",
             "and descendant budgets.",
         ],
@@ -52,7 +52,7 @@ pub fn fork() -> Effect {
             "`fork @T brief :: M T` — delegate to one sub-answerer that answers `brief` ",
             "on its own.\n",
             "`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, ",
-            "answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child ",
+            "answered together as a batch `[T]` (`import Tidepool.Answerer.Fork`). A forked child ",
             "may fork further, recursively — the driver enforces depth and total-descendant ",
             "budgets and refuses loudly past them. `T` may be any type in scope, including one you ",
             "declared yourself earlier this session — the child resolves it the same way.\n",
@@ -63,7 +63,7 @@ pub fn fork() -> Effect {
         type_params: &[],
         default_row_args: &[],
         helpers_row_polymorphic: true,
-        extra_imports: &["import Tidepool.Fork"],
+        extra_imports: &["import Tidepool.Answerer.Fork"],
         type_defs: Vec::new(),
         foreign_types: &[],
         errors: None,

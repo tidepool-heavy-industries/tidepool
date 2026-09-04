@@ -189,7 +189,7 @@ pub fn compile_turns_with_stable_inject(
 /// effects share that routing, and they DIFFER in the shape their parked
 /// continuation expects back, so the answering side must know which it is:
 ///
-/// - [`ForkSource::ForkEffect`] — `Tidepool.Fork`'s `fork`/`forkAll`
+/// - [`ForkSource::ForkEffect`] — `Tidepool.Answerer.Fork`'s `fork`/`forkAll`
 ///   (`ForkWith`/`ForkAllWith`), which resume with a bare `T` / `[T]`.
 /// - [`ForkSource::RunLLMTurn`] — `runLLMTurnFork`/`runLLMTurnFanout`
 ///   (`RunLLMTurnWith` carrying `fork: true`), which resume with
@@ -233,7 +233,7 @@ pub enum SuspensionRouting {
     /// Park a suspension into a bounded fan-out with a join. Produced by two
     /// sources that share this routing: the `Fork` effect (`ForkWith` →
     /// `fan: None`, one child; `ForkAllWith` → `fan: Some(_)`, N children —
-    /// `Tidepool.Fork`'s `fork`/`forkAll`), and the general Agent stack's
+    /// `Tidepool.Answerer.Fork`'s `fork`/`forkAll`), and the general Agent stack's
     /// `runLLMTurn` fork payload (`runLLMTurnFork`/`runLLMTurnFanout`). `ty` is
     /// the RENDERED answer type: the element type `T` for a plain fork, the
     /// LIST type `[T]` for a fanout (`engine::strip_list_type` recovers `T`).
@@ -552,7 +552,7 @@ fn decode_roster(request: &Value, table: &DataConTable) -> Result<RosterRequest,
 ///   [`SuspensionRouting::Fork`] (the general Agent stack's
 ///   `runLLMTurnFork`/`runLLMTurnFanout`); else [`SuspensionRouting::RunLLMTurn`].
 /// - `ForkWith` (site, brief) / `ForkAllWith` (site, prompts) — the `Fork`
-///   effect (`Tidepool.Fork`'s `fork`/`forkAll`) → [`SuspensionRouting::Fork`]
+///   effect (`Tidepool.Answerer.Fork`'s `fork`/`forkAll`) → [`SuspensionRouting::Fork`]
 ///   (`fan: None` for one child, `fan: Some(_)` for a batch). `asks` resolves
 ///   the site to the rendered answer type.
 /// - `FinalizeWith` (site, value) — [`SuspensionRouting::Finalize`]. The VALUE
@@ -2487,7 +2487,7 @@ pub fn build_invocation_exit_value(
 /// → `Left (…)`.
 ///
 /// This is the shape `runLLMTurnFork`/`runLLMTurnFanout` promise;
-/// `Tidepool.Fork`'s `fork`/`forkAll` do NOT go through
+/// `Tidepool.Answerer.Fork`'s `fork`/`forkAll` do NOT go through
 /// it — they still resume with a bare `T` (see [`ForkSource`]).
 /// [`build_list_value`]'s loud-failure discipline throughout: a missing
 /// `Left`/`Right` is a hard error.
@@ -2510,7 +2510,7 @@ pub fn build_child_answer_value(
 }
 
 /// Put ONE child answer into the shape the parked fork continuation expects
-/// — `Tidepool.Fork`'s `fork`/`forkAll` answer bare `T` ([`ForkSource::ForkEffect`]);
+/// — `Tidepool.Answerer.Fork`'s `fork`/`forkAll` answer bare `T` ([`ForkSource::ForkEffect`]);
 /// `runLLMTurnFork`-sourced holes answer `Either InvocationExit T`
 /// ([`ForkSource::RunLLMTurn`], via [`build_child_answer_value`] — `Right`
 /// here, this path never folds a fork child as `Left`). The ONE

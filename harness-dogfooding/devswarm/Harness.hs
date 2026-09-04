@@ -7,7 +7,7 @@
 -- | DevSwarm's executable compatibility harness.
 --
 -- One outer loop iteration opens one root owner agent session.  The owner
--- dynamically grows the recursive owner tree with typed 'Tidepool.Fork.fork'
+-- dynamically grows the recursive owner tree with typed 'Tidepool.Answerer.Fork.fork'
 -- calls and uses
 -- 'delegateTask' for short-lived repository work.  The driver's mandatory
 -- checkpointed 'State' carries only the seed and the last rendered root

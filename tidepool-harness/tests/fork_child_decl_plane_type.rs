@@ -157,7 +157,7 @@ async fn fork_child_answer_type_declared_as_decl_plane_alias_resolves() {
         // model round on resume (same shape `fork_child_gui`-style tests
         // use for a plain, non-`async` fork).
         code(
-            "import Tidepool.Fork (fork)\n\n\
+            "import Tidepool.Answerer.Fork (fork)\n\n\
              do\n\
              \x20 n <- fork @KyotoResearch \"explore\"\n\
              \x20 finalize @Int n :: M ()",
@@ -203,7 +203,7 @@ async fn fork_child_answer_type_declared_as_decl_plane_data_resolves() {
              \x20 deriving (Generic, ToJSON, FromJSON, Show)",
         ),
         code(
-            "import Tidepool.Fork (fork)\n\n\
+            "import Tidepool.Answerer.Fork (fork)\n\n\
              do\n\
              \x20 KyotoResult n <- fork @KyotoResult \"explore\"\n\
              \x20 finalize @Int n :: M ()",
@@ -248,7 +248,7 @@ async fn fork_naming_a_never_declared_type_corrects_the_parent_and_survives() {
         // "not in scope" compile error in the LOOP ANSWERER's own turn, fed
         // back as a corrective (the round doesn't advance the hole).
         code(
-            "import Tidepool.Fork (fork)\n\n\
+            "import Tidepool.Answerer.Fork (fork)\n\n\
              do\n\
              \x20 n <- fork @NoSuchKyotoType \"explore\"\n\
              \x20 finalize @Int n :: M ()",

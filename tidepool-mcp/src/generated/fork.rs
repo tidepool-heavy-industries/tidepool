@@ -5,15 +5,15 @@
 pub fn fork_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "Fork",
-        description: "Spawn parallel sub-answerers and gather their typed answers. `fork \\@T brief` forks ONE child that answers a single `T`; `forkAll \\@T briefs` forks one child per brief, answered together as `[T]` in order (`import Tidepool.Fork`). A forked child answers its own brief and may fork further, within driver-enforced depth and descendant budgets.",
-        prompt_card: Some("`fork @T brief :: M T` — delegate to one sub-answerer that answers `brief` on its own.\n`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, answered together as a batch `[T]` (`import Tidepool.Fork`). A forked child may fork further, recursively — the driver enforces depth and total-descendant budgets and refuses loudly past them. `T` may be any type in scope, including one you declared yourself earlier this session — the child resolves it the same way.\nWhen `Green` is in your row, `async (fork @T brief)` (`Tidepool.Async`) parks the fork in a green thread — spawn several, then `wait` each, in the SAME block."),
+        description: "Spawn parallel sub-answerers and gather their typed answers. `fork \\@T brief` forks ONE child that answers a single `T`; `forkAll \\@T briefs` forks one child per brief, answered together as `[T]` in order (`import Tidepool.Answerer.Fork`). A forked child answers its own brief and may fork further, within driver-enforced depth and descendant budgets.",
+        prompt_card: Some("`fork @T brief :: M T` — delegate to one sub-answerer that answers `brief` on its own.\n`forkAll @T briefs :: M [T]` — delegate to one sub-answerer per brief, answered together as a batch `[T]` (`import Tidepool.Answerer.Fork`). A forked child may fork further, recursively — the driver enforces depth and total-descendant budgets and refuses loudly past them. `T` may be any type in scope, including one you declared yourself earlier this session — the child resolves it the same way.\nWhen `Green` is in your row, `async (fork @T brief)` (`Tidepool.Async`) parks the fork in a green thread — spawn several, then `wait` each, in the SAME block."),
         constructors: &[
             "ForkWith :: Int -> Text -> Fork Value",
             "ForkAllWith :: Int -> [Text] -> Fork Value",
         ],
         type_defs: &[],
         extra_imports: &[
-            "import Tidepool.Fork",
+            "import Tidepool.Answerer.Fork",
         ],
         helpers: &[
             "-- @substrate-helper@\n{-# OPAQUE forkSited #-}\nforkSited :: forall a effs. Member Fork effs => Int -> Text -> Eff effs a\nforkSited sid brief = unsafeCoerce <$> send (ForkWith sid brief)",

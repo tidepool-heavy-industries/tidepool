@@ -69,14 +69,14 @@ sitedVerbs =
       "runLLMTurnFanoutSited" "Tidepool.Effects.Core" 1 1 True False []
   , verb "finalize" "Tidepool.Effects.Core"
       "finalizeSited" "Tidepool.Effects.Core" 2 1 False False []
-  , verb "fork" "Tidepool.Fork"
+  , verb "fork" "Tidepool.Answerer.Fork"
       "forkSited" "Tidepool.Effects.Core" 1 1 False False []
-  , verb "forkAll" "Tidepool.Fork"
+  , verb "forkAll" "Tidepool.Answerer.Fork"
       "forkAllSited" "Tidepool.Effects.Core" 1 1 True False []
-  , verb "forkMap" "Tidepool.Fork"
-      "forkMapSited" "Tidepool.Fork" 2 2 True True []
-  , verb "forkCata" "Tidepool.Fork"
-      "forkCataSited" "Tidepool.Fork" 2 2 True True []
+  , verb "forkMap" "Tidepool.Answerer.Fork"
+      "forkMapSited" "Tidepool.Answerer.Fork" 2 2 True True []
+  , verb "forkCata" "Tidepool.Answerer.Fork"
+      "forkCataSited" "Tidepool.Answerer.Fork" 2 2 True True []
   , verb "request" "Tidepool.Actors.Internal.Agent"
       "requestSited" "Tidepool.Actors.Internal.Agent" 2 3 False True [1]
   , verb "requestWith" "Tidepool.Actors.Internal.Agent"
