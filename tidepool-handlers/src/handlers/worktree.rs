@@ -177,6 +177,137 @@ impl ActorWorktreeHandler {
     }
 }
 
+macro_rules! actor_worktree_facade {
+    ($name:ident) => {
+        #[derive(Clone)]
+        pub struct $name {
+            inner: ActorWorktreeHandler,
+        }
+
+        impl $name {
+            #[must_use]
+            pub fn new(inner: ActorWorktreeHandler) -> Self {
+                Self { inner }
+            }
+
+            fn delegate(
+                &mut self,
+                request: WorktreeReq,
+                cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+            ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+                tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, request, cx)
+            }
+        }
+    };
+}
+
+actor_worktree_facade!(ActorBoundWorktreeHandler);
+actor_worktree_facade!(ActorWorktreeRegistryHandler);
+actor_worktree_facade!(ActorWorktreeAllocationHandler);
+actor_worktree_facade!(ActorWorktreeIntegrationHandler);
+
+impl ActorBoundWorktreeHandler {
+    pub(crate) fn bound_worktree_get(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeBound, cx)
+    }
+
+    pub(crate) fn bound_worktree_lookup(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        tree: WtWorktreeId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeLookup(tree), cx)
+    }
+
+    pub(crate) fn bound_worktree_branch_of(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        tree: WtWorktreeId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeBranchOf(tree), cx)
+    }
+
+    pub(crate) fn bound_worktree_head_of(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        tree: WtWorktreeId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeHeadOf(tree), cx)
+    }
+
+    pub(crate) fn bound_worktree_observe_submission(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        tree: WtWorktreeId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeObserveSubmission(tree), cx)
+    }
+}
+
+impl ActorWorktreeRegistryHandler {
+    pub(crate) fn worktree_registry_lookup(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        tree: WtWorktreeId,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeLookup(tree), cx)
+    }
+
+    pub(crate) fn worktree_registry_list(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeList, cx)
+    }
+}
+
+impl ActorWorktreeAllocationHandler {
+    pub(crate) fn worktree_allocation_create(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        spec: WtWorktreeSpec,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeCreate(spec), cx)
+    }
+
+    pub(crate) fn worktree_allocation_create_for_actor_path(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        spec: WtWorktreeSpec,
+        actor_path: String,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(
+            WorktreeReq::WorktreeCreateForActorPath(spec, actor_path),
+            cx,
+        )
+    }
+
+    pub(crate) fn worktree_allocation_create_from_bound_for_actor_path(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        dirty_policy: tidepool_bridge_effects::WtDirtyPolicy,
+        actor_path: String,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(
+            WorktreeReq::WorktreeCreateFromBoundForActorPath(dirty_policy, actor_path),
+            cx,
+        )
+    }
+}
+
+impl ActorWorktreeIntegrationHandler {
+    pub(crate) fn worktree_integration_try_merge(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        request: tidepool_bridge_effects::WtMergeRequest,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(WorktreeReq::WorktreeTryMerge(request), cx)
+    }
+}
+
 impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
     for ActorWorktreeHandler
 {

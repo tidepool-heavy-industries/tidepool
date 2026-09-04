@@ -323,6 +323,21 @@ pub struct ModuleEnv {
 }
 
 impl ModuleEnv {
+    /// Hide facade-replaced names from one unqualified import while retaining
+    /// every other declaration and all instances from that module.
+    pub fn hide_unqualified_import_names(&mut self, module: &str, names: &[&str]) {
+        if names.is_empty() {
+            return;
+        }
+        let plain = format!("import {module}");
+        let replacement = format!("{plain} hiding ({})", names.join(", "));
+        for import in &mut self.imports {
+            if import == &plain {
+                *import = replacement.clone();
+            }
+        }
+    }
+
     /// A minimal **lens-free** pure surface sufficient for standalone
     /// declarations: the JIT-safe `T.` text vocabulary (`Tidepool.Data.Text`)
     /// and `Map.`, over the base `Prelude`. Deliberately avoids

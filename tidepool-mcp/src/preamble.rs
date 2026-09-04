@@ -175,6 +175,21 @@ pub fn session_decl_module_env_with_companions(
     }
 }
 
+/// Build the declaration environment for a curated facade that replaces a
+/// subset of the generated effect helpers with its own model-facing names.
+#[must_use]
+pub fn session_decl_module_env_hiding(
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+    hidden_effect_names: &[&str],
+) -> ModuleEnv {
+    let mut environment =
+        session_decl_module_env_with_companions(effects, user_library, companion_imports);
+    environment.hide_unqualified_import_names("Tidepool.Effects", hidden_effect_names);
+    environment
+}
+
 /// The [`ModuleEnv`] for persistent authored declarations.
 ///
 /// This excludes the per-window `Tidepool.Effects` shim, whose `M` alias
@@ -233,12 +248,19 @@ fn pragmas_and_imports(
     effects: &[EffectDecl],
     user_library: bool,
     companion_imports: CompanionImports,
+    hidden_effect_names: &[&str],
 ) {
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
     out.push_str("module Expr where\n");
     for imp in eval_import_lines(user_library, PreludeHides::for_effects(effects)) {
-        out.push_str(imp);
+        if imp == "import Tidepool.Effects" && !hidden_effect_names.is_empty() {
+            out.push_str("import Tidepool.Effects hiding (");
+            out.push_str(&hidden_effect_names.join(", "));
+            out.push(')');
+        } else {
+            out.push_str(imp);
+        }
         out.push('\n');
     }
     // Each effect's own companion imports (Exec → Tidepool.Shell/Cargo, Git →
@@ -736,7 +758,28 @@ pub fn build_preamble_with_companions(
     companion_imports: CompanionImports,
 ) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library, companion_imports);
+    pragmas_and_imports(&mut out, effects, user_library, companion_imports, &[]);
+    paginate_alias(&mut out, effects, PaginateMode::Interactive);
+    out
+}
+
+/// Build a curated preamble whose facade intentionally replaces selected
+/// unqualified generated helper names.
+#[must_use]
+pub fn build_preamble_with_companions_hiding(
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+    hidden_effect_names: &[&str],
+) -> String {
+    let mut out = String::new();
+    pragmas_and_imports(
+        &mut out,
+        effects,
+        user_library,
+        companion_imports,
+        hidden_effect_names,
+    );
     paginate_alias(&mut out, effects, PaginateMode::Interactive);
     out
 }
@@ -760,7 +803,13 @@ pub fn build_preamble_non_interactive_mode(
     mode: PaginateMode,
 ) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library, CompanionImports::Include);
+    pragmas_and_imports(
+        &mut out,
+        effects,
+        user_library,
+        CompanionImports::Include,
+        &[],
+    );
     paginate_alias(&mut out, effects, mode);
     out
 }
@@ -1122,9 +1171,30 @@ pub fn library_vocab(dirs: &[std::path::PathBuf], only: Option<&str>) -> String 
 #[cfg(test)]
 mod vocab_tests {
     use super::{
-        build_preamble_with_companions, parse_library_exports,
+        build_preamble_with_companions, build_preamble_with_companions_hiding,
+        parse_library_exports, session_decl_module_env_hiding,
         session_decl_module_env_with_companions, CompanionImports,
     };
+
+    #[test]
+    fn curated_facade_can_replace_selected_generated_helpers() {
+        let worktree = crate::worktree_decl();
+        let hidden = ["tryMerge", "worktreeHead"];
+        let preamble = build_preamble_with_companions_hiding(
+            &[worktree.clone()],
+            false,
+            CompanionImports::Omit,
+            &hidden,
+        );
+        assert!(preamble.contains("import Tidepool.Effects hiding (tryMerge, worktreeHead)\n"));
+
+        let declarations =
+            session_decl_module_env_hiding(&[worktree], false, CompanionImports::Omit, &hidden);
+        assert!(declarations
+            .imports
+            .iter()
+            .any(|import| { import == "import Tidepool.Effects hiding (tryMerge, worktreeHead)" }));
+    }
 
     #[test]
     fn companion_effect_imports_can_be_left_to_a_curated_facade() {

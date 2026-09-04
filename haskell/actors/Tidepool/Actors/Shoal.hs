@@ -202,6 +202,7 @@ import Tidepool.Actors.Internal.Agent
   )
 import Tidepool.Actors.Role
 import Tidepool.Actors.Unfold
+import Tidepool.Actors.Worktree
 import Tidepool.Effects.Core
   ( ActorContextInfo (..)
   , ActorContextRole (..)
@@ -209,10 +210,18 @@ import Tidepool.Effects.Core
   , ActorWorkspaceAccess (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
-  , Worktree
   , actorContext
   )
-import Tidepool.Worktree
+import Tidepool.Worktree hiding
+  ( boundWorktree
+  , createWorktree
+  , listWorktrees
+  , lookupWorktree
+  , observeSubmission
+  , tryMerge
+  , worktreeBranch
+  , worktreeHead
+  )
 
 -- | Capabilities installed for the interactive root incarnation.
 --
@@ -222,13 +231,13 @@ type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Worktree
+   , WorktreeIntegration
    ]
 
 type ResearchActorEffects = ResearchEffects
 type CodingActorEffects = CodingEffects
-type ScaffoldActorEffects = Worktree ': ScaffoldEffects
-type IntegrationActorEffects = Worktree ': IntegrationEffects
+type ScaffoldActorEffects = ScaffoldEffects
+type IntegrationActorEffects = IntegrationEffects
 
 data WorktreePresence
   = PresentWorktrees
@@ -257,7 +266,7 @@ createdAfter timestamp query = query { queryCreatedAfter = Just timestamp }
 -- | Filter the canonical durable registry result without replacing its Git
 -- receipts with another repository model.
 queryWorktrees
-  :: (Member WorktreeRegistry effs, Member Worktree effs)
+  :: Member WorktreeRegistry effs
   => WorktreeQuery
   -> Eff effs (Either WorktreeError [WorktreeSummary])
 queryWorktrees query = fmap (fmap (filter matches)) listWorktrees

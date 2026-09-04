@@ -77,7 +77,10 @@ import Tidepool.Actors.Role
 import Tidepool.Effects.Core
   ( DirtyPolicy (..)
   , GitRef
-  , Worktree (WorktreeCreateForActorPath, WorktreeCreateFromBoundForActorPath)
+  , WorktreeAllocation
+      ( WorktreeAllocationCreateForActorPath
+      , WorktreeAllocationCreateFromBoundForActorPath
+      )
   , WorktreeError
   , WorktreeHandle (..)
   , WorktreeReceipt
@@ -277,7 +280,7 @@ childSited = BranchU
 -- same Haskell-owned result tree.
 unfold
   :: forall parent result
-   . (Member Forks parent, Member Replies parent, Member Worktree parent)
+   . (Member Forks parent, Member Replies parent, Member WorktreeAllocation parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent result
@@ -324,7 +327,7 @@ unfold (ForkGroupPath relative groupName) plan = do
 
 startBranch
   :: forall effects child input result
-   . (Member Forks effects, Member Worktree effects)
+   . (Member Forks effects, Member WorktreeAllocation effects)
   => Int
   -> Text
   -> Branch child input result
@@ -341,14 +344,14 @@ startBranch groupId allocated (Branch _ role seed _) = do
         pure (actor, confirmed, tree)
 
 createNamedWorktree
-  :: Member Worktree effects
+  :: Member WorktreeAllocation effects
   => Text
   -> WorktreeSeed
   -> Eff effects (Either WorktreeError WorktreeHandle)
 createNamedWorktree allocated (WorktreeSeed source dirtyPolicy) =
-  send (WorktreeCreateForActorPath (WorktreeSpec source allocated dirtyPolicy) allocated)
+  send (WorktreeAllocationCreateForActorPath (WorktreeSpec source allocated dirtyPolicy) allocated)
 createNamedWorktree allocated (BoundHeadSeed dirtyPolicy) =
-  send (WorktreeCreateFromBoundForActorPath dirtyPolicy allocated)
+  send (WorktreeAllocationCreateFromBoundForActorPath dirtyPolicy allocated)
 
 agentFor :: ForkRole -> WorktreeHandle -> AgentSpec
 agentFor ResearchFork = readonlyWorktreeAgent

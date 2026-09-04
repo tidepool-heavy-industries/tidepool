@@ -30,7 +30,9 @@ use tidepool_agent::{
 use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_handlers::{
-    ActorWorktreeAuthority, ActorWorktreeGrant, ActorWorktreeHandler, WorktreeHandler,
+    ActorBoundWorktreeHandler, ActorWorktreeAllocationHandler, ActorWorktreeAuthority,
+    ActorWorktreeGrant, ActorWorktreeHandler, ActorWorktreeIntegrationHandler,
+    ActorWorktreeRegistryHandler, WorktreeHandler,
 };
 use tidepool_mcp::CapturedOutput;
 use tidepool_node::{
@@ -62,12 +64,32 @@ const DRIVER_MODULE: &str = "Tidepool.Actors.Internal.ShoalDriver";
 const WORKBENCH_SURFACE_MODULE: &str = "Tidepool.Actors.Shoal";
 const DRIVER_ENTRY: &str = "rootDriver";
 const DRIVER_EFFECTS: &str = "RootEffects";
+const SHOAL_REPLACED_EFFECT_NAMES: &[&str] = &[
+    "boundWorktree",
+    "createWorktree",
+    "listWorktrees",
+    "lookupWorktree",
+    "observeSubmission",
+    "tryMerge",
+    "worktreeBranch",
+    "worktreeHead",
+    "worktreeId",
+];
 const CHILD_LIFECYCLE_NOTICE: &str = "A child actor changed lifecycle state.";
 const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_TASK_GRACE_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-type ShoalHandlerStack = HCons<ActorWorktreeHandler, HNil>;
+type ShoalHandlerStack = HCons<
+    ActorBoundWorktreeHandler,
+    HCons<
+        ActorWorktreeRegistryHandler,
+        HCons<
+            ActorWorktreeAllocationHandler,
+            HCons<ActorWorktreeIntegrationHandler, HCons<ActorWorktreeHandler, HNil>>,
+        >,
+    >,
+>;
 type ShoalRoot = ResidentActorRoot<ShoalHandlerStack, CapturedOutput>;
 
 #[derive(Clone)]
@@ -574,20 +596,30 @@ fn compile_root(
         tidepool_mcp::agent_session_decl(),
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_context_decl(),
+        tidepool_mcp::agent_control_decl(),
+        tidepool_mcp::agent_inspection_decl(),
+        tidepool_mcp::agent_launch_decl(),
+        tidepool_mcp::forks_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),
+        tidepool_mcp::bound_worktree_decl(),
+        tidepool_mcp::worktree_registry_decl(),
+        tidepool_mcp::worktree_allocation_decl(),
+        tidepool_mcp::worktree_integration_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
     let mut include = effects.include_paths().to_vec();
     include.push(config.haskell_root.clone());
     include.push(crate::haskell_sources::ensure_stdlib()?);
     let preamble = insert_preamble_imports(
-        &tidepool_mcp::build_preamble_with_companions(
+        &tidepool_mcp::build_preamble_with_companions_hiding(
             &declarations,
             false,
             tidepool_mcp::CompanionImports::Omit,
+            SHOAL_REPLACED_EFFECT_NAMES,
         ),
         DRIVER_MODULE,
     );
@@ -619,20 +651,26 @@ fn compile_root(
     let library = SessionLib::open(
         session,
         &session_root,
-        tidepool_mcp::session_decl_module_env_with_companions(
+        tidepool_mcp::session_decl_module_env_hiding(
             &declarations,
             false,
             tidepool_mcp::CompanionImports::Omit,
+            SHOAL_REPLACED_EFFECT_NAMES,
         ),
     )?
     .with_validation_include(include.clone());
+    let worktree_handler =
+        ActorWorktreeHandler::new(WorktreeHandler::from_manager(worktrees), worktree_authority);
     let mut machine = ResidentSession::bootstrap(
         &compiled.expr,
         compiled.table.clone(),
-        hlist![ActorWorktreeHandler::new(
-            WorktreeHandler::from_manager(worktrees),
-            worktree_authority,
-        )],
+        hlist![
+            ActorBoundWorktreeHandler::new(worktree_handler.clone()),
+            ActorWorktreeRegistryHandler::new(worktree_handler.clone()),
+            ActorWorktreeAllocationHandler::new(worktree_handler.clone()),
+            ActorWorktreeIntegrationHandler::new(worktree_handler.clone()),
+            worktree_handler,
+        ],
         CapturedOutput::new(),
         include.clone(),
         DEFAULT_NURSERY_SIZE,

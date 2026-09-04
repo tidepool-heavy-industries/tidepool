@@ -10,10 +10,19 @@ fn shoal_include_paths() -> Vec<PathBuf> {
         tidepool_mcp::agent_session_decl(),
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
+        tidepool_mcp::actor_context_decl(),
+        tidepool_mcp::agent_control_decl(),
+        tidepool_mcp::agent_inspection_decl(),
+        tidepool_mcp::agent_launch_decl(),
+        tidepool_mcp::forks_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::worktree_decl(),
+        tidepool_mcp::bound_worktree_decl(),
+        tidepool_mcp::worktree_registry_decl(),
+        tidepool_mcp::worktree_allocation_decl(),
+        tidepool_mcp::worktree_integration_decl(),
     ];
     let effects =
         tidepool_mcp::ensure_effects_module(&declarations).expect("materialize Shoal effects");
@@ -71,4 +80,15 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     let failure = tidepool_runtime::classify_compile(&error);
     assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
     assert!(failure.message.contains("complete"));
+
+    let error = compile_haskell(
+        include_str!("shoal_action_surface/coding_cannot_unfold.hs"),
+        "result",
+        &include_refs,
+    )
+    .expect_err("a coding leaf unexpectedly acquired recursive Forks authority");
+    assert_eq!(
+        tidepool_runtime::classify_compile(&error).class,
+        tidepool_runtime::FailureClass::UserHaskell
+    );
 }

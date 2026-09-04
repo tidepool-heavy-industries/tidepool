@@ -39,6 +39,7 @@ pub mod read_state;
 pub mod run_llm_turn;
 pub mod subagent;
 pub mod worktree;
+pub mod worktree_facades;
 
 use crate::schema::Effect;
 
@@ -78,6 +79,10 @@ pub fn all() -> Vec<Effect> {
         forks::forks(),
         agent_tools::agent_tools(),
         agent_session::agent_session(),
+        worktree_facades::bound_worktree(),
+        worktree_facades::worktree_registry(),
+        worktree_facades::worktree_allocation(),
+        worktree_facades::worktree_integration(),
     ]
 }
 

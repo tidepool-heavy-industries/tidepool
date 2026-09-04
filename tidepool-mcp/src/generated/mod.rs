@@ -10,6 +10,7 @@ pub mod agent_launch;
 pub mod agent_session;
 pub mod agent_tools;
 pub mod ask_user;
+pub mod bound_worktree;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
@@ -20,6 +21,9 @@ pub mod read_state;
 pub mod repo_event;
 pub mod run_l_l_m_turn;
 pub mod worktree;
+pub mod worktree_allocation;
+pub mod worktree_integration;
+pub mod worktree_registry;
 
 pub use actor::*;
 pub use actor_context::*;
@@ -31,6 +35,7 @@ pub use agent_launch::*;
 pub use agent_session::*;
 pub use agent_tools::*;
 pub use ask_user::*;
+pub use bound_worktree::*;
 pub use exec::*;
 pub use finalize::*;
 pub use fork::*;
@@ -41,6 +46,9 @@ pub use read_state::*;
 pub use repo_event::*;
 pub use run_l_l_m_turn::*;
 pub use worktree::*;
+pub use worktree_allocation::*;
+pub use worktree_integration::*;
+pub use worktree_registry::*;
 
 /// Every schema-owned Haskell effect declaration.
 pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
@@ -65,6 +73,10 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         forks_decl(),
         agent_tools_decl(),
         agent_session_decl(),
+        bound_worktree_decl(),
+        worktree_registry_decl(),
+        worktree_allocation_decl(),
+        worktree_integration_decl(),
     ]
 }
 
@@ -79,6 +91,10 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "Forks",
     "AgentTools",
     "AgentSession",
+    "BoundWorktree",
+    "WorktreeRegistry",
+    "WorktreeAllocation",
+    "WorktreeIntegration",
 ];
 
 /// Hidden names grouped by their owning effect.
@@ -137,4 +153,27 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         &["AgentToolsAwaitWith", "AgentToolsReplyWith"],
     ),
     ("AgentSession", &["AgentSessionWith", "AgentAttachWith"]),
+    (
+        "BoundWorktree",
+        &[
+            "BoundWorktreeGet",
+            "BoundWorktreeLookup",
+            "BoundWorktreeBranchOf",
+            "BoundWorktreeHeadOf",
+            "BoundWorktreeObserveSubmission",
+        ],
+    ),
+    (
+        "WorktreeRegistry",
+        &["WorktreeRegistryLookup", "WorktreeRegistryList"],
+    ),
+    (
+        "WorktreeAllocation",
+        &[
+            "WorktreeAllocationCreate",
+            "WorktreeAllocationCreateForActorPath",
+            "WorktreeAllocationCreateFromBoundForActorPath",
+        ],
+    ),
+    ("WorktreeIntegration", &["WorktreeIntegrationTryMerge"]),
 ];

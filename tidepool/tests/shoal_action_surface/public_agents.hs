@@ -60,6 +60,15 @@ stop = stopAgent
 inspect :: AgentRef -> Eff ActorEffects AgentObservation
 inspect = observeAgent
 
+inspectAll :: Eff ActorEffects [AgentRosterEntry]
+inspectAll = listAgents
+
+inspectSelf :: Eff ActorEffects ActorContextInfo
+inspectSelf = actorContext
+
+currentTree :: Eff CodingActorEffects (Either WorktreeError WorktreeHandle)
+currentTree = boundWorktree
+
 cancel :: Response result -> Eff '[Replies] CancelOutcome
 cancel = cancelResponse
 

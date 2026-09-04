@@ -46,16 +46,16 @@ import Tidepool.Effects.Core
   , AgentControl
   , AgentInspection
   , AgentLaunch
+  , BoundWorktree
   , Forks
+  , WorktreeAllocation
+  , WorktreeIntegration
+  , WorktreeRegistry
   )
 
 -- These nominal capabilities are the public residual row. Their operations
 -- are supplied by their owner modules; they are not aliases for the broad
 -- legacy Actor or Worktree effects.
-data BoundWorktree (a :: Type)
-data WorktreeRegistry (a :: Type)
-data WorktreeAllocation (a :: Type)
-data WorktreeIntegration (a :: Type)
 
 data EffectWitness (effect :: Type -> Type) = EffectWitness
 
@@ -104,7 +104,8 @@ type ResearchCoordinatorEffects =
 type CodingEffects = '[Replies, Watches, ActorContext, BoundWorktree]
 type ScaffoldEffects =
   '[ Replies, Watches, Forks, ActorContext
-   , AgentInspection, AgentControl, BoundWorktree, WorktreeIntegration
+   , AgentInspection, AgentControl, BoundWorktree
+   , WorktreeAllocation, WorktreeIntegration
    ]
 type IntegrationEffects =
   '[ Replies, Watches, ActorContext
