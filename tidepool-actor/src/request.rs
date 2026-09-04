@@ -5,6 +5,54 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ActorExitKind, ActorRef, ActorTerminal};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeadlineUnit {
+    Milliseconds,
+    Seconds,
+    Minutes,
+}
+
+impl std::fmt::Display for DeadlineUnit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Milliseconds => "ms",
+            Self::Seconds => "s",
+            Self::Minutes => "min",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestDeadline {
+    pub value: u64,
+    pub unit: DeadlineUnit,
+    pub milliseconds: u64,
+}
+
+impl RequestDeadline {
+    pub(crate) fn checked(
+        value: i64,
+        unit: DeadlineUnit,
+        milliseconds_per_unit: u64,
+    ) -> Result<Self, String> {
+        let value = u64::try_from(value)
+            .map_err(|_| format!("request deadline must be non-negative {unit}"))?;
+        let milliseconds = value
+            .checked_mul(milliseconds_per_unit)
+            .ok_or_else(|| format!("request deadline of {value}{unit} is too large"))?;
+        Ok(Self {
+            value,
+            unit,
+            milliseconds,
+        })
+    }
+
+    #[must_use]
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.milliseconds)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RequestId(pub u64);
@@ -144,6 +192,53 @@ struct RequestRecord {
     label: String,
     target_state: TargetState,
     owner_state: OwnerState,
+    deadline: Option<ActiveRequestDeadline>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveRequestDeadline {
+    authored: RequestDeadline,
+    due_wall: std::time::SystemTime,
+    due_monotonic: tokio::time::Instant,
+}
+
+impl ActiveRequestDeadline {
+    #[must_use]
+    pub(crate) fn start(authored: RequestDeadline) -> Result<Self, String> {
+        let duration = authored.duration();
+        let due_wall = std::time::SystemTime::now()
+            .checked_add(duration)
+            .ok_or_else(|| "request deadline exceeds the wall-clock range".to_string())?;
+        let due_monotonic = tokio::time::Instant::now()
+            .checked_add(duration)
+            .ok_or_else(|| "request deadline exceeds the monotonic-clock range".to_string())?;
+        Ok(Self {
+            authored,
+            due_wall,
+            due_monotonic,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn due_monotonic(&self) -> tokio::time::Instant {
+        self.due_monotonic
+    }
+
+    fn render(&self, request: RequestId, label: &str) -> String {
+        let due_unix_ms = self
+            .due_wall
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        let remaining = self
+            .due_monotonic
+            .saturating_duration_since(tokio::time::Instant::now());
+        format!(
+            "{request:?} {label:?} after={}{} due_unix_ms={due_unix_ms} remaining={}ms",
+            self.authored.value,
+            self.authored.unit,
+            remaining.as_millis()
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +287,7 @@ pub(crate) struct ActorRequestStatus {
     pub pending_watches: Vec<(WatchId, String)>,
     pub ready_watches: Vec<(WatchId, String)>,
     pub unavailable_watches: Vec<(WatchId, String)>,
+    pub deadlines: Vec<(RequestId, String)>,
 }
 
 impl RequestRegistry {
@@ -222,6 +318,7 @@ impl RequestRegistry {
             pending_watches: Vec::new(),
             ready_watches: Vec::new(),
             unavailable_watches: Vec::new(),
+            deadlines: Vec::new(),
         };
         for (request, record) in &state.requests {
             if record.owner != owner {
@@ -237,6 +334,13 @@ impl RequestRegistry {
                 OwnerState::Observing => status
                     .pending_responses
                     .push((*request, record.label.clone())),
+            }
+            if matches!(record.owner_state, OwnerState::Observing) {
+                if let Some(deadline) = &record.deadline {
+                    status
+                        .deadlines
+                        .push((*request, deadline.render(*request, &record.label)));
+                }
             }
         }
         for (watch, record) in &state.watches {
@@ -257,6 +361,7 @@ impl RequestRegistry {
         status.pending_watches.sort_unstable();
         status.ready_watches.sort_unstable();
         status.unavailable_watches.sort_unstable();
+        status.deadlines.sort_unstable();
         status
     }
 
@@ -282,6 +387,7 @@ impl RequestRegistry {
                 label,
                 target_state: TargetState::Reserved,
                 owner_state: OwnerState::Observing,
+                deadline: None,
             },
         );
         id
@@ -324,11 +430,22 @@ impl RequestRegistry {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_queued(
         &self,
         owner: ActorRef,
         target: ActorRef,
         request: RequestId,
+    ) -> Result<(), ReplyError> {
+        self.mark_queued_with_deadline(owner, target, request, None)
+    }
+
+    pub(crate) fn mark_queued_with_deadline(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+        request: RequestId,
+        deadline: Option<ActiveRequestDeadline>,
     ) -> Result<(), ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
@@ -339,6 +456,7 @@ impl RequestRegistry {
         match record.target_state {
             TargetState::Reserved => {
                 record.target_state = TargetState::Queued;
+                record.deadline = deadline;
                 Ok(())
             }
             _ => Err(ReplyError::AlreadySettled),
@@ -962,6 +1080,33 @@ mod tests {
         );
         assert_eq!(registry.abort_unsubmitted(other_owner), vec![unrelated]);
         assert!(registry.abort_unsubmitted(owner).is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_preserves_authored_deadline_units_and_hides_terminal_deadlines() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        let deadline =
+            RequestDeadline::checked(600, DeadlineUnit::Seconds, 1_000).expect("deadline");
+        registry
+            .mark_queued_with_deadline(
+                owner,
+                target,
+                request,
+                Some(ActiveRequestDeadline::start(deadline).expect("active deadline")),
+            )
+            .unwrap();
+
+        let pending = registry.status_for(owner);
+        assert_eq!(pending.deadlines.len(), 1);
+        assert!(pending.deadlines[0].1.contains("after=600s"));
+        assert!(pending.deadlines[0].1.contains("remaining="));
+        assert!(pending.deadlines[0].1.contains("due_unix_ms="));
+
+        registry.mark_target_unavailable(owner, request);
+        assert!(registry.status_for(owner).deadlines.is_empty());
     }
 
     #[test]

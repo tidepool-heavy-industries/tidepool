@@ -3866,11 +3866,9 @@ mod tests {
             .as_str()
             .expect("branch receipt output");
         assert!(
-            launch_receipt.contains("requestedPath = \"reply-watch/roundtrip/worker\"")
-                && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/worker\"")
-                && launch_receipt.contains("requestedPath = \"reply-watch/roundtrip/witness\"")
-                && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/witness\"")
-                && launch_receipt.contains("allocatedPath = \"reply-watch/roundtrip/scaffold\"")
+            launch_receipt.contains("ActorPath \"reply-watch/roundtrip/worker\"")
+                && launch_receipt.contains("ActorPath \"reply-watch/roundtrip/witness\"")
+                && launch_receipt.contains("ActorPath \"reply-watch/roundtrip/scaffold\"")
                 && launch_receipt.matches("forkGroupIdentity = 1").count() == 3,
             "{launch_receipt}"
         );

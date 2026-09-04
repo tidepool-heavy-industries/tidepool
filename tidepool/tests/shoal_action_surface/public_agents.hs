@@ -97,11 +97,11 @@ safeHead
   -> Eff CodingActorEffects (Either WorktreeError GitOid)
 safeHead = worktreeHead
 
-recentCampaignTrees :: Int -> Eff ActorEffects (Either WorktreeError [WorktreeSummary])
-recentCampaignTrees timestamp =
+recentCampaignTrees :: ObservedAt -> ForkGroupHandle -> Eff ActorEffects (Either WorktreeError [WorktreeSummary])
+recentCampaignTrees timestamp group =
   queryWorktrees $
     createdAfter timestamp $
-      withBranchPrefix "shoal/context-unfold/" $
+      withinForkGroup group $
         withWorktreePresence PresentWorktrees allManagedWorktrees
 
 launchFacts
@@ -153,6 +153,21 @@ configuredBranch deadline leaf =
   withBranchDeadline deadline $
     withBranchGuidance "inspect only" $
       researching @Text leaf projectHead ()
+
+tenMinuteDeadline :: RequestDeadline
+tenMinuteDeadline = after (minutes 10)
+
+tenMinuteDeadlineInSeconds :: RequestDeadline
+tenMinuteDeadlineInSeconds = after (seconds 600)
+
+subSecondRequest
+  :: AgentRef
+  -> RequestLabel
+  -> Eff ActorEffects (Response Text)
+subSecondRequest actor label =
+  requestWith actor $
+    withRequestDeadline (after (milliseconds 25)) $
+      requestOptions label ()
 
 type TinyResearchEffects = '[Replies, ActorContext]
 

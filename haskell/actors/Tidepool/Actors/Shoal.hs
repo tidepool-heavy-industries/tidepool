@@ -39,6 +39,11 @@ module Tidepool.Actors.Shoal
   , CampaignLabel
   , ForkGroupLabel
   , BranchLabel
+  , ActorPath
+  , renderActorPath
+  , GitBranchPrefix
+  , renderGitBranchPrefix
+  , actorGitBranchPrefix
   , ForkGroupPath
   , NameError (..)
   , WorktreeSeed
@@ -76,6 +81,7 @@ module Tidepool.Actors.Shoal
   , BranchReceipt (..)
   , ForkGroupHandle
   , forkGroupHandle
+  , forkGroupGitBranchPrefix
   , ForkGroupCleanupOutcome (..)
   , cleanupForkGroup
   , awaitFork
@@ -102,9 +108,13 @@ module Tidepool.Actors.Shoal
   , startAgent
   , request
   , RequestOptions
+  , Duration
   , RequestDeadline
+  , milliseconds
+  , seconds
+  , minutes
+  , after
   , requestOptions
-  , requestDeadline
   , withRequestGuidance
   , withRequestDeadline
   , requestWith
@@ -166,7 +176,10 @@ module Tidepool.Actors.Shoal
   , WorktreeQuery
   , allManagedWorktrees
   , withWorktreePresence
-  , withBranchPrefix
+  , withGitBranchPrefix
+  , withinForkGroup
+  , ObservedAt
+  , unixMilliseconds
   , createdAfter
   , queryWorktrees
   , WorktreeHandle
@@ -198,6 +211,7 @@ module Tidepool.Actors.Shoal
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
+import Numeric.Natural (Natural)
 import Prelude
 
 import Tidepool.Agent.Reply
@@ -218,9 +232,13 @@ import Tidepool.Actors.Internal.Agent
   , forgetAgent
   , readonlyAgent
   , request
+  , Duration
   , RequestDeadline
   , RequestOptions
-  , requestDeadline
+  , milliseconds
+  , seconds
+  , minutes
+  , after
   , requestOptions
   , requestWith
   , StopOutcome (..)
@@ -276,8 +294,8 @@ data WorktreePresence
 
 data WorktreeQuery = WorktreeQuery
   { queryPresence :: Maybe WorktreePresence
-  , queryBranchPrefix :: Maybe Text
-  , queryCreatedAfter :: Maybe Int
+  , queryBranchPrefix :: Maybe GitBranchPrefix
+  , queryCreatedAfter :: Maybe ObservedAt
   }
   deriving (Show, Eq)
 
@@ -287,10 +305,21 @@ allManagedWorktrees = WorktreeQuery Nothing Nothing Nothing
 withWorktreePresence :: WorktreePresence -> WorktreeQuery -> WorktreeQuery
 withWorktreePresence presence query = query { queryPresence = Just presence }
 
-withBranchPrefix :: Text -> WorktreeQuery -> WorktreeQuery
-withBranchPrefix prefix query = query { queryBranchPrefix = Just prefix }
+withGitBranchPrefix :: GitBranchPrefix -> WorktreeQuery -> WorktreeQuery
+withGitBranchPrefix prefix query = query { queryBranchPrefix = Just prefix }
 
-createdAfter :: Int -> WorktreeQuery -> WorktreeQuery
+withinForkGroup :: ForkGroupHandle -> WorktreeQuery -> WorktreeQuery
+withinForkGroup group = withGitBranchPrefix (forkGroupGitBranchPrefix group)
+
+newtype ObservedAt = ObservedAt Int
+  deriving (Show, Eq, Ord)
+
+unixMilliseconds :: Natural -> ObservedAt
+unixMilliseconds value
+  | value > fromIntegral (maxBound :: Int) = error "timestamp exceeds the runtime integer range"
+  | otherwise = ObservedAt (fromIntegral value)
+
+createdAfter :: ObservedAt -> WorktreeQuery -> WorktreeQuery
 createdAfter timestamp query = query { queryCreatedAfter = Just timestamp }
 
 -- | Ask the canonical durable registry to filter before returning rows.
@@ -303,5 +332,7 @@ queryWorktrees query = WorktreeActor.queryWorktrees
     Nothing -> Nothing
     Just PresentWorktrees -> Just True
     Just MissingWorktrees -> Just False)
-  (queryBranchPrefix query)
-  (queryCreatedAfter query)
+  (fmap renderGitBranchPrefix (queryBranchPrefix query))
+  (case queryCreatedAfter query of
+    Nothing -> Nothing
+    Just (ObservedAt value) -> Just value)

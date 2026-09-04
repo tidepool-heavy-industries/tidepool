@@ -8,13 +8,43 @@ use crate::{
     ResponseObservation, WatchId, WatchObservation,
 };
 
+#[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromCore)]
+pub(crate) enum RequestDuration {
+    DurationMilliseconds(i64),
+    DurationSeconds(i64),
+    DurationMinutes(i64),
+}
+
+impl RequestDuration {
+    pub(crate) fn checked(self) -> Result<crate::RequestDeadline, String> {
+        let (value, unit, milliseconds_per_unit) = match self {
+            Self::DurationMilliseconds(value) => (value, crate::DeadlineUnit::Milliseconds, 1_u64),
+            Self::DurationSeconds(value) => (value, crate::DeadlineUnit::Seconds, 1_000_u64),
+            Self::DurationMinutes(value) => (value, crate::DeadlineUnit::Minutes, 60_000_u64),
+        };
+        crate::RequestDeadline::checked(value, unit, milliseconds_per_unit)
+    }
+}
+
+#[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromCore)]
+pub(crate) enum RequestDeadlineWire {
+    RequestDeadline(RequestDuration),
+}
+
+impl RequestDeadlineWire {
+    pub(crate) fn checked(self) -> Result<crate::RequestDeadline, String> {
+        let Self::RequestDeadline(duration) = self;
+        duration.checked()
+    }
+}
+
 #[derive(tidepool_bridge_derive::FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub(crate) enum RepliesReq {
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     ReserveRequestWith(String, (i64, i64)),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    SubmitRequestWith(i64, Value, (i64, i64), Option<i64>),
+    SubmitRequestWith(i64, Value, (i64, i64), Option<RequestDeadlineWire>),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     AttemptReplyWith(i64, Value),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
@@ -54,7 +84,7 @@ pub(crate) struct RequestSubmission {
     pub request: RequestId,
     pub target: ActorRef,
     pub message: crate::MailboxValue,
-    pub deadline: Option<std::time::Duration>,
+    pub deadline: Option<crate::RequestDeadline>,
 }
 
 pub(crate) struct ReplyAttempt {
@@ -121,6 +151,31 @@ pub(crate) fn watch_id(raw: i64) -> Result<WatchId, BridgeError> {
     u64::try_from(raw)
         .map(WatchId)
         .map_err(|_| BridgeError::UnsupportedType(format!("invalid watch id {raw}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RequestDuration;
+    use crate::DeadlineUnit;
+
+    #[test]
+    fn request_duration_preserves_authored_units_and_checks_conversion() {
+        let seconds = RequestDuration::DurationSeconds(600)
+            .checked()
+            .expect("ten minute deadline");
+        assert_eq!(seconds.value, 600);
+        assert_eq!(seconds.unit, DeadlineUnit::Seconds);
+        assert_eq!(seconds.milliseconds, 600_000);
+
+        let immediate = RequestDuration::DurationMilliseconds(0)
+            .checked()
+            .expect("explicit immediate deadline");
+        assert_eq!(immediate.milliseconds, 0);
+        assert!(RequestDuration::DurationMinutes(-1).checked().is_err());
+        assert!(RequestDuration::DurationMinutes(i64::MAX)
+            .checked()
+            .is_err());
+    }
 }
 
 pub(crate) fn reply_error_value(

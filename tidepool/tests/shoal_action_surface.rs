@@ -70,6 +70,13 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     )
     .expect("the public facade should expose persistent agents and typed replies");
 
+    compile_haskell(
+        include_str!("shoal_action_surface/public_agents.hs"),
+        "subSecondRequest",
+        &include_refs,
+    )
+    .expect("dimensional sub-second request deadlines should extract");
+
     let source = concat!(
         "module ShoalForbidden where\n",
         "import qualified Tidepool.Actors.Shoal as Shoal\n",
@@ -80,6 +87,17 @@ fn shoal_exports_persistent_agents_and_hides_turn_lifecycle_operations() {
     let failure = tidepool_runtime::classify_compile(&error);
     assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
     assert!(failure.message.contains("complete"));
+
+    let source = concat!(
+        "module ShoalRawDeadline where\n",
+        "import qualified Tidepool.Actors.Shoal as Shoal\n",
+        "result = Shoal.requestDeadline 600\n",
+    );
+    let error = compile_haskell(source, "result", &include_refs)
+        .expect_err("the default Shoal facade exposed a bare-integer deadline constructor");
+    let failure = tidepool_runtime::classify_compile(&error);
+    assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
+    assert!(failure.message.contains("requestDeadline"));
 
     let error = compile_haskell(
         include_str!("shoal_action_surface/coding_cannot_unfold.hs"),

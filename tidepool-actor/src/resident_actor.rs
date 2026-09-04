@@ -460,7 +460,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             requests.ready_watches,
             requests.unavailable_watches,
         );
-        format!("{current}\nactors:\n{}", roster.join("\n"))
+        format!(
+            "{current}\n  deadlines: [{}]\nactors:\n{}",
+            requests
+                .deadlines
+                .iter()
+                .map(|(_, deadline)| deadline.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            roster.join("\n")
+        )
     }
 }
 
@@ -473,12 +482,12 @@ where
         &self,
         owner: ActorRef,
         request: crate::RequestId,
-        deadline: std::time::Duration,
+        deadline: crate::request::ActiveRequestDeadline,
     ) {
         let requests = Arc::clone(&self.environment.requests);
         let deployments = self.environment.deployments.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(deadline).await;
+            tokio::time::sleep_until(deadline.due_monotonic()).await;
             if let Some(notification) = requests.deadline_request(owner, request) {
                 let _ =
                     deployments.send(LocalResidentDeployment::RequestCancellation { notification });
@@ -1188,7 +1197,11 @@ where
                     .await
             }
             ResidentActorBoundary::RequestSubmission(submission) => {
-                let request_deadline = submission.deadline;
+                let request_deadline = submission
+                    .deadline
+                    .map(crate::request::ActiveRequestDeadline::start)
+                    .transpose()
+                    .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
                 let target = kernel.resolve(submission.target);
                 let target_context = kernel.session_context(submission.target);
                 let deliverable = target.as_ref().zip(target_context.as_ref()).filter(
@@ -1209,7 +1222,12 @@ where
                         .await?;
                     self.environment
                         .requests
-                        .mark_queued(context.actor, submission.target, submission.request)
+                        .mark_queued_with_deadline(
+                            context.actor,
+                            submission.target,
+                            submission.request,
+                            request_deadline.clone(),
+                        )
                         .map_err(|error| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
                                 "request submission was rejected: {error:?}"

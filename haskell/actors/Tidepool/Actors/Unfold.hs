@@ -12,6 +12,11 @@ module Tidepool.Actors.Unfold
   ( CampaignLabel
   , ForkGroupLabel
   , BranchLabel
+  , ActorPath
+  , renderActorPath
+  , GitBranchPrefix
+  , renderGitBranchPrefix
+  , actorGitBranchPrefix
   , ForkGroupPath
   , NameError (..)
   , WorktreeSeed
@@ -50,6 +55,7 @@ module Tidepool.Actors.Unfold
   , BranchReceipt (..)
   , ForkGroupHandle
   , forkGroupHandle
+  , forkGroupGitBranchPrefix
   , ForkGroupCleanupOutcome (..)
   , cleanupForkGroup
   , awaitFork
@@ -73,12 +79,12 @@ import Tidepool.Agent.Watch (Await, Settlement, awaitResponse, awaitSettled)
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , RequestDeadline
+  , agentIdentity
   , requestOptions
   , requestWithSited
+  , startForkedAgent
   , withRequestDeadline
   , withRequestGuidance
-  , startForkedAgent
-  , agentIdentity
   )
 import Tidepool.Actors.Role
   ( CodingEffects
@@ -106,7 +112,20 @@ import Tidepool.Worktree (worktreeId)
 newtype CampaignLabel = CampaignLabel Text
 newtype ForkGroupLabel = ForkGroupLabel Text
 newtype BranchLabel = BranchLabel Text
+newtype ActorPath = ActorPath Text
+  deriving (Show, Eq, Ord)
+newtype GitBranchPrefix = GitBranchPrefix Text
+  deriving (Show, Eq, Ord)
 data ForkGroupPath = ForkGroupPath Bool Text
+
+renderActorPath :: ActorPath -> Text
+renderActorPath (ActorPath path) = path
+
+renderGitBranchPrefix :: GitBranchPrefix -> Text
+renderGitBranchPrefix (GitBranchPrefix prefix) = prefix
+
+actorGitBranchPrefix :: ActorPath -> GitBranchPrefix
+actorGitBranchPrefix (ActorPath path) = GitBranchPrefix ("shoal/" <> path)
 
 data NameError
   = EmptyName
@@ -264,8 +283,9 @@ integrating label seed input =
   Branch label IntegrationFork seed knownEffects defaultBranchOptions input
 
 data BranchReceipt = BranchReceipt
-  { requestedPath :: Text
-  , allocatedPath :: Text
+  { requestedPath :: ActorPath
+  , allocatedPath :: ActorPath
+  , allocatedForkGroupPath :: ActorPath
   , forkGroupIdentity :: Int
   , launchedActorId :: Int
   , launchedActorIncarnation :: Int
@@ -287,17 +307,23 @@ data Forked result = Forked
   , forkedLaunch :: BranchReceipt
   }
 
-newtype ForkGroupHandle = ForkGroupHandle Int
+data ForkGroupHandle = ForkGroupHandle Int ActorPath
   deriving (Show, Eq)
 
 forkGroupHandle :: Forked result -> ForkGroupHandle
-forkGroupHandle = ForkGroupHandle . forkGroupIdentity . forkedLaunch
+forkGroupHandle worker =
+  let receipt = forkedLaunch worker
+  in ForkGroupHandle (forkGroupIdentity receipt) (allocatedForkGroupPath receipt)
+
+forkGroupGitBranchPrefix :: ForkGroupHandle -> GitBranchPrefix
+forkGroupGitBranchPrefix (ForkGroupHandle _ (ActorPath path)) =
+  GitBranchPrefix ("shoal/" <> path <> "/")
 
 cleanupForkGroup
   :: Member Forks effs
   => ForkGroupHandle
   -> Eff effs ForkGroupCleanupOutcome
-cleanupForkGroup (ForkGroupHandle groupId) = send (ForksCleanupWith groupId)
+cleanupForkGroup (ForkGroupHandle groupId _) = send (ForksCleanupWith groupId)
 
 data Unfold (parent :: [Type -> Type]) result where
   PureU :: result -> Unfold parent result
@@ -493,8 +519,9 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) ro
     { forkedActor = actor
     , forkedResponse = response
     , forkedLaunch = BranchReceipt
-        { requestedPath = requested
-        , allocatedPath = allocated
+        { requestedPath = ActorPath requested
+        , allocatedPath = ActorPath allocated
+        , allocatedForkGroupPath = ActorPath (allocatedGroupPath leaf allocated)
         , forkGroupIdentity = groupId
         , launchedActorId = actorId
         , launchedActorIncarnation = incarnation
@@ -503,6 +530,12 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) ro
         , launchedWorktree = handleReceipt tree
         }
     }
+
+allocatedGroupPath :: Text -> Text -> Text
+allocatedGroupPath leaf allocated =
+  case Text.stripSuffix ("/" <> leaf) allocated of
+    Just group -> group
+    Nothing -> allocated
 
 accessFor :: ForkRole -> ForkWorkspaceAccess
 accessFor ResearchFork = InspectForkWorktree

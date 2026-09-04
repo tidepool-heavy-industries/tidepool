@@ -47,6 +47,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Void (Void)
 import Prelude
+import Tidepool.Duration (RequestDeadline)
 
 import Tidepool.Internal.ExitCell
   ( ExitCell
@@ -184,7 +185,7 @@ data RawReplyObservation
 
 data Replies a where
   ReserveRequestWith :: Text -> (Int, Int) -> Replies Int
-  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe Int -> Replies ()
+  SubmitRequestWith :: Int -> request -> (Int, Int) -> Maybe RequestDeadline -> Replies ()
   AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
@@ -203,10 +204,10 @@ submitRequest
   => RequestId
   -> (Int, Int)
   -> request
-  -> Maybe Int
+  -> Maybe RequestDeadline
   -> Eff effs ()
-submitRequest (RequestId request) target requestPayload deadlineMilliseconds =
-  send (SubmitRequestWith request requestPayload target deadlineMilliseconds)
+submitRequest (RequestId request) target requestPayload deadline =
+  send (SubmitRequestWith request requestPayload target deadline)
 
 newRequestHandles :: pending -> RequestId -> (Response result, Reply result)
 newRequestHandles pending request =

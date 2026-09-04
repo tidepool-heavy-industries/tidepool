@@ -76,10 +76,10 @@ pub use mount::{
 };
 pub use profile::ActorEffectProfile;
 pub use request::{
-    AbandonResponseOutcome, CancelRequestOutcome, CancellationReason, ForgetResponseOutcome,
-    ForgetWatchOutcome, ReplyError, ReplyObservation, RequestCancellationNotification, RequestId,
-    ResponseFailure, ResponseObservation, WatchId, WatchNotification, WatchObservation,
-    WatchTransition,
+    AbandonResponseOutcome, CancelRequestOutcome, CancellationReason, DeadlineUnit,
+    ForgetResponseOutcome, ForgetWatchOutcome, ReplyError, ReplyObservation,
+    RequestCancellationNotification, RequestDeadline, RequestId, ResponseFailure,
+    ResponseObservation, WatchId, WatchNotification, WatchObservation, WatchTransition,
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_with_fork_admission, LocalResidentDeployment,

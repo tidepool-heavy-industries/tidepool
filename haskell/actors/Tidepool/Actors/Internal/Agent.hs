@@ -23,9 +23,13 @@ module Tidepool.Actors.Internal.Agent
   , request
   , requestSited
   , RequestOptions
+  , Duration
   , RequestDeadline
+  , milliseconds
+  , seconds
+  , minutes
+  , after
   , requestOptions
-  , requestDeadline
   , withRequestGuidance
   , withRequestDeadline
   , requestWith
@@ -88,6 +92,14 @@ import Tidepool.Effects.Core
   )
 import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
+import Tidepool.Duration
+  ( Duration
+  , RequestDeadline
+  , after
+  , milliseconds
+  , minutes
+  , seconds
+  )
 import Tidepool.Worktree
   ( observeSubmission
   , renderBranchName
@@ -179,9 +191,6 @@ data AgentProtocol result where
     -> AgentProtocol ()
   StopAgent :: AgentProtocol ()
 
-newtype RequestDeadline = RequestDeadline Int
-  deriving (Show, Eq, Ord)
-
 data RequestOptions input = RequestOptions
   { requestOptionsLabel :: RequestLabel
   , requestOptionsInput :: input
@@ -192,11 +201,6 @@ data RequestOptions input = RequestOptions
 
 requestOptions :: RequestLabel -> input -> RequestOptions input
 requestOptions label input = RequestOptions label input Nothing Nothing
-
-requestDeadline :: Int -> Either Text RequestDeadline
-requestDeadline milliseconds
-  | milliseconds <= 0 = Left "request deadline must be a positive number of milliseconds"
-  | otherwise = Right (RequestDeadline milliseconds)
 
 withRequestGuidance :: Text -> RequestOptions input -> RequestOptions input
 withRequestGuidance guidance options =
@@ -303,9 +307,7 @@ requestWithSited site (AgentRef target targetWorktree) options =
     targetWorktree
     (requestOptionsLabel options)
     (requestOptionsGuidance options)
-    (case requestOptionsDeadline options of
-      Nothing -> Nothing
-      Just (RequestDeadline milliseconds) -> Just milliseconds)
+    (requestOptionsDeadline options)
     (requestOptionsInput options)
 
 requestConfiguredSited
@@ -316,7 +318,7 @@ requestConfiguredSited
   -> Maybe WorktreeHandle
   -> RequestLabel
   -> Maybe Text
-  -> Maybe Int
+  -> Maybe RequestDeadline
   -> input
   -> Eff effs (Response result)
 requestConfiguredSited site target targetWorktree label@(RequestLabel renderedLabel) guidance deadline input = do
