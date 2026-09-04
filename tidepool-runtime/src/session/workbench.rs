@@ -325,13 +325,23 @@ impl WorkbenchRequest {
             }
         })
     }
+
+    #[must_use]
+    pub fn item_is_observational(&self, index: usize) -> bool {
+        self.input_kind(index) == GhciInputKind::Command
+            && self.items.get(index).is_some_and(|source| {
+                MetaCommandLine::parse(source).is_ok_and(|command| command.is_observational())
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkbenchItemStatus {
     Committed,
+    Diagnostic,
     Rejected,
+    NotRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -340,6 +350,8 @@ pub struct WorkbenchItemReceipt {
     pub index: usize,
     pub status: WorkbenchItemStatus,
     pub output: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -489,6 +501,30 @@ impl MetaCommandLine {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Whether failure of this command is itself only an observation.
+    ///
+    /// A misspelled name or unsupported argument must not prevent later
+    /// independent inspection from running. Commands outside this closed set
+    /// may acquire mutation semantics in a frontend and therefore retain the
+    /// ordinary reject-and-stop boundary.
+    #[must_use]
+    pub fn is_observational(&self) -> bool {
+        matches!(
+            self.name.as_str(),
+            "status"
+                | "t"
+                | "type"
+                | "i"
+                | "info"
+                | "show"
+                | "browse"
+                | "browse!"
+                | "bindings"
+                | "b"
+                | "doc"
+        )
     }
 }
 
@@ -866,6 +902,23 @@ mod tests {
             .unwrap()
             .discovery()
             .is_err());
+        for command in [
+            ":type missing",
+            ":info missing",
+            ":browse Missing",
+            ":bindings",
+            ":show modules",
+            ":status",
+            ":doc request",
+        ] {
+            assert!(
+                MetaCommandLine::parse(command).unwrap().is_observational(),
+                "{command}"
+            );
+        }
+        assert!(!MetaCommandLine::parse(":set -XGADTs")
+            .unwrap()
+            .is_observational());
     }
 
     #[test]
@@ -994,6 +1047,7 @@ mod tests {
                 index: 0,
                 status: WorkbenchItemStatus::Committed,
                 output: "bound `answer`".into(),
+                warnings: Vec::new(),
             }],
             next_index: 1,
             total: 1,

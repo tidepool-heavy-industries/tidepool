@@ -599,11 +599,11 @@ mod tests {
         let code = "pure [fmt|hello {name}|]";
         let mut imports = aeson_imports();
         if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
         }
         let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
         let qq = src
-            .find("import Tidepool.QQ (fmt, j, patch, uri, form)\n")
+            .find("import Tidepool.QQ (fmt, j, patch, uri)\n")
             .expect("QQ import missing from rendered module");
         let default_decl = src.find("default (Int").unwrap();
         assert!(qq < default_decl, "QQ import must precede default decl");
@@ -615,7 +615,7 @@ mod tests {
         let code = "pure [x | x <- xs]";
         let mut imports = aeson_imports();
         if uses_qq(code) {
-            imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)\n");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)\n");
         }
         let src = template_haskell(&pre, "'[]", code, &imports, "", None, None);
         assert!(

@@ -330,6 +330,7 @@ mod tests {
                 index: 0,
                 status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
                 output: "defined spotTaskText at generation 2".into(),
+                warnings: Vec::new(),
             }],
             failed_index: 1,
             total: 3,

@@ -2081,13 +2081,26 @@ where
                     index,
                     status: WorkbenchItemStatus::Committed,
                     output: self.status_text(kernel, context.actor),
+                    warnings: Vec::new(),
                 });
                 index += 1;
                 continue;
             }
-            if let Ok(Some(first)) =
-                workbench.inspection_query(&request.items[index], request.input_kind(index))
-            {
+            let inspection =
+                workbench.inspection_query(&request.items[index], request.input_kind(index));
+            if let Err(output) = &inspection {
+                if request.item_is_observational(index) {
+                    receipts.push(WorkbenchItemReceipt {
+                        index,
+                        status: WorkbenchItemStatus::Diagnostic,
+                        output: output.clone(),
+                        warnings: Vec::new(),
+                    });
+                    index += 1;
+                    continue;
+                }
+            }
+            if let Ok(Some(first)) = inspection {
                 let mut queries = vec![first];
                 while index + queries.len() < request.items.len() {
                     let candidate = index + queries.len();
@@ -2112,19 +2125,15 @@ where
                             index: receipt_index,
                             status: WorkbenchItemStatus::Committed,
                             output,
+                            warnings: Vec::new(),
                         }),
                         Err(output) => {
                             receipts.push(WorkbenchItemReceipt {
                                 index: receipt_index,
-                                status: WorkbenchItemStatus::Rejected,
+                                status: WorkbenchItemStatus::Diagnostic,
                                 output,
+                                warnings: Vec::new(),
                             });
-                            return Ok(KernelStep::Continue(workbench_response(
-                                WorkbenchRunStatus::Rejected,
-                                receipts,
-                                receipt_index,
-                                request.items.len(),
-                            )));
                         }
                     }
                 }
@@ -2181,7 +2190,7 @@ where
                 };
             }
             match step {
-                ResidentWorkbenchStep::Committed(output) => {
+                ResidentWorkbenchStep::Committed { output, warnings } => {
                     if self.environment.fork_groups.has_ready(context.actor) {
                         if index + 1 != request.items.len() {
                             self.abort_unpublished_groups(
@@ -2194,6 +2203,7 @@ where
                                 index,
                                 status: WorkbenchItemStatus::Rejected,
                                 output: "unfold must be the final executable input unit in its hosted Haskell call".into(),
+                                warnings: Vec::new(),
                             });
                             return Ok(KernelStep::Continue(workbench_response(
                                 WorkbenchRunStatus::Rejected,
@@ -2225,6 +2235,7 @@ where
                             status: WorkbenchItemStatus::Rejected,
                             output: "unfold admission ended without committing every fork group"
                                 .into(),
+                            warnings: Vec::new(),
                         });
                         return Ok(KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Rejected,
@@ -2237,9 +2248,20 @@ where
                         index,
                         status: WorkbenchItemStatus::Committed,
                         output,
+                        warnings,
                     });
                 }
                 ResidentWorkbenchStep::Rejected(output) => {
+                    if request.item_is_observational(index) {
+                        receipts.push(WorkbenchItemReceipt {
+                            index,
+                            status: WorkbenchItemStatus::Diagnostic,
+                            output,
+                            warnings: Vec::new(),
+                        });
+                        index += 1;
+                        continue;
+                    }
                     self.abort_unpublished_groups(
                         kernel,
                         context.actor,
@@ -2250,6 +2272,7 @@ where
                         index,
                         status: WorkbenchItemStatus::Rejected,
                         output,
+                        warnings: Vec::new(),
                     });
                     return Ok(KernelStep::Continue(workbench_response(
                         WorkbenchRunStatus::Rejected,
@@ -2722,17 +2745,31 @@ where
                     detail: "actor has no active Haskell application workbench".into(),
                 });
             }
-            self.execute_workbench(kernel, &context, request)
-                .await
-                .map_err(|failure| {
-                    KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
-                        actor: context.actor,
-                        completed: failure.completed,
-                        failed_index: failure.failed_index,
-                        total: failure.total,
-                        detail: failure.source.to_string(),
-                    })
+            let result = self.execute_workbench(kernel, &context, request).await;
+            let rejected = match &result {
+                Err(_) => true,
+                Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
+                    response.status == WorkbenchRunStatus::Rejected
+                }
+                Ok(KernelStep::Stop { output, .. }) => {
+                    output.status == WorkbenchRunStatus::Rejected
+                }
+            };
+            if rejected {
+                let aborted = self.environment.requests.abort_unsubmitted(context.actor);
+                if !aborted.is_empty() {
+                    tracing::debug!(actor = ?context.actor, requests = ?aborted, "aborted unpublished request reservations after rejected workbench input");
+                }
+            }
+            result.map_err(|failure| {
+                KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+                    actor: context.actor,
+                    completed: failure.completed,
+                    failed_index: failure.failed_index,
+                    total: failure.total,
+                    detail: failure.source.to_string(),
                 })
+            })
         })
     }
 
@@ -2945,10 +2982,23 @@ fn completed_terminal() -> ActorTerminal {
 
 fn workbench_response(
     status: WorkbenchRunStatus,
-    items: Vec<WorkbenchItemReceipt>,
+    mut items: Vec<WorkbenchItemReceipt>,
     next_index: usize,
     total: usize,
 ) -> WorkbenchResponse {
+    let first_not_run = match status {
+        WorkbenchRunStatus::Rejected => next_index.saturating_add(1),
+        WorkbenchRunStatus::Replied
+        | WorkbenchRunStatus::RequestCancelled
+        | WorkbenchRunStatus::Completed => next_index,
+        WorkbenchRunStatus::Committed => total,
+    };
+    items.extend((first_not_run..total).map(|index| WorkbenchItemReceipt {
+        index,
+        status: WorkbenchItemStatus::NotRun,
+        output: String::new(),
+        warnings: Vec::new(),
+    }));
     WorkbenchResponse {
         status,
         items,
@@ -2959,8 +3009,11 @@ fn workbench_response(
 
 #[cfg(test)]
 mod tests {
-    use super::ChildExitObservations;
+    use super::{workbench_response, ChildExitObservations};
     use crate::{ActorId, ActorRef, Incarnation};
+    use tidepool_runtime::session::{
+        WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRunStatus,
+    };
 
     #[test]
     fn child_exit_observation_tracks_exact_processing_order() {
@@ -2987,5 +3040,23 @@ mod tests {
         };
         assert!(!exits.process(processed_first));
         assert!(exits.observe(processed_first));
+    }
+
+    #[test]
+    fn rejected_workbench_response_marks_the_unexecuted_suffix() {
+        let response = workbench_response(
+            WorkbenchRunStatus::Rejected,
+            vec![WorkbenchItemReceipt {
+                index: 0,
+                status: WorkbenchItemStatus::Rejected,
+                output: "bad effect".into(),
+                warnings: Vec::new(),
+            }],
+            0,
+            3,
+        );
+        assert_eq!(response.items.len(), 3);
+        assert_eq!(response.items[1].status, WorkbenchItemStatus::NotRun);
+        assert_eq!(response.items[2].status, WorkbenchItemStatus::NotRun);
     }
 }

@@ -76,6 +76,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                             index: 0,
                             status: WorkbenchItemStatus::Rejected,
                             output: error.to_string(),
+                            warnings: Vec::new(),
                         }],
                         next_index: 0,
                         total: 1,
@@ -83,7 +84,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                     .map_err(ResidentToolError::Encoding);
                 }
             };
-            client.dispatch_workbench(request).await
+            client.dispatch_workbench(request, invocation.context).await
         })
     }
 }

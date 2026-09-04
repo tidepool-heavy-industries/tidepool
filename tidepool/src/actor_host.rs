@@ -884,7 +884,8 @@ fn compile_root(
     .with_effective_role(tidepool_actor::EffectiveRole::root());
     Ok((
         ActorWorkbenchSource::new(preamble, include)
-            .with_default_browse_module(WORKBENCH_SURFACE_MODULE),
+            .with_default_browse_module(WORKBENCH_SURFACE_MODULE)
+            .with_default_quasiquoters(),
         ResidentActorRoot::new(descriptor, machine, outcome),
     ))
 }
@@ -3698,6 +3699,23 @@ mod tests {
             panic!("root retired before installing its application")
         };
 
+        let ergonomics = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            include_str!("actor_host_fixtures/generic_actor/workbench_ergonomics.hs"),
+        )
+        .await;
+        assert_eq!(ergonomics["status"], "committed", "{ergonomics:?}");
+        assert_eq!(ergonomics["items"][0]["status"], "diagnostic");
+        assert_eq!(ergonomics["items"][1]["status"], "committed");
+        assert_eq!(ergonomics["items"][2]["status"], "committed");
+        assert_eq!(ergonomics["items"][3]["status"], "committed");
+        assert!(ergonomics["items"][3]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty()));
+        assert_eq!(ergonomics["items"][4]["status"], "committed");
+        assert_eq!(ergonomics["items"][5]["output"], "7");
+        assert_eq!(ergonomics["items"][6]["output"], "value=7");
+
         let setup_policy = Arc::clone(&root_installation.policy);
         let submitted = tokio::spawn(async move {
             dispatch_haskell(
@@ -3914,17 +3932,21 @@ mod tests {
         .await;
         assert_eq!(witnessed["status"], "replied", "{witnessed:?}");
 
-        let notification = loop {
-            match deployments.recv().await {
-                Some(LocalResidentDeployment::WatchChanged { notification })
-                    if notification.owner == actor.identity() =>
-                {
-                    break notification
+        let notification = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match deployments.recv().await {
+                    Some(LocalResidentDeployment::WatchChanged { notification })
+                        if notification.owner == actor.identity() =>
+                    {
+                        break notification;
+                    }
+                    Some(_) => {}
+                    None => panic!("deployment channel closed before watch transition"),
                 }
-                Some(_) => {}
-                None => panic!("deployment channel closed before watch transition"),
             }
-        };
+        })
+        .await
+        .expect("watch transition timeout");
         assert_eq!(
             notification.transition,
             tidepool_actor::WatchTransition::Ready

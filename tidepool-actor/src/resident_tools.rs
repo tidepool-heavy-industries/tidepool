@@ -4,11 +4,12 @@
 //! exposes an immutable tool surface and submits typed invocations to the
 //! owning local actor.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::{future::Future, pin::Pin};
 
 use tidepool_runtime::session::{ResidentHole, WorkbenchRequest};
-use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation};
+use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tokio::sync::oneshot;
 
 /// A policy waiting for its next invocation.
@@ -65,6 +66,65 @@ pub trait ResidentToolEndpoint: Send + Sync {
 pub(crate) struct ResidentToolClient {
     actor: crate::LocalActorRef,
     dispatch_gate: Arc<tokio::sync::Mutex<()>>,
+    completed_workbench_calls: Arc<parking_lot::Mutex<WorkbenchCallLedger>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkbenchCallKey {
+    thread_id: String,
+    turn_id: String,
+    call_id: String,
+    namespace: Option<String>,
+}
+
+impl From<ToolInvocationContext> for WorkbenchCallKey {
+    fn from(context: ToolInvocationContext) -> Self {
+        Self {
+            thread_id: context.thread_id,
+            turn_id: context.turn_id,
+            call_id: context.call_id,
+            namespace: context.namespace,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CompletedWorkbenchCall {
+    request: WorkbenchRequest,
+    reply: crate::KernelWorkbenchReply,
+}
+
+#[derive(Default)]
+struct WorkbenchCallLedger {
+    completed: HashMap<WorkbenchCallKey, CompletedWorkbenchCall>,
+}
+
+impl WorkbenchCallLedger {
+    fn lookup(
+        &self,
+        operation: &WorkbenchCallKey,
+        request: &WorkbenchRequest,
+    ) -> Result<Option<crate::KernelWorkbenchReply>, ResidentToolError> {
+        let Some(completed) = self.completed.get(operation) else {
+            return Ok(None);
+        };
+        if completed.request != *request {
+            return Err(ResidentToolError::InvalidInvocation(
+                "one hosted call identity was retried with different Haskell input".into(),
+            ));
+        }
+        Ok(Some(completed.reply.clone()))
+    }
+
+    fn record(
+        &mut self,
+        operation: WorkbenchCallKey,
+        request: WorkbenchRequest,
+        reply: crate::KernelWorkbenchReply,
+    ) {
+        self.completed
+            .insert(operation, CompletedWorkbenchCall { request, reply });
+    }
 }
 
 impl ResidentToolClient {
@@ -72,6 +132,9 @@ impl ResidentToolClient {
         Self {
             actor,
             dispatch_gate: Arc::new(tokio::sync::Mutex::new(())),
+            completed_workbench_calls: Arc::new(parking_lot::Mutex::new(
+                WorkbenchCallLedger::default(),
+            )),
         }
     }
 
@@ -101,8 +164,27 @@ impl ResidentToolClient {
     pub(crate) async fn dispatch_workbench(
         &self,
         request: WorkbenchRequest,
+        invocation: Option<ToolInvocationContext>,
     ) -> Result<serde_json::Value, ResidentToolError> {
         let _turn = self.dispatch_gate.lock().await;
+        let operation = invocation.map(WorkbenchCallKey::from);
+        let cached = operation
+            .as_ref()
+            .map(|operation| {
+                self.completed_workbench_calls
+                    .lock()
+                    .lookup(operation, &request)
+            })
+            .transpose()?
+            .flatten();
+        if let Some(reply) = cached {
+            return reply
+                .map_err(ResidentToolError::Invocation)
+                .and_then(|response| {
+                    serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+                });
+        }
+        let cache_request = operation.as_ref().map(|_| request.clone());
         let (response, receive) = oneshot::channel();
         self.actor
             .address()
@@ -111,13 +193,71 @@ impl ResidentToolClient {
                 reply: response.into(),
             })
             .map_err(|_| ResidentToolError::Unavailable("the owning actor has stopped".into()))?;
-        let response = receive.await.map_err(|_| {
+        let reply = receive.await.map_err(|_| {
             ResidentToolError::Unavailable(
                 "the actor stopped before settling the workbench invocation".into(),
             )
         })?;
-        let response = response.map_err(ResidentToolError::Invocation)?;
+        if let (Some(operation), Some(request)) = (operation, cache_request) {
+            self.completed_workbench_calls
+                .lock()
+                .record(operation, request, reply.clone());
+        }
+        let response = reply.map_err(ResidentToolError::Invocation)?;
         serde_json::to_value(response).map_err(ResidentToolError::Encoding)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidepool_runtime::session::{
+        WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchResponse, WorkbenchRunStatus,
+    };
+
+    fn call_key(call_id: &str) -> WorkbenchCallKey {
+        ToolInvocationContext {
+            thread_id: "thread".into(),
+            turn_id: "turn".into(),
+            call_id: call_id.into(),
+            namespace: Some("actor".into()),
+        }
+        .into()
+    }
+
+    fn request(source: &str) -> WorkbenchRequest {
+        WorkbenchRequest::from_ghci_input(source).expect("workbench request")
+    }
+
+    fn reply(output: &str) -> crate::KernelWorkbenchReply {
+        Ok(WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            items: vec![WorkbenchItemReceipt {
+                index: 0,
+                status: WorkbenchItemStatus::Committed,
+                output: output.into(),
+                warnings: Vec::new(),
+            }],
+            next_index: 1,
+            total: 1,
+        })
+    }
+
+    #[test]
+    fn exact_hosted_call_retry_reuses_only_the_matching_receipt() {
+        let mut ledger = WorkbenchCallLedger::default();
+        let original = request("action");
+        ledger.record(call_key("call-1"), original.clone(), reply("once"));
+
+        assert_eq!(
+            ledger.lookup(&call_key("call-1"), &original).unwrap(),
+            Some(reply("once"))
+        );
+        assert!(matches!(
+            ledger.lookup(&call_key("call-1"), &request("different")),
+            Err(ResidentToolError::InvalidInvocation(_))
+        ));
+        assert_eq!(ledger.lookup(&call_key("call-2"), &original).unwrap(), None);
     }
 }
 

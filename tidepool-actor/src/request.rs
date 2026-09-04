@@ -287,6 +287,30 @@ impl RequestRegistry {
         id
     }
 
+    /// Remove request identities which never crossed the admission commit.
+    ///
+    /// The Haskell facade constructs a live request payload in two private
+    /// effect steps because the payload itself contains the runtime-minted
+    /// request id. The surrounding workbench invocation is the transaction:
+    /// anything still `Reserved` when that invocation settles was never
+    /// published and must not leak into observable request state.
+    pub(crate) fn abort_unsubmitted(&self, owner: ActorRef) -> Vec<RequestId> {
+        let mut state = self.state.lock();
+        let mut aborted = state
+            .requests
+            .iter()
+            .filter_map(|(request, record)| {
+                (record.owner == owner && record.target_state == TargetState::Reserved)
+                    .then_some(*request)
+            })
+            .collect::<Vec<_>>();
+        aborted.sort_unstable();
+        for request in &aborted {
+            state.requests.remove(request);
+        }
+        aborted
+    }
+
     pub(crate) fn mark_target_unavailable(
         &self,
         owner: ActorRef,
@@ -914,6 +938,30 @@ mod tests {
             registry.observe_watch(owner, watch),
             Ok(WatchObservation::Ready(Vec::new()))
         );
+    }
+
+    #[test]
+    fn workbench_boundary_aborts_only_unsubmitted_reservations() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let other_owner = actor(2);
+        let target = actor(3);
+        let leaked = registry.reserve(owner, target);
+        let committed = registry.reserve(owner, target);
+        let unrelated = registry.reserve(other_owner, target);
+        registry.mark_queued(owner, target, committed).unwrap();
+
+        assert_eq!(registry.abort_unsubmitted(owner), vec![leaked]);
+        assert_eq!(
+            registry.observe_response(owner, leaked),
+            Err(ReplyError::Stale)
+        );
+        assert_eq!(
+            registry.observe_response(owner, committed),
+            Ok(ResponseObservation::Pending)
+        );
+        assert_eq!(registry.abort_unsubmitted(other_owner), vec![unrelated]);
+        assert!(registry.abort_unsubmitted(owner).is_empty());
     }
 
     #[test]

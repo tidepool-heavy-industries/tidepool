@@ -65,6 +65,13 @@ pub struct ActorWorkbenchSource {
     base_include: Arc<[PathBuf]>,
     default_browse_module: Option<Arc<str>>,
     workbench_imports: SourceImports,
+    conditional_imports: Arc<[ConditionalWorkbenchImport]>,
+}
+
+#[derive(Clone)]
+struct ConditionalWorkbenchImport {
+    triggers: Arc<[Arc<str>]>,
+    import: Arc<str>,
 }
 
 impl ActorWorkbenchSource {
@@ -75,6 +82,7 @@ impl ActorWorkbenchSource {
             base_include: base_include.into(),
             default_browse_module: None,
             workbench_imports: SourceImports::new(),
+            conditional_imports: Arc::new([]),
         }
     }
 
@@ -84,6 +92,35 @@ impl ActorWorkbenchSource {
         self.workbench_imports.extend_text(module.as_ref());
         self.default_browse_module = Some(module);
         self
+    }
+
+    /// Preload the small quasiquoter vocabulary promised by a hosted
+    /// workbench. Deployment selects this policy; the generic actor engine
+    /// does not inspect input text or depend on an MCP-specific parser.
+    #[must_use]
+    pub fn with_default_quasiquoters(mut self) -> Self {
+        self.conditional_imports = Arc::new([ConditionalWorkbenchImport {
+            triggers: ["[fmt|", "[j|", "[patch|", "[uri|"]
+                .into_iter()
+                .map(Arc::from)
+                .collect(),
+            import: Arc::from("Tidepool.QQ (fmt, j, patch, uri)"),
+        }]);
+        self
+    }
+
+    fn imports_for(&self, input: &str) -> SourceImports {
+        let mut imports = SourceImports::new();
+        for conditional in self.conditional_imports.iter() {
+            if conditional
+                .triggers
+                .iter()
+                .any(|trigger| input.contains(trigger.as_ref()))
+            {
+                imports.extend_text(conditional.import.as_ref());
+            }
+        }
+        imports
     }
 }
 
@@ -125,6 +162,7 @@ pub struct ResidentActorWorkbench<H, O> {
 pub(crate) struct ResidentWorkbenchFragment {
     display: WorkbenchDisplay,
     output: Vec<String>,
+    warnings: Vec<String>,
 }
 
 enum WorkbenchDisplay {
@@ -141,7 +179,10 @@ struct RequestWorkbenchScope<'a> {
 }
 
 pub(crate) enum ResidentWorkbenchStep {
-    Committed(String),
+    Committed {
+        output: String,
+        warnings: Vec<String>,
+    },
     Rejected(String),
     Running {
         fragment: ResidentWorkbenchFragment,
@@ -959,7 +1000,10 @@ where
     .into();
     if kind == GhciInputKind::Command {
         return match run_discovery(session, context, &source, scope.type_modules, &block)? {
-            Ok(output) => Ok(ResidentWorkbenchStep::Committed(output)),
+            Ok(output) => Ok(ResidentWorkbenchStep::Committed {
+                output,
+                warnings: Vec::new(),
+            }),
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
         };
     }
@@ -989,15 +1033,18 @@ where
                 &[&declaration_source],
                 &declaration_imports,
             ) {
-                Ok(generation) => ResidentWorkbenchStep::Committed(format!(
-                    "defined {} at generation {}",
-                    if receipt.binders.is_empty() {
-                        "declaration".to_string()
-                    } else {
-                        receipt.binders.join(", ")
-                    },
-                    generation.0
-                )),
+                Ok(generation) => ResidentWorkbenchStep::Committed {
+                    output: format!(
+                        "defined {} at generation {}",
+                        if receipt.binders.is_empty() {
+                            "declaration".to_string()
+                        } else {
+                            receipt.binders.join(", ")
+                        },
+                        generation.0
+                    ),
+                    warnings: Vec::new(),
+                },
                 Err(tidepool_runtime::session::SessionError::ValidationFailed(failure)) => {
                     ResidentWorkbenchStep::Rejected(failure.render_for_input(
                         &format!("<input unit {}>", block.ordinal),
@@ -1018,6 +1065,7 @@ where
         TurnResult::Bind {
             bound, compiled, ..
         } => {
+            let warnings = compiled.warnings.warnings.clone();
             let names = bound
                 .iter()
                 .map(|binder| binder.name.clone())
@@ -1051,11 +1099,12 @@ where
             } else {
                 WorkbenchDisplay::Binding(names.join(", "))
             };
-            start_fragment_settlement(session, context, display, outcome)
+            start_fragment_settlement(session, context, display, warnings, outcome)
         }
         TurnResult::Expr {
             variant, compiled, ..
         } => {
+            let warnings = compiled.warnings.warnings.clone();
             let outcome = session.run_with_sites(
                 "actor_interactive_expr",
                 &compiled.expr,
@@ -1067,7 +1116,7 @@ where
             } else {
                 WorkbenchDisplay::Opaque
             };
-            start_fragment_settlement(session, context, display, outcome)
+            start_fragment_settlement(session, context, display, warnings, outcome)
         }
     }
 }
@@ -1076,6 +1125,7 @@ fn start_fragment_settlement<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     display: WorkbenchDisplay,
+    warnings: Vec<String>,
     outcome: Result<ResidentOutcome, ResidentError>,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
 where
@@ -1089,6 +1139,7 @@ where
             ResidentWorkbenchFragment {
                 display,
                 output: Vec::new(),
+                warnings,
             },
             outcome,
         ),
@@ -1122,7 +1173,10 @@ where
                 transcript.push('\n');
             }
             transcript.push_str(&receipt);
-            Ok(ResidentWorkbenchStep::Committed(transcript))
+            Ok(ResidentWorkbenchStep::Committed {
+                output: transcript,
+                warnings: fragment.warnings,
+            })
         }
         ResidentOutcome::BindingsCommitted { output } => {
             let bound_name = match &fragment.display {
@@ -1130,7 +1184,10 @@ where
                 WorkbenchDisplay::Haskell | WorkbenchDisplay::Opaque => None,
             };
             let receipt = projected_binding_receipt(bound_name, &output)?;
-            Ok(ResidentWorkbenchStep::Committed(receipt))
+            Ok(ResidentWorkbenchStep::Committed {
+                output: receipt,
+                warnings: fragment.warnings,
+            })
         }
         ResidentOutcome::Suspended {
             output,
@@ -2766,7 +2823,8 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    let compile_view = actor_compile_view(session, context, source, type_modules)?
+        .with_workbench_imports(&source.imports_for(&block.source));
     let templates =
         resident_workbench_templates(&source.preamble, effect_stack, &compile_view.turn_imports());
     let include = compile_view.include_paths(&source.base_include);

@@ -563,7 +563,7 @@ impl Session {
             if !imports.is_empty() {
                 imports.push('\n');
             }
-            imports.push_str("Tidepool.QQ (fmt, j, patch, uri, form)");
+            imports.push_str("Tidepool.QQ (fmt, j, patch, uri)");
         }
         imports
     }
