@@ -53,6 +53,8 @@ module Tidepool.Actors.Shoal
   , batch
   , subgroup
   , Branch
+  , withBranchGuidance
+  , withBranchDeadline
   , RolePolicy
   , inspectionPolicy
   , codingPolicy
@@ -72,6 +74,10 @@ module Tidepool.Actors.Shoal
   , forkedResponse
   , forkedLaunch
   , BranchReceipt (..)
+  , ForkGroupHandle
+  , forkGroupHandle
+  , ForkGroupCleanupOutcome (..)
+  , cleanupForkGroup
   , awaitFork
   , awaitSettledFork
   , UnfoldError (..)
@@ -87,6 +93,8 @@ module Tidepool.Actors.Shoal
   , AgentRosterEntry (..)
   , AgentRosterState (..)
   , listAgents
+  , AgentForgetOutcome (..)
+  , forgetAgent
   , Response
   , Reply
   , codingAgent
@@ -113,14 +121,24 @@ module Tidepool.Actors.Shoal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
-  , CancelOutcome (..)
+  , CancellationReason (..)
+  , CancelRequestOutcome (..)
+  , AbandonOutcome (..)
+  , ForgetResponseOutcome (..)
+  , ReplyState (..)
   , requestId
   , attemptReply
   , reply
   , pollResponse
-  , cancelResponse
+  , cancelRequest
+  , abandonResponse
+  , forgetResponse
+  , pollReply
+  , attemptAcknowledgeCancellation
+  , acknowledgeCancellation
   , Await
   , Watch
+  , WatchId
   , WatchLabel
   , WatchLabelError (..)
   , watchLabel
@@ -133,6 +151,8 @@ module Tidepool.Actors.Shoal
   , awaitSettled
   , watch
   , pollWatch
+  , ForgetWatchOutcome (..)
+  , forgetWatch
   , WorktreeSpec
   , fromCurrentRepository
   , fromRef
@@ -178,7 +198,6 @@ module Tidepool.Actors.Shoal
 
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Prelude
 
 import Tidepool.Agent.Reply
@@ -195,6 +214,8 @@ import Tidepool.Actors.Internal.Agent
   , agentIdentity
   , observeAgent
   , listAgents
+  , AgentForgetOutcome (..)
+  , forgetAgent
   , readonlyAgent
   , request
   , RequestDeadline
@@ -210,7 +231,8 @@ import Tidepool.Actors.Internal.Agent
   )
 import Tidepool.Actors.Role
 import Tidepool.Actors.Unfold
-import Tidepool.Actors.Worktree
+import Tidepool.Actors.Worktree hiding (queryWorktrees)
+import qualified Tidepool.Actors.Worktree as WorktreeActor
 import Tidepool.Effects.Core
   ( ActorContextInfo (..)
   , ActorContextRole (..)
@@ -271,28 +293,15 @@ withBranchPrefix prefix query = query { queryBranchPrefix = Just prefix }
 createdAfter :: Int -> WorktreeQuery -> WorktreeQuery
 createdAfter timestamp query = query { queryCreatedAfter = Just timestamp }
 
--- | Filter the canonical durable registry result without replacing its Git
--- receipts with another repository model.
+-- | Ask the canonical durable registry to filter before returning rows.
 queryWorktrees
   :: Member WorktreeRegistry effs
   => WorktreeQuery
   -> Eff effs (Either WorktreeError [WorktreeSummary])
-queryWorktrees query = fmap (fmap (filter matches)) listWorktrees
-  where
-    matches summary =
-      matchesPresence summary
-        && matchesBranch summary
-        && matchesCreatedAt summary
-
-    matchesPresence summary = case queryPresence query of
-      Nothing -> True
-      Just PresentWorktrees -> present summary
-      Just MissingWorktrees -> not (present summary)
-
-    matchesBranch summary = case queryBranchPrefix query of
-      Nothing -> True
-      Just prefix -> prefix `Text.isPrefixOf` renderBranchName (branch (summaryReceipt summary))
-
-    matchesCreatedAt summary = case queryCreatedAfter query of
-      Nothing -> True
-      Just timestamp -> createdAt (summaryReceipt summary) > timestamp
+queryWorktrees query = WorktreeActor.queryWorktrees
+  (case queryPresence query of
+    Nothing -> Nothing
+    Just PresentWorktrees -> Just True
+    Just MissingWorktrees -> Just False)
+  (queryBranchPrefix query)
+  (queryCreatedAfter query)

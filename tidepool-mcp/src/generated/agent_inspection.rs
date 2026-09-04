@@ -8,12 +8,14 @@ pub fn agent_inspection_decl() -> crate::EffectDecl {
         description: "Private exact-incarnation lifecycle inspection substrate.",
         prompt_card: None,
         constructors: &[
-            "AgentInspectWith :: (Int, Int) -> AgentInspection (Maybe ActorTerminalStatus)",
+            "AgentInspectWith :: (Int, Int) -> AgentInspection (Maybe AgentRosterEntry)",
             "AgentListWith :: AgentInspection [AgentRosterEntry]",
+            "AgentForgetWith :: (Int, Int) -> AgentInspection AgentForgetOutcome",
         ],
         type_defs: &[
             "data AgentRosterState = RosterRunning | RosterStopped | RosterFailed Text | RosterCancelled Text deriving (Show, Eq)",
             "data AgentRosterEntry = AgentRosterEntry { rosterActorId :: Int, rosterActorIncarnation :: Int, rosterLabel :: Text, rosterState :: AgentRosterState, rosterRole :: ActorContextRole, rosterBoundWorktree :: Maybe Text, rosterForkGroup :: Maybe Int, rosterHaskellSnapshot :: Int, rosterProviderThread :: Maybe Text, rosterProviderParentThread :: Maybe Text, rosterCachedInputTokens :: Maybe Int, rosterUncachedInputTokens :: Maybe Int } deriving (Show, Eq)",
+            "data AgentForgetOutcome = AgentForgotten | AgentForgetRunning | AgentForgetRetained [Int] [Int] | AgentForgetUnavailable deriving (Show, Eq)",
         ],
         extra_imports: &[],
         helpers: &[],

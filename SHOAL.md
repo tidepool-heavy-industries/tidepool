@@ -189,10 +189,14 @@ suffixes on collision. `BranchReceipt`, `actorContext`, `listAgents`, and
 `:status` retain exact actor/worktree identities beneath those readable names.
 Request settlement also records the starting head and committed, staged,
 unstaged, and untracked submission evidence before response/watch readiness.
+Use `withBranchGuidance` and `withBranchDeadline` to refine one branch without
+changing the applicative tree or inventing a scheduler. Runtime descendant
+budgets remain the concurrency/fan-out boundary; `awaitFork` versus
+`awaitSettledFork` remains the typed fold-time failure choice.
 
 ## Replies, watches, and model turns
 
-The architecture and remaining verification work are recorded in
+The detailed architecture and verification record are retained in
 [the persistent applications, typed replies, and watches plan](plans/actor-model/persistent-applications-replies-and-watches.md).
 
 An interactive application remains attached for its actor incarnation. A
@@ -213,6 +217,14 @@ the request remains pending. Response state remains durable and pollable;
 registered watches, incoming requests, and supervisor transitions publish
 typed, sequenced activation events through the existing durable actor inbox.
 Prose is only their presentation.
+
+Cancellation and abandonment are intentionally different. `cancelRequest`
+asks the target to stop the active request; the requester observes
+`ResponseCancellationPending` until the target sees
+`ReplyCancellationRequested` and calls `acknowledgeCancellation`. Only that
+acknowledgement makes cancellation terminal, so work cannot continue invisibly
+after a caller has been told it stopped. `abandonResponse` instead releases the
+owner's interest without stopping target execution.
 
 `Watch` provides typed readiness composition without becoming lifecycle
 control or an executable program returned from a turn:
@@ -246,6 +258,13 @@ workbench activation without running an effectful suffix.
 Use `:status` for runtime-owned application, response, and watch state. Typed
 handles and `pollResponse`/`pollWatch` remain authoritative; activation prose
 and tmux panes are diagnosis surfaces.
+
+Retention is explicit and inside-out. `forgetWatch` refuses a pending watch;
+`forgetResponse` refuses a pending response, an active target, or a response
+still referenced by a watch; `forgetAgent` refuses a running actor or one still
+named by request/watch metadata; and `cleanupForkGroup` refuses while a child
+is active. These operations remove observation/routing metadata only after the
+typed receipts say it is safe. They do not delete worktrees or Git history.
 
 Integrate incrementally. Once a candidate is clean, independently inspect its
 exact diff and verification evidence, then land it if it is coherent. Do not
@@ -286,16 +305,21 @@ a meaningful integration boundary.
 ## Current implementation boundary
 
 The vertical now includes persistent roots and children, dual response/reply
-capabilities, exactly-once settlement, labeled applicative watches, typed
-request deadlines and cancellation, typed stop and lifecycle observation,
-role-specific effect rows, atomic cache-preserving unfold, recursive scaffold
-and fold, managed worktree queries, and runtime `:status`/`actorContext` facts.
+capabilities, acknowledged cancellation distinct from owner abandonment,
+explicit refusal-bearing retention cleanup, labeled applicative watches,
+typed request and branch deadlines, typed stop and truthful lifecycle
+observation, role-specific effect rows, atomic cache-preserving unfold,
+recursive scaffold and fold, server-filtered managed worktree queries, and
+runtime `:status`/`actorContext` facts. Supervisor lineage is recorded for every
+child; context-parent lineage is additionally recorded only for actual context
+forks.
 The old blocking answerer API remains available under
 `Tidepool.Answerer.Fork`; it is not Shoal actor unfold.
 
 Provider lineage, Haskell snapshot identity, fork group, exact effect row, and
-optional cached/uncached input counts are observable. Missing provider usage
-is represented as `Nothing`, never a fabricated zero. Tidepool deliberately
+cached/uncached input counts read from the conversation's durable Codex rollout
+are observable. Missing provider usage is represented as `Nothing`, never a
+fabricated zero. Tidepool deliberately
 keeps an idle actor's backend attached today: reply settlement is not proof of
 provider turn-idleness, and eager teardown would weaken inexpensive follow-up
 and multi-wave orchestration. Process hibernation is an optional future

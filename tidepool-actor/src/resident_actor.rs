@@ -65,6 +65,7 @@ pub struct LocalResidentInstallation {
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
     pub effective_role: crate::EffectiveRole,
+    pub supervisor_parent: Option<crate::ActorRef>,
     pub context_parent: Option<crate::ActorRef>,
     pub fork_group: Option<crate::ForkGroupId>,
     pub fork_gate: Option<crate::ForkGroupGate>,
@@ -85,6 +86,9 @@ pub enum LocalResidentDeployment {
     },
     WatchChanged {
         notification: crate::request::WatchNotification,
+    },
+    RequestCancellation {
+        notification: crate::RequestCancellationNotification,
     },
     Retired {
         actor: ActorRef,
@@ -122,7 +126,7 @@ fn actor_is_self_or_descendant(
         }
         let Some(parent) = records
             .get(&cursor)
-            .and_then(|record| record.descriptor.context_parent())
+            .and_then(|record| record.descriptor.supervisor_parent())
         else {
             return false;
         };
@@ -168,6 +172,11 @@ struct SuspendedCast {
     site: u64,
     receiver_continuation: ResidentHole,
     handler_realm: RealmId,
+}
+
+enum InteractivePark {
+    Parked,
+    Cancelled(crate::RequestId),
 }
 
 struct ReceiverSettlement<'a> {
@@ -245,6 +254,7 @@ pub struct ResidentKernelBehavior<H, O> {
     policy_installed: bool,
     pending_program: Option<ResidentOutcome>,
     pending_reply: Option<crate::RequestId>,
+    pending_cancellation: Option<crate::RequestId>,
     suspended_cast: Option<SuspendedCast>,
     child_exit_observations: ChildExitObservations,
     deferred_child_failures: Vec<ChildExitNotice>,
@@ -275,6 +285,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             policy_installed: false,
             pending_program: None,
             pending_reply: None,
+            pending_cancellation: None,
             suspended_cast: None,
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
@@ -299,6 +310,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             policy_installed: false,
             pending_program: None,
             pending_reply: None,
+            pending_cancellation: None,
             suspended_cast: None,
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
@@ -361,6 +373,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
+    fn publish_request_cancellation(
+        &self,
+        notification: Option<crate::RequestCancellationNotification>,
+    ) {
+        if let Some(notification) = notification {
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::RequestCancellation { notification });
+        }
+    }
+
     fn status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
         let (standing, current_request) = match &self.standing {
             ResidentStanding::Boot => ("booting", None),
@@ -391,10 +415,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 };
                 let runtime = record.runtime_observation.snapshot();
                 format!(
-                    "{}@{} label={:?} role={:?} worktree={:?} provider_thread={:?} cache_input={:?}/{:?} state={}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} role={:?} bound_worktree={:?} provider_thread={:?} cache_input={:?}/{:?} state={}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
+                    record.descriptor.supervisor_parent(),
+                    record.descriptor.context_parent(),
                     record.descriptor.effective_role().role(),
                     record.bound_worktree,
                     runtime.provider_thread,
@@ -407,10 +433,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         roster.sort();
         let runtime = self.runtime_observation.snapshot();
         let current = format!(
-            "actor {}@{} label={:?}: parent={:?}; fork_group={:?}; haskell_snapshot={}; provider_thread={:?}; provider_parent_thread={:?}; cache_input={:?}/{:?}; role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendants={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktree={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={:?}\n  watches: pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
+            self.descriptor.supervisor_parent(),
             self.descriptor.context_parent(),
             self.descriptor.fork_group(),
             self.descriptor.placement().lexical_scope.0,
@@ -433,7 +460,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             requests.ready_watches,
             requests.unavailable_watches,
         );
-        format!("{current}; actors=[{}]", roster.join(", "))
+        format!("{current}\nactors:\n{}", roster.join("\n"))
     }
 }
 
@@ -452,8 +479,9 @@ where
         let deployments = self.environment.deployments.clone();
         tokio::spawn(async move {
             tokio::time::sleep(deadline).await;
-            for notification in requests.deadline_response(owner, request) {
-                let _ = deployments.send(LocalResidentDeployment::WatchChanged { notification });
+            if let Some(notification) = requests.deadline_request(owner, request) {
+                let _ =
+                    deployments.send(LocalResidentDeployment::RequestCancellation { notification });
             }
         });
     }
@@ -624,12 +652,13 @@ where
         }
         if descriptor.effective_role().role() == crate::ActorRole::Scaffolding {
             let parent_budget = self.descriptor.effective_role().descendants();
-            descriptor = descriptor.with_effective_role(crate::EffectiveRole::scaffolding(
+            let role = descriptor.effective_role().clone().with_descendant_budget(
                 crate::DescendantBudget {
                     maximum_depth: parent_budget.maximum_depth.saturating_sub(1),
                     maximum_active_children: parent_budget.maximum_active_children,
                 },
-            ));
+            );
+            descriptor = descriptor.with_effective_role(role);
         }
         if descriptor.context_parent().is_some()
             && !self
@@ -824,6 +853,28 @@ where
                     )
                     .await
             }
+            ResidentActorBoundary::AgentInspect(inspection) => {
+                let records = self.environment.actors.lock().clone();
+                let observation = records.get(&inspection.target).and_then(|record| {
+                    actor_is_self_or_descendant(context.actor, inspection.target, &records).then(
+                        || crate::resident_workbench::AgentRosterProjection {
+                            actor: inspection.target,
+                            descriptor: record.descriptor.clone(),
+                            bound_worktree: record.bound_worktree.clone(),
+                            terminal: record.terminal.clone().or_else(|| {
+                                kernel
+                                    .resolve(inspection.target)
+                                    .and_then(|actor| actor.terminal().get())
+                            }),
+                            runtime: record.runtime_observation.snapshot(),
+                        },
+                    )
+                });
+                self.environment
+                    .runner
+                    .resume_agent_observation(context.clone(), inspection.continuation, observation)
+                    .await
+            }
             ResidentActorBoundary::AgentList(continuation) => {
                 let records = self.environment.actors.lock().clone();
                 let mut roster = records
@@ -849,6 +900,55 @@ where
                 self.environment
                     .runner
                     .resume_agent_roster(context.clone(), continuation, roster)
+                    .await
+            }
+            ResidentActorBoundary::AgentForget(forget) => {
+                let authorized_terminal = {
+                    let records = self.environment.actors.lock();
+                    records.get(&forget.target).and_then(|record| {
+                        actor_is_self_or_descendant(context.actor, forget.target, &records)
+                            .then(|| {
+                                record.terminal.clone().or_else(|| {
+                                    kernel
+                                        .resolve(forget.target)
+                                        .and_then(|actor| actor.terminal().get())
+                                })
+                            })
+                            .flatten()
+                    })
+                };
+                let outcome = if authorized_terminal.is_none() {
+                    let records = self.environment.actors.lock();
+                    if records.contains_key(&forget.target)
+                        && actor_is_self_or_descendant(context.actor, forget.target, &records)
+                    {
+                        crate::resident_workbench::AgentForgetProjection::Running
+                    } else {
+                        crate::resident_workbench::AgentForgetProjection::Unavailable
+                    }
+                } else {
+                    match self
+                        .environment
+                        .requests
+                        .forget_terminal_actor_metadata(forget.target)
+                    {
+                        Ok(()) => {
+                            self.environment.actors.lock().remove(&forget.target);
+                            self.environment.retired.lock().remove(&forget.target);
+                            let _ = kernel.forget_terminal_actor(forget.target);
+                            crate::resident_workbench::AgentForgetProjection::Forgotten
+                        }
+                        Err((requests, watches)) => {
+                            crate::resident_workbench::AgentForgetProjection::Retained {
+                                requests,
+                                watches,
+                            }
+                        }
+                    }
+                };
+                self.environment
+                    .runner
+                    .resume_agent_forget(context.clone(), forget.continuation, outcome)
                     .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
@@ -1015,6 +1115,19 @@ where
                     .resume_unit(context.clone(), continuation)
                     .await
             }
+            ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Cleanup {
+                continuation,
+                group,
+            }) => {
+                let outcome = self
+                    .environment
+                    .fork_groups
+                    .cleanup_committed(group, context.actor);
+                self.environment
+                    .runner
+                    .resume_fork_cleanup(context.clone(), continuation, outcome)
+                    .await
+            }
             ResidentActorBoundary::Start(start) => self.start_child(kernel, context, start).await,
             ResidentActorBoundary::Outbound(outbound) => {
                 self.resolve_outbound(kernel, context, ancestry, outbound)
@@ -1152,21 +1265,56 @@ where
                     .resume_response_observation(context.clone(), poll.continuation, observation)
                     .await
             }
-            ResidentActorBoundary::ResponseCancellation(cancellation) => {
+            ResidentActorBoundary::RequestCancellation(cancellation) => {
+                let projected = self
+                    .environment
+                    .requests
+                    .cancel_request(
+                        context.actor,
+                        cancellation.request,
+                        crate::CancellationReason::RequesterCancelled,
+                    )
+                    .map(|(outcome, notification)| {
+                        self.publish_request_cancellation(notification);
+                        outcome
+                    });
+                self.environment
+                    .runner
+                    .resume_cancel_request(context.clone(), cancellation.continuation, projected)
+                    .await
+            }
+            ResidentActorBoundary::ResponseAbandonment(abandonment) => {
+                let projected = self
+                    .environment
+                    .requests
+                    .abandon_response(context.actor, abandonment.request)
+                    .map(|(outcome, notifications)| {
+                        self.publish_watch_notifications(notifications);
+                        outcome
+                    });
+                self.environment
+                    .runner
+                    .resume_abandonment(context.clone(), abandonment.continuation, projected)
+                    .await
+            }
+            ResidentActorBoundary::ResponseForget(forget) => {
                 let outcome = self
                     .environment
                     .requests
-                    .cancel_response(context.actor, cancellation.request);
-                let projected = match outcome {
-                    Ok((outcome, notifications)) => {
-                        self.publish_watch_notifications(notifications);
-                        Ok(outcome)
-                    }
-                    Err(error) => Err(error),
-                };
+                    .forget_response(context.actor, forget.request);
                 self.environment
                     .runner
-                    .resume_cancellation(context.clone(), cancellation.continuation, projected)
+                    .resume_response_forget(context.clone(), forget.continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::ReplyPoll(poll) => {
+                let observation = self
+                    .environment
+                    .requests
+                    .observe_reply(context.actor, poll.request);
+                self.environment
+                    .runner
+                    .resume_reply_observation(context.clone(), poll.continuation, observation)
                     .await
             }
             ResidentActorBoundary::WatchRegistration(registration) => {
@@ -1202,6 +1350,16 @@ where
                 self.environment
                     .runner
                     .resume_watch_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }
+            ResidentActorBoundary::WatchForget(forget) => {
+                let outcome = self
+                    .environment
+                    .requests
+                    .forget_watch(context.actor, forget.watch);
+                self.environment
+                    .runner
+                    .resume_watch_forget(context.clone(), forget.continuation, outcome)
                     .await
             }
             other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -1263,6 +1421,7 @@ where
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
                             effective_role: self.descriptor.effective_role().clone(),
+                            supervisor_parent: self.descriptor.supervisor_parent(),
                             context_parent: self.descriptor.context_parent(),
                             fork_group: self.descriptor.fork_group(),
                             fork_gate,
@@ -1275,7 +1434,13 @@ where
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::AgentSession(session) => {
-                    self.park_interactive(kernel, context, session).await?;
+                    if let InteractivePark::Cancelled(request) =
+                        self.park_interactive(kernel, context, session).await?
+                    {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "request {request:?} was cancelled outside a mailbox handler"
+                        )));
+                    }
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::AgentAttachment(attachment) => {
@@ -1309,9 +1474,10 @@ where
         kernel: &KernelContext,
         context: &ActorSessionContext,
         session: crate::ResidentInteractiveSession,
-    ) -> Result<(), ResidentActorWorkbenchError> {
+    ) -> Result<InteractivePark, ResidentActorWorkbenchError> {
         let (request, hole, input) = session.into_parts();
-        self.environment
+        let cancellation = self
+            .environment
             .requests
             .present(context.actor, request.request)
             .map_err(|error| {
@@ -1319,6 +1485,11 @@ where
                     "request presentation was rejected: {error:?}"
                 ))
             })?;
+        if cancellation.is_some() {
+            drop(hole);
+            drop(input);
+            return Ok(InteractivePark::Cancelled(request.request));
+        }
         let request_message = request.initial_user_message.clone();
         let already_installed = self.policy_installed;
         let workbench = self.environment.runner.workbench(
@@ -1360,7 +1531,7 @@ where
                 .deployments
                 .send(LocalResidentDeployment::SessionReady { activation });
         }
-        Ok(())
+        Ok(InteractivePark::Parked)
     }
 
     fn install_interactive_policy(
@@ -1392,6 +1563,7 @@ where
             initial_user_message,
             launch_worktrees: self.launch_worktrees.clone(),
             effective_role: self.descriptor.effective_role().clone(),
+            supervisor_parent: self.descriptor.supervisor_parent(),
             context_parent: self.descriptor.context_parent(),
             fork_group: self.descriptor.fork_group(),
             fork_gate,
@@ -1696,7 +1868,44 @@ where
                 .await?;
             match boundary {
                 ResidentActorBoundary::AgentSession(session) => {
-                    self.park_interactive(kernel, context, session).await?;
+                    let parked = self.park_interactive(kernel, context, session).await?;
+                    if let InteractivePark::Cancelled(request) = parked {
+                        self.environment
+                            .requests
+                            .begin_cancellation_acknowledgement(context.actor, request)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "queued cancellation acknowledgement failed: {error:?}"
+                                ))
+                            })?;
+                        let outcome = self
+                            .environment
+                            .runner
+                            .abandon_cast_handler(
+                                context.clone(),
+                                suspended.receiver_continuation,
+                                suspended.handler_realm,
+                            )
+                            .await;
+                        match outcome {
+                            Ok(outcome) => {
+                                let notifications = self
+                                    .environment
+                                    .requests
+                                    .finish_cancellation_acknowledgement(request);
+                                self.publish_watch_notifications(notifications);
+                                return self
+                                    .stabilize_program(kernel, context, ancestry, outcome)
+                                    .await;
+                            }
+                            Err(error) => {
+                                self.environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(request);
+                                return Err(error);
+                            }
+                        }
+                    }
                     if self.suspended_cast.replace(suspended).is_some() {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(
                             "actor parked a second mailbox handler before resuming the first"
@@ -1748,8 +1957,8 @@ where
                                 .into(),
                         ));
                     }
-                    if let ResidentActorBoundary::ReplyAttempt(attempt) = boundary {
-                        match self
+                    match boundary {
+                        ResidentActorBoundary::ReplyAttempt(attempt) => match self
                             .environment
                             .requests
                             .begin_reply(context.actor, attempt.request)
@@ -1780,16 +1989,51 @@ where
                                     "reply rejected: {error:?}"
                                 )));
                             }
+                        },
+                        ResidentActorBoundary::CancellationAcknowledgement(acknowledgement) => {
+                            match self
+                                .environment
+                                .requests
+                                .begin_cancellation_acknowledgement(
+                                    context.actor,
+                                    acknowledgement.request,
+                                ) {
+                                Ok(_) => {
+                                    return Ok(ResidentWorkbenchStep::CancellationAcknowledged {
+                                        request: acknowledgement.request,
+                                    });
+                                }
+                                Err(error) if acknowledgement.recoverable => {
+                                    outcome = self
+                                        .environment
+                                        .runner
+                                        .resume_reply_rejection(
+                                            context.clone(),
+                                            acknowledgement.continuation,
+                                            error,
+                                        )
+                                        .await?;
+                                    fragment = next_fragment;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    return Ok(ResidentWorkbenchStep::Rejected(format!(
+                                        "cancellation acknowledgement rejected: {error:?}"
+                                    )));
+                                }
+                            }
+                        }
+                        boundary => {
+                            outcome = self
+                                .resolve_effect(
+                                    kernel,
+                                    context,
+                                    &crate::CallAncestry::begin(context.actor),
+                                    boundary,
+                                )
+                                .await?;
                         }
                     }
-                    outcome = self
-                        .resolve_effect(
-                            kernel,
-                            context,
-                            &crate::CallAncestry::begin(context.actor),
-                            boundary,
-                        )
-                        .await?;
                     fragment = next_fragment;
                 }
                 settled => return Ok(settled),
@@ -2102,6 +2346,130 @@ where
                         request.items.len(),
                     )));
                 }
+                ResidentWorkbenchStep::CancellationAcknowledged {
+                    request: request_id,
+                } => {
+                    if self.environment.fork_groups.has_unpublished(context.actor) {
+                        self.abort_unpublished_groups(
+                            kernel,
+                            context.actor,
+                            "request cancellation interrupted unfold admission",
+                        )
+                        .await;
+                        self.environment
+                            .requests
+                            .rollback_cancellation_acknowledgement(request_id);
+                        return Err(workbench_failure(
+                            &receipts,
+                            index,
+                            request.items.len(),
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "an actor cannot acknowledge cancellation while an unfold group is unpublished"
+                                    .into(),
+                            ),
+                        ));
+                    }
+                    if self.pending_program.is_some()
+                        || self.pending_reply.is_some()
+                        || self.pending_cancellation.is_some()
+                    {
+                        self.environment
+                            .requests
+                            .rollback_cancellation_acknowledgement(request_id);
+                        return Err(workbench_failure(
+                            &receipts,
+                            index,
+                            request.items.len(),
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "actor settled a second request before resuming the first".into(),
+                            ),
+                        ));
+                    }
+                    let awaiting =
+                        match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
+                            ResidentStanding::Interactive(awaiting)
+                                if awaiting.request.request == request_id =>
+                            {
+                                awaiting
+                            }
+                            ResidentStanding::Interactive(awaiting) => {
+                                self.standing = ResidentStanding::Interactive(awaiting);
+                                self.environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(request_id);
+                                return Err(workbench_failure(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "cancellation did not match the active request".into(),
+                                    ),
+                                ));
+                            }
+                            standing => {
+                                self.standing = standing;
+                                self.environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(request_id);
+                                return Err(workbench_failure(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "cancellation lost its active request".into(),
+                                    ),
+                                ));
+                            }
+                        };
+                    let Some(suspended) = self.suspended_cast.take() else {
+                        self.standing = ResidentStanding::Interactive(awaiting);
+                        self.environment
+                            .requests
+                            .rollback_cancellation_acknowledgement(request_id);
+                        return Err(workbench_failure(
+                            &receipts,
+                            index,
+                            request.items.len(),
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "cancellation lost its mailbox continuation".into(),
+                            ),
+                        ));
+                    };
+                    let outcome = match self
+                        .environment
+                        .runner
+                        .abandon_cast_handler(
+                            context.clone(),
+                            suspended.receiver_continuation.clone(),
+                            suspended.handler_realm,
+                        )
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            self.suspended_cast = Some(suspended);
+                            self.standing = ResidentStanding::Interactive(awaiting);
+                            self.environment
+                                .requests
+                                .rollback_cancellation_acknowledgement(request_id);
+                            return Err(workbench_failure(
+                                &receipts,
+                                index,
+                                request.items.len(),
+                                error,
+                            ));
+                        }
+                    };
+                    drop(awaiting);
+                    self.pending_program = Some(outcome);
+                    self.pending_cancellation = Some(request_id);
+                    return Ok(KernelStep::ContinueLater(workbench_response(
+                        WorkbenchRunStatus::RequestCancelled,
+                        receipts,
+                        index + 1,
+                        request.items.len(),
+                    )));
+                }
                 ResidentWorkbenchStep::Running { .. } => {
                     unreachable!("running workbench steps are settled above")
                 }
@@ -2388,11 +2756,23 @@ where
                         let notifications = self.environment.requests.finish_reply(request);
                         self.publish_watch_notifications(notifications);
                     }
+                    if let Some(request) = self.pending_cancellation.take() {
+                        let notifications = self
+                            .environment
+                            .requests
+                            .finish_cancellation_acknowledgement(request);
+                        self.publish_watch_notifications(notifications);
+                    }
                     Ok(step)
                 }
                 Err(error) => {
                     if let Some(request) = self.pending_reply.take() {
                         self.environment.requests.rollback_reply(request);
+                    }
+                    if let Some(request) = self.pending_cancellation.take() {
+                        self.environment
+                            .requests
+                            .rollback_cancellation_acknowledgement(request);
                     }
                     Err(error)
                 }

@@ -958,6 +958,31 @@ fn verbs() -> Vec<Verb> {
             extract: None,
         },
         Verb {
+            ctor: "WorktreeListMatching",
+            method: "worktree_list_matching",
+            args: vec![
+                Arg {
+                    name: "present",
+                    ty: HsType::maybe(HsType::Bool),
+                    rust: RustBinding::Path("Option<bool>"),
+                },
+                Arg {
+                    name: "branchPrefix",
+                    ty: HsType::maybe(HsType::Text),
+                    rust: RustBinding::Path("Option<String>"),
+                },
+                Arg {
+                    name: "createdAfter",
+                    ty: HsType::maybe(HsType::Int),
+                    rust: RustBinding::Path("Option<i64>"),
+                },
+            ],
+            ret: HsType::list(HsType::Named("WorktreeSummary")),
+            errors: Some("WorktreeError"),
+            handling: HandlingClass::OuterDispatch(OuterEffect::Worktree),
+            extract: None,
+        },
+        Verb {
             ctor: "WorktreeBranchOf",
             method: "worktree_branch_of",
             args: vec![tree_id_arg()],

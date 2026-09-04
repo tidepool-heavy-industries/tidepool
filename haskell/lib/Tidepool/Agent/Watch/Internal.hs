@@ -20,6 +20,8 @@ module Tidepool.Agent.Watch.Internal
   , awaitSettled
   , watch
   , pollWatch
+  , ForgetWatchOutcome (..)
+  , forgetWatch
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -101,6 +103,13 @@ data RawWatchObservation
 data Watches a where
   RegisterWatchWith :: Text -> [(Int, Bool)] -> Watches Int
   ObserveWatchWith :: Int -> Watches RawWatchObservation
+  ForgetWatchWith :: Int -> Watches ForgetWatchOutcome
+
+data ForgetWatchOutcome
+  = WatchForgotten
+  | WatchForgetPending
+  | WatchForgetRejected ReplyError
+  deriving (Show, Eq)
 
 data Settlement result
   = ReplyAvailable (ResponseResult result)
@@ -143,6 +152,9 @@ pollWatch (Watch (WatchId watchId) (Await _ observe)) = do
     RawWatchUnavailable request failure ->
       WatchUnavailable (WatchDependencyUnavailable request failure)
     RawWatchRejected failure -> WatchUnavailable (WatchRejected failure)
+
+forgetWatch :: Member Watches effs => Watch result -> Eff effs ForgetWatchOutcome
+forgetWatch (Watch (WatchId watchId) _) = send (ForgetWatchWith watchId)
 
 rawDependency :: AwaitDependency -> (Int, Bool)
 rawDependency (AwaitDependency (RequestId request) allowFailure) = (request, allowFailure)

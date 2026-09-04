@@ -36,6 +36,8 @@ module Tidepool.Actors.Internal.Agent
   , agentBoundWorktree
   , observeAgent
   , listAgents
+  , AgentForgetOutcome (..)
+  , forgetAgent
   , StopOutcome (..)
   , stopAgent
   ) where
@@ -62,6 +64,7 @@ import Tidepool.Agent.Reply.Internal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   )
+import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Agent.Session
   ( attachAgent
   , requestSessionSited
@@ -72,7 +75,6 @@ import Tidepool.Effects.Core
   , ActorEffectProfile (..)
   , ActorKernel (..)
   , ActorLaunchRole (..)
-  , ActorTerminalStatus (..)
   , AgentControl (..)
   , AgentInspection (..)
   , AgentLaunch (..)
@@ -84,6 +86,7 @@ import Tidepool.Effects.Core
   , WorktreeSpec
   , DirtyPolicy
   )
+import qualified Tidepool.Effects.Core as Core
 import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
 import Tidepool.Worktree
   ( observeSubmission
@@ -110,11 +113,13 @@ data AgentState
   | AgentStopped
   | AgentFailed Text
   | AgentCancelled Text
+  | AgentUnavailable
   deriving (Show, Eq)
 
 data AgentObservation = AgentObservation
   { observedAgentId :: Int
   , observedIncarnation :: Int
+  , observedLabel :: Maybe Text
   , observedState :: AgentState
   , observedWorktree :: Maybe WorktreeHandle
   }
@@ -131,21 +136,42 @@ observeAgent
   => AgentRef
   -> Eff effs AgentObservation
 observeAgent agent@(AgentRef target tree) = do
-  terminal <- pollAgentExit target
+  roster <- inspectAgent target
   let (actorId, incarnation) = agentIdentity agent
   pure AgentObservation
     { observedAgentId = actorId
     , observedIncarnation = incarnation
-    , observedState = case terminal of
-        Nothing -> AgentRunning
-        Just (Actor.Completed ()) -> AgentStopped
-        Just (Actor.Failed failure) -> AgentFailed (Actor.actorFailureSummary failure)
-        Just (Actor.Cancelled reason) -> AgentCancelled (Actor.cancelReasonSummary reason)
+    , observedLabel = rosterLabel <$> roster
+    , observedState = maybe AgentUnavailable rosterAgentState roster
     , observedWorktree = tree
     }
 
+rosterAgentState :: AgentRosterEntry -> AgentState
+rosterAgentState entry = case rosterState entry of
+  RosterRunning -> AgentRunning
+  RosterStopped -> AgentStopped
+  RosterFailed summary -> AgentFailed summary
+  RosterCancelled summary -> AgentCancelled summary
+
 listAgents :: Member AgentInspection effs => Eff effs [AgentRosterEntry]
 listAgents = send AgentListWith
+
+data AgentForgetOutcome
+  = AgentForgotten
+  | AgentForgetRunning
+  | AgentForgetRetained [RequestId] [WatchId]
+  | AgentForgetUnavailable
+  deriving (Show, Eq)
+
+forgetAgent :: Member AgentInspection effs => AgentRef -> Eff effs AgentForgetOutcome
+forgetAgent (AgentRef target _) = do
+  outcome <- send (AgentForgetWith (actorAddress target))
+  pure $ case outcome of
+    Core.AgentForgotten -> AgentForgotten
+    Core.AgentForgetRunning -> AgentForgetRunning
+    Core.AgentForgetRetained requests watches ->
+      AgentForgetRetained (map RequestId requests) (map WatchId watches)
+    Core.AgentForgetUnavailable -> AgentForgetUnavailable
 
 data AgentProtocol result where
   RunRequest
@@ -447,16 +473,24 @@ pollAgentExit
   => Actor.ActorRef api exit
   -> Eff effs (Maybe (Actor.ActorExit exit))
 pollAgentExit (ActorInternal.ActorRef actorId incarnation cell) = do
-  terminal <- send (AgentInspectWith (actorId, incarnation))
-  pure (terminal >>= decodeTerminal cell)
+  roster <- send (AgentInspectWith (actorId, incarnation))
+  pure (roster >>= decodeTerminal cell . rosterState)
   where
     decodeTerminal retained status = case status of
-      ActorCompletedStatus ->
+      RosterRunning -> Nothing
+      RosterStopped ->
         case readExitCell status retained of
           Just value -> Just (Actor.Completed value)
           Nothing -> error "observeAgent: completed actor has an empty exit cell"
-      ActorFailedStatus summary -> Just (Actor.Failed (Actor.ActorFailure summary))
-      ActorCancelledStatus summary -> Just (Actor.Cancelled (Actor.CancelReason summary))
+      RosterFailed summary -> Just (Actor.Failed (Actor.ActorFailure summary))
+      RosterCancelled summary -> Just (Actor.Cancelled (Actor.CancelReason summary))
+
+inspectAgent
+  :: Member AgentInspection effs
+  => Actor.ActorRef api exit
+  -> Eff effs (Maybe AgentRosterEntry)
+inspectAgent (ActorInternal.ActorRef actorId incarnation _) =
+  send (AgentInspectWith (actorId, incarnation))
 
 tryControlCall
   :: Member AgentControl effs

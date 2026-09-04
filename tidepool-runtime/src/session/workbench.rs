@@ -348,6 +348,7 @@ pub enum WorkbenchRunStatus {
     Committed,
     Rejected,
     Replied,
+    RequestCancelled,
     Completed,
 }
 

@@ -318,6 +318,19 @@ impl ActorWorktreeRegistryHandler {
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         self.delegate(WorktreeReq::WorktreeList, cx)
     }
+
+    pub(crate) fn worktree_registry_query(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        present: Option<bool>,
+        branch_prefix: Option<String>,
+        created_after: Option<i64>,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        self.delegate(
+            WorktreeReq::WorktreeListMatching(present, branch_prefix, created_after),
+            cx,
+        )
+    }
 }
 
 impl ActorWorktreeAllocationHandler {
@@ -441,7 +454,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             WorktreeReq::WorktreeCreate(_) if grant.allocate => {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
-            WorktreeReq::WorktreeList if grant.enumerate => {
+            WorktreeReq::WorktreeList | WorktreeReq::WorktreeListMatching(..)
+                if grant.enumerate =>
+            {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
             WorktreeReq::WorktreeTryMerge(..) if grant.integrate => {
@@ -451,6 +466,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             | WorktreeReq::WorktreeCreateForActorPath(..)
             | WorktreeReq::WorktreeCreateFromBoundForActorPath(..)
             | WorktreeReq::WorktreeList
+            | WorktreeReq::WorktreeListMatching(..)
             | WorktreeReq::WorktreeTryMerge(..) => None,
         };
         if let Some(wire_id) = permitted_tree {
@@ -826,6 +842,28 @@ impl WorktreeHandler {
         Ok(summaries.iter().map(summary_to_wire).collect())
     }
 
+    pub(crate) fn worktree_list_matching(
+        &mut self,
+        present: Option<bool>,
+        branch_prefix: Option<String>,
+        created_after: Option<i64>,
+    ) -> Result<Vec<WtWorktreeSummary>, WorktreeError> {
+        let summaries = self.manager.list().map_err(error_to_wire)?;
+        Ok(summaries
+            .iter()
+            .filter(|summary| present.is_none_or(|expected| summary.present == expected))
+            .filter(|summary| {
+                branch_prefix
+                    .as_deref()
+                    .is_none_or(|prefix| summary.receipt.branch.as_str().starts_with(prefix))
+            })
+            .filter(|summary| {
+                created_after.is_none_or(|timestamp| summary.receipt.created_at_ms > timestamp)
+            })
+            .map(summary_to_wire)
+            .collect())
+    }
+
     /// Reads the branch fresh from git rather than returning the receipt's
     /// recorded one — reconciled inspection is the only source of truth (see
     /// `tidepool-worktree/CLAUDE.md`).
@@ -1004,6 +1042,51 @@ mod tests {
             admitted.handle_receipt.branch.raw,
             "shoal/campaign/group/branches/leaf"
         );
+    }
+
+    #[test]
+    fn worktree_query_filters_in_the_registry_handler() {
+        let repository = tidepool_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "seed\n", "seed")
+            .unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let registry = WorktreeRegistry::open(storage.path().join("registry")).unwrap();
+        let manager = WorktreeManager::new(
+            GitCli::new(),
+            registry,
+            storage.path().join("worktrees"),
+            repository.path(),
+        );
+        let mut handler = WorktreeHandler::from_manager(manager);
+        let created = handler
+            .worktree_create(WtWorktreeSpec {
+                spec_source: WtWorktreeSource::SourceCurrentRepository,
+                spec_label: "query-target".into(),
+                spec_dirty_policy: WtDirtyPolicy::RequireClean,
+            })
+            .unwrap();
+        let receipt = created.handle_receipt;
+
+        let matched = handler
+            .worktree_list_matching(
+                Some(true),
+                Some(receipt.branch.raw.clone()),
+                Some(receipt.created_at - 1),
+            )
+            .unwrap();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].summary_receipt.tree_id, receipt.tree_id);
+
+        assert!(handler
+            .worktree_list_matching(Some(false), None, None)
+            .unwrap()
+            .is_empty());
+        assert!(handler
+            .worktree_list_matching(None, None, Some(receipt.created_at))
+            .unwrap()
+            .is_empty());
     }
 
     /// `cwd` on every receipt this handler returns is `worktree_root.join(id)`

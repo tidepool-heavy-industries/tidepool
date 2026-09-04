@@ -15,6 +15,7 @@ pub struct ActorDescriptor {
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
     role: EffectiveRole,
+    supervisor_parent: Option<ActorRef>,
     context_parent: Option<ActorRef>,
     actor_path: Option<tidepool_repr::ActorPath>,
     fork_group: Option<crate::ForkGroupId>,
@@ -31,6 +32,7 @@ impl ActorDescriptor {
             placement,
             source_imports: ActorSourceImports::default(),
             role: EffectiveRole::coding(),
+            supervisor_parent: None,
             context_parent: None,
             actor_path: None,
             fork_group: None,
@@ -61,6 +63,19 @@ impl ActorDescriptor {
     #[must_use]
     pub fn context_parent(&self) -> Option<ActorRef> {
         self.context_parent
+    }
+
+    /// The actor that owns this actor's lifecycle, whether or not model
+    /// context was inherited from it.
+    #[must_use]
+    pub fn supervisor_parent(&self) -> Option<ActorRef> {
+        self.supervisor_parent
+    }
+
+    #[must_use]
+    pub fn with_supervisor_parent(mut self, parent: ActorRef) -> Self {
+        self.supervisor_parent = Some(parent);
+        self
     }
 
     #[must_use]

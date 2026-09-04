@@ -115,6 +115,31 @@ pub fn worktree_registry() -> Effect {
                     HsType::list(HsType::Named("WorktreeSummary")),
                 ),
             ),
+            plain(
+                "WorktreeRegistryQuery",
+                "worktree_registry_query",
+                vec![
+                    Arg {
+                        name: "present",
+                        ty: HsType::maybe(HsType::Bool),
+                        rust: RustBinding::Path("Option<bool>"),
+                    },
+                    Arg {
+                        name: "branchPrefix",
+                        ty: HsType::maybe(HsType::Text),
+                        rust: RustBinding::Path("Option<String>"),
+                    },
+                    Arg {
+                        name: "createdAfter",
+                        ty: HsType::maybe(HsType::Int),
+                        rust: RustBinding::Path("Option<i64>"),
+                    },
+                ],
+                HsType::either(
+                    HsType::Named("WorktreeError"),
+                    HsType::list(HsType::Named("WorktreeSummary")),
+                ),
+            ),
         ],
     )
 }

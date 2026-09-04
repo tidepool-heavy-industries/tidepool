@@ -27,4 +27,5 @@ pub enum ForksReq {
     ),
     ForksCommitWith(i64),
     ForksAbortWith(i64),
+    ForksCleanupWith(i64),
 }

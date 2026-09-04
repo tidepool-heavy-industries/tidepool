@@ -174,6 +174,8 @@ pub enum ForkGroupError {
     },
     #[error("fork group {0} was already committed")]
     AlreadyCommitted(u64),
+    #[error("fork group {0} is not committed")]
+    NotCommitted(u64),
     #[error(
         "fork group would exceed the lineage's active descendant ceiling ({requested} requested, {active} already active or reserved, maximum {maximum})"
     )]
@@ -241,6 +243,12 @@ struct ForkGroupsState {
 pub struct ForkGroupRegistry {
     lineage: ActorLineageRegistry,
     state: Arc<Mutex<ForkGroupsState>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkGroupCleanupOutcome {
+    Cleaned,
+    Active(Vec<ActorRef>),
 }
 
 impl ForkGroupRegistry {
@@ -581,6 +589,46 @@ impl ForkGroupRegistry {
     pub fn retire_actor(&self, actor: ActorRef) {
         self.state.lock().active.remove(&actor);
     }
+
+    pub fn cleanup_committed(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+    ) -> Result<ForkGroupCleanupOutcome, ForkGroupError> {
+        let mut state = self.state.lock();
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        if *group.phase.borrow() != ForkGroupPhase::Committed {
+            return Err(ForkGroupError::NotCommitted(id.0));
+        }
+        let mut active = state
+            .active
+            .iter()
+            .copied()
+            .filter(|actor| {
+                group
+                    .children
+                    .iter()
+                    .any(|child| actor == child || is_descendant_of(&state.parents, *actor, *child))
+            })
+            .collect::<Vec<_>>();
+        active.sort_unstable_by_key(|actor| (actor.id, actor.incarnation));
+        if !active.is_empty() {
+            return Ok(ForkGroupCleanupOutcome::Active(active));
+        }
+        let Some(group) = state.groups.remove(&id) else {
+            return Err(ForkGroupError::Unknown(id.0));
+        };
+        for child in group.children {
+            state.parents.remove(&child);
+        }
+        Ok(ForkGroupCleanupOutcome::Cleaned)
+    }
 }
 
 fn lineage_root(parents: &HashMap<ActorRef, ActorRef>, mut actor: ActorRef) -> ActorRef {
@@ -810,6 +858,21 @@ mod tests {
             groups.abort(group, owner),
             Err(ForkGroupError::AlreadyCommitted(_))
         ));
+        assert_eq!(
+            groups.cleanup_committed(group, owner).unwrap(),
+            ForkGroupCleanupOutcome::Active(children.to_vec())
+        );
+        for child in children {
+            groups.retire_actor(child);
+        }
+        assert_eq!(
+            groups.cleanup_committed(group, owner).unwrap(),
+            ForkGroupCleanupOutcome::Cleaned
+        );
+        assert!(matches!(
+            groups.cleanup_committed(group, owner),
+            Err(ForkGroupError::Unknown(_))
+        ));
     }
 
     #[test]
@@ -853,5 +916,53 @@ mod tests {
                 2,
             )
             .is_ok());
+    }
+
+    #[test]
+    fn parent_group_cleanup_waits_for_active_grandchildren() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let root = ActorRef::first(ActorId(1));
+        let scaffold = ActorRef::first(ActorId(2));
+        let leaf = ActorRef::first(ActorId(3));
+
+        let (outer, outer_reservations) = groups
+            .begin(
+                root,
+                ActorPath::parse("campaign/outer").unwrap(),
+                vec![segment("scaffold")],
+                3,
+            )
+            .unwrap();
+        groups
+            .claim(outer, root, &outer_reservations[0].allocated)
+            .unwrap();
+        groups.attach_child(outer, root, scaffold).unwrap();
+        let _phase = groups.request_commit(outer, root).unwrap();
+        groups.gate(outer, scaffold).unwrap().mark_ready().unwrap();
+        groups.publish_ready(root).unwrap();
+
+        let (inner, inner_reservations) = groups
+            .begin(
+                scaffold,
+                ActorPath::parse("campaign/outer/scaffold/inner").unwrap(),
+                vec![segment("leaf")],
+                3,
+            )
+            .unwrap();
+        groups
+            .claim(inner, scaffold, &inner_reservations[0].allocated)
+            .unwrap();
+        groups.attach_child(inner, scaffold, leaf).unwrap();
+
+        groups.retire_actor(scaffold);
+        assert_eq!(
+            groups.cleanup_committed(outer, root).unwrap(),
+            ForkGroupCleanupOutcome::Active(vec![leaf])
+        );
+        groups.retire_actor(leaf);
+        assert_eq!(
+            groups.cleanup_committed(outer, root).unwrap(),
+            ForkGroupCleanupOutcome::Cleaned
+        );
     }
 }

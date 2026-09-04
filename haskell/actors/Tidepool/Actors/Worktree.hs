@@ -11,6 +11,7 @@ module Tidepool.Actors.Worktree
   , lookupWorktree
   , boundWorktree
   , listWorktrees
+  , queryWorktrees
   , worktreeBranch
   , worktreeHead
   , observeSubmission
@@ -18,6 +19,7 @@ module Tidepool.Actors.Worktree
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
+import Data.Text (Text)
 import Prelude
 
 import Tidepool.Effects.Core
@@ -59,19 +61,28 @@ listWorktrees
   => Eff effs (Either WorktreeError [WorktreeSummary])
 listWorktrees = send WorktreeRegistryList
 
+queryWorktrees
+  :: Member WorktreeRegistry effs
+  => Maybe Bool
+  -> Maybe Text
+  -> Maybe Int
+  -> Eff effs (Either WorktreeError [WorktreeSummary])
+queryWorktrees present branchPrefix createdAfter =
+  send (WorktreeRegistryQuery present branchPrefix createdAfter)
+
 worktreeBranch
   :: Member BoundWorktree effs
   => WorktreeHandle
-  -> Eff effs BranchName
+  -> Eff effs (Either WorktreeError BranchName)
 worktreeBranch tree =
-  send (BoundWorktreeBranchOf (Worktree.worktreeId tree)) >>= liftWorktree
+  send (BoundWorktreeBranchOf (Worktree.worktreeId tree))
 
 worktreeHead
   :: Member BoundWorktree effs
   => WorktreeHandle
-  -> Eff effs GitOid
+  -> Eff effs (Either WorktreeError GitOid)
 worktreeHead tree =
-  send (BoundWorktreeHeadOf (Worktree.worktreeId tree)) >>= liftWorktree
+  send (BoundWorktreeHeadOf (Worktree.worktreeId tree))
 
 observeSubmission
   :: Member BoundWorktree effs
@@ -84,8 +95,3 @@ tryMerge
   => MergeRequest
   -> Eff effs (Either WorktreeError MergeOutcome)
 tryMerge = send . WorktreeIntegrationTryMerge
-
-liftWorktree :: Either WorktreeError value -> Eff effs value
-liftWorktree (Right value) = pure value
-liftWorktree (Left failure) =
-  error (show failure)

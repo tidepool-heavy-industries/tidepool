@@ -64,11 +64,30 @@ pub fn agent_inspection() -> Effect {
                 domain: None,
                 doc: &["One authorized actor visible to the executing supervisor."],
             },
+            TypeDef {
+                name: "AgentForgetOutcome",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        variant("AgentForgotten", vec![]),
+                        variant("AgentForgetRunning", vec![]),
+                        variant(
+                            "AgentForgetRetained",
+                            vec![
+                                HsType::List(Box::new(HsType::Int)),
+                                HsType::List(Box::new(HsType::Int)),
+                            ],
+                        ),
+                        variant("AgentForgetUnavailable", vec![]),
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: NO_WIRE,
+                domain: None,
+                doc: &["Explicit, refusal-bearing release of terminal actor observations."],
+            },
         ],
-        foreign_types: &[
-            ("ActorTerminalStatus", "crate::ActorTerminalStatusWire"),
-            ("ActorContextRole", "crate::ActorContextRoleWire"),
-        ],
+        foreign_types: &[("ActorContextRole", "crate::ActorContextRoleWire")],
         errors: None,
         verbs: vec![
             Verb {
@@ -79,7 +98,7 @@ pub fn agent_inspection() -> Effect {
                     ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
                     rust: RustBinding::Path("(i64, i64)"),
                 }],
-                ret: HsType::maybe(HsType::Named("ActorTerminalStatus")),
+                ret: HsType::maybe(HsType::Named("AgentRosterEntry")),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,
@@ -89,6 +108,19 @@ pub fn agent_inspection() -> Effect {
                 method: "agent_list_with",
                 args: vec![],
                 ret: HsType::List(Box::new(HsType::Named("AgentRosterEntry"))),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "AgentForgetWith",
+                method: "agent_forget_with",
+                args: vec![Arg {
+                    name: "actor",
+                    ty: HsType::Tuple(vec![HsType::Int, HsType::Int]),
+                    rust: RustBinding::Path("(i64, i64)"),
+                }],
+                ret: HsType::Named("AgentForgetOutcome"),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

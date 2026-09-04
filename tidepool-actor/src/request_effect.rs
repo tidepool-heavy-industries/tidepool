@@ -4,8 +4,8 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::{ResidentHole, RootCustody};
 
 use crate::{
-    ActorRef, ReplyError, RequestId, ResponseFailure, ResponseObservation, WatchId,
-    WatchObservation,
+    ActorRef, CancellationReason, ReplyError, ReplyObservation, RequestId, ResponseFailure,
+    ResponseObservation, WatchId, WatchObservation,
 };
 
 #[derive(tidepool_bridge_derive::FromCore)]
@@ -22,15 +22,25 @@ pub(crate) enum RepliesReq {
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     ObserveResponseWith(i64),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    CancelResponseWith(i64),
+    CancelRequestWith(i64),
+    AbandonResponseWith(i64),
+    ForgetResponseWith(i64),
+    ObserveReplyWith(i64),
+    AttemptAcknowledgeCancellationWith(i64),
+    AcknowledgeCancellationWith(i64),
 }
 
 #[derive(tidepool_bridge_derive::FromCore)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "variant names are the stable Haskell constructor names"
+)]
 pub(crate) enum WatchesReq {
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     RegisterWatchWith(String, Vec<(i64, bool)>),
     #[core(module = "Tidepool.Agent.Watch.Internal")]
     ObserveWatchWith(i64),
+    ForgetWatchWith(i64),
 }
 
 pub(crate) struct RequestReservation {
@@ -59,9 +69,30 @@ pub(crate) struct ResponsePoll {
     pub request: RequestId,
 }
 
-pub(crate) struct ResponseCancellation {
+pub(crate) struct RequestCancellation {
     pub continuation: ResidentHole,
     pub request: RequestId,
+}
+
+pub(crate) struct ResponseAbandonment {
+    pub continuation: ResidentHole,
+    pub request: RequestId,
+}
+
+pub(crate) struct ResponseForget {
+    pub continuation: ResidentHole,
+    pub request: RequestId,
+}
+
+pub(crate) struct ReplyPoll {
+    pub continuation: ResidentHole,
+    pub request: RequestId,
+}
+
+pub(crate) struct CancellationAcknowledgement {
+    pub continuation: ResidentHole,
+    pub request: RequestId,
+    pub recoverable: bool,
 }
 
 pub(crate) struct WatchRegistration {
@@ -71,6 +102,11 @@ pub(crate) struct WatchRegistration {
 }
 
 pub(crate) struct WatchPoll {
+    pub continuation: ResidentHole,
+    pub watch: WatchId,
+}
+
+pub(crate) struct WatchForget {
     pub continuation: ResidentHole,
     pub watch: WatchId,
 }
@@ -96,6 +132,7 @@ pub(crate) fn reply_error_value(
         ReplyError::AlreadySettled => "ReplyAlreadySettled",
         ReplyError::Unauthorized => "ReplyUnauthorized",
         ReplyError::WrongIncarnation => "ReplyWrongIncarnation",
+        ReplyError::CancellationRequested => "ReplySettlementCancelled",
     };
     constructor(table, "Tidepool.Agent.Reply.Internal", name, Vec::new())
 }
@@ -121,6 +158,12 @@ pub(crate) fn response_observation_value(
             "RawResponsePending",
             Vec::new(),
         ),
+        Ok(ResponseObservation::CancellationPending(reason)) => constructor(
+            table,
+            "Tidepool.Agent.Reply.Internal",
+            "RawResponseCancellationPending",
+            vec![cancellation_reason_value(reason, table)?],
+        ),
         Ok(ResponseObservation::Ready) => constructor(
             table,
             "Tidepool.Agent.Reply.Internal",
@@ -142,21 +185,115 @@ pub(crate) fn response_observation_value(
     }
 }
 
-pub(crate) fn cancellation_value(
-    outcome: Result<crate::CancelResponseOutcome, ReplyError>,
+pub(crate) fn cancel_request_value(
+    outcome: Result<crate::CancelRequestOutcome, ReplyError>,
     table: &DataConTable,
 ) -> Result<Value, BridgeError> {
     let (name, fields) = match outcome {
-        Ok(crate::CancelResponseOutcome::CancelledNow) => ("ResponseCancelledNow", Vec::new()),
-        Ok(crate::CancelResponseOutcome::AlreadyTerminal) => {
-            ("ResponseAlreadyTerminal", Vec::new())
+        Ok(crate::CancelRequestOutcome::Requested) => ("CancellationRequested", Vec::new()),
+        Ok(crate::CancelRequestOutcome::AlreadyRequested) => {
+            ("CancellationAlreadyRequested", Vec::new())
+        }
+        Ok(crate::CancelRequestOutcome::AlreadyTerminal) => {
+            ("CancellationAlreadyTerminal", Vec::new())
         }
         Err(error) => (
-            "ResponseCancelRejected",
+            "CancellationRejected",
             vec![reply_error_value(error, table)?],
         ),
     };
     constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
+}
+
+pub(crate) fn abandon_response_value(
+    outcome: Result<crate::AbandonResponseOutcome, ReplyError>,
+    table: &DataConTable,
+) -> Result<Value, BridgeError> {
+    let (name, fields) = match outcome {
+        Ok(crate::AbandonResponseOutcome::AbandonedNow) => ("ResponseAbandonedNow", Vec::new()),
+        Ok(crate::AbandonResponseOutcome::AlreadyAbandoned) => {
+            ("ResponseAlreadyAbandoned", Vec::new())
+        }
+        Ok(crate::AbandonResponseOutcome::AlreadyTerminal) => {
+            ("ResponseAlreadyTerminal", Vec::new())
+        }
+        Err(error) => (
+            "ResponseAbandonRejected",
+            vec![reply_error_value(error, table)?],
+        ),
+    };
+    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
+}
+
+pub(crate) fn forget_response_value(
+    outcome: Result<crate::ForgetResponseOutcome, ReplyError>,
+    table: &DataConTable,
+) -> Result<Value, BridgeError> {
+    let (name, fields) = match outcome {
+        Ok(crate::ForgetResponseOutcome::Forgotten) => ("ResponseForgotten", Vec::new()),
+        Ok(crate::ForgetResponseOutcome::StillPending) => ("ResponseForgetPending", Vec::new()),
+        Ok(crate::ForgetResponseOutcome::TargetStillActive) => {
+            ("ResponseForgetTargetActive", Vec::new())
+        }
+        Ok(crate::ForgetResponseOutcome::RetainedByWatches(watches)) => (
+            "ResponseRetainedByWatches",
+            vec![watches
+                .into_iter()
+                .map(|watch| {
+                    i64::try_from(watch.0)
+                        .map_err(|_| BridgeError::UnsupportedType("watch id exceeds Int".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .to_value(table)?],
+        ),
+        Err(error) => (
+            "ResponseForgetRejected",
+            vec![reply_error_value(error, table)?],
+        ),
+    };
+    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
+}
+
+pub(crate) fn forget_watch_value(
+    outcome: Result<crate::ForgetWatchOutcome, ReplyError>,
+    table: &DataConTable,
+) -> Result<Value, BridgeError> {
+    let (name, fields) = match outcome {
+        Ok(crate::ForgetWatchOutcome::Forgotten) => ("WatchForgotten", Vec::new()),
+        Ok(crate::ForgetWatchOutcome::StillPending) => ("WatchForgetPending", Vec::new()),
+        Err(error) => (
+            "WatchForgetRejected",
+            vec![reply_error_value(error, table)?],
+        ),
+    };
+    constructor(table, "Tidepool.Agent.Watch.Internal", name, fields)
+}
+
+pub(crate) fn reply_observation_value(
+    observation: Result<ReplyObservation, ReplyError>,
+    table: &DataConTable,
+) -> Result<Value, BridgeError> {
+    let (name, fields) = match observation {
+        Ok(ReplyObservation::Open) => ("RawReplyOpen", Vec::new()),
+        Ok(ReplyObservation::CancellationRequested(reason)) => (
+            "RawReplyCancellationRequested",
+            vec![cancellation_reason_value(reason, table)?],
+        ),
+        Ok(ReplyObservation::Closed) => ("RawReplyClosed", Vec::new()),
+        Err(error) => ("RawReplyRejected", vec![reply_error_value(error, table)?]),
+    };
+    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
+}
+
+fn cancellation_reason_value(
+    reason: CancellationReason,
+    table: &DataConTable,
+) -> Result<Value, BridgeError> {
+    let name = match reason {
+        CancellationReason::RequesterCancelled => "CancelledByRequester",
+        CancellationReason::DeadlineExpired => "DeadlineExpired",
+    };
+    constructor(table, "Tidepool.Agent.Reply.Internal", name, Vec::new())
 }
 
 pub(crate) fn watch_observation_value(
@@ -220,6 +357,7 @@ fn response_failure_value(
             ("ResponseTargetCancelled", vec![summary.to_value(table)?])
         }
         ResponseFailure::RequesterStopped => ("ResponseRequesterStopped", Vec::new()),
+        ResponseFailure::Abandoned => ("ResponseAbandoned", Vec::new()),
         ResponseFailure::Cancelled => ("ResponseCancelled", Vec::new()),
         ResponseFailure::DeadlineExceeded => ("ResponseDeadlineExceeded", Vec::new()),
     };

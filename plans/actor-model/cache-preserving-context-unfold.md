@@ -1735,6 +1735,21 @@ production support.
     cached input tokens out of 16,107, while the extractor/provider semantic
     campaign covered heterogeneous siblings, recursive scaffold/fold, retained
     actors, typed watches, and named worktree integration.
+- [x] Complete the post-canary durability pass without adding parallel owners.
+  - Inspection-only roles now attenuate inherited policy, receive a native
+    build/artifact denial, and cannot write either their checkout or shared Git
+    metadata. Root delegation remains conditional on faithful context transfer.
+  - The request registry separately owns acknowledged target cancellation and
+    requester abandonment; responses, watches, actors, and committed fork
+    groups have explicit refusal-bearing cleanup in dependency order.
+  - Supervisor lineage is independent from context inheritance, inspection is
+    truthful for unknown/forgotten actors, worktree filtering happens in the
+    canonical registry handler, and branch-local guidance/deadlines preserve
+    the applicative unfold shape.
+  - The Codex backend reads the latest durable rollout usage and publishes real
+    cached/uncached input counts. The provider-backed reply/watch campaign was
+    reclassified from the quick pure-Rust tier into the daemon-backed heavy
+    lane rather than weakened or duplicated.
 - [x] Run the final relevant broad checks once, move stable contracts to
   owning crate docs and the glossary, and retire this plan.
   - 2026-09-04: `CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 just verify`
@@ -1744,6 +1759,11 @@ production support.
     all 217 Haskell fixture semantic tests passed with a current source
     fingerprint. Test debug information was disabled only to keep link output
     below the host's storage ceiling.
+  - 2026-09-04 durability follow-up: `just verify` passed with workspace-wide
+    formatting and all-target Clippy clean, 2,391 default-tier tests passing,
+    complete suite-manifest coverage, and all 217 regenerated Haskell fixture
+    semantics passing. The daemon-backed provider reply/watch campaign passed
+    separately, as did the generated-file and public Shoal surface checks.
 
 Do not check a gate merely because its happy-path code exists. Record the
 focused commands and failure/cleanup evidence immediately beneath the item or

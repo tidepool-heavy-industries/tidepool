@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -19,7 +20,7 @@ use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
     InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
-    QueueReadyThread, ReasoningEffort,
+    QueueReadyThread, ReasoningEffort, TokenUsage,
 };
 
 const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
@@ -259,6 +260,21 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
         ))
     }
 
+    fn usage<'a>(
+        &'a self,
+        thread: &'a QueueReadyThread,
+    ) -> InteractiveFuture<'a, Option<TokenUsage>> {
+        let sessions = super::isolation::codex_home().join("sessions");
+        let thread = thread.id().0.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || read_rollout_usage(&sessions, &thread))
+                .await
+                .map_err(|error| AgentBackendError::BackendUnavailable {
+                    detail: format!("Codex usage reader task failed: {error}"),
+                })?
+        })
+    }
+
     fn archive<'a>(
         &'a self,
         cwd: &'a str,
@@ -266,6 +282,77 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     ) -> InteractiveFuture<'a, ()> {
         Box::pin(archive_thread(&self.installation, Path::new(cwd), thread))
     }
+}
+
+fn read_rollout_usage(
+    sessions: &Path,
+    thread: &str,
+) -> Result<Option<TokenUsage>, AgentBackendError> {
+    let Some(path) = find_rollout(sessions, thread, 4)? else {
+        return Ok(None);
+    };
+    let file = std::fs::File::open(&path)
+        .map_err(|error| unavailable("open Codex rollout for usage", error))?;
+    let mut latest = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| unavailable("read Codex rollout usage", error))?;
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(usage) = value
+            .pointer("/payload/info/last_token_usage")
+            .and_then(parse_rollout_usage)
+        else {
+            continue;
+        };
+        latest = Some(usage);
+    }
+    Ok(latest)
+}
+
+fn find_rollout(
+    directory: &Path,
+    thread: &str,
+    depth: usize,
+) -> Result<Option<PathBuf>, AgentBackendError> {
+    if depth == 0 || !directory.exists() {
+        return Ok(None);
+    }
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| unavailable("enumerate Codex rollouts", error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| unavailable("enumerate Codex rollout entry", error))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_rollout(&path, thread, depth - 1)? {
+                return Ok(Some(found));
+            }
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rollout-") && name.contains(thread))
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_rollout_usage(value: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = TokenUsage {
+        input_tokens: value.get("input_tokens")?.as_i64()?,
+        cached_input_tokens: value.get("cached_input_tokens")?.as_i64()?,
+        output_tokens: value.get("output_tokens")?.as_i64()?,
+        reasoning_output_tokens: value.get("reasoning_output_tokens")?.as_i64()?,
+        total_tokens: value.get("total_tokens")?.as_i64()?,
+    };
+    (usage.input_tokens >= 0
+        && usage.cached_input_tokens >= 0
+        && usage.cached_input_tokens <= usage.input_tokens
+        && usage.output_tokens >= 0
+        && usage.reasoning_output_tokens >= 0
+        && usage.total_tokens >= 0)
+        .then_some(usage)
 }
 
 fn prepare_native_tool_policy(
@@ -834,5 +921,38 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains(ENV_INTERACTIVE_CODEX_BIN));
+    }
+
+    #[test]
+    fn durable_rollout_usage_preserves_reported_cache_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/09/04");
+        std::fs::create_dir_all(&day).unwrap();
+        let thread = "019fe92a-1a66-7820-9481-c0a2d108aba1";
+        let rollout = day.join(format!("rollout-now-{thread}.jsonl"));
+        std::fs::write(
+            rollout,
+            concat!(
+                "{\"payload\":{\"type\":\"other\"}}\n",
+                "{\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{",
+                "\"input_tokens\":100,\"cached_input_tokens\":80,\"output_tokens\":7,",
+                "\"reasoning_output_tokens\":3,\"total_tokens\":107}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let usage = read_rollout_usage(root.path(), thread).unwrap().unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cached_input_tokens, 80);
+        assert_eq!(usage.total_tokens, 107);
+
+        let invalid = serde_json::json!({
+            "input_tokens": 10,
+            "cached_input_tokens": 11,
+            "output_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "total_tokens": 10
+        });
+        assert_eq!(parse_rollout_usage(&invalid), None);
     }
 }

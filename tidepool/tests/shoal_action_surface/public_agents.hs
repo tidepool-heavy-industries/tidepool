@@ -69,8 +69,33 @@ inspectSelf = actorContext
 currentTree :: Eff CodingActorEffects (Either WorktreeError WorktreeHandle)
 currentTree = boundWorktree
 
-cancel :: Response result -> Eff '[Replies] CancelOutcome
-cancel = cancelResponse
+cancel :: Response result -> Eff '[Replies] CancelRequestOutcome
+cancel = cancelRequest
+
+releaseResponse :: Response result -> Eff '[Replies] ForgetResponseOutcome
+releaseResponse = forgetResponse
+
+releaseWatch :: Watch result -> Eff '[Watches] ForgetWatchOutcome
+releaseWatch = forgetWatch
+
+releaseAgent :: AgentRef -> Eff ActorEffects AgentForgetOutcome
+releaseAgent = forgetAgent
+
+retainedAgentDependencies :: AgentForgetOutcome -> ([RequestId], [WatchId])
+retainedAgentDependencies outcome =
+  case outcome of
+    AgentForgetRetained requests watches -> (requests, watches)
+    AgentForgotten -> ([], [])
+    AgentForgetRunning -> ([], [])
+    AgentForgetUnavailable -> ([], [])
+
+releaseForkGroup :: Forked result -> Eff ActorEffects ForkGroupCleanupOutcome
+releaseForkGroup = cleanupForkGroup . forkGroupHandle
+
+safeHead
+  :: WorktreeHandle
+  -> Eff CodingActorEffects (Either WorktreeError GitOid)
+safeHead = worktreeHead
 
 recentCampaignTrees :: Int -> Eff ActorEffects (Either WorktreeError [WorktreeSummary])
 recentCampaignTrees timestamp =
@@ -119,6 +144,15 @@ recoverableUnfold
 recoverableUnfold group leaf =
   attemptUnfold group $
     child (researching @Text leaf projectHead ())
+
+configuredBranch
+  :: RequestDeadline
+  -> BranchLabel
+  -> Branch ResearchActorEffects () Text
+configuredBranch deadline leaf =
+  withBranchDeadline deadline $
+    withBranchGuidance "inspect only" $
+      researching @Text leaf projectHead ()
 
 type TinyResearchEffects = '[Replies, ActorContext]
 

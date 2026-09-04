@@ -26,8 +26,9 @@ use tidepool_runtime::{classify_compile, classify_session, CompileError, Failure
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
 use crate::request_effect::{
-    RepliesReq, ReplyAttempt, RequestReservation, RequestSubmission, ResponseCancellation,
-    ResponsePoll, WatchPoll, WatchRegistration, WatchesReq,
+    CancellationAcknowledgement, RepliesReq, ReplyAttempt, ReplyPoll, RequestCancellation,
+    RequestReservation, RequestSubmission, ResponseAbandonment, ResponseForget, ResponsePoll,
+    WatchForget, WatchPoll, WatchRegistration, WatchesReq,
 };
 use crate::{ActorCompileViewError, ResponseExpectation};
 
@@ -150,6 +151,9 @@ pub(crate) enum ResidentWorkbenchStep {
         request: crate::RequestId,
         result: RootCustody,
     },
+    CancellationAcknowledged {
+        request: crate::RequestId,
+    },
 }
 
 /// The one machine-entry component for installed actor program segments.
@@ -211,9 +215,83 @@ pub(crate) struct AgentRosterProjection {
     pub(crate) runtime: crate::ActorRuntimeObservation,
 }
 
+pub(crate) struct AgentInspectionBoundary {
+    pub(crate) target: crate::ActorRef,
+    pub(crate) continuation: ResidentHole,
+}
+
+pub(crate) enum AgentForgetProjection {
+    Forgotten,
+    Running,
+    Retained {
+        requests: Vec<crate::RequestId>,
+        watches: Vec<crate::WatchId>,
+    },
+    Unavailable,
+}
+
+fn agent_roster_value(
+    table: &DataConTable,
+    entry: AgentRosterProjection,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let state = match entry.terminal {
+        None => actor_context_constructor(table, "RosterRunning", Vec::new())?,
+        Some(terminal) => match terminal.kind {
+            crate::ActorExitKind::Completed => {
+                actor_context_constructor(table, "RosterStopped", Vec::new())?
+            }
+            crate::ActorExitKind::Failed => actor_context_constructor(
+                table,
+                "RosterFailed",
+                vec![terminal.summary.to_value(table)?],
+            )?,
+            crate::ActorExitKind::Cancelled => actor_context_constructor(
+                table,
+                "RosterCancelled",
+                vec![terminal.summary.to_value(table)?],
+            )?,
+        },
+    };
+    let role = match entry.descriptor.effective_role().role() {
+        crate::ActorRole::Root => "ContextRoot",
+        crate::ActorRole::Research => "ContextResearch",
+        crate::ActorRole::Coding => "ContextCoding",
+        crate::ActorRole::Scaffolding => "ContextScaffolding",
+        crate::ActorRole::Integration => "ContextIntegration",
+        crate::ActorRole::Inherited => "ContextInherited",
+    };
+    Ok(actor_context_constructor(
+        table,
+        "AgentRosterEntry",
+        vec![
+            actor_int(entry.actor.id.0)?.to_value(table)?,
+            actor_int(entry.actor.incarnation.0)?.to_value(table)?,
+            entry.descriptor.label().to_owned().to_value(table)?,
+            state,
+            actor_context_constructor(table, role, Vec::new())?,
+            entry.bound_worktree.to_value(table)?,
+            entry
+                .descriptor
+                .fork_group()
+                .map(|group| actor_int(group.0))
+                .transpose()?
+                .to_value(table)?,
+            actor_int(entry.descriptor.placement().lexical_scope.0)?.to_value(table)?,
+            entry.runtime.provider_thread.to_value(table)?,
+            entry.runtime.provider_parent_thread.to_value(table)?,
+            entry.runtime.cached_input_tokens.to_value(table)?,
+            entry.runtime.uncached_input_tokens.to_value(table)?,
+        ],
+    )?)
+}
+
 /// One fully captured boundary reached by an installed actor program.
 /// Variants own every linear runtime value needed to service that boundary;
 /// downstream orchestration never re-decodes the suspended request.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boundaries deliberately retain linear runtime custody without a second allocation layer"
+)]
 pub(crate) enum ResidentActorBoundary {
     Completed,
     ActorContext(ResidentHole),
@@ -227,14 +305,21 @@ pub(crate) enum ResidentActorBoundary {
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
     AgentAttachment(ResidentAgentAttachment),
+    AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
+    AgentForget(AgentInspectionBoundary),
     RequestReservation(RequestReservation),
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
-    ResponseCancellation(ResponseCancellation),
+    RequestCancellation(RequestCancellation),
+    ResponseAbandonment(ResponseAbandonment),
+    ResponseForget(ResponseForget),
+    ReplyPoll(ReplyPoll),
+    CancellationAcknowledgement(CancellationAcknowledgement),
     WatchRegistration(WatchRegistration),
     WatchPoll(WatchPoll),
+    WatchForget(WatchForget),
 }
 
 pub(crate) enum ForkGroupBoundary {
@@ -249,6 +334,10 @@ pub(crate) enum ForkGroupBoundary {
         group: crate::ForkGroupId,
     },
     Abort {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
+    Cleanup {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
     },
@@ -277,6 +366,7 @@ impl ResidentActorBoundary {
             Self::ForkGroup(ForkGroupBoundary::Begin { .. }) => "begin context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Commit { .. }) => "commit context-fork group",
             Self::ForkGroup(ForkGroupBoundary::Abort { .. }) => "abort context-fork group",
+            Self::ForkGroup(ForkGroupBoundary::Cleanup { .. }) => "cleanup context-fork group",
             Self::Start(_) => "startActor",
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
             Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
@@ -288,14 +378,21 @@ impl ResidentActorBoundary {
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
             Self::AgentAttachment(_) => "agent attachment",
+            Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
+            Self::AgentForget(_) => "forgetAgent",
             Self::RequestReservation(_) => "request",
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
             Self::ResponsePoll(_) => "pollResponse",
-            Self::ResponseCancellation(_) => "cancelResponse",
+            Self::RequestCancellation(_) => "cancelRequest",
+            Self::ResponseAbandonment(_) => "abandonResponse",
+            Self::ResponseForget(_) => "forgetResponse",
+            Self::ReplyPoll(_) => "pollReply",
+            Self::CancellationAcknowledgement(_) => "acknowledgeCancellation",
             Self::WatchRegistration(_) => "watch",
             Self::WatchPoll(_) => "pollWatch",
+            Self::WatchForget(_) => "forgetWatch",
         }
     }
 }
@@ -394,6 +491,9 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
             ) => "listAgents",
+            Self::AgentInspection(
+                crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
+            ) => "forgetAgent",
             Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
                 ..,
             )) => "startAgent",
@@ -406,6 +506,9 @@ impl ResidentRequest {
             }
             Self::Forks(crate::generated::forks::ForksReq::ForksAbortWith(..)) => {
                 "abort context-fork group"
+            }
+            Self::Forks(crate::generated::forks::ForksReq::ForksCleanupWith(..)) => {
+                "cleanup context-fork group"
             }
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
             Self::Actor(crate::generated::actor::ActorReq::ActorForkWith(..)) => "context fork",
@@ -452,9 +555,17 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
-            Self::Replies(RepliesReq::CancelResponseWith(..)) => "cancelResponse",
+            Self::Replies(RepliesReq::CancelRequestWith(..)) => "cancelRequest",
+            Self::Replies(RepliesReq::AbandonResponseWith(..)) => "abandonResponse",
+            Self::Replies(RepliesReq::ForgetResponseWith(..)) => "forgetResponse",
+            Self::Replies(RepliesReq::ObserveReplyWith(..)) => "pollReply",
+            Self::Replies(RepliesReq::AttemptAcknowledgeCancellationWith(..)) => {
+                "attemptAcknowledgeCancellation"
+            }
+            Self::Replies(RepliesReq::AcknowledgeCancellationWith(..)) => "acknowledgeCancellation",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
+            Self::Watches(WatchesReq::ForgetWatchWith(..)) => "forgetWatch",
         }
     }
 }
@@ -1170,12 +1281,24 @@ where
                             ))
                         })?),
                     })),
+                    ResidentRequest::Forks(
+                        crate::generated::forks::ForksReq::ForksCleanupWith(group),
+                    ) => Ok(ResidentActorBoundary::ForkGroup(
+                        ForkGroupBoundary::Cleanup {
+                            continuation: hole,
+                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "invalid fork group id {group}"
+                                ))
+                            })?),
+                        },
+                    )),
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(
                             target,
                         ),
-                    ) => Ok(ResidentActorBoundary::Poll(
-                        crate::wait::ResidentPollRequest {
+                    ) => Ok(ResidentActorBoundary::AgentInspect(
+                        AgentInspectionBoundary {
                             target: crate::wait::decode_address(target.0, target.1)?,
                             continuation: hole,
                         },
@@ -1183,6 +1306,16 @@ where
                     ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),
+                    ResidentRequest::AgentInspection(
+                        crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(
+                            target,
+                        ),
+                    ) => Ok(ResidentActorBoundary::AgentForget(
+                        AgentInspectionBoundary {
+                            target: crate::wait::decode_address(target.0, target.1)?,
+                            continuation: hole,
+                        },
+                    )),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlTryCallWith(
                             target,
@@ -1432,12 +1565,48 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                         }))
                     }
-                    ResidentRequest::Replies(RepliesReq::CancelResponseWith(request_id)) => Ok(
-                        ResidentActorBoundary::ResponseCancellation(ResponseCancellation {
+                    ResidentRequest::Replies(RepliesReq::CancelRequestWith(request_id)) => Ok(
+                        ResidentActorBoundary::RequestCancellation(RequestCancellation {
                             continuation: hole,
                             request: crate::request_effect::request_id(request_id)?,
                         }),
                     ),
+                    ResidentRequest::Replies(RepliesReq::AbandonResponseWith(request_id)) => Ok(
+                        ResidentActorBoundary::ResponseAbandonment(ResponseAbandonment {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        }),
+                    ),
+                    ResidentRequest::Replies(RepliesReq::ForgetResponseWith(request_id)) => {
+                        Ok(ResidentActorBoundary::ResponseForget(ResponseForget {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        }))
+                    }
+                    ResidentRequest::Replies(RepliesReq::ObserveReplyWith(request_id)) => {
+                        Ok(ResidentActorBoundary::ReplyPoll(ReplyPoll {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        }))
+                    }
+                    ResidentRequest::Replies(RepliesReq::AttemptAcknowledgeCancellationWith(
+                        request_id,
+                    )) => Ok(ResidentActorBoundary::CancellationAcknowledgement(
+                        CancellationAcknowledgement {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                            recoverable: true,
+                        },
+                    )),
+                    ResidentRequest::Replies(RepliesReq::AcknowledgeCancellationWith(
+                        request_id,
+                    )) => Ok(ResidentActorBoundary::CancellationAcknowledgement(
+                        CancellationAcknowledgement {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                            recoverable: false,
+                        },
+                    )),
                     ResidentRequest::Watches(WatchesReq::RegisterWatchWith(
                         label,
                         dependencies,
@@ -1459,6 +1628,12 @@ where
                     }
                     ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
                         Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
+                            continuation: hole,
+                            watch: crate::request_effect::watch_id(watch_id)?,
+                        }))
+                    }
+                    ResidentRequest::Watches(WatchesReq::ForgetWatchWith(watch_id)) => {
+                        Ok(ResidentActorBoundary::WatchForget(WatchForget {
                             continuation: hole,
                             watch: crate::request_effect::watch_id(watch_id)?,
                         }))
@@ -1897,58 +2072,66 @@ where
                 let table = session.data_con_table();
                 let mut entries = Vec::with_capacity(roster.len());
                 for entry in roster {
-                    let state = match entry.terminal {
-                        None => actor_context_constructor(table, "RosterRunning", Vec::new())?,
-                        Some(terminal) => match terminal.kind {
-                            crate::ActorExitKind::Completed => {
-                                actor_context_constructor(table, "RosterStopped", Vec::new())?
-                            }
-                            crate::ActorExitKind::Failed => actor_context_constructor(
-                                table,
-                                "RosterFailed",
-                                vec![terminal.summary.to_value(table)?],
-                            )?,
-                            crate::ActorExitKind::Cancelled => actor_context_constructor(
-                                table,
-                                "RosterCancelled",
-                                vec![terminal.summary.to_value(table)?],
-                            )?,
-                        },
-                    };
-                    let role = match entry.descriptor.effective_role().role() {
-                        crate::ActorRole::Root => "ContextRoot",
-                        crate::ActorRole::Research => "ContextResearch",
-                        crate::ActorRole::Coding => "ContextCoding",
-                        crate::ActorRole::Scaffolding => "ContextScaffolding",
-                        crate::ActorRole::Integration => "ContextIntegration",
-                        crate::ActorRole::Inherited => "ContextInherited",
-                    };
-                    entries.push(actor_context_constructor(
-                        table,
-                        "AgentRosterEntry",
-                        vec![
-                            actor_int(entry.actor.id.0)?.to_value(table)?,
-                            actor_int(entry.actor.incarnation.0)?.to_value(table)?,
-                            entry.descriptor.label().to_owned().to_value(table)?,
-                            state,
-                            actor_context_constructor(table, role, Vec::new())?,
-                            entry.bound_worktree.to_value(table)?,
-                            entry
-                                .descriptor
-                                .fork_group()
-                                .map(|group| actor_int(group.0))
-                                .transpose()?
-                                .to_value(table)?,
-                            actor_int(entry.descriptor.placement().lexical_scope.0)?
-                                .to_value(table)?,
-                            entry.runtime.provider_thread.to_value(table)?,
-                            entry.runtime.provider_parent_thread.to_value(table)?,
-                            entry.runtime.cached_input_tokens.to_value(table)?,
-                            entry.runtime.uncached_input_tokens.to_value(table)?,
-                        ],
-                    )?);
+                    entries.push(agent_roster_value(table, entry)?);
                 }
                 let answer = core_list(table, entries)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_agent_observation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Option<AgentRosterProjection>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let answer = observation
+                    .map(|entry| agent_roster_value(table, entry))
+                    .transpose()?
+                    .to_value(table)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_agent_forget(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: AgentForgetProjection,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let (name, fields) = match outcome {
+                    AgentForgetProjection::Forgotten => ("AgentForgotten", Vec::new()),
+                    AgentForgetProjection::Running => ("AgentForgetRunning", Vec::new()),
+                    AgentForgetProjection::Unavailable => ("AgentForgetUnavailable", Vec::new()),
+                    AgentForgetProjection::Retained { requests, watches } => (
+                        "AgentForgetRetained",
+                        vec![
+                            requests
+                                .into_iter()
+                                .map(|request| actor_int(request.0))
+                                .collect::<Result<Vec<_>, _>>()?
+                                .to_value(table)?,
+                            watches
+                                .into_iter()
+                                .map(|watch| actor_int(watch.0))
+                                .collect::<Result<Vec<_>, _>>()?
+                                .to_value(table)?,
+                        ],
+                    ),
+                };
+                let answer = actor_context_constructor(table, name, fields)?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -2016,19 +2199,94 @@ where
             .await
     }
 
-    pub(crate) async fn resume_cancellation(
+    pub(crate) async fn resume_cancel_request(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
-        outcome: Result<crate::CancelResponseOutcome, crate::ReplyError>,
+        outcome: Result<crate::CancelRequestOutcome, crate::ReplyError>,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer =
-                    crate::request_effect::cancellation_value(outcome, session.data_con_table())?;
+                    crate::request_effect::cancel_request_value(outcome, session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_abandonment(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<crate::AbandonResponseOutcome, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = crate::request_effect::abandon_response_value(
+                    outcome,
+                    session.data_con_table(),
+                )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_response_forget(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<crate::ForgetResponseOutcome, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = crate::request_effect::forget_response_value(
+                    outcome,
+                    session.data_con_table(),
+                )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_reply_observation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<crate::ReplyObservation, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = crate::request_effect::reply_observation_value(
+                    observation,
+                    session.data_con_table(),
+                )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn abandon_cast_handler(
+        &self,
+        context: crate::ActorSessionContext,
+        receiver_continuation: ResidentHole,
+        handler_realm: RealmId,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let keep_receiving = true.to_value(session.data_con_table())?;
+                let outcome = session
+                    .resume(receiver_continuation, keep_receiving)
+                    .map_err(ResidentActorWorkbenchError::Resident)?;
+                let _ = session.close_realm(handler_realm);
+                Ok(outcome)
             })
             .await
     }
@@ -2045,6 +2303,23 @@ where
                     observation,
                     session.data_con_table(),
                 )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_watch_forget(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<crate::ForgetWatchOutcome, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer =
+                    crate::request_effect::forget_watch_value(outcome, session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -2261,6 +2536,40 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = Ok::<(), String>(()).to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_fork_cleanup(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<crate::ForkGroupCleanupOutcome, crate::ForkGroupError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let (name, fields) = match outcome {
+                    Ok(crate::ForkGroupCleanupOutcome::Cleaned) => ("ForkGroupCleaned", Vec::new()),
+                    Ok(crate::ForkGroupCleanupOutcome::Active(actors)) => (
+                        "ForkGroupStillActive",
+                        vec![actors
+                            .into_iter()
+                            .map(|actor| {
+                                Ok((actor_int(actor.id.0)?, actor_int(actor.incarnation.0)?))
+                            })
+                            .collect::<Result<Vec<_>, ResidentActorWorkbenchError>>()?
+                            .to_value(table)?],
+                    ),
+                    Err(error) => (
+                        "ForkGroupCleanupRejected",
+                        vec![error.to_string().to_value(table)?],
+                    ),
+                };
+                let answer = actor_context_constructor(table, name, fields)?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

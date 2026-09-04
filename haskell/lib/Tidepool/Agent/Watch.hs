@@ -4,6 +4,7 @@
 module Tidepool.Agent.Watch
   ( Await
   , Watch
+  , WatchId
   , WatchLabel
   , WatchLabelError (..)
   , watchLabel
@@ -16,11 +17,14 @@ module Tidepool.Agent.Watch
   , awaitSettled
   , watch
   , pollWatch
+  , ForgetWatchOutcome (..)
+  , forgetWatch
   ) where
 
 import Tidepool.Agent.Watch.Internal
   ( Await
   , Watch
+  , WatchId
   , WatchLabel
   , WatchLabelError (..)
   , Watches
@@ -31,6 +35,8 @@ import Tidepool.Agent.Watch.Internal
   , awaitValue
   , awaitSettled
   , pollWatch
+  , ForgetWatchOutcome (..)
+  , forgetWatch
   , watch
   , watchLabel
   )

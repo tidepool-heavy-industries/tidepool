@@ -93,6 +93,18 @@ impl LocalActorDirectory {
     fn insert(&self, actor: LocalActorRef) {
         self.actors.write().insert(actor.identity(), actor);
     }
+
+    fn forget_terminal(&self, actor: ActorRef) -> bool {
+        let mut actors = self.actors.write();
+        let terminal = actors
+            .get(&actor)
+            .is_some_and(|actor| actor.terminal().get().is_some());
+        if terminal {
+            actors.remove(&actor);
+            self.sessions.write().remove(&actor);
+        }
+        terminal
+    }
 }
 
 impl KernelContext {
@@ -136,6 +148,18 @@ impl KernelContext {
             .lock()
             .values()
             .any(|child| child.identity() == actor)
+    }
+
+    /// Release routing and terminal metadata for an exact, already-terminal
+    /// actor. Live Haskell handles become explicitly unavailable afterward.
+    pub fn forget_terminal_actor(&self, actor: ActorRef) -> bool {
+        let forgotten = self.directory.forget_terminal(actor);
+        if forgotten {
+            self.children
+                .lock()
+                .retain(|_, child| child.identity() != actor);
+        }
+        forgotten
     }
 
     /// Start a linked child and return its exact handle only after startup.

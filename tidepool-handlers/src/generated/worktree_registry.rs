@@ -9,6 +9,7 @@ use tidepool_bridge_derive::FromCore;
 pub enum WorktreeRegistryReq {
     WorktreeRegistryLookup(tidepool_bridge_effects::WtWorktreeId),
     WorktreeRegistryList,
+    WorktreeRegistryQuery(Option<bool>, Option<String>, Option<i64>),
 }
 
 impl tidepool_mcp::DescribeEffect for ActorWorktreeRegistryHandler {
@@ -32,6 +33,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
                 self.worktree_registry_lookup(cx, tree_id)
             }
             WorktreeRegistryReq::WorktreeRegistryList => self.worktree_registry_list(cx),
+            WorktreeRegistryReq::WorktreeRegistryQuery(present, branch_prefix, created_after) => {
+                self.worktree_registry_query(cx, present, branch_prefix, created_after)
+            }
         }
     }
 }

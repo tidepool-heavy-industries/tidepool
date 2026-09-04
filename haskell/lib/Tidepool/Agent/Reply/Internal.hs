@@ -17,7 +17,11 @@ module Tidepool.Agent.Reply.Internal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
-  , CancelOutcome (..)
+  , CancellationReason (..)
+  , CancelRequestOutcome (..)
+  , AbandonOutcome (..)
+  , ForgetResponseOutcome (..)
+  , ReplyState (..)
   , RawResponseObservation (..)
   , reserveRequest
   , submitRequest
@@ -29,7 +33,12 @@ module Tidepool.Agent.Reply.Internal
   , attemptReply
   , reply
   , pollResponse
-  , cancelResponse
+  , cancelRequest
+  , abandonResponse
+  , forgetResponse
+  , pollReply
+  , attemptAcknowledgeCancellation
+  , acknowledgeCancellation
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -84,6 +93,7 @@ data ReplyError
   | ReplyAlreadySettled
   | ReplyUnauthorized
   | ReplyWrongIncarnation
+  | ReplySettlementCancelled
   deriving (Show, Eq)
 
 data ResponseFailure
@@ -91,6 +101,7 @@ data ResponseFailure
   | ResponseTargetFailed Text
   | ResponseTargetCancelled Text
   | ResponseRequesterStopped
+  | ResponseAbandoned
   | ResponseCancelled
   | ResponseDeadlineExceeded
   | ResponseRejected ReplyError
@@ -118,21 +129,57 @@ data ResponseResult result = ResponseResult
 
 data ResponseState result
   = ResponsePending
+  | ResponseCancellationPending CancellationReason
   | ResponseReady (ResponseResult result)
   | ResponseUnavailable ResponseFailure
   deriving (Show, Eq)
 
-data CancelOutcome
-  = ResponseCancelledNow
+data CancellationReason
+  = CancelledByRequester
+  | DeadlineExpired
+  deriving (Show, Eq)
+
+data CancelRequestOutcome
+  = CancellationRequested
+  | CancellationAlreadyRequested
+  | CancellationAlreadyTerminal
+  | CancellationRejected ReplyError
+  deriving (Show, Eq)
+
+data AbandonOutcome
+  = ResponseAbandonedNow
+  | ResponseAlreadyAbandoned
   | ResponseAlreadyTerminal
-  | ResponseCancelRejected ReplyError
+  | ResponseAbandonRejected ReplyError
+  deriving (Show, Eq)
+
+data ForgetResponseOutcome
+  = ResponseForgotten
+  | ResponseForgetPending
+  | ResponseForgetTargetActive
+  | ResponseRetainedByWatches [Int]
+  | ResponseForgetRejected ReplyError
+  deriving (Show, Eq)
+
+data ReplyState
+  = ReplyOpen
+  | ReplyCancellationRequested CancellationReason
+  | ReplyClosed
+  | ReplyObservationRejected ReplyError
   deriving (Show, Eq)
 
 data RawResponseObservation
   = RawResponsePending
+  | RawResponseCancellationPending CancellationReason
   | RawResponseReady
   | RawResponseUnavailable ResponseFailure
   | RawResponseRejected ReplyError
+
+data RawReplyObservation
+  = RawReplyOpen
+  | RawReplyCancellationRequested CancellationReason
+  | RawReplyClosed
+  | RawReplyRejected ReplyError
 
 data Replies a where
   ReserveRequestWith :: Text -> (Int, Int) -> Replies Int
@@ -140,7 +187,12 @@ data Replies a where
   AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
-  CancelResponseWith :: Int -> Replies CancelOutcome
+  CancelRequestWith :: Int -> Replies CancelRequestOutcome
+  AbandonResponseWith :: Int -> Replies AbandonOutcome
+  ForgetResponseWith :: Int -> Replies ForgetResponseOutcome
+  ObserveReplyWith :: Int -> Replies RawReplyObservation
+  AttemptAcknowledgeCancellationWith :: Int -> Replies (Either ReplyError Void)
+  AcknowledgeCancellationWith :: Int -> Replies Void
 
 reserveRequest :: Member Replies effs => RequestLabel -> (Int, Int) -> Eff effs RequestId
 reserveRequest (RequestLabel label) target = RequestId <$> send (ReserveRequestWith label target)
@@ -190,6 +242,7 @@ pollResponse response@(Response (RequestId request) _) = do
   observation <- send (ObserveResponseWith request)
   pure $ case observation of
     RawResponsePending -> ResponsePending
+    RawResponseCancellationPending reason -> ResponseCancellationPending reason
     RawResponseReady ->
       case readResponse response of
         Just result -> ResponseReady result
@@ -198,8 +251,40 @@ pollResponse response@(Response (RequestId request) _) = do
     RawResponseRejected failure ->
       ResponseUnavailable (ResponseRejected failure)
 
-cancelResponse
+cancelRequest
   :: Member Replies effs
   => Response result
-  -> Eff effs CancelOutcome
-cancelResponse (Response (RequestId request) _) = send (CancelResponseWith request)
+  -> Eff effs CancelRequestOutcome
+cancelRequest (Response (RequestId request) _) = send (CancelRequestWith request)
+
+abandonResponse
+  :: Member Replies effs
+  => Response result
+  -> Eff effs AbandonOutcome
+abandonResponse (Response (RequestId request) _) = send (AbandonResponseWith request)
+
+forgetResponse
+  :: Member Replies effs
+  => Response result
+  -> Eff effs ForgetResponseOutcome
+forgetResponse (Response (RequestId request) _) = send (ForgetResponseWith request)
+
+pollReply :: Member Replies effs => Reply result -> Eff effs ReplyState
+pollReply (Reply (RequestId request)) = do
+  observation <- send (ObserveReplyWith request)
+  pure $ case observation of
+    RawReplyOpen -> ReplyOpen
+    RawReplyCancellationRequested reason -> ReplyCancellationRequested reason
+    RawReplyClosed -> ReplyClosed
+    RawReplyRejected failure -> ReplyObservationRejected failure
+
+attemptAcknowledgeCancellation
+  :: Member Replies effs
+  => Reply result
+  -> Eff effs (Either ReplyError Void)
+attemptAcknowledgeCancellation (Reply (RequestId request)) =
+  send (AttemptAcknowledgeCancellationWith request)
+
+acknowledgeCancellation :: Member Replies effs => Reply result -> Eff effs Void
+acknowledgeCancellation (Reply (RequestId request)) =
+  send (AcknowledgeCancellationWith request)

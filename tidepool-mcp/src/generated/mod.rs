@@ -134,8 +134,10 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         &[
             "AgentRosterState",
             "AgentRosterEntry",
+            "AgentForgetOutcome",
             "AgentInspectWith",
             "AgentListWith",
+            "AgentForgetWith",
         ],
     ),
     ("AgentLaunch", &["AgentLaunchWith"]),
@@ -143,10 +145,12 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         "Forks",
         &[
             "ActorEffectKey",
+            "ForkGroupCleanupOutcome",
             "ForksBeginWith",
             "ForksStartWith",
             "ForksCommitWith",
             "ForksAbortWith",
+            "ForksCleanupWith",
         ],
     ),
     (
@@ -166,7 +170,11 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
     ),
     (
         "WorktreeRegistry",
-        &["WorktreeRegistryLookup", "WorktreeRegistryList"],
+        &[
+            "WorktreeRegistryLookup",
+            "WorktreeRegistryList",
+            "WorktreeRegistryQuery",
+        ],
     ),
     (
         "WorktreeAllocation",

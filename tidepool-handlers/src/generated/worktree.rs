@@ -47,6 +47,7 @@ pub enum WorktreeReq {
     WorktreeLookup(tidepool_bridge_effects::WtWorktreeId),
     WorktreeBound,
     WorktreeList,
+    WorktreeListMatching(Option<bool>, Option<String>, Option<i64>),
     WorktreeBranchOf(tidepool_bridge_effects::WtWorktreeId),
     WorktreeHeadOf(tidepool_bridge_effects::WtWorktreeId),
     WorktreeObserveSubmission(tidepool_bridge_effects::WtWorktreeId),
@@ -78,6 +79,9 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             WorktreeReq::WorktreeLookup(tree_id) => cx.respond(self.worktree_lookup(tree_id)),
             WorktreeReq::WorktreeBound => cx.respond(self.worktree_bound()),
             WorktreeReq::WorktreeList => cx.respond(self.worktree_list()),
+            WorktreeReq::WorktreeListMatching(present, branch_prefix, created_after) => {
+                cx.respond(self.worktree_list_matching(present, branch_prefix, created_after))
+            }
             WorktreeReq::WorktreeBranchOf(tree_id) => cx.respond(self.worktree_branch_of(tree_id)),
             WorktreeReq::WorktreeHeadOf(tree_id) => cx.respond(self.worktree_head_of(tree_id)),
             WorktreeReq::WorktreeObserveSubmission(tree_id) => {

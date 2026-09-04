@@ -227,6 +227,7 @@ impl ResidentActorStart {
         )
         .with_profile(profile)
         .with_effective_role(effective_role)
+        .with_supervisor_parent(parent_actor)
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         if context_fork {
             descriptor = descriptor.with_context_parent(parent_actor);

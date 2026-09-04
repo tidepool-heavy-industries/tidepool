@@ -62,8 +62,8 @@ pub use kernel::{
     LocalActorRef,
 };
 pub use lineage::{
-    ActorLineageRegistry, ActorPathReservation, ForkGroupError, ForkGroupGate, ForkGroupId,
-    ForkGroupPhase, ForkGroupRegistry,
+    ActorLineageRegistry, ActorPathReservation, ForkGroupCleanupOutcome, ForkGroupError,
+    ForkGroupGate, ForkGroupId, ForkGroupPhase, ForkGroupRegistry,
 };
 pub use local_actor::{
     spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
@@ -76,8 +76,10 @@ pub use mount::{
 };
 pub use profile::ActorEffectProfile;
 pub use request::{
-    CancelResponseOutcome, ReplyError, RequestId, ResponseFailure, ResponseObservation, WatchId,
-    WatchNotification, WatchObservation, WatchTransition,
+    AbandonResponseOutcome, CancelRequestOutcome, CancellationReason, ForgetResponseOutcome,
+    ForgetWatchOutcome, ReplyError, ReplyObservation, RequestCancellationNotification, RequestId,
+    ResponseFailure, ResponseObservation, WatchId, WatchNotification, WatchObservation,
+    WatchTransition,
 };
 pub use resident_actor::{
     spawn_resident_root, spawn_resident_root_with_fork_admission, LocalResidentDeployment,

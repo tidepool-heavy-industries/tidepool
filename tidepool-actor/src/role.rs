@@ -205,6 +205,12 @@ impl EffectiveRole {
     }
 
     #[must_use]
+    pub fn with_descendant_budget(mut self, descendants: DescendantBudget) -> Self {
+        self.descendants = descendants;
+        self
+    }
+
+    #[must_use]
     pub const fn role(&self) -> ActorRole {
         self.role
     }
@@ -319,5 +325,25 @@ mod tests {
         let narrow = EffectiveRole::coding().with_effect_keys(vec![ActorEffectKey::Replies]);
         assert_eq!(narrow.haskell_effects_type(), "'[Replies]");
         assert!(EffectiveRole::root().permits_child(&narrow));
+    }
+
+    #[test]
+    fn attenuating_descendants_preserves_every_other_role_dimension() {
+        let narrow = EffectiveRole::scaffolding(DescendantBudget {
+            maximum_depth: 3,
+            maximum_active_children: 4,
+        })
+        .with_effect_keys(vec![ActorEffectKey::Replies, ActorEffectKey::Forks]);
+        let attenuated = narrow.clone().with_descendant_budget(DescendantBudget {
+            maximum_depth: 2,
+            maximum_active_children: 4,
+        });
+
+        assert_eq!(attenuated.role(), narrow.role());
+        assert_eq!(attenuated.native_tools(), narrow.native_tools());
+        assert_eq!(attenuated.workspace(), narrow.workspace());
+        assert_eq!(attenuated.prompt_profile(), narrow.prompt_profile());
+        assert_eq!(attenuated.effect_keys(), narrow.effect_keys());
+        assert_eq!(attenuated.descendants().maximum_depth, 2);
     }
 }

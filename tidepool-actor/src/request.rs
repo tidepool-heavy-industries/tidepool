@@ -19,6 +19,7 @@ pub enum ResponseFailure {
     TargetFailed(String),
     TargetCancelled(String),
     RequesterStopped,
+    Abandoned,
     Cancelled,
     DeadlineExceeded,
 }
@@ -26,14 +27,50 @@ pub enum ResponseFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseObservation {
     Pending,
+    CancellationPending(CancellationReason),
     Ready,
     Unavailable(ResponseFailure),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelResponseOutcome {
-    CancelledNow,
+pub enum CancelRequestOutcome {
+    Requested,
+    AlreadyRequested,
     AlreadyTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbandonResponseOutcome {
+    AbandonedNow,
+    AlreadyAbandoned,
+    AlreadyTerminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetResponseOutcome {
+    Forgotten,
+    StillPending,
+    TargetStillActive,
+    RetainedByWatches(Vec<WatchId>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetWatchOutcome {
+    Forgotten,
+    StillPending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancellationReason {
+    RequesterCancelled,
+    DeadlineExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyObservation {
+    Open,
+    CancellationRequested(CancellationReason),
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +79,7 @@ pub enum ReplyError {
     AlreadySettled,
     Unauthorized,
     WrongIncarnation,
+    CancellationRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,20 +109,40 @@ pub struct WatchNotification {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RequestState {
+pub struct RequestCancellationNotification {
+    pub target: ActorRef,
+    pub request: RequestId,
+    pub reason: CancellationReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetState {
     Reserved,
     Queued,
     Presented,
+    CancellationRequested {
+        presented: bool,
+        reason: CancellationReason,
+    },
+    AcknowledgingCancellation(CancellationReason),
     Settling,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OwnerState {
+    Observing,
     Ready,
     Unavailable(ResponseFailure),
+    Abandoned,
 }
 
 struct RequestRecord {
     owner: ActorRef,
     target: ActorRef,
     label: String,
-    state: RequestState,
+    target_state: TargetState,
+    owner_state: OwnerState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,9 +201,9 @@ impl RequestRegistry {
             .iter()
             .filter(|(_, record)| {
                 record.target == target
-                    && matches!(
-                        record.state,
-                        RequestState::Queued | RequestState::Presented | RequestState::Settling
+                    && !matches!(
+                        record.target_state,
+                        TargetState::Reserved | TargetState::Closed
                     )
             })
             .map(|(request, record)| (*request, record.label.clone()))
@@ -168,17 +226,14 @@ impl RequestRegistry {
             if record.owner != owner {
                 continue;
             }
-            match record.state {
-                RequestState::Ready => status
+            match record.owner_state {
+                OwnerState::Ready => status
                     .ready_responses
                     .push((*request, record.label.clone())),
-                RequestState::Unavailable(_) => status
+                OwnerState::Unavailable(_) | OwnerState::Abandoned => status
                     .unavailable_responses
                     .push((*request, record.label.clone())),
-                RequestState::Reserved
-                | RequestState::Queued
-                | RequestState::Presented
-                | RequestState::Settling => status
+                OwnerState::Observing => status
                     .pending_responses
                     .push((*request, record.label.clone())),
             }
@@ -224,7 +279,8 @@ impl RequestRegistry {
                 owner,
                 target,
                 label,
-                state: RequestState::Reserved,
+                target_state: TargetState::Reserved,
+                owner_state: OwnerState::Observing,
             },
         );
         id
@@ -236,7 +292,10 @@ impl RequestRegistry {
         request: RequestId,
     ) -> Vec<WatchNotification> {
         self.transition_request(owner, request, |record| {
-            record.state = RequestState::Unavailable(ResponseFailure::TargetUnavailable);
+            record.target_state = TargetState::Closed;
+            if record.owner_state == OwnerState::Observing {
+                record.owner_state = OwnerState::Unavailable(ResponseFailure::TargetUnavailable);
+            }
         })
     }
 
@@ -252,28 +311,46 @@ impl RequestRegistry {
         if record.target != target {
             return Err(identity_error(record.target, target));
         }
-        match record.state {
-            RequestState::Reserved => {
-                record.state = RequestState::Queued;
+        match record.target_state {
+            TargetState::Reserved => {
+                record.target_state = TargetState::Queued;
                 Ok(())
             }
             _ => Err(ReplyError::AlreadySettled),
         }
     }
 
-    pub(crate) fn present(&self, target: ActorRef, request: RequestId) -> Result<(), ReplyError> {
+    pub(crate) fn present(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+    ) -> Result<Option<CancellationReason>, ReplyError> {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
-        match record.state {
-            RequestState::Queued => {
-                record.state = RequestState::Presented;
-                Ok(())
+        match record.target_state {
+            TargetState::Queued => {
+                record.target_state = TargetState::Presented;
+                Ok(None)
             }
-            RequestState::Unavailable(_) | RequestState::Ready => Err(ReplyError::AlreadySettled),
-            RequestState::Reserved | RequestState::Presented | RequestState::Settling => {
-                Err(ReplyError::Stale)
+            TargetState::CancellationRequested {
+                presented: false,
+                reason,
+            } => {
+                record.target_state = TargetState::CancellationRequested {
+                    presented: true,
+                    reason,
+                };
+                Ok(Some(reason))
             }
+            TargetState::Closed => Err(ReplyError::AlreadySettled),
+            TargetState::Reserved
+            | TargetState::Presented
+            | TargetState::CancellationRequested {
+                presented: true, ..
+            }
+            | TargetState::AcknowledgingCancellation(_)
+            | TargetState::Settling => Err(ReplyError::Stale),
         }
     }
 
@@ -285,13 +362,15 @@ impl RequestRegistry {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_target(record, target)?;
-        match record.state {
-            RequestState::Presented => {
-                record.state = RequestState::Settling;
+        match record.target_state {
+            TargetState::Presented => {
+                record.target_state = TargetState::Settling;
                 Ok(())
             }
-            RequestState::Ready | RequestState::Unavailable(_) => Err(ReplyError::AlreadySettled),
-            RequestState::Reserved | RequestState::Queued | RequestState::Settling => {
+            TargetState::CancellationRequested { .. }
+            | TargetState::AcknowledgingCancellation(_) => Err(ReplyError::CancellationRequested),
+            TargetState::Closed => Err(ReplyError::AlreadySettled),
+            TargetState::Reserved | TargetState::Queued | TargetState::Settling => {
                 Err(ReplyError::Stale)
             }
         }
@@ -302,18 +381,21 @@ impl RequestRegistry {
         let Some(record) = state.requests.get_mut(&request) else {
             return Vec::new();
         };
-        if record.state != RequestState::Settling {
+        if record.target_state != TargetState::Settling {
             return Vec::new();
         }
-        record.state = RequestState::Ready;
+        record.target_state = TargetState::Closed;
+        if record.owner_state == OwnerState::Observing {
+            record.owner_state = OwnerState::Ready;
+        }
         reevaluate_watches(&mut state)
     }
 
     pub(crate) fn rollback_reply(&self, request: RequestId) {
         let mut state = self.state.lock();
         if let Some(record) = state.requests.get_mut(&request) {
-            if record.state == RequestState::Settling {
-                record.state = RequestState::Presented;
+            if record.target_state == TargetState::Settling {
+                record.target_state = TargetState::Presented;
             }
         }
     }
@@ -326,40 +408,189 @@ impl RequestRegistry {
         let state = self.state.lock();
         let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        Ok(match &record.state {
-            RequestState::Reserved
-            | RequestState::Queued
-            | RequestState::Presented
-            | RequestState::Settling => ResponseObservation::Pending,
-            RequestState::Ready => ResponseObservation::Ready,
-            RequestState::Unavailable(failure) => ResponseObservation::Unavailable(failure.clone()),
+        Ok(match &record.owner_state {
+            OwnerState::Ready => ResponseObservation::Ready,
+            OwnerState::Unavailable(failure) => ResponseObservation::Unavailable(failure.clone()),
+            OwnerState::Abandoned => ResponseObservation::Unavailable(ResponseFailure::Abandoned),
+            OwnerState::Observing => match record.target_state {
+                TargetState::CancellationRequested { reason, .. } => {
+                    ResponseObservation::CancellationPending(reason)
+                }
+                _ => ResponseObservation::Pending,
+            },
         })
     }
 
-    pub(crate) fn cancel_response(
+    pub(crate) fn cancel_request(
         &self,
         owner: ActorRef,
         request: RequestId,
-    ) -> Result<(CancelResponseOutcome, Vec<WatchNotification>), ReplyError> {
+        reason: CancellationReason,
+    ) -> Result<
+        (
+            CancelRequestOutcome,
+            Option<RequestCancellationNotification>,
+        ),
+        ReplyError,
+    > {
         let mut state = self.state.lock();
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
-        if is_terminal(&record.state) {
-            return Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()));
+        if is_owner_terminal(&record.owner_state) || record.target_state == TargetState::Closed {
+            return Ok((CancelRequestOutcome::AlreadyTerminal, None));
         }
-        record.state = RequestState::Unavailable(ResponseFailure::Cancelled);
-        let notifications = reevaluate_watches(&mut state);
-        Ok((CancelResponseOutcome::CancelledNow, notifications))
+        if matches!(
+            record.target_state,
+            TargetState::CancellationRequested { .. } | TargetState::AcknowledgingCancellation(_)
+        ) {
+            return Ok((CancelRequestOutcome::AlreadyRequested, None));
+        }
+        if record.target_state == TargetState::Settling {
+            return Ok((CancelRequestOutcome::AlreadyTerminal, None));
+        }
+        let presented = record.target_state == TargetState::Presented;
+        record.target_state = TargetState::CancellationRequested { presented, reason };
+        let notification = presented.then_some(RequestCancellationNotification {
+            target: record.target,
+            request,
+            reason,
+        });
+        Ok((CancelRequestOutcome::Requested, notification))
     }
 
-    pub(crate) fn deadline_response(
+    pub(crate) fn deadline_request(
         &self,
         owner: ActorRef,
         request: RequestId,
-    ) -> Vec<WatchNotification> {
-        self.transition_request(owner, request, |record| {
-            record.state = RequestState::Unavailable(ResponseFailure::DeadlineExceeded);
+    ) -> Option<RequestCancellationNotification> {
+        self.cancel_request(owner, request, CancellationReason::DeadlineExpired)
+            .ok()
+            .and_then(|(_, notification)| notification)
+    }
+
+    pub(crate) fn observe_reply(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+    ) -> Result<ReplyObservation, ReplyError> {
+        let state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        authorize_target(record, target)?;
+        Ok(match record.target_state {
+            TargetState::CancellationRequested { reason, .. } => {
+                ReplyObservation::CancellationRequested(reason)
+            }
+            TargetState::AcknowledgingCancellation(reason) => {
+                ReplyObservation::CancellationRequested(reason)
+            }
+            TargetState::Closed => ReplyObservation::Closed,
+            _ => ReplyObservation::Open,
         })
+    }
+
+    pub(crate) fn begin_cancellation_acknowledgement(
+        &self,
+        target: ActorRef,
+        request: RequestId,
+    ) -> Result<CancellationReason, ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_target(record, target)?;
+        let reason = match record.target_state {
+            TargetState::CancellationRequested { reason, .. } => reason,
+            TargetState::Closed => return Err(ReplyError::AlreadySettled),
+            _ => return Err(ReplyError::Stale),
+        };
+        record.target_state = TargetState::AcknowledgingCancellation(reason);
+        Ok(reason)
+    }
+
+    pub(crate) fn finish_cancellation_acknowledgement(
+        &self,
+        request: RequestId,
+    ) -> Vec<WatchNotification> {
+        let mut state = self.state.lock();
+        let Some(record) = state.requests.get_mut(&request) else {
+            return Vec::new();
+        };
+        let TargetState::AcknowledgingCancellation(reason) = record.target_state else {
+            return Vec::new();
+        };
+        record.target_state = TargetState::Closed;
+        if record.owner_state == OwnerState::Observing {
+            record.owner_state = OwnerState::Unavailable(match reason {
+                CancellationReason::RequesterCancelled => ResponseFailure::Cancelled,
+                CancellationReason::DeadlineExpired => ResponseFailure::DeadlineExceeded,
+            });
+        }
+        reevaluate_watches(&mut state)
+    }
+
+    pub(crate) fn rollback_cancellation_acknowledgement(&self, request: RequestId) {
+        let mut state = self.state.lock();
+        if let Some(record) = state.requests.get_mut(&request) {
+            if let TargetState::AcknowledgingCancellation(reason) = record.target_state {
+                record.target_state = TargetState::CancellationRequested {
+                    presented: true,
+                    reason,
+                };
+            }
+        }
+    }
+
+    pub(crate) fn abandon_response(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+    ) -> Result<(AbandonResponseOutcome, Vec<WatchNotification>), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        let outcome = match record.owner_state {
+            OwnerState::Observing => {
+                record.owner_state = OwnerState::Abandoned;
+                AbandonResponseOutcome::AbandonedNow
+            }
+            OwnerState::Abandoned => AbandonResponseOutcome::AlreadyAbandoned,
+            OwnerState::Ready | OwnerState::Unavailable(_) => {
+                AbandonResponseOutcome::AlreadyTerminal
+            }
+        };
+        let notifications = reevaluate_watches(&mut state);
+        Ok((outcome, notifications))
+    }
+
+    pub(crate) fn forget_response(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+    ) -> Result<ForgetResponseOutcome, ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if record.owner_state == OwnerState::Observing {
+            return Ok(ForgetResponseOutcome::StillPending);
+        }
+        if record.target_state != TargetState::Closed {
+            return Ok(ForgetResponseOutcome::TargetStillActive);
+        }
+        let mut watches = state
+            .watches
+            .iter()
+            .filter(|(_, watch)| {
+                watch
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.request == request)
+            })
+            .map(|(watch, _)| *watch)
+            .collect::<Vec<_>>();
+        watches.sort_unstable();
+        if !watches.is_empty() {
+            return Ok(ForgetResponseOutcome::RetainedByWatches(watches));
+        }
+        state.requests.remove(&request);
+        Ok(ForgetResponseOutcome::Forgotten)
     }
 
     #[cfg(test)]
@@ -428,9 +659,12 @@ impl RequestRegistry {
                     .iter()
                     .filter_map(|dependency| {
                         let request = state.requests.get(&dependency.request)?;
-                        match &request.state {
-                            RequestState::Unavailable(failure) => {
+                        match &request.owner_state {
+                            OwnerState::Unavailable(failure) => {
                                 Some((dependency.request, failure.clone()))
+                            }
+                            OwnerState::Abandoned => {
+                                Some((dependency.request, ResponseFailure::Abandoned))
                             }
                             _ => None,
                         }
@@ -444,6 +678,53 @@ impl RequestRegistry {
         })
     }
 
+    pub(crate) fn forget_watch(
+        &self,
+        owner: ActorRef,
+        watch: WatchId,
+    ) -> Result<ForgetWatchOutcome, ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.watches.get(&watch).ok_or(ReplyError::Stale)?;
+        if record.owner != owner {
+            return Err(identity_error(record.owner, owner));
+        }
+        if record.state == WatchState::Pending {
+            return Ok(ForgetWatchOutcome::StillPending);
+        }
+        state.watches.remove(&watch);
+        Ok(ForgetWatchOutcome::Forgotten)
+    }
+
+    pub(crate) fn forget_terminal_actor_metadata(
+        &self,
+        actor: ActorRef,
+    ) -> Result<(), (Vec<RequestId>, Vec<WatchId>)> {
+        let mut state = self.state.lock();
+        let mut requests = state
+            .requests
+            .iter()
+            .filter(|(_, record)| {
+                record.target == actor
+                    || (record.owner == actor && record.target_state != TargetState::Closed)
+            })
+            .map(|(request, _)| *request)
+            .collect::<Vec<_>>();
+        let mut watches = state
+            .watches
+            .iter()
+            .filter(|(_, record)| record.owner == actor && record.state == WatchState::Pending)
+            .map(|(watch, _)| *watch)
+            .collect::<Vec<_>>();
+        requests.sort_unstable();
+        watches.sort_unstable();
+        if !requests.is_empty() || !watches.is_empty() {
+            return Err((requests, watches));
+        }
+        state.watches.retain(|_, record| record.owner != actor);
+        state.requests.retain(|_, record| record.owner != actor);
+        Ok(())
+    }
+
     pub(crate) fn actor_stopped(
         &self,
         actor: ActorRef,
@@ -451,21 +732,23 @@ impl RequestRegistry {
     ) -> Vec<WatchNotification> {
         let mut state = self.state.lock();
         for record in state.requests.values_mut() {
-            if is_terminal(&record.state) {
-                continue;
-            }
             if record.target == actor {
-                record.state = RequestState::Unavailable(match terminal.kind {
-                    ActorExitKind::Completed => ResponseFailure::TargetUnavailable,
-                    ActorExitKind::Failed => {
-                        ResponseFailure::TargetFailed(terminal.summary.clone())
+                if record.target_state != TargetState::Closed {
+                    record.target_state = TargetState::Closed;
+                    if record.owner_state == OwnerState::Observing {
+                        record.owner_state = OwnerState::Unavailable(match terminal.kind {
+                            ActorExitKind::Completed => ResponseFailure::TargetUnavailable,
+                            ActorExitKind::Failed => {
+                                ResponseFailure::TargetFailed(terminal.summary.clone())
+                            }
+                            ActorExitKind::Cancelled => {
+                                ResponseFailure::TargetCancelled(terminal.summary.clone())
+                            }
+                        });
                     }
-                    ActorExitKind::Cancelled => {
-                        ResponseFailure::TargetCancelled(terminal.summary.clone())
-                    }
-                });
-            } else if record.owner == actor {
-                record.state = RequestState::Unavailable(ResponseFailure::RequesterStopped);
+                }
+            } else if record.owner == actor && record.owner_state == OwnerState::Observing {
+                record.owner_state = OwnerState::Unavailable(ResponseFailure::RequesterStopped);
             }
         }
         reevaluate_watches(&mut state)
@@ -481,7 +764,7 @@ impl RequestRegistry {
         let Some(record) = state.requests.get_mut(&request) else {
             return Vec::new();
         };
-        if record.owner != owner || is_terminal(&record.state) {
+        if record.owner != owner || is_owner_terminal(&record.owner_state) {
             return Vec::new();
         }
         transition(record);
@@ -489,8 +772,11 @@ impl RequestRegistry {
     }
 }
 
-fn is_terminal(state: &RequestState) -> bool {
-    matches!(state, RequestState::Ready | RequestState::Unavailable(_))
+fn is_owner_terminal(state: &OwnerState) -> bool {
+    matches!(
+        state,
+        OwnerState::Ready | OwnerState::Unavailable(_) | OwnerState::Abandoned
+    )
 }
 
 fn authorize_owner(record: &RequestRecord, actor: ActorRef) -> Result<(), ReplyError> {
@@ -525,11 +811,17 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
         }
         let transition = watch.dependencies.iter().find_map(|dependency| {
             let record = state.requests.get(&dependency.request)?;
-            match &record.state {
-                RequestState::Unavailable(failure) if !dependency.allow_failure => {
+            match &record.owner_state {
+                OwnerState::Unavailable(failure) if !dependency.allow_failure => {
                     Some(WatchTransition::Unavailable {
                         request: dependency.request,
                         failure: failure.clone(),
+                    })
+                }
+                OwnerState::Abandoned if !dependency.allow_failure => {
+                    Some(WatchTransition::Unavailable {
+                        request: dependency.request,
+                        failure: ResponseFailure::Abandoned,
                     })
                 }
                 _ => None,
@@ -543,9 +835,11 @@ fn reevaluate_watches(state: &mut RequestStateTable) -> Vec<WatchNotification> {
                     state
                         .requests
                         .get(&dependency.request)
-                        .is_some_and(|record| match record.state {
-                            RequestState::Ready => true,
-                            RequestState::Unavailable(_) => dependency.allow_failure,
+                        .is_some_and(|record| match record.owner_state {
+                            OwnerState::Ready => true,
+                            OwnerState::Unavailable(_) | OwnerState::Abandoned => {
+                                dependency.allow_failure
+                            }
                             _ => false,
                         })
                 })
@@ -715,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn response_cancellation_is_authorized_terminal_and_idempotent() {
+    fn response_cancellation_requires_target_acknowledgement() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -725,11 +1019,34 @@ mod tests {
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
 
         assert_eq!(
-            registry.cancel_response(intruder, request),
+            registry.cancel_request(intruder, request, CancellationReason::RequesterCancelled),
             Err(ReplyError::Unauthorized)
         );
-        let (outcome, notifications) = registry.cancel_response(owner, request).unwrap();
-        assert_eq!(outcome, CancelResponseOutcome::CancelledNow);
+        let (outcome, notification) = registry
+            .cancel_request(owner, request, CancellationReason::RequesterCancelled)
+            .unwrap();
+        assert_eq!(outcome, CancelRequestOutcome::Requested);
+        assert_eq!(notification, None);
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::CancellationPending(
+                CancellationReason::RequesterCancelled
+            ))
+        );
+        assert_eq!(
+            registry.present(target, request),
+            Ok(Some(CancellationReason::RequesterCancelled))
+        );
+        assert_eq!(
+            registry.observe_reply(target, request),
+            Ok(ReplyObservation::CancellationRequested(
+                CancellationReason::RequesterCancelled
+            ))
+        );
+        registry
+            .begin_cancellation_acknowledgement(target, request)
+            .unwrap();
+        let notifications = registry.finish_cancellation_acknowledgement(request);
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
@@ -737,13 +1054,13 @@ mod tests {
             Ok(ResponseObservation::Unavailable(ResponseFailure::Cancelled))
         );
         assert_eq!(
-            registry.cancel_response(owner, request),
-            Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()))
+            registry.cancel_request(owner, request, CancellationReason::RequesterCancelled),
+            Ok((CancelRequestOutcome::AlreadyTerminal, None))
         );
     }
 
     #[test]
-    fn response_deadline_uses_the_same_single_terminal_transition() {
+    fn response_deadline_uses_the_same_acknowledged_transition() {
         let registry = RequestRegistry::default();
         let owner = actor(1);
         let target = actor(2);
@@ -751,7 +1068,18 @@ mod tests {
         registry.mark_queued(owner, target, request).unwrap();
         let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
 
-        let notifications = registry.deadline_response(owner, request);
+        assert_eq!(registry.deadline_request(owner, request), None);
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::CancellationPending(
+                CancellationReason::DeadlineExpired
+            ))
+        );
+        registry.present(target, request).unwrap();
+        registry
+            .begin_cancellation_acknowledgement(target, request)
+            .unwrap();
+        let notifications = registry.finish_cancellation_acknowledgement(request);
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].watch, watch);
         assert_eq!(
@@ -760,10 +1088,41 @@ mod tests {
                 ResponseFailure::DeadlineExceeded
             ))
         );
-        assert!(registry.deadline_response(owner, request).is_empty());
+        assert_eq!(registry.deadline_request(owner, request), None);
         assert_eq!(
-            registry.cancel_response(owner, request),
-            Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()))
+            registry.cancel_request(owner, request, CancellationReason::RequesterCancelled),
+            Ok((CancelRequestOutcome::AlreadyTerminal, None))
+        );
+    }
+
+    #[test]
+    fn abandonment_settles_observation_without_closing_target_execution() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+
+        let (outcome, _) = registry.abandon_response(owner, request).unwrap();
+        assert_eq!(outcome, AbandonResponseOutcome::AbandonedNow);
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(ResponseFailure::Abandoned))
+        );
+        assert_eq!(
+            registry.observe_reply(target, request),
+            Ok(ReplyObservation::Open)
+        );
+        registry.begin_reply(target, request).unwrap();
+        assert!(registry.finish_reply(request).is_empty());
+        assert_eq!(
+            registry.observe_reply(target, request),
+            Ok(ReplyObservation::Closed)
+        );
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(ResponseFailure::Abandoned))
         );
     }
 
@@ -805,6 +1164,44 @@ mod tests {
         assert_eq!(
             registry.register_watch(intruder, vec![request]),
             Err(ReplyError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn explicit_cleanup_refuses_live_dependencies_and_succeeds_inside_out() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        assert_eq!(
+            registry.forget_response(owner, request),
+            Ok(ForgetResponseOutcome::StillPending)
+        );
+        assert_eq!(
+            registry.forget_watch(owner, watch),
+            Ok(ForgetWatchOutcome::StillPending)
+        );
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+        assert_eq!(
+            registry.forget_response(owner, request),
+            Ok(ForgetResponseOutcome::RetainedByWatches(vec![watch]))
+        );
+        assert_eq!(
+            registry.forget_watch(owner, watch),
+            Ok(ForgetWatchOutcome::Forgotten)
+        );
+        assert_eq!(
+            registry.forget_response(owner, request),
+            Ok(ForgetResponseOutcome::Forgotten)
+        );
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Err(ReplyError::Stale)
         );
     }
 }

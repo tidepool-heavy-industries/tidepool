@@ -15,12 +15,21 @@ module Tidepool.Agent.Reply
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
-  , CancelOutcome (..)
+  , CancellationReason (..)
+  , CancelRequestOutcome (..)
+  , AbandonOutcome (..)
+  , ForgetResponseOutcome (..)
+  , ReplyState (..)
   , requestId
   , attemptReply
   , reply
   , pollResponse
-  , cancelResponse
+  , cancelRequest
+  , abandonResponse
+  , forgetResponse
+  , pollReply
+  , attemptAcknowledgeCancellation
+  , acknowledgeCancellation
   ) where
 
 import Tidepool.Agent.Reply.Internal
@@ -36,10 +45,19 @@ import Tidepool.Agent.Reply.Internal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
-  , CancelOutcome (..)
+  , CancellationReason (..)
+  , CancelRequestOutcome (..)
+  , AbandonOutcome (..)
+  , ForgetResponseOutcome (..)
+  , ReplyState (..)
   , attemptReply
   , pollResponse
-  , cancelResponse
+  , cancelRequest
+  , abandonResponse
+  , forgetResponse
+  , pollReply
+  , attemptAcknowledgeCancellation
+  , acknowledgeCancellation
   , reply
   , responseRequestId
   , requestLabel

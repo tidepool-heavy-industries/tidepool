@@ -26,6 +26,8 @@ module Tidepool.Actors.Unfold
   , batch
   , subgroup
   , Branch
+  , withBranchGuidance
+  , withBranchDeadline
   , RolePolicy
   , inspectionPolicy
   , codingPolicy
@@ -46,6 +48,10 @@ module Tidepool.Actors.Unfold
   , forkedResponse
   , forkedLaunch
   , BranchReceipt (..)
+  , ForkGroupHandle
+  , forkGroupHandle
+  , ForkGroupCleanupOutcome (..)
+  , cleanupForkGroup
   , awaitFork
   , awaitSettledFork
   , UnfoldError (..)
@@ -66,7 +72,11 @@ import Tidepool.Agent.Reply.Internal (RequestLabel (..))
 import Tidepool.Agent.Watch (Await, Settlement, awaitResponse, awaitSettled)
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
-  , requestSited
+  , RequestDeadline
+  , requestOptions
+  , requestWithSited
+  , withRequestDeadline
+  , withRequestGuidance
   , startForkedAgent
   , agentIdentity
   )
@@ -88,6 +98,7 @@ import Tidepool.Effects.Core
   , WorktreeReceipt
   , WorktreeSource (..)
   , Forks (..)
+  , ForkGroupCleanupOutcome (..)
   , WorktreeSpec (..)
   )
 import Tidepool.Worktree (worktreeId)
@@ -168,8 +179,31 @@ data Branch (childEffects :: [Type -> Type]) input result where
     -> ForkRole
     -> WorktreeSeed
     -> Effects childEffects
+    -> BranchOptions
     -> input
     -> Branch childEffects input result
+
+data BranchOptions = BranchOptions
+  { branchGuidance :: Maybe Text
+  , branchDeadline :: Maybe RequestDeadline
+  }
+
+defaultBranchOptions :: BranchOptions
+defaultBranchOptions = BranchOptions Nothing Nothing
+
+withBranchGuidance
+  :: Text
+  -> Branch child input result
+  -> Branch child input result
+withBranchGuidance guidance (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchGuidance = Just guidance }) input
+
+withBranchDeadline
+  :: RequestDeadline
+  -> Branch child input result
+  -> Branch child input result
+withBranchDeadline deadline (Branch label role seed effects options input) =
+  Branch label role seed effects (options { branchDeadline = Just deadline }) input
 
 data RolePolicy (childEffects :: [Type -> Type]) = RolePolicy ForkRole WorktreeSeed
 
@@ -193,7 +227,7 @@ narrowed
   -> input
   -> Branch child input result
 narrowed effects (RolePolicy role seed) label input =
-  Branch label role seed effects input
+  Branch label role seed effects defaultBranchOptions input
 
 researching
   :: forall result input
@@ -201,7 +235,7 @@ researching
   -> WorktreeSeed
   -> input
   -> Branch ResearchEffects input result
-researching label seed input = Branch label ResearchFork seed knownEffects input
+researching label seed input = Branch label ResearchFork seed knownEffects defaultBranchOptions input
 
 coding
   :: forall result input
@@ -209,7 +243,7 @@ coding
   -> WorktreeSeed
   -> input
   -> Branch CodingEffects input result
-coding label seed input = Branch label CodingFork seed knownEffects input
+coding label seed input = Branch label CodingFork seed knownEffects defaultBranchOptions input
 
 scaffolding
   :: forall result input
@@ -218,7 +252,7 @@ scaffolding
   -> input
   -> Branch ScaffoldEffects input result
 scaffolding label seed input =
-  Branch label ScaffoldingFork seed knownEffects input
+  Branch label ScaffoldingFork seed knownEffects defaultBranchOptions input
 
 integrating
   :: forall result input
@@ -227,7 +261,7 @@ integrating
   -> input
   -> Branch IntegrationEffects input result
 integrating label seed input =
-  Branch label IntegrationFork seed knownEffects input
+  Branch label IntegrationFork seed knownEffects defaultBranchOptions input
 
 data BranchReceipt = BranchReceipt
   { requestedPath :: Text
@@ -252,6 +286,18 @@ data Forked result = Forked
   , forkedResponse :: Response result
   , forkedLaunch :: BranchReceipt
   }
+
+newtype ForkGroupHandle = ForkGroupHandle Int
+  deriving (Show, Eq)
+
+forkGroupHandle :: Forked result -> ForkGroupHandle
+forkGroupHandle = ForkGroupHandle . forkGroupIdentity . forkedLaunch
+
+cleanupForkGroup
+  :: Member Forks effs
+  => ForkGroupHandle
+  -> Eff effs ForkGroupCleanupOutcome
+cleanupForkGroup (ForkGroupHandle groupId) = send (ForksCleanupWith groupId)
 
 data Unfold (parent :: [Type -> Type]) result where
   PureU :: result -> Unfold parent result
@@ -374,7 +420,7 @@ attemptUnfold (ForkGroupPath relative groupName) plan = do
 
     branchNames :: Unfold parent a -> [Text]
     branchNames (PureU _) = []
-    branchNames (BranchU _ (Branch (BranchLabel leaf) _ _ _ _)) = [leaf]
+    branchNames (BranchU _ (Branch (BranchLabel leaf) _ _ _ _ _)) = [leaf]
     branchNames (ApU functions arguments) =
       branchNames functions <> branchNames arguments
 
@@ -397,7 +443,7 @@ startBranch
   -> Text
   -> Branch child input result
   -> Eff effects (Either UnfoldError (AgentRef, Text, WorktreeHandle))
-startBranch groupId allocated (Branch _ role seed effects _) = do
+startBranch groupId allocated (Branch _ role seed effects _ _) = do
   let (worktreeSpec, dirtyPolicy) = seedRequest allocated seed
   launched <- startForkedAgent
     (launchRoleFor role)
@@ -432,10 +478,17 @@ requestBranch
   -> Text
   -> WorktreeHandle
   -> Eff effects (Forked result)
-requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) role _ _ input) actor allocated tree = do
+requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) role _ _ options input) actor allocated tree = do
   let requested = group <> "/" <> leaf
       (actorId, incarnation) = agentIdentity actor
-  response <- requestSited @result @input site actor (RequestLabel leaf) input
+  let baseOptions = requestOptions (RequestLabel leaf) input
+      guidedOptions = case branchGuidance options of
+        Nothing -> baseOptions
+        Just guidance -> withRequestGuidance guidance baseOptions
+      finalOptions = case branchDeadline options of
+        Nothing -> guidedOptions
+        Just deadline -> withRequestDeadline deadline guidedOptions
+  response <- requestWithSited @result @input site actor finalOptions
   pure Forked
     { forkedActor = actor
     , forkedResponse = response

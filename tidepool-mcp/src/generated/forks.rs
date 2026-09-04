@@ -12,9 +12,11 @@ pub fn forks_decl() -> crate::EffectDecl {
             "ForksStartWith :: Text -> (Int -> Eff childEffs ()) -> Int -> ActorLaunchRole -> ActorEffectProfile -> [Text] -> Maybe WorktreeSpec -> DirtyPolicy -> [ActorEffectKey] -> Forks (Either Text ((Int, Int, Text), WorktreeHandle))",
             "ForksCommitWith :: Int -> Forks (Either Text ())",
             "ForksAbortWith :: Int -> Forks (Either Text ())",
+            "ForksCleanupWith :: Int -> Forks ForkGroupCleanupOutcome",
         ],
         type_defs: &[
             "data ActorEffectKey = EffectReplies | EffectWatches | EffectForks | EffectActorContext | EffectAgentLaunch | EffectAgentInspection | EffectAgentControl | EffectBoundWorktree | EffectWorktreeRegistry | EffectWorktreeAllocation | EffectWorktreeIntegration deriving (Show, Eq)",
+            "data ForkGroupCleanupOutcome = ForkGroupCleaned | ForkGroupStillActive [(Int, Int)] | ForkGroupCleanupRejected Text deriving (Show, Eq)",
         ],
         extra_imports: &[],
         helpers: &[],

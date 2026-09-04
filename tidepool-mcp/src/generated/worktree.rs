@@ -14,6 +14,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "WorktreeLookup :: WorktreeId -> Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeBound :: Worktree (Either WorktreeError WorktreeHandle)",
             "WorktreeList :: Worktree (Either WorktreeError [WorktreeSummary])",
+            "WorktreeListMatching :: Maybe Bool -> Maybe Text -> Maybe Int -> Worktree (Either WorktreeError [WorktreeSummary])",
             "WorktreeBranchOf :: WorktreeId -> Worktree (Either WorktreeError BranchName)",
             "WorktreeHeadOf :: WorktreeId -> Worktree (Either WorktreeError GitOid)",
             "WorktreeObserveSubmission :: WorktreeId -> Worktree (Either WorktreeError SubmissionObservation)",

@@ -10,6 +10,7 @@ pub fn worktree_registry_decl() -> crate::EffectDecl {
         constructors: &[
             "WorktreeRegistryLookup :: WorktreeId -> WorktreeRegistry (Either WorktreeError WorktreeHandle)",
             "WorktreeRegistryList :: WorktreeRegistry (Either WorktreeError [WorktreeSummary])",
+            "WorktreeRegistryQuery :: Maybe Bool -> Maybe Text -> Maybe Int -> WorktreeRegistry (Either WorktreeError [WorktreeSummary])",
         ],
         type_defs: &[],
         extra_imports: &[],

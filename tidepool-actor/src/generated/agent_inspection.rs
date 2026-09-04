@@ -15,4 +15,5 @@ use tidepool_bridge_derive::FromCore;
 pub enum AgentInspectionReq {
     AgentInspectWith((i64, i64)),
     AgentListWith,
+    AgentForgetWith((i64, i64)),
 }

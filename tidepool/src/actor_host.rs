@@ -221,6 +221,10 @@ enum TypedActorEvent {
         watch: tidepool_actor::WatchId,
         transition: tidepool_actor::WatchTransition,
     },
+    RequestCancellation {
+        request: tidepool_actor::RequestId,
+        reason: tidepool_actor::CancellationReason,
+    },
     ChildExited,
 }
 
@@ -242,6 +246,10 @@ impl DurableActorEvent {
             Self::Typed(TypedActorEvent::WatchChanged { watch, transition }) => format!(
                 "Typed watch {} changed to {transition:?}. Inspect it with `pollWatch`; the handle is authoritative.",
                 watch.0,
+            ),
+            Self::Typed(TypedActorEvent::RequestCancellation { request, reason }) => format!(
+                "Typed request {} has cancellation pending ({reason:?}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
+                request.0,
             ),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
         }
@@ -965,6 +973,21 @@ async fn run_interactive_applications(
                             }),
                         ));
                     }
+                    LocalResidentDeployment::RequestCancellation { notification } => {
+                        let Some(application) = deployments
+                            .iter()
+                            .find(|app| app.actor == notification.target)
+                        else {
+                            continue;
+                        };
+                        notifications.spawn(publish_inbox_event(
+                            Arc::clone(&application.inbox),
+                            DurableActorEvent::Typed(TypedActorEvent::RequestCancellation {
+                                request: notification.request,
+                                reason: notification.reason,
+                            }),
+                        ));
+                    }
                 }
             }
             launched = launches.join_next(), if !launches.is_empty() => {
@@ -1076,6 +1099,7 @@ async fn run_interactive_applications(
                             thread.clone(),
                             Arc::clone(&backend),
                             deployment.workspace.clone(),
+                            deployment.runtime_observation.clone(),
                             stop_delivery,
                         ));
                         deployment.connection = InteractiveConnection::Bound {
@@ -1378,6 +1402,7 @@ async fn launch_prepared_interactive_application(
         )?;
     let writable_roots = writable_repository_roots(
         actor_identity == root,
+        installation.effective_role.workspace(),
         &config.workspace,
         worktree.as_ref().map(WorktreeHandle::cwd),
         &git_common_dir,
@@ -1714,9 +1739,11 @@ async fn run_delivery_pump(
     thread: QueueReadyThread,
     backend: Arc<dyn InteractiveAgentBackend>,
     workspace: PathBuf,
+    runtime_observation: tidepool_actor::ActorRuntimeObservationHandle,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut health = tokio::time::interval(Duration::from_secs(1));
+    let mut usage_poll = tokio::time::interval(Duration::from_secs(10));
     let mut last_error = None;
     loop {
         tokio::select! {
@@ -1735,6 +1762,16 @@ async fn run_delivery_pump(
                         }
                         last_error = Some(error);
                     }
+                }
+            }
+            _ = usage_poll.tick() => {
+                match backend.usage(&thread).await {
+                    Ok(Some(usage)) => runtime_observation.publish_cache_usage(
+                        usage.cached_input_tokens,
+                        usage.input_tokens.saturating_sub(usage.cached_input_tokens),
+                    ),
+                    Ok(None) => {}
+                    Err(error) => tracing::debug!(actor = ?actor, %error, "provider usage observation unavailable"),
                 }
             }
         }
@@ -2008,6 +2045,7 @@ fn worktree_grant(role: tidepool_actor::ActorRole) -> ActorWorktreeGrant {
 
 fn writable_repository_roots(
     root: bool,
+    workspace_access: tidepool_actor::WorkspaceAccess,
     source: &Path,
     worker_worktree: Option<&Path>,
     git_common_dir: &Path,
@@ -2016,13 +2054,17 @@ fn writable_repository_roots(
         // Integration advances the source HEAD; child coding happens only in
         // the exact linked worktree granted to that child.
         vec![source.to_path_buf()]
-    } else {
+    } else if workspace_access == tidepool_actor::WorkspaceAccess::WritableBound {
         worker_worktree.map(Path::to_path_buf).into_iter().collect()
+    } else {
+        Vec::new()
     };
-    // Linked worktrees intentionally share objects, refs, config, and
-    // per-worktree administrative state. Making the resolved common dir
-    // writable is what lets native Git behave normally inside every actor.
-    writable.push(git_common_dir.to_path_buf());
+    if root || workspace_access == tidepool_actor::WorkspaceAccess::WritableBound {
+        // Writable linked worktrees intentionally share objects, refs, config,
+        // and per-worktree administrative state. Inspection-only actors must
+        // observe the same metadata without being able to mutate it.
+        writable.push(git_common_dir.to_path_buf());
+    }
     writable
 }
 
@@ -2295,16 +2337,34 @@ mod tests {
         let common = Path::new("/source/.git");
 
         assert_eq!(
-            writable_repository_roots(true, source, None, common),
+            writable_repository_roots(
+                true,
+                tidepool_actor::WorkspaceAccess::WritableBound,
+                source,
+                None,
+                common,
+            ),
             vec![source.to_path_buf(), common.to_path_buf()]
         );
         assert_eq!(
-            writable_repository_roots(false, source, Some(worker), common),
+            writable_repository_roots(
+                false,
+                tidepool_actor::WorkspaceAccess::WritableBound,
+                source,
+                Some(worker),
+                common,
+            ),
             vec![worker.to_path_buf(), common.to_path_buf()]
         );
         assert_eq!(
-            writable_repository_roots(false, source, None, common),
-            vec![common.to_path_buf()]
+            writable_repository_roots(
+                false,
+                tidepool_actor::WorkspaceAccess::InspectOnly,
+                source,
+                Some(worker),
+                common,
+            ),
+            Vec::<PathBuf>::new()
         );
     }
 
@@ -3459,21 +3519,20 @@ mod tests {
             "{pending_status}"
         );
         assert!(
-            pending_status.contains("responses pending=[")
+            pending_status.contains("responses:")
                 && pending_status.contains("\"worker\"")
                 && pending_status.contains("\"witness\""),
             "{pending_status}"
         );
         assert!(
-            pending_status.contains("watches pending=[")
-                && pending_status.contains("\"both-ready\""),
+            pending_status.contains("watches:") && pending_status.contains("\"both-ready\""),
             "{pending_status}"
         );
         assert!(
-            pending_status.contains("actors=[")
+            pending_status.contains("actors:\n")
                 && pending_status.contains("role=Research")
                 && pending_status.contains("role=Scaffolding")
-                && pending_status.contains("worktree=Some("),
+                && pending_status.contains("bound_worktree=Some("),
             "{pending_status}"
         );
         let launch_receipt = dispatch_haskell_script(

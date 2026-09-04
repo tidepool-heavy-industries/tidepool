@@ -1,8 +1,9 @@
 # Persistent applications, typed replies, and watches
 
-Status: core vertical implemented and focused integration checks passing; a
-fresh live-console canary is available. Supervisor deadlines/cancellation and
-live-result reclamation remain follow-up slices. This design supersedes the
+Status: core vertical, acknowledged cancellation, and explicit retention
+cleanup implemented with focused and provider-backed checks passing. A fresh
+live-console run remains a useful operator canary, not an implementation gate.
+This design supersedes the
 root-completion and interactive `AgentAction` direction in the workbench
 correctness wave.
 
@@ -512,13 +513,14 @@ consumer has migrated.
 - Update prompts and the field guide only after the replacement surface is
   executable.
 
-### 8. Supervisor deadlines and cancellation
+### 8. Supervisor deadlines and cancellation (implemented)
 
-- Add typed deadline and cancellation operations against the single request
-  state owner.
-- Return receipts distinguishing already terminal, cancellation requested,
-  graceful settlement, and forced termination.
-- Settle every affected response and watch exactly once during actor shutdown.
+- Deadlines and `cancelRequest` request cancellation from the single request
+  state owner; they do not claim terminal success before target acknowledgement.
+- Targets observe cancellation through `pollReply` and make it terminal with
+  `acknowledgeCancellation`; owner-side `abandonResponse` is a separate action.
+- Explicit response/watch/agent/fork-group cleanup refuses live dependencies
+  and removes metadata inside-out without deleting Git custody.
 
 Worktree API consistency and merge-direction naming remain a separate change.
 They do not share lifecycle ownership with this plan.
