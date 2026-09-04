@@ -9,6 +9,10 @@ sketches in
 [architecture.md](architecture.md) and
 [haskell-surface.md](haskell-surface.md).
 
+Live production-like campaign findings and the active post-implementation
+hardening checklist are tracked separately in
+[live context-unfold dogfood follow-ups](live-context-unfold-dogfood-followups.md).
+
 This file is the root document for the feature: product decisions, worked
 LLM interaction, runtime boundaries, implementation ordering, and the durable
 implementation checklist all live here. Supporting actor-model documents provide

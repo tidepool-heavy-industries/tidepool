@@ -157,6 +157,10 @@ restating it unless an acceptance test needs the detail.
    specifies the accepted next interaction surface: an applicative fork plan,
    narrowed child roles, persistent handles, authoritative per-response
    worktree evidence, and a later typed fold through `Await` and `Watch`.
+8. [Live context-unfold dogfood follow-ups](live-context-unfold-dogfood-followups.md)
+   is the active hardening plan derived from the first recursive production-like
+   campaign: reply/JIT correctness, dimensional deadlines, structured tracing,
+   stable build-cache leases, and focused workbench ergonomics.
 
 ## Vocabulary
 

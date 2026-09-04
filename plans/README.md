@@ -17,6 +17,8 @@ charter / glossary and the plan file is deleted (git is the archive).
   and the canonical root plan, implementation handoff, and todo checklist for the
   accepted next interaction surface is
   [cache-preserving context unfold](actor-model/cache-preserving-context-unfold.md).
+  Live recursive dogfood findings and the next hardening checklist are in
+  [live context-unfold dogfood follow-ups](actor-model/live-context-unfold-dogfood-followups.md).
 - [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
   `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
   candidate/review/revision interpreter. The current runnable slice uses a
