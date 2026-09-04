@@ -49,8 +49,9 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "deadline" | "deadlines" | "duration" => {
             Ok(include_str!("../../prompts/shoal/docs/deadline.md"))
         }
+        "cleanup" | "clean" => Ok(include_str!("../../prompts/shoal/docs/cleanup.md")),
         "help" | "topics" => {
-            Ok("Shoal topics: request, unfold, watch, deadline. Use `:doc <topic>`.")
+            Ok("Shoal topics: request, unfold, watch, deadline, cleanup. Use `:doc <topic>`.")
         }
         other => Err(format!(
             "unknown Shoal documentation topic `{other}`; use `:doc topics`"
@@ -82,6 +83,7 @@ mod tests {
         assert!(description.contains("Ordinary model-response termination"));
         assert!(!description.contains("assemble"));
         assert!(workbench_doc("unfold").unwrap().contains("Forked a"));
+        assert!(workbench_doc("cleanup").unwrap().contains("executeCleanup"));
         assert!(workbench_doc("missing").is_err());
     }
 }

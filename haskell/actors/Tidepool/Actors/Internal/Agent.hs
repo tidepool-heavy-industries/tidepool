@@ -75,12 +75,12 @@ import Tidepool.Agent.Session
   , requestSessionSited
   )
 import Tidepool.Effects.Core
-  ( ActorCallStatus (..)
-  , ActorEffectKey
+  ( ActorEffectKey
   , ActorEffectProfile (..)
   , ActorKernel (..)
   , ActorLaunchRole (..)
   , AgentControl (..)
+  , AgentStopControlOutcome (..)
   , AgentInspection (..)
   , AgentLaunch (..)
   , AgentRosterEntry (..)
@@ -92,7 +92,7 @@ import Tidepool.Effects.Core
   , DirtyPolicy
   )
 import qualified Tidepool.Effects.Core as Core
-import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
+import Tidepool.Internal.ExitCell (fillExitCell, newExitCell)
 import Tidepool.Duration
   ( Duration
   , RequestDeadline
@@ -196,7 +196,6 @@ data AgentProtocol result where
   RunRequest
     :: Eff (Actor.ReadOnlyEffects AgentProtocol) ()
     -> AgentProtocol ()
-  StopAgent :: AgentProtocol ()
 
 data RequestOptions input = RequestOptions
   { requestOptionsLabel :: RequestLabel
@@ -371,35 +370,31 @@ activationGuidance label (Just guidance) =
 
 -- | Observable result of asking one exact actor incarnation to retire.
 --
--- A stop request is cooperative and mailbox ordered. 'StopRequested' means
--- the target accepted that request; lifecycle observation may still briefly
--- report it as running. Repeating the operation after terminal publication is
--- harmless and returns 'AlreadyStopped'.
+-- Retirement is supervisor-owned and mailbox ordered. 'StoppedNow' means the
+-- exact incarnation published its terminal state before the operation
+-- returned. Repeating the operation is harmless and returns 'AlreadyStopped'.
 data StopOutcome
-  = StopRequested
-  | AlreadyStopped (Actor.ActorExit ())
+  = StoppedNow
+  | AlreadyStopped
+  | StopUnavailable
+  | StopUnauthorized
   | StopFailed Text
   deriving (Show, Eq)
 
 -- | Ask an agent to retire after all earlier mailbox requests settle.
 -- The typed receipt makes retries and already-terminal handles explicit.
 stopAgent
-  :: (Member AgentControl effs, Member AgentInspection effs)
+  :: Member AgentControl effs
   => AgentRef
   -> Eff effs StopOutcome
 stopAgent (AgentRef target _) = do
-  before <- pollAgentExit target
-  case before of
-    Just terminal -> pure (AlreadyStopped terminal)
-    Nothing -> do
-      requested <- tryControlCall target StopAgent
-      case requested of
-        Right () -> pure StopRequested
-        Left failure -> do
-          after <- pollAgentExit target
-          pure $ case after of
-            Just terminal -> AlreadyStopped terminal
-            Nothing -> StopFailed failure
+  outcome <- send (AgentControlStopWith (actorAddress target))
+  pure $ case outcome of
+    AgentStoppedNow -> StoppedNow
+    AgentStopAlreadyStopped -> AlreadyStopped
+    AgentStopUnavailable -> StopUnavailable
+    AgentStopUnauthorized -> StopUnauthorized
+    AgentStopFailed detail -> StopFailed detail
 
 launchFreshActor
   :: forall effs startup api exit
@@ -477,40 +472,12 @@ launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
     Right ((actorId, incarnation, allocatedPath), tree) ->
       Right (ActorInternal.ActorRef actorId incarnation cell, allocatedPath, tree)
 
-pollAgentExit
-  :: Member AgentInspection effs
-  => Actor.ActorRef api exit
-  -> Eff effs (Maybe (Actor.ActorExit exit))
-pollAgentExit (ActorInternal.ActorRef actorId incarnation cell) = do
-  roster <- send (AgentInspectWith (actorId, incarnation))
-  pure (roster >>= decodeTerminal cell . rosterState)
-  where
-    decodeTerminal retained status = case status of
-      RosterRunning -> Nothing
-      RosterStopped ->
-        case readExitCell status retained of
-          Just value -> Just (Actor.Completed value)
-          Nothing -> error "observeAgent: completed actor has an empty exit cell"
-      RosterFailed summary -> Just (Actor.Failed (Actor.ActorFailure summary))
-      RosterCancelled summary -> Just (Actor.Cancelled (Actor.CancelReason summary))
-
 inspectAgent
   :: Member AgentInspection effs
   => Actor.ActorRef api exit
   -> Eff effs (Maybe AgentRosterEntry)
 inspectAgent (ActorInternal.ActorRef actorId incarnation _) =
   send (AgentInspectWith (actorId, incarnation))
-
-tryControlCall
-  :: Member AgentControl effs
-  => Actor.ActorRef protocol exit
-  -> protocol ()
-  -> Eff effs (Either Text ())
-tryControlCall (ActorInternal.ActorRef actorId incarnation _) request = do
-  status <- send (AgentControlTryCallWith (actorId, incarnation) request)
-  pure $ case status of
-    ActorCallSucceeded -> Right ()
-    ActorCallFailed summary -> Left summary
 
 profileCode :: Actor.EffectProfile protocol effs -> ActorEffectProfile
 profileCode Actor.ReadWrite = ActorReadWriteProfile
@@ -567,7 +534,6 @@ agentLoop = do
        . AgentProtocol result
       -> Eff (Actor.ReadOnlyEffects AgentProtocol) (result, Bool)
     handle (RunRequest action) = action >> pure ((), True)
-    handle StopAgent = pure ((), False)
 
 actorAddress :: Actor.ActorRef protocol exit -> (Int, Int)
 actorAddress (ActorInternal.ActorRef actorId incarnation _) =

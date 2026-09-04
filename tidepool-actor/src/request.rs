@@ -315,7 +315,125 @@ pub(crate) struct ActorRequestStatus {
     pub deadlines: Vec<(RequestId, String)>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CleanupMetadataOutcome {
+    pub forgotten_responses: Vec<RequestId>,
+    pub forgotten_watches: Vec<WatchId>,
+    pub pending_responses: Vec<RequestId>,
+    pub pending_watches: Vec<WatchId>,
+}
+
 impl RequestRegistry {
+    pub(crate) fn campaign_cleanup_blockers(
+        &self,
+        owners: &std::collections::HashSet<ActorRef>,
+        targets: &std::collections::HashSet<ActorRef>,
+    ) -> (Vec<RequestId>, Vec<WatchId>) {
+        let state = self.state.lock();
+        let scoped = state
+            .requests
+            .iter()
+            .filter_map(|(request, record)| {
+                (owners.contains(&record.owner) && targets.contains(&record.target))
+                    .then_some((*request, record))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut requests = scoped
+            .iter()
+            .filter_map(|(request, record)| {
+                (record.owner_state == OwnerState::Observing
+                    || record.target_state != TargetState::Closed)
+                    .then_some(*request)
+            })
+            .collect::<Vec<_>>();
+        let mut watches = state
+            .watches
+            .iter()
+            .filter_map(|(watch, record)| {
+                (owners.contains(&record.owner)
+                    && record.state == WatchState::Pending
+                    && record
+                        .dependencies
+                        .iter()
+                        .any(|dependency| scoped.contains_key(&dependency.request)))
+                .then_some(*watch)
+            })
+            .collect::<Vec<_>>();
+        requests.sort_unstable();
+        watches.sort_unstable();
+        (requests, watches)
+    }
+
+    /// Release terminal request/watch metadata owned by `owner` and wholly
+    /// contained in `targets`. Pending dependencies are reported as blockers
+    /// and retained. This is the request owner's campaign-cleanup primitive;
+    /// callers do not reproduce dependency ordering.
+    pub(crate) fn cleanup_campaign_metadata(
+        &self,
+        owner: ActorRef,
+        targets: &std::collections::HashSet<ActorRef>,
+    ) -> CleanupMetadataOutcome {
+        let mut state = self.state.lock();
+        let scoped_requests = state
+            .requests
+            .iter()
+            .filter_map(|(request, record)| {
+                (record.owner == owner && targets.contains(&record.target)).then_some(*request)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let scoped_watches = state
+            .watches
+            .iter()
+            .filter_map(|(watch, record)| {
+                (record.owner == owner
+                    && !record.dependencies.is_empty()
+                    && record
+                        .dependencies
+                        .iter()
+                        .all(|dependency| scoped_requests.contains(&dependency.request)))
+                .then_some(*watch)
+            })
+            .collect::<Vec<_>>();
+
+        let mut outcome = CleanupMetadataOutcome::default();
+        for watch in scoped_watches {
+            let Some(record) = state.watches.get(&watch) else {
+                continue;
+            };
+            if record.state == WatchState::Pending {
+                outcome.pending_watches.push(watch);
+            } else {
+                state.watches.remove(&watch);
+                outcome.forgotten_watches.push(watch);
+            }
+        }
+        for request in scoped_requests {
+            let retained_by_watch = state.watches.values().any(|watch| {
+                watch
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.request == request)
+            });
+            let Some(record) = state.requests.get(&request) else {
+                continue;
+            };
+            if record.owner_state == OwnerState::Observing
+                || record.target_state != TargetState::Closed
+                || retained_by_watch
+            {
+                outcome.pending_responses.push(request);
+            } else {
+                state.requests.remove(&request);
+                outcome.forgotten_responses.push(request);
+            }
+        }
+        outcome.forgotten_responses.sort_unstable();
+        outcome.forgotten_watches.sort_unstable();
+        outcome.pending_responses.sort_unstable();
+        outcome.pending_watches.sort_unstable();
+        outcome
+    }
+
     pub(crate) fn active_for_target(&self, target: ActorRef) -> Vec<(RequestId, String)> {
         let state = self.state.lock();
         let mut active = state
@@ -1558,6 +1676,48 @@ mod tests {
         assert_eq!(
             registry.observe_response(owner, request),
             Err(ReplyError::Stale)
+        );
+    }
+
+    #[test]
+    fn campaign_cleanup_forgets_only_terminal_scoped_metadata_and_reports_blockers() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let ready_target = actor(2);
+        let pending_target = actor(3);
+        let outside_target = actor(4);
+
+        let ready = registry.reserve_labeled(owner, ready_target, "ready".into());
+        registry.mark_queued(owner, ready_target, ready).unwrap();
+        registry.present(ready_target, ready).unwrap();
+        let (ready_watch, _) = registry.register_watch(owner, vec![ready]).unwrap();
+        registry.begin_reply(ready_target, ready).unwrap();
+        registry.finish_reply(ready);
+
+        let pending = registry.reserve_labeled(owner, pending_target, "pending".into());
+        registry
+            .mark_queued(owner, pending_target, pending)
+            .unwrap();
+        let outside = registry.reserve_labeled(owner, outside_target, "outside".into());
+        registry
+            .mark_queued(owner, outside_target, outside)
+            .unwrap();
+
+        let owners = [owner].into_iter().collect();
+        let targets = [ready_target, pending_target].into_iter().collect();
+        assert_eq!(
+            registry.campaign_cleanup_blockers(&owners, &targets),
+            (vec![pending], Vec::new())
+        );
+        let outcome = registry.cleanup_campaign_metadata(owner, &targets);
+        assert_eq!(outcome.forgotten_responses, vec![ready]);
+        assert_eq!(outcome.forgotten_watches, vec![ready_watch]);
+        assert_eq!(outcome.pending_responses, vec![pending]);
+        assert!(outcome.pending_watches.is_empty());
+        assert_eq!(
+            registry.observe_response(owner, outside),
+            Ok(ResponseObservation::Pending),
+            "another campaign remains untouched"
         );
     }
 }

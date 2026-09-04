@@ -62,6 +62,13 @@ module Tidepool.Actors.Unfold
   , observeCampaign
   , ForkGroupCleanupOutcome (..)
   , cleanupForkGroup
+  , CleanupPlan (..)
+  , CleanupActorPlan (..)
+  , CleanupActorState (..)
+  , CleanupReceipt (..)
+  , CleanupStepReceipt (..)
+  , planCleanup
+  , executeCleanup
   , awaitFork
   , awaitSettledFork
   , UnfoldError (..)
@@ -104,7 +111,13 @@ import Tidepool.Actors.Role
   , knownEffects
   )
 import Tidepool.Effects.Core
-  ( DirtyPolicy (..)
+  ( AgentControl (..)
+  , CleanupActorPlan (..)
+  , CleanupActorState (..)
+  , CleanupPlan (..)
+  , CleanupReceipt (..)
+  , CleanupStepReceipt (..)
+  , DirtyPolicy (..)
   , AgentRosterEntry (..)
   , GitRef
   , WorktreeHandle (..)
@@ -374,6 +387,18 @@ cleanupForkGroup
   => ForkGroupHandle
   -> Eff effs ForkGroupCleanupOutcome
 cleanupForkGroup (ForkGroupHandle groupId _) = send (ForksCleanupWith groupId)
+
+planCleanup
+  :: Member AgentControl effs
+  => ForkGroupHandle
+  -> Eff effs CleanupPlan
+planCleanup (ForkGroupHandle groupId _) = send (AgentControlPlanCleanupWith groupId)
+
+executeCleanup
+  :: Member AgentControl effs
+  => CleanupPlan
+  -> Eff effs CleanupReceipt
+executeCleanup plan = send (AgentControlExecuteCleanupWith (cleanupPlanGroup plan))
 
 data Unfold (parent :: [Type -> Type]) result where
   PureU :: result -> Unfold parent result

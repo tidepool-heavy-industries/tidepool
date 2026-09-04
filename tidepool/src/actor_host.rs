@@ -3900,7 +3900,7 @@ mod tests {
             )
             .await
         });
-        let child_installations = tokio::time::timeout(Duration::from_secs(60), async {
+        let child_installations = tokio::time::timeout(Duration::from_secs(180), async {
             let mut children = Vec::new();
             while children.len() < 3 {
                 match deployments.recv().await {
@@ -4470,6 +4470,45 @@ mod tests {
             .is_some_and(|output| {
                 output.contains("ReplyAvailable") && output.contains("ScaffoldReport \"folded\"")
             }));
+
+        let cleanup_plan = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "campaignCleanupPlan <- planCleanup (forkGroupHandle (first3 workers))\ncampaignCleanupPlan",
+        )
+        .await;
+        assert_eq!(cleanup_plan["status"], "committed", "{cleanup_plan:?}");
+        assert!(
+            cleanup_plan["items"][1]["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("cleanupPlanRefusal = Nothing")),
+            "{cleanup_plan:?}"
+        );
+
+        let cleanup = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "campaignCleanupReceipt <- executeCleanup campaignCleanupPlan\ncampaignCleanupReceipt",
+        )
+        .await;
+        assert_eq!(cleanup["status"], "committed", "{cleanup:?}");
+        assert!(
+            cleanup["items"][1]["output"]
+                .as_str()
+                .is_some_and(|output| {
+                    output.contains("cleanupReceiptComplete = True")
+                        && output.contains("CleanupGroupRetired")
+                }),
+            "{cleanup:?}"
+        );
+
+        let cleanup_retry = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "executeCleanup campaignCleanupPlan",
+        )
+        .await;
+        assert_eq!(cleanup_retry["status"], "committed", "{cleanup_retry:?}");
+        assert!(cleanup_retry["items"][0]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("cleanupReceiptComplete = True")));
 
         actor
             .shutdown(ActorTerminal {

@@ -112,6 +112,18 @@ retainedAgentDependencies outcome =
 releaseForkGroup :: Forked result -> Eff ActorEffects ForkGroupCleanupOutcome
 releaseForkGroup = cleanupForkGroup . forkGroupHandle
 
+inspectCleanup :: Forked result -> Eff ActorEffects CleanupPlan
+inspectCleanup = planCleanup . forkGroupHandle
+
+runCleanup :: CleanupPlan -> Eff ActorEffects CleanupReceipt
+runCleanup = executeCleanup
+
+cleanupBlocked :: CleanupPlan -> Bool
+cleanupBlocked plan =
+  not (null (cleanupPlanPendingResponses plan))
+    || not (null (cleanupPlanPendingWatches plan))
+    || maybe False (const True) (cleanupPlanRefusal plan)
+
 safeHead
   :: WorktreeHandle
   -> Eff CodingActorEffects (Either WorktreeError GitOid)

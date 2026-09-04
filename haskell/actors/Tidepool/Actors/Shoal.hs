@@ -89,6 +89,13 @@ module Tidepool.Actors.Shoal
   , observeCampaign
   , ForkGroupCleanupOutcome (..)
   , cleanupForkGroup
+  , CleanupPlan (..)
+  , CleanupActorPlan (..)
+  , CleanupActorState (..)
+  , CleanupReceipt (..)
+  , CleanupStepReceipt (..)
+  , planCleanup
+  , executeCleanup
   , awaitFork
   , awaitSettledFork
   , UnfoldError (..)

@@ -271,6 +271,51 @@ pub(crate) enum AgentForgetProjection {
     Unavailable,
 }
 
+#[derive(Clone)]
+pub(crate) enum AgentStopProjection {
+    StoppedNow,
+    AlreadyStopped,
+    Unavailable,
+    Unauthorized,
+    Failed(String),
+}
+
+#[derive(Clone)]
+pub(crate) struct CleanupActorProjection {
+    pub actor: crate::ActorRef,
+    pub label: String,
+    pub terminal: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct CleanupPlanProjection {
+    pub group: crate::ForkGroupId,
+    pub actors: Vec<CleanupActorProjection>,
+    pub pending_responses: Vec<crate::RequestId>,
+    pub pending_watches: Vec<crate::WatchId>,
+    pub refusal: Option<String>,
+}
+
+pub(crate) enum CleanupStepProjection {
+    ForgotResponses(Vec<crate::RequestId>),
+    ForgotWatches(Vec<crate::WatchId>),
+    StoppedActor(crate::ActorRef, AgentStopProjection),
+    ForgotActor(crate::ActorRef),
+    ActorRetained {
+        actor: crate::ActorRef,
+        requests: Vec<crate::RequestId>,
+        watches: Vec<crate::WatchId>,
+    },
+    GroupRetired(crate::ForkGroupId),
+    Blocked(String),
+}
+
+pub(crate) struct CleanupReceiptProjection {
+    pub plan: CleanupPlanProjection,
+    pub steps: Vec<CleanupStepProjection>,
+    pub complete: bool,
+}
+
 fn agent_roster_value(
     table: &DataConTable,
     entry: AgentRosterProjection,
@@ -382,6 +427,135 @@ fn agent_roster_value(
     )?)
 }
 
+fn agent_stop_value(
+    table: &DataConTable,
+    outcome: AgentStopProjection,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let (name, fields) = match outcome {
+        AgentStopProjection::StoppedNow => ("AgentStoppedNow", Vec::new()),
+        AgentStopProjection::AlreadyStopped => ("AgentStopAlreadyStopped", Vec::new()),
+        AgentStopProjection::Unavailable => ("AgentStopUnavailable", Vec::new()),
+        AgentStopProjection::Unauthorized => ("AgentStopUnauthorized", Vec::new()),
+        AgentStopProjection::Failed(detail) => ("AgentStopFailed", vec![detail.to_value(table)?]),
+    };
+    Ok(actor_context_constructor(table, name, fields)?)
+}
+
+fn cleanup_plan_value(
+    table: &DataConTable,
+    plan: &CleanupPlanProjection,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let actors = plan
+        .actors
+        .iter()
+        .map(|actor| -> Result<Value, ResidentActorWorkbenchError> {
+            let state = actor_context_constructor(
+                table,
+                if actor.terminal {
+                    "CleanupActorTerminal"
+                } else {
+                    "CleanupActorRunning"
+                },
+                Vec::new(),
+            )?;
+            Ok(actor_context_constructor(
+                table,
+                "CleanupActorPlan",
+                vec![
+                    actor_int(actor.actor.id.0)?.to_value(table)?,
+                    actor_int(actor.actor.incarnation.0)?.to_value(table)?,
+                    actor.label.clone().to_value(table)?,
+                    state,
+                ],
+            )?)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .to_value(table)?;
+    let responses = plan
+        .pending_responses
+        .iter()
+        .map(|request| actor_int(request.0))
+        .collect::<Result<Vec<_>, _>>()?
+        .to_value(table)?;
+    let watches = plan
+        .pending_watches
+        .iter()
+        .map(|watch| actor_int(watch.0))
+        .collect::<Result<Vec<_>, _>>()?
+        .to_value(table)?;
+    Ok(actor_context_constructor(
+        table,
+        "CleanupPlan",
+        vec![
+            actor_int(plan.group.0)?.to_value(table)?,
+            actors,
+            responses,
+            watches,
+            plan.refusal.clone().to_value(table)?,
+        ],
+    )?)
+}
+
+fn cleanup_step_value(
+    table: &DataConTable,
+    step: CleanupStepProjection,
+) -> Result<Value, ResidentActorWorkbenchError> {
+    let ints = |values: Vec<u64>| -> Result<Value, ResidentActorWorkbenchError> {
+        values
+            .into_iter()
+            .map(actor_int)
+            .collect::<Result<Vec<_>, _>>()?
+            .to_value(table)
+            .map_err(ResidentActorWorkbenchError::Bridge)
+    };
+    let (name, fields) = match step {
+        CleanupStepProjection::ForgotResponses(requests) => (
+            "CleanupForgotResponses",
+            vec![ints(
+                requests.into_iter().map(|request| request.0).collect(),
+            )?],
+        ),
+        CleanupStepProjection::ForgotWatches(watches) => (
+            "CleanupForgotWatches",
+            vec![ints(watches.into_iter().map(|watch| watch.0).collect())?],
+        ),
+        CleanupStepProjection::StoppedActor(actor, outcome) => (
+            "CleanupStoppedActor",
+            vec![
+                actor_int(actor.id.0)?.to_value(table)?,
+                actor_int(actor.incarnation.0)?.to_value(table)?,
+                agent_stop_value(table, outcome)?,
+            ],
+        ),
+        CleanupStepProjection::ForgotActor(actor) => (
+            "CleanupForgotActor",
+            vec![
+                actor_int(actor.id.0)?.to_value(table)?,
+                actor_int(actor.incarnation.0)?.to_value(table)?,
+            ],
+        ),
+        CleanupStepProjection::ActorRetained {
+            actor,
+            requests,
+            watches,
+        } => (
+            "CleanupActorRetained",
+            vec![
+                actor_int(actor.id.0)?.to_value(table)?,
+                actor_int(actor.incarnation.0)?.to_value(table)?,
+                ints(requests.into_iter().map(|request| request.0).collect())?,
+                ints(watches.into_iter().map(|watch| watch.0).collect())?,
+            ],
+        ),
+        CleanupStepProjection::GroupRetired(group) => (
+            "CleanupGroupRetired",
+            vec![actor_int(group.0)?.to_value(table)?],
+        ),
+        CleanupStepProjection::Blocked(detail) => ("CleanupBlocked", vec![detail.to_value(table)?]),
+    };
+    Ok(actor_context_constructor(table, name, fields)?)
+}
+
 /// One fully captured boundary reached by an installed actor program.
 /// Variants own every linear runtime value needed to service that boundary;
 /// downstream orchestration never re-decodes the suspended request.
@@ -405,6 +579,15 @@ pub(crate) enum ResidentActorBoundary {
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
     AgentForget(AgentInspectionBoundary),
+    AgentStop(AgentInspectionBoundary),
+    CleanupPlan {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
+    CleanupExecute {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
     RequestReservation(RequestReservation),
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
@@ -478,6 +661,9 @@ impl ResidentActorBoundary {
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
             Self::AgentForget(_) => "forgetAgent",
+            Self::AgentStop(_) => "stopAgent",
+            Self::CleanupPlan { .. } => "planCleanup",
+            Self::CleanupExecute { .. } => "executeCleanup",
             Self::RequestReservation(_) => "request",
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
@@ -580,8 +766,16 @@ impl ResidentRequest {
                 crate::generated::actor_context::ActorContextReq::ActorContextWith,
             ) => "actorContext",
             Self::AgentControl(
-                crate::generated::agent_control::AgentControlReq::AgentControlTryCallWith(..),
+                crate::generated::agent_control::AgentControlReq::AgentControlStopWith(..),
             ) => "stopAgent",
+            Self::AgentControl(
+                crate::generated::agent_control::AgentControlReq::AgentControlPlanCleanupWith(..),
+            ) => "planCleanup",
+            Self::AgentControl(
+                crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
+                    ..,
+                ),
+            ) => "executeCleanup",
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(..),
             ) => "observeAgent",
@@ -1430,18 +1624,37 @@ where
                         },
                     )),
                     ResidentRequest::AgentControl(
-                        crate::generated::agent_control::AgentControlReq::AgentControlTryCallWith(
+                        crate::generated::agent_control::AgentControlReq::AgentControlStopWith(
                             target,
-                            _,
                         ),
-                    ) => capture_outbound_boundary(
-                        session,
-                        context,
-                        hole,
-                        target,
-                        OutboundKind::TryCall,
-                        actor_realm,
-                    ),
+                    ) => Ok(ResidentActorBoundary::AgentStop(AgentInspectionBoundary {
+                        target: crate::wait::decode_address(target.0, target.1)?,
+                        continuation: hole,
+                    })),
+                    ResidentRequest::AgentControl(
+                        crate::generated::agent_control::AgentControlReq::AgentControlPlanCleanupWith(
+                            group,
+                        ),
+                    ) => Ok(ResidentActorBoundary::CleanupPlan {
+                        continuation: hole,
+                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "invalid cleanup group id {group}"
+                            ))
+                        })?),
+                    }),
+                    ResidentRequest::AgentControl(
+                        crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
+                            group,
+                        ),
+                    ) => Ok(ResidentActorBoundary::CleanupExecute {
+                        continuation: hole,
+                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "invalid cleanup group id {group}"
+                            ))
+                        })?),
+                    }),
                     ResidentRequest::Actor(
                         crate::generated::actor::ActorReq::ActorStartWith(..)
                         | crate::generated::actor::ActorReq::ActorForkWith(..),
@@ -2272,6 +2485,67 @@ where
                     ),
                 };
                 let answer = actor_context_constructor(table, name, fields)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_agent_stop(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: AgentStopProjection,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let answer = agent_stop_value(table, outcome)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_cleanup_plan(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        plan: CleanupPlanProjection,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = cleanup_plan_value(session.data_con_table(), &plan)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_cleanup_receipt(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        receipt: CleanupReceiptProjection,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let plan = cleanup_plan_value(table, &receipt.plan)?;
+                let steps = receipt
+                    .steps
+                    .into_iter()
+                    .map(|step| cleanup_step_value(table, step))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .to_value(table)?;
+                let answer = actor_context_constructor(
+                    table,
+                    "CleanupReceipt",
+                    vec![plan, steps, receipt.complete.to_value(table)?],
+                )?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

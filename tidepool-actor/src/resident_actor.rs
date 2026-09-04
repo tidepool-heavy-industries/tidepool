@@ -543,6 +543,63 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             status
         }
     }
+
+    fn cleanup_plan(
+        &self,
+        kernel: &KernelContext,
+        owner: ActorRef,
+        group: crate::ForkGroupId,
+    ) -> crate::resident_workbench::CleanupPlanProjection {
+        let members = match self.environment.fork_groups.cleanup_members(group, owner) {
+            Ok(members) => members,
+            Err(error) => {
+                return crate::resident_workbench::CleanupPlanProjection {
+                    group,
+                    actors: Vec::new(),
+                    pending_responses: Vec::new(),
+                    pending_watches: Vec::new(),
+                    refusal: Some(error.to_string()),
+                };
+            }
+        };
+        let records = self.environment.actors.lock();
+        let actors = members
+            .iter()
+            .map(|actor| {
+                let record = records.get(actor);
+                crate::resident_workbench::CleanupActorProjection {
+                    actor: *actor,
+                    label: record
+                        .map(|record| record.descriptor.label().to_owned())
+                        .unwrap_or_else(|| "<unavailable>".into()),
+                    terminal: (record.is_none() && kernel.resolve(*actor).is_none())
+                        || record.and_then(|record| record.terminal.as_ref()).is_some()
+                        || kernel
+                            .resolve(*actor)
+                            .and_then(|actor| actor.terminal().get())
+                            .is_some(),
+                }
+            })
+            .collect::<Vec<_>>();
+        drop(records);
+        let targets = members
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let mut owners = targets.clone();
+        owners.insert(owner);
+        let (pending_responses, pending_watches) = self
+            .environment
+            .requests
+            .campaign_cleanup_blockers(&owners, &targets);
+        crate::resident_workbench::CleanupPlanProjection {
+            group,
+            actors,
+            pending_responses,
+            pending_watches,
+            refusal: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1038,6 +1095,257 @@ where
                 self.environment
                     .runner
                     .resume_agent_forget(context.clone(), forget.continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::AgentStop(stop) => {
+                let (known, authorized) = {
+                    let records = self.environment.actors.lock();
+                    (
+                        records.contains_key(&stop.target),
+                        stop.target != context.actor
+                            && actor_is_self_or_descendant(context.actor, stop.target, &records),
+                    )
+                };
+                let outcome = if stop.target == context.actor {
+                    crate::resident_workbench::AgentStopProjection::Unauthorized
+                } else if !known {
+                    crate::resident_workbench::AgentStopProjection::Unavailable
+                } else if !authorized {
+                    crate::resident_workbench::AgentStopProjection::Unauthorized
+                } else if kernel
+                    .resolve(stop.target)
+                    .and_then(|actor| actor.terminal().get())
+                    .is_some()
+                {
+                    crate::resident_workbench::AgentStopProjection::AlreadyStopped
+                } else if let Some(target) = kernel.resolve(stop.target) {
+                    match target
+                        .shutdown(ActorTerminal {
+                            kind: ActorExitKind::Cancelled,
+                            summary: format!(
+                                "supervisor {}@{} requested retirement",
+                                context.actor.id.0, context.actor.incarnation.0
+                            ),
+                        })
+                        .await
+                    {
+                        Ok(terminal) => {
+                            self.publish_retired(stop.target, terminal);
+                            crate::resident_workbench::AgentStopProjection::StoppedNow
+                        }
+                        Err(error) => crate::resident_workbench::AgentStopProjection::Failed(
+                            error.to_string(),
+                        ),
+                    }
+                } else {
+                    crate::resident_workbench::AgentStopProjection::Unavailable
+                };
+                self.environment
+                    .runner
+                    .resume_agent_stop(context.clone(), stop.continuation, outcome)
+                    .await
+            }
+            ResidentActorBoundary::CleanupPlan {
+                continuation,
+                group,
+            } => {
+                let plan = self.cleanup_plan(kernel, context.actor, group);
+                self.environment
+                    .runner
+                    .resume_cleanup_plan(context.clone(), continuation, plan)
+                    .await
+            }
+            ResidentActorBoundary::CleanupExecute {
+                continuation,
+                group,
+            } => {
+                use crate::resident_workbench::{
+                    AgentStopProjection, CleanupReceiptProjection, CleanupStepProjection,
+                };
+
+                let plan = self.cleanup_plan(kernel, context.actor, group);
+                let mut steps = Vec::new();
+                if let Some(ref refusal) = plan.refusal {
+                    steps.push(CleanupStepProjection::Blocked(refusal.clone()));
+                    return self
+                        .environment
+                        .runner
+                        .resume_cleanup_receipt(
+                            context.clone(),
+                            continuation,
+                            CleanupReceiptProjection {
+                                plan,
+                                steps,
+                                complete: false,
+                            },
+                        )
+                        .await;
+                }
+                if !plan.pending_responses.is_empty() || !plan.pending_watches.is_empty() {
+                    steps.push(CleanupStepProjection::Blocked(
+                        "campaign still has pending responses or watches".into(),
+                    ));
+                    return self
+                        .environment
+                        .runner
+                        .resume_cleanup_receipt(
+                            context.clone(),
+                            continuation,
+                            CleanupReceiptProjection {
+                                plan,
+                                steps,
+                                complete: false,
+                            },
+                        )
+                        .await;
+                }
+
+                let group_order = match self
+                    .environment
+                    .fork_groups
+                    .cleanup_group_order(group, context.actor)
+                {
+                    Ok(order) => order,
+                    Err(error) => {
+                        steps.push(CleanupStepProjection::Blocked(error.to_string()));
+                        return self
+                            .environment
+                            .runner
+                            .resume_cleanup_receipt(
+                                context.clone(),
+                                continuation,
+                                CleanupReceiptProjection {
+                                    plan,
+                                    steps,
+                                    complete: false,
+                                },
+                            )
+                            .await;
+                    }
+                };
+
+                let targets = plan
+                    .actors
+                    .iter()
+                    .map(|actor| actor.actor)
+                    .collect::<std::collections::HashSet<_>>();
+                let mut owners = targets.clone();
+                owners.insert(context.actor);
+                let mut forgotten_responses = Vec::new();
+                let mut forgotten_watches = Vec::new();
+                for owner in owners {
+                    let forgotten = self
+                        .environment
+                        .requests
+                        .cleanup_campaign_metadata(owner, &targets);
+                    forgotten_responses.extend(forgotten.forgotten_responses);
+                    forgotten_watches.extend(forgotten.forgotten_watches);
+                }
+                forgotten_responses.sort_unstable();
+                forgotten_watches.sort_unstable();
+                if !forgotten_watches.is_empty() {
+                    steps.push(CleanupStepProjection::ForgotWatches(forgotten_watches));
+                }
+                if !forgotten_responses.is_empty() {
+                    steps.push(CleanupStepProjection::ForgotResponses(forgotten_responses));
+                }
+
+                let mut stop_failed = false;
+                for actor_plan in &plan.actors {
+                    let actor = actor_plan.actor;
+                    let outcome = if actor_plan.terminal {
+                        AgentStopProjection::AlreadyStopped
+                    } else if let Some(target) = kernel.resolve(actor) {
+                        match target
+                            .shutdown(ActorTerminal {
+                                kind: ActorExitKind::Cancelled,
+                                summary: format!(
+                                    "campaign {} cleanup requested by {}@{}",
+                                    group.0, context.actor.id.0, context.actor.incarnation.0
+                                ),
+                            })
+                            .await
+                        {
+                            Ok(terminal) => {
+                                self.publish_retired(actor, terminal);
+                                AgentStopProjection::StoppedNow
+                            }
+                            Err(error) => {
+                                stop_failed = true;
+                                AgentStopProjection::Failed(error.to_string())
+                            }
+                        }
+                    } else {
+                        stop_failed = true;
+                        AgentStopProjection::Unavailable
+                    };
+                    steps.push(CleanupStepProjection::StoppedActor(actor, outcome));
+                }
+
+                if !stop_failed {
+                    for actor in plan.actors.iter().map(|actor| actor.actor) {
+                        match self
+                            .environment
+                            .requests
+                            .forget_terminal_actor_metadata(actor)
+                        {
+                            Ok(()) => {
+                                self.environment.actors.lock().remove(&actor);
+                                self.environment.retired.lock().remove(&actor);
+                                let _ = kernel.forget_terminal_actor(actor);
+                                steps.push(CleanupStepProjection::ForgotActor(actor));
+                            }
+                            Err((requests, watches)) => {
+                                stop_failed = true;
+                                steps.push(CleanupStepProjection::ActorRetained {
+                                    actor,
+                                    requests,
+                                    watches,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let complete = if stop_failed {
+                    false
+                } else {
+                    let mut groups_complete = true;
+                    for (cleanup_group, group_owner) in group_order {
+                        match self
+                            .environment
+                            .fork_groups
+                            .cleanup_committed(cleanup_group, group_owner)
+                        {
+                            Ok(crate::ForkGroupCleanupOutcome::Cleaned) => {
+                                steps.push(CleanupStepProjection::GroupRetired(cleanup_group));
+                            }
+                            Ok(crate::ForkGroupCleanupOutcome::Active(active)) => {
+                                groups_complete = false;
+                                steps.push(CleanupStepProjection::Blocked(format!(
+                                    "fork group {} still has active descendants: {active:?}",
+                                    cleanup_group.0
+                                )));
+                            }
+                            Err(error) => {
+                                groups_complete = false;
+                                steps.push(CleanupStepProjection::Blocked(error.to_string()));
+                            }
+                        }
+                    }
+                    groups_complete
+                };
+                self.environment
+                    .runner
+                    .resume_cleanup_receipt(
+                        context.clone(),
+                        continuation,
+                        CleanupReceiptProjection {
+                            plan,
+                            steps,
+                            complete,
+                        },
+                    )
                     .await
             }
             ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {

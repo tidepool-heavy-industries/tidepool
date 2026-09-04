@@ -234,6 +234,7 @@ impl ForkGroupGate {
 struct ForkGroupsState {
     next: u64,
     groups: HashMap<ForkGroupId, ForkGroup>,
+    cleaned: HashSet<ForkGroupId>,
     parents: HashMap<ActorRef, ActorRef>,
     active: HashSet<ActorRef>,
 }
@@ -259,6 +260,7 @@ impl ForkGroupRegistry {
             state: Arc::new(Mutex::new(ForkGroupsState {
                 next: 1,
                 groups: HashMap::new(),
+                cleaned: HashSet::new(),
                 parents: HashMap::new(),
                 active: HashSet::new(),
             })),
@@ -596,6 +598,9 @@ impl ForkGroupRegistry {
         owner: ActorRef,
     ) -> Result<ForkGroupCleanupOutcome, ForkGroupError> {
         let mut state = self.state.lock();
+        if state.cleaned.contains(&id) {
+            return Ok(ForkGroupCleanupOutcome::Cleaned);
+        }
         let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
         if group.owner != owner {
             return Err(ForkGroupError::WrongOwner {
@@ -627,7 +632,109 @@ impl ForkGroupRegistry {
         for child in group.children {
             state.parents.remove(&child);
         }
+        state.cleaned.insert(id);
         Ok(ForkGroupCleanupOutcome::Cleaned)
+    }
+
+    /// Exact direct and recursive members of one owned committed group,
+    /// ordered deepest-first for supervisor cleanup.
+    pub fn cleanup_members(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+    ) -> Result<Vec<ActorRef>, ForkGroupError> {
+        let state = self.state.lock();
+        if state.cleaned.contains(&id) {
+            return Ok(Vec::new());
+        }
+        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        if *group.phase.borrow() != ForkGroupPhase::Committed {
+            return Err(ForkGroupError::NotCommitted(id.0));
+        }
+        let mut members = state
+            .parents
+            .keys()
+            .copied()
+            .filter_map(|candidate| {
+                group
+                    .children
+                    .iter()
+                    .copied()
+                    .find_map(|root| descendant_depth(&state.parents, candidate, root))
+                    .map(|depth| (depth, candidate))
+            })
+            .collect::<Vec<_>>();
+        members.sort_unstable_by_key(|(depth, actor)| {
+            (std::cmp::Reverse(*depth), actor.id, actor.incarnation)
+        });
+        Ok(members.into_iter().map(|(_, actor)| actor).collect())
+    }
+
+    /// Committed nested groups owned by members of `id`, followed by `id`
+    /// itself. The supervisor uses this after retiring the actor tree so group
+    /// admission records disappear inside-out as well.
+    pub fn cleanup_group_order(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+    ) -> Result<Vec<(ForkGroupId, ActorRef)>, ForkGroupError> {
+        let state = self.state.lock();
+        if state.cleaned.contains(&id) {
+            return Ok(Vec::new());
+        }
+        let root_group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+        if root_group.owner != owner {
+            return Err(ForkGroupError::WrongOwner {
+                group: id.0,
+                actual: owner,
+            });
+        }
+        if *root_group.phase.borrow() != ForkGroupPhase::Committed {
+            return Err(ForkGroupError::NotCommitted(id.0));
+        }
+        let roots = &root_group.children;
+        let mut nested = state
+            .groups
+            .iter()
+            .filter_map(|(candidate_id, candidate)| {
+                if *candidate_id == id || *candidate.phase.borrow() != ForkGroupPhase::Committed {
+                    return None;
+                }
+                roots
+                    .iter()
+                    .filter_map(|root| descendant_depth(&state.parents, candidate.owner, *root))
+                    .max()
+                    .map(|depth| (depth, *candidate_id, candidate.owner))
+            })
+            .collect::<Vec<_>>();
+        nested.sort_unstable_by_key(|(depth, group, _)| (std::cmp::Reverse(*depth), group.0));
+        let mut ordered = nested
+            .into_iter()
+            .map(|(_, group, group_owner)| (group, group_owner))
+            .collect::<Vec<_>>();
+        ordered.push((id, owner));
+        Ok(ordered)
+    }
+}
+
+fn descendant_depth(
+    parents: &HashMap<ActorRef, ActorRef>,
+    mut actor: ActorRef,
+    root: ActorRef,
+) -> Option<usize> {
+    let mut depth = 0;
+    loop {
+        if actor == root {
+            return Some(depth);
+        }
+        actor = *parents.get(&actor)?;
+        depth = depth.saturating_add(1);
     }
 }
 
@@ -869,10 +976,11 @@ mod tests {
             groups.cleanup_committed(group, owner).unwrap(),
             ForkGroupCleanupOutcome::Cleaned
         );
-        assert!(matches!(
-            groups.cleanup_committed(group, owner),
-            Err(ForkGroupError::Unknown(_))
-        ));
+        assert_eq!(
+            groups.cleanup_committed(group, owner).unwrap(),
+            ForkGroupCleanupOutcome::Cleaned,
+            "a retry observes the durable cleaned tombstone"
+        );
     }
 
     #[test]
@@ -953,6 +1061,19 @@ mod tests {
             .claim(inner, scaffold, &inner_reservations[0].allocated)
             .unwrap();
         groups.attach_child(inner, scaffold, leaf).unwrap();
+        let _inner_phase = groups.request_commit(inner, scaffold).unwrap();
+        groups.gate(inner, leaf).unwrap().mark_ready().unwrap();
+        groups.publish_ready(scaffold).unwrap();
+
+        assert_eq!(
+            groups.cleanup_members(outer, root).unwrap(),
+            vec![leaf, scaffold],
+            "cleanup walks recursive descendants deepest-first"
+        );
+        assert_eq!(
+            groups.cleanup_group_order(outer, root).unwrap(),
+            vec![(inner, scaffold), (outer, root)]
+        );
 
         groups.retire_actor(scaffold);
         assert_eq!(

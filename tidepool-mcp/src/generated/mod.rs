@@ -128,7 +128,20 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         ],
     ),
     ("ActorLocal", &["ActorReceiveWith"]),
-    ("AgentControl", &["AgentControlTryCallWith"]),
+    (
+        "AgentControl",
+        &[
+            "AgentStopControlOutcome",
+            "CleanupActorState",
+            "CleanupActorPlan",
+            "CleanupPlan",
+            "CleanupStepReceipt",
+            "CleanupReceipt",
+            "AgentControlStopWith",
+            "AgentControlPlanCleanupWith",
+            "AgentControlExecuteCleanupWith",
+        ],
+    ),
     (
         "AgentInspection",
         &[
