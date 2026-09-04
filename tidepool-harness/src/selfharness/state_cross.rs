@@ -377,8 +377,13 @@ mod tests {
             &[HARNESS_CTX_BINDING.to_string()],
         );
         assert!(source.contains("module TidepoolHarnessCtx where"));
-        assert!(source.contains("__result :: Eff '[] _"));
+        assert!(source.contains("__result = do {"));
+        assert!(source.contains("_ <- (pure () :: Eff '[] ())"));
         assert!(source.contains("pure __harnessCtx"));
+        assert!(
+            !source.contains("__result ::"),
+            "the generated wrapper must not reintroduce a warning-producing partial signature"
+        );
     }
 
     /// [`state_in_via_ctx`]/[`operator_msg_in_via_ctx`] take NO arguments and
