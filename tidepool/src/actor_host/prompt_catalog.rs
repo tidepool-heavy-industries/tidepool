@@ -9,7 +9,7 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 2;
+    pub(super) const CATALOG_VERSION: u32 = 3;
 
     #[cfg(test)]
     pub(super) const ALL: [Self; 6] = [

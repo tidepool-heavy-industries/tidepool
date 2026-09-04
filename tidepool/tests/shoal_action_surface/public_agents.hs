@@ -82,6 +82,9 @@ cacheFacts
 cacheFacts entry =
   (rosterUsageScope entry, rosterCacheBoundary entry, rosterEventWatermark entry)
 
+workbenchPosture :: AgentRosterEntry -> AgentWorkbenchPosture
+workbenchPosture = rosterWorkbenchPosture
+
 activationFacts :: ActorContextInfo -> (ActivationKind, Int)
 activationFacts context =
   (contextActivationKind context, contextEventWatermark context)

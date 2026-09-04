@@ -371,6 +371,51 @@ fn agent_roster_value(
         crate::ActorRole::Integration => "ContextIntegration",
         crate::ActorRole::Inherited => "ContextInherited",
     };
+    let workbench_posture = match &entry.runtime.workbench_posture {
+        crate::ActorWorkbenchPosture::Idle => {
+            actor_context_constructor(table, "WorkbenchIdle", Vec::new())?
+        }
+        crate::ActorWorkbenchPosture::RunningUnit {
+            input_unit_index,
+            total,
+        } => actor_context_constructor(
+            table,
+            "WorkbenchRunningUnit",
+            vec![
+                workbench_int(*input_unit_index)?.to_value(table)?,
+                workbench_int(*total)?.to_value(table)?,
+            ],
+        )?,
+        crate::ActorWorkbenchPosture::AwaitingEffect {
+            input_unit_index,
+            total,
+            effect,
+        } => actor_context_constructor(
+            table,
+            "WorkbenchAwaitingEffect",
+            vec![
+                workbench_int(*input_unit_index)?.to_value(table)?,
+                workbench_int(*total)?.to_value(table)?,
+                effect.to_value(table)?,
+            ],
+        )?,
+        crate::ActorWorkbenchPosture::TerminalTransfer { transfer } => {
+            let transfer = actor_context_constructor(
+                table,
+                match transfer {
+                    crate::ActorWorkbenchTransfer::Reply => "WorkbenchReplyTransfer",
+                    crate::ActorWorkbenchTransfer::CancellationAcknowledgement => {
+                        "WorkbenchCancellationTransfer"
+                    }
+                },
+                Vec::new(),
+            )?;
+            actor_context_constructor(table, "WorkbenchTerminalTransfer", vec![transfer])?
+        }
+        crate::ActorWorkbenchPosture::Failed => {
+            actor_context_constructor(table, "WorkbenchFailed", Vec::new())?
+        }
+    };
     Ok(actor_context_constructor(
         table,
         "AgentRosterEntry",
@@ -424,6 +469,7 @@ fn agent_roster_value(
             usage_scope.to_value(table)?,
             cache_boundary.to_value(table)?,
             actor_int(entry.runtime.event_watermark)?.to_value(table)?,
+            workbench_posture,
         ],
     )?)
 }
@@ -3013,6 +3059,14 @@ fn actor_int(value: u64) -> Result<i64, ResidentActorWorkbenchError> {
     i64::try_from(value).map_err(|_| {
         ResidentActorWorkbenchError::ActorProtocol(
             "runtime actor identity exceeds Haskell Int".into(),
+        )
+    })
+}
+
+fn workbench_int(value: usize) -> Result<i64, ResidentActorWorkbenchError> {
+    i64::try_from(value).map_err(|_| {
+        ResidentActorWorkbenchError::ActorProtocol(
+            "workbench input-unit coordinate exceeds Haskell Int".into(),
         )
     })
 }

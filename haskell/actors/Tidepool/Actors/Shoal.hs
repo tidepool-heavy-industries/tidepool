@@ -110,6 +110,8 @@ module Tidepool.Actors.Shoal
   , observeAgent
   , AgentRosterEntry (..)
   , AgentRosterState (..)
+  , AgentWorkbenchPosture (..)
+  , AgentWorkbenchTransfer (..)
   , ProviderUsageScope (..)
   , CacheBoundaryReason (..)
   , listAgents
@@ -273,6 +275,8 @@ import Tidepool.Effects.Core
   , ActorWorkspaceAccess (..)
   , AgentRosterEntry (..)
   , AgentRosterState (..)
+  , AgentWorkbenchPosture (..)
+  , AgentWorkbenchTransfer (..)
   , ProviderUsageScope (..)
   , CacheBoundaryReason (..)
   , actorContext

@@ -68,6 +68,45 @@ pub fn agent_inspection() -> Effect {
                 doc: &[],
             },
             TypeDef {
+                name: "AgentWorkbenchTransfer",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        variant("WorkbenchReplyTransfer", vec![]),
+                        variant("WorkbenchCancellationTransfer", vec![]),
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: NO_WIRE,
+                domain: None,
+                doc: &["An accepted terminal control transfer from the resident workbench."],
+            },
+            TypeDef {
+                name: "AgentWorkbenchPosture",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        variant("WorkbenchIdle", vec![]),
+                        variant("WorkbenchRunningUnit", vec![HsType::Int, HsType::Int]),
+                        variant(
+                            "WorkbenchAwaitingEffect",
+                            vec![HsType::Int, HsType::Int, HsType::Text],
+                        ),
+                        variant(
+                            "WorkbenchTerminalTransfer",
+                            vec![HsType::Named("AgentWorkbenchTransfer")],
+                        ),
+                        variant("WorkbenchFailed", vec![]),
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: NO_WIRE,
+                domain: None,
+                doc: &[
+                    "Whether hosted Haskell is idle, running, suspended at an effect, or terminal.",
+                ],
+            },
+            TypeDef {
                 name: "AgentRosterEntry",
                 wire_rust: None,
                 shape: TypeShape::Record {
@@ -99,6 +138,10 @@ pub fn agent_inspection() -> Effect {
                             HsType::maybe(HsType::Named("CacheBoundaryReason")),
                         ),
                         field("rosterEventWatermark", HsType::Int),
+                        field(
+                            "rosterWorkbenchPosture",
+                            HsType::Named("AgentWorkbenchPosture"),
+                        ),
                     ],
                 },
                 json: JsonInstance::None,

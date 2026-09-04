@@ -22,3 +22,6 @@ applications do not. Ordinary model-response termination ends the current
 turn. Register a labeled `watch` when a response becoming ready should durably
 reactivate the application; typed handles and polling remain authoritative.
 `:status` reports the actor standing and response/watch queues.
+It also distinguishes a running Haskell input unit from suspension at a named
+effect boundary; `listAgents` exposes the same fact as
+`rosterWorkbenchPosture`.

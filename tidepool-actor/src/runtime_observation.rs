@@ -42,6 +42,36 @@ pub enum CacheBoundaryReason {
     ProviderUnknown,
 }
 
+/// Current posture of the hosted Haskell workbench.
+///
+/// This deliberately distinguishes running Haskell from waiting inside a
+/// named effect handler. It is an observation only; scheduler control remains
+/// in the actor and resident machine owners.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ActorWorkbenchPosture {
+    #[default]
+    Idle,
+    RunningUnit {
+        input_unit_index: usize,
+        total: usize,
+    },
+    AwaitingEffect {
+        input_unit_index: usize,
+        total: usize,
+        effect: String,
+    },
+    TerminalTransfer {
+        transfer: ActorWorkbenchTransfer,
+    },
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActorWorkbenchTransfer {
+    Reply,
+    CancellationAcknowledgement,
+}
+
 impl Default for CacheBoundaryReason {
     fn default() -> Self {
         Self::ProviderUnknown
@@ -73,6 +103,7 @@ pub struct ActorRuntimeObservation {
     pub prompt_catalog_version: Option<u32>,
     pub prompt_fingerprint: Option<String>,
     pub provider_usage: Vec<ProviderUsageSample>,
+    pub workbench_posture: ActorWorkbenchPosture,
 }
 
 impl ActorRuntimeObservation {
@@ -120,6 +151,10 @@ impl ActorRuntimeObservationHandle {
 
     pub fn publish_cache_boundary(&self, cache_boundary: CacheBoundaryReason) {
         self.inner.write().cache_boundary = cache_boundary;
+    }
+
+    pub fn publish_workbench_posture(&self, posture: ActorWorkbenchPosture) {
+        self.inner.write().workbench_posture = posture;
     }
 
     /// Record the exact composed developer prompt installed for this actor.
@@ -253,5 +288,35 @@ mod tests {
         assert_eq!(sample.prompt_profile.as_deref(), Some("coding-v1"));
         assert_eq!(sample.prompt_catalog_version, Some(3));
         assert_eq!(sample.prompt_fingerprint.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn workbench_posture_preserves_the_named_suspension_boundary() {
+        let observation = ActorRuntimeObservationHandle::default();
+        observation.publish_workbench_posture(ActorWorkbenchPosture::RunningUnit {
+            input_unit_index: 2,
+            total: 5,
+        });
+        assert_eq!(
+            observation.snapshot().workbench_posture,
+            ActorWorkbenchPosture::RunningUnit {
+                input_unit_index: 2,
+                total: 5,
+            }
+        );
+
+        observation.publish_workbench_posture(ActorWorkbenchPosture::AwaitingEffect {
+            input_unit_index: 2,
+            total: 5,
+            effect: "watch replies".into(),
+        });
+        assert_eq!(
+            observation.snapshot().workbench_posture,
+            ActorWorkbenchPosture::AwaitingEffect {
+                input_unit_index: 2,
+                total: 5,
+                effect: "watch replies".into(),
+            }
+        );
     }
 }

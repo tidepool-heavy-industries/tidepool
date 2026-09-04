@@ -45,6 +45,9 @@ reports the effective module environment. The supported meta-command set is
 intentionally smaller than full GHCi. `:status` emphasizes active work,
 `:status!` includes terminal history, `:lineage` isolates ancestry, and
 `:trace` adds exact prompt/cache samples and identifiers.
+Actor observations include `rosterWorkbenchPosture`, which distinguishes a
+running Haskell input unit from suspension at a named Rust-handled effect.
+This state is runtime-owned; elapsed time and notification prose are not.
 
 The workbench executes input units in order. A failed observational command
 such as `:type`, `:info`, or `:browse` is a local `Diagnostic`, so later
@@ -344,7 +347,8 @@ recursive scaffold and fold, server-filtered managed worktree queries, and
 runtime `:status`/`actorContext` facts, activation-scoped provider usage,
 versioned prompt fingerprints, structured workbench item receipts, typed
 campaign snapshots and cleanup, source-checkout integration custody, and
-honest source-only root recovery. Supervisor lineage is recorded for every
+honest source-only root recovery. Workbench posture is visible in `:status`
+and typed roster observations. Supervisor lineage is recorded for every
 child; context-parent lineage is additionally recorded only for actual context
 forks.
 The old blocking answerer API remains available under

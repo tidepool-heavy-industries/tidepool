@@ -529,7 +529,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 let runtime = record.runtime_observation.snapshot();
                 let usage = runtime.latest_provider_usage();
                 Some(format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} state={}",
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} workbench={:?} state={}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
@@ -544,6 +544,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     usage.map(|sample| sample.uncached_input_tokens),
                     usage.map(|sample| sample.scope),
                     usage.and_then(|sample| sample.activation_sequence),
+                    runtime.workbench_posture,
                     state,
                 ))
             })
@@ -587,7 +588,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             String::new()
         };
         let current = format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
@@ -615,6 +616,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .unwrap_or(self.descriptor.effective_role().prompt_profile()),
             prompt_identity,
             if self.policy_installed { "attached" } else { "detached" },
+            runtime.workbench_posture,
             self.launch_worktrees.first(),
             requests.pending_responses,
             requests.ready_responses,
@@ -2464,10 +2466,17 @@ where
         mut outcome: ResidentOutcome,
         execution: Option<&WorkbenchExecutionId>,
         input_unit_index: usize,
+        total: usize,
         operations: &mut Vec<WorkbenchOperationReceipt>,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         let mut effect_ordinal = 0;
         loop {
+            self.runtime_observation.publish_workbench_posture(
+                crate::ActorWorkbenchPosture::RunningUnit {
+                    input_unit_index,
+                    total,
+                },
+            );
             match workbench
                 .settle_item(context.clone(), fragment, outcome)
                 .await?
@@ -2482,6 +2491,13 @@ where
                         .capture_boundary(context.clone(), *next, context.placement.resource_scope)
                         .await?;
                     let effect = boundary.operation().to_owned();
+                    self.runtime_observation.publish_workbench_posture(
+                        crate::ActorWorkbenchPosture::AwaitingEffect {
+                            input_unit_index,
+                            total,
+                            effect: effect.clone(),
+                        },
+                    );
                     let commits_with_unit = boundary.commits_with_workbench_unit();
                     let ordinal = effect_ordinal;
                     effect_ordinal += 1;
@@ -2797,6 +2813,12 @@ where
                 total: request.items.len(),
                 source,
             };
+            self.runtime_observation.publish_workbench_posture(
+                crate::ActorWorkbenchPosture::RunningUnit {
+                    input_unit_index: index,
+                    total: request.items.len(),
+                },
+            );
             let mut step = match workbench
                 .begin_item(context.clone(), block, request.input_kind(index))
                 .await
@@ -2827,6 +2849,7 @@ where
                         *outcome,
                         execution.as_ref(),
                         index,
+                        request.items.len(),
                         &mut unit_operations,
                     )
                     .await
@@ -3492,6 +3515,35 @@ where
             }
             let retained_request = execution.as_ref().map(|_| request.clone());
             let result = self.execute_workbench(kernel, &context, request).await;
+            match &result {
+                Ok(KernelStep::Continue(_)) => self
+                    .runtime_observation
+                    .publish_workbench_posture(crate::ActorWorkbenchPosture::Idle),
+                Ok(
+                    KernelStep::ContinueLater(response)
+                    | KernelStep::Stop {
+                        output: response, ..
+                    },
+                ) => {
+                    let transfer = match response.status {
+                        WorkbenchRunStatus::Replied => Some(crate::ActorWorkbenchTransfer::Reply),
+                        WorkbenchRunStatus::RequestCancelled => {
+                            Some(crate::ActorWorkbenchTransfer::CancellationAcknowledgement)
+                        }
+                        WorkbenchRunStatus::Committed
+                        | WorkbenchRunStatus::Rejected
+                        | WorkbenchRunStatus::Completed => None,
+                    };
+                    self.runtime_observation.publish_workbench_posture(
+                        transfer.map_or(crate::ActorWorkbenchPosture::Idle, |transfer| {
+                            crate::ActorWorkbenchPosture::TerminalTransfer { transfer }
+                        }),
+                    );
+                }
+                Err(_) => self
+                    .runtime_observation
+                    .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed),
+            }
             let rejected = match &result {
                 Err(_) => true,
                 Ok(KernelStep::Continue(response) | KernelStep::ContinueLater(response)) => {
@@ -3578,6 +3630,8 @@ where
                             .finish_cancellation_acknowledgement(request);
                         self.publish_watch_notifications(notifications);
                     }
+                    self.runtime_observation
+                        .publish_workbench_posture(crate::ActorWorkbenchPosture::Idle);
                     Ok(step)
                 }
                 Err(error) => {
@@ -3593,6 +3647,8 @@ where
                             .requests
                             .rollback_cancellation_acknowledgement(request);
                     }
+                    self.runtime_observation
+                        .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed);
                     Err(error)
                 }
             }

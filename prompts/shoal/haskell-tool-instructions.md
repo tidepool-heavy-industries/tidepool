@@ -14,7 +14,9 @@ receipt; writing the same source in a new hosted call is new intent.
 
 Start discovery with `:browse`; use `:type`, `:info`, `:browse!`, and
 `:bindings` for detail, `:recovery` after a successor starts, and `:status` for
-runtime-owned actor/request state.
+runtime-owned actor/request state. `:status` and `rosterWorkbenchPosture`
+distinguish active Haskell execution from suspension at a named effect; do not
+infer either state from elapsed time.
 Use `:doc topics` for short executable examples.
 Request scopes mount typed `sessionInput`, `sessionReply`, and `respond`; roots
 do not. Ending a model response ends the turn—there is no Haskell completion,
