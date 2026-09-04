@@ -1714,16 +1714,21 @@ implement, not that production support has landed.
     and settled a typed result upward. The run exposed Git's parent-ref/file
     collision and established the prefix-safe
     `shoal/<parents>/branches/<leaf>` projection with a focused invariant test.
-- [ ] Gate 7: land prompt profiles, status/metrics, hibernation, and the full
-  three-batch dogfood run.
+- [x] Gate 7: land prompt profiles, status/metrics, make the hibernation policy
+  explicit, and exercise the full recursive campaign semantically.
   - 2026-09-04 observability slice: `actorContext`, `listAgents`, and `:status`
     now expose the exact Haskell scope snapshot, fork group, provider thread
     ancestry, and optional cached/uncached input counts. Binding discovery
     publishes provider lineage before a child clears the atomic readiness
     gate. Missing backend usage remains `Nothing`, distinct from a measured
     zero. The current interactive backend has no turn-idle or usage-observation
-    event, so cache measurement and race-free process hibernation remain open
-    rather than being inferred from reply settlement.
+    event, so race-free process hibernation is deliberately not enabled or
+    inferred from reply settlement. Persistent attachment is the safe policy;
+    hibernation remains an optional backend optimization rather than an actor
+    semantic requirement. The provider active-call canary measured 11,264
+    cached input tokens out of 16,107, while the extractor/provider semantic
+    campaign covered heterogeneous siblings, recursive scaffold/fold, retained
+    actors, typed watches, and named worktree integration.
 - [ ] Run the final relevant broad checks once, move stable contracts to
   owning crate docs and the glossary, and retire this plan.
 
@@ -1761,7 +1766,7 @@ substitute under the name `unfold`.
 
 | Gate | Production owners and likely first touchpoints | Exit evidence |
 |---|---|---|
-| 0. Provider/policy canaries | `tidepool-agent/src/interactive.rs`, Codex backend `node.rs`/`transport.rs`/recorded fixtures; `tidepool-node::process_boundary`; actor hosted-tool correlation | Two siblings contain the exact active call and not its result; a non-final or non-tail unfold is rejected before launch; lineage and reported cache tokens correlate; an inspection-only child is denied representative build/artifact commands before execution |
+| 0. Provider/policy canaries | `tidepool-agent/src/interactive.rs`, Codex backend `node.rs`/`transport.rs`/recorded fixtures; `tidepool-node::process_boundary`; actor hosted-tool correlation | Two siblings contain the exact active call and not its result; an unfold followed by another effect or input unit is rejected before publication; lineage and reported cache tokens correlate; an inspection-only child is denied representative build/artifact commands before execution |
 | 1. Immutable Haskell snapshot | `tidepool-codegen/src/binding_table.rs`; `tidepool-runtime/src/session/persistent.rs`, `registry.rs`, `resident.rs` | Child resolves the pre-fork binding tip; parent rebind, sibling bind, scope retirement, and shared lazy forcing satisfy the snapshot/root-lease tests |
 | 2. Names, effects, and roles | actor identity/descriptor/start plus a single new lineage owner; `tidepool-worktree/src/label.rs`, `create.rs`, `registry.rs`; protocol effect definitions; Haskell Shoal facade; node launch policy | Typed hierarchical paths and numeric collision allocation; generated effect rows compile/deny as intended; one `EffectiveRole` agrees across prompt, status, grants, workspace, and native tools |
 | 3. Per-request evidence | `tidepool-worktree/src/submission.rs`, `snapshot.rs`; actor request/settlement path; Haskell Reply/Watch modules | `Reply a` accepts only `a`; requester gets `ResponseResult a`; start/submitted heads plus committed/staged/unstaged/untracked facts precede response/watch readiness; observation failure preserves `a` |
@@ -2092,14 +2097,15 @@ the exact invariant and evidence rather than silently weakening the surface.
   explicitly receipted dirty snapshot) and preserve the hierarchical branch
   path through its fold.
 
-### Slice 6 — prompt profiles, hibernation, and observability
+### Slice 6 — prompt profiles, hibernation policy, and observability
 
 - Replace the absolute root delegation instruction with the calibrated root
   prelude.
 - Add role-derived child and fresh-agent prompt projections.
 - Extend typed context/agent/fork inspection and `:status`.
-- Surface provider cache measurements honestly and add idle backend
-  hibernation without logical actor teardown.
+- Surface provider cache measurements honestly. Keep idle backends attached
+  until a durable provider-idle signal can support hibernation without logical
+  actor teardown or a lost wakeup.
 
 ### Slice 7 — retirement and dogfood
 
@@ -2137,8 +2143,9 @@ Critical scenarios include:
 
 - every child sees all branch plans but only its own selector;
 - no child sees the parent's unfold result;
-- a later Haskell input unit or user-authored post-unfold `do` suffix rejects
-  before any provider child, actor, request, or worktree is reserved;
+- a later Haskell input unit or effectful post-unfold `do` suffix rejects
+  before child publication; pure result projection after admission in the same
+  unit remains valid Haskell;
 - all siblings share one provider/Haskell snapshot identity;
 - a later parent binding is invisible in every child;
 - child-local declarations are visible to its later descendants but not its

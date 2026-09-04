@@ -63,17 +63,20 @@ data AgentSpec
 data AgentRef
 data Response result
 data Reply result
+data RequestLabel
 
 codingAgent   :: WorktreeHandle -> AgentSpec
 readonlyAgent :: Text -> AgentSpec
-startAgent    :: Member Actor effs => AgentSpec -> Eff effs AgentRef
+startAgent    :: Member AgentLaunch effs => AgentSpec -> Eff effs AgentRef
 
 request
   :: forall result input effs
    . Member Replies effs
-  => AgentRef -> Text -> input -> Eff effs (Response result)
+  => AgentRef -> RequestLabel -> input -> Eff effs (Response result)
 
-stopAgent :: Member Actor effs => AgentRef -> Eff effs ()
+stopAgent
+  :: (Member AgentControl effs, Member AgentInspection effs)
+  => AgentRef -> Eff effs StopOutcome
 
 pollResponse
   :: Member Replies effs
@@ -85,13 +88,16 @@ put the requested result type at the dispatch site when the reply crosses
 workbench input units:
 
 ```haskell
+let Right reviewLabel = requestLabel "review-a"
+let Right testLabel = requestLabel "test-b"
+let Right bothLabel = watchLabel "review-and-test"
 reviewerA <- startAgent (codingAgent treeA)
 reviewerB <- startAgent (codingAgent treeB)
 
-responseA <- request @ReviewReport reviewerA prompt candidateA
-responseB <- request @ReviewReport reviewerB prompt candidateB
+responseA <- request @ReviewReport reviewerA reviewLabel candidateA
+responseB <- request @ReviewReport reviewerB testLabel candidateB
 
-both <- watch $
+both <- watch bothLabel $
   (,) <$> awaitResponse responseA <*> awaitResponse responseB
 ```
 
@@ -139,6 +145,51 @@ The older blocking sub-answerer combinators now live under
 not the persistent-actor fork surface. Shoal context forks are described with
 the applicative `Tidepool.Actors.Unfold` API exported by the default facade.
 
+## Cache-preserving context unfold
+
+Use `unfold` when several independent branches materially benefit from the
+caller's accumulated model context. It forks the active provider thread and
+the immutable Haskell binding tip, creates one persistent actor and named
+worktree per branch, and returns typed handles in the applicative plan's
+original shape. Each child receives the whole unfold call plus only its own
+selected `sessionInput`; the parent keeps the original reply authority.
+
+```haskell
+let Right campaign = campaignLabel "normalization"
+let Right wave = forkGroupLabel "implementation"
+let Right domain = branchLabel "domain"
+let Right ui = branchLabel "ui"
+
+forks <- unfold (batch campaign wave) $
+  (,) <$> child (coding @DomainReport domain projectHead domainTask)
+      <*> child (coding @UiReport ui projectHead uiTask)
+```
+
+`Unfold` is deliberately applicative, not monadic: the runtime can see and
+reserve the complete sibling shape before it publishes any assignment. A
+successful admission must be the final effect boundary in the final Haskell
+input unit. Pure projection or reshaping of its returned handles in that same
+unit is allowed; no later effect is. Pre-publication failure rolls the whole
+group back. After publication, each persistent child has its own lifecycle and
+may receive typed follow-up requests.
+
+The standard role rows are `ResearchEffects`, `CodingEffects`,
+`ScaffoldEffects`, and `IntegrationEffects`. `narrowed` may select any
+compile-time subset of the caller's row. The requested row, semantic role,
+native command policy, workspace access, and descendant budget are projected
+into one effective runtime policy; Haskell membership expresses intent while
+opaque handles and runtime grants remain authoritative. Inspection-only
+children may read and search but are denied builds, tests, formatters,
+generators, installers, and other artifact-producing commands before process
+launch.
+
+Branches use readable hierarchical paths such as
+`shoal/normalization/implementation/domain`, with deterministic numeric
+suffixes on collision. `BranchReceipt`, `actorContext`, `listAgents`, and
+`:status` retain exact actor/worktree identities beneath those readable names.
+Request settlement also records the starting head and committed, staged,
+unstaged, and untracked submission evidence before response/watch readiness.
+
 ## Replies, watches, and model turns
 
 The architecture and remaining verification work are recorded in
@@ -167,10 +218,10 @@ Prose is only their presentation.
 control or an executable program returned from a turn:
 
 ```haskell
-review <- request @ReviewReport reviewer reviewPrompt candidate
-tests  <- request @TestReport tester testPrompt candidate
+review <- request @ReviewReport reviewer reviewLabel candidate
+tests  <- request @TestReport tester testLabel candidate
 
-both <- watch $
+both <- watch bothLabel $
   (,) <$> awaitResponse review <*> awaitResponse tests
 ```
 
@@ -234,17 +285,22 @@ a meaningful integration boundary.
 
 ## Current implementation boundary
 
-The core vertical now has one fixed model-facing effect row, persistent root
-and child applications, dual response/reply capabilities, exactly-once reply
-state, explicit applicative watches, typed durable watch events, and runtime
-`:status`. The focused host acceptance case sends a typed request, settles it
-through `respond`, receives the registered watch transition, and repeatedly
-observes the same typed result through both handles.
+The vertical now includes persistent roots and children, dual response/reply
+capabilities, exactly-once settlement, labeled applicative watches, typed
+request deadlines and cancellation, typed stop and lifecycle observation,
+role-specific effect rows, atomic cache-preserving unfold, recursive scaffold
+and fold, managed worktree queries, and runtime `:status`/`actorContext` facts.
+The old blocking answerer API remains available under
+`Tidepool.Answerer.Fork`; it is not Shoal actor unfold.
 
-Supervisor deadlines, cancellation receipts, and result-root reclamation after
-the final response/watch handle are separate follow-up slices. They extend the
-single request-state owner; they must not introduce another scheduler or a
-model-turn lifecycle effect.
+Provider lineage, Haskell snapshot identity, fork group, exact effect row, and
+optional cached/uncached input counts are observable. Missing provider usage
+is represented as `Nothing`, never a fabricated zero. Tidepool deliberately
+keeps an idle actor's backend attached today: reply settlement is not proof of
+provider turn-idleness, and eager teardown would weaken inexpensive follow-up
+and multi-wave orchestration. Process hibernation is an optional future
+backend optimization once a durable provider idle/usage event can make it
+race-free; it is not part of actor semantics.
 
 ## Next live canary
 
@@ -290,9 +346,9 @@ worker through replies and watches:
 Submit both requests before waiting. A representative shape is:
 
 ```haskell
-responseA <- request @Text agent firstRealTask ()
-responseB <- request @CanaryReport agent secondRealTask ()
-both <- watch ((,) <$> awaitResponse responseA <*> awaitResponse responseB)
+responseA <- request @Text agent firstLabel ()
+responseB <- request @CanaryReport agent secondLabel ()
+both <- watch bothLabel ((,) <$> awaitResponse responseA <*> awaitResponse responseB)
 ```
 
 Handle `createWorktree`'s `Either` explicitly and keep the `AgentRef`, both
@@ -307,10 +363,8 @@ settlement, host lifecycle evidence, and independently verified Git/test facts.
 - Correlate actor incarnation, request/activation identity, hosted-tool
   invocation, compile attempt, and settlement in the existing structured
   tracing path.
-- Consider provider-native context splitting only after persistent requests
-  have real dogfood evidence. A fork must give every child a new actor identity
-  and explicit authority; capabilities and live values are never cloned
-  implicitly.
+- Feed durable provider turn-idle and token-usage events into the existing
+  context observation seam before considering process hibernation.
 - Keep common fan-out, review, and fold patterns as ordinary Haskell rather
   than adding a worker registry, merge queue, or second scheduler.
 

@@ -1744,7 +1744,7 @@ where
                         )
                         .await;
                         return Ok(ResidentWorkbenchStep::Rejected(
-                            "unfold must be in tail position; no effect may follow its admission commit"
+                            "unfold must commit the final effect boundary; no effect may follow its admission commit"
                                 .into(),
                         ));
                     }
