@@ -5,6 +5,12 @@ It keeps the runnable surface visibly distinct from active replacement
 designs. Runtime semantics remain owned by the relevant crate documentation;
 active designs remain in `plans/`.
 
+The active post-dogfood implementation handoff is
+[live context-unfold dogfood follow-ups](plans/actor-model/live-context-unfold-dogfood-followups.md).
+It is the root plan for the next resident-agent UX, correctness,
+observability, resource, and recovery wave; this guide continues to describe
+only the currently landed surface.
+
 ## Working model
 
 Shoal is a typed orchestration environment for persistent Codex nodes working

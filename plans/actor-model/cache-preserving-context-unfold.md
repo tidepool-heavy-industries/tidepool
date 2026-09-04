@@ -10,7 +10,7 @@ sketches in
 [haskell-surface.md](haskell-surface.md).
 
 Live production-like campaign findings and the active post-implementation
-hardening checklist are tracked separately in
+resident-agent UX and hardening implementation handoff are tracked separately in
 [live context-unfold dogfood follow-ups](live-context-unfold-dogfood-followups.md).
 
 This file is the root document for the feature: product decisions, worked
