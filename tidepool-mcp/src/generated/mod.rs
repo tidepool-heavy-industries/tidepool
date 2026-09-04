@@ -4,12 +4,16 @@ pub mod actor;
 pub mod actor_context;
 pub mod actor_kernel;
 pub mod actor_local;
+pub mod agent_control;
+pub mod agent_inspection;
+pub mod agent_launch;
 pub mod agent_session;
 pub mod agent_tools;
 pub mod ask_user;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
+pub mod forks;
 pub mod green;
 pub mod journal;
 pub mod read_state;
@@ -21,12 +25,16 @@ pub use actor::*;
 pub use actor_context::*;
 pub use actor_kernel::*;
 pub use actor_local::*;
+pub use agent_control::*;
+pub use agent_inspection::*;
+pub use agent_launch::*;
 pub use agent_session::*;
 pub use agent_tools::*;
 pub use ask_user::*;
 pub use exec::*;
 pub use finalize::*;
 pub use fork::*;
+pub use forks::*;
 pub use green::*;
 pub use journal::*;
 pub use read_state::*;
@@ -51,6 +59,10 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         actor_context_decl(),
         actor_kernel_decl(),
         actor_local_decl(),
+        agent_control_decl(),
+        agent_inspection_decl(),
+        agent_launch_decl(),
+        forks_decl(),
         agent_tools_decl(),
         agent_session_decl(),
     ]
@@ -61,6 +73,10 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
     "Actor",
     "ActorKernel",
     "ActorLocal",
+    "AgentControl",
+    "AgentInspection",
+    "AgentLaunch",
+    "Forks",
     "AgentTools",
     "AgentSession",
 ];
@@ -96,6 +112,18 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         ],
     ),
     ("ActorLocal", &["ActorReceiveWith"]),
+    ("AgentControl", &["AgentControlTryCallWith"]),
+    ("AgentInspection", &["AgentInspectWith"]),
+    ("AgentLaunch", &["AgentLaunchWith"]),
+    (
+        "Forks",
+        &[
+            "ForksBeginWith",
+            "ForksStartWith",
+            "ForksCommitWith",
+            "ForksAbortWith",
+        ],
+    ),
     (
         "AgentTools",
         &["AgentToolsAwaitWith", "AgentToolsReplyWith"],

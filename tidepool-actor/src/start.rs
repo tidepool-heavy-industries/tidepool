@@ -108,6 +108,35 @@ impl ResidentActorStart {
                 }
                 _ => return Err(ActorStartCaptureError::UnexpectedRequest),
             };
+        Self::capture_decoded(
+            session,
+            parent_hole,
+            label,
+            role,
+            profile,
+            launch_worktrees,
+            fork_group,
+            session_id,
+            parent_actor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture_decoded<H, O>(
+        session: &mut ResidentSession<H, O>,
+        parent_hole: ResidentHole,
+        label: String,
+        role: ActorLaunchRoleWire,
+        profile: ActorEffectProfileWire,
+        launch_worktrees: Vec<String>,
+        fork_group: Option<crate::ForkGroupId>,
+        session_id: tidepool_repr::SessionId,
+        parent_actor: crate::ActorRef,
+    ) -> Result<Self, ActorStartCaptureError>
+    where
+        H: DispatchEffect<O> + Send,
+        O: OutputSink + Sync,
+    {
         let context_fork = fork_group.is_some();
         let child_realm = RealmId::fresh();
         let entry = session

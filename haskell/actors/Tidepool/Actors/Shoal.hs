@@ -199,8 +199,7 @@ import Tidepool.Actors.Internal.Agent
 import Tidepool.Actors.Role
 import Tidepool.Actors.Unfold
 import Tidepool.Effects.Core
-  ( Actor
-  , ActorContextInfo (..)
+  ( ActorContextInfo (..)
   , ActorContextRole (..)
   , ActorNativeTools (..)
   , ActorWorkspaceAccess (..)
@@ -217,12 +216,12 @@ type ActorEffects =
   '[ Replies, Watches, Forks, ActorContext
    , AgentLaunch, AgentInspection, AgentControl
    , BoundWorktree, WorktreeRegistry, WorktreeAllocation
-   , WorktreeIntegration, Actor, Worktree
+   , WorktreeIntegration, Worktree
    ]
 
 type ResearchActorEffects = ResearchEffects
 type CodingActorEffects = CodingEffects
-type ScaffoldActorEffects = Actor ': Worktree ': ScaffoldEffects
+type ScaffoldActorEffects = Worktree ': ScaffoldEffects
 type IntegrationActorEffects = Worktree ': IntegrationEffects
 
 data WorktreePresence

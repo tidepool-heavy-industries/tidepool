@@ -296,6 +296,10 @@ impl ResidentActorBoundary {
 enum ResidentRequest {
     Actor(crate::generated::actor::ActorReq),
     ActorContext(crate::generated::actor_context::ActorContextReq),
+    AgentControl(crate::generated::agent_control::AgentControlReq),
+    AgentInspection(crate::generated::agent_inspection::AgentInspectionReq),
+    AgentLaunch(crate::generated::agent_launch::AgentLaunchReq),
+    Forks(crate::generated::forks::ForksReq),
     ActorKernel(crate::generated::actor_kernel::ActorKernelReq),
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
     AgentTools(crate::generated::agent_tools::AgentToolsReq),
@@ -326,6 +330,19 @@ impl ResidentRequest {
             Self::ActorContext,
             crate::generated::actor_context::ActorContextReq
         );
+        try_member!(
+            Self::AgentControl,
+            crate::generated::agent_control::AgentControlReq
+        );
+        try_member!(
+            Self::AgentInspection,
+            crate::generated::agent_inspection::AgentInspectionReq
+        );
+        try_member!(
+            Self::AgentLaunch,
+            crate::generated::agent_launch::AgentLaunchReq
+        );
+        try_member!(Self::Forks, crate::generated::forks::ForksReq);
         try_member!(
             Self::ActorKernel,
             crate::generated::actor_kernel::ActorKernelReq
@@ -358,6 +375,25 @@ impl ResidentRequest {
             Self::ActorContext(
                 crate::generated::actor_context::ActorContextReq::ActorContextWith,
             ) => "actorContext",
+            Self::AgentControl(
+                crate::generated::agent_control::AgentControlReq::AgentControlTryCallWith(..),
+            ) => "stopAgent",
+            Self::AgentInspection(
+                crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(..),
+            ) => "observeAgent",
+            Self::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
+                ..,
+            )) => "startAgent",
+            Self::Forks(crate::generated::forks::ForksReq::ForksBeginWith(..)) => {
+                "begin context-fork group"
+            }
+            Self::Forks(crate::generated::forks::ForksReq::ForksStartWith(..)) => "context fork",
+            Self::Forks(crate::generated::forks::ForksReq::ForksCommitWith(..)) => {
+                "commit context-fork group"
+            }
+            Self::Forks(crate::generated::forks::ForksReq::ForksAbortWith(..)) => {
+                "abort context-fork group"
+            }
             Self::Actor(crate::generated::actor::ActorReq::ActorStartWith(..)) => "startActor",
             Self::Actor(crate::generated::actor::ActorReq::ActorForkWith(..)) => "context fork",
             Self::Actor(crate::generated::actor::ActorReq::ActorCommitForkGroupWith(..)) => {
@@ -1031,6 +1067,109 @@ where
                     ResidentRequest::ActorContext(
                         crate::generated::actor_context::ActorContextReq::ActorContextWith,
                     ) => Ok(ResidentActorBoundary::ActorContext(hole)),
+                    ResidentRequest::AgentLaunch(
+                        crate::generated::agent_launch::AgentLaunchReq::AgentLaunchWith(
+                            label,
+                            _,
+                            role,
+                            profile,
+                            worktrees,
+                        ),
+                    ) => crate::ResidentActorStart::capture_decoded(
+                        session,
+                        hole,
+                        label,
+                        role,
+                        profile,
+                        worktrees,
+                        None,
+                        context.placement.session,
+                        context.actor,
+                    )
+                    .map(ResidentActorBoundary::Start)
+                    .map_err(ResidentActorWorkbenchError::StartCapture),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksStartWith(
+                        label,
+                        _,
+                        group,
+                        role,
+                        profile,
+                        worktrees,
+                    )) => {
+                        let group = u64::try_from(group).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "invalid fork group id {group}"
+                            ))
+                        })?;
+                        crate::ResidentActorStart::capture_decoded(
+                            session,
+                            hole,
+                            label,
+                            role,
+                            profile,
+                            worktrees,
+                            Some(crate::ForkGroupId(group)),
+                            context.placement.session,
+                            context.actor,
+                        )
+                        .map(ResidentActorBoundary::Start)
+                        .map_err(ResidentActorWorkbenchError::StartCapture)
+                    }
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksBeginWith(
+                        relative,
+                        group,
+                        branches,
+                    )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Begin {
+                        continuation: hole,
+                        relative,
+                        group,
+                        branches,
+                    })),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksCommitWith(
+                        group,
+                    )) => Ok(ResidentActorBoundary::ForkGroup(
+                        ForkGroupBoundary::Commit {
+                            continuation: hole,
+                            group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "invalid fork group id {group}"
+                                ))
+                            })?),
+                        },
+                    )),
+                    ResidentRequest::Forks(crate::generated::forks::ForksReq::ForksAbortWith(
+                        group,
+                    )) => Ok(ResidentActorBoundary::ForkGroup(ForkGroupBoundary::Abort {
+                        continuation: hole,
+                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "invalid fork group id {group}"
+                            ))
+                        })?),
+                    })),
+                    ResidentRequest::AgentInspection(
+                        crate::generated::agent_inspection::AgentInspectionReq::AgentInspectWith(
+                            target,
+                        ),
+                    ) => Ok(ResidentActorBoundary::Poll(
+                        crate::wait::ResidentPollRequest {
+                            target: crate::wait::decode_address(target.0, target.1)?,
+                            continuation: hole,
+                        },
+                    )),
+                    ResidentRequest::AgentControl(
+                        crate::generated::agent_control::AgentControlReq::AgentControlTryCallWith(
+                            target,
+                            _,
+                        ),
+                    ) => capture_outbound_boundary(
+                        session,
+                        context,
+                        hole,
+                        target,
+                        OutboundKind::TryCall,
+                        actor_realm,
+                    ),
                     ResidentRequest::Actor(
                         crate::generated::actor::ActorReq::ActorStartWith(..)
                         | crate::generated::actor::ActorReq::ActorForkWith(..),

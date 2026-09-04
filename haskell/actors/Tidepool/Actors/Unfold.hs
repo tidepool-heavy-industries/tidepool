@@ -55,7 +55,6 @@ import Prelude
 import Tidepool.Agent.Reply (Replies, Response, ResponseResult)
 import Tidepool.Agent.Reply.Internal (RequestLabel (..))
 import Tidepool.Agent.Watch (Await, Settlement, awaitResponse, awaitSettled)
-import qualified Tidepool.Actor as ActorRuntime
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , AgentSpec
@@ -69,7 +68,6 @@ import Tidepool.Actors.Internal.Agent
   )
 import Tidepool.Actors.Role
   ( CodingEffects
-  , Forks
   , IntegrationEffects
   , KnownEffects
   , ResearchEffects
@@ -77,14 +75,14 @@ import Tidepool.Actors.Role
   , Subset
   )
 import Tidepool.Effects.Core
-  ( Actor
-  , DirtyPolicy (..)
+  ( DirtyPolicy (..)
   , GitRef
   , Worktree (WorktreeCreateForActorPath, WorktreeCreateFromBoundForActorPath)
   , WorktreeError
   , WorktreeHandle (..)
   , WorktreeReceipt
   , WorktreeSource (..)
+  , Forks (..)
   , WorktreeSpec (..)
   )
 import Tidepool.Worktree (renderWorktreeError, worktreeId)
@@ -279,18 +277,18 @@ childSited = BranchU
 -- same Haskell-owned result tree.
 unfold
   :: forall parent result
-   . (Member Forks parent, Member Actor parent, Member Replies parent, Member Worktree parent)
+   . (Member Forks parent, Member Replies parent, Member Worktree parent)
   => ForkGroupPath
   -> Unfold parent result
   -> Eff parent result
 unfold (ForkGroupPath relative groupName) plan = do
-  (groupId, resolvedGroup, allocated) <- ActorRuntime.beginActorForkGroup relative groupName (branchNames plan)
+  (groupId, resolvedGroup, allocated) <- send (ForksBeginWith relative groupName (branchNames plan))
   let group = ForkGroupPath False resolvedGroup
   (started, remaining) <- start groupId group plan allocated
   case remaining of
     [] -> do
       result <- activate started
-      ActorRuntime.commitActorForkGroup groupId
+      send (ForksCommitWith groupId)
       pure result
     _ -> error "unfold: runtime returned more branch paths than requested"
   where
@@ -326,7 +324,7 @@ unfold (ForkGroupPath relative groupName) plan = do
 
 startBranch
   :: forall effects child input result
-   . (Member Actor effects, Member Worktree effects)
+   . (Member Forks effects, Member Worktree effects)
   => Int
   -> Text
   -> Branch child input result
@@ -335,7 +333,7 @@ startBranch groupId allocated (Branch _ role seed _) = do
   created <- createNamedWorktree allocated seed
   case created of
     Left failure -> do
-      ActorRuntime.abortActorForkGroup groupId
+      send (ForksAbortWith groupId)
       error (Text.unpack ("unfold worktree admission failed: " <> renderWorktreeError failure))
     Right tree ->
       do

@@ -20,6 +20,9 @@ pub mod actor;
 pub mod actor_context;
 pub mod actor_kernel;
 pub mod actor_local;
+pub mod agent_control;
+pub mod agent_inspection;
+pub mod agent_launch;
 pub mod agent_session;
 pub mod agent_tools;
 pub mod ask;
@@ -29,6 +32,7 @@ pub mod event;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
+pub mod forks;
 pub mod green;
 pub mod journal;
 pub mod read_state;
@@ -68,6 +72,10 @@ pub fn all() -> Vec<Effect> {
         actor_context::actor_context(),
         actor_kernel::actor_kernel(),
         actor_local::actor_local(),
+        agent_control::agent_control(),
+        agent_inspection::agent_inspection(),
+        agent_launch::agent_launch(),
+        forks::forks(),
         agent_tools::agent_tools(),
         agent_session::agent_session(),
     ]

@@ -5,6 +5,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
 
 -- | Private construction and protocols for persistent Shoal agents.
 module Tidepool.Actors.Internal.Agent
@@ -38,13 +39,13 @@ module Tidepool.Actors.Internal.Agent
   , stopAgent
   ) where
 
-import Control.Monad.Freer (Eff, Member)
+import Control.Monad.Freer (Eff, Member, raise, send)
 import Data.Text (Text)
 import Prelude
 
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Internal as ActorInternal
-import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch)
+import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch, Forks)
 import Tidepool.Agent.Reply.Internal
   ( Reply
   , Replies
@@ -64,7 +65,20 @@ import Tidepool.Agent.Session
   ( attachAgent
   , requestSessionSited
   )
-import Tidepool.Effects.Core (Actor, WorktreeHandle (..), WorktreeReceipt (..))
+import Tidepool.Effects.Core
+  ( ActorCallStatus (..)
+  , ActorEffectProfile (..)
+  , ActorKernel (..)
+  , ActorLaunchRole (..)
+  , ActorTerminalStatus (..)
+  , AgentControl (..)
+  , AgentInspection (..)
+  , AgentLaunch (..)
+  , Forks (..)
+  , WorktreeHandle (..)
+  , WorktreeReceipt (..)
+  )
+import Tidepool.Internal.ExitCell (fillExitCell, newExitCell, readExitCell)
 import Tidepool.Worktree
   ( observeSubmission
   , renderBranchName
@@ -107,11 +121,11 @@ agentBoundWorktree :: AgentRef -> Maybe WorktreeHandle
 agentBoundWorktree (AgentRef _ tree) = tree
 
 observeAgent
-  :: (Member AgentInspection effs, Member Actor effs)
+  :: Member AgentInspection effs
   => AgentRef
   -> Eff effs AgentObservation
 observeAgent agent@(AgentRef target tree) = do
-  terminal <- Actor.pollExit target
+  terminal <- pollAgentExit target
   let (actorId, incarnation) = agentIdentity agent
   pure AgentObservation
     { observedAgentId = actorId
@@ -175,16 +189,16 @@ integrationAgent :: WorktreeHandle -> AgentSpec
 integrationAgent = IntegrationAgent
 
 -- | Start one persistent Codex identity. Requests do not terminate it.
-startAgent :: (Member AgentLaunch effs, Member Actor effs) => AgentSpec -> Eff effs AgentRef
+startAgent :: Member AgentLaunch effs => AgentSpec -> Eff effs AgentRef
 startAgent spec = do
-  actor <- Actor.startActor (agentDefinition spec) ()
+  actor <- launchFreshActor (agentDefinition spec) ()
   pure (AgentRef actor (agentWorktree spec))
 
 -- | Start an agent by forking the caller's active provider and Haskell
 -- snapshots. Public Shoal code reaches this through the applicative unfold DSL.
-startForkedAgent :: Member Actor effs => Int -> Text -> AgentSpec -> Eff effs (AgentRef, Text)
+startForkedAgent :: Member Forks effs => Int -> Text -> AgentSpec -> Eff effs (AgentRef, Text)
 startForkedAgent forkGroup actorLabel spec = do
-  (actor, allocatedPath) <- Actor.startActorFork (agentRole spec) forkGroup (agentDefinitionNamed actorLabel spec) ()
+  (actor, allocatedPath) <- launchForkedActor (agentRole spec) forkGroup (agentDefinitionNamed actorLabel spec) ()
   pure (AgentRef actor (agentWorktree spec), allocatedPath)
 
 -- | Submit a typed request and return its independently awaitable reply.
@@ -308,22 +322,136 @@ data StopOutcome
 -- | Ask an agent to retire after all earlier mailbox requests settle.
 -- The typed receipt makes retries and already-terminal handles explicit.
 stopAgent
-  :: (Member AgentControl effs, Member Actor effs)
+  :: (Member AgentControl effs, Member AgentInspection effs)
   => AgentRef
   -> Eff effs StopOutcome
 stopAgent (AgentRef target _) = do
-  before <- Actor.pollExit target
+  before <- pollAgentExit target
   case before of
     Just terminal -> pure (AlreadyStopped terminal)
     Nothing -> do
-      requested <- ActorInternal.tryCallUnit target StopAgent
+      requested <- tryControlCall target StopAgent
       case requested of
         Right () -> pure StopRequested
         Left failure -> do
-          after <- Actor.pollExit target
+          after <- pollAgentExit target
           pure $ case after of
             Just terminal -> AlreadyStopped terminal
             Nothing -> StopFailed failure
+
+launchFreshActor
+  :: forall effs startup api exit
+   . Member AgentLaunch effs
+  => Actor.ActorDefinition startup api exit
+  -> startup
+  -> Eff effs (Actor.ActorRef api exit)
+launchFreshActor definition@Actor.ActorDefinition
+  { Actor.label = actorLabel
+  , Actor.effectProfile = profile
+  , Actor.initialization = startupAction
+  , Actor.behavior = install
+  , Actor.onShutdown = shutdownAction
+  } startup = do
+  let cell = newExitCell startup
+      shutdownEntry reasonCode =
+        raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
+      entry _ = do
+        send (ActorInstallShutdownWith 0 shutdownEntry)
+        initial <- raiseActorKernel (startupAction startup)
+        send ActorReadyWith
+        result <- raiseActorKernel (install startup initial)
+        case fillExitCell cell result of
+          () -> pure ()
+  (actorId, incarnation, _) <- send
+    (AgentLaunchWith
+      actorLabel
+      entry
+      ActorInheritedRole
+      (profileCode profile)
+      (ActorInternal.actorLaunchWorktrees definition))
+  pure (ActorInternal.ActorRef actorId incarnation cell)
+
+launchForkedActor
+  :: forall effs startup api exit
+   . Member Forks effs
+  => Actor.LaunchRole
+  -> Int
+  -> Actor.ActorDefinition startup api exit
+  -> startup
+  -> Eff effs (Actor.ActorRef api exit, Text)
+launchForkedActor launchRole forkGroup definition@Actor.ActorDefinition
+  { Actor.label = actorLabel
+  , Actor.effectProfile = profile
+  , Actor.initialization = startupAction
+  , Actor.behavior = install
+  , Actor.onShutdown = shutdownAction
+  } startup = do
+  let cell = newExitCell startup
+      shutdownEntry reasonCode =
+        raiseActorKernel (shutdownAction (decodeShutdownReason reasonCode))
+      entry _ = do
+        send (ActorInstallShutdownWith 0 shutdownEntry)
+        initial <- raiseActorKernel (startupAction startup)
+        send ActorReadyWith
+        result <- raiseActorKernel (install startup initial)
+        case fillExitCell cell result of
+          () -> pure ()
+  (actorId, incarnation, allocatedPath) <- send
+    (ForksStartWith
+      actorLabel
+      entry
+      forkGroup
+      (roleCode launchRole)
+      (profileCode profile)
+      (ActorInternal.actorLaunchWorktrees definition))
+  pure (ActorInternal.ActorRef actorId incarnation cell, allocatedPath)
+
+pollAgentExit
+  :: Member AgentInspection effs
+  => Actor.ActorRef api exit
+  -> Eff effs (Maybe (Actor.ActorExit exit))
+pollAgentExit (ActorInternal.ActorRef actorId incarnation cell) = do
+  terminal <- send (AgentInspectWith (actorId, incarnation))
+  pure (terminal >>= decodeTerminal cell)
+  where
+    decodeTerminal retained status = case status of
+      ActorCompletedStatus ->
+        case readExitCell status retained of
+          Just value -> Just (Actor.Completed value)
+          Nothing -> error "observeAgent: completed actor has an empty exit cell"
+      ActorFailedStatus summary -> Just (Actor.Failed (Actor.ActorFailure summary))
+      ActorCancelledStatus summary -> Just (Actor.Cancelled (Actor.CancelReason summary))
+
+tryControlCall
+  :: Member AgentControl effs
+  => Actor.ActorRef protocol exit
+  -> protocol ()
+  -> Eff effs (Either Text ())
+tryControlCall (ActorInternal.ActorRef actorId incarnation _) request = do
+  status <- send (AgentControlTryCallWith (actorId, incarnation) request)
+  pure $ case status of
+    ActorCallSucceeded -> Right ()
+    ActorCallFailed summary -> Left summary
+
+profileCode :: Actor.EffectProfile protocol effs -> ActorEffectProfile
+profileCode Actor.ReadWrite = ActorReadWriteProfile
+profileCode Actor.ReadOnly = ActorReadOnlyProfile
+
+roleCode :: Actor.LaunchRole -> ActorLaunchRole
+roleCode Actor.RootRole = ActorRootRole
+roleCode Actor.ResearchRole = ActorResearchRole
+roleCode Actor.CodingRole = ActorCodingRole
+roleCode Actor.ScaffoldingRole = ActorScaffoldingRole
+roleCode Actor.IntegrationRole = ActorIntegrationRole
+roleCode Actor.InheritedRole = ActorInheritedRole
+
+decodeShutdownReason :: Int -> Actor.ShutdownReason
+decodeShutdownReason 0 = Actor.ShutdownCompleted
+decodeShutdownReason 1 = Actor.ShutdownFailed
+decodeShutdownReason _ = Actor.ShutdownCancelled
+
+raiseActorKernel :: Eff effs a -> Eff (ActorKernel ': effs) a
+raiseActorKernel = raise
 
 agentWorktree :: AgentSpec -> Maybe WorktreeHandle
 agentWorktree (CodingAgent tree) = Just tree
