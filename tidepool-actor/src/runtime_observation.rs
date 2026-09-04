@@ -54,6 +54,9 @@ pub struct ProviderUsageSample {
     pub observed_at_unix_ms: u64,
     pub scope: ProviderUsageScope,
     pub cache_boundary: CacheBoundaryReason,
+    pub prompt_profile: Option<String>,
+    pub prompt_catalog_version: Option<u32>,
+    pub prompt_fingerprint: Option<String>,
     pub cached_input_tokens: i64,
     pub uncached_input_tokens: i64,
 }
@@ -66,6 +69,9 @@ pub struct ActorRuntimeObservation {
     pub activation_kind: ActorActivationKind,
     pub event_watermark: u64,
     pub cache_boundary: CacheBoundaryReason,
+    pub prompt_profile: Option<String>,
+    pub prompt_catalog_version: Option<u32>,
+    pub prompt_fingerprint: Option<String>,
     pub provider_usage: Vec<ProviderUsageSample>,
 }
 
@@ -116,15 +122,34 @@ impl ActorRuntimeObservationHandle {
         self.inner.write().cache_boundary = cache_boundary;
     }
 
+    /// Record the exact composed developer prompt installed for this actor.
+    /// The body stays out of runtime observations; profile, catalog version,
+    /// and content fingerprint are enough to correlate cache behavior.
+    pub fn publish_prompt_profile(
+        &self,
+        profile: impl Into<String>,
+        catalog_version: u32,
+        fingerprint: impl Into<String>,
+    ) {
+        let mut observation = self.inner.write();
+        observation.prompt_profile = Some(profile.into());
+        observation.prompt_catalog_version = Some(catalog_version);
+        observation.prompt_fingerprint = Some(fingerprint.into());
+    }
+
     pub fn publish_cache_usage(&self, cached_input_tokens: i64, uncached_input_tokens: i64) {
         let mut observation = self.inner.write();
         let activation_sequence = observation.current_activation_sequence;
         let cache_boundary = observation.cache_boundary;
+        let prompt_profile = observation.prompt_profile.clone();
+        let prompt_catalog_version = observation.prompt_catalog_version;
+        let prompt_fingerprint = observation.prompt_fingerprint.clone();
         if observation.provider_usage.last().is_some_and(|sample| {
             sample.activation_sequence == activation_sequence
                 && sample.cached_input_tokens == cached_input_tokens
                 && sample.uncached_input_tokens == uncached_input_tokens
                 && sample.cache_boundary == cache_boundary
+                && sample.prompt_fingerprint == prompt_fingerprint
         }) {
             return;
         }
@@ -133,6 +158,9 @@ impl ActorRuntimeObservationHandle {
             observed_at_unix_ms: unix_time_ms(),
             scope: ProviderUsageScope::LastProviderResponse,
             cache_boundary,
+            prompt_profile,
+            prompt_catalog_version,
+            prompt_fingerprint,
             cached_input_tokens,
             uncached_input_tokens,
         });
@@ -213,5 +241,17 @@ mod tests {
                 inbox_sequences: vec![11, 12]
             }
         );
+    }
+
+    #[test]
+    fn usage_sample_carries_the_prompt_identity_active_for_that_response() {
+        let observation = ActorRuntimeObservationHandle::default();
+        observation.publish_prompt_profile("coding-v1", 3, "abc123");
+        observation.publish_cache_usage(90, 10);
+        let snapshot = observation.snapshot();
+        let sample = snapshot.latest_provider_usage().unwrap();
+        assert_eq!(sample.prompt_profile.as_deref(), Some("coding-v1"));
+        assert_eq!(sample.prompt_catalog_version, Some(3));
+        assert_eq!(sample.prompt_fingerprint.as_deref(), Some("abc123"));
     }
 }

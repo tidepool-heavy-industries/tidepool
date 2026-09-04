@@ -75,6 +75,7 @@ pub use mount::{
     ActorSourceImports,
 };
 pub use profile::ActorEffectProfile;
+pub use prompt_catalog::hosted_prompt_fingerprint as shoal_hosted_prompt_fingerprint;
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,
     DeadlineUnit, ForgetResponseOutcome, ForgetWatchOutcome, ReplyError, ReplyObservation,

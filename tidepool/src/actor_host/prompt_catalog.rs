@@ -9,6 +9,8 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
+    pub(super) const CATALOG_VERSION: u32 = 1;
+
     #[cfg(test)]
     pub(super) const ALL: [Self; 6] = [
         Self::ShoalRoot,
@@ -35,12 +37,22 @@ impl PromptId {
         PromptArtifact {
             id: self,
             role: PromptRole::Developer,
+            catalog_version: Self::CATALOG_VERSION,
             body,
         }
     }
 
     pub(super) fn body(self) -> &'static str {
         self.artifact().body
+    }
+
+    pub(super) fn composed_fingerprint(body: &str, hosted_tool_fingerprint: &str) -> String {
+        let mut hasher = blake3::Hasher::new();
+        for part in [body, hosted_tool_fingerprint] {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
     }
 }
 
@@ -53,6 +65,7 @@ pub(super) enum PromptRole {
 pub(super) struct PromptArtifact {
     pub(super) id: PromptId,
     pub(super) role: PromptRole,
+    pub(super) catalog_version: u32,
     pub(super) body: &'static str,
 }
 
@@ -70,5 +83,13 @@ mod tests {
         assert!(artifacts
             .iter()
             .all(|artifact| artifact.role == PromptRole::Developer));
+        assert!(artifacts
+            .iter()
+            .all(|artifact| artifact.catalog_version == PromptId::CATALOG_VERSION));
+        assert_eq!(
+            PromptId::composed_fingerprint(PromptId::ShoalRoot.body(), "hosted-tool-fingerprint")
+                .len(),
+            64
+        );
     }
 }

@@ -476,8 +476,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         } else {
             String::new()
         };
+        let prompt_identity = if view == StatusView::Trace {
+            format!(
+                " prompt_catalog={:?} prompt_fingerprint={:?}",
+                runtime.prompt_catalog_version, runtime.prompt_fingerprint
+            )
+        } else {
+            String::new()
+        };
         let current = format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
@@ -499,7 +507,11 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             self.descriptor.effective_role().native_tools(),
             self.descriptor.effective_role().workspace(),
             self.descriptor.effective_role().descendants(),
-            self.descriptor.effective_role().prompt_profile(),
+            runtime
+                .prompt_profile
+                .as_deref()
+                .unwrap_or(self.descriptor.effective_role().prompt_profile()),
+            prompt_identity,
             if self.policy_installed { "attached" } else { "detached" },
             self.launch_worktrees.first(),
             requests.pending_responses,

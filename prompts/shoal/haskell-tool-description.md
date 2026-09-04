@@ -5,8 +5,9 @@ Outside `:{` / `:}`, each colon-prefixed line is one reserved command and every
 other nonblank line is one Haskell input unit. Inside `:{` / `:}`, the entire
 body is one GHC input unit: ordinary declaration groups are valid, effect
 sequences belong in `do`, and persisting several effect results requires one
-outer tuple or record pattern binding. Units execute in order and stop at the
-first rejection; earlier successful units remain committed. A rejected
+outer tuple or record pattern binding. Units execute in order. Failed
+observational commands are local diagnostics; a rejected Haskell or effectful
+unit stops the suffix. Earlier successful units remain committed. A rejected
 effectful unit does not install its projected bindings and does not roll back
 effects already performed.
 

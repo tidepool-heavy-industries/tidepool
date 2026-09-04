@@ -1785,6 +1785,14 @@ async fn launch_prepared_interactive_application(
         InteractiveLaunchMode::Resume(_) => tidepool_actor::CacheBoundaryReason::ReattachedThread,
     });
     let developer_instructions = developer_instructions(&installation.effective_role, &launch_mode);
+    runtime_observation.publish_prompt_profile(
+        installation.effective_role.prompt_profile(),
+        PromptId::CATALOG_VERSION,
+        PromptId::composed_fingerprint(
+            &developer_instructions,
+            &tidepool_actor::shoal_hosted_prompt_fingerprint(),
+        ),
+    );
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
         model: config.model.clone(),
