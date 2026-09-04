@@ -1,27 +1,13 @@
-Run a GHCi-style script in this actor's persistent session. Send raw input
-without JSON or Markdown fences.
+Run raw GHCi-style input in this actor's persistent workbench, without JSON or
+Markdown fences. Each nonblank line is an input unit; `:{` through `:}` forms
+one unit. Put effect sequences in `do`, using one outer tuple or record binding
+to retain several results. Units run in order. Failed observational commands
+are local diagnostics; a rejected Haskell/effect unit stops the suffix.
+Successful earlier units and performed effects remain committed.
 
-Outside `:{` / `:}`, each colon-prefixed line is one reserved command and every
-other nonblank line is one Haskell input unit. Inside `:{` / `:}`, the entire
-body is one GHC input unit: ordinary declaration groups are valid, effect
-sequences belong in `do`, and persisting several effect results requires one
-outer tuple or record pattern binding. Units execute in order. Failed
-observational commands are local diagnostics; a rejected Haskell or effectful
-unit stops the suffix. Earlier successful units remain committed. A rejected
-effectful unit does not install its projected bindings and does not roll back
-effects already performed.
-Structured item receipts identify installed bindings, completed effect
-operations, and accepted terminal transfers; use them instead of inferring
-completion from prose or elapsed time.
-
-Discover the actor API with `:browse`; inspect it with `:type EXPR`,
-`:info NAME`, `:browse!`, and `:bindings`; use `:doc topics` for executable
-Shoal patterns. Request-activated agents receive a
-stable typed `sessionInput`, a typed `sessionReply`, and `respond`; root
-applications do not. Ordinary model-response termination ends the current
-turn. Register a labeled `watch` when a response becoming ready should durably
-reactivate the application; typed handles and polling remain authoritative.
-`:status` reports the actor standing and response/watch queues.
-It also distinguishes a running Haskell input unit from suspension at a named
-effect boundary; `listAgents` exposes the same fact as
-`rosterWorkbenchPosture`.
+Discover with `:browse`, `:type`, `:info`, `:bindings`, and `:doc topics`.
+Request activations provide `sessionInput`, `sessionReply`, and `respond`; roots
+do not. Ending the model response ends the turn—there is no completion, yield,
+or park effect. A labeled `watch` requests durable reactivation. Typed handles,
+polling, and structured receipts are authoritative; `:status` reports posture
+and queues.

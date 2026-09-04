@@ -27,6 +27,7 @@ use tokio::sync::Mutex;
 const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 const NAMESPACE: &str = "tidepool_actor";
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
+const DESCRIPTION_LIMIT: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolKind {
@@ -88,6 +89,10 @@ impl HostDynamicToolService {
             .instructions()
             .unwrap_or("Actor-scoped Tidepool tools")
             .to_owned();
+        validate_description("dynamic-tool namespace", NAMESPACE, &description)?;
+        for tool in endpoint.tools() {
+            validate_description("dynamic tool", tool.name(), tool.description())?;
+        }
         let registration = Registration {
             protocol_version: PROTOCOL_VERSION,
             dynamic_tools: vec![DynamicTool::Namespace {
@@ -118,6 +123,15 @@ impl HostDynamicToolService {
             .with_state(self.state);
         axum::serve(listener, app).await
     }
+}
+
+fn validate_description(kind: &str, name: &str, description: &str) -> Result<(), String> {
+    if description.chars().count() <= DESCRIPTION_LIMIT {
+        return Ok(());
+    }
+    Err(format!(
+        "{kind} `{name}` description exceeds the {DESCRIPTION_LIMIT}-character provider limit"
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -608,6 +622,18 @@ mod tests {
         assert_eq!(value["dynamicTools"][0]["name"], NAMESPACE);
         assert_eq!(value["dynamicTools"][0]["tools"][0]["type"], "custom");
         assert_eq!(value["dynamicTools"][0]["tools"][0]["name"], "haskell");
+    }
+
+    #[test]
+    fn provider_description_limit_is_checked_before_launch() {
+        let boundary = "x".repeat(DESCRIPTION_LIMIT);
+        assert!(validate_description("dynamic tool", "boundary", &boundary).is_ok());
+
+        let too_long = "x".repeat(DESCRIPTION_LIMIT + 1);
+        assert_eq!(
+            validate_description("dynamic tool", "oversized", &too_long).unwrap_err(),
+            "dynamic tool `oversized` description exceeds the 1024-character provider limit"
+        );
     }
 
     #[test]

@@ -101,10 +101,12 @@ mod tests {
             ]
         );
         let description = PromptId::HaskellToolDescription.body();
-        assert!(description.contains("typed `sessionReply`"));
+        assert!(description.contains("`sessionReply`"));
         assert!(description.contains("`:status`"));
-        assert!(description.contains("Ordinary model-response termination"));
-        assert!(!description.contains("assemble"));
+        assert!(description.contains("Ending the model response ends the turn"));
+        assert!(artifacts
+            .iter()
+            .all(|artifact| artifact.body.chars().count() <= 1024));
         assert!(workbench_doc("unfold").unwrap().contains("Forked a"));
         assert!(workbench_doc("cleanup").unwrap().contains("executeCleanup"));
         assert!(workbench_doc("refinement")
