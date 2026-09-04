@@ -4,6 +4,19 @@
 //! resident agent sessions, Haskell actor startup, and supervision. Machine
 //! execution remains in `tidepool-runtime`;
 //! provider transport remains behind `tidepool-model`'s seams.
+//!
+//! A resident root or child is a persistent actor application, not one model
+//! round. Ordinary provider output termination makes it idle; reply settlement
+//! completes one typed request; only supervision terminates the actor.
+//!
+//! Cache-preserving context unfold is admitted here as one atomic sibling
+//! group. The caller's active provider thread and immutable Haskell snapshot
+//! are shared as information, while [`EffectiveRole`], exact
+//! [`ActorEffectKey`] membership, opaque grants, workspace placement, and
+//! descendant limits independently define each child's authority. Children
+//! are not published until every provider binding is queue-ready and the final
+//! hosted effect boundary commits. Pre-publication failure aborts the group;
+//! published children remain independently addressable for typed follow-up.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 

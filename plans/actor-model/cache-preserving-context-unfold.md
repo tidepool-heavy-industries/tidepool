@@ -1,9 +1,11 @@
 # Cache-preserving context unfold and typed result fold
 
-Status: accepted and interaction-pressure-tested; implementation in progress.
-This plan is the canonical design and linear handoff for context-preserving
-forks of interactive agent applications. It refines the older process-fork-
-shaped sketches in
+Status: implemented and verified; retained as the decision record and gate
+evidence. The stable user contract now lives in the root `SHOAL.md`, the
+public Haskell modules, and the owning Rust crate docs. This plan records the
+design and linear implementation history for context-preserving forks of
+interactive agent applications. It refines the older process-fork-shaped
+sketches in
 [architecture.md](architecture.md) and
 [haskell-surface.md](haskell-surface.md).
 
@@ -11,8 +13,7 @@ This file is the root document for the feature: product decisions, worked
 LLM interaction, runtime boundaries, implementation ordering, and the durable
 implementation checklist all live here. Supporting actor-model documents provide
 landed substrate detail; when they disagree about interactive context forks,
-this document wins until the feature lands and its contracts move into the
-owning crate guides.
+the landed public surface and owning crate guides now win.
 
 ## Outcome
 
@@ -31,28 +32,33 @@ it does not tear down the child or its useful learned context.
 The interaction should feel like this:
 
 ```haskell
-contextUnfold = campaign "context-unfold"
+let Right contextUnfold = campaignLabel "context-unfold"
+let Right implementation = forkGroupLabel "implementation"
+let Right domainBranch = branchLabel "domain"
+let Right testsBranch = branchLabel "tests"
+let Right semanticsBranch = branchLabel "semantics"
 
-workers <- unfold (batch contextUnfold "implementation") $
+workers <- unfold (batch contextUnfold implementation) $
   Campaign
-    <$> child (coding @PatchReport "domain" domainTree domainPlan)
-    <*> child (coding @TestReport "tests" testTree testPlan)
-    <*> child (researching @ReviewReport "semantics" projectHead reviewPlan)
+    <$> child (coding @PatchReport domainBranch projectHead domainPlan)
+    <*> child (coding @TestReport testsBranch projectHead testPlan)
+    <*> child (researching @ReviewReport semanticsBranch projectHead reviewPlan)
 ```
 
 In the next hosted Haskell call:
 
 ```haskell
-finished <- watch "implementation-results" $
+let Right resultWatch = watchLabel "implementation-results"
+finished <- watch resultWatch $
   CampaignResult
     <$> awaitFork (domain workers)
     <*> awaitFork (tests workers)
     <*> awaitFork (semantics workers)
 ```
 
-The exact function names remain provisional. The shape is not: one applicative unfold
-at one frozen context boundary, immediate persistent actor handles, and an
-explicit typed fold later.
+The landed surface preserves this shape: one applicative unfold at one frozen
+context boundary, immediate persistent actor handles, and an explicit typed
+fold later.
 
 ## Accepted product decisions
 
@@ -69,7 +75,8 @@ explicit typed fold later.
 4. **Children are persistent by default.** After replying they remain idle and
    addressable for follow-up requests. A backend may hibernate an idle process
    without changing the logical actor or its retained provider thread.
-   `oneShot` is an explicit policy modifier, not the default.
+   Any future one-shot convenience must be an explicit policy modifier, not
+   the default or the meaning of reply settlement.
 5. **Admission is atomic.** No handle is published and no child assignment is
    activated until every branch in an unfold has passed preflight and reached
    queue readiness. A pre-publication failure cleans up all unpublished
@@ -1622,10 +1629,9 @@ parallel shortcut merely to keep moving.
 
 ### Implementation checklist
 
-This is the durable todo list for the feature. Update this checklist in the same
-commit that changes a gate's state; the detailed gate table below owns its
-exit evidence. A checked planning item means the decision is ready to
-implement, not that production support has landed.
+This is the durable todo list for the feature. The first three items record
+design readiness; the numbered gates and their evidence record landed
+production support.
 
 - [x] Fix the permanent-application, typed reply/watch, and non-fatal
   interactive pattern contracts from live Shoal use.
@@ -1729,8 +1735,15 @@ implement, not that production support has landed.
     cached input tokens out of 16,107, while the extractor/provider semantic
     campaign covered heterogeneous siblings, recursive scaffold/fold, retained
     actors, typed watches, and named worktree integration.
-- [ ] Run the final relevant broad checks once, move stable contracts to
+- [x] Run the final relevant broad checks once, move stable contracts to
   owning crate docs and the glossary, and retire this plan.
+  - 2026-09-04: `CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 just verify`
+    passed on the committed tree: formatting and all-target Clippy were clean;
+    all 2,387 default-tier tests passed (including the provider-backed unfold
+    canary); the suite manifest covered every declared integration binary; and
+    all 217 Haskell fixture semantic tests passed with a current source
+    fingerprint. Test debug information was disabled only to keep link output
+    below the host's storage ceiling.
 
 Do not check a gate merely because its happy-path code exists. Record the
 focused commands and failure/cleanup evidence immediately beneath the item or

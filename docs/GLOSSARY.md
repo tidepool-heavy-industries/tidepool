@@ -24,6 +24,11 @@ units. Bare **"window" is banned everywhere** — the ONLY surviving use is
 Qualified companions: a **child agent session** (was "fork/branch child
 window"); a session is **reusable** (the per-loop answerer) or **one-shot**.
 
+An **actor application** is the persistent supervised identity that may handle
+many agent sessions and model rounds. A root or child actor application becomes
+idle when a model round ends; it is not completed by ending that round or by
+settling one reply.
+
 ## Survivors table (what to write instead)
 
 | Was | Write instead |
@@ -41,6 +46,7 @@ window"); a session is **reusable** (the per-loop answerer) or **one-shot**.
 | hylo boundary | say what crosses: the Haskell-expand / Rust-collapse split |
 | one-session collapse / pillar A/B/D / lane coordinates | name the mechanism plainly; project coordinates never leave `plans/` |
 | session (bare, for runtime state) | **machine session** (`ResidentSession` — the resident JIT machine + heap + bindings) |
+| context fork / self-fork (Shoal actor surface) | **context unfold** for the applicative expansion; **blocking answerer fork** for `Tidepool.Answerer.Fork` |
 
 ## Reserved words (industry meaning only)
 
@@ -59,6 +65,13 @@ vocabulary); **parked continuation**; **green thread**; **resident** (as in
 machine session: state genuinely stays in memory across calls);
 **`ContextRef` / frozen context snapshot** (an opaque capability reference
 to an exact retained transcript prefix).
+
+**context unfold** is the applicative construction of persistent child actor
+applications from one active provider call and immutable Haskell binding tip.
+It shares context, narrows authority explicitly, and returns typed handles;
+results return later through replies and watches. **fold** is ordinary Haskell
+composition of those typed results and worktree evidence, not an automatic
+merge of model contexts.
 
 ## Model-facing prompt rules
 
