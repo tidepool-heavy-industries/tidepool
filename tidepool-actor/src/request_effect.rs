@@ -21,6 +21,8 @@ pub(crate) enum RepliesReq {
     ReplyWith(i64, Value),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     ObserveResponseWith(i64),
+    #[core(module = "Tidepool.Agent.Reply.Internal")]
+    CancelResponseWith(i64),
 }
 
 #[derive(tidepool_bridge_derive::FromCore)]
@@ -52,6 +54,11 @@ pub(crate) struct ReplyAttempt {
 }
 
 pub(crate) struct ResponsePoll {
+    pub continuation: ResidentHole,
+    pub request: RequestId,
+}
+
+pub(crate) struct ResponseCancellation {
     pub continuation: ResidentHole,
     pub request: RequestId,
 }
@@ -132,6 +139,23 @@ pub(crate) fn response_observation_value(
             vec![reply_error_value(error, table)?],
         ),
     }
+}
+
+pub(crate) fn cancellation_value(
+    outcome: Result<crate::CancelResponseOutcome, ReplyError>,
+    table: &DataConTable,
+) -> Result<Value, BridgeError> {
+    let (name, fields) = match outcome {
+        Ok(crate::CancelResponseOutcome::CancelledNow) => ("ResponseCancelledNow", Vec::new()),
+        Ok(crate::CancelResponseOutcome::AlreadyTerminal) => {
+            ("ResponseAlreadyTerminal", Vec::new())
+        }
+        Err(error) => (
+            "ResponseCancelRejected",
+            vec![reply_error_value(error, table)?],
+        ),
+    };
+    constructor(table, "Tidepool.Agent.Reply.Internal", name, fields)
 }
 
 pub(crate) fn watch_observation_value(

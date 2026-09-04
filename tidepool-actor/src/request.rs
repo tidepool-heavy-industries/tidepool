@@ -31,6 +31,12 @@ pub enum ResponseObservation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelResponseOutcome {
+    CancelledNow,
+    AlreadyTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyError {
     Stale,
     AlreadySettled,
@@ -310,6 +316,22 @@ impl RequestRegistry {
             RequestState::Ready => ResponseObservation::Ready,
             RequestState::Unavailable(failure) => ResponseObservation::Unavailable(failure.clone()),
         })
+    }
+
+    pub(crate) fn cancel_response(
+        &self,
+        owner: ActorRef,
+        request: RequestId,
+    ) -> Result<(CancelResponseOutcome, Vec<WatchNotification>), ReplyError> {
+        let mut state = self.state.lock();
+        let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
+        authorize_owner(record, owner)?;
+        if is_terminal(&record.state) {
+            return Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()));
+        }
+        record.state = RequestState::Unavailable(ResponseFailure::Cancelled);
+        let notifications = reevaluate_watches(&mut state);
+        Ok((CancelResponseOutcome::CancelledNow, notifications))
     }
 
     #[cfg(test)]
@@ -661,6 +683,34 @@ mod tests {
                 failed,
                 ResponseFailure::TargetFailed("boom".into())
             )]))
+        );
+    }
+
+    #[test]
+    fn response_cancellation_is_authorized_terminal_and_idempotent() {
+        let registry = RequestRegistry::default();
+        let owner = actor(1);
+        let target = actor(2);
+        let intruder = actor(3);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        let (watch, _) = registry.register_watch(owner, vec![request]).unwrap();
+
+        assert_eq!(
+            registry.cancel_response(intruder, request),
+            Err(ReplyError::Unauthorized)
+        );
+        let (outcome, notifications) = registry.cancel_response(owner, request).unwrap();
+        assert_eq!(outcome, CancelResponseOutcome::CancelledNow);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].watch, watch);
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Unavailable(ResponseFailure::Cancelled))
+        );
+        assert_eq!(
+            registry.cancel_response(owner, request),
+            Ok((CancelResponseOutcome::AlreadyTerminal, Vec::new()))
         );
     }
 

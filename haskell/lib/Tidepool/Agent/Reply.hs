@@ -15,10 +15,12 @@ module Tidepool.Agent.Reply
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
+  , CancelOutcome (..)
   , requestId
   , attemptReply
   , reply
   , pollResponse
+  , cancelResponse
   ) where
 
 import Tidepool.Agent.Reply.Internal
@@ -34,8 +36,10 @@ import Tidepool.Agent.Reply.Internal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
+  , CancelOutcome (..)
   , attemptReply
   , pollResponse
+  , cancelResponse
   , reply
   , responseRequestId
   , requestLabel

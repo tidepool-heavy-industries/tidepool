@@ -47,6 +47,9 @@ stop = stopAgent
 inspect :: AgentRef -> Eff ActorEffects AgentObservation
 inspect = observeAgent
 
+cancel :: Response result -> Eff '[Replies] CancelOutcome
+cancel = cancelResponse
+
 launchFacts
   :: Forked result
   -> (Int, Int, ForkRole, ForkWorkspaceAccess, WorktreeReceipt)

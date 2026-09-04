@@ -17,6 +17,7 @@ module Tidepool.Agent.Reply.Internal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
+  , CancelOutcome (..)
   , RawResponseObservation (..)
   , reserveRequest
   , submitRequest
@@ -28,6 +29,7 @@ module Tidepool.Agent.Reply.Internal
   , attemptReply
   , reply
   , pollResponse
+  , cancelResponse
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -120,6 +122,12 @@ data ResponseState result
   | ResponseUnavailable ResponseFailure
   deriving (Show, Eq)
 
+data CancelOutcome
+  = ResponseCancelledNow
+  | ResponseAlreadyTerminal
+  | ResponseCancelRejected ReplyError
+  deriving (Show, Eq)
+
 data RawResponseObservation
   = RawResponsePending
   | RawResponseReady
@@ -132,6 +140,7 @@ data Replies a where
   AttemptReplyWith :: Int -> result -> Replies (Either ReplyError Void)
   ReplyWith :: Int -> result -> Replies Void
   ObserveResponseWith :: Int -> Replies RawResponseObservation
+  CancelResponseWith :: Int -> Replies CancelOutcome
 
 reserveRequest :: Member Replies effs => RequestLabel -> (Int, Int) -> Eff effs RequestId
 reserveRequest (RequestLabel label) target = RequestId <$> send (ReserveRequestWith label target)
@@ -187,3 +196,9 @@ pollResponse response@(Response (RequestId request) _) = do
     RawResponseUnavailable failure -> ResponseUnavailable failure
     RawResponseRejected failure ->
       ResponseUnavailable (ResponseRejected failure)
+
+cancelResponse
+  :: Member Replies effs
+  => Response result
+  -> Eff effs CancelOutcome
+cancelResponse (Response (RequestId request) _) = send (CancelResponseWith request)

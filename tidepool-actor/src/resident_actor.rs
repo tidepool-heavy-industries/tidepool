@@ -901,6 +901,23 @@ where
                     .resume_response_observation(context.clone(), poll.continuation, observation)
                     .await
             }
+            ResidentActorBoundary::ResponseCancellation(cancellation) => {
+                let outcome = self
+                    .environment
+                    .requests
+                    .cancel_response(context.actor, cancellation.request);
+                let projected = match outcome {
+                    Ok((outcome, notifications)) => {
+                        self.publish_watch_notifications(notifications);
+                        Ok(outcome)
+                    }
+                    Err(error) => Err(error),
+                };
+                self.environment
+                    .runner
+                    .resume_cancellation(context.clone(), cancellation.continuation, projected)
+                    .await
+            }
             ResidentActorBoundary::WatchRegistration(registration) => {
                 crate::ActorPathSegment::new(&registration.label).map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(format!(

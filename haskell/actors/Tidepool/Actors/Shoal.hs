@@ -89,10 +89,12 @@ module Tidepool.Actors.Shoal
   , ExecutionReceipt (..)
   , WorktreeEvidence (..)
   , ResponseState (..)
+  , CancelOutcome (..)
   , requestId
   , attemptReply
   , reply
   , pollResponse
+  , cancelResponse
   , Await
   , Watch
   , WatchLabel

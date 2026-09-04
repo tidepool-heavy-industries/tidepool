@@ -60,8 +60,8 @@ pub use mount::{
 };
 pub use profile::ActorEffectProfile;
 pub use request::{
-    ReplyError, RequestId, ResponseFailure, ResponseObservation, WatchId, WatchNotification,
-    WatchObservation, WatchTransition,
+    CancelResponseOutcome, ReplyError, RequestId, ResponseFailure, ResponseObservation, WatchId,
+    WatchNotification, WatchObservation, WatchTransition,
 };
 pub use resident_actor::{
     spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,

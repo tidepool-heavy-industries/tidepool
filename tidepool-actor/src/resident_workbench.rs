@@ -26,8 +26,8 @@ use tidepool_runtime::{classify_compile, classify_session, CompileError, Failure
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
 use crate::request_effect::{
-    RepliesReq, ReplyAttempt, RequestReservation, RequestSubmission, ResponsePoll, WatchPoll,
-    WatchRegistration, WatchesReq,
+    RepliesReq, ReplyAttempt, RequestReservation, RequestSubmission, ResponseCancellation,
+    ResponsePoll, WatchPoll, WatchRegistration, WatchesReq,
 };
 use crate::{ActorCompileViewError, ResponseExpectation};
 
@@ -222,6 +222,7 @@ pub(crate) enum ResidentActorBoundary {
     RequestSubmission(RequestSubmission),
     ReplyAttempt(ReplyAttempt),
     ResponsePoll(ResponsePoll),
+    ResponseCancellation(ResponseCancellation),
     WatchRegistration(WatchRegistration),
     WatchPoll(WatchPoll),
 }
@@ -280,6 +281,7 @@ impl ResidentActorBoundary {
             Self::RequestSubmission(_) => "request",
             Self::ReplyAttempt(_) => "reply",
             Self::ResponsePoll(_) => "pollResponse",
+            Self::ResponseCancellation(_) => "cancelResponse",
             Self::WatchRegistration(_) => "watch",
             Self::WatchPoll(_) => "pollWatch",
         }
@@ -391,6 +393,7 @@ impl ResidentRequest {
             Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
             Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
             Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
+            Self::Replies(RepliesReq::CancelResponseWith(..)) => "cancelResponse",
             Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
             Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
         }
@@ -1238,6 +1241,12 @@ where
                             request: crate::request_effect::request_id(request_id)?,
                         }))
                     }
+                    ResidentRequest::Replies(RepliesReq::CancelResponseWith(request_id)) => Ok(
+                        ResidentActorBoundary::ResponseCancellation(ResponseCancellation {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        }),
+                    ),
                     ResidentRequest::Watches(WatchesReq::RegisterWatchWith(
                         label,
                         dependencies,
@@ -1660,6 +1669,23 @@ where
                     observation,
                     session.data_con_table(),
                 )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_cancellation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        outcome: Result<crate::CancelResponseOutcome, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer =
+                    crate::request_effect::cancellation_value(outcome, session.data_con_table())?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
