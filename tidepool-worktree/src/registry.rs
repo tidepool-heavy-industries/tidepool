@@ -42,6 +42,9 @@ pub(crate) fn worktree_present(cwd: &Path) -> bool {
 /// reconstructing it from the branch graph after the fact is guesswork.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorktreeOrigin {
+    /// The source checkout itself, registered as a conservative integration
+    /// target. Unlike the other variants, no linked worktree was created.
+    SourceCheckout,
     /// Seeded from the repository Tidepool itself is running against.
     CurrentRepository,
     /// Seeded from an explicit ref in the source repository.

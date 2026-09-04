@@ -1,0 +1,11 @@
+{
+  "worktree_id": "wt-source-0000",
+  "cwd": "/home/dev/repo",
+  "branch": "main",
+  "source_head": "0000000000000000000000000000000000000000",
+  "snapshot_ref": null,
+  "origin": "SourceCheckout",
+  "source_repository": "/home/dev/repo",
+  "created_at_ms": 1699999999000,
+  "status": "Finalized"
+}

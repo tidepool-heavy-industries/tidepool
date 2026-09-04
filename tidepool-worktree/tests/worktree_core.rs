@@ -99,6 +99,54 @@ fn clean_creation_from_current_repository_leaves_source_untouched() {
 }
 
 #[test]
+fn source_checkout_registration_is_clean_idempotent_and_non_mutating() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("base.txt", "base", "base")
+        .expect("commit base");
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+    let git = GitCli::new();
+    let before = capture_state(&git, repo.path());
+
+    let first = manager
+        .register_source_checkout()
+        .expect("register clean source");
+    let second = manager
+        .register_source_checkout()
+        .expect("repeat registration");
+
+    assert_eq!(first.id(), second.id());
+    assert_eq!(first.cwd(), repo.path());
+    assert_eq!(first.receipt().origin, WorktreeOrigin::SourceCheckout);
+    assert_eq!(first.branch().as_str(), before.branch.as_deref().unwrap());
+    assert_untouched(&before, &capture_state(&git, repo.path()));
+}
+
+#[test]
+fn source_checkout_registration_refuses_user_changes_without_recording_a_target() {
+    let repo = TestRepo::init().expect("init");
+    repo.writer()
+        .commit_file("base.txt", "base", "base")
+        .expect("commit base");
+    repo.writer()
+        .write_file("untracked.txt", "mine")
+        .expect("write user file");
+    let base = tempfile::TempDir::new().expect("tempdir");
+    let manager = manager_over(&repo, base.path());
+
+    assert!(matches!(
+        manager.register_source_checkout(),
+        Err(WorktreeError::SourceDirty(_))
+    ));
+    assert!(manager.list().expect("list registry").is_empty());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("untracked.txt")).expect("read user file"),
+        "mine"
+    );
+}
+
+#[test]
 fn actor_and_descendant_branches_coexist_in_git_namespace() {
     let repo = TestRepo::init().expect("init");
     repo.writer()

@@ -241,3 +241,45 @@ fn moved_readable_branch_returns_manual_handoff_without_mutation() {
         expected.as_str()
     );
 }
+
+#[test]
+fn dirty_target_is_refused_before_merge_mutates_it() {
+    let repo = TestRepo::init().expect("init repo");
+    repo.writer()
+        .commit_file("README.md", "base\n", "base commit")
+        .expect("base commit");
+    let child_path = add_worktree(&repo, "child", "main");
+    repo.writer_at(&child_path)
+        .commit_file("child.txt", "child\n", "child work")
+        .expect("child commit");
+    let node_path = add_worktree(&repo, "node", "main");
+    std::fs::write(node_path.join("mine.txt"), "user state\n").expect("dirty target");
+    let before = repo
+        .git()
+        .try_run(&node_path, &["rev-parse", "HEAD"])
+        .expect("target head")
+        .trimmed()
+        .to_string();
+    let source = GitOid::from_raw(
+        repo.git()
+            .try_run(&child_path, &["rev-parse", "HEAD"])
+            .expect("child head")
+            .trimmed(),
+    );
+
+    assert!(matches!(
+        try_merge(repo.git(), &node_path, &source, None, "must refuse"),
+        Err(WorktreeError::SourceDirty(_))
+    ));
+    assert_eq!(
+        repo.git()
+            .try_run(&node_path, &["rev-parse", "HEAD"])
+            .expect("target head after refusal")
+            .trimmed(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(node_path.join("mine.txt")).expect("user state retained"),
+        "user state\n"
+    );
+}

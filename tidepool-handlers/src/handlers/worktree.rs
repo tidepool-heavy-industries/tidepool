@@ -389,6 +389,21 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
     ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
         let principal = cx.principal();
         if self.authority.is_root(principal) {
+            if matches!(&req, WorktreeReq::WorktreeBound) {
+                if camino::Utf8Path::from_path(self.inner.manager.source_repository()).is_none() {
+                    return cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
+                        "the source checkout path is not valid UTF-8 and cannot cross the Haskell boundary"
+                            .into(),
+                    )));
+                }
+                return cx.respond(
+                    self.inner
+                        .manager
+                        .register_source_checkout()
+                        .map(|handle| handle_to_wire(&handle))
+                        .map_err(error_to_wire),
+                );
+            }
             return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
         }
 

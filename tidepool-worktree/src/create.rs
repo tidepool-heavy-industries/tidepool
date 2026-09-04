@@ -160,6 +160,65 @@ impl WorktreeManager {
         &self.worktree_root
     }
 
+    /// Repository used by [`WorktreeSource::CurrentRepository`].
+    pub fn source_repository(&self) -> &Path {
+        &self.source_repository
+    }
+
+    /// Register the clean source checkout as a typed integration target.
+    ///
+    /// This records an existing checkout; it does not create, reset, stage, or
+    /// otherwise mutate Git state. Repeated calls return the same durable
+    /// receipt. The dirty and in-progress checks happen on every call so a
+    /// stale handle cannot turn the conservative merge path into an implicit
+    /// overwrite of user work.
+    pub fn register_source_checkout(&self) -> Result<WorktreeHandle, WorktreeError> {
+        let source = inspect::work_tree(&self.git, &self.source_repository)?;
+        if let Some(kind) = inspect::in_progress(&self.git, &source)? {
+            return Err(WorktreeError::SourceOperationInProgress(kind));
+        }
+        let dirty = inspect::dirty_summary(&self.git, &source)?;
+        if !dirty.is_clean() {
+            return Err(WorktreeError::SourceDirty(dirty));
+        }
+
+        let canonical_source =
+            source
+                .canonicalize()
+                .map_err(|error| WorktreeError::StorageFailure {
+                    path: source.clone(),
+                    detail: error.to_string(),
+                })?;
+        if let Some(receipt) = self.registry.list()?.into_iter().find_map(|summary| {
+            (summary.receipt.origin == WorktreeOrigin::SourceCheckout
+                && summary.receipt.cwd.canonicalize().ok().as_ref() == Some(&canonical_source))
+            .then_some(summary.receipt)
+        }) {
+            return Ok(WorktreeHandle::from_receipt(receipt));
+        }
+
+        let branch = self.git.try_run(
+            &canonical_source,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        )?;
+        let head = self
+            .git
+            .try_run(&canonical_source, &["rev-parse", "HEAD"])?;
+        let receipt = WorktreeReceipt {
+            worktree_id: self.registry.mint_id()?,
+            cwd: canonical_source.clone(),
+            branch: BranchName::from_raw(branch.trimmed()),
+            source_head: GitOid::from_raw(head.trimmed()),
+            snapshot_ref: None,
+            origin: WorktreeOrigin::SourceCheckout,
+            source_repository: canonical_source,
+            created_at_ms: now_ms(),
+            status: WorktreeRecordStatus::Finalized,
+        };
+        self.registry.put(&receipt)?;
+        Ok(WorktreeHandle::from_receipt(receipt))
+    }
+
     /// Create a managed worktree.
     ///
     /// Ordering that L1 must hold, and why: resolve the seed commit, mint the

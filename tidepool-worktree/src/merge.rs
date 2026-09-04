@@ -89,6 +89,13 @@ pub fn try_merge(
     source_branch: Option<&BranchName>,
     message: &str,
 ) -> Result<MergeOutcome, WorktreeError> {
+    if let Some(kind) = inspect::in_progress(git, target_cwd)? {
+        return Err(WorktreeError::SourceOperationInProgress(kind));
+    }
+    let dirty = inspect::dirty_summary(git, target_cwd)?;
+    if !dirty.is_clean() {
+        return Err(WorktreeError::SourceDirty(dirty));
+    }
     let target = GitOid::from_raw(git.try_run(target_cwd, &["rev-parse", "HEAD"])?.trimmed());
 
     git.try_run(

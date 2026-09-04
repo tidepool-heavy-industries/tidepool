@@ -148,8 +148,22 @@ fn oid(hex_digit: char) -> GitOid {
     GitOid::from_raw(std::iter::repeat_n(hex_digit, 40).collect::<String>())
 }
 
-// --- WorktreeReceipt samples: WorktreeOrigin's 3 variants, WorktreeRecordStatus's
-// --- 2 variants, and Option<GitRef>'s Some/None, spread across 3 samples. ----
+// --- WorktreeReceipt samples: WorktreeOrigin's variants, WorktreeRecordStatus's
+// --- 2 variants, and Option<GitRef>'s Some/None. -----------------------------
+
+fn receipt_source_checkout() -> WorktreeReceipt {
+    WorktreeReceipt {
+        worktree_id: WorktreeId::from_raw("wt-source-0000"),
+        cwd: PathBuf::from("/home/dev/repo"),
+        branch: BranchName::from_raw("main"),
+        source_head: oid('0'),
+        snapshot_ref: None,
+        origin: WorktreeOrigin::SourceCheckout,
+        source_repository: PathBuf::from("/home/dev/repo"),
+        created_at_ms: 1_699_999_999_000,
+        status: WorktreeRecordStatus::Finalized,
+    }
+}
 
 fn receipt_provisional() -> WorktreeReceipt {
     WorktreeReceipt {
@@ -384,6 +398,16 @@ fn worktree_receipt_provisional_golden_round_trips() {
          break (renamed field, changed default) would show up here even when \
          serialization alone still looks fine"
     );
+}
+
+#[test]
+fn worktree_receipt_source_checkout_golden_round_trips() {
+    let sample = receipt_source_checkout();
+    let json = assert_golden("worktree_receipt_source_checkout.json", &sample);
+    let back: WorktreeReceipt = serde_json::from_str(&json).unwrap_or_else(|error| {
+        panic!("WorktreeReceipt failed to deserialize from source-checkout golden: {error}")
+    });
+    assert_eq!(back, sample);
 }
 
 #[test]
