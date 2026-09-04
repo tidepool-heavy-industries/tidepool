@@ -1,10 +1,57 @@
 # Live context-unfold dogfood follow-ups
 
-Status: active; product and architecture decisions frozen, implementation
-pending from Slice 0. This is the root plan and checklist for hardening the
-landed cache-preserving context-unfold surface from live Shoal Console use. It
-does not reopen the accepted architecture in
+Status: implemented through the reviewed live-process hardening wave; a fresh
+provider canary is the final acceptance gate. Host-restart reconstruction is a
+separately gated successor phase, not a partially landed durability claim.
+This is the root plan and implementation record for hardening the landed
+cache-preserving context-unfold surface from live Shoal Console use. It does
+not reopen the accepted architecture in
 [cache-preserving context unfold](cache-preserving-context-unfold.md).
+
+## Implementation outcome (2026-09-04)
+
+The original checklists below are retained as the design and review record;
+they are not an assertion that every aspirational R4 item became part of this
+wave. The following ledger is the authoritative implementation status.
+
+| Area | Outcome | Primary commits |
+|---|---|---|
+| child/cleanup fault containment | landed; child failures no longer collapse the permanent host, cleanup reports a successful prefix | `b1316b8b` |
+| reply and activation failure containment | landed; an accepted reply never reopens, failed activations settle locally | `b8b51aa5`, `0ca864c1` |
+| dimensional time and typed paths | landed; raw model-facing millisecond and branch-prefix guesses removed | `af65318b` |
+| build posture and actor observations | landed; inspection actors are denied build-like processes before launch, coding actors hold lifetime leases | `71cc7a32` |
+| activation, campaign, lineage, and cache projection | landed; observations preserve exact incarnation, watermark, measurement scope, and prompt identity | `9f8f9c86`, `d7efe4a1`, `b9af76bb`, `9bff1978` |
+| final integration custody and campaign cleanup | landed; source checkout is a validated target and cleanup is typed, dependency ordered, and retryable while the host lives | `fb02d96e`, `1eb719ec` |
+| resident recovery | landed for diagnostic isolation and honest root successor declaration replay; effects and arbitrary live values are never replayed or serialized | `d00db7e6`, `cc5222b0` |
+| workbench ergonomics and retry | landed; diagnostics continue, patterns fail locally, bindings/operations/terminal transfers are structured, exact-call retries are actor-owned | `0ca864c1`, `9bfb51f3`, `9c150a83`, `9bff1978` |
+| prompt and executable guidance | landed and versioned; role deltas, inspection posture, lifecycle, cache, recovery, and docs match the mounted surface | `b9af76bb`, `ceb92f9d`, `9bff1978` |
+
+The retry ledger deliberately lives with the resident actor that owns the
+effects. It proves exact retry only while that actor/machine incarnation is
+alive. A composition-root journal cannot honestly close the crash gap between
+an owner commit and an observer append, so this wave did not add one and does
+not claim pre/post-host-death exactly-once behavior.
+
+### Gated successor work
+
+- [ ] Reattach a failed external child application to the same still-live
+  actor/machine incarnation only after the provider exposes a durable idle and
+  reattachment contract that makes duplicate turns impossible.
+- [ ] Generalize root source-only successor recovery to independently owned
+  child machines when Shoal introduces that machine boundary; report every
+  lost live binding/handle explicitly and issue fresh exact incarnations.
+- [ ] Implement R4 only as owner-emitted, versioned actor/request/watch/fork
+  transitions with replay tests at every commit point. Do not infer this
+  ledger from composition-root observations or serialize actor tasks.
+- [ ] Add handle-filtered `:trace`/campaign renderers only when another live
+  campaign shows that the existing typed `observeCampaign`, `:lineage`,
+  `:status!`, and `:trace` views are insufficient; no renderer may own state.
+- [ ] Complete the fresh low-effort provider canary and record its spot-check
+  evidence below.
+
+These are explicit architecture gates, not hidden incomplete behavior in the
+landed API. The first three require new owner/provider prerequisites and are
+not completion criteria for the live-process hardening wave.
 
 ## Handoff contract
 
