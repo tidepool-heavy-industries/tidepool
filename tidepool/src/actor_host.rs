@@ -8,11 +8,13 @@ mod prompt_catalog;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use frunk::{hlist, HCons, HNil};
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tidepool_actor::{
@@ -197,6 +199,7 @@ struct LaunchedInteractiveApplication {
 }
 
 struct OwnerNotification {
+    owner: ActorRef,
     inbox: Arc<DurableInbox<DurableActorEvent>>,
     event: DurableActorEvent,
 }
@@ -225,6 +228,9 @@ enum TypedActorEvent {
         request: tidepool_actor::RequestId,
         reason: tidepool_actor::CancellationReason,
     },
+    CleanupFinished {
+        receipt: InteractiveCleanupReceipt,
+    },
     ChildExited,
 }
 
@@ -251,7 +257,71 @@ impl DurableActorEvent {
                 "Typed request {} has cancellation pending ({reason:?}). Inspect `sessionReply` with `pollReply`; acknowledge it with `acknowledgeCancellation sessionReply` when the active work is safely quiescent.",
                 request.0,
             ),
+            Self::Typed(TypedActorEvent::CleanupFinished { receipt }) => receipt.render(),
             Self::Typed(TypedActorEvent::ChildExited) => CHILD_LIFECYCLE_NOTICE.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CleanupComponent {
+    Process,
+    ToolService,
+    Delivery,
+    Socket,
+    WorktreeBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum CleanupComponentOutcome {
+    Completed,
+    Forced,
+    Failed { detail: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CleanupComponentReceipt {
+    component: CleanupComponent,
+    outcome: CleanupComponentOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteractiveCleanupReceipt {
+    actor: ActorRef,
+    components: Vec<CleanupComponentReceipt>,
+}
+
+impl InteractiveCleanupReceipt {
+    fn degraded(&self) -> bool {
+        self.components
+            .iter()
+            .any(|component| matches!(component.outcome, CleanupComponentOutcome::Failed { .. }))
+    }
+
+    fn render(&self) -> String {
+        let failures = self
+            .components
+            .iter()
+            .filter_map(|component| match &component.outcome {
+                CleanupComponentOutcome::Failed { detail } => {
+                    Some(format!("{:?}: {detail}", component.component))
+                }
+                CleanupComponentOutcome::Completed | CleanupComponentOutcome::Forced => None,
+            })
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            format!(
+                "Actor {:?} retired and all cleanup components settled.",
+                self.actor
+            )
+        } else {
+            format!(
+                "Actor {:?} retired with degraded cleanup: {}. The permanent host and sibling actors remain available.",
+                self.actor,
+                failures.join("; ")
+            )
         }
     }
 }
@@ -277,7 +347,6 @@ enum InteractiveOperation {
     ServeToolHost,
     LaunchProcess,
     DiscoverBinding,
-    StopProcess,
 }
 
 impl fmt::Display for InteractiveOperation {
@@ -291,7 +360,6 @@ impl fmt::Display for InteractiveOperation {
             Self::ServeToolHost => "serve host dynamic tools",
             Self::LaunchProcess => "launch agent process",
             Self::DiscoverBinding => "discover conversation binding",
-            Self::StopProcess => "stop agent process",
         };
         formatter.write_str(name)
     }
@@ -309,7 +377,6 @@ impl InteractiveOperation {
             | Self::ServeToolHost
             | Self::DiscoverBinding
             | Self::PrepareRuntime => ExternalApplicationFailureClass::ToolHostStartup,
-            Self::StopProcess => ExternalApplicationFailureClass::UnexpectedExit,
         }
     }
 }
@@ -320,6 +387,60 @@ struct InteractiveApplicationError {
     actor: ActorRef,
     operation: InteractiveOperation,
     detail: String,
+}
+
+#[derive(Debug)]
+enum InteractiveFailureDomain {
+    ActorDegraded {
+        actor: ActorRef,
+        failure: ExternalApplicationFailure,
+    },
+    FleetFatal {
+        detail: String,
+    },
+}
+
+fn classify_application_failure(
+    root: ActorRef,
+    actor: ActorRef,
+    failure: ExternalApplicationFailure,
+) -> InteractiveFailureDomain {
+    if actor == root {
+        InteractiveFailureDomain::FleetFatal {
+            detail: format!("root {root:?}: {}", failure.detail),
+        }
+    } else {
+        InteractiveFailureDomain::ActorDegraded { actor, failure }
+    }
+}
+
+async fn apply_application_failure(
+    root: ActorRef,
+    actor: LocalActorRef,
+    failure: ExternalApplicationFailure,
+) -> Result<(), String> {
+    let identity = actor.identity();
+    match classify_application_failure(root, identity, failure) {
+        InteractiveFailureDomain::FleetFatal { detail } => Err(detail),
+        InteractiveFailureDomain::ActorDegraded {
+            actor: classified,
+            failure,
+        } => {
+            debug_assert_eq!(classified, identity);
+            match actor.report_external_failure(failure).await {
+                Ok(
+                    ExternalFailureDisposition::Applied
+                    | ExternalFailureDisposition::AlreadyTerminal,
+                ) => Ok(()),
+                Ok(ExternalFailureDisposition::UnknownOrStale) => Err(format!(
+                    "actor registry rejected exact deployed actor {identity:?} as unknown or stale"
+                )),
+                Err(error) => Err(format!(
+                    "actor registry could not record application failure for {identity:?}: {error}"
+                )),
+            }
+        }
+    }
 }
 
 fn application_error(
@@ -842,27 +963,18 @@ async fn run_interactive_applications(
                                     if delivery.is_finished()
                             ))
                 }) {
-                    let actor = deployments[index].actor;
                     let local_actor = deployments[index].local_actor.clone();
                     deployments[index].failure_reported = true;
                     let detail = "interactive application exited before actor settlement".to_string();
-                    if actor == root_identity {
-                        break Some(format!("root {actor:?}: {detail}"));
-                    }
-                    let result = local_actor
-                        .report_external_failure(ExternalApplicationFailure {
+                    if let Err(error) = apply_application_failure(
+                        root_identity,
+                        local_actor,
+                        ExternalApplicationFailure {
                             class: ExternalApplicationFailureClass::UnexpectedExit,
                             detail,
-                        })
-                        .await;
-                    match result {
-                        Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
-                        Ok(ExternalFailureDisposition::UnknownOrStale) => {
-                            break Some(format!("resident host rejected the exact deployed actor {actor:?} as unknown or stale"));
                         }
-                        Err(error) => {
-                            break Some(format!("report child application failure for {actor:?}: {error}"));
-                        }
+                    ).await {
+                        break Some(error);
                     }
                 }
             }
@@ -900,12 +1012,21 @@ async fn run_interactive_applications(
                         debug_assert!(previous.is_none(), "one launch per exact actor incarnation");
                         launches.spawn(async move {
                             let local_actor = installation.actor.clone();
-                            let result = launch_interactive_application(
+                            let result = AssertUnwindSafe(launch_interactive_application(
                                 installation,
                                 context,
                                 cancelled,
                                 fork_parent_thread,
-                            ).await;
+                            ))
+                            .catch_unwind()
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(application_error(
+                                    actor,
+                                    InteractiveOperation::PrepareRuntime,
+                                    "interactive launch task panicked",
+                                ))
+                            });
                             (local_actor, result)
                         });
                     }
@@ -920,7 +1041,22 @@ async fn run_interactive_applications(
                                 Arc::clone(&application.inbox),
                                 DurableActorEvent::session(&activation),
                             ).await {
-                                break Some(error);
+                                application.failure_reported = true;
+                                let local_actor = application.local_actor.clone();
+                                tracing::warn!(?actor, %error, "actor activation delivery degraded");
+                                if let Err(error) = apply_application_failure(
+                                    root_identity,
+                                    local_actor,
+                                    ExternalApplicationFailure {
+                                        class: ExternalApplicationFailureClass::ToolHostStartup,
+                                        detail: error,
+                                    },
+                                )
+                                .await
+                                {
+                                    break Some(error);
+                                }
+                                continue;
                             }
                             application.last_activation_sequence = sequence;
                         }
@@ -944,7 +1080,7 @@ async fn run_interactive_applications(
                                 BindingTerminal::Released
                             };
                             retirements.spawn(async move {
-                                retire_interactive_application(
+                                retire_interactive_application_guarded(
                                     deployment,
                                     &tmux,
                                     &bindings,
@@ -965,7 +1101,8 @@ async fn run_interactive_applications(
                         else {
                             continue;
                         };
-                        notifications.spawn(publish_inbox_event(
+                        notifications.spawn(publish_inbox_event_for(
+                            notification.owner,
                             Arc::clone(&application.inbox),
                             DurableActorEvent::Typed(TypedActorEvent::WatchChanged {
                                 watch: notification.watch,
@@ -980,7 +1117,8 @@ async fn run_interactive_applications(
                         else {
                             continue;
                         };
-                        notifications.spawn(publish_inbox_event(
+                        notifications.spawn(publish_inbox_event_for(
+                            notification.target,
                             Arc::clone(&application.inbox),
                             DurableActorEvent::Typed(TypedActorEvent::RequestCancellation {
                                 request: notification.request,
@@ -1005,13 +1143,21 @@ async fn run_interactive_applications(
                         let fork_parent_thread = deployment.fork_parent_thread.clone();
                         let tmux = tmux.clone();
                         binding_discoveries.spawn(async move {
-                            let result = discover_interactive_binding(
+                            let result = AssertUnwindSafe(discover_interactive_binding(
                                 actor,
                                 launched.binding,
                                 &tmux,
                                 &pane,
-                            )
-                            .await;
+                            ))
+                            .catch_unwind()
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(application_error(
+                                    actor,
+                                    InteractiveOperation::DiscoverBinding,
+                                    "interactive binding task panicked",
+                                ))
+                            });
                             if let Ok(thread) = &result {
                                 runtime_observation.publish_provider_binding(
                                     fork_parent_thread.map(|thread| thread.0),
@@ -1058,25 +1204,15 @@ async fn run_interactive_applications(
                                 let _ = gate.mark_failed();
                             }
                         }
-                        if actor == root_identity {
-                            break Some(error.to_string());
-                        }
-                        let result = local_actor
-                            .report_external_failure(ExternalApplicationFailure {
+                        if let Err(error) = apply_application_failure(
+                            root_identity,
+                            local_actor,
+                            ExternalApplicationFailure {
                                 class: error.operation.failure_class(),
                                 detail: error.detail,
-                            })
-                            .await;
-                        match result {
-                            Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
-                            Ok(ExternalFailureDisposition::UnknownOrStale) => {
-                                break Some(format!("resident host rejected the exact launching actor {actor:?} as unknown or stale"));
                             }
-                            Err(report_error) => {
-                                break Some(format!(
-                                    "report child launch failure for {actor:?}: {report_error}"
-                                ));
-                            }
+                        ).await {
+                            break Some(error);
                         }
                     }
                     Some(Err(error)) => break Some(format!("interactive launch task: {error}")),
@@ -1122,9 +1258,6 @@ async fn run_interactive_applications(
                             let _ = gate.mark_failed();
                         }
                         deployment.failure_reported = true;
-                        if actor == root_identity {
-                            break Some(error.to_string());
-                        }
                         let Some(local_actor) = deployments
                             .iter()
                             .find(|application| application.actor == actor)
@@ -1132,20 +1265,15 @@ async fn run_interactive_applications(
                         else {
                             break Some(format!("lost exact local actor for failed application {actor:?}"));
                         };
-                        let result = local_actor
-                            .report_external_failure(ExternalApplicationFailure {
+                        if let Err(error) = apply_application_failure(
+                            root_identity,
+                            local_actor,
+                            ExternalApplicationFailure {
                                 class: error.operation.failure_class(),
                                 detail: error.detail,
-                            })
-                            .await;
-                        match result {
-                            Ok(ExternalFailureDisposition::Applied | ExternalFailureDisposition::AlreadyTerminal) => {}
-                            Ok(ExternalFailureDisposition::UnknownOrStale) => {
-                                break Some(format!("resident host rejected the exact binding actor {actor:?} as unknown or stale"));
                             }
-                            Err(report_error) => {
-                                break Some(format!("report child binding failure for {actor:?}: {report_error}"));
-                            }
+                        ).await {
+                            break Some(error);
                         }
                     }
                     Some(Err(error)) => break Some(format!("interactive binding task: {error}")),
@@ -1154,17 +1282,57 @@ async fn run_interactive_applications(
             }
             retired = retirements.join_next(), if !retirements.is_empty() => {
                 match retired {
-                    Some(Ok(Ok(()))) => {}
-                    Some(Ok(Err(error))) => break Some(error.to_string()),
-                    Some(Err(error)) => break Some(format!("interactive retirement task: {error}")),
+                    Some(Ok(receipt)) => {
+                        let degraded = receipt.degraded();
+                        if degraded {
+                            tracing::warn!(actor = ?receipt.actor, components = ?receipt.components, "interactive application cleanup degraded");
+                            if receipt.actor != root_identity {
+                                if let Some(root_application) = deployments.iter().find(|app| app.actor == root_identity) {
+                                    notifications.spawn(publish_inbox_event_for(
+                                        root_identity,
+                                        Arc::clone(&root_application.inbox),
+                                        DurableActorEvent::Typed(TypedActorEvent::CleanupFinished { receipt }),
+                                    ));
+                                }
+                            }
+                        } else {
+                            tracing::info!(actor = ?receipt.actor, "interactive application retired");
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "interactive retirement task join failed after cleanup isolation");
+                    }
                     None => {}
                 }
             }
             notified = notifications.join_next(), if !notifications.is_empty() => {
                 match notified {
-                    Some(Ok(Ok(()))) => {}
-                    Some(Ok(Err(error))) => break Some(error),
-                    Some(Err(error)) => break Some(format!("owner notification task: {error}")),
+                    Some(Ok((_actor, Ok(())))) => {}
+                    Some(Ok((actor, Err(error)))) => {
+                        tracing::warn!(?actor, %error, "actor notification delivery degraded");
+                        let Some(local_actor) = deployments
+                            .iter()
+                            .find(|application| application.actor == actor)
+                            .map(|application| application.local_actor.clone())
+                        else {
+                            continue;
+                        };
+                        if let Err(error) = apply_application_failure(
+                            root_identity,
+                            local_actor,
+                            ExternalApplicationFailure {
+                                class: ExternalApplicationFailureClass::ToolHostStartup,
+                                detail: error,
+                            },
+                        )
+                        .await
+                        {
+                            break Some(error);
+                        }
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "actor notification task join failed");
+                    }
                     None => {}
                 }
             }
@@ -1194,8 +1362,13 @@ async fn run_interactive_applications(
         let tmux = tmux.clone();
         let bindings = Arc::clone(&bindings);
         retirements.spawn(async move {
-            retire_interactive_application(deployment, &tmux, &bindings, BindingTerminal::Released)
-                .await
+            retire_interactive_application_guarded(
+                deployment,
+                &tmux,
+                &bindings,
+                BindingTerminal::Released,
+            )
+            .await
         });
     }
     let notification_cleanup = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
@@ -1203,7 +1376,7 @@ async fn run_interactive_applications(
         while let Some(result) = notifications.join_next().await {
             let result = result
                 .map_err(|error| format!("owner notification task: {error}"))
-                .and_then(|result| result);
+                .and_then(|(_actor, result)| result);
             if let Err(error) = result {
                 failure.get_or_insert(error);
             }
@@ -1215,11 +1388,17 @@ async fn run_interactive_applications(
     let cleanup_failure = tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, async {
         let mut failure = None;
         while let Some(result) = retirements.join_next().await {
-            let result = result
-                .map_err(|error| format!("interactive retirement task: {error}"))
-                .and_then(|result| result.map_err(|error| error.to_string()));
-            if let Err(error) = result {
-                failure.get_or_insert(error);
+            match result {
+                Ok(receipt) if receipt.degraded() && receipt.actor == root_identity => {
+                    failure.get_or_insert_with(|| receipt.render());
+                }
+                Ok(receipt) if receipt.degraded() => {
+                    tracing::warn!(actor = ?receipt.actor, components = ?receipt.components, "child cleanup degraded during host shutdown");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    failure.get_or_insert_with(|| format!("interactive retirement task: {error}"));
+                }
             }
         }
         failure
@@ -1784,13 +1963,24 @@ fn prepare_owner_notification(
 ) -> Option<OwnerNotification> {
     let owner_application = deployments.iter().find(|app| app.actor == notice.owner)?;
     Some(OwnerNotification {
+        owner: notice.owner,
         inbox: Arc::clone(&owner_application.inbox),
         event: DurableActorEvent::Typed(TypedActorEvent::ChildExited),
     })
 }
 
-async fn publish_owner_notification(notification: OwnerNotification) -> Result<(), String> {
-    publish_inbox_event(notification.inbox, notification.event).await
+async fn publish_owner_notification(
+    notification: OwnerNotification,
+) -> (ActorRef, Result<(), String>) {
+    publish_inbox_event_for(notification.owner, notification.inbox, notification.event).await
+}
+
+async fn publish_inbox_event_for(
+    actor: ActorRef,
+    inbox: Arc<DurableInbox<DurableActorEvent>>,
+    event: DurableActorEvent,
+) -> (ActorRef, Result<(), String>) {
+    (actor, publish_inbox_event(inbox, event).await)
 }
 
 async fn publish_inbox_event(
@@ -1804,12 +1994,43 @@ async fn publish_inbox_event(
     Ok(())
 }
 
+async fn retire_interactive_application_guarded(
+    deployment: InteractiveDeployment,
+    tmux: &TmuxSession,
+    bindings: &Arc<Mutex<BindingTable>>,
+    binding_terminal: BindingTerminal,
+) -> InteractiveCleanupReceipt {
+    let actor = deployment.actor;
+    match AssertUnwindSafe(retire_interactive_application(
+        deployment,
+        tmux,
+        bindings,
+        binding_terminal,
+    ))
+    .catch_unwind()
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(_) => InteractiveCleanupReceipt {
+            actor,
+            components: vec![CleanupComponentReceipt {
+                component: CleanupComponent::ToolService,
+                outcome: CleanupComponentOutcome::Failed {
+                    detail: "cleanup task panicked; component completion is unknown".into(),
+                },
+            }],
+        },
+    }
+}
+
 async fn retire_interactive_application(
     mut deployment: InteractiveDeployment,
     tmux: &TmuxSession,
     bindings: &Arc<Mutex<BindingTable>>,
     binding_terminal: BindingTerminal,
-) -> Result<(), InteractiveApplicationError> {
+) -> InteractiveCleanupReceipt {
+    let actor = deployment.actor;
+    let mut components = Vec::with_capacity(5);
     let mut delivery = match deployment.connection {
         InteractiveConnection::AwaitingBinding => None,
         InteractiveConnection::Bound {
@@ -1821,59 +2042,85 @@ async fn retire_interactive_application(
             Some(delivery)
         }
     };
-    let stop_error =
-        tmux.kill_pane(&deployment.pane).await.err().map(|error| {
-            application_error(deployment.actor, InteractiveOperation::StopProcess, error)
-        });
-    tokio::join!(
-        stop_retired_tool_service(deployment.actor, &mut deployment.service,),
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::Process,
+        outcome: match tmux.kill_pane(&deployment.pane).await {
+            Ok(()) => CleanupComponentOutcome::Completed,
+            Err(error) => CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            },
+        },
+    });
+    let (service_outcome, delivery_outcome) = tokio::join!(
+        stop_retired_tool_service(deployment.actor, &mut deployment.service),
         async {
             if let Some(delivery) = delivery.as_mut() {
                 stop_retired_delivery(deployment.actor, delivery, APPLICATION_TASK_GRACE_TIMEOUT)
-                    .await;
+                    .await
+            } else {
+                CleanupComponentOutcome::Completed
             }
         },
     );
-    let _ = std::fs::remove_dir_all(&deployment.socket_root);
-    let binding_error = if let Some(binding) = deployment.worktree_binding.take() {
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::ToolService,
+        outcome: service_outcome,
+    });
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::Delivery,
+        outcome: delivery_outcome,
+    });
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::Socket,
+        outcome: match std::fs::remove_dir_all(&deployment.socket_root) {
+            Ok(()) => CleanupComponentOutcome::Completed,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                CleanupComponentOutcome::Completed
+            }
+            Err(error) => CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            },
+        },
+    });
+    let binding_outcome = if let Some(binding) = deployment.worktree_binding.take() {
         let result = match binding_terminal {
             BindingTerminal::Completed => binding.complete(&mut bindings.lock()),
             BindingTerminal::Released => binding.release(&mut bindings.lock()),
         };
-        result.err().map(|error| {
-            application_error(deployment.actor, InteractiveOperation::BindWorktree, error)
-        })
+        match result {
+            Ok(()) => CleanupComponentOutcome::Completed,
+            Err(error) => CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            },
+        }
     } else {
-        None
+        CleanupComponentOutcome::Completed
     };
-    match (stop_error, binding_error) {
-        (Some(mut stop), Some(binding)) => {
-            stop.detail
-                .push_str(&format!("; binding settlement failed: {binding}"));
-            Err(stop)
-        }
-        (Some(error), None) | (None, Some(error)) => Err(error),
-        (None, None) => {
-            tracing::info!(
-                actor = ?deployment.actor,
-                terminal = ?binding_terminal,
-                "interactive application retired"
-            );
-            Ok(())
-        }
-    }
+    components.push(CleanupComponentReceipt {
+        component: CleanupComponent::WorktreeBinding,
+        outcome: binding_outcome,
+    });
+    InteractiveCleanupReceipt { actor, components }
 }
 
 /// Stop the actor-lifetime host-tools listener after its application pane is gone.
 async fn stop_retired_tool_service(
     actor: ActorRef,
     service: &mut tokio::task::JoinHandle<Result<(), InteractiveApplicationError>>,
-) {
+) -> CleanupComponentOutcome {
     service.abort();
-    if let Err(error) = service.await {
-        if !error.is_cancelled() {
+    match service.await {
+        Err(error) if error.is_cancelled() => CleanupComponentOutcome::Forced,
+        Err(error) => {
             tracing::warn!(actor = ?actor, %error, "retired actor tool service task failed");
+            CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            }
         }
+        Ok(Ok(())) => CleanupComponentOutcome::Completed,
+        Ok(Err(error)) => CleanupComponentOutcome::Failed {
+            detail: error.to_string(),
+        },
     }
 }
 
@@ -1881,16 +2128,20 @@ async fn stop_retired_delivery(
     actor: ActorRef,
     delivery: &mut tokio::task::JoinHandle<()>,
     grace: Duration,
-) {
+) -> CleanupComponentOutcome {
     match tokio::time::timeout(grace, &mut *delivery).await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => CleanupComponentOutcome::Completed,
         Ok(Err(error)) => {
             tracing::warn!(actor = ?actor, %error, "retired actor inbox task failed");
+            CleanupComponentOutcome::Failed {
+                detail: error.to_string(),
+            }
         }
         Err(_) => {
             tracing::debug!(actor = ?actor, "forcing retired actor inbox task to stop");
             delivery.abort();
             let _ = delivery.await;
+            CleanupComponentOutcome::Forced
         }
     }
 }
@@ -2551,13 +2802,66 @@ mod tests {
         });
         let mut delivery = tokio::spawn(std::future::pending::<()>());
 
-        tokio::join!(
+        let (service_outcome, delivery_outcome) = tokio::join!(
             stop_retired_tool_service(actor, &mut service),
             stop_retired_delivery(actor, &mut delivery, Duration::ZERO),
         );
 
         assert!(service.is_finished());
         assert!(delivery.is_finished());
+        assert_eq!(service_outcome, CleanupComponentOutcome::Forced);
+        assert_eq!(delivery_outcome, CleanupComponentOutcome::Forced);
+    }
+
+    #[test]
+    fn degraded_cleanup_receipt_preserves_each_component_without_becoming_fleet_failure() {
+        let receipt = InteractiveCleanupReceipt {
+            actor: ActorRef::first(tidepool_actor::ActorId(7)),
+            components: vec![
+                CleanupComponentReceipt {
+                    component: CleanupComponent::Process,
+                    outcome: CleanupComponentOutcome::Failed {
+                        detail: "pane already unavailable".into(),
+                    },
+                },
+                CleanupComponentReceipt {
+                    component: CleanupComponent::Delivery,
+                    outcome: CleanupComponentOutcome::Completed,
+                },
+                CleanupComponentReceipt {
+                    component: CleanupComponent::WorktreeBinding,
+                    outcome: CleanupComponentOutcome::Failed {
+                        detail: "binding journal unavailable".into(),
+                    },
+                },
+            ],
+        };
+
+        assert!(receipt.degraded());
+        assert_eq!(receipt.components.len(), 3);
+        let rendered = receipt.render();
+        assert!(rendered.contains("Process: pane already unavailable"));
+        assert!(rendered.contains("WorktreeBinding: binding journal unavailable"));
+        assert!(rendered.contains("permanent host and sibling actors remain available"));
+    }
+
+    #[test]
+    fn application_failure_domain_separates_child_degradation_from_root_failure() {
+        let root = ActorRef::first(tidepool_actor::ActorId(1));
+        let child = ActorRef::first(tidepool_actor::ActorId(2));
+        let failure = || ExternalApplicationFailure {
+            class: ExternalApplicationFailureClass::UnexpectedExit,
+            detail: "pane exited".into(),
+        };
+
+        assert!(matches!(
+            classify_application_failure(root, child, failure()),
+            InteractiveFailureDomain::ActorDegraded { actor, .. } if actor == child
+        ));
+        assert!(matches!(
+            classify_application_failure(root, root, failure()),
+            InteractiveFailureDomain::FleetFatal { .. }
+        ));
     }
 
     #[test]
