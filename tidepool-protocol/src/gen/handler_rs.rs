@@ -138,10 +138,18 @@ fn body(e: &Effect) -> String {
     out.push_str("    }\n}\n\n");
 
     // --- the dispatch -----------------------------------------------------
-    out.push_str(&format!(
-        "impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for {} {{\n",
+    let dispatch_impl = format!(
+        "impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for {}",
         e.handler
-    ));
+    );
+    if dispatch_impl.chars().count() + " {".len() <= 100 {
+        out.push_str(&format!("{dispatch_impl} {{\n"));
+    } else {
+        out.push_str(&format!(
+            "impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>\n    for {}\n{{\n",
+            e.handler
+        ));
+    }
     out.push_str(&format!("    type Request = {};\n\n", e.req_enum));
     out.push_str("    fn handle(\n");
     out.push_str("        &mut self,\n");
@@ -185,9 +193,29 @@ fn body(e: &Effect) -> String {
         // gate and the golden gate fight (this generator's stated acceptance
         // property — see the module doc).
         let single_line = format!("            {pat} => {call},");
+        let pattern_width = "            ".len() + pat.chars().count();
         if single_line.chars().count() <= 100 {
             out.push_str(&single_line);
             out.push('\n');
+        } else if pattern_width > 100 && !names.is_empty() {
+            out.push_str(&format!("            {}::{}(\n", e.req_enum, v.ctor));
+            for name in &names {
+                out.push_str(&format!("                {name},\n"));
+            }
+            if v.errors.is_some() {
+                out.push_str(&format!("            ) => cx.respond(self.{}(\n", v.method));
+                for name in &names {
+                    out.push_str(&format!("                {name},\n"));
+                }
+                out.push_str("            )),\n");
+            } else {
+                out.push_str(&format!("            ) => self.{}(\n", v.method));
+                out.push_str("                cx,\n");
+                for name in &names {
+                    out.push_str(&format!("                {name},\n"));
+                }
+                out.push_str("            ),\n");
+            }
         } else {
             out.push_str(&format!(
                 "            {pat} => {{\n                {call}\n            }}\n"

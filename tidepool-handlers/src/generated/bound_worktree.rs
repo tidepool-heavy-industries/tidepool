@@ -19,7 +19,9 @@ impl tidepool_mcp::DescribeEffect for ActorBoundWorktreeHandler {
     }
 }
 
-impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for ActorBoundWorktreeHandler {
+impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
+    for ActorBoundWorktreeHandler
+{
     type Request = BoundWorktreeReq;
 
     fn handle(

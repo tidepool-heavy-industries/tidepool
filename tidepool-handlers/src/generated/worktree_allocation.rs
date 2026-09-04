@@ -17,7 +17,9 @@ impl tidepool_mcp::DescribeEffect for ActorWorktreeAllocationHandler {
     }
 }
 
-impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for ActorWorktreeAllocationHandler {
+impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
+    for ActorWorktreeAllocationHandler
+{
     type Request = WorktreeAllocationReq;
 
     fn handle(
@@ -32,9 +34,14 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for 
             WorktreeAllocationReq::WorktreeAllocationCreateForActorPath(spec, actor_path) => {
                 self.worktree_allocation_create_for_actor_path(cx, spec, actor_path)
             }
-            WorktreeAllocationReq::WorktreeAllocationCreateFromBoundForActorPath(dirty_policy, actor_path) => {
-                self.worktree_allocation_create_from_bound_for_actor_path(cx, dirty_policy, actor_path)
-            }
+            WorktreeAllocationReq::WorktreeAllocationCreateFromBoundForActorPath(
+                dirty_policy,
+                actor_path,
+            ) => self.worktree_allocation_create_from_bound_for_actor_path(
+                cx,
+                dirty_policy,
+                actor_path,
+            ),
         }
     }
 }

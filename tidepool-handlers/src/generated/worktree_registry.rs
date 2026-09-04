@@ -16,7 +16,9 @@ impl tidepool_mcp::DescribeEffect for ActorWorktreeRegistryHandler {
     }
 }
 
-impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput> for ActorWorktreeRegistryHandler {
+impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
+    for ActorWorktreeRegistryHandler
+{
     type Request = WorktreeRegistryReq;
 
     fn handle(
