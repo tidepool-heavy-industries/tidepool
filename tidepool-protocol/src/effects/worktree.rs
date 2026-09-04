@@ -474,6 +474,12 @@ fn type_defs() -> Vec<TypeDef> {
                         doc: &[],
                     },
                     RecordField {
+                        hs_name: "committedPaths",
+                        rust_name: "committed_paths",
+                        ty: HsType::List(Box::new(HsType::Text)),
+                        doc: &["Paths changed by commits after the request base."],
+                    },
+                    RecordField {
                         hs_name: "submittedHead",
                         rust_name: "submitted_head",
                         ty: HsType::Named("HeadState"),

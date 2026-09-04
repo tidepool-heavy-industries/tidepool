@@ -64,6 +64,7 @@ pub struct LocalResidentInstallation {
     pub policy: Arc<dyn ResidentToolEndpoint>,
     pub initial_user_message: Option<String>,
     pub launch_worktrees: Vec<String>,
+    pub effective_role: crate::EffectiveRole,
 }
 
 #[derive(Clone)]
@@ -327,10 +328,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let requests = self.environment.requests.status_for(actor);
         format!(
-            "actor {}@{} label={:?}: application={}; program={standing}; current_request={current_request:?}; worktrees={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}: role={:?}; native_tools={:?}; workspace={:?}; prompt_profile={:?}; application={}; program={standing}; current_request={current_request:?}; bound_worktrees={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
+            self.descriptor.effective_role().role(),
+            self.descriptor.effective_role().native_tools(),
+            self.descriptor.effective_role().workspace(),
+            self.descriptor.effective_role().prompt_profile(),
             if self.policy_installed { "attached" } else { "detached" },
             self.launch_worktrees,
             requests.pending_responses,
@@ -753,6 +758,7 @@ where
                             policy,
                             initial_user_message: awaiting.initial_user_message.clone(),
                             launch_worktrees: self.launch_worktrees.clone(),
+                            effective_role: self.descriptor.effective_role().clone(),
                         };
                         self.publish_installation(installation);
                         self.policy_installed = true;
@@ -871,6 +877,7 @@ where
             policy,
             initial_user_message,
             launch_worktrees: self.launch_worktrees.clone(),
+            effective_role: self.descriptor.effective_role().clone(),
         });
         self.policy_installed = true;
         for notice in self.deferred_child_failures.drain(..) {

@@ -14,6 +14,7 @@ use crate::registry::{
     WorktreeSummary,
 };
 use crate::storage::now_ms;
+use tidepool_repr::ActorPath;
 
 /// Tidepool's owned branch namespace. Every managed branch lives under this
 /// prefix so a managed branch can never collide with, or be mistaken for, a
@@ -168,6 +169,25 @@ impl WorktreeManager {
     /// materializing and finalize it after; a provisional row that never
     /// finalized is discoverable as such.
     pub fn create(&self, spec: &WorktreeSpec) -> Result<WorktreeHandle, WorktreeError> {
+        self.create_with_branch(spec, None)
+    }
+
+    /// Create a worktree whose readable Git branch is the exact projection of
+    /// an already allocated actor lineage. The actor registry is the naming
+    /// authority; this owner performs the Git mutation and durable receipt.
+    pub fn create_for_actor_path(
+        &self,
+        spec: &WorktreeSpec,
+        actor_path: &ActorPath,
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        self.create_with_branch(spec, Some(BranchName::from_raw(actor_path.git_branch())))
+    }
+
+    fn create_with_branch(
+        &self,
+        spec: &WorktreeSpec,
+        named_branch: Option<BranchName>,
+    ) -> Result<WorktreeHandle, WorktreeError> {
         let id = self.registry.mint_id()?;
         let resolved = self.resolve_source(spec, &id)?;
 
@@ -192,11 +212,13 @@ impl WorktreeManager {
             }
         }
         let cwd = self.worktree_root.join(id.as_str());
-        let branch = BranchName::from_raw(format!(
-            "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
-            sanitize_branch_label(&spec.label),
-            id.as_str()
-        ));
+        let branch = named_branch.unwrap_or_else(|| {
+            BranchName::from_raw(format!(
+                "{TIDEPOOL_BRANCH_PREFIX}/{}-{}",
+                sanitize_branch_label(&spec.label),
+                id.as_str()
+            ))
+        });
 
         let provisional = WorktreeReceipt {
             worktree_id: id.clone(),

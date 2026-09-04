@@ -266,6 +266,7 @@ fn submission_observation_to_wire(observation: &SubmissionObservation) -> WtSubm
     WtSubmissionObservation {
         observed_worktree_id: worktree_id_to_wire(&observation.worktree_id),
         base_head: git_oid_to_wire(&observation.base_head),
+        committed_paths: observation.committed_paths.clone(),
         submitted_head: head_state_to_wire(&observation.submitted_head),
         working_state: working_state_to_wire(&observation.working_state),
     }

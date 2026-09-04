@@ -6,6 +6,7 @@
 //! [`DataConTable`] for constructor metadata.
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
+pub mod actor_path;
 pub mod builder;
 pub mod datacon;
 pub mod datacon_table;
@@ -25,6 +26,7 @@ pub mod types;
 pub mod varid_check;
 pub mod version_ladder;
 
+pub use actor_path::{ActorPath, ActorPathError, ActorPathSegment};
 pub use builder::TreeBuilder;
 pub use datacon::*;
 pub use datacon_table::*;

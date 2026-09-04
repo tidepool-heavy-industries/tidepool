@@ -13,6 +13,7 @@ mod generated;
 mod identity;
 mod interactive_session;
 mod kernel;
+mod lineage;
 mod local_actor;
 mod mailbox;
 mod mount;
@@ -24,6 +25,7 @@ mod resident_actor;
 mod resident_interactive;
 mod resident_tools;
 mod resident_workbench;
+mod role;
 mod start;
 mod termination;
 mod typed_request;
@@ -43,6 +45,7 @@ pub use kernel::{
     KernelInvocationReply, KernelMessage, KernelWorkbenchFailure, KernelWorkbenchReply,
     LocalActorRef,
 };
+pub use lineage::{ActorLineageRegistry, ActorPathReservation};
 pub use local_actor::{
     spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
     KernelStep, LocalActor, LocalActorArguments, LocalActorDirectory, LocalActorState,
@@ -69,7 +72,9 @@ pub use resident_workbench::{
     ActorMachineRegistry, ActorWorkbenchSource, ResidentActorRunner, ResidentActorWorkbench,
     ResidentActorWorkbenchError,
 };
+pub use role::{ActorRole, DescendantBudget, EffectiveRole, NativeToolClass, WorkspaceAccess};
 pub use start::{ActorEffectProfileWire, ActorStartCaptureError, ResidentActorStart};
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
+pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};
 pub use wait::{actor_terminal_value, ActorWaitError};

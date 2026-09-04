@@ -7,6 +7,25 @@
 -- DevSwarm belong in separately loaded application modules.
 module Tidepool.Actors.Shoal
   ( ActorEffects
+  , CoreEffects
+  , ResearchEffects
+  , ResearchCoordinatorEffects
+  , CodingEffects
+  , ScaffoldEffects
+  , IntegrationEffects
+  , ActorContext
+  , AgentLaunch
+  , AgentInspection
+  , AgentControl
+  , BoundWorktree
+  , WorktreeRegistry
+  , WorktreeAllocation
+  , WorktreeIntegration
+  , Forks
+  , Effects
+  , KnownEffect (effectWitness)
+  , KnownEffects (knownEffects)
+  , Subset
   , AgentSpec
   , AgentRef
   , Response
@@ -20,6 +39,8 @@ module Tidepool.Actors.Shoal
   , Replies
   , ReplyError (..)
   , ResponseFailure (..)
+  , ResponseResult (..)
+  , WorktreeEvidence (..)
   , ResponseState (..)
   , requestId
   , attemptReply
@@ -31,6 +52,8 @@ module Tidepool.Actors.Shoal
   , WatchFailure (..)
   , WatchState (..)
   , awaitResponse
+  , awaitValue
+  , awaitSettled
   , watch
   , pollWatch
   , WorktreeSpec
@@ -80,6 +103,7 @@ import Tidepool.Actors.Internal.Agent
   , startAgent
   , stopAgent
   )
+import Tidepool.Actors.Role
 import Tidepool.Effects.Core (Actor, Worktree)
 import Tidepool.Worktree
 

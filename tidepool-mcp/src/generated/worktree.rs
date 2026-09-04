@@ -28,7 +28,7 @@ pub fn worktree_decl() -> crate::EffectDecl {
             "data DirtySummary = DirtySummary { staged :: [Text], unstaged :: [Text], untracked :: [Text], ignoredExcluded :: Int } deriving (Show, Eq)",
             "data HeadState = OnBranch { headBranch :: BranchName, headOid :: GitOid } | Detached { headOid :: GitOid } deriving (Show, Eq)",
             "data WorkingState = WorkingState { changes :: DirtySummary, operation :: Maybe InProgressKind } deriving (Show, Eq)",
-            "data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)",
+            "data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, committedPaths :: [Text], submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)",
             "data GitFailureReceipt = GitFailureReceipt { gitArgs :: [Text], gitCwd :: Text, gitExitCode :: Maybe Int, gitStdout :: Text, gitStderr :: Text } deriving (Show, Eq)",
             "data WorktreeReceipt = WorktreeReceipt { treeId :: WorktreeId, cwd :: Text, branch :: BranchName, sourceHead :: GitOid, snapshotRef :: Maybe GitRef, createdAt :: Int } deriving (Show, Eq)",
             "data WorktreeHandle = WorktreeHandle { handleReceipt :: WorktreeReceipt } deriving (Show, Eq)",

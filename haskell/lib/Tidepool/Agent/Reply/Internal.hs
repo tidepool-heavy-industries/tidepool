@@ -9,6 +9,8 @@ module Tidepool.Agent.Reply.Internal
   , Replies (..)
   , ReplyError (..)
   , ResponseFailure (..)
+  , ResponseResult (..)
+  , WorktreeEvidence (..)
   , ResponseState (..)
   , RawResponseObservation (..)
   , reserveRequest
@@ -34,12 +36,13 @@ import Tidepool.Internal.ExitCell
   , newExitCell
   , readExitCell
   )
+import Tidepool.Effects.Core (GitOid, SubmissionObservation, WorktreeError)
 
 newtype RequestId = RequestId Int
   deriving (Show, Eq, Ord)
 
 data Response result where
-  Response :: RequestId -> ExitCell pending result -> Response result
+  Response :: RequestId -> ExitCell pending (ResponseResult result) -> Response result
 
 instance Show (Response result) where
   show (Response request _) = "Response " <> show request
@@ -64,9 +67,21 @@ data ResponseFailure
   | ResponseRejected ReplyError
   deriving (Show, Eq)
 
+data WorktreeEvidence
+  = NoBoundWorktree
+  | WorktreeObserved GitOid SubmissionObservation
+  | WorktreeObservationFailed WorktreeError
+  deriving (Show, Eq)
+
+data ResponseResult result = ResponseResult
+  { responseValue :: result
+  , responseWorktree :: WorktreeEvidence
+  }
+  deriving (Show, Eq)
+
 data ResponseState result
   = ResponsePending
-  | ResponseReady result
+  | ResponseReady (ResponseResult result)
   | ResponseUnavailable ResponseFailure
   deriving (Show, Eq)
 
@@ -99,7 +114,7 @@ newRequestHandles :: pending -> RequestId -> (Response result, Reply result)
 newRequestHandles pending request =
   (Response request (newExitCell pending), Reply request)
 
-fillResponse :: Response result -> result -> ()
+fillResponse :: Response result -> ResponseResult result -> ()
 fillResponse (Response _ cell) = fillExitCell cell
 
 responseRequestId :: Response result -> RequestId
@@ -108,7 +123,7 @@ responseRequestId (Response request _) = request
 replyRequestId :: Reply result -> RequestId
 replyRequestId (Reply request) = request
 
-readResponse :: Response result -> Maybe result
+readResponse :: Response result -> Maybe (ResponseResult result)
 readResponse (Response _ cell) = readExitCell () cell
 
 attemptReply

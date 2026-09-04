@@ -98,6 +98,11 @@ impl ResidentActorStart {
             },
         )
         .with_profile(profile)
+        .with_effective_role(if launch_worktrees.is_empty() {
+            crate::EffectiveRole::research()
+        } else {
+            crate::EffectiveRole::coding()
+        })
         .with_source_imports(crate::ActorSourceImports::from_exact_facades([&facade]));
         Ok(Self {
             descriptor,

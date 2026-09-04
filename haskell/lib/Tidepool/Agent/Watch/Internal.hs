@@ -11,6 +11,8 @@ module Tidepool.Agent.Watch.Internal
   , WatchState (..)
   , RawWatchObservation (..)
   , awaitResponse
+  , awaitValue
+  , awaitSettled
   , watch
   , pollWatch
   ) where
@@ -23,6 +25,7 @@ import Tidepool.Agent.Reply.Internal
   , RequestId (..)
   , Response
   , ResponseFailure
+  , ResponseResult (responseValue)
   , readResponse
   , responseRequestId
   )
@@ -69,9 +72,16 @@ data Watches a where
   RegisterWatchWith :: [Int] -> Watches Int
   ObserveWatchWith :: Int -> Watches RawWatchObservation
 
-awaitResponse :: Response result -> Await result
-awaitResponse response =
+awaitSettled :: Response result -> Await (ResponseResult result)
+awaitSettled response =
   Await [responseRequestId response] (const (readResponse response))
+
+awaitValue :: Response result -> Await result
+awaitValue = fmap responseValue . awaitSettled
+
+-- | Compatibility spelling for callers interested only in the authored value.
+awaitResponse :: Response result -> Await result
+awaitResponse = awaitValue
 
 watch :: Member Watches effs => Await result -> Eff effs (Watch result)
 watch awaiting@(Await dependencies _) = do

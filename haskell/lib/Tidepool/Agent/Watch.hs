@@ -8,6 +8,8 @@ module Tidepool.Agent.Watch
   , WatchFailure (..)
   , WatchState (..)
   , awaitResponse
+  , awaitValue
+  , awaitSettled
   , watch
   , pollWatch
   ) where
@@ -19,6 +21,8 @@ import Tidepool.Agent.Watch.Internal
   , WatchFailure (..)
   , WatchState (..)
   , awaitResponse
+  , awaitValue
+  , awaitSettled
   , pollWatch
   , watch
   )

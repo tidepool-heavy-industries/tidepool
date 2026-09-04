@@ -1450,8 +1450,8 @@ data HeadState = OnBranch { headBranch :: BranchName, headOid :: GitOid } | Deta
 data WorkingState = WorkingState { changes :: DirtySummary, operation :: Maybe InProgressKind } deriving (Show, Eq)
 -- end type_defs[10] --
 
--- type_defs[11] (185 bytes) --
-data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)
+-- type_defs[11] (211 bytes) --
+data SubmissionObservation = SubmissionObservation { observedWorktreeId :: WorktreeId, baseHead :: GitOid, committedPaths :: [Text], submittedHead :: HeadState, workingState :: WorkingState } deriving (Show, Eq)
 -- end type_defs[11] --
 
 -- type_defs[12] (164 bytes) --
@@ -2398,18 +2398,18 @@ true
 AgentSession
 -- end type_name --
 
--- description (191 bytes) --
-Open this actor's supervised interactive-agent session with a statically typed completion. The external application reaches the persistent Haskell workbench through its actor-local transport.
+-- description (164 bytes) --
+Present one typed request to this actor's attached application. The external application reaches the persistent Haskell workbench through its actor-local transport.
 -- end description --
 
 -- prompt_card: Some --
--- prompt_card.0 (142 bytes) --
-`agentSession activation prompt input` — expose the persistent Haskell workbench to the attached agent and resume with a GHC-checked result.
+-- prompt_card.0 (108 bytes) --
+A request activation mounts typed `sessionInput`, `sessionReply`, and `respond` in the attached application.
 -- end prompt_card.0 --
 
 -- constructors (2 items) --
 -- constructors[0] (76 bytes) --
-AgentSessionWith :: Int -> input -> Maybe Text -> Int -> AgentSession output
+AgentSessionWith :: Int -> input -> Int -> Maybe Text -> AgentSession output
 -- end constructors[0] --
 
 -- constructors[1] (48 bytes) --

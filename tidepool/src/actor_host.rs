@@ -661,7 +661,8 @@ fn compile_root(
     )
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
-    .with_profile(ActorEffectProfile::ReadWrite);
+    .with_profile(ActorEffectProfile::ReadWrite)
+    .with_effective_role(tidepool_actor::EffectiveRole::root());
     Ok((
         ActorWorkbenchSource::new(preamble, include)
             .with_default_browse_module(WORKBENCH_SURFACE_MODULE),
@@ -1217,10 +1218,13 @@ async fn launch_prepared_interactive_application(
         &git_common_dir,
     );
     let agent_workspace = PathBuf::from(ACTOR_PROJECT_ROOT);
-    let native_tool_policy = if actor_identity != root && worktree.is_none() {
-        InteractiveNativeToolPolicy::InspectionOnly
-    } else {
-        InteractiveNativeToolPolicy::Standard
+    let native_tool_policy = match installation.effective_role.native_tools() {
+        tidepool_actor::NativeToolClass::InspectionOnly => {
+            InteractiveNativeToolPolicy::InspectionOnly
+        }
+        tidepool_actor::NativeToolClass::Coding
+        | tidepool_actor::NativeToolClass::Integration
+        | tidepool_actor::NativeToolClass::Inherited => InteractiveNativeToolPolicy::Standard,
     };
     let policy_mounts = backend
         .prepare_native_tool_policy(native_tool_policy, &actor_root.join("native-policy"))
@@ -3165,7 +3169,11 @@ mod tests {
         assert!(
             observed["items"][0]["output"]
                 .as_str()
-                .is_some_and(|output| output.contains("ResponseReady (ReplyReport 42)")),
+                .is_some_and(|output| {
+                    output.contains("ResponseReady")
+                        && output.contains("responseValue = ReplyReport 42")
+                        && output.contains("responseWorktree = NoBoundWorktree")
+                }),
             "{observed:?}"
         );
         assert!(

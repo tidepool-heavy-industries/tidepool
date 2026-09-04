@@ -36,19 +36,29 @@ import Tidepool.Agent.Reply.Internal
   , reserveRequest
   , replyRequestId
   , submitRequest
+  , ResponseResult (..)
+  , WorktreeEvidence (..)
   )
 import Tidepool.Agent.Session
   ( attachAgent
   , requestSessionSited
   )
 import Tidepool.Effects.Core (Actor, WorktreeHandle (..), WorktreeReceipt (..))
-import Tidepool.Worktree (renderBranchName, withWorktree)
+import Tidepool.Worktree
+  ( observeSubmission
+  , renderBranchName
+  , withWorktree
+  , worktreeHead
+  , worktreeId
+  )
 
 data AgentSpec
   = CodingAgent WorktreeHandle
   | ReadonlyAgent Text
 
-newtype AgentRef = AgentRef (Actor.ActorRef AgentProtocol ())
+data AgentRef = AgentRef
+  (Actor.ActorRef AgentProtocol ())
+  (Maybe WorktreeHandle)
 
 data AgentProtocol result where
   RunRequest
@@ -66,7 +76,9 @@ readonlyAgent = ReadonlyAgent
 
 -- | Start one persistent Codex identity. Requests do not terminate it.
 startAgent :: Member Actor effs => AgentSpec -> Eff effs AgentRef
-startAgent spec = AgentRef <$> Actor.startActor (agentDefinition spec) ()
+startAgent spec = do
+  actor <- Actor.startActor (agentDefinition spec) ()
+  pure (AgentRef actor (agentWorktree spec))
 
 -- | Submit a typed request and return its independently awaitable reply.
 {-# OPAQUE request #-}
@@ -90,27 +102,42 @@ requestSited
   -> Text
   -> input
   -> Eff effs (Response result)
-requestSited site (AgentRef target) prompt input = do
+requestSited site (AgentRef target targetWorktree) prompt input = do
   requestId <- reserveRequest (actorAddress target)
   let (response, reply) = newRequestHandles input requestId
   submitRequest
     requestId
     (actorAddress target)
-    (RunRequest (runRequest response reply))
+    (RunRequest (runRequest targetWorktree response reply))
   pure response
   where
-    runRequest response replyHandle = do
+    runRequest targetTree response replyHandle = do
       let requestId = case replyRequestId replyHandle of
             RequestId value -> value
+      start <- case targetTree of
+        Nothing -> pure Nothing
+        Just tree -> Just <$> worktreeHead tree
       result <-
         requestSessionSited @result @input
           site requestId (Just prompt) input
-      case fillResponse response result of
+      evidence <- case (targetTree, start) of
+        (Nothing, _) -> pure NoBoundWorktree
+        (Just tree, Just startHead) -> do
+          observed <- observeSubmission (worktreeId tree)
+          pure $ case observed of
+            Left failure -> WorktreeObservationFailed failure
+            Right submission -> WorktreeObserved startHead submission
+        (Just _, Nothing) -> error "bound worktree was not sampled"
+      case fillResponse response (ResponseResult result evidence) of
         () -> pure ()
 
 -- | Ask an agent to retire after all earlier mailbox requests settle.
 stopAgent :: Member Actor effs => AgentRef -> Eff effs ()
-stopAgent (AgentRef target) = Actor.cast target StopAgent
+stopAgent (AgentRef target _) = Actor.cast target StopAgent
+
+agentWorktree :: AgentSpec -> Maybe WorktreeHandle
+agentWorktree (CodingAgent tree) = Just tree
+agentWorktree (ReadonlyAgent _) = Nothing
 
 agentDefinition :: AgentSpec -> Actor.ActorDefinition () AgentProtocol ()
 agentDefinition spec = attachWorktree spec definition

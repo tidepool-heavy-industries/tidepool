@@ -37,6 +37,8 @@ pub struct WorkingState {
 pub struct SubmissionObservation {
     pub worktree_id: WorktreeId,
     pub base_head: GitOid,
+    /// Repository-relative paths changed by commits after `base_head`.
+    pub committed_paths: Vec<String>,
     pub submitted_head: HeadState,
     pub working_state: WorkingState,
 }
@@ -44,11 +46,26 @@ pub struct SubmissionObservation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RepositorySample {
     submitted_head: HeadState,
+    committed_paths: Vec<String>,
     working_state: WorkingState,
 }
 
-fn sample(git: &GitCli, cwd: &Path) -> Result<RepositorySample, WorktreeError> {
+fn sample(git: &GitCli, cwd: &Path, base: &GitOid) -> Result<RepositorySample, WorktreeError> {
     let oid = GitOid::from_raw(git.try_run(cwd, &["rev-parse", "HEAD"])?.trimmed());
+    let committed_paths = git
+        .try_run(
+            cwd,
+            &[
+                "diff",
+                "--name-only",
+                "-z",
+                &format!("{}..{}", base.as_str(), oid.as_str()),
+            ],
+        )?
+        .nul_fields()
+        .into_iter()
+        .map(String::from)
+        .collect();
     let branch_output = git.try_run(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     let branch = branch_output.trimmed();
     let submitted_head = if branch == "HEAD" {
@@ -62,6 +79,7 @@ fn sample(git: &GitCli, cwd: &Path) -> Result<RepositorySample, WorktreeError> {
 
     Ok(RepositorySample {
         submitted_head,
+        committed_paths,
         working_state: WorkingState {
             changes: inspect::dirty_summary(git, cwd)?,
             operation: inspect::in_progress(git, cwd)?,
@@ -83,10 +101,13 @@ pub(crate) fn observe(
         return Err(WorktreeError::WorktreeLost(handle.id().clone()));
     }
 
-    let stable = stable_sample(handle.id(), || sample(git, handle.cwd()))?;
+    let stable = stable_sample(handle.id(), || {
+        sample(git, handle.cwd(), handle.source_head())
+    })?;
     Ok(SubmissionObservation {
         worktree_id: handle.id().clone(),
         base_head: handle.source_head().clone(),
+        committed_paths: stable.committed_paths,
         submitted_head: stable.submitted_head,
         working_state: stable.working_state,
     })
@@ -116,6 +137,7 @@ mod tests {
             submitted_head: HeadState::Detached {
                 oid: GitOid::from_raw(oid),
             },
+            committed_paths: Vec::new(),
             working_state: WorkingState {
                 changes: DirtySummary::default(),
                 operation: None,

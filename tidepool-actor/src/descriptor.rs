@@ -2,6 +2,7 @@ use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
 use crate::{
     ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports,
+    EffectiveRole,
 };
 
 /// Immutable execution attributes selected before an actor is spawned.
@@ -13,6 +14,7 @@ pub struct ActorDescriptor {
     live_payload: LivePayloadPolicy,
     placement: ActorPlacement,
     source_imports: ActorSourceImports,
+    role: EffectiveRole,
 }
 
 impl ActorDescriptor {
@@ -25,6 +27,7 @@ impl ActorDescriptor {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
             source_imports: ActorSourceImports::default(),
+            role: EffectiveRole::coding(),
         }
     }
 
@@ -36,6 +39,17 @@ impl ActorDescriptor {
     #[must_use]
     pub fn profile(&self) -> ActorEffectProfile {
         self.profile
+    }
+
+    #[must_use]
+    pub fn effective_role(&self) -> &EffectiveRole {
+        &self.role
+    }
+
+    #[must_use]
+    pub fn with_effective_role(mut self, role: EffectiveRole) -> Self {
+        self.role = role;
+        self
     }
 
     #[must_use]

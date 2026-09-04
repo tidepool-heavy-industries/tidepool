@@ -275,6 +275,7 @@ instance ToJSON SubmissionObservation where
   toJSON observation = object
     [ "observedWorktreeId" .= observation.observedWorktreeId
     , "baseHead" .= observation.baseHead
+    , "committedPaths" .= observation.committedPaths
     , "submittedHead" .= observation.submittedHead
     , "workingState" .= observation.workingState
     ]
@@ -283,6 +284,7 @@ instance FromJSON SubmissionObservation where
   parseJSON = withObject "SubmissionObservation" $ \value -> SubmissionObservation
     <$> value .: "observedWorktreeId"
     <*> value .: "baseHead"
+    <*> value .: "committedPaths"
     <*> value .: "submittedHead"
     <*> value .: "workingState"
 
@@ -290,6 +292,7 @@ instance JsonSchema SubmissionObservation where
   jsonSchema _ = objectSchema Nothing
     [ ("observedWorktreeId", jsonSchema (Proxy @WorktreeId), True)
     , ("baseHead", jsonSchema (Proxy @GitOid), True)
+    , ("committedPaths", jsonSchema (Proxy @[Text]), True)
     , ("submittedHead", jsonSchema (Proxy @HeadState), True)
     , ("workingState", jsonSchema (Proxy @WorkingState), True)
     ]

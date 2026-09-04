@@ -130,6 +130,8 @@ pub struct WtWorkingState {
 pub struct WtSubmissionObservation {
     pub observed_worktree_id: WtWorktreeId,
     pub base_head: WtGitOid,
+    /// Paths changed by commits after the request base.
+    pub committed_paths: Vec<String>,
     pub submitted_head: WtHeadState,
     pub working_state: WtWorkingState,
 }

@@ -8,6 +8,8 @@ module Tidepool.Agent.Reply
   , Replies
   , ReplyError (..)
   , ResponseFailure (..)
+  , ResponseResult (..)
+  , WorktreeEvidence (..)
   , ResponseState (..)
   , requestId
   , attemptReply
@@ -22,6 +24,8 @@ import Tidepool.Agent.Reply.Internal
   , RequestId
   , Response
   , ResponseFailure (..)
+  , ResponseResult (..)
+  , WorktreeEvidence (..)
   , ResponseState (..)
   , attemptReply
   , pollResponse
