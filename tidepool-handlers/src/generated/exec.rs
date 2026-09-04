@@ -18,6 +18,7 @@ pub enum ExecError {
 }
 
 /// One variant per `Exec` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum ExecReq {
     Run(String),

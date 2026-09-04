@@ -4,6 +4,7 @@ use crate::handlers::worktree::ActorWorktreeAllocationHandler;
 use tidepool_bridge_derive::FromCore;
 
 /// One variant per `WorktreeAllocation` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum WorktreeAllocationReq {
     WorktreeAllocationCreate(tidepool_bridge_effects::WtWorktreeSpec),

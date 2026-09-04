@@ -32,10 +32,9 @@ impl ActorLineageRegistry {
         requested: ActorPath,
     ) -> Result<ActorPathReservation, ActorPathError> {
         let mut state = self.state.lock();
-        let (leaf, prefix) = requested
-            .segments()
-            .split_last()
-            .expect("validated actor paths are nonempty");
+        let Some((leaf, prefix)) = requested.segments().split_last() else {
+            return Err(ActorPathError::EmptyPath);
+        };
         let allocated = lowest_available(&state.occupied, prefix, leaf)?;
         state.occupied.insert(allocated.clone());
         Ok(ActorPathReservation {

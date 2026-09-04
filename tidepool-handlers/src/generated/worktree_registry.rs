@@ -4,6 +4,7 @@ use crate::handlers::worktree::ActorWorktreeRegistryHandler;
 use tidepool_bridge_derive::FromCore;
 
 /// One variant per `WorktreeRegistry` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum WorktreeRegistryReq {
     WorktreeRegistryLookup(tidepool_bridge_effects::WtWorktreeId),

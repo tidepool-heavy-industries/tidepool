@@ -113,6 +113,7 @@ fn body(e: &Effect) -> String {
         "/// One variant per `{}` GADT constructor, named EXACTLY as in Haskell.\n",
         e.name
     ));
+    out.push_str("#[allow(clippy::enum_variant_names)]\n");
     out.push_str("#[derive(FromCore)]\n");
     out.push_str(&format!("pub enum {} {{\n", e.req_enum));
     for v in &e.verbs {

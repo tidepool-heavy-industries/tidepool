@@ -4,6 +4,7 @@ use crate::handlers::worktree::ActorWorktreeIntegrationHandler;
 use tidepool_bridge_derive::FromCore;
 
 /// One variant per `WorktreeIntegration` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum WorktreeIntegrationReq {
     WorktreeIntegrationTryMerge(tidepool_bridge_effects::WtMergeRequest),

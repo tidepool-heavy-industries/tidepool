@@ -22,6 +22,7 @@ pub enum EventError {
 }
 
 /// One variant per `RepoEvent` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum RepoEventReq {
     RepoEventSubscribe(Vec<tidepool_bridge_effects::EvWatch>),

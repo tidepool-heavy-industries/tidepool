@@ -111,17 +111,16 @@ impl ActorPath {
 
     #[must_use]
     pub fn git_branch(&self) -> String {
-        let (leaf, parents) = self
-            .0
-            .split_last()
-            .expect("validated actor paths are nonempty");
-        if parents.is_empty() {
+        let leaf = self.0.last().map_or("", ActorPathSegment::as_str);
+        let parent_count = self.0.len().saturating_sub(1);
+        if parent_count == 0 {
             format!("shoal/branches/{leaf}")
         } else {
             format!(
                 "shoal/{}/branches/{leaf}",
-                parents
+                self.0
                     .iter()
+                    .take(parent_count)
                     .map(ActorPathSegment::as_str)
                     .collect::<Vec<_>>()
                     .join("/")

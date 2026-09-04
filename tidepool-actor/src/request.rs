@@ -141,14 +141,14 @@ impl RequestRegistry {
         let mut active = state
             .requests
             .iter()
-            .filter_map(|(request, record)| {
-                (record.target == target
+            .filter(|(_, record)| {
+                record.target == target
                     && matches!(
                         record.state,
                         RequestState::Queued | RequestState::Presented | RequestState::Settling
-                    ))
-                .then(|| (*request, record.label.clone()))
+                    )
             })
+            .map(|(request, record)| (*request, record.label.clone()))
             .collect::<Vec<_>>();
         active.sort_unstable();
         active

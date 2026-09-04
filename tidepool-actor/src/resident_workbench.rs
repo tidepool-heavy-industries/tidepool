@@ -2285,7 +2285,7 @@ fn actor_context_constructor(
     let qualified = format!("Tidepool.Effects.Core.{name}");
     let constructor = table
         .get_by_qualified_name(&qualified)
-        .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;
+        .ok_or(tidepool_bridge::BridgeError::UnknownDataConName(qualified))?;
     Ok(Value::Con(constructor, fields))
 }
 

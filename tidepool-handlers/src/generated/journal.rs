@@ -4,6 +4,7 @@ use crate::handlers::journal::JournalHandler;
 use tidepool_bridge_derive::FromCore;
 
 /// One variant per `Journal` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum JournalReq {
     RecordStep(String, String, crate::effect_glue::JsonArg),

@@ -38,6 +38,7 @@ pub enum WorktreeError {
 }
 
 /// One variant per `Worktree` GADT constructor, named EXACTLY as in Haskell.
+#[allow(clippy::enum_variant_names)]
 #[derive(FromCore)]
 pub enum WorktreeReq {
     WorktreeCreate(tidepool_bridge_effects::WtWorktreeSpec),
