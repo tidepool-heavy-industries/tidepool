@@ -516,6 +516,9 @@ impl MetaCommandLine {
         matches!(
             self.name.as_str(),
             "status"
+                | "status!"
+                | "lineage"
+                | "trace"
                 | "t"
                 | "type"
                 | "i"

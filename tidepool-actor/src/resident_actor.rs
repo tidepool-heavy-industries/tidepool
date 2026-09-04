@@ -385,7 +385,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
 
-    fn status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
+    fn status_text(&self, kernel: &KernelContext, actor: ActorRef, view: StatusView) -> String {
         let (standing, current_request) = match &self.standing {
             ResidentStanding::Boot => ("booting", None),
             ResidentStanding::Receiving(_) => ("receiving", None),
@@ -396,17 +396,28 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             ResidentStanding::Terminal => ("terminal", None),
         };
         let requests = self.environment.requests.status_for(actor);
-        let mut roster = self
-            .environment
-            .actors
-            .lock()
+        let records = self.environment.actors.lock();
+        let terminal_actors = records
             .iter()
-            .map(|(identity, record)| {
+            .filter(|(identity, record)| {
+                record.terminal.is_some()
+                    || kernel
+                        .resolve(**identity)
+                        .and_then(|actor| actor.terminal().get())
+                        .is_some()
+            })
+            .count();
+        let mut roster = records
+            .iter()
+            .filter_map(|(identity, record)| {
                 let terminal = record.terminal.clone().or_else(|| {
                     kernel
                         .resolve(*identity)
                         .and_then(|actor| actor.terminal().get())
                 });
+                if terminal.is_some() && view == StatusView::Concise {
+                    return None;
+                }
                 let active = self.environment.requests.active_for_target(*identity);
                 let state = match terminal {
                     Some(ref terminal) => format!("terminal:{:?}", terminal.kind),
@@ -415,29 +426,58 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 };
                 let runtime = record.runtime_observation.snapshot();
                 let usage = runtime.latest_provider_usage();
-                format!(
-                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} role={:?} bound_worktree={:?} provider_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} state={}",
+                Some(format!(
+                    "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} state={}",
                     identity.id.0,
                     identity.incarnation.0,
                     record.descriptor.label(),
                     record.descriptor.supervisor_parent(),
                     record.descriptor.context_parent(),
+                    record.descriptor.fork_group(),
                     record.descriptor.effective_role().role(),
                     record.bound_worktree,
                     runtime.provider_thread,
+                    runtime.provider_parent_thread,
                     usage.map(|sample| sample.cached_input_tokens),
                     usage.map(|sample| sample.uncached_input_tokens),
                     usage.map(|sample| sample.scope),
                     usage.and_then(|sample| sample.activation_sequence),
                     state,
-                )
+                ))
             })
             .collect::<Vec<_>>();
+        drop(records);
         roster.sort();
         let runtime = self.runtime_observation.snapshot();
         let usage = runtime.latest_provider_usage();
+        let unavailable_responses = if view != StatusView::Concise {
+            format!("{:?}", requests.unavailable_responses)
+        } else {
+            format!(
+                "{} terminal (use :status!)",
+                requests.unavailable_responses.len()
+            )
+        };
+        let unavailable_watches = if view != StatusView::Concise {
+            format!("{:?}", requests.unavailable_watches)
+        } else {
+            format!(
+                "{} terminal (use :status!)",
+                requests.unavailable_watches.len()
+            )
+        };
+        let roster_summary = if view != StatusView::Concise || terminal_actors == 0 {
+            String::new()
+        } else {
+            format!("\n  terminal actors hidden={terminal_actors} (use :status!)")
+        };
+        let sample_history = if view == StatusView::Trace {
+            format!("\n  provider_usage_history={:?}", runtime.provider_usage)
+        } else {
+            String::new()
+        };
         let current = format!(
-            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={:?}\n  watches: pending={:?} ready={:?} unavailable={:?}",
+            "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_snapshot={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}\n  runtime: application={} program={standing} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
             actor.id.0,
             actor.incarnation.0,
             self.descriptor.label(),
@@ -464,12 +504,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             self.launch_worktrees.first(),
             requests.pending_responses,
             requests.ready_responses,
-            requests.unavailable_responses,
+            unavailable_responses,
             requests.pending_watches,
             requests.ready_watches,
-            requests.unavailable_watches,
+            unavailable_watches,
+            roster_summary,
+            sample_history,
         );
-        format!(
+        let status = format!(
             "{current}\n  deadlines: [{}]\nactors:\n{}",
             requests
                 .deadlines
@@ -478,8 +520,37 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .collect::<Vec<_>>()
                 .join(", "),
             roster.join("\n")
-        )
+        );
+        if view == StatusView::Lineage {
+            let lineage = roster
+                .iter()
+                .map(|entry| {
+                    entry
+                        .split_once(" role=")
+                        .map_or(entry.as_str(), |(identity, _)| identity)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "actor {}@{} lineage\n  supervisor={:?}\n  context_parent={:?}\n  fork_group={:?}\nactors:\n{lineage}",
+                actor.id.0,
+                actor.incarnation.0,
+                self.descriptor.supervisor_parent(),
+                self.descriptor.context_parent(),
+                self.descriptor.fork_group(),
+            )
+        } else {
+            status
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusView {
+    Concise,
+    Expanded,
+    Lineage,
+    Trace,
 }
 
 impl<H, O> ResidentKernelBehavior<H, O>
@@ -2115,11 +2186,19 @@ where
         let mut receipts = Vec::new();
         let mut index = 0;
         while index < request.items.len() {
-            if request.items[index].trim() == ":status" {
+            let command = request.items[index].trim();
+            let status_view = match command {
+                ":status" => Some(StatusView::Concise),
+                ":status!" => Some(StatusView::Expanded),
+                ":lineage" => Some(StatusView::Lineage),
+                ":trace" => Some(StatusView::Trace),
+                _ => None,
+            };
+            if let Some(status_view) = status_view {
                 receipts.push(WorkbenchItemReceipt {
                     index,
                     status: WorkbenchItemStatus::Committed,
-                    output: self.status_text(kernel, context.actor),
+                    output: self.status_text(kernel, context.actor, status_view),
                     warnings: Vec::new(),
                 });
                 index += 1;
