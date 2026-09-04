@@ -100,7 +100,7 @@ async fn refutable_let_pattern_warns_without_rejecting_the_binding() {
     let bound = repl.eval("let Right answer = source").await;
     let text = bound.expect_ok("refutable let binding");
     let receipt: serde_json::Value =
-        serde_json::from_str(&text).expect("binding receipt should be JSON");
+        serde_json::from_str(text).expect("binding receipt should be JSON");
     let warnings = receipt["warnings"]
         .as_array()
         .expect("a refutable binding should carry its advisory GHC warning");

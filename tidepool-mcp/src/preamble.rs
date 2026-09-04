@@ -1181,7 +1181,7 @@ mod vocab_tests {
         let worktree = crate::worktree_decl();
         let hidden = ["tryMerge", "worktreeHead"];
         let preamble = build_preamble_with_companions_hiding(
-            &[worktree.clone()],
+            &[worktree],
             false,
             CompanionImports::Omit,
             &hidden,
