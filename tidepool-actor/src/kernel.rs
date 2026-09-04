@@ -210,9 +210,9 @@ impl std::fmt::Debug for KernelMessage {
 
 /// Exact local address paired with immutable terminal observation.
 ///
-/// The Ractor PID is unique for the process lifetime. V0 assigns incarnation
-/// `1` because actors are never restarted in place; no same-lineage
-/// substitution semantics are implied.
+/// The Ractor PID is unique only for the process lifetime. A local host pairs
+/// it with one durably claimed incarnation so exact handles remain distinct
+/// after process restart.
 #[derive(Clone)]
 pub struct LocalActorRef {
     identity: ActorRef,
@@ -234,8 +234,20 @@ impl std::fmt::Debug for LocalActorRef {
 impl LocalActorRef {
     #[must_use]
     pub fn new(address: RactorRef<KernelMessage>, terminal: RetainedActorExit) -> Self {
+        Self::new_in_incarnation(address, terminal, crate::Incarnation::FIRST)
+    }
+
+    #[must_use]
+    pub fn new_in_incarnation(
+        address: RactorRef<KernelMessage>,
+        terminal: RetainedActorExit,
+        incarnation: crate::Incarnation,
+    ) -> Self {
         Self {
-            identity: ActorRef::first(crate::ActorId(address.get_id().pid())),
+            identity: ActorRef {
+                id: crate::ActorId(address.get_id().pid()),
+                incarnation,
+            },
             address,
             terminal,
         }

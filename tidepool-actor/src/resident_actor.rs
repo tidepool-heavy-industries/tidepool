@@ -3403,6 +3403,28 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    spawn_resident_root_in_incarnation(source, root, fork_workspaces, crate::Incarnation::FIRST)
+        .await
+}
+
+/// Spawn a resident root under one durable local-host incarnation.
+pub async fn spawn_resident_root_in_incarnation<H, O>(
+    source: ActorWorkbenchSource,
+    root: ResidentActorRoot<H, O>,
+    fork_workspaces: Option<crate::fork_workspace::SharedForkWorkspaceAdmission>,
+    incarnation: crate::Incarnation,
+) -> Result<
+    (
+        LocalActorRef,
+        ractor::concurrency::JoinHandle<()>,
+        mpsc::UnboundedReceiver<LocalResidentDeployment>,
+    ),
+    ractor::SpawnErr,
+>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     let (descriptor, machine, outcome) = root.into_parts();
     let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
     let session = descriptor.placement().session;
@@ -3420,7 +3442,8 @@ where
         fork_workspaces,
     };
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
-    let (actor, task) = crate::spawn_local_actor(None, behavior).await?;
+    let (actor, task) =
+        crate::spawn_local_actor_in_incarnation(None, behavior, incarnation).await?;
     Ok((actor, task, receiver))
 }
 

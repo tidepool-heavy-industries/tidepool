@@ -181,11 +181,12 @@ impl KernelContext {
                     behavior,
                     terminal: terminal.clone(),
                     directory: self.directory.clone(),
+                    incarnation: self.identity.incarnation,
                 },
             )
             .await?;
         drop(task);
-        let child = LocalActorRef::new(address, terminal);
+        let child = LocalActorRef::new_in_incarnation(address, terminal, self.identity.incarnation);
         self.children
             .lock()
             .insert(child.address().get_id(), child.clone());
@@ -284,6 +285,12 @@ pub struct LocalActorArguments<B> {
     pub behavior: B,
     pub terminal: RetainedActorExit,
     pub directory: LocalActorDirectory,
+    /// Durable runtime epoch shared by every actor in one local host.
+    ///
+    /// Ractor process IDs may be reused after a host restart. Pairing them
+    /// with the host epoch prevents an old exact handle from addressing a new
+    /// actor that happens to receive the same process ID.
+    pub incarnation: crate::Incarnation,
 }
 
 pub struct LocalActorState<B> {
@@ -307,7 +314,10 @@ where
         myself: RactorRef<Self::Msg>,
         arguments: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let identity = ActorRef::first(crate::ActorId(myself.get_id().pid()));
+        let identity = ActorRef {
+            id: crate::ActorId(myself.get_id().pid()),
+            incarnation: arguments.incarnation,
+        };
         let context = KernelContext {
             identity,
             myself,
@@ -321,10 +331,14 @@ where
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
         };
-        state.context.directory.insert(LocalActorRef::new(
-            state.context.myself.clone(),
-            state.terminal.clone(),
-        ));
+        state
+            .context
+            .directory
+            .insert(LocalActorRef::new_in_incarnation(
+                state.context.myself.clone(),
+                state.terminal.clone(),
+                state.context.identity.incarnation,
+            ));
         match state.behavior.start(&state.context).await {
             Ok(KernelStep::Continue(())) => {}
             Ok(KernelStep::ContinueLater(())) => {
@@ -539,6 +553,23 @@ pub async fn spawn_local_actor<B>(
 where
     B: KernelBehavior,
 {
+    spawn_local_actor_in_incarnation(name, behavior, crate::Incarnation::FIRST).await
+}
+
+/// Spawn one root in an explicitly claimed durable host incarnation.
+///
+/// Ordinary embedders and tests can use [`spawn_local_actor`]. A host whose
+/// actor IDs must remain exact across process restarts claims an incarnation
+/// durably and supplies it here. Children inherit this value from their
+/// parent, so authority cannot accidentally cross a restarted host boundary.
+pub async fn spawn_local_actor_in_incarnation<B>(
+    name: Option<String>,
+    behavior: B,
+    incarnation: crate::Incarnation,
+) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr>
+where
+    B: KernelBehavior,
+{
     let terminal = RetainedActorExit::new();
     let directory = LocalActorDirectory::default();
     let (address, task) = Actor::spawn(
@@ -548,10 +579,14 @@ where
             behavior,
             terminal: terminal.clone(),
             directory,
+            incarnation,
         },
     )
     .await?;
-    Ok((LocalActorRef::new(address, terminal), task))
+    Ok((
+        LocalActorRef::new_in_incarnation(address, terminal, incarnation),
+        task,
+    ))
 }
 
 async fn fail_actor<B>(
@@ -1222,9 +1257,12 @@ mod tests {
     #[tokio::test]
     async fn child_failure_is_retained_and_notifies_without_killing_owner() {
         let fixture = behavior(false);
-        let (owner, owner_task) = spawn_local_actor(None, fixture.behavior)
-            .await
-            .expect("spawn owner");
+        let incarnation = crate::Incarnation(41);
+        let (owner, owner_task) =
+            spawn_local_actor_in_incarnation(None, fixture.behavior, incarnation)
+                .await
+                .expect("spawn owner");
+        assert_eq!(owner.identity().incarnation, incarnation);
         let (spawn_tx, spawn_rx) = oneshot::channel();
         owner
             .address()
@@ -1235,6 +1273,7 @@ mod tests {
             .expect("request child");
         spawn_rx.await.expect("spawn reply").expect("spawn result");
         let child = fixture.spawned_child.lock().clone().expect("child handle");
+        assert_eq!(child.identity().incarnation, incarnation);
         assert_eq!(
             child
                 .report_external_failure(ExternalApplicationFailure {

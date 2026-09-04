@@ -66,8 +66,9 @@ pub use lineage::{
     ForkGroupGate, ForkGroupId, ForkGroupPhase, ForkGroupRegistry,
 };
 pub use local_actor::{
-    spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
-    KernelStep, LocalActor, LocalActorArguments, LocalActorDirectory, LocalActorState,
+    spawn_local_actor, spawn_local_actor_in_incarnation, ChildExitNotice, KernelBehavior,
+    KernelBehaviorError, KernelContext, KernelStep, LocalActor, LocalActorArguments,
+    LocalActorDirectory, LocalActorState,
 };
 pub use mailbox::MailboxValue;
 pub use mount::{
@@ -84,8 +85,9 @@ pub use request::{
     WatchTransition,
 };
 pub use resident_actor::{
-    spawn_resident_root, spawn_resident_root_with_fork_admission, LocalResidentDeployment,
-    LocalResidentInstallation, ResidentActorRoot, ResidentKernelBehavior,
+    spawn_resident_root, spawn_resident_root_in_incarnation,
+    spawn_resident_root_with_fork_admission, LocalResidentDeployment, LocalResidentInstallation,
+    ResidentActorRoot, ResidentKernelBehavior,
 };
 pub use resident_interactive::{ResidentInteractivePolicy, HASKELL_TOOL};
 pub use resident_tools::{

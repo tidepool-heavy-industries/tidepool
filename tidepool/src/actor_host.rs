@@ -4,6 +4,7 @@
 //! stock interactive agent is attached to each installed Haskell tool policy;
 //! tmux is process ownership and observability, never message transport.
 
+mod host_incarnation;
 mod prompt_catalog;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -18,7 +19,7 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tidepool_actor::{
-    spawn_resident_root_with_fork_admission, ActorDescriptor, ActorEffectProfile, ActorExitKind,
+    spawn_resident_root_in_incarnation, ActorDescriptor, ActorEffectProfile, ActorExitKind,
     ActorPlacement, ActorRef, ActorTerminal, ActorWorkbenchSource, ExternalApplicationFailure,
     ExternalApplicationFailureClass, ExternalFailureDisposition, ForkWorkspaceAdmission,
     ForkWorkspaceAdmissionError, ForkWorkspaceSeed, LocalActorRef, LocalResidentDeployment,
@@ -56,6 +57,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
+use self::host_incarnation::HostIncarnationLease;
 use self::prompt_catalog::PromptId;
 
 /// Every interactive actor sees its own repository at this path. Bubblewrap
@@ -550,6 +552,7 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let run_root = config.run_root.clone();
     std::fs::create_dir_all(&run_root)?;
+    let host_incarnation = HostIncarnationLease::claim(&run_root)?;
 
     let (worktrees, bindings) = actor_worktree_resources(&config.workspace)?;
     let bindings = Arc::new(Mutex::new(bindings));
@@ -579,8 +582,13 @@ pub async fn run(
         )?;
         let fork_workspaces =
             fork_workspace_admission(worktrees.clone(), worktree_authority.clone());
-        let (root_actor, mut root_task, deployments) =
-            spawn_resident_root_with_fork_admission(source, root, Some(fork_workspaces)).await?;
+        let (root_actor, mut root_task, deployments) = spawn_resident_root_in_incarnation(
+            source,
+            root,
+            Some(fork_workspaces),
+            host_incarnation.incarnation(),
+        )
+        .await?;
         worktree_authority.install_root(root_actor.identity().into());
 
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -3142,16 +3150,17 @@ mod tests {
             authority.clone(),
         )
         .expect("compile permanent root");
-        let (actor, hosted, mut deployments) = spawn_resident_root_with_fork_admission(
-            source,
-            root,
-            Some(fork_workspace_admission(
-                worktrees.clone(),
-                authority.clone(),
-            )),
-        )
-        .await
-        .expect("spawn permanent root");
+        let (actor, hosted, mut deployments) =
+            tidepool_actor::spawn_resident_root_with_fork_admission(
+                source,
+                root,
+                Some(fork_workspace_admission(
+                    worktrees.clone(),
+                    authority.clone(),
+                )),
+            )
+            .await
+            .expect("spawn permanent root");
         authority.install_root(actor.identity().into());
         let LocalResidentDeployment::PolicyInstalled(root_installation) = deployments
             .recv()
