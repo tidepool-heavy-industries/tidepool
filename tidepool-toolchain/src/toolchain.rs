@@ -65,7 +65,7 @@
 //! per-eval.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Env var naming the extract binary (step 1 of the extract precedence).
 /// Read here only for the stdlib table's step 3; the extract binary itself is
@@ -107,10 +107,7 @@ pub fn classify_extract_binary(stderr: &[u8]) -> ExtractBinaryRole {
 /// stand in for the other.
 #[must_use]
 pub fn probe_extract_binary(path: &Path) -> ExtractBinaryRole {
-    Command::new(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .output()
+    tidepool_extract_cmd::probe_binary(path)
         .map(|output| classify_extract_binary(&output.stderr))
         .unwrap_or(ExtractBinaryRole::Unknown)
 }

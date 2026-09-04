@@ -95,6 +95,23 @@ fn production_source(text: &str) -> &str {
     }
 }
 
+fn open_coded_markers(source: &str) -> Vec<&'static str> {
+    source
+        .match_indices("Command::new")
+        .filter_map(|(index, _)| {
+            // Inspect the selected program expression, not the entire fluent
+            // statement or file. A Cabal/Git/Nix command may legitimately
+            // carry an extractor path as data or preserve its environment.
+            let tail = &source[index..];
+            let program = tail.split_once(')').map_or(tail, |(head, _)| head);
+            EXTRACT_MARKERS
+                .iter()
+                .copied()
+                .find(|marker| program.contains(marker))
+        })
+        .collect()
+}
+
 #[test]
 fn no_workspace_crate_open_codes_an_extract_spawn() {
     let root = workspace_root();
@@ -121,12 +138,9 @@ fn no_workspace_crate_open_codes_an_extract_spawn() {
             if allowed.contains(&file) {
                 continue;
             }
-            if !src.contains("Command::new") {
-                continue;
-            }
-            if let Some(marker) = EXTRACT_MARKERS.iter().find(|m| src.contains(**m)) {
+            for marker in open_coded_markers(src) {
                 offenders.push(format!(
-                    "{}: builds a `Command` in a file that also names {marker:?}",
+                    "{}: builds a `Command` statement that names {marker:?}",
                     file.strip_prefix(&root).unwrap_or(&file).display()
                 ));
             }
@@ -144,6 +158,20 @@ fn no_workspace_crate_open_codes_an_extract_spawn() {
          Open-coded site(s):\n  {}",
         offenders.join("\n  ")
     );
+}
+
+#[test]
+fn scan_correlates_markers_with_the_command_statement() {
+    let unrelated = r#"
+        let command = Command::new("git").arg("status").output();
+        let preserved = "TIDEPOOL_EXTRACT";
+    "#;
+    assert!(open_coded_markers(unrelated).is_empty());
+
+    let open_coded = r#"
+        let command = Command::new(extract_bin).arg("--target").output();
+    "#;
+    assert_eq!(open_coded_markers(open_coded), vec!["extract_bin"]);
 }
 
 /// The allowlist is an exemption for a PROBE, not a licence to extract. If an

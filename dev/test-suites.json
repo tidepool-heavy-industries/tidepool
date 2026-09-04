@@ -1,7 +1,7 @@
 {
   "tidepool-harness": [
-    ["acceptance_actor_mount", "acceptance_askuser", "acceptance_boot_compile_count", "acceptance_cross_turn", "acceptance_finalize", "acceptance_lazy_boot", "acceptance_multi_target", "acceptance_selfharness"],
-    ["selfharness_budget", "selfharness_compaction_fixes", "selfharness_compaction", "selfharness_context_window", "selfharness_framing", "selfharness_lifecycle", "selfharness_spine", "companion_mount_spike", "companion_scope_trees"],
+    ["acceptance_askuser", "acceptance_boot_compile_count", "acceptance_cross_turn", "acceptance_finalize", "acceptance_lazy_boot", "acceptance_multi_target", "acceptance_selfharness"],
+    ["selfharness_budget", "selfharness_compaction_fixes", "selfharness_compaction", "selfharness_context_window", "selfharness_framing", "selfharness_lifecycle", "selfharness_spine", "companion_scope_trees"],
     ["selfharness_persistence", "selfharness_fn_finalize_spike", "persistence_migration_corpus"],
     ["companion_collapsed_slice", "answerer_async_fork", "fork_child_decl_plane_type", "listen_channel"],
     ["agent_stack_scoping", "decl_plane_run_scoping", "dogfood_harness_typecheck", "dogfood_observability", "operator_gate_lifecycle", "finalize_type_pinning", "outer_effects", "outer_fanout", "outer_subagent", "timing_emission_pin", "turn_lease", "provider_behavior"],
@@ -30,6 +30,6 @@
     ["lifecycle_meta", "it_binding", "error_recovery"],
     ["multi_binder", "info_introspect", "lifecycle_state", "lost_session", "gc_heap_verify_stress", "gc_field_replay"],
     ["value_fidelity", "shadow_rebind", "bindings_dedup"],
-    ["text_bind", "stub_fetch", "session_acceptance", "repro_decl_library_import", "value_binding_acceptance", "repro_t_multiline_sig", "name_shadowing"]
+    ["text_bind", "stub_fetch", "session_acceptance", "repro_decl_library_import", "value_binding_acceptance", "repro_t_multiline_sig", "name_shadowing", "workbench_imports"]
   ]
 }

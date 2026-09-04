@@ -74,6 +74,18 @@ pub fn reset_extract_spawn_count() {
     EXTRACT_SPAWNS.store(0, Ordering::SeqCst);
 }
 
+/// Run the extractor's no-input role probe through the process-boundary owner.
+///
+/// A probe performs no compilation and therefore does not increment
+/// [`extract_spawn_count`]. Callers interpret the returned banner according to
+/// their own frontend/worker compatibility policy.
+pub fn probe_binary(path: &Path) -> std::io::Result<Output> {
+    std::process::Command::new(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()
+}
+
 // ---------------------------------------------------------------------------
 // Binary resolution
 // ---------------------------------------------------------------------------
