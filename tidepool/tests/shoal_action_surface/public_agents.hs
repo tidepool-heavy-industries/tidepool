@@ -44,6 +44,9 @@ watchBoth label left right = watch label (compose left right)
 stop :: AgentRef -> Eff ActorEffects StopOutcome
 stop = stopAgent
 
+inspect :: AgentRef -> Eff ActorEffects AgentObservation
+inspect = observeAgent
+
 heterogeneousUnfold
   :: ForkGroupPath
   -> BranchLabel

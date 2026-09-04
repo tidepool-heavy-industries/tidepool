@@ -21,6 +21,11 @@ module Tidepool.Actors.Internal.Agent
   , startForkedAgent
   , request
   , requestSited
+  , AgentState (..)
+  , AgentObservation (..)
+  , agentIdentity
+  , agentBoundWorktree
+  , observeAgent
   , StopOutcome (..)
   , stopAgent
   ) where
@@ -31,7 +36,7 @@ import Prelude
 
 import qualified Tidepool.Actor as Actor
 import qualified Tidepool.Actor.Internal as ActorInternal
-import Tidepool.Actors.Role (AgentControl, AgentLaunch)
+import Tidepool.Actors.Role (AgentControl, AgentInspection, AgentLaunch)
 import Tidepool.Agent.Reply.Internal
   ( Reply
   , Replies
@@ -70,6 +75,46 @@ data AgentSpec
 data AgentRef = AgentRef
   (Actor.ActorRef AgentProtocol ())
   (Maybe WorktreeHandle)
+
+-- | Repeatable lifecycle observation of one exact actor incarnation.
+data AgentState
+  = AgentRunning
+  | AgentStopped
+  | AgentFailed Text
+  | AgentCancelled Text
+  deriving (Show, Eq)
+
+data AgentObservation = AgentObservation
+  { observedAgentId :: Int
+  , observedIncarnation :: Int
+  , observedState :: AgentState
+  , observedWorktree :: Maybe WorktreeHandle
+  }
+  deriving (Show, Eq)
+
+agentIdentity :: AgentRef -> (Int, Int)
+agentIdentity (AgentRef target _) = actorAddress target
+
+agentBoundWorktree :: AgentRef -> Maybe WorktreeHandle
+agentBoundWorktree (AgentRef _ tree) = tree
+
+observeAgent
+  :: (Member AgentInspection effs, Member Actor effs)
+  => AgentRef
+  -> Eff effs AgentObservation
+observeAgent agent@(AgentRef target tree) = do
+  terminal <- Actor.pollExit target
+  let (actorId, incarnation) = agentIdentity agent
+  pure AgentObservation
+    { observedAgentId = actorId
+    , observedIncarnation = incarnation
+    , observedState = case terminal of
+        Nothing -> AgentRunning
+        Just (Actor.Completed ()) -> AgentStopped
+        Just (Actor.Failed failure) -> AgentFailed (Actor.actorFailureSummary failure)
+        Just (Actor.Cancelled reason) -> AgentCancelled (Actor.cancelReasonSummary reason)
+    , observedWorktree = tree
+    }
 
 data AgentProtocol result where
   RunRequest

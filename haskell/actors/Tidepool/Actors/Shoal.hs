@@ -63,6 +63,11 @@ module Tidepool.Actors.Shoal
   , unfold
   , AgentSpec
   , AgentRef
+  , AgentState (..)
+  , AgentObservation (..)
+  , agentIdentity
+  , agentBoundWorktree
+  , observeAgent
   , Response
   , Reply
   , codingAgent
@@ -140,10 +145,15 @@ import Tidepool.Agent.Reply
 import Tidepool.Agent.Watch
 import Tidepool.Actors.Internal.Agent
   ( AgentRef
+  , AgentObservation (..)
   , AgentSpec
+  , AgentState (..)
   , Reply
   , Response
   , codingAgent
+  , agentBoundWorktree
+  , agentIdentity
+  , observeAgent
   , readonlyAgent
   , request
   , StopOutcome (..)
