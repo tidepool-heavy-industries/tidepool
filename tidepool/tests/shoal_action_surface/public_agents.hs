@@ -47,6 +47,18 @@ stop = stopAgent
 inspect :: AgentRef -> Eff ActorEffects AgentObservation
 inspect = observeAgent
 
+launchFacts
+  :: Forked result
+  -> (Int, Int, ForkRole, ForkWorkspaceAccess, WorktreeReceipt)
+launchFacts worker =
+  let receipt = forkedLaunch worker
+  in ( launchedActorId receipt
+     , launchedActorIncarnation receipt
+     , launchedRole receipt
+     , launchedWorkspaceAccess receipt
+     , launchedWorktree receipt
+     )
+
 heterogeneousUnfold
   :: ForkGroupPath
   -> BranchLabel

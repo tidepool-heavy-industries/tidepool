@@ -26,6 +26,8 @@ module Tidepool.Actors.Unfold
   , batch
   , subgroup
   , Branch
+  , ForkRole (..)
+  , ForkWorkspaceAccess (..)
   , researching
   , coding
   , scaffolding
@@ -63,6 +65,7 @@ import Tidepool.Actors.Internal.Agent
   , readonlyWorktreeAgent
   , requestSited
   , startForkedAgent
+  , agentIdentity
   )
 import Tidepool.Actors.Role
   ( CodingEffects
@@ -79,7 +82,8 @@ import Tidepool.Effects.Core
   , GitRef
   , Worktree (WorktreeCreateForActorPath, WorktreeCreateFromBoundForActorPath)
   , WorktreeError
-  , WorktreeHandle
+  , WorktreeHandle (..)
+  , WorktreeReceipt
   , WorktreeSource (..)
   , WorktreeSpec (..)
   )
@@ -143,12 +147,22 @@ snapshotDirty :: WorktreeSeed -> WorktreeSeed
 snapshotDirty (WorktreeSeed source _) = WorktreeSeed source AllowDirtySnapshot
 snapshotDirty (BoundHeadSeed _) = BoundHeadSeed AllowDirtySnapshot
 
-data BranchRole = ResearchBranch | CodingBranch | ScaffoldingBranch | IntegrationBranch
+data ForkRole
+  = ResearchFork
+  | CodingFork
+  | ScaffoldingFork
+  | IntegrationFork
+  deriving (Show, Eq)
+
+data ForkWorkspaceAccess
+  = InspectForkWorktree
+  | WriteForkWorktree
+  deriving (Show, Eq)
 
 data Branch (childEffects :: [Type -> Type]) input result where
   Branch
     :: BranchLabel
-    -> BranchRole
+    -> ForkRole
     -> WorktreeSeed
     -> input
     -> Branch childEffects input result
@@ -159,7 +173,7 @@ researching
   -> WorktreeSeed
   -> input
   -> Branch ResearchEffects input result
-researching label seed input = Branch label ResearchBranch seed input
+researching label seed input = Branch label ResearchFork seed input
 
 coding
   :: forall result input
@@ -167,7 +181,7 @@ coding
   -> WorktreeSeed
   -> input
   -> Branch CodingEffects input result
-coding label seed input = Branch label CodingBranch seed input
+coding label seed input = Branch label CodingFork seed input
 
 scaffolding
   :: forall result input
@@ -176,7 +190,7 @@ scaffolding
   -> input
   -> Branch ScaffoldEffects input result
 scaffolding label seed input =
-  Branch label ScaffoldingBranch seed input
+  Branch label ScaffoldingFork seed input
 
 integrating
   :: forall result input
@@ -185,12 +199,17 @@ integrating
   -> input
   -> Branch IntegrationEffects input result
 integrating label seed input =
-  Branch label IntegrationBranch seed input
+  Branch label IntegrationFork seed input
 
 data BranchReceipt = BranchReceipt
   { requestedPath :: Text
   , allocatedPath :: Text
   , forkGroupIdentity :: Int
+  , launchedActorId :: Int
+  , launchedActorIncarnation :: Int
+  , launchedRole :: ForkRole
+  , launchedWorkspaceAccess :: ForkWorkspaceAccess
+  , launchedWorktree :: WorktreeReceipt
   }
   deriving (Show, Eq)
 
@@ -223,6 +242,7 @@ data Started (parent :: [Type -> Type]) result where
     -> Branch child input result
     -> AgentRef
     -> Text
+    -> WorktreeHandle
     -> Started parent (Forked result)
   StartedAp
     :: Started parent (a -> result)
@@ -284,8 +304,8 @@ unfold (ForkGroupPath relative groupName) plan = do
     start groupId path (BranchU site branchPlan) paths = case paths of
       [] -> error "unfold: runtime returned fewer branch paths than requested"
       allocated : rest -> do
-        (actor, confirmed) <- startBranch groupId allocated branchPlan
-        pure (StartedBranch site groupId path branchPlan actor confirmed, rest)
+        (actor, confirmed, tree) <- startBranch groupId allocated branchPlan
+        pure (StartedBranch site groupId path branchPlan actor confirmed tree, rest)
     start groupId path (ApU functions arguments) paths = do
       (startedFunctions, afterFunctions) <- start groupId path functions paths
       (startedArguments, remaining) <- start groupId path arguments afterFunctions
@@ -293,8 +313,8 @@ unfold (ForkGroupPath relative groupName) plan = do
 
     activate :: Started parent a -> Eff parent a
     activate (StartedPure value) = pure value
-    activate (StartedBranch site groupId path branchPlan actor allocated) =
-      requestBranch site groupId path branchPlan actor allocated
+    activate (StartedBranch site groupId path branchPlan actor allocated tree) =
+      requestBranch site groupId path branchPlan actor allocated tree
     activate (StartedAp functions arguments) =
       activate functions <*> activate arguments
 
@@ -310,7 +330,7 @@ startBranch
   => Int
   -> Text
   -> Branch child input result
-  -> Eff effects (AgentRef, Text)
+  -> Eff effects (AgentRef, Text, WorktreeHandle)
 startBranch groupId allocated (Branch _ role seed _) = do
   created <- createNamedWorktree allocated seed
   case created of
@@ -318,7 +338,9 @@ startBranch groupId allocated (Branch _ role seed _) = do
       ActorRuntime.abortActorForkGroup groupId
       error (Text.unpack ("unfold worktree admission failed: " <> renderWorktreeError failure))
     Right tree ->
-      startForkedAgent groupId allocated (agentFor role tree)
+      do
+        (actor, confirmed) <- startForkedAgent groupId allocated (agentFor role tree)
+        pure (actor, confirmed, tree)
 
 createNamedWorktree
   :: Member Worktree effects
@@ -330,11 +352,11 @@ createNamedWorktree allocated (WorktreeSeed source dirtyPolicy) =
 createNamedWorktree allocated (BoundHeadSeed dirtyPolicy) =
   send (WorktreeCreateFromBoundForActorPath dirtyPolicy allocated)
 
-agentFor :: BranchRole -> WorktreeHandle -> AgentSpec
-agentFor ResearchBranch = readonlyWorktreeAgent
-agentFor CodingBranch = codingAgent
-agentFor ScaffoldingBranch = scaffoldingAgent
-agentFor IntegrationBranch = integrationAgent
+agentFor :: ForkRole -> WorktreeHandle -> AgentSpec
+agentFor ResearchFork = readonlyWorktreeAgent
+agentFor CodingFork = codingAgent
+agentFor ScaffoldingFork = scaffoldingAgent
+agentFor IntegrationFork = integrationAgent
 
 requestBranch
   :: forall effects child input result
@@ -345,12 +367,29 @@ requestBranch
   -> Branch child input result
   -> AgentRef
   -> Text
+  -> WorktreeHandle
   -> Eff effects (Forked result)
-requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) _ _ input) actor allocated = do
+requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) role _ input) actor allocated tree = do
   let requested = group <> "/" <> leaf
+      (actorId, incarnation) = agentIdentity actor
   response <- requestSited @result @input site actor (RequestLabel leaf) input
   pure Forked
     { forkedActor = actor
     , forkedResponse = response
-    , forkedLaunch = BranchReceipt requested allocated groupId
+    , forkedLaunch = BranchReceipt
+        { requestedPath = requested
+        , allocatedPath = allocated
+        , forkGroupIdentity = groupId
+        , launchedActorId = actorId
+        , launchedActorIncarnation = incarnation
+        , launchedRole = role
+        , launchedWorkspaceAccess = accessFor role
+        , launchedWorktree = handleReceipt tree
+        }
     }
+
+accessFor :: ForkRole -> ForkWorkspaceAccess
+accessFor ResearchFork = InspectForkWorktree
+accessFor CodingFork = WriteForkWorktree
+accessFor ScaffoldingFork = WriteForkWorktree
+accessFor IntegrationFork = WriteForkWorktree

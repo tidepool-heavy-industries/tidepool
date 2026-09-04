@@ -47,6 +47,8 @@ module Tidepool.Actors.Shoal
   , batch
   , subgroup
   , Branch
+  , ForkRole (..)
+  , ForkWorkspaceAccess (..)
   , researching
   , coding
   , scaffolding
