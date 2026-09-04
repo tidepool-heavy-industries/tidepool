@@ -971,7 +971,7 @@ mod tests {
             .commit_file("README.md", "seed\n", "seed")
             .unwrap();
         let storage = tempfile::tempdir().unwrap();
-        let registry = WorktreeRegistry::open(&storage.path().join("registry")).unwrap();
+        let registry = WorktreeRegistry::open(storage.path().join("registry")).unwrap();
         let manager = WorktreeManager::new(
             GitCli::new(),
             registry,
@@ -979,7 +979,7 @@ mod tests {
             repository.path(),
         );
         let bindings = Arc::new(Mutex::new(
-            BindingTable::open(&storage.path().join("bindings")).unwrap(),
+            BindingTable::open(storage.path().join("bindings")).unwrap(),
         ));
         let authority = ActorWorktreeAuthority::new("run-1", bindings);
         let root = tidepool_repr::PrincipalId::new(1, 1);
