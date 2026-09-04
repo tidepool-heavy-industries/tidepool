@@ -226,16 +226,6 @@ fn actor_decl_matches_the_schema_exactly() {
     );
 }
 
-/// Deliberation is runtime suspension substrate generated directly from the
-/// schema. Keep its compiled declaration pinned independently of file output.
-#[test]
-fn deliberate_decl_matches_the_schema_exactly() {
-    assert_decl_matches_schema(
-        &tidepool_mcp::deliberate_decl(),
-        &tidepool_protocol::effects::deliberate::deliberate(),
-    );
-}
-
 /// The private actor kernel is schema-owned even though its constructors are
 /// absent from the authored surface.
 #[test]
@@ -288,7 +278,6 @@ fn every_schema_effect_is_reachable() {
             "Journal",
             "Worktree",
             "RepoEvent",
-            "Deliberate",
             "AskUser",
             "ReadState",
             "RunLLMTurn",

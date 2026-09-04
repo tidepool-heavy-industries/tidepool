@@ -95,10 +95,8 @@ data ActorExit exit
 -- definition's exact Haskell environment internally; authored code does not
 -- manage a separate deployment value or preparation step.
 --
--- Keep any 'deliberate' call in the definition's initialization function:
--- that concrete call site is where GHC records its exact input and output
--- types. This operation returns only after the child has installed its
--- behavior and reached readiness.
+-- This operation returns only after the child has installed its behavior and
+-- reached readiness.
 {-# NOINLINE startActor #-}
 startActor
   :: forall effs startup api exit

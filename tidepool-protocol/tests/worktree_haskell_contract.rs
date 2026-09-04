@@ -124,8 +124,8 @@ fn worktree_helper_texts_are_pinned() {
             concat!(
                 "-- | Every registered worktree, present or lost. A lost tree is listed\n",
                 "-- with `present = False` rather than failing the whole listing.\n",
-                "listWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]\n",
-                "listWorktrees = send WorktreeList >>= liftEither",
+                "listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])\n",
+                "listWorktrees = send WorktreeList",
             ),
             concat!(
                 "-- | The durable identity of a managed worktree. Pure: the handle\n",

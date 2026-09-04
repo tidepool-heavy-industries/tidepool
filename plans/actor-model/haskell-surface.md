@@ -1,5 +1,10 @@
 # Haskell and model interaction surface
 
+Status: the sections describing `Complete`, `AgentAction`, `nextTurn`, and
+`waitReply` are a superseded design record. The executable Shoal surface is
+summarized below and specified by
+[persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md).
+
 ## 1. Design target
 
 The Haskell side should feel like a small actor and state-machine library, not
@@ -28,31 +33,37 @@ secret source rewriting: actual values and authority are installed through
 the Haskell/interpreter boundary, and executable fences retain their ordinary
 explicit meaning. User messages carry tasks and domain requests.
 
-The routine vocabulary should stay close to:
+The currently landed Shoal vocabulary is:
 
 ```haskell
-deliberate
-complete
-startActor
-runActor
-call
-cast
-receive
-serve
-awaitExit
-forkActors
+startAgent
+request @Result
+stopAgent
+attemptReply
+reply
+pollResponse
+awaitResponse
+watch
+pollWatch
 
-ActorDefinition startup protocol exit
-ActorRef protocol exit
-ActorExit exit
+AgentSpec
+AgentRef
+Response result
+Reply result
+Await result
+Watch result
 ```
 
-Private readiness requests, reply obligations, deployment roots, Rust actor
-identities, program-image records, and provider machinery are not additional
-model-facing nouns.
+Model-response termination ends a turn without a Haskell lifecycle operation.
+The root is permanent and supervisor-owned.
 
-Unless a fence is explicitly marked as pseudocode, the public names and types
-below describe the landed Haskell surface.
+Low-level `ActorDefinition`, indexed protocols, calls, receives, and lifecycle
+observation remain available through an intentional `Tidepool.Actor` import.
+Private readiness requests, reply obligations, deployment roots, Rust actor
+identities, and program-image records are not additional model-facing nouns.
+
+Sections below the current fixed-row surface retain older alternatives for
+design comparison and must not be read as current API documentation.
 
 ## 2. Actor-local effect stacks
 
@@ -67,10 +78,9 @@ The public library exposes these profile rows:
 ```haskell
 type ReadOnlyEffects protocol =
   '[ ActorLocal protocol
-   , Actor
    , AgentTools
    , AgentSession
-   , Deliberate
+   , Actor
    , FsRead
    , Worktree
    ]
@@ -226,12 +236,10 @@ there is no generic grant record or policy enum. Attaching a recipe must not
 change the definition's program image, and copying a definition or recipe must
 not itself transfer authority.
 
-`startActor` runs the definition's concrete `initialization` action. Any
-`deliberate` calls remain at authored monomorphic sites, so GHC records their
-exact input and output types before the definition hides the initialization
-artifact and row. Initialization may call `deliberate` zero or more times
-sequentially. Startup then applies `behavior startup initial` and returns only
-after the resulting computation is installed and ready. The startup,
+`startActor` runs the definition's concrete `initialization` action without
+implicitly opening a model session. Startup then applies
+`behavior startup initial` and returns only after the resulting computation is
+installed and ready. The startup,
 initialization-artifact, protocol, and successful-exit types need not resemble
 one another. A non-prompted constructor remains absent until a real actor needs
 one.
@@ -243,13 +251,13 @@ terminal. Fixed resident programs normally use `awaitExit`; an interactive tool
 policy uses `pollExit` when blocking its sole model-facing turn would hide
 other completed work.
 
-The outer session that asks a model to author a definition likewise fixes the
-whole result type at its `deliberate` site:
+The default Shoal surface asks a long-lived agent for typed work through an
+explicit request site:
 
 ```haskell
-definition <-
-  (deliberate "Define the reviewer actor." goalInput
-    :: Eff ActorEffects (ActorDefinition ReviewSeed Reviewer ReviewExit))
+reply <-
+  request @(ActorDefinition ReviewSeed Reviewer ReviewExit)
+    reviewer "Define the reviewer actor." goalInput
 ```
 
 Inside the fenced response, define new nominal types as declarations, then
@@ -280,7 +288,7 @@ Rust invokes the definition's shutdown hook at a safe boundary for
 cooperative shutdown without depending on it for hard cleanup. The hook runs
 under the actor's normal row and principal, but the interpreter is in its
 closing phase: installed handlers may finish ordinary bounded cleanup, while
-an unhandled suspension such as `Deliberate` or actor startup fails the hook.
+an unhandled agent session or actor startup fails the hook.
 Rust closes the actor realm regardless, so cooperative Haskell cleanup is
 best-effort rather than a prerequisite for hard cleanup. Hook failure is a
 structured runtime diagnostic; it does not rewrite the actor's retained
@@ -438,44 +446,16 @@ The delivery contract is in
 
 ## 4. Result-bearing agent sessions
 
-The fixed program opens a result-bearing agent session by asking its resident
-model for a value of a known type:
-
-```haskell
-deliberate
-  :: Member Deliberate effs
-  => Text
-  -> input
-  -> Eff effs output
-```
-
-The text describes the task; the call site's ordinary Haskell types define the
-contract. A reusable request is an ordinary function returning `Eff`, not a
-separate descriptor value. The input is mounted as a live Haskell binding, not
-serialized merely to place it in a prompt. The prompt may summarize the input
-for orientation, while the authoritative value remains available to code.
-
-Each `deliberate` call creates one agent session, possibly containing many
-model rounds, against the actor's accumulating provider conversation.
-Completing the request returns to the fixed Haskell continuation. Later
-`deliberate` calls reuse the same model context and Haskell environment.
-
-At the start of a result-bearing session, the workbench exposes bindings
-conceptually like:
-
-```haskell
-goalInput :: input
-complete  :: output -> Eff effs a
-```
-
-The completion mechanism is a typed suspending effect. GHC—not Rust-side JSON
-conversion—checks the result against `output`.
+The root sends a typed request to a persistent agent. The prompt is ordinary
+User input; the call site's Haskell types define the contract. The input is
+mounted as a live `sessionInput`, not serialized merely to place it in a
+prompt. The session-local workbench exposes `complete` at the exact requested
+result type.
 
 ### The scoped completion effect
 
-`deliberate` and `complete` are the two directions of one typed interaction:
-the installed program requests cognition, and the active workbench supplies
-the result.
+`request` and `complete` are the two directions of one typed interaction: the
+caller admits work, and the target's active workbench supplies the result.
 
 ```haskell
 data Complete output a
@@ -486,11 +466,10 @@ complete
   -> Eff effs a
 ```
 
-Any workbench execution opened through `deliberate` receives exactly one
-current `Complete output`. Ordinary backend input to an interactive actor has
-no typed completion expectation. Completion is scoped to the whole possibly
-multi-round agent session, not to one provider response. The model may define
-and test substantial Haskell before calling `complete`.
+Any request activation receives exactly one current `Complete output`.
+Completion is scoped to that agent interaction rather than one hosted-tool
+call. The model may define and test substantial Haskell before calling
+`complete`.
 
 Return expectations may nest internally, but authored Haskell sees only the
 innermost one. The runtime retains outer expectations privately and restores
@@ -504,15 +483,6 @@ There is no public completion identifier, token, lookup operation, or generic
 obligation registry. Compiler site ids and runtime continuation identities are
 substrate. An installed actor's successful `exit` uses ordinary Haskell return;
 it does not need a second `Complete exit` convention.
-
-### Re-entrant resident-agent requests
-
-While satisfying one typed request, the model may define and return closures
-that contain future `deliberate` calls. It may not synchronously invoke such a
-call while the same actor's agent session is active. That would re-enter one
-serial actor and one accumulating model context. The disposable fragment gets
-an unavailable-operation receipt; defining or returning the future closure
-remains valid.
 
 ### Persistent agent requests
 
@@ -550,11 +520,11 @@ units. Do not pass `Proxy`, a JSON schema, a dummy result value, or a rendered
 type name. Compiler metadata carries the concrete monotype and its defining
 modules across the actor boundary.
 
-Dispatch and waiting are separate. The exact final names remain subject to a
-live API spike, but the two observation levels mirror `waitOn` and
-`awaitExit`: one success-shaped `AgentAction` composes common fan-in, while a
-complete outcome is available when failure, cancellation, or target exit is
-domain policy.
+Dispatch and waiting are separate. `waitReply` supplies the success-shaped
+`AgentAction` used for common fan-in. A public complete reply-lifecycle sum is
+deferred until authored policy has a concrete need for it. If the exact agent
+has already stopped, the wait short-circuits with `ReplyUnavailable` through
+the ordinary `ActionFailure` activation; it does not terminate the root.
 
 ```haskell
 left  <- request @ReviewReport reviewerA prompt candidate
@@ -569,17 +539,17 @@ contract:
 
 ```haskell
 sessionInput :: Candidate
-reply        :: ReviewReport -> SessionM ()
+complete     :: ReviewReport -> Eff (Complete ReviewReport ': ActorEffects) ()
 ```
 
-`reply value` uses the same GHC-checking and live-root capture substrate as
-`complete value`, but it settles only the current request. The actor returns
-to its mailbox afterward and may next receive a request for a different type.
-Calling an old reply twice or after its activation was superseded is a runtime
-single-settlement violation, never permission to address another request.
+`complete value` settles only the current request. The actor publishes the
+request's managed single-assignment cell and returns to its mailbox afterward;
+it may next receive a request for a different type. `Reply result` is an
+abstract handle over that cell and the exact target, not another actor or a
+Rust registry entry.
 
-The first vertical must prove a result type declared in the caller's
-persistent session, a closure-valued result, and two consecutively different
+The first vertical proves a result type declared in the caller's persistent
+session, a closure-valued result, and two consecutively different
 request/result pairs against one still-live target. An abstract result whose
 constructors are intentionally unavailable must be constructed through an
 explicit live builder capability supplied by the caller; the runtime does not
@@ -587,20 +557,17 @@ break Haskell abstraction to manufacture it.
 
 ## 5. The persistent Haskell workbench
 
-The persistent GHCi-style environment is the actor's primary workbench. A
-Tidepool-owned provider loop reaches it through fenced Haskell in ordinary
-assistant output. An externally hosted agent such as Codex reaches it through
-the actor-local custom tool `tidepool_actor.haskell`, because Tidepool cannot
-safely treat that application's prose as an executable callback. The tool
-carries raw Haskell source and receipts; actor operations remain ordinary
+The persistent GHCi-style environment is the actor's primary workbench. Codex
+reaches it through the actor-local custom tool `tidepool_actor.haskell`, because
+Tidepool cannot safely treat application prose as an executable callback. The
+tool carries raw Haskell source and receipts; actor operations remain ordinary
 Haskell effects rather than separate JSON tools.
 
-Every fenced block or `tidepool_actor.haskell` call executes one item against the same
+Each `tidepool_actor.haskell` call executes a GHCi-style script against the same
 actor-bound persistent environment. The shared Haskell-aware runner classifies
-declarations, binds, expressions, and supported meta commands. The provider
-adapter extracts explicitly tagged fences; the hosted custom tool accepts one
-raw Haskell item unchanged. Neither parses Haskell argument syntax or
-infers executable intent from prose.
+declarations, binds, expressions, and supported meta commands. The hosted
+custom tool accepts the raw script unchanged and does not infer executable
+intent from prose.
 
 Required behavior:
 
@@ -686,43 +653,48 @@ roots so later compaction or machine rotation has a sound reachability target.
 
 ## 8. Self-improving behavior
 
-An actor program can ask for a replacement behind a stable interface:
+An actor can ask a persistent agent for a replacement behind a stable
+interface:
 
 ```haskell
 data Controller observation action = Controller
   { decide
       :: forall effs
-       . Members '[Deliberate, Act] effs
+       . Member Act effs
       => observation
       -> Eff effs action
   }
 
 improve
-  :: Member Deliberate effs
-  => Controller observation action
+  :: Member Actor effs
+  => AgentRef
+  -> Controller observation action
   -> FailureHistory observation action
-  -> Eff effs (Controller observation action)
+  -> Eff effs (Reply (Controller observation action))
+improve agent controller history =
+  request @(Controller observation action)
+    agent "Improve this controller." (controller, history)
 ```
 
 The agent may define new private types and helpers while producing the next
 `Controller`. The program can test it, install it, and retain the predecessor.
 This is self-extension through typed values rather than source-file mutation.
 
-The smaller escape hatch is an ordinary function that consults the resident
-model only when local policy cannot decide:
+The smaller escape hatch sends a request only when local policy cannot decide:
 
 ```haskell
 decide observation =
   case decideLocally observation of
-    Just action -> pure action
-    Nothing -> deliberate "Resolve this ambiguous observation." observation
+    Just action -> pure (Right action)
+    Nothing -> Left <$> request @Action agent
+      "Resolve this ambiguous observation." observation
 ```
 
 Do not standardize a universal confidence score, epistemic enum, evidence
-ladder, or one blessed escalation combinator. Direct `deliberate` calls,
-injected judgment functions, model-authored local effects, and controller
-replacement are all ordinary Haskell patterns. Domain-specific uncertainty
-types remain welcome when the domain actually needs them.
+ladder, or one blessed escalation combinator. Typed requests, injected judgment
+functions, model-authored local effects, and controller replacement are
+ordinary Haskell patterns. Domain-specific uncertainty types remain welcome
+when the domain actually needs them.
 
 ## 9. Dynamic protocols and child actors
 
@@ -874,10 +846,11 @@ reached, the same interactive context is activated through its native event
 channel and the live result is mounted as `sessionInput`. Closures and
 user-defined types remain heap values throughout.
 
-`waitOn` is intentionally success-shaped. Actor failure short-circuits the
-action into a typed `ActionFailure` mounted in the next activation. Use
-`awaitExit` directly when failure, cancellation, and success are ordinary
-domain branches. All reusable helpers retain `Member` constraints; only
+`waitOn` and `waitReply` are intentionally success-shaped. Actor failure or an
+unavailable reply target short-circuits the action into a typed `ActionFailure`
+mounted in the next activation. Use `awaitExit` directly when failure,
+cancellation, and success are ordinary domain branches. All reusable helpers
+retain `Member` constraints; only
 `Complete result` is row-headed because it is the scoped result delimiter
 from which GHC infers the session's return type.
 

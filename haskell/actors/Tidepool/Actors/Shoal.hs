@@ -7,28 +7,84 @@
 -- DevSwarm belong in separately loaded application modules.
 module Tidepool.Actors.Shoal
   ( ActorEffects
-  , module Tidepool.Actor
-  , AgentAction
-  , ActionFailure (..)
-  , liftAction
-  , waitOn
-  , nextTurn
-  , module Tidepool.Worktree
+  , AgentSpec
+  , AgentRef
+  , Response
+  , Reply
+  , codingAgent
+  , readonlyAgent
+  , startAgent
+  , request
+  , stopAgent
+  , RequestId
+  , Replies
+  , ReplyError (..)
+  , ResponseFailure (..)
+  , ResponseState (..)
+  , requestId
+  , attemptReply
+  , reply
+  , pollResponse
+  , Await
+  , Watch
+  , Watches
+  , WatchFailure (..)
+  , WatchState (..)
+  , awaitResponse
+  , watch
+  , pollWatch
+  , WorktreeSpec
+  , fromCurrentRepository
+  , fromRef
+  , fromWorktree
+  , allowDirtySnapshot
+  , createWorktree
+  , lookupWorktree
+  , listWorktrees
+  , WorktreeHandle
+  , WorktreeId (..)
+  , BranchName
+  , mkBranchName
+  , GitRef
+  , InProgressKind (..)
+  , GitOid
+  , worktreeId
+  , worktreeBranch
+  , worktreeHead
+  , observeSubmission
+  , MergeOutcome (..)
+  , mergeBranchInto
+  , WorktreeReceipt (..)
+  , WorktreeSummary (..)
+  , WorktreeError (..)
+  , DirtySummary (..)
+  , HeadState (..)
+  , WorkingState (..)
+  , SubmissionObservation (..)
+  , renderWorktreeError
+  , renderWorktreeId
+  , renderBranchName
+  , renderGitOid
   ) where
 
-import Tidepool.Actor
-import Tidepool.Agent.Action
-  ( ActionFailure (..)
-  , AgentAction
-  , liftAction
-  , nextTurn
-  , waitOn
+import Tidepool.Agent.Reply
+import Tidepool.Agent.Watch
+import Tidepool.Actors.Internal.Agent
+  ( AgentRef
+  , AgentSpec
+  , Reply
+  , Response
+  , codingAgent
+  , readonlyAgent
+  , request
+  , startAgent
+  , stopAgent
   )
-import Tidepool.Effects.Core (Actor, AgentSession, Worktree)
+import Tidepool.Effects.Core (Actor, Worktree)
 import Tidepool.Worktree
 
 -- | Capabilities installed for the interactive root incarnation.
 --
 -- Naming the row makes the workbench's inferred types readable; it does not
 -- prescribe any actor protocol, declarations, state machine, or program.
-type ActorEffects = '[AgentSession, Actor, Worktree]
+type ActorEffects = '[Replies, Watches, Actor, Worktree]

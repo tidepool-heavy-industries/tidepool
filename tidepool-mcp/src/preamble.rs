@@ -143,13 +143,26 @@ fn eval_import_lines(user_library: bool, hides: PreludeHides) -> Vec<&'static st
 /// re-exports, would collide).
 #[must_use]
 pub fn session_decl_module_env(effects: &[EffectDecl], user_library: bool) -> ModuleEnv {
+    session_decl_module_env_with_companions(effects, user_library, CompanionImports::Include)
+}
+
+/// Build a declaration environment whose effect companion modules are either
+/// implicit or left behind an authored facade.
+#[must_use]
+pub fn session_decl_module_env_with_companions(
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+) -> ModuleEnv {
     let mut imports: Vec<String> =
         eval_import_lines(user_library, PreludeHides::for_effects(effects))
             .into_iter()
             .map(String::from)
             .collect();
-    for decl in effects {
-        imports.extend(decl.extra_imports.iter().map(|s| (*s).to_string()));
+    if companion_imports == CompanionImports::Include {
+        for decl in effects {
+            imports.extend(decl.extra_imports.iter().map(|s| (*s).to_string()));
+        }
     }
     // Orchestration helpers (readGlob/searchFiles/memo/renderJson/…): the
     // stmt plane gets these via the expr module's imports; without this the
@@ -215,7 +228,12 @@ pub fn pure_decl_module_env() -> ModuleEnv {
 // (see 71d77fb, reverted) or upstream lazy provisioning.
 // Dialect note: with QuasiQuotes on, `[x|x<-xs]` (comprehension with no
 // space before `|`) parses as a quasi-quote — write `[x | x <- xs]`.
-fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: bool) {
+fn pragmas_and_imports(
+    out: &mut String,
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+) {
     out.push_str(EVAL_PRAGMAS);
     out.push('\n');
     out.push_str("module Expr where\n");
@@ -230,10 +248,12 @@ fn pragmas_and_imports(out: &mut String, effects: &[EffectDecl], user_library: b
     // smaller stack). One fold over `EffectDecl::extra_imports`, in list
     // order, shared with `session_decl_module_env` — see that fn's doc
     // comment for why this used to be two hand-mirrored gates (friction #23).
-    for decl in effects {
-        for imp in decl.extra_imports {
-            out.push_str(imp);
-            out.push('\n');
+    if companion_imports == CompanionImports::Include {
+        for decl in effects {
+            for imp in decl.extra_imports {
+                out.push_str(imp);
+                out.push('\n');
+            }
         }
     }
     // The pagination / orchestration helper DEFINITIONS live in the generated
@@ -641,6 +661,15 @@ pub fn orchestrate_module_source(effects: &[EffectDecl]) -> String {
     out
 }
 
+/// Whether effect-specific helper modules are part of the implicit authored
+/// vocabulary. Curated facades can omit them while retaining the same effect
+/// declarations and handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionImports {
+    Include,
+    Omit,
+}
+
 /// Result-pagination mode selecting which `paginateResult` alias body a
 /// preamble emits — see [`build_preamble_non_interactive_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,8 +723,20 @@ fn paginate_alias(out: &mut String, effects: &[EffectDecl], mode: PaginateMode) 
 /// alias. The helper bodies live in the imported `Tidepool.Orchestrate` module,
 /// not spliced here (the namespace-poison fix).
 pub fn build_preamble(effects: &[EffectDecl], user_library: bool) -> String {
+    build_preamble_with_companions(effects, user_library, CompanionImports::Include)
+}
+
+/// Build an eval preamble while controlling whether effect helper modules are
+/// imported implicitly. Installed effects and interpreter authority are
+/// unchanged.
+#[must_use]
+pub fn build_preamble_with_companions(
+    effects: &[EffectDecl],
+    user_library: bool,
+    companion_imports: CompanionImports,
+) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library);
+    pragmas_and_imports(&mut out, effects, user_library, companion_imports);
     paginate_alias(&mut out, effects, PaginateMode::Interactive);
     out
 }
@@ -719,7 +760,7 @@ pub fn build_preamble_non_interactive_mode(
     mode: PaginateMode,
 ) -> String {
     let mut out = String::new();
-    pragmas_and_imports(&mut out, effects, user_library);
+    pragmas_and_imports(&mut out, effects, user_library, CompanionImports::Include);
     paginate_alias(&mut out, effects, mode);
     out
 }
@@ -1080,7 +1121,26 @@ pub fn library_vocab(dirs: &[std::path::PathBuf], only: Option<&str>) -> String 
 
 #[cfg(test)]
 mod vocab_tests {
-    use super::parse_library_exports;
+    use super::{
+        build_preamble_with_companions, parse_library_exports,
+        session_decl_module_env_with_companions, CompanionImports,
+    };
+
+    #[test]
+    fn companion_effect_imports_can_be_left_to_a_curated_facade() {
+        let actor = crate::actor_decl();
+        let included = build_preamble_with_companions(&[actor], false, CompanionImports::Include);
+        let omitted = build_preamble_with_companions(&[actor], false, CompanionImports::Omit);
+        assert!(included.contains("import Tidepool.Actor\n"));
+        assert!(!omitted.contains("import Tidepool.Actor\n"));
+
+        let decls =
+            session_decl_module_env_with_companions(&[actor], false, CompanionImports::Omit);
+        assert!(!decls
+            .imports
+            .iter()
+            .any(|import| import == "import Tidepool.Actor"));
+    }
 
     #[test]
     fn parses_reexport_list_and_excludes_siblings() {

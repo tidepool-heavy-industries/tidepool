@@ -13,6 +13,25 @@ use std::pin::Pin;
 
 use crate::{AgentBackendError, BackendThreadId, ReasoningEffort};
 
+/// An interactive conversation whose durable rollout can be addressed by a
+/// separate native queue or archive process.
+///
+/// Only the interactive binding owner can construct this proof after the
+/// hosted-session readiness contract has been durably recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueReadyThread(BackendThreadId);
+
+impl QueueReadyThread {
+    pub(crate) fn new(thread: BackendThreadId) -> Self {
+        Self(thread)
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &BackendThreadId {
+        &self.0
+    }
+}
+
 /// One exact, behaviorally verified interactive-agent installation.
 ///
 /// Shoal resolves this once before it mutates tmux state, then passes the
@@ -84,8 +103,9 @@ pub struct InteractiveAgentSpec {
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub developer_instructions: String,
-    /// First user message. A fresh stock TUI needs this to create the rollout
-    /// addressed by subsequent native push operations.
+    /// Optional first user message. Hosted agents do not need a synthetic
+    /// message because their session handshake publishes only queue-ready
+    /// conversations.
     pub initial_prompt: Option<String>,
     pub native_sandbox: InteractiveNativeSandbox,
     /// Actor-scoped host dynamic tools served over HTTP/1.1 on this Unix
@@ -107,13 +127,13 @@ pub trait InteractiveAgentBackend: Send + Sync {
     fn push<'a>(
         &'a self,
         cwd: &'a str,
-        thread: &'a BackendThreadId,
+        thread: &'a QueueReadyThread,
         message: &'a str,
     ) -> InteractiveFuture<'a, ()>;
 
     fn archive<'a>(
         &'a self,
         cwd: &'a str,
-        thread: &'a BackendThreadId,
+        thread: &'a QueueReadyThread,
     ) -> InteractiveFuture<'a, ()>;
 }

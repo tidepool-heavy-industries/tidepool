@@ -16,6 +16,11 @@ unset TIDEPOOL_EXTRACT
 unset TIDEPOOL_EXTRACT_WORKER
 unset TIDEPOOL_EXTRACT_DAEMON_SOCKET
 
+# Actor shells isolate Cargo artifacts under their actor build root. This
+# bootstrap executes binaries from the workspace target directory, so own that
+# path explicitly instead of inheriting a caller's CARGO_TARGET_DIR.
+export CARGO_TARGET_DIR="$PWD/target"
+
 source scripts/lib-extract.sh
 resolve_tidepool_extract
 

@@ -184,20 +184,6 @@ pub trait ActorRunTarget {
     ) -> Result<(), Self::Error>;
 }
 
-pub(crate) fn install_actor_context<Target>(
-    target: &mut Target,
-    context: &ActorSessionContext,
-) -> Result<(), Target::Error>
-where
-    Target: ActorRunTarget,
-{
-    target.install_actor_execution(
-        context.run_context(),
-        context.effect_policy,
-        context.live_payload,
-    )
-}
-
 impl<H, O> ActorRunTarget for ResidentSession<H, O>
 where
     H: DispatchEffect<O> + Send,

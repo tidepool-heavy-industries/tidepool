@@ -68,7 +68,10 @@ pub fn module_index(effects: &[Effect]) -> GeneratedFile {
             rust_string_literal(effect.name),
             hidden.join(", ")
         );
-        if hidden.len() == 1 && compact_entry.trim_end().len() <= 100 {
+        // rustfmt applies its 60-column call-width heuristic to the tuple
+        // expression (the four-column array indent is outside that width).
+        // Emit the compact form exactly when rustfmt will preserve it.
+        if compact_entry.trim_end().len() <= 64 {
             contents.push_str(&compact_entry);
         } else if compact_entry.trim_end().len() <= 100 {
             contents.push_str("    (\n");

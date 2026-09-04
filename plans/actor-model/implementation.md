@@ -1,240 +1,127 @@
 # Actor implementation status
 
-This file records only the current implementation, its evidence, and the next
-architectural boundaries. Design semantics live in
-[architecture.md](architecture.md); the model-facing contract lives in
-[haskell-surface.md](haskell-surface.md). Superseded phase plans belong in Git
-history, not in this document.
+This file is the current landed-versus-pending inventory. The active request
+and activation contract is specified in
+[persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md).
+Older `Complete`/`AgentAction` sections in the adjacent long-form plans are a
+superseded design record, not the executable surface.
 
-Backward compatibility is not a constraint. Once a replacement proves the
-behavior Tidepool still wants, delete the older mechanism rather than keeping
-an adapter or a second scheduler.
+Backward compatibility is not a constraint for internal actor APIs. Preserve
+serialized and externally consumed formats only through an explicit migration
+decision.
 
-## Landed architecture
+## Implemented architecture
 
 ### Actor substrate
 
-- Ractor is the sole in-process actor scheduler. It owns serial mailboxes,
-  local addresses, linked ownership, task lifecycle, and supervision.
-- `tidepool-actor::LocalActor` adds exact Tidepool incarnation identity,
-  retained terminal observation, typed live-value messages, call ancestry,
-  and subtree shutdown. It does not mirror Ractor's runnable state.
-- `ResidentKernelBehavior` is the one resident-Haskell actor behavior. Its
-  state owns the installed Haskell continuation, shutdown hook, agent session,
-  and current activation context.
-- A shared `ActorMachineRegistry` owns only resident-machine checkout. It is
-  not an actor registry or scheduler.
-- Root and child actors use the same local-actor path. Root compilation is a
-  bootstrap concern, not a second lifecycle implementation.
-- Graceful termination and supervisor-observed failure converge on one
-  exact-incarnation retirement publication. Duplicate cleanup notifications
-  are suppressed.
+- Ractor is the sole in-process scheduler and mailbox owner.
+- Tidepool adds exact incarnation identity, retained terminal observation,
+  live Haskell message custody, call ancestry, and subtree shutdown.
+- One `ResidentKernelBehavior` serializes installed Haskell program work,
+  external-application workbench calls, mailbox handling, and supervision.
+- Root and child actors use the same local-actor and resident-machine paths.
+- The resident session is the sole owner of Haskell heap roots,
+  continuations, declarations, bindings, and machine checkout.
 
-The superseded hand-written `ActorRegistry`, `ResidentActorHost`, host task
-table, parked call/wait maps, lifecycle scheduler, and registry authorization
-layer have been deleted.
+### Persistent applications and root lifecycle
 
-### Resident Haskell and model sessions
+- An interactive application attaches once per actor incarnation and remains
+  available independently of the installed program's mailbox standing.
+- A model response ends by ordinary response termination. The public Haskell
+  surface has no `complete`, `yield`, `park`, `AgentAction`, or `nextTurn`.
+- The private permanent root attaches its application and blocks on an
+  uninhabited mailbox protocol. Only the supervisor intentionally stops it.
+- Request scopes retain `sessionInput`, `sessionReply`, and monomorphic
+  `respond` across any number of model responses until terminal settlement.
+- An accepted reply closes that request's current workbench activation and
+  suppresses its effectful suffix; it does not terminate the agent actor.
 
-- `tidepool-runtime::PersistentSession` remains the owner of GHC compilation,
-  live roots, continuations, declarations, bindings, and machine checkout.
-- One `ActorAgentSession` belongs to one actor incarnation. Provider inference,
-  fenced-Haskell execution, correction rounds, and completion form one serial
-  actor turn; provider inference does not hold a machine checkout.
-- Resident providers and external Codex applications enter the same actor
-  workbench. External applications use one actor-local hosted tool carrying
-  Haskell source and structured execution receipts, not a parallel domain API.
-- `tidepool-model-output` owns fenced-Haskell parsing. The actor layer has no
-  second parser.
-- Completion values cross consecutive agent sessions through managed Haskell
-  custody. The returned value is rooted before the producing completion scope
-  closes; the next activation can force it safely.
-- The actor workbench and ordinary REPL share one parser for `:type`, `:info`,
-  and `:bindings`. `:type` and `:info` resolve through one GHC-backed runtime
-  inspection path against the exact next-turn compile view; source scanners
-  are not semantic authority. GHC-derived binder metadata also supports
-  ordinary pattern bindings, including bindings whose right-hand side
-  suspends and resumes.
-- `AgentAction` is the live executable result of an interactive session.
-  Returning it settles the hosted-tool call before execution; the resident
-  actor then owns suspension, resumption, and the explicit next activation.
-- `waitOn` gives already-running actors ordinary `Functor`/`Applicative`/
-  `Monad` fan-in. `nextTurn` mounts the successful live result into the same
-  agent context without JSON or a second continuation registry.
+### Replies and watches
 
-### Haskell actor surface
+- `request @Result` returns requester-side `Response Result`; the target gets
+  a distinct one-shot `Reply Result`.
+- The fixed `Replies` effect owns request identity, private mailbox admission,
+  settlement, and repeatable response polling. Admission either transfers the
+  private request payload under live-value custody or marks the response
+  unavailable; callers do not perform a second cast.
+- Rust owns closed request state and authority checks. The Haskell heap owns
+  arbitrary live result values and applicative result combiners.
+- `attemptReply` resumes only on a typed rejection. Accepted settlement never
+  manufactures `Right Void`; `reply`/`respond` use terminal transfer.
+- First terminal transition wins, duplicate settlement cannot overwrite a
+  value, and exact actor incarnation checks prevent ABA retargeting.
+- `Await` has `Functor` and `Applicative` but deliberately no `Monad`.
+  `watch` registers known response dependencies atomically and `pollWatch`
+  remains repeatable.
+- Unwatched response settlement does not wake the model. A terminal watched
+  condition publishes one durable typed transition after both response and
+  watch polling can observe it.
 
-- Public construction is `ActorDefinition -> startActor`.
-- `call`, `cast`, `receive`, `serve`, `runActor`, and `awaitExit` operate on
-  exact `ActorRef protocol exit` values and move live Haskell values within one
-  machine.
-- Successful exits remain Haskell-owned live cells referenced by `ActorRef`;
-  Rust retains immutable terminal metadata, not a duplicate exit payload.
-- The private `ActorKernel`, readiness, reply, and settlement
-  constructors are absent from ordinary authored exports.
-- Experimental `ReadWrite` and `ReadOnly` profiles select resident Haskell
-  rows and constrain spawn attenuation. They are not native Codex or OS
-  sandboxes.
-- Public reusable code uses `Member` constraints. Rust does not reflect or
-  compare positional effect-row ABIs.
-- `Complete result` alone occupies the row head as a scoped result delimiter;
-  this lets GHC infer the exact return type while ordinary capabilities remain
-  `Member`-polymorphic.
+### Workbench and observability
 
-### Shoal and Git custody
+- Root and request activations use the same fixed authored row:
+  `ActorEffects = '[Replies, Watches, Actor, Worktree]`.
+- The GHCi-shaped workbench preserves committed prefixes, reports explicit
+  `committed`/`rejected`/`replied` dispositions, and keeps effectful rejection
+  non-transactional.
+- `:status` projects actor incarnation, application/program standing, and
+  pending/ready/unavailable response and watch identities from runtime state.
+- Durable application inbox rows are typed actor events. Legacy string rows
+  remain readable during migration; prose is rendered only at delivery.
+- Worktree head/branch reads are genuinely `Member Worktree effs`-polymorphic,
+  and effect-level failures use the existing typed worktree error boundary.
 
-- `shoal new` creates only operational `.shoal/` content, installs
-  `/.shoal/` in `.git/info/exclude`, initializes Git when necessary, and creates
-  an empty base commit when needed. It does not scaffold project files.
-- Shoal uses ordinary Git worktrees in the source repository's namespace.
-  Workers can commit and branch normally; this is cooperative change custody,
-  not a Git-metadata security boundary.
-- Each interactive actor sees its checkout at the stable
-  `/tmp/tidepool-actor-workspace` path, avoiding per-worktree Codex trust
-  prompts and making conversation forks relocatable.
-- Each writable actor checkout receives its own `.shoal/build` Cargo target
-  directory. Mutable compiler artifacts are not shared across root and worker
-  incarnations.
-- `finishWork` combines a model-authored report with one Rust-observed Git
-  snapshot: worktree identity, base OID, branch or detached head, submitted
-  OID, dirty state, and in-progress Git operation.
-- Candidate objects live in the shared repository namespace and are directly
-  reviewable and integrable from the root checkout.
-- Lifecycle exits enqueue backend-native wakes. Pending collection instructs
-  the model to end the current turn rather than poll; delayed or duplicate
-  wakes are harmless because collection and acknowledgement are idempotent.
-- Recreating a root starts a new incarnation. The resumed conversation is told
-  that old actor handles, bindings, and pending results are invalid. Durable
-  actor-state restoration is not claimed.
-- Structured tracing writes under `.shoal/logs/` and correlates actor,
-  application, worktree, and lifecycle activity.
+## Active verification
 
-## Current acceptance evidence
-
-The current boundary is covered at three levels.
-
-### Pure and component tests
-
-- call-cycle ancestry, exact address decoding, terminal encoding, profile
-  attenuation, and source/dependency-closure helpers;
-- provider-session serialization, queued lifecycle input, and provider failure;
-- generated protocol declarations and Haskell/Rust request decoding.
-
-### Local actor tests
-
-- readiness publication after `pre_start`;
-- one-message-at-a-time processing and call non-reentry;
-- linked child failure not killing an overriding owner;
-- in-flight and queued live-value custody released on kill;
-- abandoned RPC reply custody;
-- explicit recursive subtree shutdown;
-- retained typed completion and exact child-exit observation.
-
-### Real GHC/JIT/Shoal verticals
-
-- a resident root installs its actor-local tool policy, handles a typed call,
-  starts and awaits a child, and retires exactly once;
-- an interactive root returns an `AgentAction`, composes two closure-valued
-  child exits with ordinary `Applicative`, settles its hosted-tool caller
-  before waiting, and forces the composed closure as the next activation's
-  live `sessionInput`;
-- the same vertical maps an intentionally failed child into typed
-  `ActionFailure` and reactivates the root without losing its session;
-- real Shoal exercises have produced isolated candidate commits with
-  runtime-observed clean receipts, direct root-side review, integration, and
-  lifecycle-triggered continuation.
-
-Run focused tests while iterating. At a major boundary run formatting, strict
-Clippy on touched crates, the complete `tidepool-actor` suite, and relevant
-Shoal CLI/integration tests through the Nix development shell.
+- `tidepool-actor` component tests cover exactly-once settlement, fan-in wake,
+  ready-before-registration, incarnation fencing, target/requester shutdown,
+  and owner authorization.
+- The Haskell surface fixture proves persistent agents, `Replies`-only request
+  admission, applicative watches, and absence of root `complete`.
+- The focused host vertical proves permanent-root attachment, typed request
+  presentation, `respond`, terminal transfer, durable watch notification,
+  repeatable typed response/watch observation, and `:status` transitions.
+- Protocol freshness, Worktree Haskell contracts, strict Clippy, and the
+  217-case extractor fixture suite are integration gates.
+- The completion-era monolithic host scenario and its escaped fixtures are
+  quarantined during this migration. It is replaced by focused semantic
+  scenarios; it is not a gate that should be repeatedly rewritten as one huge
+  generated transcript.
 
 ## Remaining work
 
-These are future features or measured hardening seams, not unfinished pieces
-of the Ractor cutover.
+### Supervisor policy
 
-### Persistent Shoal agent messaging
+- Add typed deadlines and cancellation against the existing request-state
+  owner.
+- Replace unit-returning `stopAgent` only when the supervisor can truthfully
+  distinguish already stopped, cancellation requested, graceful settlement,
+  and forced termination.
+- Exercise every affected response/watch transition through target and owner
+  shutdown races.
 
-The next self-hosting boundary replaces Shoal's provisional one-shot
-`AgentRef exit` construction shape with long-lived, recursively owned
-agent-backed actors:
+### Retention and bounded observability
 
-1. Construct and ready an `AgentRef` independently of any one work result;
-   preserve its model context, Haskell scope, worktree authority, exact
-   incarnation, and parent/child ownership until explicit shutdown.
-2. Add an ad hoc sited request whose first visible type argument is the result,
-   giving the stable model-facing spelling `request @Result agent prompt input`.
-   Carry compiler-derived input/result types and modules; never parse the
-   prompt or inspect a heap tag to recover the contract.
-3. Return a separate opaque `Reply result` after mailbox admission. Provide a
-   success-shaped `waitReply` for `AgentAction` composition and a complete
-   outcome observer for explicit lifecycle policy.
-4. Generalize the resident interactive standing state from one program
-   completion to a typed activation settlement. Reuse completion's GHC wrapper
-   and root capture; route request settlement back to the exact reply and
-   return the target to readiness instead of terminating it.
-5. Keep one Ractor mailbox and one custody owner. Request cancellation, target
-   exit, abandoned waits, duplicate reply, and subtree shutdown each settle or
-   release every input/reply root exactly once without a second registry.
-6. Curate the default Shoal facade around long-lived `startAgent`,
-   `request @Result`, reply observation, explicit shutdown, worktrees, and
-   `AgentAction`. Keep `ActorDefinition`, indexed protocols, `startActor`,
-   `call`, `receive`, and profiles behind an intentional advanced import.
-7. Dogfood a recursive two-level tree in which an agent starts children,
-   sends typed work and review requests, receives live typed replies, folds
-   exact commits, follows up with a differently typed request to an existing
-   child, and shuts the subtree down explicitly.
+- Prove reclamation of the live result graph after the final response and
+  dependent watch handle disappear, then add only the minimum registry cleanup
+  signal the proof requires.
+- Extend `:status` with request age and durable inbox watermarks when those
+  values have one runtime owner available at the query boundary.
+- Correlate request, watch, activation, hosted-tool, and actor-incarnation IDs
+  in existing structured tracing rather than creating a second event store.
 
-Do not land the held one-shot Shoal construction candidate as `AgentRef`; its
-facade curation, worktree binding, site-metadata, and visibility tests may be
-reused after the persistent boundary owns their semantics.
+### Live dogfood
 
-### Near-term UX and operations
+- Run the two-request, one-persistent-worker canary in `shoal-console` using
+  two result types and one applicative watch.
+- Verify ordinary response termination leaves root and child applications
+  attached, request scopes survive a response without settlement, and queued
+  requests retain FIFO custody.
+- Independently inspect the worker commits and tests; tmux remains diagnostic,
+  not authoritative.
 
-- Generate concise happy-path examples from the exported Haskell surface and
-  distinguish outer tool execution from actor lifecycle in the eventual
-  non-JSON frontend. Exact signatures, constructors, binding
-  inventory, and ordered partial-commit semantics are already discoverable in
-  the shared workbench.
-- Retire the declaration plane's textual `M`-signature generalization once the
-  frontend has a type-aware authored-module path. Until then, teach reusable
-  declarations with `Member` constraints and do not extend the rewrite with
-  more syntax heuristics.
-- Improve concise rendering for actor starts, exits, and root completion while
-  retaining a verbose structured view.
-- Measure and separately attribute queueing, compilation, worktree creation,
-  actor execution, hosted-tool transport, and outer-cell resume latency before changing
-  execution architecture.
-- Project direct local-actor lifecycle and execution facts into one neutral,
-  bounded event stream. Do not revive the deleted selfharness-to-actor event
-  adapter or create mutable scheduler state to support observability.
-- Define explicit retention and garbage-collection policy for worktrees, refs,
-  logs, and terminal records. Cleanup failure must remain observable without
-  rewriting actor lifecycle.
+## Retirement rule
 
-### Deliberately deferred architecture
-
-- Structural context fork, including cloned model memory, persistent Haskell
-  snapshot sharing, invalidation of actor-linear continuation references, and
-  per-capability fork policy.
-- Durable cross-incarnation actor recovery or replay of live Haskell values.
-- Distributed actors and serialized protocol boundaries.
-- Trusted Haskell intent-to-kernel lowering. It must fit behind the existing
-  public profiles and nominal interpreters without a reflected effect-row ABI.
-- Arbitrary capability delegation/revocation, detached actors, adoption, and
-  restart supervision.
-- Security isolation for untrusted native workers. Git worktrees and Codex
-  sandbox flags currently express cooperative workspace policy only.
-- Project-specific reports, typed findings/checks, merge policy, and higher-level
-  scaffold/fan-out/fold combinators. Add these in application libraries when a
-  real workflow demonstrates the useful shape; do not recreate lifecycle state
-  in Haskell or the Shoal host.
-
-## Completion rule
-
-The Ractor refactor is complete when the deleted scheduler stays deleted, the
-tests above pass, no production reference names the superseded runtime, and
-the remaining work is honestly classified as a new feature or hardening seam.
-The actor-model planning directory itself can retire after its stable
-contracts have moved into crate-level `AGENTS.md`, Rust/Haskell API docs, and
-the repository glossary.
+These plan files retire when their stable contracts have moved into crate
+guides, public API documentation, and the glossary. Historical API variants
+are deleted rather than maintained as standing architecture.

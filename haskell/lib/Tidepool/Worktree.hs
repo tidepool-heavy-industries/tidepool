@@ -129,7 +129,7 @@ module Tidepool.Worktree
   , renderGitOid
   ) where
 
-import Control.Monad.Freer (send)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Proxy (Proxy (..))
 import qualified Tidepool.Data.Text as T
 import Tidepool.Actor.Internal (ActorDefinition, withLaunchWorktree)
@@ -144,7 +144,6 @@ import Tidepool.Effects
   , GitOid (..)
   , GitRef
   , InProgressKind (..)
-  , M
   , MergeOutcome (..)
   , HeadState (..)
   , WorkingState (..)
@@ -331,7 +330,7 @@ allowDirtySnapshot :: WorktreeSpec -> WorktreeSpec
 allowDirtySnapshot s = s { specDirtyPolicy = AllowDirtySnapshot }
 
 -- | The managed branch this worktree is on, read fresh from git.
-worktreeBranch :: WorktreeHandle -> M BranchName
+worktreeBranch :: Member Worktree effs => WorktreeHandle -> Eff effs BranchName
 worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 
 -- | This worktree's CURRENT @HEAD@, read fresh from git right now.
@@ -355,7 +354,7 @@ worktreeBranch h = send (WorktreeBranchOf (worktreeId h)) >>= liftEither
 -- replay mechanism, because the resident — which knows what it already
 -- acted on — decides what the gap meant, rather than the runtime
 -- guessing on its behalf.
-worktreeHead :: WorktreeHandle -> M GitOid
+worktreeHead :: Member Worktree effs => WorktreeHandle -> Eff effs GitOid
 worktreeHead h = send (WorktreeHeadOf (worktreeId h)) >>= liftEither
 
 -- | Attach this exact managed worktree to an actor definition. The public

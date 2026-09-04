@@ -57,13 +57,13 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         let client = self.client.clone();
         Box::pin(async move {
             if invocation.name != HASKELL_TOOL {
-                return Err(crate::ResidentToolError::Failed(format!(
+                return Err(crate::ResidentToolError::InvalidInvocation(format!(
                     "unknown actor workbench tool `{}`",
                     invocation.name
                 )));
             }
             let ToolArguments::Raw(source) = invocation.arguments else {
-                return Err(crate::ResidentToolError::Failed(
+                return Err(crate::ResidentToolError::InvalidInvocation(
                     "actor Haskell tool received structured arguments".into(),
                 ));
             };
@@ -80,7 +80,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
                         next_index: 0,
                         total: 1,
                     })
-                    .map_err(|error| ResidentToolError::Failed(error.to_string()));
+                    .map_err(ResidentToolError::Encoding);
                 }
             };
             client.dispatch_workbench(request).await

@@ -2,8 +2,9 @@
 //!
 //! The socket directory is the authority membrane: it is owner-only, created
 //! for one actor incarnation, and mounted into only that actor's interactive
-//! process. Registration is immutable, and `/session` binds exactly one Codex
-//! thread before any invocation can be dispatched.
+//! process. Registration is immutable, and the v2 `/session` callback certifies
+//! that exactly one Codex thread is durably queue-ready before any invocation
+//! can be dispatched.
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
@@ -15,13 +16,15 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tidepool_actor::ResidentToolEndpoint;
-use tidepool_agent::{persist_interactive_binding, BackendThreadId};
+use tidepool_actor::{ResidentToolEndpoint, ResidentToolError};
+use tidepool_agent::{
+    accept_interactive_session_binding, BackendThreadId, HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION,
+};
 use tidepool_tool::{HostedTool, ToolArguments, ToolInvocation, ToolInvocationContext};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 const NAMESPACE: &str = "tidepool_actor";
 const REQUEST_LIMIT: usize = 4 * 1024 * 1024;
 
@@ -174,9 +177,6 @@ async fn attach_session(
     State(state): State<HostState>,
     Json(request): Json<SessionRequest>,
 ) -> Result<StatusCode, (StatusCode, &'static str)> {
-    if request.protocol_version != PROTOCOL_VERSION {
-        return Err((StatusCode::BAD_REQUEST, "unsupported protocol version"));
-    }
     let thread = parse_thread(request.thread_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "invalid thread id"))?;
     if state
@@ -192,19 +192,31 @@ async fn attach_session(
 
     let mut bound = state.bound_thread.lock().await;
     match bound.as_ref() {
-        Some(existing) if existing == &thread => return Ok(StatusCode::NO_CONTENT),
+        // Repeated callbacks still enter the acceptance owner below so an
+        // unsupported protocol version cannot inherit an earlier v2 success.
+        Some(existing) if existing == &thread => {}
         Some(_) => return Err((StatusCode::CONFLICT, "actor is already bound")),
         None => {}
     }
-    persist_interactive_binding(&state.binding_path, thread.clone())
-        .await
-        .map_err(|error| {
+    accept_interactive_session_binding(
+        &state.binding_path,
+        request.protocol_version,
+        thread.clone(),
+    )
+    .await
+    .map_err(|error| match &error {
+        tidepool_agent::AgentBackendError::ProtocolRejected { .. } => {
+            tracing::warn!(%error, "rejected host dynamic-tool session binding");
+            (StatusCode::BAD_REQUEST, "unsupported protocol version")
+        }
+        _ => {
             tracing::error!(%error, "failed to persist host dynamic-tool session binding");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "could not persist session binding",
             )
-        })?;
+        }
+    })?;
     *bound = Some(thread);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -251,13 +263,54 @@ impl CallResponse {
         }
     }
 
-    fn infrastructure_failure() -> Self {
+    fn failure(error: &HostToolFailure) -> Self {
         Self {
             content_items: vec![CallContent::InputText {
-                text: "host dynamic-tool infrastructure failure".into(),
+                text: error.to_string(),
             }],
             success: false,
         }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HostToolFailure {
+    #[error("unsupported dynamic-tool protocol version {actual}; expected {expected}")]
+    UnsupportedProtocol { expected: u32, actual: u32 },
+    #[error("dynamic-tool namespace mismatch: received {actual:?}; expected {expected:?}")]
+    NamespaceMismatch {
+        expected: &'static str,
+        actual: Option<String>,
+    },
+    #[error("unknown actor-scoped tool `{0}`")]
+    UnknownTool(String),
+    #[error("dynamic-tool call thread {actual:?} does not match bound thread {expected:?}")]
+    ThreadMismatch {
+        expected: Option<String>,
+        actual: String,
+    },
+    #[error("tool `{tool}` expected {expected} arguments, received {actual}")]
+    ArgumentKindMismatch {
+        tool: String,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    #[error(transparent)]
+    Dispatch(#[from] ResidentToolError),
+    #[error("resident tool dispatch panicked before returning its future: {0}")]
+    PanicBeforeFuture(String),
+    #[error("resident tool dispatch panicked while polling its future: {0}")]
+    PanicInFuture(String),
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -315,25 +368,51 @@ async fn call(
     State(state): State<HostState>,
     Json(request): Json<CallRequest>,
 ) -> Json<CallResponse> {
-    let failure = || Json(CallResponse::infrastructure_failure());
-    if request.protocol_version != PROTOCOL_VERSION
-        || request.namespace.as_deref() != Some(NAMESPACE)
-    {
-        return failure();
+    if request.protocol_version != PROTOCOL_VERSION {
+        return Json(CallResponse::failure(
+            &HostToolFailure::UnsupportedProtocol {
+                expected: PROTOCOL_VERSION,
+                actual: request.protocol_version,
+            },
+        ));
+    }
+    if request.namespace.as_deref() != Some(NAMESPACE) {
+        return Json(CallResponse::failure(&HostToolFailure::NamespaceMismatch {
+            expected: NAMESPACE,
+            actual: request.namespace,
+        }));
     }
     let Some(kind) = state.tools.get(&request.tool).copied() else {
-        return failure();
+        return Json(CallResponse::failure(&HostToolFailure::UnknownTool(
+            request.tool,
+        )));
     };
     let bound = state.bound_thread.lock().await.clone();
     if bound.as_ref().map(|thread| thread.0.as_str()) != Some(request.thread_id.as_str()) {
-        return failure();
+        return Json(CallResponse::failure(&HostToolFailure::ThreadMismatch {
+            expected: bound.map(|thread| thread.0),
+            actual: request.thread_id,
+        }));
     }
+    let actual_argument_kind = json_kind(&request.arguments);
     let arguments = match (kind, request.arguments) {
         (ToolKind::Custom, serde_json::Value::String(source)) => ToolArguments::Raw(source),
         (ToolKind::Function, value @ serde_json::Value::Object(_)) => {
             ToolArguments::Structured(value)
         }
-        _ => return failure(),
+        _ => {
+            let expected = match kind {
+                ToolKind::Custom => "string",
+                ToolKind::Function => "object",
+            };
+            return Json(CallResponse::failure(
+                &HostToolFailure::ArgumentKindMismatch {
+                    tool: request.tool,
+                    expected,
+                    actual: actual_argument_kind,
+                },
+            ));
+        }
     };
     let invocation = ToolInvocation {
         context: Some(ToolInvocationContext {
@@ -350,33 +429,41 @@ async fn call(
     }));
     let result = match future {
         Ok(future) => AssertUnwindSafe(future).catch_unwind().await,
-        Err(_) => {
+        Err(payload) => {
+            let failure = HostToolFailure::PanicBeforeFuture(
+                tidepool_runtime::panic_payload_message(payload),
+            );
             tracing::error!(
                 turn_id = %request.turn_id,
                 call_id = %request.call_id,
+                error = %failure,
                 "resident tool dispatch panicked before returning its future"
             );
-            return failure();
+            return Json(CallResponse::failure(&failure));
         }
     };
     match result {
         Ok(Ok(value)) => Json(CallResponse::domain(kind, value)),
         Ok(Err(error)) => {
+            let failure = HostToolFailure::Dispatch(error);
             tracing::error!(
                 turn_id = %request.turn_id,
                 call_id = %request.call_id,
-                %error,
+                error = %failure,
                 "resident tool dispatch failed"
             );
-            failure()
+            Json(CallResponse::failure(&failure))
         }
-        Err(_) => {
+        Err(payload) => {
+            let failure =
+                HostToolFailure::PanicInFuture(tidepool_runtime::panic_payload_message(payload));
             tracing::error!(
                 turn_id = %request.turn_id,
                 call_id = %request.call_id,
+                error = %failure,
                 "resident tool dispatch panicked"
             );
-            failure()
+            Json(CallResponse::failure(&failure))
         }
     }
 }
@@ -384,7 +471,7 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidepool_actor::{ResidentToolError, ResidentToolFuture};
+    use tidepool_actor::ResidentToolFuture;
     use tidepool_tool::{CustomToolDeclaration, ToolDeclaration};
 
     struct EchoEndpoint {
@@ -411,7 +498,7 @@ mod tests {
                         "callId": context.as_ref().map(|value| &value.call_id),
                         "namespace": context.as_ref().and_then(|value| value.namespace.as_ref()),
                     })),
-                    ToolArguments::Structured(_) => Err(ResidentToolError::Failed(
+                    ToolArguments::Structured(_) => Err(ResidentToolError::InvalidInvocation(
                         "unexpected structured call".into(),
                     )),
                 }
@@ -431,6 +518,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum ControlledOutcome {
         Reject,
+        Error,
         PanicBeforeFuture,
         PanicInFuture,
     }
@@ -454,6 +542,11 @@ mod tests {
                 ControlledOutcome::Reject => {
                     Box::pin(async { Ok(serde_json::json!({"status": "rejected"})) })
                 }
+                ControlledOutcome::Error => Box::pin(async {
+                    Err(ResidentToolError::InvalidInvocation(
+                        "controlled dispatch failure".into(),
+                    ))
+                }),
                 ControlledOutcome::PanicBeforeFuture => panic!("panic before future"),
                 ControlledOutcome::PanicInFuture => {
                     Box::pin(async { panic!("panic while polling future") })
@@ -490,27 +583,26 @@ mod tests {
     }
 
     async fn call_haskell(state: HostState, arguments: serde_json::Value) -> CallResponse {
-        call(
-            State(state),
-            Json(CallRequest {
-                protocol_version: PROTOCOL_VERSION,
-                thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
-                turn_id: "turn".into(),
-                call_id: "call".into(),
-                namespace: Some(NAMESPACE.into()),
-                tool: "haskell".into(),
-                arguments,
-            }),
-        )
-        .await
-        .0
+        call(State(state), Json(call_request(arguments))).await.0
+    }
+
+    fn call_request(arguments: serde_json::Value) -> CallRequest {
+        CallRequest {
+            protocol_version: PROTOCOL_VERSION,
+            thread_id: "01a05a16-97f5-7722-aa8d-467e01e2e5b4".into(),
+            turn_id: "turn".into(),
+            call_id: "call".into(),
+            namespace: Some(NAMESPACE.into()),
+            tool: "haskell".into(),
+            arguments,
+        }
     }
 
     #[test]
     fn registration_is_namespaced_and_custom() {
         let service = HostDynamicToolService::new(endpoint(), "/tmp/binding".into(), None).unwrap();
         let value = serde_json::to_value(&*service.state.registration).unwrap();
-        assert_eq!(value["protocolVersion"], 1);
+        assert_eq!(value["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(value["scope"], "primaryThread");
         assert_eq!(value["dynamicTools"][0]["type"], "namespace");
         assert_eq!(value["dynamicTools"][0]["name"], NAMESPACE);
@@ -525,11 +617,11 @@ mod tests {
             serde_json::json!({
                 "items": [{
                     "index": 0,
-                    "output": "sessionInput :: Maybe ActionFailure",
+                    "output": "response :: Response ReviewReport",
                     "status": "committed"
                 }, {
                     "index": 1,
-                    "output": "waitOn :: ActorRef protocol exit -> AgentAction effs exit",
+                    "output": "readiness :: Watch ReviewReport",
                     "status": "committed"
                 }],
                 "nextIndex": 2,
@@ -540,7 +632,7 @@ mod tests {
         let CallContent::InputText { text } = &response.content_items[0];
         assert_eq!(
             text,
-            "sessionInput :: Maybe ActionFailure\nwaitOn :: ActorRef protocol exit -> AgentAction effs exit"
+            "response :: Response ReviewReport\nreadiness :: Watch ReviewReport"
         );
     }
 
@@ -621,10 +713,33 @@ mod tests {
         )
         .await;
         assert!(!mismatch.success);
+        let CallContent::InputText { text } = &mismatch.content_items[0];
+        assert_eq!(
+            text,
+            "tool `haskell` expected object arguments, received string"
+        );
 
-        for outcome in [
-            ControlledOutcome::PanicBeforeFuture,
-            ControlledOutcome::PanicInFuture,
+        let dispatch_error = call_haskell(
+            attached_state(controlled_endpoint(ControlledOutcome::Error)).await,
+            serde_json::Value::String("pure ()".into()),
+        )
+        .await;
+        assert!(!dispatch_error.success);
+        let CallContent::InputText { text } = &dispatch_error.content_items[0];
+        assert_eq!(
+            text,
+            "invalid resident tool invocation: controlled dispatch failure"
+        );
+
+        for (outcome, expected) in [
+            (
+                ControlledOutcome::PanicBeforeFuture,
+                "resident tool dispatch panicked before returning its future: panic before future",
+            ),
+            (
+                ControlledOutcome::PanicInFuture,
+                "resident tool dispatch panicked while polling its future: panic while polling future",
+            ),
         ] {
             let response = call_haskell(
                 attached_state(controlled_endpoint(outcome)).await,
@@ -633,8 +748,50 @@ mod tests {
             .await;
             assert!(!response.success);
             let CallContent::InputText { text } = &response.content_items[0];
-            assert_eq!(text, "host dynamic-tool infrastructure failure");
+            assert_eq!(text, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn routing_failures_name_the_rejected_boundary() {
+        let state = HostDynamicToolService::new(endpoint(), "/tmp/unused-binding".into(), None)
+            .unwrap()
+            .state;
+        let mut request = call_request(serde_json::Value::String("pure ()".into()));
+        request.protocol_version = 9;
+        let response = call(State(state.clone()), Json(request)).await.0;
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "unsupported dynamic-tool protocol version 9; expected 2"
+        );
+
+        let mut request = call_request(serde_json::Value::String("pure ()".into()));
+        request.namespace = Some("wrong".into());
+        let response = call(State(state.clone()), Json(request)).await.0;
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "dynamic-tool namespace mismatch: received Some(\"wrong\"); expected \"tidepool_actor\""
+        );
+
+        let mut request = call_request(serde_json::Value::String("pure ()".into()));
+        request.tool = "missing".into();
+        let response = call(State(state.clone()), Json(request)).await.0;
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(text, "unknown actor-scoped tool `missing`");
+
+        let response = call(
+            State(state),
+            Json(call_request(serde_json::Value::String("pure ()".into()))),
+        )
+        .await
+        .0;
+        let CallContent::InputText { text } = &response.content_items[0];
+        assert_eq!(
+            text,
+            "dynamic-tool call thread \"01a05a16-97f5-7722-aa8d-467e01e2e5b4\" does not match bound thread None"
+        );
     }
 
     #[tokio::test]
@@ -676,12 +833,13 @@ mod tests {
             .json()
             .await
             .unwrap();
+        assert_eq!(registration["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(registration["dynamicTools"][0]["name"], NAMESPACE);
 
         let thread = "01a05a16-97f5-7722-aa8d-467e01e2e5b4";
         let source = "let x = \"quotes \\\" and \\\\ and λ\"\n    in x";
         let request = serde_json::json!({
-            "protocolVersion": 1,
+            "protocolVersion": PROTOCOL_VERSION,
             "threadId": thread,
             "turnId": "turn-1",
             "callId": "call-1",
@@ -700,7 +858,16 @@ mod tests {
             .unwrap();
         assert_eq!(before["success"], false);
 
-        let session = serde_json::json!({"protocolVersion": 1, "threadId": thread});
+        let legacy_session = client
+            .post("http://localhost/v1/dynamic-tools/session")
+            .json(&serde_json::json!({"protocolVersion": 1, "threadId": thread}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(legacy_session.status(), StatusCode::BAD_REQUEST);
+        assert!(!binding.exists());
+
+        let session = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "threadId": thread});
         for _ in 0..2 {
             assert_eq!(
                 client
@@ -716,8 +883,9 @@ mod tests {
         assert_eq!(
             tidepool_agent::read_interactive_binding(&binding)
                 .await
-                .unwrap(),
-            BackendThreadId(thread.into())
+                .unwrap()
+                .id(),
+            &BackendThreadId(thread.into())
         );
 
         let response: serde_json::Value = client
@@ -741,7 +909,7 @@ mod tests {
         let conflict = client
             .post("http://localhost/v1/dynamic-tools/session")
             .json(&serde_json::json!({
-                "protocolVersion": 1,
+                "protocolVersion": PROTOCOL_VERSION,
                 "threadId": "019fe92a-1a66-7820-9481-c0a2d108aba1"
             }))
             .send()

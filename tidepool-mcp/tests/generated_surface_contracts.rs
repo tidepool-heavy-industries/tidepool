@@ -304,7 +304,8 @@ fn authored_event_module() -> String {
 #[test]
 fn worktree_head_is_effectful_and_worktree_id_is_pure() {
     assert!(
-        authored_worktree_module().contains("worktreeHead :: WorktreeHandle -> M GitOid"),
+        authored_worktree_module()
+            .contains("worktreeHead :: Member Worktree effs => WorktreeHandle -> Eff effs GitOid"),
         "worktreeHead must be a fresh, effectful read — not a pure accessor over recorded state"
     );
     assert!(

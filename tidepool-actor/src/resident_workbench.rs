@@ -3,7 +3,7 @@
 //! This adapter owns no machine and holds no checkout between calls. Each
 //! fenced block checks out the actor's registered resident session, installs
 //! the exact actor context, compiles and runs one segment on the blocking
-//! pool, then restores the machine before the provider loop continues.
+//! pool, then restores the machine before the actor loop continues.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,37 +17,33 @@ use tidepool_repr::DataConTable;
 use tidepool_runtime::session::registry::{CheckoutError, SessionRegistry};
 use tidepool_runtime::session::{
     classify_workbench_item, insert_preamble_imports, render_turn_compile_error,
-    resident_workbench_templates, run_inspections, run_turn, BlockExecution, GhciInputKind,
-    InspectionQuery, InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock, ResidentError,
-    ResidentHole, ResidentOutcome, ResidentSession, RootCustody, SessionRunContext, SourceImports,
-    TurnClassification, TurnKind, TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
+    resident_workbench_templates, run_inspections, run_turn, GhciInputKind, InspectionQuery,
+    InspectionRequest, MetaCommandLine, OutputSink, ParsedBlock, ResidentError, ResidentHole,
+    ResidentOutcome, ResidentSession, RootCustody, SourceImports, TurnClassification, TurnKind,
+    TurnRequest, TurnResult, WorkbenchDiscovery, WorkbenchItem,
 };
 use tidepool_runtime::{classify_compile, classify_session, CompileError, FailureClass};
 
 use crate::mailbox::{InstalledReceiver, KernelValue, ResidentOutbound, ResidentWaitRequest};
-use crate::{
-    ActorCompileViewError, AdmittedAgentSession, AgentBlockStop, AgentWorkbench,
-    CompletionExpectation,
+use crate::request_effect::{
+    RepliesReq, ReplyAttempt, RequestReservation, RequestSubmission, ResponsePoll, WatchPoll,
+    WatchRegistration, WatchesReq,
 };
+use crate::{ActorCompileViewError, ResponseExpectation};
 
 const MACHINE_WAIT: Duration = Duration::from_secs(30);
 
-impl CompletionExpectation {
-    fn effect_stack(&self) -> String {
-        format!(
-            "(TidepoolCompletion.Complete ({}) ': ActorEffects)",
-            self.expected_type()
-        )
-    }
-
-    fn workbench_preamble(&self, preamble: &str) -> String {
+impl ResponseExpectation {
+    fn request_preamble(&self, preamble: &str, request: crate::RequestId) -> String {
         let mut preamble = insert_preamble_imports(
             preamble,
-            "qualified Tidepool.Deliberation as TidepoolCompletion",
+            "qualified Tidepool.Agent.Reply.Internal as TidepoolReplies",
         );
+        preamble = insert_preamble_imports(&preamble, "qualified Data.Void as TidepoolVoid");
         preamble.push_str(&format!(
-            "\ncomplete :: ({0}) -> Eff (TidepoolCompletion.Complete ({0}) ': ActorEffects) ()\ncomplete = TidepoolCompletion.complete\n",
-            self.expected_type()
+            "\nsessionReply :: TidepoolReplies.Reply ({0})\nsessionReply = TidepoolReplies.Reply (TidepoolReplies.RequestId {1})\nrespond :: ({0}) -> Eff ActorEffects TidepoolVoid.Void\nrespond = TidepoolReplies.reply sessionReply\n",
+            self.expected_type(),
+            request.0,
         ));
         preamble
     }
@@ -109,7 +105,8 @@ impl<H, O> ResidentMachineAccess<H, O> {
 /// Concrete resident workbench for one typed agent-session obligation.
 pub struct ResidentActorWorkbench<H, O> {
     access: ResidentMachineAccess<H, O>,
-    completion: CompletionExpectation,
+    response: Option<ResponseExpectation>,
+    request: Option<crate::RequestId>,
     type_modules: Arc<[String]>,
     json_input: Option<serde_json::Value>,
 }
@@ -129,6 +126,13 @@ enum WorkbenchDisplay {
     Opaque,
 }
 
+#[derive(Clone, Copy)]
+struct RequestWorkbenchScope<'a> {
+    response: Option<&'a ResponseExpectation>,
+    request: Option<crate::RequestId>,
+    type_modules: &'a [String],
+}
+
 pub(crate) enum ResidentWorkbenchStep {
     Committed(String),
     Rejected(String),
@@ -136,7 +140,10 @@ pub(crate) enum ResidentWorkbenchStep {
         fragment: ResidentWorkbenchFragment,
         outcome: Box<ResidentOutcome>,
     },
-    Completed(RootCustody),
+    Replied {
+        request: crate::RequestId,
+        result: RootCustody,
+    },
 }
 
 /// The one machine-entry component for installed actor program segments.
@@ -181,8 +188,13 @@ impl ResidentActorShutdown {
 /// interpreters land; they must never be mistaken for readiness.
 pub(crate) enum ResidentActorStartupStep {
     InstallShutdown(ResidentActorShutdown),
-    Deliberate(crate::ResidentCompletion),
+    Attach(ResidentAgentAttachment),
     Ready(ResidentActorReadiness),
+}
+
+pub(crate) struct ResidentAgentAttachment {
+    pub(crate) continuation: ResidentHole,
+    pub(crate) initial_user_message: Option<String>,
 }
 
 /// One fully captured boundary reached by an installed actor program.
@@ -190,7 +202,6 @@ pub(crate) enum ResidentActorStartupStep {
 /// downstream orchestration never re-decodes the suspended request.
 pub(crate) enum ResidentActorBoundary {
     Completed,
-    Deliberate(crate::ResidentCompletion),
     Start(crate::ResidentActorStart),
     Outbound(ResidentOutbound),
     Wait(ResidentWaitRequest),
@@ -199,6 +210,13 @@ pub(crate) enum ResidentActorBoundary {
     ToolAwait(crate::resident_tools::ResidentToolAwait),
     ToolReply(crate::resident_tools::ResidentToolReply),
     AgentSession(crate::ResidentInteractiveSession),
+    AgentAttachment(ResidentAgentAttachment),
+    RequestReservation(RequestReservation),
+    RequestSubmission(RequestSubmission),
+    ReplyAttempt(ReplyAttempt),
+    ResponsePoll(ResponsePoll),
+    WatchRegistration(WatchRegistration),
+    WatchPoll(WatchPoll),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -220,9 +238,9 @@ impl ResidentActorBoundary {
     pub(crate) fn operation(&self) -> &'static str {
         match self {
             Self::Completed => "program completion",
-            Self::Deliberate(_) => "deliberate",
             Self::Start(_) => "startActor",
             Self::Outbound(ResidentOutbound::Call { .. }) => "call",
+            Self::Outbound(ResidentOutbound::TryCall { .. }) => "tryCall",
             Self::Outbound(ResidentOutbound::Cast { .. }) => "cast",
             Self::Wait(_) => "awaitExit",
             Self::Poll(_) => "pollExit",
@@ -230,15 +248,15 @@ impl ResidentActorBoundary {
             Self::ToolAwait(_) => "agent tool await",
             Self::ToolReply(_) => "agent tool reply",
             Self::AgentSession(_) => "agent session",
+            Self::AgentAttachment(_) => "agent attachment",
+            Self::RequestReservation(_) => "request",
+            Self::RequestSubmission(_) => "request",
+            Self::ReplyAttempt(_) => "reply",
+            Self::ResponsePoll(_) => "pollResponse",
+            Self::WatchRegistration(_) => "watch",
+            Self::WatchPoll(_) => "pollWatch",
         }
     }
-}
-
-#[derive(tidepool_bridge_derive::FromCore)]
-#[allow(dead_code)]
-enum CompleteReq {
-    #[core(module = "Tidepool.Deliberation")]
-    CompleteWith(i64, Value),
 }
 
 /// The one nominal roster for requests interpreted at actor execution
@@ -250,8 +268,8 @@ enum ResidentRequest {
     ActorLocal(crate::generated::actor_local::ActorLocalReq),
     AgentTools(crate::generated::agent_tools::AgentToolsReq),
     AgentSession(crate::generated::agent_session::AgentSessionReq),
-    Deliberate(crate::generated::deliberate::DeliberateReq),
-    Complete(CompleteReq),
+    Replies(RepliesReq),
+    Watches(WatchesReq),
 }
 
 impl ResidentRequest {
@@ -288,11 +306,8 @@ impl ResidentRequest {
             Self::AgentSession,
             crate::generated::agent_session::AgentSessionReq
         );
-        try_member!(
-            Self::Deliberate,
-            crate::generated::deliberate::DeliberateReq
-        );
-        try_member!(Self::Complete, CompleteReq);
+        try_member!(Self::Replies, RepliesReq);
+        try_member!(Self::Watches, WatchesReq);
 
         Err(ResidentActorWorkbenchError::UnsupportedRequest {
             constructor: request_constructor(request, table),
@@ -305,6 +320,7 @@ impl ResidentRequest {
             Self::Actor(crate::generated::actor::ActorReq::ActorWaitWith(..)) => "awaitExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorPollWith(..)) => "pollExit",
             Self::Actor(crate::generated::actor::ActorReq::ActorCallWith(..)) => "call",
+            Self::Actor(crate::generated::actor::ActorReq::ActorTryCallWith(..)) => "tryCall",
             Self::Actor(crate::generated::actor::ActorReq::ActorCastWith(..)) => "cast",
             Self::ActorKernel(
                 crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(..),
@@ -330,10 +346,16 @@ impl ResidentRequest {
             Self::AgentSession(
                 crate::generated::agent_session::AgentSessionReq::AgentSessionWith(..),
             ) => "agent session",
-            Self::Deliberate(crate::generated::deliberate::DeliberateReq::DeliberateWith(..)) => {
-                "deliberate"
-            }
-            Self::Complete(CompleteReq::CompleteWith(..)) => "complete",
+            Self::AgentSession(
+                crate::generated::agent_session::AgentSessionReq::AgentAttachWith(..),
+            ) => "agent attachment",
+            Self::Replies(RepliesReq::ReserveRequestWith(..)) => "request reservation",
+            Self::Replies(RepliesReq::SubmitRequestWith(..)) => "request submission",
+            Self::Replies(RepliesReq::AttemptReplyWith(..)) => "attemptReply",
+            Self::Replies(RepliesReq::ReplyWith(..)) => "reply",
+            Self::Replies(RepliesReq::ObserveResponseWith(..)) => "pollResponse",
+            Self::Watches(WatchesReq::RegisterWatchWith(..)) => "watch",
+            Self::Watches(WatchesReq::ObserveWatchWith(..)) => "pollWatch",
         }
     }
 }
@@ -348,14 +370,26 @@ impl<H, O> ResidentActorRunner<H, O> {
 
     pub(crate) fn workbench(
         &self,
-        completion: CompletionExpectation,
+        response: ResponseExpectation,
+        request: crate::RequestId,
         type_modules: Vec<String>,
     ) -> ResidentActorWorkbench<H, O> {
         ResidentActorWorkbench::new(
             Arc::clone(&self.access.machines),
             self.access.source.clone(),
-            completion,
+            Some(response),
+            Some(request),
             type_modules,
+        )
+    }
+
+    pub(crate) fn application_workbench(&self) -> ResidentActorWorkbench<H, O> {
+        ResidentActorWorkbench::new(
+            Arc::clone(&self.access.machines),
+            self.access.source.clone(),
+            None,
+            None,
+            Vec::new(),
         )
     }
 }
@@ -365,12 +399,14 @@ impl<H, O> ResidentActorWorkbench<H, O> {
     pub fn new(
         machines: Arc<ActorMachineRegistry<H, O>>,
         source: ActorWorkbenchSource,
-        completion: CompletionExpectation,
+        response: Option<ResponseExpectation>,
+        request: Option<crate::RequestId>,
         type_modules: Vec<String>,
     ) -> Self {
         Self {
             access: ResidentMachineAccess::new(machines, source),
-            completion,
+            response,
+            request,
             type_modules: type_modules.into(),
             json_input: None,
         }
@@ -397,8 +433,6 @@ pub enum ResidentActorWorkbenchError {
     Resident(ResidentError),
     #[error("resident workbench task panicked or was cancelled: {0}")]
     Join(tokio::task::JoinError),
-    #[error("typed completion suspended without a live payload")]
-    MissingCompletionPayload,
     #[error("could not mount the typed completion input: {0}")]
     InputMount(String),
     #[error("actor protocol violation: {0}")]
@@ -412,8 +446,6 @@ pub enum ResidentActorWorkbenchError {
     },
     #[error("could not bridge an actor protocol value: {0}")]
     Bridge(#[from] tidepool_bridge::BridgeError),
-    #[error(transparent)]
-    CompletionCapture(#[from] crate::CompletionCaptureError),
     #[error(transparent)]
     InteractiveSessionCapture(#[from] crate::InteractiveSessionCaptureError),
     #[error(transparent)]
@@ -528,22 +560,6 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    /// Mount the authoritative input for the current completion under the
-    /// one stable workbench name `goalInput`.
-    ///
-    /// GHC compiles the binding identity and thin interface, but its
-    /// `undefined` expression is deliberately never run. The resident mount
-    /// transfers the already-existing live value directly into that binding.
-    pub async fn mount_goal_input(
-        &self,
-        admitted: &AdmittedAgentSession,
-        input_type: impl Into<String>,
-        input: RootCustody,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.mount_named_input(admitted.session_context(), "goalInput", input_type, input)
-            .await
-    }
-
     pub(crate) async fn mount_named_input(
         &self,
         context: crate::ActorSessionContext,
@@ -605,7 +621,7 @@ where
             .await
     }
 
-    pub(crate) async fn resume_completion(
+    pub(crate) async fn resume_request(
         &self,
         context: crate::ActorSessionContext,
         hole: ResidentHole,
@@ -629,7 +645,8 @@ where
         block: ParsedBlock,
         kind: GhciInputKind,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        let completion = self.completion.clone();
+        let response = self.response.clone();
+        let request = self.request;
         let type_modules = Arc::clone(&self.type_modules);
         let mut turn_source = self.access.source.clone();
         turn_source.preamble = format!(
@@ -644,8 +661,11 @@ where
                     session,
                     context,
                     &turn_source,
-                    &completion,
-                    &type_modules,
+                    RequestWorkbenchScope {
+                        response: response.as_ref(),
+                        request,
+                        type_modules: &type_modules,
+                    },
                     block,
                     kind,
                 )
@@ -668,9 +688,16 @@ where
     ) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
         let type_modules = Arc::clone(&self.type_modules);
         let mut turn_source = self.access.source.clone();
+        let preamble = match (&self.response, self.request) {
+            (Some(response), Some(request)) => {
+                response.request_preamble(&turn_source.preamble, request)
+            }
+            (None, None) => turn_source.preamble.to_string(),
+            _ => unreachable!("request workbench scope is constructed atomically"),
+        };
         turn_source.preamble = format!(
             "{}{}",
-            self.completion.workbench_preamble(&turn_source.preamble),
+            preamble,
             tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
         )
         .into();
@@ -681,7 +708,7 @@ where
             .await
     }
 
-    /// Settle a resumed fragment outcome. Non-completion suspensions retain
+    /// Settle a resumed fragment outcome. Nominal suspensions retain
     /// the same realm and return to the host for nominal actor dispatch.
     pub(crate) async fn settle_item(
         &self,
@@ -701,8 +728,7 @@ fn begin_fragment<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
     source: &ActorWorkbenchSource,
-    completion: &CompletionExpectation,
-    type_modules: &[String],
+    scope: RequestWorkbenchScope<'_>,
     block: ParsedBlock,
     kind: GhciInputKind,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
@@ -710,22 +736,25 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let completion_preamble = completion.workbench_preamble(&source.preamble);
     let mut source = source.clone();
-    source.preamble = completion_preamble.into();
+    source.preamble = match (scope.response, scope.request) {
+        (Some(response), Some(request)) => response.request_preamble(&source.preamble, request),
+        (None, None) => source.preamble.to_string(),
+        _ => unreachable!("request workbench scope is constructed atomically"),
+    }
+    .into();
     if kind == GhciInputKind::Command {
-        return match run_discovery(session, context, &source, type_modules, &block)? {
+        return match run_discovery(session, context, &source, scope.type_modules, &block)? {
             Ok(output) => Ok(ResidentWorkbenchStep::Committed(output)),
             Err(diagnostic) => Ok(ResidentWorkbenchStep::Rejected(diagnostic)),
         };
     }
-    let effect_stack = completion.effect_stack();
     let compiled = match compile_block(
         session,
         context,
         &source,
-        &effect_stack,
-        type_modules,
+        "ActorEffects",
+        scope.type_modules,
         &block,
     )? {
         CompiledBlock::Ready(compiled) => compiled,
@@ -856,7 +885,7 @@ where
 
 fn settle_fragment<H, O>(
     session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
+    _context: &crate::ActorSessionContext,
     mut fragment: ResidentWorkbenchFragment,
     outcome: ResidentOutcome,
 ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError>
@@ -895,22 +924,15 @@ where
             request,
         } => {
             fragment.output.extend(output);
-            let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
-            if matches!(decoded, ResidentRequest::Complete(_)) {
-                let completion = session
-                    .live_payload_handle_owned_by(hole.cont_id(), context.placement.resource_scope)
-                    .ok_or(ResidentActorWorkbenchError::MissingCompletionPayload)?;
-                Ok(ResidentWorkbenchStep::Completed(completion))
-            } else {
-                Ok(ResidentWorkbenchStep::Running {
-                    fragment,
-                    outcome: Box::new(ResidentOutcome::Suspended {
-                        output: Vec::new(),
-                        hole,
-                        request,
-                    }),
-                })
-            }
+            let _ = ResidentRequest::decode(&request, session.data_con_table())?;
+            Ok(ResidentWorkbenchStep::Running {
+                fragment,
+                outcome: Box::new(ResidentOutcome::Suspended {
+                    output: Vec::new(),
+                    hole,
+                    request,
+                }),
+            })
         }
     }
 }
@@ -975,6 +997,16 @@ where
                         hole,
                         target,
                         OutboundKind::Call,
+                        actor_realm,
+                    ),
+                    ResidentRequest::Actor(
+                        crate::generated::actor::ActorReq::ActorTryCallWith(target, _),
+                    ) => capture_outbound_boundary(
+                        session,
+                        context,
+                        hole,
+                        target,
+                        OutboundKind::TryCall,
                         actor_realm,
                     ),
                     ResidentRequest::Actor(crate::generated::actor::ActorReq::ActorCastWith(
@@ -1062,20 +1094,100 @@ where
                         .map(ResidentActorBoundary::AgentSession)
                         .map_err(ResidentActorWorkbenchError::InteractiveSessionCapture)
                     }
-                    ResidentRequest::Deliberate(
-                        crate::generated::deliberate::DeliberateReq::DeliberateWith(..),
-                    ) => {
-                        let table = session.data_con_table().clone();
-                        crate::ResidentCompletion::capture(
-                            session,
-                            hole,
-                            &request,
-                            &table,
-                            actor_realm,
-                        )
-                        .map(ResidentActorBoundary::Deliberate)
-                        .map_err(ResidentActorWorkbenchError::CompletionCapture)
+                    ResidentRequest::Replies(RepliesReq::ReserveRequestWith(address)) => Ok(
+                        ResidentActorBoundary::RequestReservation(RequestReservation {
+                            continuation: hole,
+                            target: crate::wait::decode_address(address.0, address.1)?,
+                        }),
+                    ),
+                    ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
+                        request_id,
+                        _,
+                        address,
+                    )) => {
+                        let custody = session
+                            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "request submission suspended without its live payload".into(),
+                                )
+                            })?;
+                        Ok(ResidentActorBoundary::RequestSubmission(
+                            RequestSubmission {
+                                continuation: hole,
+                                request: crate::request_effect::request_id(request_id)?,
+                                target: crate::wait::decode_address(address.0, address.1)?,
+                                message: crate::MailboxValue::new(
+                                    context.placement.session,
+                                    custody,
+                                ),
+                            },
+                        ))
                     }
+                    ResidentRequest::Replies(RepliesReq::AttemptReplyWith(request_id, _)) => {
+                        let result = session
+                            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "reply suspended without its live result".into(),
+                                )
+                            })?;
+                        Ok(ResidentActorBoundary::ReplyAttempt(ReplyAttempt {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                            result,
+                            recoverable: true,
+                        }))
+                    }
+                    ResidentRequest::Replies(RepliesReq::ReplyWith(request_id, _)) => {
+                        let result = session
+                            .live_payload_handle_owned_by(hole.cont_id(), actor_realm)
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "reply suspended without its live result".into(),
+                                )
+                            })?;
+                        Ok(ResidentActorBoundary::ReplyAttempt(ReplyAttempt {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                            result,
+                            recoverable: false,
+                        }))
+                    }
+                    ResidentRequest::Replies(RepliesReq::ObserveResponseWith(request_id)) => {
+                        Ok(ResidentActorBoundary::ResponsePoll(ResponsePoll {
+                            continuation: hole,
+                            request: crate::request_effect::request_id(request_id)?,
+                        }))
+                    }
+                    ResidentRequest::Watches(WatchesReq::RegisterWatchWith(dependencies)) => {
+                        let dependencies = dependencies
+                            .into_iter()
+                            .map(crate::request_effect::request_id)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(ResidentActorBoundary::WatchRegistration(
+                            WatchRegistration {
+                                continuation: hole,
+                                dependencies,
+                            },
+                        ))
+                    }
+                    ResidentRequest::Watches(WatchesReq::ObserveWatchWith(watch_id)) => {
+                        Ok(ResidentActorBoundary::WatchPoll(WatchPoll {
+                            continuation: hole,
+                            watch: crate::request_effect::watch_id(watch_id)?,
+                        }))
+                    }
+                    ResidentRequest::AgentSession(
+                        crate::generated::agent_session::AgentSessionReq::AgentAttachWith(
+                            initial_user_message,
+                        ),
+                    ) => Ok(ResidentActorBoundary::AgentAttachment(
+                        ResidentAgentAttachment {
+                            continuation: hole,
+                            initial_user_message,
+                        },
+                    )),
                     invalid => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                         "installed actor program suspended on phase-invalid `{}`",
                         invalid.operation()
@@ -1117,19 +1229,6 @@ where
             .await
     }
 
-    pub async fn capture_completion(
-        &self,
-        context: crate::ActorSessionContext,
-        outcome: ResidentOutcome,
-        actor_realm: RealmId,
-    ) -> Result<crate::ResidentCompletion, ResidentActorWorkbenchError> {
-        let boundary = self.capture_boundary(context, outcome, actor_realm).await?;
-        match boundary {
-            ResidentActorBoundary::Deliberate(completion) => Ok(completion),
-            other => Err(unexpected_boundary("deliberate", &other)),
-        }
-    }
-
     pub(crate) async fn capture_startup_step(
         &self,
         context: crate::ActorSessionContext,
@@ -1164,24 +1263,21 @@ where
                             },
                         ))
                     }
-                    ResidentRequest::Deliberate(
-                        crate::generated::deliberate::DeliberateReq::DeliberateWith(..),
-                    ) => {
-                        let table = session.data_con_table().clone();
-                        let completion = crate::ResidentCompletion::capture(
-                            session,
-                            hole,
-                            &request,
-                            &table,
-                            actor_realm,
-                        )?;
-                        Ok(ResidentActorStartupStep::Deliberate(completion))
-                    }
                     ResidentRequest::ActorKernel(
                         crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith,
                     ) if session.parked_realm(&hole) == Some(actor_realm) => {
                         Ok(ResidentActorStartupStep::Ready(ResidentActorReadiness {
                             hole,
+                        }))
+                    }
+                    ResidentRequest::AgentSession(
+                        crate::generated::agent_session::AgentSessionReq::AgentAttachWith(
+                            initial_user_message,
+                        ),
+                    ) if session.parked_realm(&hole) == Some(actor_realm) => {
+                        Ok(ResidentActorStartupStep::Attach(ResidentAgentAttachment {
+                            continuation: hole,
+                            initial_user_message,
                         }))
                     }
                     unsupported => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
@@ -1347,6 +1443,50 @@ where
             .await
     }
 
+    pub(crate) async fn kernel_boundary(
+        &self,
+        context: crate::ActorSessionContext,
+        outcome: &ResidentOutcome,
+    ) -> Result<Option<(ResidentKernelBoundary, u64)>, ResidentActorWorkbenchError> {
+        let ResidentOutcome::Suspended { request, .. } = outcome else {
+            return Ok(None);
+        };
+        let request = request.clone();
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let decoded = match crate::generated::actor_kernel::ActorKernelReq::from_value(
+                    &request,
+                    session.data_con_table(),
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(BridgeError::UnknownDataCon(_)) => return Ok(None),
+                    Err(source) => return Err(source.into()),
+                };
+                let (kind, site) = match decoded {
+                    crate::generated::actor_kernel::ActorKernelReq::ActorReplyWith(site, _) => {
+                        (ResidentKernelBoundary::Reply, site)
+                    }
+                    crate::generated::actor_kernel::ActorKernelReq::ActorContinueWith(site, _) => {
+                        (ResidentKernelBoundary::Continue, site)
+                    }
+                    crate::generated::actor_kernel::ActorKernelReq::ActorInstallShutdownWith(
+                        ..,
+                    )
+                    | crate::generated::actor_kernel::ActorKernelReq::ActorReadyWith => {
+                        return Ok(None)
+                    }
+                };
+                let site = u64::try_from(site).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(format!(
+                        "`{}` carried invalid site id {site}",
+                        kind.operation()
+                    ))
+                })?;
+                Ok(Some((kind, site)))
+            })
+            .await
+    }
+
     pub(crate) async fn resume_unit(
         &self,
         context: crate::ActorSessionContext,
@@ -1355,6 +1495,82 @@ where
         self.access
             .with_machine(context, move |session, _, _| {
                 let answer = ().to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_int(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        value: u64,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let value = i64::try_from(value).map_err(|_| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "runtime identity exceeds Haskell Int".into(),
+                    )
+                })?;
+                let answer = value.to_value(session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_reply_rejection(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        error: crate::ReplyError,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer =
+                    crate::request_effect::rejected_reply_value(error, session.data_con_table())?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_response_observation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<crate::ResponseObservation, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = crate::request_effect::response_observation_value(
+                    observation,
+                    session.data_con_table(),
+                )?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_watch_observation(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        observation: Result<crate::WatchObservation, crate::ReplyError>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let answer = crate::request_effect::watch_observation_value(
+                    observation,
+                    session.data_con_table(),
+                )?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)
@@ -1405,6 +1621,32 @@ where
                 let answer = crate::actor_terminal_value(&terminal, session.data_con_table())?;
                 session
                     .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_call_status(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        failure: Option<String>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let (name, fields) = match failure {
+                    Some(summary) => (
+                        "Tidepool.Effects.Core.ActorCallFailed",
+                        vec![summary.to_value(table)?],
+                    ),
+                    None => ("Tidepool.Effects.Core.ActorCallSucceeded", Vec::new()),
+                };
+                let constructor = table.get_by_qualified_name(name).ok_or_else(|| {
+                    tidepool_bridge::BridgeError::UnknownDataConName(name.to_owned())
+                })?;
+                session
+                    .resume(hole, Value::Con(constructor, fields))
                     .map_err(ResidentActorWorkbenchError::Resident)
             })
             .await
@@ -1494,6 +1736,7 @@ where
 #[derive(Clone, Copy)]
 enum OutboundKind {
     Call,
+    TryCall,
     Cast,
 }
 
@@ -1534,6 +1777,11 @@ where
     let request = crate::MailboxValue::new(context.placement.session, custody);
     Ok(ResidentActorBoundary::Outbound(match kind {
         OutboundKind::Call => ResidentOutbound::Call {
+            target,
+            continuation: hole,
+            request,
+        },
+        OutboundKind::TryCall => ResidentOutbound::TryCall {
             target,
             continuation: hole,
             request,
@@ -1588,32 +1836,6 @@ fn unexpected_boundary(
         "expected `{expected}`, reached `{}`",
         actual.operation()
     ))
-}
-
-impl<H, O> AgentWorkbench for ResidentActorWorkbench<H, O>
-where
-    H: DispatchEffect<O> + Send + 'static,
-    O: OutputSink + Sync + 'static,
-{
-    type Completion = RootCustody;
-    type Error = ResidentActorWorkbenchError;
-
-    async fn execute(
-        &mut self,
-        admitted: &AdmittedAgentSession,
-        block: ParsedBlock,
-    ) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, Self::Error> {
-        let completion = self.completion.clone();
-        let type_modules = Arc::clone(&self.type_modules);
-        self.access
-            .with_machine(
-                admitted.session_context(),
-                move |session, context, source| {
-                    execute_checked_out(session, context, source, &completion, &type_modules, block)
-                },
-            )
-            .await
-    }
 }
 
 struct ReadyBlock {
@@ -1720,53 +1942,6 @@ where
     }
 }
 
-fn execute_checked_out<H, O>(
-    session: &mut ResidentSession<H, O>,
-    context: &crate::ActorSessionContext,
-    source: &ActorWorkbenchSource,
-    completion: &CompletionExpectation,
-    type_modules: &[String],
-    block: ParsedBlock,
-) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    let fragment_realm = RealmId::fresh();
-    let actor_context = context.run_context();
-    session
-        .set_actor_execution(
-            SessionRunContext::new(
-                fragment_realm,
-                actor_context.lexical_scope,
-                actor_context.principal,
-            ),
-            context.effect_policy,
-            context.live_payload,
-        )
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-    let kind = if block.source.trim_start().starts_with(':') {
-        GhciInputKind::Command
-    } else {
-        GhciInputKind::Code
-    };
-    let outcome = begin_fragment(
-        session,
-        context,
-        source,
-        completion,
-        type_modules,
-        block,
-        kind,
-    )
-    .and_then(|step| adapt_agent_step(session, step));
-    session.close_realm(fragment_realm);
-    session
-        .set_actor_execution(actor_context, context.effect_policy, context.live_payload)
-        .map_err(ResidentActorWorkbenchError::Resident)?;
-    outcome
-}
-
 fn run_discovery<H, O>(
     session: &ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
@@ -1786,7 +1961,7 @@ where
         Ok(Some(command)) => command,
         Ok(None) => {
             return Ok(Err(format!(
-            "unknown actor workbench command `:{}` (supported: :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :show imports)",
+            "unknown actor workbench command `:{}` (supported: :status, :type/:t, :info/:i, :browse, :browse!, :bindings/:b, :show imports)",
             line.name
         )))
         }
@@ -1954,49 +2129,6 @@ where
     }
 }
 
-fn adapt_agent_step<H, O>(
-    session: &mut ResidentSession<H, O>,
-    step: ResidentWorkbenchStep,
-) -> Result<BlockExecution<String, AgentBlockStop<RootCustody>>, ResidentActorWorkbenchError>
-where
-    H: DispatchEffect<O> + Send,
-    O: OutputSink + Sync,
-{
-    match step {
-        ResidentWorkbenchStep::Committed(receipt) => Ok(BlockExecution::Committed(receipt)),
-        ResidentWorkbenchStep::Rejected(diagnostic) => Ok(BlockExecution::Stopped(
-            AgentBlockStop::Rejected(diagnostic),
-        )),
-        ResidentWorkbenchStep::Completed(completion) => Ok(BlockExecution::Stopped(
-            AgentBlockStop::Completed(completion),
-        )),
-        ResidentWorkbenchStep::Running { fragment, outcome } => {
-            let ResidentOutcome::Suspended { request, .. } = *outcome else {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "running workbench step did not carry a suspension".into(),
-                ));
-            };
-            let operation = ResidentRequest::decode(&request, session.data_con_table())
-                .map_or_else(
-                    |error| error.to_string(),
-                    |request| request.operation().to_string(),
-                );
-            let output = if fragment.output.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n\nOutput before suspension:\n{}",
-                    fragment.output.join("\n")
-                )
-            };
-            Ok(BlockExecution::Stopped(AgentBlockStop::Rejected(format!(
-                "fragment suspended on `{}`, which the current actor interpreter could not settle{output}",
-                operation
-            ))))
-        }
-    }
-}
-
 fn projected_binding_receipt(
     bound_name: Option<&str>,
     output: &[String],
@@ -2017,7 +2149,6 @@ fn projected_binding_receipt(
 #[cfg(test)]
 mod request_tests {
     use super::*;
-    use tidepool_repr::{DataCon, DataConId, Literal};
 
     #[test]
     fn bare_browse_resolves_the_actor_incarnations_configured_api_module() {
@@ -2045,81 +2176,5 @@ mod request_tests {
             inspection_query(&source, ":browse", GhciInputKind::Code).unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn resident_roster_decodes_complete_nominally() {
-        let mut table = DataConTable::new();
-        table.insert(data_con(
-            1,
-            "CompleteWith",
-            "Tidepool.Deliberation.CompleteWith",
-            2,
-        ));
-        let request = Value::Con(
-            DataConId(1),
-            vec![
-                Value::Lit(Literal::LitInt(0)),
-                Value::Lit(Literal::LitInt(42)),
-            ],
-        );
-
-        let decoded = ResidentRequest::decode(&request, &table).expect("decode CompleteWith");
-        assert_eq!(decoded.operation(), "complete");
-    }
-
-    #[test]
-    fn same_spelled_complete_from_another_module_is_not_completion() {
-        let mut table = DataConTable::new();
-        table.insert(data_con(1, "CompleteWith", "User.CompleteWith", 2));
-        let request = Value::Con(
-            DataConId(1),
-            vec![
-                Value::Lit(Literal::LitInt(0)),
-                Value::Lit(Literal::LitInt(42)),
-            ],
-        );
-
-        assert!(matches!(
-            ResidentRequest::decode(&request, &table),
-            Err(ResidentActorWorkbenchError::UnsupportedRequest { constructor })
-                if constructor == "User.CompleteWith"
-        ));
-    }
-
-    #[test]
-    fn malformed_known_request_is_a_decode_error_not_an_unknown_operation() {
-        let mut table = DataConTable::new();
-        table.insert(data_con(
-            1,
-            "CompleteWith",
-            "Tidepool.Deliberation.CompleteWith",
-            2,
-        ));
-        let request = Value::Con(
-            DataConId(1),
-            vec![
-                Value::Lit(Literal::LitString(b"not an Int".to_vec())),
-                Value::Lit(Literal::LitInt(42)),
-            ],
-        );
-
-        assert!(matches!(
-            ResidentRequest::decode(&request, &table),
-            Err(ResidentActorWorkbenchError::RequestDecode { constructor, .. })
-                if constructor == "Tidepool.Deliberation.CompleteWith"
-        ));
-    }
-
-    fn data_con(id: u64, name: &str, qualified_name: &str, rep_arity: u32) -> DataCon {
-        DataCon {
-            id: DataConId(id),
-            name: name.to_string(),
-            tag: 1,
-            rep_arity,
-            field_bangs: Vec::new(),
-            qualified_name: Some(qualified_name.to_string()),
-            type_name: "Request".to_string(),
-        }
     }
 }

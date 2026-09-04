@@ -52,6 +52,18 @@ pub use failclass::{
 };
 pub use render::{value_to_json, EvalResult};
 
+/// Render a caught panic payload without discarding its useful string detail.
+#[must_use]
+pub fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_owned()
+    }
+}
+
 /// Result of successful Haskell compilation: a Core expression, DataCon metadata, and warnings.
 #[derive(Debug)]
 pub struct CompileResult {

@@ -11,19 +11,21 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 use tidepool_extract_cmd::exec_check::is_readable_executable_file;
+use tidepool_repr::version_ladder::{self, LadderError};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::{
     AgentBackendError, BackendThreadId, InteractiveAgentBackend, InteractiveAgentCommand,
     InteractiveAgentInstallation, InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode,
-    InteractiveNativeSandbox, ReasoningEffort,
+    InteractiveNativeSandbox, QueueReadyThread, ReasoningEffort,
 };
 
 const ENV_INTERACTIVE_CODEX_BIN: &str = "TIDEPOOL_INTERACTIVE_CODEX_BIN";
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const CLI_DEADLINE: Duration = Duration::from_secs(30);
 const CAPTURE_LIMIT: usize = 64 * 1024;
+pub const HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION: u32 = 2;
 
 /// Resolve and behaviorally verify the interactive Codex executable.
 ///
@@ -204,7 +206,7 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     fn push<'a>(
         &'a self,
         cwd: &'a str,
-        thread: &'a BackendThreadId,
+        thread: &'a QueueReadyThread,
         message: &'a str,
     ) -> InteractiveFuture<'a, ()> {
         Box::pin(queue_message(
@@ -218,7 +220,7 @@ impl InteractiveAgentBackend for CodexInteractiveBackend {
     fn archive<'a>(
         &'a self,
         cwd: &'a str,
-        thread: &'a BackendThreadId,
+        thread: &'a QueueReadyThread,
     ) -> InteractiveFuture<'a, ()> {
         Box::pin(archive_thread(&self.installation, Path::new(cwd), thread))
     }
@@ -319,16 +321,17 @@ fn config_encode_error(error: serde_json::Error) -> AgentBackendError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RolloutBinding {
-    pub version: u32,
-    pub thread: BackendThreadId,
+struct RolloutBinding {
+    version: u32,
+    thread: BackendThreadId,
 }
 
 impl RolloutBinding {
-    /// V3 is bound directly by Codex's host dynamic-tool session callback.
-    pub const VERSION: u32 = 3;
+    /// V4 certifies that the host session callback ran only after Codex made
+    /// the rollout durably discoverable to separate lifecycle processes.
+    const VERSION: u32 = 4;
 
-    pub fn new(thread: BackendThreadId) -> Result<Self, AgentBackendError> {
+    fn new(thread: BackendThreadId) -> Result<Self, AgentBackendError> {
         validate_thread(&thread)?;
         Ok(Self {
             version: Self::VERSION,
@@ -337,29 +340,71 @@ impl RolloutBinding {
     }
 }
 
-pub async fn read_binding(path: &Path) -> Result<RolloutBinding, AgentBackendError> {
+pub async fn read_binding(path: &Path) -> Result<QueueReadyThread, AgentBackendError> {
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|error| unavailable("read rollout binding", error))?;
-    let binding: RolloutBinding =
+    let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|error| AgentBackendError::ProtocolRejected {
             detail: format!("invalid rollout binding {}: {error}", path.display()),
         })?;
-    if binding.version != RolloutBinding::VERSION {
+    let found = version_ladder::found_version(&value);
+    let value = version_ladder::migrate_to_current(
+        value,
+        found,
+        RolloutBinding::VERSION,
+        RolloutBinding::VERSION,
+        &[],
+    )
+    .map_err(|error| binding_version_error(path, error))?;
+    let binding: RolloutBinding =
+        serde_json::from_value(value).map_err(|error| AgentBackendError::ProtocolRejected {
+            detail: format!("invalid rollout binding {}: {error}", path.display()),
+        })?;
+    validate_thread(&binding.thread)?;
+    Ok(QueueReadyThread::new(binding.thread))
+}
+
+fn binding_version_error(path: &Path, error: LadderError) -> AgentBackendError {
+    let detail = match error {
+        LadderError::BelowFloor { found, floor } => format!(
+            "rollout binding {} uses version {found}, below the queue-readiness floor {floor}, and cannot prove durable queue readiness; start a fresh Shoal root instead of resuming this conversation",
+            path.display()
+        ),
+        LadderError::UnsupportedVersion { found, current } => format!(
+            "rollout binding {} uses future version {found}, but this Tidepool build supports through version {current}; resume with a newer Tidepool build",
+            path.display()
+        ),
+        LadderError::Migration { from, source } => format!(
+            "rollout binding {} migration from version {from} failed: {source}",
+            path.display()
+        ),
+    };
+    AgentBackendError::ProtocolRejected { detail }
+}
+
+pub async fn accept_session_binding(
+    path: &Path,
+    protocol_version: u32,
+    thread: BackendThreadId,
+) -> Result<(), AgentBackendError> {
+    if protocol_version != HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION {
         return Err(AgentBackendError::ProtocolRejected {
             detail: format!(
-                "unsupported rollout binding version {} (expected {})",
-                binding.version,
-                RolloutBinding::VERSION
+                "unsupported host dynamic-tools protocol version {protocol_version}; expected {HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION}"
             ),
         });
     }
-    validate_thread(&binding.thread)?;
-    Ok(binding)
+    let binding = RolloutBinding::new(thread)?;
+    persist_binding(path, &binding).await?;
+    Ok(())
 }
 
-pub async fn write_binding(path: &Path, thread: BackendThreadId) -> Result<(), AgentBackendError> {
-    let binding = RolloutBinding::new(thread)?;
+pub async fn copy_binding(path: &Path, thread: &QueueReadyThread) -> Result<(), AgentBackendError> {
+    persist_binding(path, &RolloutBinding::new(thread.id().clone())?).await
+}
+
+async fn persist_binding(path: &Path, binding: &RolloutBinding) -> Result<(), AgentBackendError> {
     let bytes = serde_json::to_vec_pretty(&binding).map_err(|error| {
         AgentBackendError::ProtocolRejected {
             detail: format!("cannot encode rollout binding: {error}"),
@@ -384,10 +429,10 @@ pub async fn write_binding(path: &Path, thread: BackendThreadId) -> Result<(), A
 async fn queue_message(
     installation: &InteractiveAgentInstallation,
     cwd: &Path,
-    thread: &BackendThreadId,
+    thread: &QueueReadyThread,
     message: &str,
 ) -> Result<(), AgentBackendError> {
-    validate_thread(thread)?;
+    let thread = thread.id();
     run_cli(
         installation,
         cwd,
@@ -400,9 +445,9 @@ async fn queue_message(
 async fn archive_thread(
     installation: &InteractiveAgentInstallation,
     cwd: &Path,
-    thread: &BackendThreadId,
+    thread: &QueueReadyThread,
 ) -> Result<(), AgentBackendError> {
-    validate_thread(thread)?;
+    let thread = thread.id();
     run_cli(installation, cwd, "archive", ["archive", thread.0.as_str()]).await
 }
 
@@ -543,14 +588,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("binding.json");
         let thread = BackendThreadId(THREAD.to_string());
-        write_binding(&path, thread.clone()).await.unwrap();
-        assert_eq!(
-            read_binding(&path).await.unwrap(),
-            RolloutBinding {
-                version: RolloutBinding::VERSION,
-                thread
-            }
-        );
+        accept_session_binding(&path, HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION, thread.clone())
+            .await
+            .unwrap();
+        assert_eq!(read_binding(&path).await.unwrap().id(), &thread);
+        let encoded: RolloutBinding =
+            serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+        assert_eq!(encoded.version, 4);
+        assert_eq!(encoded.thread, thread);
     }
 
     #[tokio::test]
@@ -565,10 +610,39 @@ mod tests {
             Err(AgentBackendError::ProtocolRejected { .. })
         ));
 
+        tokio::fs::write(&path, format!(r#"{{"version": 3, "thread": "{THREAD}"}}"#))
+            .await
+            .unwrap();
+        let error = read_binding(&path).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot prove durable queue readiness"));
+        assert!(error.to_string().contains("start a fresh Shoal root"));
+
+        tokio::fs::write(&path, format!(r#"{{"version": 5, "thread": "{THREAD}"}}"#))
+            .await
+            .unwrap();
+        let error = read_binding(&path).await.unwrap_err();
+        assert!(error.to_string().contains("uses future version 5"));
+        assert!(error.to_string().contains("newer Tidepool build"));
+
         assert!(matches!(
             RolloutBinding::new(BackendThreadId("not-a-thread".to_string())),
             Err(AgentBackendError::ProtocolRejected { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_session_protocol_cannot_mint_or_persist_queue_readiness() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binding.json");
+        let error = accept_session_binding(&path, 1, BackendThreadId(THREAD.to_string()))
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported host dynamic-tools protocol version 1; expected 2"));
+        assert!(!path.exists());
     }
 
     #[test]

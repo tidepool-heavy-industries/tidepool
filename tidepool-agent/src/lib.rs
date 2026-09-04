@@ -19,11 +19,13 @@ pub mod interactive;
 pub mod seam;
 pub mod spawn;
 
+pub use backend::codex::node::HOST_DYNAMIC_TOOLS_PROTOCOL_VERSION;
 pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
     InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentInstallation,
     InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, InteractiveNativeSandbox,
+    QueueReadyThread,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,
@@ -63,17 +65,26 @@ pub fn native_interactive_agent_from_parts(
 /// interactive host-tools session callback.
 pub async fn read_interactive_binding(
     path: &std::path::Path,
-) -> Result<BackendThreadId, AgentBackendError> {
-    backend::codex::node::read_binding(path)
-        .await
-        .map(|binding| binding.thread)
+) -> Result<QueueReadyThread, AgentBackendError> {
+    backend::codex::node::read_binding(path).await
 }
 
-/// Durably retain the exact conversation binding selected by a composition
-/// root after the newly launched interactive process has proved readiness.
-pub async fn persist_interactive_binding(
+/// Accept the hosted-session protocol claim and durably retain the exact
+/// conversation. Queue-readiness proof is restored only by reading that
+/// current binding through [`read_interactive_binding`].
+pub async fn accept_interactive_session_binding(
     path: &std::path::Path,
+    protocol_version: u32,
     thread: BackendThreadId,
 ) -> Result<(), AgentBackendError> {
-    backend::codex::node::write_binding(path, thread).await
+    backend::codex::node::accept_session_binding(path, protocol_version, thread).await
+}
+
+/// Copy a previously certified queue-ready conversation binding to another
+/// durable location without weakening it back to an unproven thread id.
+pub async fn copy_interactive_binding(
+    path: &std::path::Path,
+    thread: &QueueReadyThread,
+) -> Result<(), AgentBackendError> {
+    backend::codex::node::copy_binding(path, thread).await
 }

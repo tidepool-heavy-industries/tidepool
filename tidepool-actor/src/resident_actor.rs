@@ -10,25 +10,25 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
-use tidepool_model::{DynModelProvider, StreamSink};
 use tidepool_runtime::session::{
-    OutputSink, ParsedBlock, ResidentOutcome, ResidentSession, RootCustody, WorkbenchItemReceipt,
-    WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus,
+    OutputSink, ParsedBlock, ResidentHole, ResidentOutcome, ResidentSession, RootCustody,
+    WorkbenchItemReceipt, WorkbenchItemStatus, WorkbenchRequest, WorkbenchResponse,
+    WorkbenchRunStatus,
 };
 use tokio::sync::mpsc;
 
 use crate::mailbox::{InstalledReceiver, ResidentOutbound};
+use crate::request::RequestRegistry;
 use crate::resident_workbench::{
     ResidentActorBoundary, ResidentActorStartupStep, ResidentKernelBoundary,
     ResidentWorkbenchFragment, ResidentWorkbenchStep,
 };
 use crate::{
-    ActorAgentSession, ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef,
-    ActorSessionContext, ActorTerminal, ActorWorkbenchSource, ChildExitNotice,
-    ExternalApplicationFailure, ExternalFailureDisposition, KernelBehavior, KernelBehaviorError,
-    KernelCallFailure, KernelContext, KernelInvocationFailure, KernelMessage, KernelStep,
-    LocalActorRef, MailboxValue, ResidentActorRunner, ResidentActorWorkbenchError,
-    ResidentCompletionExecutor, ResidentToolEndpoint,
+    ActorDescriptor, ActorExitKind, ActorMachineRegistry, ActorRef, ActorSessionContext,
+    ActorTerminal, ActorWorkbenchSource, ChildExitNotice, ExternalApplicationFailure,
+    ExternalFailureDisposition, KernelBehavior, KernelBehaviorError, KernelCallFailure,
+    KernelContext, KernelInvocationFailure, KernelMessage, KernelStep, LocalActorRef, MailboxValue,
+    ResidentActorRunner, ResidentActorWorkbenchError, ResidentToolEndpoint,
 };
 
 /// A compiled root at the point where ownership moves into its local actor.
@@ -78,6 +78,9 @@ pub enum LocalResidentDeployment {
     ChildExited {
         notice: ChildExitNotice,
     },
+    WatchChanged {
+        notification: crate::request::WatchNotification,
+    },
     Retired {
         actor: ActorRef,
         terminal: ActorTerminal,
@@ -86,22 +89,18 @@ pub enum LocalResidentDeployment {
 
 struct ResidentEnvironment<H, O> {
     runner: ResidentActorRunner<H, O>,
-    completions: ResidentCompletionExecutor<H, O>,
-    provider: Arc<dyn DynModelProvider>,
-    sink: Option<StreamSink>,
     deployments: mpsc::UnboundedSender<LocalResidentDeployment>,
     retired: Arc<Mutex<std::collections::HashSet<ActorRef>>>,
+    requests: Arc<RequestRegistry>,
 }
 
 impl<H, O> Clone for ResidentEnvironment<H, O> {
     fn clone(&self) -> Self {
         Self {
             runner: self.runner.clone(),
-            completions: self.completions.clone(),
-            provider: Arc::clone(&self.provider),
-            sink: self.sink.clone(),
             deployments: self.deployments.clone(),
             retired: Arc::clone(&self.retired),
+            requests: Arc::clone(&self.requests),
         }
     }
 }
@@ -117,6 +116,45 @@ enum ResidentStanding {
     Tools(crate::resident_tools::ResidentToolAwait),
     Interactive(crate::interactive_session::ResidentInteractiveAwait),
     Terminal,
+}
+
+struct WorkbenchExecutionFailure {
+    completed: Vec<WorkbenchItemReceipt>,
+    failed_index: usize,
+    total: usize,
+    source: ResidentActorWorkbenchError,
+}
+
+struct SuspendedCast {
+    site: u64,
+    receiver_continuation: ResidentHole,
+    handler_realm: RealmId,
+}
+
+struct ReceiverSettlement<'a> {
+    caller: Option<ActorRef>,
+    ancestry: &'a crate::CallAncestry,
+    suspended: SuspendedCast,
+    outcome: ResidentOutcome,
+}
+
+enum ResidentCallError {
+    Call(KernelCallFailure),
+    Runtime(ResidentActorWorkbenchError),
+}
+
+fn workbench_failure(
+    completed: &[WorkbenchItemReceipt],
+    failed_index: usize,
+    total: usize,
+    source: ResidentActorWorkbenchError,
+) -> WorkbenchExecutionFailure {
+    WorkbenchExecutionFailure {
+        completed: completed.to_vec(),
+        failed_index,
+        total,
+        source,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -163,11 +201,12 @@ pub struct ResidentKernelBehavior<H, O> {
     environment: ResidentEnvironment<H, O>,
     boot: Option<ResidentBoot>,
     standing: ResidentStanding,
-    session: Option<ActorAgentSession>,
     shutdown_hook: Option<RootCustody>,
     launch_worktrees: Vec<String>,
     policy_installed: bool,
     pending_program: Option<ResidentOutcome>,
+    pending_reply: Option<crate::RequestId>,
+    suspended_cast: Option<SuspendedCast>,
     child_exit_observations: ChildExitObservations,
     deferred_child_failures: Vec<ChildExitNotice>,
     next_activation_sequence: u64,
@@ -191,11 +230,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             environment,
             boot: Some(ResidentBoot::Prepared(Box::new(outcome))),
             standing: ResidentStanding::Boot,
-            session: None,
             shutdown_hook: None,
             launch_worktrees: Vec::new(),
             policy_installed: false,
             pending_program: None,
+            pending_reply: None,
+            suspended_cast: None,
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
@@ -213,11 +253,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             environment,
             boot: Some(ResidentBoot::Entry(entry)),
             standing: ResidentStanding::Boot,
-            session: None,
             shutdown_hook: None,
             launch_worktrees,
             policy_installed: false,
             pending_program: None,
+            pending_reply: None,
+            suspended_cast: None,
             child_exit_observations: ChildExitObservations::default(),
             deferred_child_failures: Vec::new(),
             next_activation_sequence: 1,
@@ -261,6 +302,45 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 .send(LocalResidentDeployment::Retired { actor, terminal });
         }
     }
+
+    fn publish_watch_notifications(
+        &self,
+        notifications: impl IntoIterator<Item = crate::request::WatchNotification>,
+    ) {
+        for notification in notifications {
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::WatchChanged { notification });
+        }
+    }
+
+    fn status_text(&self, actor: ActorRef) -> String {
+        let (standing, current_request) = match &self.standing {
+            ResidentStanding::Boot => ("booting", None),
+            ResidentStanding::Receiving(_) => ("receiving", None),
+            ResidentStanding::Tools(_) => ("awaiting-tool", None),
+            ResidentStanding::Interactive(awaiting) => {
+                ("request-active", Some(awaiting.request.request))
+            }
+            ResidentStanding::Terminal => ("terminal", None),
+        };
+        let requests = self.environment.requests.status_for(actor);
+        format!(
+            "actor {}@{} label={:?}: application={}; program={standing}; current_request={current_request:?}; worktrees={:?}; responses pending={:?} ready={:?} unavailable={:?}; watches pending={:?} ready={:?} unavailable={:?}",
+            actor.id.0,
+            actor.incarnation.0,
+            self.descriptor.label(),
+            if self.policy_installed { "attached" } else { "detached" },
+            self.launch_worktrees,
+            requests.pending_responses,
+            requests.ready_responses,
+            requests.unavailable_responses,
+            requests.pending_watches,
+            requests.ready_watches,
+            requests.unavailable_watches,
+        )
+    }
 }
 
 impl<H, O> ResidentKernelBehavior<H, O>
@@ -268,26 +348,62 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    async fn resolve_completion(
-        &mut self,
-        completion: crate::ResidentCompletion,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
-        let session = self.session.as_ref().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "resident actor has no model transcript".into(),
-            )
-        })?;
-        let mut admitted = session.begin_agent_session();
-        self.environment
-            .completions
-            .resolve_admitted(
-                &mut admitted,
-                self.environment.provider.as_ref(),
-                completion,
-                self.environment.sink.clone(),
+    async fn perform_call(
+        &self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        ancestry: &crate::CallAncestry,
+        target: ActorRef,
+        request: MailboxValue,
+    ) -> Result<MailboxValue, ResidentCallError> {
+        ancestry.enter(target).map_err(ResidentCallError::Call)?;
+        let target_ref = kernel
+            .resolve(target)
+            .ok_or_else(|| ResidentCallError::Call(KernelCallFailure::TargetUnavailable(target)))?;
+        if target_ref.terminal().get().is_some() {
+            return Err(ResidentCallError::Call(KernelCallFailure::TargetExited(
+                target,
+            )));
+        }
+        let target_context = kernel
+            .session_context(target)
+            .ok_or_else(|| ResidentCallError::Call(KernelCallFailure::TargetUnavailable(target)))?;
+        if target_context.placement.session != context.placement.session {
+            return Err(ResidentCallError::Call(
+                KernelCallFailure::MachineBoundary {
+                    caller: context.actor,
+                    caller_session: context.placement.session,
+                    target,
+                    target_session: target_context.placement.session,
+                },
+            ));
+        }
+        let request = self
+            .environment
+            .runner
+            .rehome_mailbox_value(
+                context.clone(),
+                request,
+                target_context.placement.resource_scope,
             )
             .await
-            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))
+            .map_err(ResidentCallError::Runtime)?;
+        target_ref
+            .address()
+            .call(
+                |reply| KernelMessage::Call {
+                    caller: context.actor,
+                    ancestry: ancestry.clone(),
+                    request,
+                    reply,
+                },
+                None,
+            )
+            .await
+            .map_err(|_| ResidentCallError::Call(KernelCallFailure::TargetExited(target)))?
+            .success_or_else(|| KernelCallFailure::TargetExited(target))
+            .map_err(ResidentCallError::Call)?
+            .map_err(ResidentCallError::Call)
     }
 
     async fn start_child(
@@ -395,67 +511,39 @@ where
                 continuation,
                 request,
             } => {
-                ancestry.enter(target).map_err(|error| {
-                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
-                })?;
-                let target_ref = kernel.resolve(target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::TargetUnavailable(target).to_string(),
-                    )
-                })?;
-                let target_context = kernel.session_context(target).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::TargetUnavailable(target).to_string(),
-                    )
-                })?;
-                if target_context.placement.session != context.placement.session {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                        KernelCallFailure::MachineBoundary {
-                            caller: context.actor,
-                            caller_session: context.placement.session,
-                            target,
-                            target_session: target_context.placement.session,
-                        }
-                        .to_string(),
-                    ));
-                }
-                let request = self
-                    .environment
-                    .runner
-                    .rehome_mailbox_value(
-                        context.clone(),
-                        request,
-                        target_context.placement.resource_scope,
-                    )
-                    .await?;
-                let reply = target_ref
-                    .address()
-                    .call(
-                        |reply| KernelMessage::Call {
-                            caller: context.actor,
-                            ancestry: ancestry.clone(),
-                            request,
-                            reply,
-                        },
-                        None,
-                    )
+                let reply = self
+                    .perform_call(kernel, context, ancestry, target, request)
                     .await
-                    .map_err(|_| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            KernelCallFailure::TargetExited(target).to_string(),
-                        )
-                    })?
-                    .success_or_else(|| {
-                        ResidentActorWorkbenchError::ActorProtocol(
-                            KernelCallFailure::TargetExited(target).to_string(),
-                        )
-                    })?
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    .map_err(|error| match error {
+                        ResidentCallError::Call(error) => {
+                            ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                        }
+                        ResidentCallError::Runtime(error) => error,
                     })?;
                 self.environment
                     .runner
                     .resume_live(context.clone(), continuation, reply.into_custody())
+                    .await
+            }
+            ResidentOutbound::TryCall {
+                target,
+                continuation,
+                request,
+            } => {
+                let failure = match self
+                    .perform_call(kernel, context, ancestry, target, request)
+                    .await
+                {
+                    Ok(reply) => {
+                        drop(reply);
+                        None
+                    }
+                    Err(ResidentCallError::Call(error)) => Some(error.to_string()),
+                    Err(ResidentCallError::Runtime(error)) => return Err(error),
+                };
+                self.environment
+                    .runner
+                    .resume_call_status(context.clone(), continuation, failure)
                     .await
             }
         }
@@ -469,9 +557,6 @@ where
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
         match boundary {
-            ResidentActorBoundary::Deliberate(completion) => {
-                self.resolve_completion(completion).await
-            }
             ResidentActorBoundary::Start(start) => self.start_child(kernel, context, start).await,
             ResidentActorBoundary::Outbound(outbound) => {
                 self.resolve_outbound(kernel, context, ancestry, outbound)
@@ -514,6 +599,109 @@ where
                     self.record_child_observation(poll.target);
                 }
                 Ok(outcome)
+            }
+            ResidentActorBoundary::RequestReservation(reservation) => {
+                let request = self
+                    .environment
+                    .requests
+                    .reserve(context.actor, reservation.target);
+                self.environment
+                    .runner
+                    .resume_int(context.clone(), reservation.continuation, request.0)
+                    .await
+            }
+            ResidentActorBoundary::RequestSubmission(submission) => {
+                let target = kernel.resolve(submission.target);
+                let target_context = kernel.session_context(submission.target);
+                let deliverable = target.as_ref().zip(target_context.as_ref()).filter(
+                    |(target, target_context)| {
+                        target.terminal().get().is_none()
+                            && target_context.placement.session == context.placement.session
+                    },
+                );
+                if let Some((target, target_context)) = deliverable {
+                    let message = self
+                        .environment
+                        .runner
+                        .rehome_mailbox_value(
+                            context.clone(),
+                            submission.message,
+                            target_context.placement.resource_scope,
+                        )
+                        .await?;
+                    self.environment
+                        .requests
+                        .mark_queued(context.actor, submission.target, submission.request)
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "request submission was rejected: {error:?}"
+                            ))
+                        })?;
+                    if target
+                        .address()
+                        .send_message(KernelMessage::Cast {
+                            sender: context.actor,
+                            request: message,
+                        })
+                        .is_err()
+                    {
+                        let notifications = self
+                            .environment
+                            .requests
+                            .mark_target_unavailable(context.actor, submission.request);
+                        self.publish_watch_notifications(notifications);
+                    }
+                    self.environment
+                        .runner
+                        .resume_unit(context.clone(), submission.continuation)
+                        .await
+                } else {
+                    let notifications = self
+                        .environment
+                        .requests
+                        .mark_target_unavailable(context.actor, submission.request);
+                    self.publish_watch_notifications(notifications);
+                    self.environment
+                        .runner
+                        .resume_unit(context.clone(), submission.continuation)
+                        .await
+                }
+            }
+            ResidentActorBoundary::ResponsePoll(poll) => {
+                let observation = self
+                    .environment
+                    .requests
+                    .observe_response(context.actor, poll.request);
+                self.environment
+                    .runner
+                    .resume_response_observation(context.clone(), poll.continuation, observation)
+                    .await
+            }
+            ResidentActorBoundary::WatchRegistration(registration) => {
+                let (watch, notifications) = self
+                    .environment
+                    .requests
+                    .register_watch(context.actor, registration.dependencies)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "watch registration was rejected: {error:?}"
+                        ))
+                    })?;
+                self.publish_watch_notifications(notifications);
+                self.environment
+                    .runner
+                    .resume_int(context.clone(), registration.continuation, watch.0)
+                    .await
+            }
+            ResidentActorBoundary::WatchPoll(poll) => {
+                let observation = self
+                    .environment
+                    .requests
+                    .observe_watch(context.actor, poll.watch);
+                self.environment
+                    .runner
+                    .resume_watch_observation(context.clone(), poll.continuation, observation)
+                    .await
             }
             other => Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                 "`{}` is not an active actor effect",
@@ -573,72 +761,25 @@ where
                     return Ok(KernelStep::Continue(()));
                 }
                 ResidentActorBoundary::AgentSession(session) => {
-                    let (request, hole, input) = session.into_parts();
-                    let activation_reason = request.activation_reason;
-                    let workbench = self
+                    self.park_interactive(kernel, context, session).await?;
+                    return Ok(KernelStep::Continue(()));
+                }
+                ResidentActorBoundary::AgentAttachment(attachment) => {
+                    if self.policy_installed {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor installed its Codex application more than once".into(),
+                        ));
+                    }
+                    self.install_interactive_policy(
+                        kernel,
+                        context,
+                        attachment.initial_user_message,
+                    )?;
+                    outcome = self
                         .environment
                         .runner
-                        .workbench(request.completion.clone(), request.output_modules.clone());
-                    workbench
-                        .mount_named_input(
-                            context.clone(),
-                            "sessionInput",
-                            request.input_type.clone(),
-                            input,
-                        )
+                        .resume_unit(context.clone(), attachment.continuation)
                         .await?;
-                    if !self.policy_installed {
-                        let actor = kernel.resolve(context.actor).ok_or_else(|| {
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "local actor was absent from its routing directory".into(),
-                            )
-                        })?;
-                        let policy: Arc<dyn ResidentToolEndpoint> =
-                            Arc::new(crate::ResidentInteractivePolicy::local(actor.clone()));
-                        let installation = LocalResidentInstallation {
-                            actor,
-                            label: self.descriptor.label().to_owned(),
-                            policy,
-                            initial_user_message: request.initial_user_message.clone(),
-                            launch_worktrees: self.launch_worktrees.clone(),
-                        };
-                        self.publish_installation(installation);
-                        self.policy_installed = true;
-                    }
-                    self.standing = ResidentStanding::Interactive(
-                        crate::interactive_session::ResidentInteractiveAwait { request, hole },
-                    );
-                    if let Some(activation) = crate::ResidentActivation::mounted(
-                        context.actor,
-                        self.next_activation_sequence,
-                        activation_reason,
-                        match &self.standing {
-                            ResidentStanding::Interactive(awaiting) => {
-                                awaiting.request.input_type.clone()
-                            }
-                            _ => unreachable!(),
-                        },
-                    ) {
-                        self.next_activation_sequence += 1;
-                        let _ = self
-                            .environment
-                            .deployments
-                            .send(LocalResidentDeployment::SessionReady { activation });
-                    }
-                    if activation_reason == crate::ActivationReason::ManualReady {
-                        for notice in self.deferred_child_failures.drain(..) {
-                            if !self
-                                .child_exit_observations
-                                .process(notice.child.identity())
-                            {
-                                let _ = self
-                                    .environment
-                                    .deployments
-                                    .send(LocalResidentDeployment::ChildExited { notice });
-                            }
-                        }
-                    }
-                    return Ok(KernelStep::Continue(()));
                 }
                 boundary => {
                     outcome = self
@@ -647,6 +788,98 @@ where
                 }
             }
         }
+    }
+
+    async fn park_interactive(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        session: crate::ResidentInteractiveSession,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        let (request, hole, input) = session.into_parts();
+        self.environment
+            .requests
+            .present(context.actor, request.request)
+            .map_err(|error| {
+                ResidentActorWorkbenchError::ActorProtocol(format!(
+                    "request presentation was rejected: {error:?}"
+                ))
+            })?;
+        let request_message = request.initial_user_message.clone();
+        let already_installed = self.policy_installed;
+        let workbench = self.environment.runner.workbench(
+            request.response.clone(),
+            request.request,
+            request.output_modules.clone(),
+        );
+        workbench
+            .mount_named_input(
+                context.clone(),
+                "sessionInput",
+                request.input_type.clone(),
+                input,
+            )
+            .await?;
+        self.install_interactive_policy(kernel, context, request.initial_user_message.clone())?;
+        self.standing =
+            ResidentStanding::Interactive(crate::interactive_session::ResidentInteractiveAwait {
+                request,
+                hole,
+            });
+        if already_installed {
+            let activation = crate::ResidentActivation::mounted(
+                context.actor,
+                self.next_activation_sequence,
+                match &self.standing {
+                    ResidentStanding::Interactive(awaiting) => awaiting.request.request,
+                    _ => unreachable!(),
+                },
+                match &self.standing {
+                    ResidentStanding::Interactive(awaiting) => awaiting.request.input_type.clone(),
+                    _ => unreachable!(),
+                },
+                request_message.as_deref(),
+            );
+            self.next_activation_sequence += 1;
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::SessionReady { activation });
+        }
+        Ok(())
+    }
+
+    fn install_interactive_policy(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        initial_user_message: Option<String>,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if self.policy_installed {
+            return Ok(());
+        }
+        let actor = kernel.resolve(context.actor).ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "local actor was absent from its routing directory".into(),
+            )
+        })?;
+        let policy: Arc<dyn ResidentToolEndpoint> =
+            Arc::new(crate::ResidentInteractivePolicy::local(actor.clone()));
+        self.publish_installation(LocalResidentInstallation {
+            actor,
+            label: self.descriptor.label().to_owned(),
+            policy,
+            initial_user_message,
+            launch_worktrees: self.launch_worktrees.clone(),
+        });
+        self.policy_installed = true;
+        for notice in self.deferred_child_failures.drain(..) {
+            let _ = self
+                .environment
+                .deployments
+                .send(LocalResidentDeployment::ChildExited { notice });
+        }
+        Ok(())
     }
 
     async fn initialize(
@@ -688,8 +921,22 @@ where
                                 .resume_unit(context.clone(), continuation)
                                 .await?;
                         }
-                        ResidentActorStartupStep::Deliberate(completion) => {
-                            outcome = self.resolve_completion(completion).await?;
+                        ResidentActorStartupStep::Attach(attachment) => {
+                            if self.policy_installed {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "actor installed its Codex application more than once".into(),
+                                ));
+                            }
+                            self.install_interactive_policy(
+                                kernel,
+                                context,
+                                attachment.initial_user_message,
+                            )?;
+                            outcome = self
+                                .environment
+                                .runner
+                                .resume_unit(context.clone(), attachment.continuation)
+                                .await?;
                         }
                         ResidentActorStartupStep::Ready(readiness) => {
                             break self
@@ -738,17 +985,79 @@ where
             .runner
             .rehome_mailbox_value(context.clone(), request, context.placement.resource_scope)
             .await?;
+        let InstalledReceiver {
+            site,
+            continuation: receiver_continuation,
+            handler,
+        } = receiver;
         let handler_realm = RealmId::fresh();
         let outcome = self
             .environment
             .runner
             .run_mailbox_handler(
                 context.clone(),
-                receiver.handler,
+                handler,
                 request.into_custody(),
                 handler_realm,
             )
             .await?;
+        if caller.is_none()
+            && self
+                .environment
+                .runner
+                .kernel_boundary(context.clone(), &outcome)
+                .await?
+                .is_none()
+        {
+            let step = self
+                .advance_cast_handler(
+                    kernel,
+                    context,
+                    ancestry,
+                    SuspendedCast {
+                        site,
+                        receiver_continuation,
+                        handler_realm,
+                    },
+                    outcome,
+                )
+                .await?;
+            return Ok((None, step));
+        }
+        self.finish_receiver(
+            kernel,
+            context,
+            ReceiverSettlement {
+                caller,
+                ancestry,
+                suspended: SuspendedCast {
+                    site,
+                    receiver_continuation,
+                    handler_realm,
+                },
+                outcome,
+            },
+        )
+        .await
+    }
+
+    async fn finish_receiver(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        settlement: ReceiverSettlement<'_>,
+    ) -> Result<(Option<MailboxValue>, KernelStep<()>), ResidentActorWorkbenchError> {
+        let ReceiverSettlement {
+            caller,
+            ancestry,
+            suspended:
+                SuspendedCast {
+                    site,
+                    receiver_continuation,
+                    handler_realm,
+                },
+            outcome,
+        } = settlement;
         let reply = self
             .environment
             .runner
@@ -756,7 +1065,7 @@ where
                 context.clone(),
                 outcome,
                 ResidentKernelBoundary::Reply,
-                receiver.site,
+                site,
                 handler_realm,
                 context.placement.resource_scope,
             )
@@ -795,7 +1104,7 @@ where
                 context.clone(),
                 outcome,
                 ResidentKernelBoundary::Continue,
-                receiver.site,
+                site,
                 handler_realm,
                 context.placement.resource_scope,
             )
@@ -817,12 +1126,67 @@ where
         let program = self
             .environment
             .runner
-            .resume_live(context.clone(), receiver.continuation, next.value)
+            .resume_live(context.clone(), receiver_continuation, next.value)
             .await?;
         let step = self
             .stabilize_program(kernel, context, ancestry, program)
             .await?;
         Ok((reply, step))
+    }
+
+    async fn advance_cast_handler(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        ancestry: &crate::CallAncestry,
+        suspended: SuspendedCast,
+        mut outcome: ResidentOutcome,
+    ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        loop {
+            if self
+                .environment
+                .runner
+                .kernel_boundary(context.clone(), &outcome)
+                .await?
+                .is_some()
+            {
+                let (_, step) = self
+                    .finish_receiver(
+                        kernel,
+                        context,
+                        ReceiverSettlement {
+                            caller: None,
+                            ancestry,
+                            suspended,
+                            outcome,
+                        },
+                    )
+                    .await?;
+                return Ok(step);
+            }
+            let boundary = self
+                .environment
+                .runner
+                .capture_boundary(context.clone(), outcome, suspended.handler_realm)
+                .await?;
+            match boundary {
+                ResidentActorBoundary::AgentSession(session) => {
+                    self.park_interactive(kernel, context, session).await?;
+                    if self.suspended_cast.replace(suspended).is_some() {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "actor parked a second mailbox handler before resuming the first"
+                                .into(),
+                        ));
+                    }
+                    return Ok(KernelStep::Continue(()));
+                }
+                boundary => {
+                    outcome = self
+                        .resolve_effect(kernel, context, ancestry, boundary)
+                        .await?;
+                }
+            }
+        }
     }
 
     async fn settle_fragment_effects(
@@ -847,6 +1211,40 @@ where
                         .runner
                         .capture_boundary(context.clone(), *next, context.placement.resource_scope)
                         .await?;
+                    if let ResidentActorBoundary::ReplyAttempt(attempt) = boundary {
+                        match self
+                            .environment
+                            .requests
+                            .begin_reply(context.actor, attempt.request)
+                        {
+                            Ok(()) => {
+                                return Ok(ResidentWorkbenchStep::Replied {
+                                    request: attempt.request,
+                                    result: attempt.result,
+                                });
+                            }
+                            Err(error) if attempt.recoverable => {
+                                drop(attempt.result);
+                                outcome = self
+                                    .environment
+                                    .runner
+                                    .resume_reply_rejection(
+                                        context.clone(),
+                                        attempt.continuation,
+                                        error,
+                                    )
+                                    .await?;
+                                fragment = next_fragment;
+                                continue;
+                            }
+                            Err(error) => {
+                                drop(attempt.result);
+                                return Ok(ResidentWorkbenchStep::Rejected(format!(
+                                    "reply rejected: {error:?}"
+                                )));
+                            }
+                        }
+                    }
                     outcome = self
                         .resolve_effect(
                             kernel,
@@ -867,28 +1265,45 @@ where
         kernel: &KernelContext,
         context: &ActorSessionContext,
         request: WorkbenchRequest,
-    ) -> Result<KernelStep<WorkbenchResponse>, ResidentActorWorkbenchError> {
-        let ResidentStanding::Interactive(awaiting_view) = &self.standing else {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "interactive workbench lost its agent-session continuation".into(),
-            ));
-        };
-        let workbench = self
-            .environment
-            .runner
-            .workbench(
-                awaiting_view.request.completion.clone(),
-                awaiting_view.request.output_modules.clone(),
-            )
-            .with_json_input(
-                request
-                    .input
-                    .as_ref()
-                    .map(tidepool_runtime::session::normalize_workbench_input),
-            );
+    ) -> Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure> {
+        let workbench = match &self.standing {
+            ResidentStanding::Interactive(awaiting) => self.environment.runner.workbench(
+                awaiting.request.response.clone(),
+                awaiting.request.request,
+                awaiting.request.output_modules.clone(),
+            ),
+            ResidentStanding::Receiving(_) if self.policy_installed => {
+                self.environment.runner.application_workbench()
+            }
+            _ => {
+                return Err(workbench_failure(
+                    &[],
+                    0,
+                    request.items.len(),
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        "actor application has no active Haskell workbench".into(),
+                    ),
+                ));
+            }
+        }
+        .with_json_input(
+            request
+                .input
+                .as_ref()
+                .map(tidepool_runtime::session::normalize_workbench_input),
+        );
         let mut receipts = Vec::new();
         let mut index = 0;
         while index < request.items.len() {
+            if request.items[index].trim() == ":status" {
+                receipts.push(WorkbenchItemReceipt {
+                    index,
+                    status: WorkbenchItemStatus::Committed,
+                    output: self.status_text(context.actor),
+                });
+                index += 1;
+                continue;
+            }
             if let Ok(Some(first)) =
                 workbench.inspection_query(&request.items[index], request.input_kind(index))
             {
@@ -903,7 +1318,12 @@ where
                     }
                 }
                 let batch_len = queries.len();
-                let outputs = workbench.inspect_items(context.clone(), queries).await?;
+                let outputs = workbench
+                    .inspect_items(context.clone(), queries)
+                    .await
+                    .map_err(|source| {
+                        workbench_failure(&receipts, index, request.items.len(), source)
+                    })?;
                 for (offset, output) in outputs.into_iter().enumerate() {
                     let receipt_index = index + offset;
                     match output {
@@ -939,11 +1359,17 @@ where
             };
             let mut step = workbench
                 .begin_item(context.clone(), block, request.input_kind(index))
-                .await?;
+                .await
+                .map_err(|source| {
+                    workbench_failure(&receipts, index, request.items.len(), source)
+                })?;
             if let ResidentWorkbenchStep::Running { fragment, outcome } = step {
                 step = self
                     .settle_fragment_effects(kernel, context, &workbench, fragment, *outcome)
-                    .await?;
+                    .await
+                    .map_err(|source| {
+                        workbench_failure(&receipts, index, request.items.len(), source)
+                    })?;
             }
             match step {
                 ResidentWorkbenchStep::Committed(output) => receipts.push(WorkbenchItemReceipt {
@@ -964,39 +1390,77 @@ where
                         request.items.len(),
                     )));
                 }
-                ResidentWorkbenchStep::Completed(answer) => {
+                ResidentWorkbenchStep::Replied {
+                    request: request_id,
+                    result,
+                } => {
                     let awaiting =
                         match std::mem::replace(&mut self.standing, ResidentStanding::Boot) {
-                            ResidentStanding::Interactive(awaiting) => awaiting,
+                            ResidentStanding::Interactive(awaiting)
+                                if awaiting.request.request == request_id =>
+                            {
+                                awaiting
+                            }
+                            ResidentStanding::Interactive(awaiting) => {
+                                self.standing = ResidentStanding::Interactive(awaiting);
+                                self.environment.requests.rollback_reply(request_id);
+                                return Err(workbench_failure(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "reply did not match the active request".into(),
+                                    ),
+                                ));
+                            }
                             standing => {
                                 self.standing = standing;
-                                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                    "completion lost its agent-session continuation".into(),
+                                self.environment.requests.rollback_reply(request_id);
+                                return Err(workbench_failure(
+                                    &receipts,
+                                    index,
+                                    request.items.len(),
+                                    ResidentActorWorkbenchError::ActorProtocol(
+                                        "reply lost its request continuation".into(),
+                                    ),
                                 ));
                             }
                         };
                     let outcome = match workbench
-                        .resume_completion(context.clone(), awaiting.hole.clone(), answer)
+                        .resume_request(context.clone(), awaiting.hole.clone(), result)
                         .await
                     {
                         Ok(outcome) => outcome,
                         Err(error) => {
                             self.standing = ResidentStanding::Interactive(awaiting);
-                            return Err(error);
+                            self.environment.requests.rollback_reply(request_id);
+                            return Err(workbench_failure(
+                                &receipts,
+                                index,
+                                request.items.len(),
+                                error,
+                            ));
                         }
                     };
-                    if self.pending_program.replace(outcome).is_some() {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(
-                            "actor yielded a second continuation before resuming the first".into(),
+                    if self.pending_program.replace(outcome).is_some()
+                        || self.pending_reply.replace(request_id).is_some()
+                    {
+                        self.environment.requests.rollback_reply(request_id);
+                        return Err(workbench_failure(
+                            &receipts,
+                            index,
+                            request.items.len(),
+                            ResidentActorWorkbenchError::ActorProtocol(
+                                "actor settled a second reply before resuming the first".into(),
+                            ),
                         ));
                     }
-                    let response = workbench_response(
-                        WorkbenchRunStatus::Completed,
+                    return Ok(KernelStep::ContinueLater(workbench_response(
+                        WorkbenchRunStatus::Replied,
                         receipts,
                         index + 1,
                         request.items.len(),
-                    );
-                    return Ok(KernelStep::ContinueLater(response));
+                    )));
                 }
                 ResidentWorkbenchStep::Running { .. } => {
                     unreachable!("running workbench steps are settled above")
@@ -1018,6 +1482,10 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
+    fn accepts_mailbox(&self) -> bool {
+        matches!(self.standing, ResidentStanding::Receiving(_))
+    }
+
     fn start<'a>(
         &'a mut self,
         kernel: &'a KernelContext,
@@ -1025,7 +1493,6 @@ where
         Box::pin(async move {
             let context = self.context(kernel.identity());
             kernel.install_session_context(context.clone())?;
-            self.session = Some(ActorAgentSession::local(context.clone()));
             let boot = self.boot.take().ok_or_else(|| KernelBehaviorError {
                 detail: "resident actor boot was consumed twice".into(),
             })?;
@@ -1191,15 +1658,28 @@ where
     > {
         Box::pin(async move {
             let context = self.context(kernel.identity());
-            if !matches!(self.standing, ResidentStanding::Interactive(_)) {
+            if !self.policy_installed
+                || !matches!(
+                    self.standing,
+                    ResidentStanding::Interactive(_) | ResidentStanding::Receiving(_)
+                )
+            {
                 return Err(KernelInvocationFailure::Rejected {
                     actor: context.actor,
-                    detail: "actor has no active Haskell agent session".into(),
+                    detail: "actor has no active Haskell application workbench".into(),
                 });
             }
             self.execute_workbench(kernel, &context, request)
                 .await
-                .map_err(|error| Self::invocation_failure(context.actor, error))
+                .map_err(|failure| {
+                    KernelInvocationFailure::Workbench(crate::KernelWorkbenchFailure {
+                        actor: context.actor,
+                        completed: failure.completed,
+                        failed_index: failure.failed_index,
+                        total: failure.total,
+                        detail: failure.source.to_string(),
+                    })
+                })
         })
     }
 
@@ -1215,14 +1695,41 @@ where
                 .ok_or_else(|| KernelBehaviorError {
                     detail: "resident actor resumed without a pending Haskell action".into(),
                 })?;
-            self.stabilize_program(
-                kernel,
-                &context,
-                &crate::CallAncestry::begin(context.actor),
-                outcome,
-            )
-            .await
-            .map_err(Self::failure)
+            let step = if let Some(suspended) = self.suspended_cast.take() {
+                self.advance_cast_handler(
+                    kernel,
+                    &context,
+                    &crate::CallAncestry::begin(context.actor),
+                    suspended,
+                    outcome,
+                )
+                .await
+                .map_err(Self::failure)
+            } else {
+                self.stabilize_program(
+                    kernel,
+                    &context,
+                    &crate::CallAncestry::begin(context.actor),
+                    outcome,
+                )
+                .await
+                .map_err(Self::failure)
+            };
+            match step {
+                Ok(step) => {
+                    if let Some(request) = self.pending_reply.take() {
+                        let notifications = self.environment.requests.finish_reply(request);
+                        self.publish_watch_notifications(notifications);
+                    }
+                    Ok(step)
+                }
+                Err(error) => {
+                    if let Some(request) = self.pending_reply.take() {
+                        self.environment.requests.rollback_reply(request);
+                    }
+                    Err(error)
+                }
+            }
         })
     }
 
@@ -1241,6 +1748,11 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<(), KernelBehaviorError>> {
         Box::pin(async move {
             let context = self.context(kernel.identity());
+            let notifications = self
+                .environment
+                .requests
+                .actor_stopped(context.actor, terminal);
+            self.publish_watch_notifications(notifications);
             if let Some(hook) = self.shutdown_hook.take() {
                 self.environment
                     .runner
@@ -1270,6 +1782,11 @@ where
         terminal: &'a ActorTerminal,
     ) -> futures_util::future::BoxFuture<'a, ()> {
         Box::pin(async move {
+            let notifications = self
+                .environment
+                .requests
+                .actor_stopped(kernel.identity(), terminal);
+            self.publish_watch_notifications(notifications);
             self.publish_retired(kernel.identity(), terminal.clone());
         })
     }
@@ -1297,8 +1814,6 @@ where
 
 pub async fn spawn_resident_root<H, O>(
     source: ActorWorkbenchSource,
-    provider: Arc<dyn DynModelProvider>,
-    sink: Option<StreamSink>,
     root: ResidentActorRoot<H, O>,
 ) -> Result<
     (
@@ -1316,16 +1831,13 @@ where
     let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
     let session = descriptor.placement().session;
     debug_assert!(machines.insert_idle(session, machine).is_none());
-    let runner = ResidentActorRunner::new(Arc::clone(&machines), source.clone());
-    let completions = ResidentCompletionExecutor::new(machines, source);
+    let runner = ResidentActorRunner::new(machines, source);
     let (deployments, receiver) = mpsc::unbounded_channel();
     let environment = ResidentEnvironment {
         runner,
-        completions,
-        provider,
-        sink,
         deployments,
         retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        requests: Arc::new(RequestRegistry::default()),
     };
     let behavior = ResidentKernelBehavior::prepared(descriptor, environment, outcome);
     let (actor, task) = crate::spawn_local_actor(None, behavior).await?;

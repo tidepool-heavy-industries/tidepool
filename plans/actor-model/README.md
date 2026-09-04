@@ -11,10 +11,10 @@ paired with one serial agent context and a resident GHCi-style environment.
 The agent context may be Tidepool-resident or a supervised interactive agent
 application; the Haskell program remains the actor's policy in either form.
 
-Rust owns execution mechanics. Haskell owns behavior. The Haskell program may
-open a result-bearing agent session with `deliberate`; within an agent session,
-the model can define new types and functions, return live values, replace
-behavior, and construct new actor definitions.
+Rust owns execution mechanics. Haskell owns behavior. A long-lived agent actor
+receives ad hoc typed requests through its mailbox; within each Codex-backed
+session, the model can define new types and functions, return live values,
+replace behavior, and construct new actor definitions.
 
 The Haskell API optimizes for use by an LLM in a resident GHCi-style
 environment, not for comprehensive exposure of runtime machinery. A small,
@@ -27,12 +27,10 @@ The useful slogan is:
 
 > Each actor is a Haskell program that can extend itself.
 
-"Extend itself" may mean persistent declarations in a resident session or
-editing and reloading an agent-backed actor's Haskell policy. A Tidepool-owned
-provider loop reaches the workbench through fenced Haskell; an externally
-hosted interactive agent reaches the same workbench through one actor-local,
-GHCi-shaped hosted tool carrying raw Haskell. The transport differs, but the
-language, persistent heap, interpreter, and typed completion contract do not.
+"Extend itself" may mean persistent declarations or editing and reloading an
+agent-backed actor's Haskell policy. Codex reaches the workbench through one
+actor-local, GHCi-shaped hosted tool carrying raw Haskell. The persistent heap,
+interpreter, and typed completion contract stay under Tidepool ownership.
 
 At the system level, those actors form an adaptive unfold/execute/fold loop
 over worktrees. The organization may begin as a detailed plan, a partial
@@ -42,10 +40,10 @@ then unfold again from what integration revealed. The canonical contract is
 [the architecture's self-hosting shape](architecture.md#self-hosting-shape-iterative-worktree-hylomorphisms).
 
 The first production composition root is `shoal`: one host process owns the
-resident Haskell machine and every actor, while external Codex TUIs occupy
-tmux panes and connect to actor-scoped HTTP-over-UDS host dynamic tools. Local
+resident Haskell machine and every actor, while Codex TUIs occupy tmux panes
+and connect to actor-scoped HTTP-over-UDS host dynamic tools. Local
 actor scheduling, mailboxes, links, and supervision use Ractor. Tidepool adds
-live Haskell execution, authority, provider sessions, and retained typed exits
+live Haskell execution, authority, Codex sessions, and retained typed exits
 above that substrate; it does not maintain a second actor scheduler.
 
 ## Accepted direction
@@ -72,16 +70,19 @@ above that substrate; it does not maintain a second actor scheduler.
   that exact incarnation, and stops it separately. One-shot work is a small
   composition over those operations rather than a second actor model.
 - An ad hoc request fixes its result visibly at the sending boundary, normally
-  as `request @ReviewReport agent prompt input`. Dispatch returns a separate
-  `Reply ReviewReport` that can be awaited later, so independent requests are
-  admitted before ordinary `Applicative` fan-in. The target receives the exact
-  input as a live value and a monomorphic reply obligation; GHC checks the
-  result before Rust transfers it back without serialization.
-- Interactive sessions may return a live `AgentAction`. The hosted-tool call
-  settles immediately; the resident actor runs and parks that action, and
-  reactivates the same agent context only when the Haskell program asks for
-  its next session. Ordinary `Functor`/`Applicative`/`Monad` composition is the
-  orchestration vocabulary.
+  as `request @ReviewReport agent prompt input`. Dispatch returns a requester-
+  side `Response ReviewReport`; the target receives a distinct one-shot
+  `Reply ReviewReport`. The result index belongs to those dual capabilities
+  and the fixed-row `Replies` effect, not a result-indexed effect stack.
+- Interactive applications remain attached for their actor incarnation. A
+  model turn ends when the model stops producing output; no Haskell operation
+  completes, yields, or parks a turn. Request and watch transitions reactivate
+  the application through typed durable events, while only the supervisor may
+  intentionally terminate the permanent root.
+- Typed `Watch result` subscriptions recover useful `Functor`/`Applicative`
+  readiness composition without becoming model-turn continuations or
+  executable values returned through completion. A data-dependent `Monad`
+  waits for a proven consumer because it adds continuation custody.
 - Fresh spawn deploys an explicit program into a fresh context. Structural
   fork clones one exact model/Haskell/control point and applies registered
   capability and actor-linear-reference policy.
@@ -93,9 +94,10 @@ above that substrate; it does not maintain a second actor scheduler.
   the actor's principal and grants. Authored libraries remain
   `Member`-polymorphic; a later Haskell intent-to-kernel split must not require
   a reflected row ABI in Rust.
-- One actor-turn admission spans a complete result-bearing agent session,
-  while shorter machine checkouts serialize only its Haskell run segments.
-  Lifecycle wake delivery is backend input, not a second session executor.
+- One admitted request remains current across any number of model turns until
+  typed settlement, cancellation, deadline, or target termination. Shorter
+  machine checkouts serialize its Haskell run segments. Durable activation
+  delivery is backend input, not another session executor.
 - Actor observability should converge on one neutral projection of runtime
   truth. Tracing, durable logs, owner notifications, and UI must not become a
   second scheduler or lifecycle registry.
@@ -118,19 +120,23 @@ above that substrate; it does not maintain a second actor scheduler.
 Each contract has one canonical home. Other documents link to it instead of
 restating it unless an acceptance test needs the detail.
 
-1. [Architecture](architecture.md) is canonical for runtime semantics,
-   invariants, lifecycle, construction, and persistence.
+1. [Architecture](architecture.md) records runtime semantics, invariants,
+   construction, and persistence; completion-era sections are superseded.
 2. [Live values and authority](live-values-and-authority.md) defines same-
    machine value transfer, caller identity, launch grants, and the
    distinction between invoking a closure and calling an actor.
-3. [Haskell interaction surface](haskell-surface.md) is canonical for typed API
-   consequences and the model-facing Haskell experience.
+3. [Haskell interaction surface](haskell-surface.md) records typed API
+   consequences and older alternatives; the current Shoal vocabulary is in
+   the reply/watch plan and field guide.
 4. [Implementation plan](implementation.md) owns current status, delivery
    order, acceptance criteria, and retirement work.
 5. [Shoal workbench correctness wave](shoal-workbench-correctness-wave.md)
-   records the next deliberately deferred implementation tranche: a truthful
-   completion boundary, atomic activations, GHCi-shaped discovery, and a
-   Codex-node-only default Shoal surface.
+   records the superseded completion-era migration baseline and the still-live
+   GHCi/workbench findings.
+6. [Persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md)
+   supersedes that wave's root-completion and interactive `AgentAction`
+   direction after live Shoal Console use, and owns the current
+   request/activation contract.
 
 ## Vocabulary
 
@@ -143,7 +149,8 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | actor program | One installed authored `Eff` continuation with fixed row, protocol, and exit types |
 | actor definition | An ordinary Haskell `ActorDefinition` containing typed startup, behavior, profile selection, and shutdown behavior |
 | sealed deployment | The private exact-source/live-root representation produced inside `startActor`; never a model-facing value |
-| agent session | One serialized, possibly multi-round resident or externally hosted agent interaction with a typed `Complete output` expectation |
+| interactive application | The persistent model context and hosted workbench attached to one actor incarnation |
+| request scope | The typed input and one-shot reply authority retained across model turns until one request settles or becomes unavailable |
 | effect profile | An experimental named resident-Haskell row and spawn-attenuation class; initially `ReadWrite` or `ReadOnly`, and not a native-tool sandbox |
 | machine session | The resident JIT machine, heap, declarations, bindings, and parked continuations |
 | program image | The exact declarations, interface metadata, and live roots captured while `startActor` seals a definition |
@@ -153,7 +160,9 @@ This plan follows [the repository glossary](../../docs/GLOSSARY.md).
 | actor interpreter | Rust-owned nominal handlers and lifecycle policy enforcing requests under one actor principal |
 | owner wake | Informational backend-native input derived from a child exit; typed results remain behind the exact `ActorRef` |
 | agent request | One ad hoc, caller-typed interaction with a long-lived agent-backed actor; it does not define or end that actor |
-| reply | An exact typed handle for one admitted agent request; settlement is separate from actor termination |
+| response | The requester's typed observation capability for one request and the owner of its ready live-result reachability |
+| reply | The target's typed, one-shot settlement capability for one request; settlement is separate from model-turn and actor lifecycle |
+| watch | An actor-owned typed readiness subscription over one or more response handles; it notifies without completing a model turn |
 
 ## Relationship to existing work
 

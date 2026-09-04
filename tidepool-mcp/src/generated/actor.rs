@@ -12,11 +12,13 @@ pub fn actor_decl() -> crate::EffectDecl {
             "ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus",
             "ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)",
             "ActorCallWith :: (Int, Int) -> protocol result -> Actor result",
+            "ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus",
             "ActorCastWith :: (Int, Int) -> protocol () -> Actor ()",
         ],
         type_defs: &[
             "data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)",
             "data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)",
+            "data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)",
         ],
         extra_imports: &[
             "import Tidepool.Actor",

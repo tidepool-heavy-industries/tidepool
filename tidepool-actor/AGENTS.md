@@ -24,11 +24,9 @@ handlers, and observability UIs stay in their owning crates.
 - Compile actor-authored code through the actor's exact `SessionCompileView`.
   Do not pass ambient scope ancestry or caller-authored import lists through
   this membrane.
-- Reattach to the one accumulating `ActorAgentSession`; never open parallel
-  model contexts for one actor. Provider inference must not hold a machine
-  checkout.
-- Parse model output through `tidepool-model-output`; do not grow an actor-local
-  fenced-block parser.
+- Reattach to the one accumulating external interactive session; never open
+  parallel coding-agent contexts for one actor. External inference must not
+  hold a machine checkout.
 - Worker lifecycle, wake correlation, collection, and acknowledgement are
   Rust interpreter state. Do not expose a copied worker registry as Haskell
   state or add a second result store.

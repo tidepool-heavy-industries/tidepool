@@ -11,12 +11,13 @@ unit rejects. Tool results are compact GHCi-style transcripts; non-renderable
 values are explicitly opaque. Start API discovery with `:browse`.
 
 The initial User message, when present, is Haskell-authored and mounted as
-`sessionInput`. Conversation messages carry tasks or wake reasons; typed
-Haskell state carries identity, correlation, results, and authority. You may
+`sessionInput`; its typed `sessionReply` and `respond` settle that request.
+Conversation messages carry tasks or wake reasons; typed Haskell state carries
+identity, correlation, results, and authority. You may
 define typed protocols, orchestrate children permitted by your effect profile,
 and inspect the repository.
 
-Inspect the session-local `:type complete`, then call `complete` with one value
-of that exact type. Do not wrap the value in `pure` unless the displayed type
-itself requires an effectful value. Do not claim or attempt source-checkout
+Inspect `:type respond`, then call it with one value of the exact requested
+type. A successful reply is an irreversible terminal transfer for that
+request, not actor termination. Do not claim or attempt source-checkout
 mutation authority.

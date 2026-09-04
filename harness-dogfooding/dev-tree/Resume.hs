@@ -574,24 +574,29 @@ retainedHandle (RetainedWorktree h) = h
 -- | Look a retained worktree up by branch.  Rebind, never recreate.
 retainWorktree :: Text -> Harness (Either Text RetainedWorktree)
 retainWorktree branch = do
-  trees <- listWorktrees
-  case [s | s <- trees, renderBranchName s.summaryReceipt.branch == branch] of
-    [] -> pure (Left [fmt|no retained worktree is registered for branch {branch}|])
-    -- Two registered worktrees claiming one branch is a real corrupted
-    -- state, and rebinding to whichever listed first would silently work on
-    -- a coin flip.
-    (_ : _ : _) ->
-      pure (Left [fmt|more than one retained worktree claims branch {branch} — refusing to guess which to rebind|])
-    [s]
-      | not s.present ->
-          pure
-            ( Left
-                [fmt|retained worktree {renderWorktreeId s.summaryReceipt.treeId} for {branch} is gone from disk (WorktreeLost); it is never recreated|]
-            )
-      | otherwise ->
-          lookupWorktree s.summaryReceipt.treeId >>= \case
-            Left err -> pure (Left (renderWorktreeError err))
-            Right h -> pure (Right (RetainedWorktree h))
+  listed <- listWorktrees
+  case listed of
+    Left err -> pure (Left (renderWorktreeError err))
+    Right trees -> retainListed trees
+  where
+    retainListed trees =
+      case [s | s <- trees, renderBranchName s.summaryReceipt.branch == branch] of
+        [] -> pure (Left [fmt|no retained worktree is registered for branch {branch}|])
+        -- Two registered worktrees claiming one branch is a real corrupted
+        -- state, and rebinding to whichever listed first would silently work on
+        -- a coin flip.
+        (_ : _ : _) ->
+          pure (Left [fmt|more than one retained worktree claims branch {branch} — refusing to guess which to rebind|])
+        [s]
+          | not s.present ->
+              pure
+                ( Left
+                    [fmt|retained worktree {renderWorktreeId s.summaryReceipt.treeId} for {branch} is gone from disk (WorktreeLost); it is never recreated|]
+                )
+          | otherwise ->
+              lookupWorktree s.summaryReceipt.treeId >>= \case
+                Left err -> pure (Left (renderWorktreeError err))
+                Right h -> pure (Right (RetainedWorktree h))
 
 -- | A retained tree whose HEAD differs from its baseline: an orphan candidate,
 -- not yet trusted.

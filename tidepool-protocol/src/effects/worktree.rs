@@ -966,7 +966,7 @@ fn helpers() -> Vec<Helper> {
                 "Every registered worktree, present or lost. A lost tree is listed",
                 "with `present = False` rather than failing the whole listing.",
             ],
-            body: HelperBody::NullaryLiftEither,
+            body: HelperBody::Nullary,
         },
         Helper {
             name: "worktreeId",

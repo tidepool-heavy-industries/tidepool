@@ -347,6 +347,7 @@ pub struct WorkbenchItemReceipt {
 pub enum WorkbenchRunStatus {
     Committed,
     Rejected,
+    Replied,
     Completed,
 }
 

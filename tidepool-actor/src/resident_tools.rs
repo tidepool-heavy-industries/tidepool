@@ -29,8 +29,12 @@ pub(crate) struct ResidentToolReply {
 pub enum ResidentToolError {
     #[error("resident tool policy is unavailable: {0}")]
     Unavailable(String),
-    #[error("resident tool invocation failed: {0}")]
-    Failed(String),
+    #[error("invalid resident tool invocation: {0}")]
+    InvalidInvocation(String),
+    #[error(transparent)]
+    Invocation(#[from] crate::KernelInvocationFailure),
+    #[error("could not encode resident tool response: {0}")]
+    Encoding(#[from] serde_json::Error),
 }
 
 /// A cloneable request handle for one exact actor incarnation.
@@ -91,7 +95,7 @@ impl ResidentToolClient {
                     "the actor stopped before settling the invocation".into(),
                 )
             })?
-            .map_err(|error| ResidentToolError::Failed(error.to_string()))
+            .map_err(ResidentToolError::Invocation)
     }
 
     pub(crate) async fn dispatch_workbench(
@@ -112,8 +116,8 @@ impl ResidentToolClient {
                 "the actor stopped before settling the workbench invocation".into(),
             )
         })?;
-        let response = response.map_err(|error| ResidentToolError::Failed(error.to_string()))?;
-        serde_json::to_value(response).map_err(|error| ResidentToolError::Failed(error.to_string()))
+        let response = response.map_err(ResidentToolError::Invocation)?;
+        serde_json::to_value(response).map_err(ResidentToolError::Encoding)
     }
 }
 
@@ -133,7 +137,7 @@ impl ResidentToolPolicy {
         invocation: ToolInvocation,
     ) -> Result<serde_json::Value, ResidentToolError> {
         if !matches!(&invocation.arguments, ToolArguments::Structured(_)) {
-            return Err(ResidentToolError::Failed(
+            return Err(ResidentToolError::InvalidInvocation(
                 "function tool received raw arguments".into(),
             ));
         }
@@ -154,7 +158,7 @@ impl ResidentToolEndpoint for ResidentToolPolicy {
         let client = self.client.clone();
         Box::pin(async move {
             if !matches!(&invocation.arguments, ToolArguments::Structured(_)) {
-                return Err(ResidentToolError::Failed(
+                return Err(ResidentToolError::InvalidInvocation(
                     "function tool received raw arguments".into(),
                 ));
             }

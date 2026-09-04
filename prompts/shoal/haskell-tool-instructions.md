@@ -8,4 +8,7 @@ Units run in order and preserve successful prefixes; effects are not rolled
 back when a unit rejects.
 
 Start discovery with `:browse`; use `:type`, `:info`, `:browse!`, and
-`:bindings` for detail. Use native coding tools for repository work.
+`:bindings` for detail, and `:status` for runtime-owned actor/request state.
+Request scopes mount typed `sessionInput`, `sessionReply`, and `respond`; roots
+do not. Ending a model response ends the turn—there is no Haskell completion,
+yield, or park operation. Use native coding tools for repository work.

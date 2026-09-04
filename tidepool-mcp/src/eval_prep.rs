@@ -1415,7 +1415,7 @@ mod tests {
         assert!(core.contains("ActorStartWith ::"), "{core}");
         assert!(core.contains("ActorWaitWith ::"), "{core}");
         assert!(
-            authored.contains("ActorStartWith") && authored.contains("WorkerAttachWith"),
+            authored.contains("ActorStartWith") && authored.contains("AgentAttachWith"),
             "{authored}"
         );
         assert!(shim.contains("import Tidepool.Effects.Authored"), "{shim}");

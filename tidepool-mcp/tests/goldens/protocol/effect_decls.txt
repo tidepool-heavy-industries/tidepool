@@ -1547,11 +1547,11 @@ lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (E
 lookupWorktree = send . WorktreeLookup
 -- end helpers[1] --
 
--- helpers[2] (265 bytes) --
+-- helpers[2] (273 bytes) --
 -- | Every registered worktree, present or lost. A lost tree is listed
 -- with `present = False` rather than failing the whole listing.
-listWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]
-listWorktrees = send WorktreeList >>= liftEither
+listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])
+listWorktrees = send WorktreeList
 -- end helpers[2] --
 
 -- helpers[3] (206 bytes) --
@@ -1721,51 +1721,6 @@ mailboxDrop :: forall effs. Member RepoEvent effs => Int -> Eff effs (Either Eve
 mailboxDrop = send . MailboxDrop
 -- end helpers[3] --
 
--- end helpers --
-
--- type_params (0 items) --
--- end type_params --
-
--- default_row_args (0 items) --
--- end default_row_args --
-
--- helpers_row_polymorphic --
-true
--- end helpers_row_polymorphic --
-
-=============================== EFFECT: Deliberate ===============================
-
--- type_name (10 bytes) --
-Deliberate
--- end type_name --
-
--- description (166 bytes) --
-Ask this actor's resident model to produce a statically typed Haskell value. Use `Tidepool.Deliberation.deliberate`; the raw request constructor is runtime substrate.
--- end description --
-
--- prompt_card: Some --
--- prompt_card.0 (110 bytes) --
-`deliberate goal input` — run the actor's persistent Haskell workbench and resume with a GHC-checked result.
--- end prompt_card.0 --
-
--- constructors (1 items) --
--- constructors[0] (59 bytes) --
-DeliberateWith :: Int -> input -> Text -> Deliberate output
--- end constructors[0] --
-
--- end constructors --
-
--- type_defs (0 items) --
--- end type_defs --
-
--- extra_imports (1 items) --
--- extra_imports[0] (41 bytes) --
-import Tidepool.Deliberation (deliberate)
--- end extra_imports[0] --
-
--- end extra_imports --
-
--- helpers (0 items) --
 -- end helpers --
 
 -- type_params (0 items) --
@@ -2229,7 +2184,7 @@ Typed actor lifecycle and communication. Authored code uses `Tidepool.Actor`; th
 `Tidepool.Actor` provides exact-incarnation actor references and typed exit observation. `awaitExit ref` returns `Completed value`, `Failed reason`, or `Cancelled reason`; it is repeatable and preserves closure-valued exits.
 -- end prompt_card.0 --
 
--- constructors (5 items) --
+-- constructors (6 items) --
 -- constructors[0] (103 bytes) --
 ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorEffectProfile -> [Text] -> Actor (Int, Int)
 -- end constructors[0] --
@@ -2246,13 +2201,17 @@ ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
 ActorCallWith :: (Int, Int) -> protocol result -> Actor result
 -- end constructors[3] --
 
--- constructors[4] (54 bytes) --
-ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- constructors[4] (70 bytes) --
+ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus
 -- end constructors[4] --
+
+-- constructors[5] (54 bytes) --
+ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
+-- end constructors[5] --
 
 -- end constructors --
 
--- type_defs (2 items) --
+-- type_defs (3 items) --
 -- type_defs[0] (90 bytes) --
 data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
 -- end type_defs[0] --
@@ -2260,6 +2219,10 @@ data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving 
 -- type_defs[1] (120 bytes) --
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
 -- end type_defs[1] --
+
+-- type_defs[2] (84 bytes) --
+data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)
+-- end type_defs[2] --
 
 -- end type_defs --
 
@@ -2444,10 +2407,14 @@ Open this actor's supervised interactive-agent session with a statically typed c
 `agentSession activation prompt input` — expose the persistent Haskell workbench to the attached agent and resume with a GHC-checked result.
 -- end prompt_card.0 --
 
--- constructors (1 items) --
+-- constructors (2 items) --
 -- constructors[0] (76 bytes) --
 AgentSessionWith :: Int -> input -> Maybe Text -> Int -> AgentSession output
 -- end constructors[0] --
+
+-- constructors[1] (48 bytes) --
+AgentAttachWith :: Maybe Text -> AgentSession ()
+-- end constructors[1] --
 
 -- end constructors --
 

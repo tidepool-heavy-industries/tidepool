@@ -76,12 +76,8 @@ sitedVerbs =
       "forkMapSited" "Tidepool.Fork" 2 2 True True []
   , verb "forkCata" "Tidepool.Fork"
       "forkCataSited" "Tidepool.Fork" 2 2 True True []
-  , verb "deliberate" "Tidepool.Deliberation"
-      "deliberateSited" "Tidepool.Deliberation" 2 2 False True [1]
-  , verb "agentSession" "Tidepool.Agent.Session"
-      "agentSessionSited" "Tidepool.Agent.Session" 2 3 False True [1]
-  , resultVerb "nextTurn" "Tidepool.Agent.Action"
-      "nextTurnSited" "Tidepool.Agent.Action" 2 1 False True [1]
+  , verb "request" "Tidepool.Actors.Internal.Agent"
+      "requestSited" "Tidepool.Actors.Internal.Agent" 2 3 False True [1]
   , verb "receive" "Tidepool.Actor"
       "receiveSited" "Tidepool.Actor" 1 1 False True []
   , verb "serve" "Tidepool.Actor"
@@ -90,5 +86,3 @@ sitedVerbs =
   where
     verb name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs =
       VerbSpec name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs FirstTypeArgument
-    resultVerb name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs =
-      VerbSpec name source sibling siblingSource typeArgs valueArity listAnswer shapeError inputs AppliedResultType

@@ -1,11 +1,14 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE EmptyCase #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
 
--- | Private interactive-runtime trampoline.
+-- | Private permanent root application.
 --
--- This is not Shoal's actor program. It only hands each model-authored
--- 'AgentAction' to the resident interpreter and reopens the same hosted
--- workbench when that action settles.
+-- The authored model workbench is attached to this actor, but model-response
+-- termination is not a Haskell effect. The private actor program simply owns
+-- a mailbox receive continuation until its supervisor stops the root.
 module Tidepool.Actors.Internal.ShoalDriver
   ( RootEffects
   , rootDriver
@@ -13,33 +16,16 @@ module Tidepool.Actors.Internal.ShoalDriver
   ) where
 
 import Control.Monad.Freer (Eff)
-import Prelude
-
-import Tidepool.Actor
-import Tidepool.Agent.Action (AgentAction, runAgentAction)
-import Tidepool.Agent.Session
-  ( pattern ActionFailed
-  , pattern InitialUser
-  , pattern ManualReady
-  , agentSession
-  )
+import Tidepool.Actor (serve)
+import Tidepool.Agent.Session (attachAgent)
 import Tidepool.Actors.Shoal
+import Tidepool.Effects.Core (ActorLocal, AgentSession)
 
-type RootEffects = ActorEffects
+data RootProtocol result
+
+type RootEffects = AgentSession ': ActorLocal RootProtocol ': ActorEffects
 
 rootDriver :: Eff RootEffects a
-rootDriver = loop InitialUser Nothing Nothing
-  where
-    loop activation initialUser interruption = do
-      action <-
-        ( agentSession activation initialUser interruption
-            :: Eff RootEffects (AgentAction RootEffects ())
-        )
-      outcome <- runAgentAction action
-      case outcome of
-        Right () -> loop ManualReady Nothing Nothing
-        Left failure ->
-          loop
-            ActionFailed
-            Nothing
-            (Just failure)
+rootDriver = do
+  attachAgent Nothing
+  serve @() @RootProtocol () (\() request -> case request of {})

@@ -1,7 +1,5 @@
 //! The real resident MCP policy driven directly by the canonical local actor.
 
-use std::sync::Arc;
-
 use tidepool_actor::{
     spawn_resident_root, ActorDescriptor, ActorPlacement, ActorWorkbenchSource,
     LocalResidentDeployment, ResidentActorRoot,
@@ -12,7 +10,6 @@ use tidepool_effect::dispatch::{DispatchEffect, EffectContext};
 use tidepool_effect::error::EffectError;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy, Response};
 use tidepool_eval::Value;
-use tidepool_model::{ModelProvider, ProviderError, StreamSink, TurnRequest, TurnResponse};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates, run_turn, ModuleEnv, OutputSink,
     ResidentSession, SessionLib, TurnRequest as HaskellTurnRequest, TurnResult,
@@ -47,18 +44,6 @@ impl DispatchEffect<TestSink> for NoHandlers {
     }
 }
 
-struct NoModelRounds;
-
-impl ModelProvider for NoModelRounds {
-    async fn complete(
-        &self,
-        _request: TurnRequest,
-        _sink: Option<StreamSink>,
-    ) -> Result<TurnResponse, ProviderError> {
-        panic!("resident MCP fixture must not open a model round")
-    }
-}
-
 #[tokio::test]
 async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     eval_harness::require_extract();
@@ -69,7 +54,6 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
-        tidepool_mcp::deliberate_decl(),
         tidepool_mcp::fs_read_decl(),
     ];
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
@@ -148,8 +132,6 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
     );
     let (actor, task, mut deployments) = spawn_resident_root(
         ActorWorkbenchSource::new(preamble, include),
-        Arc::new(NoModelRounds),
-        None,
         ResidentActorRoot::new(descriptor, machine, outcome),
     )
     .await
@@ -197,12 +179,6 @@ async fn local_actor_owns_resident_policy_children_and_terminal_reply() {
         LocalResidentDeployment::Retired { ref terminal, .. }
             if terminal.kind == tidepool_actor::ActorExitKind::Completed
     ));
-    assert!(matches!(
-        deployments.recv().await,
-        Some(LocalResidentDeployment::ChildExited { ref notice, .. })
-            if notice.terminal.kind == tidepool_actor::ActorExitKind::Completed
-    ));
-
     let finished = server
         .dispatch_tool("finish_value", serde_json::Map::new())
         .await

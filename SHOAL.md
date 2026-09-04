@@ -1,14 +1,14 @@
 # Shoal field guide
 
 Status: evolving. This is the practical guide for using and improving Shoal.
-It records techniques proven in live work and keeps proposed improvements
-visibly separate from the current interface. Runtime semantics remain owned by
-the relevant crate documentation; active designs remain in `plans/`.
+It keeps the runnable surface visibly distinct from active replacement
+designs. Runtime semantics remain owned by the relevant crate documentation;
+active designs remain in `plans/`.
 
 ## Working model
 
-Shoal is a typed orchestration environment for Codex nodes working in managed
-Git worktrees. Use the persistent Haskell workbench for orchestration and live
+Shoal is a typed orchestration environment for persistent Codex nodes working
+in managed Git worktrees. Use the Haskell workbench for orchestration and live
 typed state. Use native repository tools to inspect, test, review, and
 integrate exact commits.
 
@@ -19,11 +19,11 @@ calculation and small orchestration helpers belong in the root's live Haskell
 environment.
 
 Conversation prose explains tasks and wake reasons. It is not authoritative
-state. Exact actor references, worktree handles, exit values, and activation
+state. Exact agent references, reply handles, worktree handles, and activation
 inputs stay as typed Haskell values; exact commits and repository state are
 verified with Git.
 
-## Core techniques
+## Workbench basics
 
 Start by inspecting the actual environment:
 
@@ -33,9 +33,9 @@ Start by inspecting the actual environment:
 :type sessionInput
 ```
 
-Use `:type` and `:info` when a name or constructor is unclear. The supported
-meta-command set is intentionally smaller than full GHCi and should be learned
-from the tool's current help rather than guessed.
+Use `:type` and `:info` when a name or constructor is unclear. `:show imports`
+reports the effective module environment. The supported meta-command set is
+intentionally smaller than full GHCi.
 
 The workbench executes input units in order. A rejected unit stops the suffix;
 earlier successful declarations and bindings remain committed. Effects already
@@ -43,25 +43,154 @@ performed by the rejected unit are not rolled back. Put a declaration group or
 one effect sequence inside `:{` / `:}` and persist several results with one
 outer tuple or record binding.
 
-Define campaign-specific types and helpers freely in the live session. They
-are cheap experimental vocabulary and may capture exact handles or user-defined
-values without becoming product API. Promote a helper into the repository only
-after repeated use shows that it improves discovery or composition for more
-than one task and has a clear owner.
+Compiler diagnostics are part of the interaction interface. A rejected input
+reports the exact failing unit and cause, including completed prefix receipts.
+Host routing, invocation, encoding, and panic failures are distinct errors and
+retain their underlying cause. Empty wrapper output is never evidence that a
+Haskell action completed.
 
-Create independent worktrees explicitly, then start every independent child
-before waiting on any of them. Compose already-running results with ordinary
-Haskell:
+Define campaign-specific types and helpers freely in the live session. Promote
+a helper into the repository only after repeated use shows that it improves
+more than one task and has one clear owner.
+
+## Persistent agents
+
+The default `Tidepool.Actors.Shoal` facade exposes Codex-node operations rather
+than low-level actor construction:
 
 ```haskell
-complete $ nextTurn $
-  (,) <$> waitOn implementationAgent <*> waitOn reviewAgent
+data AgentSpec
+data AgentRef
+data Response result
+data Reply result
+
+codingAgent   :: WorktreeHandle -> AgentSpec
+readonlyAgent :: Text -> AgentSpec
+startAgent    :: Member Actor effs => AgentSpec -> Eff effs AgentRef
+
+request
+  :: forall result input effs
+   . Member Replies effs
+  => AgentRef -> Text -> input -> Eff effs (Response result)
+
+stopAgent :: Member Actor effs => AgentRef -> Eff effs ()
+
+pollResponse
+  :: Member Replies effs
+  => Response result -> Eff effs (ResponseState result)
 ```
 
-`waitOn` is the success-shaped composition path. Use `awaitExit` when failure
-and cancellation are domain decisions. `nextTurn` reactivates the same Codex
-context with the successful live result mounted as the next `sessionInput`.
-Closures and user-defined types can cross this boundary without serialization.
+Create worktrees explicitly, start every independent agent before waiting, and
+put the requested result type at the dispatch site when the reply crosses
+workbench input units:
+
+```haskell
+reviewerA <- startAgent (codingAgent treeA)
+reviewerB <- startAgent (codingAgent treeB)
+
+responseA <- request @ReviewReport reviewerA prompt candidateA
+responseB <- request @ReviewReport reviewerB prompt candidateB
+
+both <- watch $
+  (,) <$> awaitResponse responseA <*> awaitResponse responseB
+```
+
+`AgentRef` identifies one persistent actor, Codex context, Haskell scope,
+worktree authority, and place in the recursive ownership tree. A
+`Response result` belongs to the requester and supports repeatable typed
+observation. The dual `Reply result` belongs to the target and authorizes one
+settlement. Same-machine inputs and results may contain closures and types
+declared in the caller's live session; they are not serialized.
+
+`request` admits the private request payload and returns immediately. The
+`Replies` interpreter owns registration and mailbox admission, so there is no
+second public cast for callers to coordinate. The target may have many requests
+queued, and each request may use unrelated input and result types. Settling a
+request returns the target's private actor program to mailbox readiness; it
+does not terminate the target. `stopAgent` is explicit and is ordered behind
+earlier messages from the same sender.
+
+Agent applications start eagerly without a bootstrap prompt or throwaway model
+turn. Codex makes the empty conversation rollout durable before publishing its
+v2 hosted-session callback. That callback records durable binding version 4;
+only reading the accepted binding creates the queue-ready handle used by native
+delivery. Older bindings are rejected on resume with guidance to start a fresh
+root because a thread ID alone cannot establish queue readiness.
+
+The target activation carries the task as an ordinary User message. Its
+request scope mounts visibly distinct input and output authority:
+
+```haskell
+:type sessionInput
+:type sessionReply
+:type respond
+respond (ReviewReport findings)
+```
+
+Submitting a type error rejects only that workbench input. Correct it in the
+same persistent agent session. Ending a model response without replying leaves
+the request pending. After a valid settlement, the same Codex identity handles
+the next request with its accumulated conversation and declarations intact.
+
+The low-level `Tidepool.Actor` API remains available through an intentional
+advanced import. It is not imported or re-exported by the default facade.
+
+## Replies, watches, and model turns
+
+The architecture and remaining verification work are recorded in
+[the persistent applications, typed replies, and watches plan](plans/actor-model/persistent-applications-replies-and-watches.md).
+
+An interactive application remains attached for its actor incarnation. A
+model turn ends when the model stops producing output. The permanent root has
+no Haskell `complete`, `yield`, or `park` operation, and only its supervisor
+may intentionally terminate it.
+
+Requests use distinct capabilities for the two roles:
+
+- `Response result` belongs to the requester and supports repeatable typed
+  observation;
+- `Reply result` belongs to the target and authorizes exactly one settlement;
+- both identify one request and exact target incarnation.
+
+A request activation retains `sessionInput`, `sessionReply`, and a monomorphic
+`respond` across model turns. If the target ends a response without settling,
+the request remains pending. Response state remains durable and pollable;
+registered watches, incoming requests, and supervisor transitions publish
+typed, sequenced activation events through the existing durable actor inbox.
+Prose is only their presentation.
+
+`Watch` provides typed readiness composition without becoming lifecycle
+control or an executable program returned from a turn:
+
+```haskell
+review <- request @ReviewReport reviewer reviewPrompt candidate
+tests  <- request @TestReport tester testPrompt candidate
+
+both <- watch $
+  (,) <$> awaitResponse review <*> awaitResponse tests
+```
+
+`watch` returns immediately. When its condition becomes terminal, a durable
+event reactivates the application and `pollWatch both` observes the typed
+result. Unwatched responses do not spend an inference turn merely because
+their state changes. A watch is a readiness subscription over response
+handles, not an actor, result store, scheduler, hidden continuation API, or
+replacement for ordinary end-of-response behavior.
+
+`Await` deliberately has `Functor` and `Applicative`, but not `Monad`. It
+combines known response dependencies while keeping subscription ownership and
+cleanup simple. Add data-dependent subscription expansion only for a proven
+orchestration case.
+
+The root application is permanent. Ordinary model-response termination ends a
+turn; it is not represented by a Haskell function or effect. The root exposes
+no `complete`, `yield`, or `park`, and only its supervisor terminates the actor.
+Successful `respond` transfers result custody and closes that request's current
+workbench activation without running an effectful suffix.
+
+Use `:status` for runtime-owned application, response, and watch state. Typed
+handles and `pollResponse`/`pollWatch` remain authoritative; activation prose
+and tmux panes are diagnosis surfaces.
 
 Integrate incrementally. Once a candidate is clean, independently inspect its
 exact diff and verification evidence, then land it if it is coherent. Do not
@@ -70,317 +199,120 @@ only from the commit that integrated its prerequisite.
 
 A worker report is an authored claim. Verify the named commit, clean worktree,
 changed targets, and important failure paths yourself. Tmux panes and tracing
-are useful operator telemetry, but neither replaces typed lifecycle state or
-Git evidence.
+are operator telemetry, not transport or lifecycle truth.
 
 Keep concurrent verification focused. Compile every changed target, execute
 the smallest tests that prove the behavior, use the repository's matched
 Nix/extractor setup for Haskell-backed checks, and reserve broad validation for
 a meaningful integration boundary.
 
-## Current temporary sharp edges
+## Current sharp edges
 
-The default Shoal facade still exposes lower-level resident-actor construction.
-Until the Codex-node facade lands, a bootstrap worker must use `agentSession`
-to enter an external Codex application. `deliberate` requests a resident
-provider and is not the construction path for a worktree-backed Shoal node.
-This distinction is a known product defect, not intended permanent vocabulary.
+- An abnormally terminated root is recreated as a new actor incarnation while
+  the Shoal host remains alive. Conversation survives, but previous Haskell
+  bindings, actor references, response handles, worktree authority bindings,
+  pending exits, and mounted live values do not. Reconcile through current Git
+  and runtime state rather than transcript references.
+- Linked worktrees share Git objects and configuration but not working files,
+  indexes, or `HEAD`. Use the repository's matched extractor/toolchain path;
+  stale inherited endpoints can otherwise compile a different checkout.
+- During the first live code canary, Cargo output directories below the
+  worker's mounted workspace disappeared during compilation. An explicit
+  target outside that workspace survived. This has not yet been reproduced in
+  a small repository; use the `shoal-console` canary below to determine whether
+  the owner is actor workspace mounting, Codex command sandboxing, or the
+  disposable Tidepool mirror rather than adding another target-path policy.
+- A running Shoal process does not hot-reload Haskell, prompts, or runtime
+  code. `just shoal-console` builds the current checkout, including uncommitted
+  source, but an already-launched root keeps the snapshot embedded in its
+  running host. Restart at a reviewed clean boundary before judging a changed
+  facade live.
 
-A root recreation starts a new actor incarnation. Conversation may survive,
-but previous Haskell bindings, actor references, worktree authority bindings,
-pending exits, and mounted live values do not. Reconcile through current Git
-and runtime state instead of trusting transcript references.
+## Current implementation boundary
 
-The currently running root still uses Codex `3c67184`, whose Code Mode wrapper
-may discard an inner Haskell rejection. Empty wrapper output is not affirmative
-evidence that Haskell completed. The checkout now pins Codex `b8d44e30`, which
-passes completed custom-tool text through verbatim and removes the hard-coded
-script wrappers; the next Shoal restart must validate that repaired boundary.
+The core vertical now has one fixed model-facing effect row, persistent root
+and child applications, dual response/reply capabilities, exactly-once reply
+state, explicit applicative watches, typed durable watch events, and runtime
+`:status`. The focused host acceptance case sends a typed request, settles it
+through `respond`, receives the registered watch transition, and repeatedly
+observes the same typed result through both handles.
 
-Linked worktrees share Git objects and configuration but not working files,
-indexes, or `HEAD`. They may also encounter compiler-cache or stale-extractor
-confusion if a check bypasses the repository's matched toolchain path. Treat
-the toolchain identity as part of test evidence.
+Supervisor deadlines, cancellation receipts, and result-root reclamation after
+the final response/watch handle are separate follow-up slices. They extend the
+single request-state owner; they must not introduce another scheduler or a
+model-turn lifecycle effect.
 
-## Aspirational direction
+## Next live canary
 
-These are product goals, not claims about the current checkout:
-
-- The default facade exposes `startAgent`, a narrow typed `AgentRef`,
-  `request @Result`, separately awaitable `Reply` values, action composition,
-  explicit shutdown, and managed-worktree operations. An agent keeps its
-  identity, model context, Haskell scope, and place in the recursive ownership
-  tree across requests; a reply settles one request rather than terminating
-  the actor. Lower-level resident actors remain available only through an
-  intentional advanced import.
-- Workbench rejection, actor completion, lifecycle failure, stale activation,
-  and host infrastructure failure render as unmistakably different outcomes.
-  GHC diagnostics always reach the model without wrapper-specific handling.
-- `:show imports`, `:browse`, `:type`, and authored declarations describe the
-  same effective module environment.
-- Each activation atomically binds one reason, message, input type, and live
-  value under an opaque activation identity. Stale delivery cannot pair prose
-  with another activation's input.
-- `Host` and `Compiler` panes retain concise readiness and request-level
-  tracing while detailed structured logs remain authoritative.
-- Common fan-out, review, and fold patterns remain ordinary Haskell rather
-  than growing a second scheduler, worker registry, or merge queue.
-- A future context-split operation may fork several child Codex nodes from one
-  deliberate parent snapshot so they share the full architectural context up
-  to that point and diverge only under their typed assignments. This must be
-  explicit and distinguish a provider-native context fork from replaying the
-  visible transcript. Each child still receives a new actor identity and
-  explicit worktree authority; capabilities and live Haskell values are
-  transferred deliberately rather than cloned implicitly, and only typed
-  results fold back into the parent.
-
-## Current wave handoff
-
-This section is a restart aid for the active self-dogfooding wave and should be
-deleted when the wave closes. As of 2026-09-03, `main` contains these reviewed
-folds after `origin/main`:
-
-```text
-5812624e fix: carry constructor metadata across live actions
-9bb8921e feat: simplify Shoal agent actions
-00392b63 refactor: extract fixed prompt artifacts
-07765a1b docs: add evolving Shoal field guide
-d11e7d52 feat: surface Shoal daemon tracing in tmux
-7f09f384 feat: expose persistent workbench imports
-6aa5638b fix: make Shoal activations atomic and typed
-84fd259b plan: define persistent Shoal agent messaging
-c52a51fd feat: make actor completion expectation first-class
-HEAD     fix: harden Shoal dogfood boundary
-```
-
-The activation fold makes delivery atomic and typed and rejects duplicate or
-stale activation sequences. It is the prerequisite for persistent requests.
-It does not yet implement the complete persistent-request record or long-lived
-agent lifecycle described below.
-
-The completion-affordance candidate from actor `actor-9-1` was manually
-integrated as `c52a51fd` after the old host began rejecting every dynamic tool
-call before GHC received it. Git commit `613ed7192` in managed worktree
-`wt-37f74e28-dde7-4d67-9536-9563d1093c6e` is its original authored commit.
-The fold supplies the monomorphic, activation-local result compiler that
-persistent request settlement should reuse. The old root Haskell continuation
-was awaiting this actor together with two already-finished actors; after a
-restart, recover from Git and actor/worktree state instead of expecting the old
-live Haskell binding to exist.
-
-The worktree `wt-e8fc3099-529d-4bf0-ad58-adf5d2d23943` on branch
-`tidepool/worktree/shoal-start-agent-wt-e8fc3099-529d-4bf0-ad58-adf5d2d23943`
-contains a deliberately held, dirty `startAgent` spike. Do not land it whole:
-it encodes the superseded one-shot `AgentRef exit` model. Its curated facade,
-worktree-authority recipe, compiler-derived site metadata, and visibility tests
-are useful source material for the persistent implementation.
-
-### Architecture review of the landed wave
-
-The root reviewed every Shoal-era commit from `cfc9ab940` through `c52a51fd`
-against its production consumers, not only the worker reports and focused
-tests. The mechanisms have coherent owners: rejection recovery and lifecycle
-policy remain in `tidepool-actor`; compilation, persistent declarations, and
-constructor vocabulary remain in the runtime/toolchain path; prompt artifacts
-are compile-time assets selected by their consuming host; tracing uses the
-existing `tracing` and tmux owners; and the Haskell facade remains a thin typed
-surface over those mechanisms.
-
-The audit found and corrected these cross-commit gaps in the final integration
-fold:
-
-- The four-constructor Haskell `SessionActivation` sum trapped in the real JIT
-  at the generated effect boundary. It is now a hidden `newtype` with a closed
-  set of public pattern synonyms, retaining type-directed authored control and
-  the extractor's supported unboxed representation.
-- Completion integration tests still destructured the pre-activation
-  `SessionReady` shape. They now consume the exact `ResidentActivation` record.
-- An observed child exit could be inserted after its supervisor callback had
-  already run and remain in the pending set forever. The actor-local lifecycle
-  record now distinguishes typed observation from supervisor processing in
-  either order, keyed by exact incarnation, and removes any failure deferred
-  before its typed observation.
-- A failed internal completion resume could leave the actor standing at
-  `Boot`. The activation-local continuation is restored when transfer fails.
-- Extracted prompt assets still taught the superseded generic `complete action`,
-  `pure`, and `assemble` shapes. The multiline artifacts now direct
-  the model to inspect the session-local `:type complete` and pass its exact
-  value directly.
-- The tracing fold's two `needless_borrow` warnings were wave-owned rather than
-  unrelated. They are fixed, and strict Clippy now passes for the compiler
-  daemon and the affected host/actor targets.
-- The completion fold narrowed the generated Deliberation import without
-  updating its protocol golden. The reviewed golden now matches the generated
-  schema, and the committed fixture fingerprint matches the current extractor
-  inputs.
-
-The persistent-import constructor has one documented Clippy arity exception:
-it takes the independently owned fields of one immutable compile-view snapshot.
-Introducing carrier structs solely to cross the lint threshold would obscure,
-rather than clarify, its ownership boundary.
-
-The live root inherited a `CARGO_TARGET_DIR` inside an actor-specific directory
-that disappeared when the pane/worktree lifecycle advanced. Use a stable target
-such as `/tmp/tidepool-root-fold-build` and unset inherited extractor endpoints
-for root verification. A matched command has this shape:
+Use the independent, small `/home/inanna/dev/shoal-console` repository for the
+next run. It has fast Rust tests and a dependency-free `cargo run -- --smoke`
+contract, so lifecycle evidence is not buried under a cold Tidepool/Cranelift
+build. Start it from the Tidepool checkout with a unique tmux name:
 
 ```sh
-env -u TIDEPOOL_EXTRACT -u TIDEPOOL_EXTRACT_WORKER \
-  -u TIDEPOOL_EXTRACT_DAEMON_SOCKET \
-  CARGO_TARGET_DIR=/tmp/tidepool-root-fold-build RUSTC_WRAPPER= \
-  just test tidepool 'test(actor_host::tests::shoal_exposes_generic_haskell_actor_composition)'
+just shoal-console -- --session shoal-console-canary --no-attach
+tmux list-panes -t shoal-console-canary -F '#{pane_id} #{pane_title}'
 ```
 
-The held spike should be mined selectively. Its private
-`Tidepool.Actors.Internal.Agent` shows the existing worktree-authority recipe;
-its preamble changes prove how to omit companion modules behind a curated
-facade; and its visibility fixtures test that low-level actor construction is
-absent. Its `AgentRef exit`, startup prompt/input, `waitOn`, and terminal
-completion model must be discarded.
+Inspect both the Host and Root panes before dispatch, while workers run, and
+after settlement. The next live boundary is queued reuse of one persistent
+worker through replies and watches:
 
-### Next-wave design philosophy
+1. In the root workbench, inspect `:browse`, `:bindings`, and `:status`; define
+   one small report ADT. A root has no `sessionInput` outside a request scope.
+2. Create one managed worktree with `allowDirtySnapshot` if the console source
+   is dirty, start one `codingAgent`, and submit two real code-and-test requests
+   to that same agent before watching either response. Use different result
+   types, for example `Text` and the session-defined report ADT.
+3. Make the first task add one narrowly named unit test and the second add a
+   different small test or smoke-contract assertion in the same worktree. The
+   second task should naturally build on the first checkout state. Neither task
+   may be a readiness probe or throwaway message.
+4. Register one applicative watch over the two original response handles and
+   end the root response normally. Confirm the worker receives two request
+   activations, `pollWatch` returns the exact typed pair, and the worker retains
+   its Codex context and declarations between requests.
+5. Verify each focused test independently, inspect the exact Git diff/commits,
+   call `stopAgent`, and require an orderly retirement with no retry or
+   missing-rollout log entry.
+6. Check whether the console worker's normal Cargo target survives across both
+   requests. If it disappears, reproduce with the smallest pair of commands
+   and trace the existing workspace-mount and Codex sandbox owners. If it does
+   not reproduce, record that the earlier failure was specific to the
+   disposable Tidepool mirror rather than generalizing a workaround.
+7. Stop the disposable tmux session and discard its managed canary worktree;
+   do not merge the test-only changes.
 
-The next wave should treat the failures observed here as design input, not as
-an unrelated bug list. Exomonad's battle-tested steering model is useful where
-it names real structure: agent work unfolds through scaffold and delegation,
-then folds through review and integration; a node's worktree, context window,
-and actor lifetime form one ownership unit; child events are pushed; and tmux
-is observability rather than transport. Shoal adds a persistent typed Haskell
-scope and live values to that unit.
-
-Apply these lenses:
-
-- Compiler feedback is the primary interaction UI. Preserve exact multiline
-  diagnostics across every wrapper and require affirmative typed settlement;
-  tool return, empty output, pane disappearance, or process intent must never
-  masquerade as semantic completion.
-- Separate readiness, request admission, reply settlement, actor exit, and
-  teardown. Each transition needs one explicit owner and observable evidence.
-  Replying is not exiting; an observed dead pane is not a typed reply.
-- Keep one authoritative exact identity. Human labels and branch names are
-  coordinates for people, not routing keys. The long-lived actor, Codex
-  context, Haskell scope, worktree authority, and recursive parentage should
-  be born and retired coherently.
-- Make coordination push-based and durable, but keep payload contracts typed.
-  Tmux panes and log lines help operators; they do not carry messages or own
-  lifecycle truth.
-- Treat a scaffold as compressed architectural context and a fold as a design
-  review, not just `git merge`. Merge independent completed work as it becomes
-  reviewed; spawn dependent work only from the integrated prerequisite.
-- A child completion report is a submission claim. The parent inspects the
-  exact commit, affected owners, generated artifacts, failure paths, and test
-  evidence before accepting it.
-- Make invalid model actions hard to express: monomorphic activation-local
-  operations, `request @Result` at cross-unit boundaries, curated imports, and
-  closed reason vocabularies. Do not compensate with string parsing, prompt
-  schemas, `Proxy`, or a universal low-level facade.
-- Let abstractions pay rent. Preserve names such as unfold, fold, activation,
-  and reply when they compress real semantics; reject speculative registries,
-  paired mechanisms, or role-general machinery without a present consumer.
-  Temporary bridges must name their owner, destination, and removal condition.
-- Treat test topology as part of developer efficacy. Concurrent workers run
-  focused proofs; extractor-backed and broad tests run at folds with a matched
-  toolchain. A test that passes alone in 19 seconds but takes 406 seconds in a
-  broad parallel tier is correct but badly scheduled.
-- Experiment freely in live Haskell declarations and campaign-local helpers.
-  Promote only repeated, general improvements with a clear mechanism owner;
-  delete the unsuccessful shape instead of preserving compatibility layers.
-
-The Codex pin in this integration fold advances from `3c67184` to
-`b8d44e30de8cc2dd777f16ba218f4d248babb435`. Its host dynamic-tool contract is
-part of Shoal's model-facing correctness boundary. The targeted Nix contract
-check passed against this pin before the restart boundary.
-
-Before spawning any next-wave implementation actor, run one disposable live
-canary through the rebuilt Shoal:
-
-1. In the root workbench, declare a concrete `CanaryReport` result type and
-   create one managed worktree.
-2. Spawn one real worktree-backed Codex actor. Ask it to add exactly one line
-   to exactly one disposable file, commit that change, and return a
-   `CanaryReport` through its session-local monomorphic `complete`.
-3. First submit one intentional Haskell type error and confirm the full GHC
-   diagnostic appears in the actor's context. Correct it in the same resident
-   session; an empty tool result or wrapper status is not success.
-4. Await the live typed report in the root. Independently verify the exact
-   commit, one-file/one-line diff, clean worktree, and actor lifecycle.
-5. Discard the canary branch/worktree without merging its disposable change.
-
-Do not begin persistent messaging if any part of this canary needs transcript
-interpretation, tmux inference, or manual recovery. Fix the owning interaction
-boundary first.
-
-### Suggested persistent request model
-
-The public model should make the recursively owned actor long-lived and put the
-per-interaction result type on a separate handle:
+Submit both requests before waiting. A representative shape is:
 
 ```haskell
-data AgentRef
-data Reply result
-
-startAgent :: Member Actor effs => AgentSpec -> Eff effs AgentRef
-
-request
-  :: forall result input effs
-   . Member Actor effs
-  => AgentRef
-  -> Text
-  -> input
-  -> Eff effs (Reply result)
-
-waitReply :: Reply result -> AgentAction result
-stopAgent :: Member Actor effs => AgentRef -> Eff effs ()
+responseA <- request @Text agent firstRealTask ()
+responseB <- request @CanaryReport agent secondRealTask ()
+both <- watch ((,) <$> awaitResponse responseA <*> awaitResponse responseB)
 ```
 
-Normal orchestration is explicit about the requested result at the dispatch
-boundary, especially when a later GHCi unit cannot contribute inference:
+Handle `createWorktree`'s `Either` explicitly and keep the `AgentRef`, both
+`Response` handles, and the `Watch` in one fenced outer binding. Do not infer
+success from panes, transcript prose, or process intent: require typed
+settlement, host lifecycle evidence, and independently verified Git/test facts.
 
-```haskell
-reviewA <- request @ReviewReport reviewer prompt candidateA
-reviewB <- request @ReviewReport reviewer prompt candidateB
+## Longer-term direction
 
-complete $ nextTurn $
-  (,) <$> waitReply reviewA <*> waitReply reviewB
-```
-
-On each target activation, Shoal supplies a request-specific environment:
-
-```haskell
-sessionInput :: Candidate
-reply        :: ReviewReport -> SessionM ()
-```
-
-`reply` is monomorphic and single-use for that activation. It settles the
-corresponding `Reply ReviewReport`, then the actor returns to mailbox readiness
-with its model context, declarations, capabilities, worktree, and identity
-intact. It must not retire the actor. A later request may have unrelated input
-and result types. Actor shutdown remains explicit and recursive ownership, not
-request completion, governs child lifetime.
-
-The caller's GHC fixes both monotypes and records their defining modules at the
-request site. Rust owns the opaque request ID, actor incarnation, mailbox
-admission, live-root custody, cancellation, single settlement, and target-exit
-cleanup. The same-machine result stays a live Haskell value; prompts, rendered
-type names, heap tags, JSON schemas, `Proxy`, and unsafe casts never determine
-the contract. An intentionally abstract result is constructed through an
-explicit caller-supplied live builder capability.
-
-The first vertical acceptance case should send two consecutively different
-typed requests to the same still-live actor and include both a caller-session
-defined ADT and a closure-valued reply. Once the completion fold is integrated,
-build and restart Shoal at this clean boundary so subsequent actors dogfood the
-new activation and completion behavior. Then implement persistent lifecycle and
-request custody as the prerequisite before splitting facade and recursive-tree
-dogfood lanes.
+- Expose a complete reply lifecycle observation when a real policy needs to
+  branch over target failure or cancellation.
+- Correlate actor incarnation, request/activation identity, hosted-tool
+  invocation, compile attempt, and settlement in the existing structured
+  tracing path.
+- Consider provider-native context splitting only after persistent requests
+  have real dogfood evidence. A fork must give every child a new actor identity
+  and explicit authority; capabilities and live values are never cloned
+  implicitly.
+- Keep common fan-out, review, and fold patterns as ordinary Haskell rather
+  than adding a worker registry, merge queue, or second scheduler.
 
 ## Updating this guide
 
-Add a current technique after it succeeds in live use and its boundary is
-understood. Add a sharp edge when it is repeatable and materially affects
-agent efficacy; remove it when the owning fix lands. Aspirational entries must
-name an observable improvement and move into the current sections only after
-the implementation and acceptance evidence land.
-
-Prefer deleting obsolete advice over preserving historical variants. Git is
-the history of this guide.
+Add a current technique after it succeeds and its boundary is understood. Add
+a sharp edge when it is repeatable and materially affects agent efficacy;
+remove it when the owning fix lands. Prefer deleting obsolete advice over
+preserving historical variants. Git is the history of this guide.

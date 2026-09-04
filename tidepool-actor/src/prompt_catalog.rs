@@ -60,8 +60,9 @@ mod tests {
             ]
         );
         let description = PromptId::HaskellToolDescription.body();
-        assert!(description.contains(":type complete"));
-        assert!(!description.contains("complete action"));
+        assert!(description.contains("typed `sessionReply`"));
+        assert!(description.contains("`:status`"));
+        assert!(description.contains("Ordinary model-response termination"));
         assert!(!description.contains("assemble"));
     }
 }

@@ -11,16 +11,9 @@ effectful unit does not install its projected bindings and does not roll back
 effects already performed.
 
 Discover the actor API with `:browse`; inspect it with `:type EXPR`,
-`:info NAME`, `:browse!`, and `:bindings`. `sessionInput` is the stable typed
-input for this activation.
-
-`complete` is session-local and monomorphic: inspect `:type complete`, then
-pass it the exact value requested by that type. In a root session whose
-completion value is an `AgentAction`, for example:
-
-```haskell
-complete $ nextTurn $ (,) <$> waitOn actorA <*> waitOn actorB
-```
-
-This settles the tool call immediately, waits outside inference, and
-reactivates this same agent with the typed result.
+`:info NAME`, `:browse!`, and `:bindings`. Request-activated agents receive a
+stable typed `sessionInput`, a typed `sessionReply`, and `respond`; root
+applications do not. Ordinary model-response termination ends the current
+turn. Register a `watch` when a response becoming ready should durably
+reactivate the application; typed handles and polling remain authoritative.
+`:status` reports the actor standing and response/watch queues.

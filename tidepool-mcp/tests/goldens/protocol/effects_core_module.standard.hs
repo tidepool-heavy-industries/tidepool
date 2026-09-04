@@ -213,9 +213,6 @@ data RepoEvent a where
   MailboxSend :: Int -> Text -> Value -> RepoEvent (Either EventError ())
   MailboxDrop :: Int -> RepoEvent (Either EventError ())
 
-data Deliberate a where
-  DeliberateWith :: Int -> input -> Text -> Deliberate output
-
 data AskUser a where
   AskUserWith :: Value -> AskUser Value
   NoteWith :: Text -> AskUser ()
@@ -251,11 +248,13 @@ data Green a where
 
 data ActorEffectProfile = ActorReadWriteProfile | ActorReadOnlyProfile deriving (Show, Eq)
 data ActorTerminalStatus = ActorCompletedStatus | ActorFailedStatus Text | ActorCancelledStatus Text deriving (Show, Eq)
+data ActorCallStatus = ActorCallSucceeded | ActorCallFailed Text deriving (Show, Eq)
 data Actor a where
   ActorStartWith :: Text -> (Int -> Eff childEffs ()) -> ActorEffectProfile -> [Text] -> Actor (Int, Int)
   ActorWaitWith :: (Int, Int) -> Actor ActorTerminalStatus
   ActorPollWith :: (Int, Int) -> Actor (Maybe ActorTerminalStatus)
   ActorCallWith :: (Int, Int) -> protocol result -> Actor result
+  ActorTryCallWith :: (Int, Int) -> protocol () -> Actor ActorCallStatus
   ActorCastWith :: (Int, Int) -> protocol () -> Actor ()
 
 data ActorKernel a where
@@ -273,6 +272,7 @@ data AgentTools a where
 
 data AgentSession a where
   AgentSessionWith :: Int -> input -> Maybe Text -> Int -> AgentSession output
+  AgentAttachWith :: Maybe Text -> AgentSession ()
 
 -- | Emit a line of console output. Thin wrapper over the Print effect
 -- so chains never need `send (Print …)`.
@@ -659,8 +659,8 @@ lookupWorktree :: forall effs. Member Worktree effs => WorktreeId -> Eff effs (E
 lookupWorktree = send . WorktreeLookup
 -- | Every registered worktree, present or lost. A lost tree is listed
 -- with `present = False` rather than failing the whole listing.
-listWorktrees :: forall effs. Member Worktree effs => Eff effs [WorktreeSummary]
-listWorktrees = send WorktreeList >>= liftEither
+listWorktrees :: forall effs. Member Worktree effs => Eff effs (Either WorktreeError [WorktreeSummary])
+listWorktrees = send WorktreeList
 -- | The durable identity of a managed worktree. Pure: the handle
 -- already carries its receipt, so this reads no git state.
 worktreeId :: WorktreeHandle -> WorktreeId

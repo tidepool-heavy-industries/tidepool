@@ -6,7 +6,6 @@ pub mod actor_local;
 pub mod agent_session;
 pub mod agent_tools;
 pub mod ask_user;
-pub mod deliberate;
 pub mod exec;
 pub mod finalize;
 pub mod fork;
@@ -23,7 +22,6 @@ pub use actor_local::*;
 pub use agent_session::*;
 pub use agent_tools::*;
 pub use ask_user::*;
-pub use deliberate::*;
 pub use exec::*;
 pub use finalize::*;
 pub use fork::*;
@@ -41,7 +39,6 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         journal_decl(),
         worktree_decl(),
         event_decl(),
-        deliberate_decl(),
         askuser_decl(),
         readstate_decl(),
         runllmturn_decl(),
@@ -58,7 +55,6 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
 
 /// Effects with an explicitly curated authored vocabulary.
 pub(crate) const CURATED_EFFECTS: &[&str] = &[
-    "Deliberate",
     "Actor",
     "ActorKernel",
     "ActorLocal",
@@ -68,16 +64,17 @@ pub(crate) const CURATED_EFFECTS: &[&str] = &[
 
 /// Hidden names grouped by their owning effect.
 pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
-    ("Deliberate", &["DeliberateWith"]),
     (
         "Actor",
         &[
             "ActorEffectProfile",
             "ActorTerminalStatus",
+            "ActorCallStatus",
             "ActorStartWith",
             "ActorWaitWith",
             "ActorPollWith",
             "ActorCallWith",
+            "ActorTryCallWith",
             "ActorCastWith",
         ],
     ),
@@ -95,5 +92,5 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         "AgentTools",
         &["AgentToolsAwaitWith", "AgentToolsReplyWith"],
     ),
-    ("AgentSession", &["AgentSessionWith"]),
+    ("AgentSession", &["AgentSessionWith", "AgentAttachWith"]),
 ];

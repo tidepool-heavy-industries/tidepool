@@ -613,16 +613,16 @@ fn assemble_expression_module_with_result(
         (ExpressionLift::Effectful, ExpressionResult::Raw) => "__workbenchValue",
         (ExpressionLift::Pure, ExpressionResult::Raw) => "pure __workbenchValue",
         (ExpressionLift::Effectful, ExpressionResult::HaskellDisplay) => {
-            "do { __value <- __workbenchValue ; pure (__value, pack (show __value)) }"
+            "do { __value <- __workbenchValue ; pure (__value, T.pack (show __value)) }"
         }
         (ExpressionLift::Pure, ExpressionResult::HaskellDisplay) => {
-            "pure (__workbenchValue, pack (show __workbenchValue))"
+            "pure (__workbenchValue, T.pack (show __workbenchValue))"
         }
         (ExpressionLift::Effectful, ExpressionResult::OpaqueDisplay) => {
-            "do { _ <- __workbenchValue ; pure (pack \"<opaque value>\") }"
+            "do { _ <- __workbenchValue ; pure (T.pack \"<opaque value>\") }"
         }
         (ExpressionLift::Pure, ExpressionResult::OpaqueDisplay) => {
-            "pure (__workbenchValue `seq` pack \"<opaque value>\")"
+            "pure (__workbenchValue `seq` T.pack \"<opaque value>\")"
         }
     };
     out.push_str(target);
@@ -1523,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn display_expression_keeps_value_and_rendering_in_one_result() {
+    fn display_expression_keeps_value_and_uses_qualified_private_rendering() {
         let row = "(Complete Text ': ActorEffects)";
         let source = assemble_display_expression_module(
             "module Expr where\n",
@@ -1534,12 +1534,41 @@ mod tests {
         );
 
         assert!(source.contains("__value <- __workbenchValue"));
-        assert!(source.contains("pure (__value, pack (show __value))"));
+        assert!(source.contains("pure (__value, T.pack (show __value))"));
+        assert!(!source.contains("pure (__value, pack (show __value))"));
         assert_eq!(source.matches("effectfulValue").count(), 1);
         assert_eq!(
             turn_user_code_line_range(&source, "effectfulValue"),
             Some((6, 6))
         );
+
+        let pure = assemble_display_expression_module(
+            "module Expr where\n",
+            "__result",
+            row,
+            "pureValue",
+            ExpressionLift::Pure,
+        );
+        let opaque = assemble_opaque_expression_module(
+            "module Expr where\n",
+            "__result",
+            row,
+            "opaqueValue",
+            ExpressionLift::Effectful,
+        );
+        let pure_opaque = assemble_opaque_expression_module(
+            "module Expr where\n",
+            "__result",
+            row,
+            "pureOpaqueValue",
+            ExpressionLift::Pure,
+        );
+        assert!(pure.contains("T.pack (show __workbenchValue)"));
+        assert!(opaque.contains("T.pack \"<opaque value>\""));
+        assert!(pure_opaque.contains("T.pack \"<opaque value>\""));
+        assert!(!pure.contains(" pack "));
+        assert!(!opaque.contains(" pack "));
+        assert!(!pure_opaque.contains(" pack "));
     }
 
     #[test]

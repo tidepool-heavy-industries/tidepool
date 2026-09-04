@@ -28,6 +28,11 @@ pub(crate) enum ResidentOutbound {
         continuation: ResidentHole,
         request: MailboxValue,
     },
+    TryCall {
+        target: ActorRef,
+        continuation: ResidentHole,
+        request: MailboxValue,
+    },
     Cast {
         target: ActorRef,
         continuation: ResidentHole,

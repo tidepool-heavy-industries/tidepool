@@ -82,7 +82,46 @@ pub enum KernelInvocationFailure {
     Rejected { actor: ActorRef, detail: String },
     #[error("actor {actor:?} invocation failed: {detail}")]
     Failed { actor: ActorRef, detail: String },
+    #[error(transparent)]
+    Workbench(#[from] KernelWorkbenchFailure),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelWorkbenchFailure {
+    pub actor: ActorRef,
+    pub completed: Vec<tidepool_runtime::session::WorkbenchItemReceipt>,
+    pub failed_index: usize,
+    pub total: usize,
+    pub detail: String,
+}
+
+impl std::fmt::Display for KernelWorkbenchFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "actor {:?} workbench input unit {} of {} failed: {}",
+            self.actor,
+            self.failed_index + 1,
+            self.total,
+            self.detail
+        )?;
+        if !self.completed.is_empty() {
+            formatter.write_str("\ncompleted prefix:")?;
+            for receipt in &self.completed {
+                write!(
+                    formatter,
+                    "\ninput unit {} ({:?}): {}",
+                    receipt.index + 1,
+                    receipt.status,
+                    receipt.output
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for KernelWorkbenchFailure {}
 
 pub type KernelInvocationReply = Result<serde_json::Value, KernelInvocationFailure>;
 pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailure>;
@@ -113,6 +152,9 @@ pub enum KernelMessage {
         request: WorkbenchRequest,
         reply: RpcReplyPort<KernelWorkbenchReply>,
     },
+    /// Drain one mailbox request retained while the resident behavior was
+    /// parked on an external interaction rather than on `receive`.
+    DrainMailbox,
     /// Resume actor-owned work after its initiating caller has been settled.
     Resume,
     ExternalApplicationFailed {
@@ -152,6 +194,7 @@ impl std::fmt::Debug for KernelMessage {
                 .debug_struct("Workbench")
                 .field("request", request)
                 .finish_non_exhaustive(),
+            Self::DrainMailbox => formatter.write_str("DrainMailbox"),
             Self::Resume => formatter.write_str("Resume"),
             Self::ExternalApplicationFailed { failure, .. } => formatter
                 .debug_struct("ExternalApplicationFailed")
@@ -276,6 +319,26 @@ mod tests {
                 target: a,
                 ancestry: vec![a],
             })
+        );
+    }
+
+    #[test]
+    fn workbench_failure_keeps_committed_prefix_and_exact_cause() {
+        let failure = KernelWorkbenchFailure {
+            actor: ActorRef::first(crate::ActorId(7)),
+            completed: vec![tidepool_runtime::session::WorkbenchItemReceipt {
+                index: 0,
+                status: tidepool_runtime::session::WorkbenchItemStatus::Committed,
+                output: "defined spotTaskText at generation 2".into(),
+            }],
+            failed_index: 1,
+            total: 3,
+            detail: "actor protocol violation: unsupported resident actor request `MissingEffect`"
+                .into(),
+        };
+        assert_eq!(
+            failure.to_string(),
+            "actor ActorRef { id: ActorId(7), incarnation: Incarnation(1) } workbench input unit 2 of 3 failed: actor protocol violation: unsupported resident actor request `MissingEffect`\ncompleted prefix:\ninput unit 1 (Committed): defined spotTaskText at generation 2"
         );
     }
 }

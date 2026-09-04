@@ -13,5 +13,6 @@ use tidepool_bridge_derive::FromCore;
 #[derive(FromCore)]
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum AgentSessionReq {
-    AgentSessionWith(i64, tidepool_eval::value::Value, Option<String>, i64),
+    AgentSessionWith(i64, tidepool_eval::value::Value, i64, Option<String>),
+    AgentAttachWith(Option<String>),
 }

@@ -44,7 +44,6 @@ tidepool-worktree.workspace = true
 tidepool-agent.workspace = true
 tidepool-actor.workspace = true
 tidepool-tool.workspace = true
-tidepool-model.workspace = true
 tidepool-node.workspace = true
 tidepool-atomic-write.workspace = true
 tidepool-extract-cmd.workspace = true

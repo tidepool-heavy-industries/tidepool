@@ -1,23 +1,15 @@
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 {-# OPTIONS_GHC -Wno-simplifiable-class-constraints #-}
 
 -- | One typed session owned by a supervised interactive agent application.
 --
 -- The optional prompt becomes that application's first User message. The
 -- authoritative input remains a live Haskell value mounted in the persistent
--- workbench, and GHC checks the value supplied through 'complete' before the
--- installed actor program resumes.
+-- workbench. Request settlement uses the separate 'Replies' effect.
 module Tidepool.Agent.Session
-  ( agentSession
-  , SessionActivation
-  , pattern InitialUser
-  , pattern ActionCompleted
-  , pattern ActionFailed
-  , pattern ManualReady
-  , agentSessionSited
+  ( attachAgent
+  , requestSessionSited
   ) where
 
 import Control.Monad.Freer (Eff, Member, send)
@@ -25,48 +17,20 @@ import Data.Text (Text)
 
 import Tidepool.Effects.Core (AgentSession (..))
 
--- Keep the public vocabulary closed while giving the extractor an unboxed
--- representation at the generated effect boundary.
-newtype SessionActivation = SessionActivation Int
+-- | Request this actor's Codex application without manufacturing a model turn.
+attachAgent :: Member AgentSession effs => Maybe Text -> Eff effs ()
+attachAgent initialUser = send (AgentAttachWith initialUser)
 
-pattern InitialUser :: SessionActivation
-pattern InitialUser = SessionActivation 0
-
-pattern ActionCompleted :: SessionActivation
-pattern ActionCompleted = SessionActivation 1
-
-pattern ActionFailed :: SessionActivation
-pattern ActionFailed = SessionActivation 2
-
-pattern ManualReady :: SessionActivation
-pattern ManualReady = SessionActivation 3
-
-{-# COMPLETE InitialUser, ActionCompleted, ActionFailed, ManualReady #-}
-
-activationCode :: SessionActivation -> Int
-activationCode (SessionActivation code) = code
-
-{-# OPAQUE agentSession #-}
-agentSession
-  :: forall output input effs
-   . Member AgentSession effs
-  => SessionActivation
-  -> Maybe Text
-  -> input
-  -> Eff effs output
-agentSession activation initialUser input =
-  agentSessionSited @output @input 0 activation initialUser input
-
--- Extractor substrate. The public fully-applied call is rewritten with the
--- site whose GHC-derived input/output types cross compiler metadata.
-{-# OPAQUE agentSessionSited #-}
-agentSessionSited
+-- Engine-private request presentation. The request identity is runtime
+-- authority; the site still carries GHC's input/result types.
+{-# OPAQUE requestSessionSited #-}
+requestSessionSited
   :: forall output input effs
    . Member AgentSession effs
   => Int
-  -> SessionActivation
+  -> Int
   -> Maybe Text
   -> input
   -> Eff effs output
-agentSessionSited site activation initialUser input =
-  send (AgentSessionWith site input initialUser (activationCode activation))
+requestSessionSited site requestId initialUser input =
+  send (AgentSessionWith site input requestId initialUser)

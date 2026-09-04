@@ -920,7 +920,7 @@ impl<O: OutputSink> SessionEngine<O> {
                 let thread_panic = handle
                     .take()
                     .and_then(|h| h.join().err())
-                    .map(format_panic_payload);
+                    .map(crate::panic_payload_message);
                 TurnOutcome::Crashed {
                     output,
                     thread_panic,
@@ -1113,7 +1113,7 @@ fn describe_run_error(
 /// run-phase runtime crash, appending any JIT diagnostics.
 fn describe_panic(payload: Box<dyn std::any::Any + Send>) -> (String, FailureClass, Phase) {
     let diagnostics = crate::drain_diagnostics();
-    let mut detail = format_panic_payload(payload);
+    let mut detail = crate::panic_payload_message(payload);
     if !diagnostics.is_empty() {
         detail.push_str("\n\n## JIT Diagnostics\n");
         for d in &diagnostics {
@@ -1238,17 +1238,6 @@ pub fn extract_ask_request(
     })?;
     let meta = fields.get(1).map(|m| value_to_json(m, table, 0));
     Ok((prompt, meta))
-}
-
-/// Format a caught panic payload as a human string (downcast to `&str`/`String`).
-fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_string()
-    }
 }
 
 #[cfg(test)]

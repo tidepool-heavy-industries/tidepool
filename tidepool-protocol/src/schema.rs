@@ -1140,18 +1140,12 @@ pub enum HelperBody {
     /// current registry's helpers do not always reuse the argument names.
     Applied(&'static [&'static str]),
     /// `v = send Ctor >>= liftEither` — a nullary, errors-tagged constructor
-    /// whose helper UNWRAPS the `Either` into the effect monad's failure. The
-    /// derived signature therefore carries the verb's success type bare
-    /// (`listWorktrees :: M [WorktreeSummary]`, not `M (Either …)`).
+    /// whose helper unwraps the `Either` into the effect monad's failure.
     ///
     /// A shape, not a body: `liftEither` is named once here, in Rust, and there
     /// is no Haskell source in the schema.
     ///
-    /// The point-free and applied `liftEither` forms are NOT added, because no
-    /// migrated effect needs them: Worktree's other two `>>= liftEither`
-    /// helpers (`worktreeBranch`, `worktreeHead`) additionally adapt their
-    /// argument through a pure projection, so they would stay unrepresentable
-    /// even with those variants. Adding them now would be speculation.
+    /// No migrated authored helper currently uses this legacy shape.
     NullaryLiftEither,
     /// `v h = h.f1.f2` — a PURE record-field projection over the helper's one
     /// argument. No verb, no `send`, no effect: the argument already carries the
@@ -1651,8 +1645,6 @@ pub enum HandlingClass {
     Green,
     /// Routed to the Rust-owned actor registry and scheduler.
     Actor,
-    /// Runs one typed model/Haskell deliberation inside the current actor.
-    Deliberate,
     /// Publishes an actor-local persistent Haskell interaction session and
     /// resumes only with its statically declared completion type.
     AgentSession,

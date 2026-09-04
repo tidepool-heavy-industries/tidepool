@@ -24,7 +24,6 @@ pub mod agent_tools;
 pub mod ask;
 pub mod ask_user;
 pub mod console;
-pub mod deliberate;
 pub mod event;
 pub mod exec;
 pub mod finalize;
@@ -58,7 +57,6 @@ pub fn all() -> Vec<Effect> {
         journal::journal(),
         worktree::worktree(),
         event::event(),
-        deliberate::deliberate(),
         ask_user::ask_user(),
         read_state::read_state(),
         run_llm_turn::run_llm_turn(),

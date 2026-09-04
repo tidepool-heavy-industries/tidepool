@@ -809,9 +809,10 @@ rootTree fold st = case rootBranchOf fold (nodeName (plan st)) of
 -- only the process that happened to finish it.
 summarize :: ResumeFold -> Outcome -> Harness RunSummary
 summarize fold root = do
-  trees <- listWorktrees
-  pure
-    RunSummary
+  listed <- listWorktrees
+  case listed of
+    Left err -> error [fmt|Could not list retained worktrees: {renderWorktreeError err}|]
+    Right trees -> pure RunSummary
       { runRoot = outcomeNodeName root
       -- 'failureText' already renders 'Done' as "done" — the same sentinel
       -- this used to compute a second, independent way.

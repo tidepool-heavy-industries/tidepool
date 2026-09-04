@@ -71,8 +71,14 @@ fn unsafe_io_import_fails_as_compile_diagnostic_not_a_crash() {
         Err(RuntimeError::Compile(CompileError::ExtractFailed(msg))) => {
             assert!(!msg.is_empty(), "ExtractFailed message must not be empty");
         }
+        Err(RuntimeError::Compile(CompileError::WorkerFailure(diags))) => {
+            assert!(
+                !diags.is_empty(),
+                "WorkerFailure must carry the extractor's unsupported-primop diagnostic"
+            );
+        }
         Err(other) => panic!(
-            "expected a Compile(Diagnostics|ExtractFailed) error surfacing the unsupported \
+            "expected a Compile(Diagnostics|ExtractFailed|WorkerFailure) error surfacing the unsupported \
              IO primop, got a different error shape: {other:?}"
         ),
     }

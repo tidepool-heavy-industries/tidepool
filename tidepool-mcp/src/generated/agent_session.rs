@@ -5,10 +5,11 @@
 pub fn agent_session_decl() -> crate::EffectDecl {
     crate::EffectDecl {
         type_name: "AgentSession",
-        description: "Open this actor's supervised interactive-agent session with a statically typed completion. The external application reaches the persistent Haskell workbench through its actor-local transport.",
-        prompt_card: Some("`agentSession activation prompt input` — expose the persistent Haskell workbench to the attached agent and resume with a GHC-checked result."),
+        description: "Present one typed request to this actor's attached application. The external application reaches the persistent Haskell workbench through its actor-local transport.",
+        prompt_card: Some("A request activation mounts typed `sessionInput`, `sessionReply`, and `respond` in the attached application."),
         constructors: &[
-            "AgentSessionWith :: Int -> input -> Maybe Text -> Int -> AgentSession output",
+            "AgentSessionWith :: Int -> input -> Int -> Maybe Text -> AgentSession output",
+            "AgentAttachWith :: Maybe Text -> AgentSession ()",
         ],
         type_defs: &[],
         extra_imports: &[

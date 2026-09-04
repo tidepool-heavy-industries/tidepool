@@ -7,10 +7,7 @@
 
 #![warn(clippy::unwrap_used, clippy::expect_used)]
 
-mod agent_session;
-mod completion;
 mod descriptor;
-mod executor;
 mod external_application;
 mod generated;
 mod identity;
@@ -21,36 +18,30 @@ mod mailbox;
 mod mount;
 mod profile;
 mod prompt_catalog;
+mod request;
+mod request_effect;
 mod resident_actor;
 mod resident_interactive;
 mod resident_tools;
 mod resident_workbench;
 mod start;
 mod termination;
+mod typed_request;
 mod wait;
 
-pub use agent_session::{
-    ActorAgentSession, AdmittedAgentSession, AgentSessionError, AssistantTurn, PendingProviderRound,
-};
-pub use completion::{
-    CompletionCaptureError, CompletionRequest, CompletionRequestError, ResidentCompletion,
-    ResidentCompletionError, ResidentCompletionExecutor,
-};
 pub use descriptor::ActorDescriptor;
-pub use executor::{
-    run_result_session, AgentBlockStop, AgentExecutionError, AgentWorkbench, CompletionExpectation,
-};
 pub use external_application::{
     ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
 };
 pub use identity::{ActorId, ActorRef, Incarnation};
 pub use interactive_session::{
-    ActivationId, ActivationReason, InteractiveSessionCaptureError, InteractiveSessionRequest,
-    ResidentActivation, ResidentInteractiveSession,
+    ActivationId, InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentActivation,
+    ResidentInteractiveSession,
 };
 pub use kernel::{
     CallAncestry, KernelCallFailure, KernelCallReply, KernelInvocationFailure,
-    KernelInvocationReply, KernelMessage, KernelWorkbenchReply, LocalActorRef,
+    KernelInvocationReply, KernelMessage, KernelWorkbenchFailure, KernelWorkbenchReply,
+    LocalActorRef,
 };
 pub use local_actor::{
     spawn_local_actor, ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext,
@@ -62,6 +53,10 @@ pub use mount::{
     ActorSourceImports,
 };
 pub use profile::ActorEffectProfile;
+pub use request::{
+    ReplyError, RequestId, ResponseFailure, ResponseObservation, WatchId, WatchNotification,
+    WatchObservation, WatchTransition,
+};
 pub use resident_actor::{
     spawn_resident_root, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
     ResidentKernelBehavior,
@@ -76,4 +71,5 @@ pub use resident_workbench::{
 };
 pub use start::{ActorEffectProfileWire, ActorStartCaptureError, ResidentActorStart};
 pub use termination::{ActorExitAlreadyPublished, ActorExitKind, ActorTerminal, RetainedActorExit};
+pub use typed_request::{RequestSignatureError, ResponseExpectation};
 pub use wait::{actor_terminal_value, ActorWaitError};

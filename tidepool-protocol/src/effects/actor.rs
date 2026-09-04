@@ -103,6 +103,33 @@ pub fn actor() -> Effect {
                 domain: None,
                 doc: &[],
             },
+            TypeDef {
+                name: "ActorCallStatus",
+                wire_rust: None,
+                shape: TypeShape::Sum {
+                    variants: vec![
+                        SumVariant {
+                            ctor: "ActorCallSucceeded",
+                            fields: positional_fields![],
+                            doc: &[],
+                        },
+                        SumVariant {
+                            ctor: "ActorCallFailed",
+                            fields: positional_fields![HsType::Text],
+                            doc: &[],
+                        },
+                    ],
+                },
+                json: JsonInstance::None,
+                derives: WireDerives(&[
+                    WireDerive::Debug,
+                    WireDerive::Clone,
+                    WireDerive::PartialEq,
+                    WireDerive::Eq,
+                ]),
+                domain: None,
+                doc: &["Result of a unit-returning actor call whose lifecycle failure is data."],
+            },
         ],
         foreign_types: &[],
         errors: None,
@@ -185,6 +212,26 @@ pub fn actor() -> Effect {
                     },
                 ],
                 ret: HsType::Var("result"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "ActorTryCallWith",
+                method: "actor_try_call_with",
+                args: vec![
+                    Arg {
+                        name: "actor",
+                        ty: address_type(),
+                        rust: RustBinding::Path("(i64, i64)"),
+                    },
+                    Arg {
+                        name: "request",
+                        ty: HsType::app(HsType::Var("protocol"), HsType::Unit),
+                        rust: RustBinding::CoreValue,
+                    },
+                ],
+                ret: HsType::Named("ActorCallStatus"),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

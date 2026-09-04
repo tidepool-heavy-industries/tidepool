@@ -1,5 +1,11 @@
 # Actor architecture
 
+Status: the actor substrate and persistent reply/watch vertical are landed.
+The `Complete`/interactive `AgentAction` portions later in this document are a
+superseded design record; the current contract is
+[persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md)
+and the current inventory is [implementation status](implementation.md).
+
 ## 1. The unit of execution
 
 An actor is not a process identity, a Haskell machine, or a model conversation
@@ -7,8 +13,7 @@ considered alone. Every actor combines:
 
 1. a fixed typed Haskell program;
 2. a persistent Haskell declaration and binding environment;
-3. one serial agent context, either Tidepool-resident or owned by an
-   interactive agent backend; and
+3. for an agent-backed actor, one serial Codex context; and
 4. Rust-owned identity, lifecycle, execution context, and authority.
 
 ```text
@@ -20,11 +25,11 @@ considered alone. Every actor combines:
                    typed Haskell actor program
                 fixed control flow and invariants
                               │
-       deliberate :: Member Deliberate effs => Text -> input -> Eff effs output
+     request @Result :: AgentRef -> Text -> input -> Eff effs (Response result)
                               │
                               ▼
        resident fenced Haskell or actor-local hosted tool
-           define · inspect · evaluate · spawn · complete
+          define · inspect · evaluate · spawn · reply · watch
                               │
                          live value a
                               │
@@ -34,8 +39,8 @@ considered alone. Every actor combines:
 
 The first two execution forms share the same actor kernel:
 
-- a **resident actor** lets Tidepool own the provider conversation and uses
-  fenced Haskell as its primary workbench; and
+- a **resident actor** runs its installed Haskell program without owning a
+  model-provider loop; and
 - an **agent-backed actor** wraps a long-lived interactive agent application.
   Its actor-local custom tool transports persistent GHCi-style workbench turns,
   while the backend owns its conversation and native user interaction.
@@ -47,11 +52,10 @@ wakes through their existing owners; a shared neutral event projection is a
 future observability boundary, not a second actor runtime. Recreation creates
 another exact identity; V0 has no in-place restart or retargeting.
 
-For a resident actor, Haskell controls when to open a result-bearing agent
-session and fixes its result type. An agent-backed actor receives runtime facts
-through its durable node inbox and invokes the same resident workbench through
-one GHCi-shaped hosted tool. Rust does not create a second administrative API
-or lifecycle session beside that program.
+An agent-backed actor receives typed mailbox requests and runtime facts through
+its durable node inbox, then invokes the resident workbench through one
+GHCi-shaped hosted tool. Rust does not create a resident-provider loop or a
+second administrative API beside that program.
 
 ## 2. Actor components
 
@@ -64,7 +68,7 @@ inventory, not a required Rust struct layout.
 | mailbox | Ractor-owned queue of local calls, casts, and runtime requests |
 | actor program continuation | The currently running or parked installed `Eff` computation |
 | program snapshot | Current persistent declarations, bindings, and installed behavior roots |
-| agent context | Resident canonical conversation or an opaque interactive-backend thread binding, plus compaction and usage facts the backend exposes |
+| agent context | Opaque Codex thread binding plus compaction and usage facts the backend exposes; absent for headless actors |
 | execution form | Immutable resident or agent-backed driver selection for this incarnation; descriptive, never an authority check by itself |
 | actor interpreter | Rust nominal handlers, grants, and lifecycle restrictions for this actor |
 | execution principal | Identity installed while this actor's Haskell runs |
@@ -75,10 +79,9 @@ inventory, not a required Rust struct layout.
 
 The mailbox and Haskell program are sequential for one actor. Concurrency is
 expressed by several actors and asynchronous actor operations between them.
-It never re-enters one actor's Haskell session. Resident provider calls are
-serialized by actor admission. An interactive backend serializes its own
-native conversation; every callback into resident Haskell still passes through
-the same actor admission and execution-principal boundary.
+It never re-enters one actor's Haskell session. Codex serializes its native
+conversation; every callback into resident Haskell still passes through the
+same actor admission and execution-principal boundary.
 
 The initial topology keeps cooperating actors on one shared machine session.
 That is what makes structural sharing and arbitrary live-value delivery
@@ -87,11 +90,11 @@ values.
 
 Two nested admissions have different lifetimes and must not be conflated:
 
-- an **actor-turn admission** excludes every other turn for that actor. An
-  agent session retains it across provider waits, fenced-Haskell blocks,
-  retries, and corrective rounds;
+- an **actor-turn admission** owns one authored Haskell continuation. A Codex
+  request retains that continuation across hosted-tool blocks, retries, and
+  corrective rounds while later calls and casts remain queued in FIFO order;
 - a **machine checkout** covers one Haskell run segment. It is released while
-  the admitted actor waits on a provider, actor reply, or external operation,
+  the admitted actor waits on Codex, an actor reply, or external operation,
   so another actor may use the shared machine without re-entering the first.
 
 The existing resident-machine checkout owns one FIFO ready queue per machine
@@ -103,12 +106,13 @@ separate machine sessions. All JIT admission stays on the existing checkout
 path. Ractor's sequential message handler supplies actor-turn admission; no
 second registry lock or host task table mirrors that state.
 
-One Ractor message handler owns an actor for the full logical operation. If an
-authored Haskell turn suspends on `deliberate`, a call, a wait, or an external
-operation, that handler remains pending while releasing any machine checkout;
-the actor cannot process another ordinary message. Kill and shutdown remain
-framework control operations. Backend-native owner wakes queue for a later
-activation and never re-enter the current Haskell continuation.
+One authored mailbox handler owns its continuation for the full logical
+operation. If it suspends on an agent session, call, wait, or external
+operation, the resident behavior retains that private settlement state while
+releasing any machine checkout. Calls and casts received before it returns to
+`receive` retain custody in FIFO order and drain afterward. Kill and shutdown
+remain framework control operations. Backend-native owner wakes never re-enter
+the current Haskell continuation.
 
 ## 3. Ownership boundary
 
@@ -117,7 +121,7 @@ activation and never re-enter the current Haskell continuation.
 - exact process-local actor identities and Tidepool-to-Ractor handles;
 - Ractor actor construction, links, mailbox lifetime, and sequential turns;
 - admission to a shared machine session through the resident checkout;
-- model-provider threads or supervised interactive-agent processes, exact
+- supervised Codex processes and thread bindings, exact
   context/thread bindings, compaction, push delivery, and cache accounting;
 - one Rust effect interpreter per actor, routing nominal request constructors
   under that actor's policy and execution principal;
@@ -126,7 +130,7 @@ activation and never re-enter the current Haskell continuation.
 - capability registration, launch-grant derivation, revocation, and caller
   checks;
 - timeout, cancellation, shutdown, and supervision propagation;
-- network mounts, provider transport, node inboxes, and actor-scoped host-tool
+- network mounts, Codex transport, node inboxes, and actor-scoped host-tool
   transport;
 - durable namespace allocation and external resource cleanup;
 - authoritative structured actor events and resource-growth accounting.
@@ -141,7 +145,7 @@ external and durable boundaries.
 - actor protocols and their result types;
 - the fixed named effect profile selected when an actor incarnation starts;
 - fixed control flow, state-machine structure, and domain invariants;
-- deciding when and why to call its resident model;
+- deciding when and why to send typed work to an agent actor;
 - installing or rolling back model-authored behavior;
 - recursive organization, including which actors to create and how to combine
   their results;
@@ -151,11 +155,11 @@ external and durable boundaries.
 
 ### The model owns no runtime mechanism
 
-The model writes Haskell within the interface exposed by its actor. A resident
-actor does so through fenced Haskell; an agent-backed actor invokes its
-Haskell-authored tool policy through the native agent application. It does
+The model writes Haskell within the interface exposed by its agent-backed
+actor through the native Codex application. A headless resident actor runs
+only its installed Haskell program. The model does
 not parse process arguments, choose filesystem layouts, maintain actor registries,
-construct provider envelopes, assign identifiers, serialize internal values,
+construct Codex transport envelopes, assign identifiers, serialize internal values,
 or implement scheduling loops.
 
 ### Self-hosting shape: iterative worktree hylomorphisms
@@ -299,27 +303,18 @@ spellings of an existing operation do not.
 ### Primary model interaction
 
 The primary execution protocol is a persistent GHCi-style Haskell workbench,
-not a catalog of actor-control verbs. Its transport depends on who owns the
-model loop:
-
-- Tidepool-owned provider loops extract fenced `haskell` or `hs` blocks from
-  assistant responses.
-- Externally hosted interactive agents invoke the actor-local custom tool
-  `tidepool_actor.haskell`, carrying a raw GHCi-style script without JSON
-  argument ceremony. Colon-prefixed lines are reserved commands, other
-  nonblank lines are Haskell input units, and `:{` / `:}` delimit one
-  multiline GHC input unit. A fenced body uses ordinary Haskell: declaration
-  groups are valid directly, effect sequences use `do`, and one outer tuple or
-  record pattern binding persists multiple results. Pest owns only this
-  framing; GHC remains authoritative for the Haskell inside each unit. Units
-  execute in order and preserve successful prefixes.
-
-Both routes use the same classifier, persistent declaration/binding scope,
-resident machine, actor principal, effect interpreter, and structured
-receipts. Neither creates another scheduler or machine session. Provider-native
-fences keep Haskell in the assistant text channel; external agents use an
-explicit host-tool call because Tidepool cannot safely interpret their prose
-as executable output.
+not a catalog of actor-control verbs. Codex invokes the actor-local custom tool
+`tidepool_actor.haskell`, carrying a raw GHCi-style script without JSON
+argument ceremony. Colon-prefixed lines are reserved commands, other nonblank
+lines are Haskell input units, and `:{` / `:}` delimit one multiline GHC input
+unit. A fenced body uses ordinary Haskell: declaration groups are valid
+directly, effect sequences use `do`, and one outer tuple or record pattern
+binding persists multiple results. Pest owns only this framing; GHC remains
+authoritative for the Haskell inside each unit. Units execute in order and
+preserve successful prefixes. The tool uses the same classifier, persistent
+declaration/binding scope, resident machine, actor principal, effect
+interpreter, and structured receipts as the ordinary workbench. Tidepool
+cannot safely interpret Codex prose as executable output.
 
 The result of an interactive session may itself be an `AgentAction`: an
 ordinary live Haskell computation over the actor's existing effect row. The
@@ -331,23 +326,14 @@ over already-running actors, not a long-lived tool request or a scheduler DSL.
 Its composed result may be a closure or user-defined value and remains in the
 shared heap when mounted into the next activation.
 
-The common agent-session executor owns this response-to-block-to-resident-run
-loop. The `agentSession` effect opens it with one typed `Complete output`
-expectation and an optional first User message. `deliberate` remains an
-ordinary resident-model operation; it is not the lifecycle or transport name
-for every external agent interaction. Lifecycle wake delivery is backend
-input, not another executor or completion shape.
-One admitted agent session owns the actor for the complete interaction: its
-provider rounds, ordered fenced-Haskell execution, transport retries, and
-corrective rounds. A provider response is only a borrowed round inside that
-session; completing or dropping the response does not create an interleaving
-point. Mailbox work and another model interaction may begin only
-after the enclosing session settles or is abandoned.
-
-When `deliberate` opens a session from the actor program, the executor owns the
-program turn's transferred admission rather than acquiring a nested actor
-turn. Fenced blocks use separate machine checkouts, but remain segments of that
-one actor turn.
+The `AgentSession` effect opens one typed `Complete output` expectation with an
+optional User task. One session owns the request through ordered workbench
+execution, transport retries, and corrective rounds. Completing the request
+resumes its retained mailbox handler, publishes the request-local reply cell,
+and returns the target to `receive`; it does not terminate the actor. Workbench
+blocks use separate machine checkouts but remain segments of that request.
+Lifecycle wake delivery is backend input, not another executor or completion
+shape.
 
 ### Actor events and observability
 
@@ -369,14 +355,12 @@ per-actor timelines, streaming, usage accounting, and GUI presentation are
 folds over the neutral stream. Native owner notifications are delivery derived
 from runtime facts, not substitutes for the event record.
 
-### Provider roles
+### Conversation roles
 
-Task prompts supplied by Haskell `deliberate`, including calls during
-initialization, use the User role. Runtime facts should use Developer context
-when the backend exposes that distinction. The stock Codex V0 instead uses its
-public native queue operation, whose role is backend-owned; the message is
-clearly identified as Tidepool lifecycle input. This is provider-context
-management, not a generated Haskell declaration or binding rewrite.
+Task prompts supplied by Haskell `request` use the User role. Runtime facts use
+Developer context when Codex exposes that distinction. Native lifecycle input
+is clearly identified as Tidepool runtime context; it is not a generated
+Haskell declaration or binding rewrite.
 
 Developer context is a high-authority policy and runtime-fact plane, not a
 generic notification bucket. Reserve it for Tidepool-attested invariants,
@@ -389,14 +373,9 @@ model. Such text describes trusted context but does not itself mutate the
 Haskell environment. Use an executable `haskell` fence only when the normal
 fenced-code path is deliberately meant to run it.
 
-A legal boundary starts a new provider response; Rust cannot inject a message
-into an inference already generating. The initial implementation sends the
-actor's one canonical `Conversation` by exact replay on every request. This
-makes the shared fork prefix explicit, auditable, and available to provider
-prefix caching without maintaining a second transcript or opaque continuation
-chain in an adapter. Request-local instructions are not durable conversation
-state. A provider cursor may later be added as a derived optimization, never as
-the authoritative history or a second continuation mode.
+A legal boundary starts a new Codex turn; Rust cannot inject a message into an
+inference already generating. Request-local task text is ordinary User input;
+actor identity and runtime facts remain separate trusted context.
 
 ## 4. Fixed structure with dynamic behavior
 
@@ -531,6 +510,13 @@ recovery or diagnostic protocol. The immutable `ActorExit` retains terminal
 program failure for exact `awaitExit`. No final inference session runs in a
 dying actor.
 
+An operation may instead define a narrower typed failure result when its
+authored consumer has a concrete recovery path. Persistent-agent reply waits
+use that boundary for target call failure: `waitReply` maps it to
+`ReplyUnavailable`, `AgentAction` short-circuits, and the root driver reopens
+the same workbench. Machine, custody, and continuation invariant failures are
+not reclassified by this path.
+
 The runtime never synthesizes the missing success value, retries through model
 judgment, nominates a replacement actor, or resumes an unsatisfiable
 continuation. Dead or stale targets, exhausted mechanical retry, permanent
@@ -578,10 +564,9 @@ one yields. Accordingly, a nonblocking pending collection result means
 poll.” The lifecycle input begins the turn that performs the next collection.
 Delayed or duplicate correlation for an already acknowledged worker is
 harmless and requires no policy action. A temporary delivery failure leaves
-the row pending for retry and never kills the owner. Provider failure inside a
-result-bearing resident session still follows the typed obligation it
-interrupted; lifecycle delivery does not create another provider executor,
-completion token, or recovery protocol.
+the row pending for retry and never kills the owner. Codex application failure
+settles the exact actor lifecycle; lifecycle delivery does not create another
+session executor, completion token, or recovery protocol.
 
 An external interactive agent is an application attached to an actor, not a
 second actor identity or lifecycle owner. A worker-spawn response means the
@@ -600,27 +585,33 @@ application ends the Shoal run. A post-terminal failure to contain an orphaned
 native process may still fail the run as a resource-containment invariant, but
 it cannot revise the already-published child exit.
 
+Abnormal termination of the resident root program does not end the host. The
+host logs the exact terminal result, retires that incarnation's owned fleet,
+and starts a fresh root incarnation on the retained queue-ready conversation.
+Normal root completion and explicit operator shutdown remain terminal to the
+run.
+
 Interactive application ownership precedes conversation binding. A fresh
-stock Codex TUI has no thread identity until its first real User submission.
-Shoal therefore registers the pane, durable inbox, host-tools listener, and cleanup
-resources immediately and reports the root as awaiting input; it does not
-manufacture an inference turn merely to obtain an identifier. The first real
-submission creates the thread and Codex attaches it through the actor's
-HTTP-over-UDS `/session` route, which durably binds the exact thread and enables
-native lifecycle pushes. Binding discovery
-has no user-input deadline and remains subordinate to exact pane ownership.
-Workers normally cross this boundary immediately because their assignment is
-their genuine launch-time User prompt.
+hosted Codex TUI creates its thread and immediately persists the empty rollout
+without a synthetic User submission or inference turn. Only after that
+durability barrier does Codex publish the v2 HTTP-over-UDS `/session` callback.
+Shoal registers the pane, durable inbox, host-tools listener, and cleanup
+resources immediately and reports the application as awaiting binding; the
+callback records binding v4, whose subsequent read enables native lifecycle
+pushes. Binding discovery has no user-input deadline and remains subordinate
+to exact pane ownership. Worker assignments may enter the durable inbox before
+binding, but delivery begins only after the queue-ready proof is restored.
 
 ## 6. Actor construction
 
-The three context relationships are deliberately distinct:
+The context relationships are deliberately distinct:
 
 | Operation | Model/Haskell context | Use |
 |---|---|---|
-| `deliberate` | Same actor, accumulating conversation and environment | Consult this actor's future self |
+| `request` | Same target actor, accumulating Codex conversation and Haskell environment | Give an existing agent another typed task |
 | `forkActors` | Exact shared conversation, environment, and control prefix, then divergence | Explore several context-rich alternatives with prefix-cache reuse |
-| `startActor` | Fresh conversation with an explicit Haskell definition | Obtain an independent actor or fresh judgment |
+| `startAgent` | Fresh Codex conversation and explicit worktree binding | Obtain an independent coding agent or fresh judgment |
+| `startActor` | No implicit model context; explicit Haskell definition | Build a lower-level headless actor |
 
 This is guidance, not a set of runtime role presets. Reviewers, workers,
 speculative branches, and one-shot jobs remain ordinary Haskell compositions.
@@ -678,12 +669,9 @@ to its own Haskell environment and model conversation remain ordinary local
 execution, so `ReadOnly` does not disable self-extension.
 
 Startup runs one concrete `startup -> Eff actorEffs initial` action in the new
-child's workbench under that actor interpreter. Keeping the `deliberate` call
-at this authored, monomorphic site lets GHC record its exact types before the
-definition hides `actorEffs`. Initialization may call `deliberate` zero or more
-times sequentially; ordinary actor admission still forbids concurrent or
-re-entrant model sessions. When initialization returns, the trusted wrapper
-requires readiness and refuses `receive` and `forkActors` before that point. A
+child's workbench under that actor interpreter. It is ordinary Haskell and does
+not implicitly open a model session. When initialization returns, the trusted
+wrapper requires readiness and refuses `receive` and `forkActors` before that point. A
 pure authored function combines `startup` and `initial` into the installed
 `Eff actorEffs exit` continuation. This removes
 the need for separate `prepare`/`StartupM` mechanisms and for a public
@@ -913,13 +901,14 @@ stored JSON and external resources recoverable by their trusted interpreters.
 Live closures, parked continuations, Haskell bindings, and provider contexts do
 not survive. Restart tolerance is not required for the initial actor model.
 
-Shoal's V0 `--recreate` contract is deliberately smaller still: it may resume
-the root provider conversation, but creates a fresh root incarnation and does
-not restore worker records, actor references, bindings, acknowledgments, or
-pending results. The resumed model receives explicit reconciliation context
-that those values are dead. Retained worktrees remain ordinary external
-resources, but are not silently rebound to new actors. Same-incarnation
-collection replay must not be mistaken for restart recovery.
+Shoal's V0 root-recreation contract, whether triggered in-process by abnormal
+root termination or explicitly by `--recreate`, is deliberately smaller
+still: it may resume the root Codex conversation, but creates a fresh root
+incarnation and does not restore worker records, actor references, bindings,
+acknowledgments, or pending results. The resumed model receives explicit
+reconciliation context that those values are dead. Retained worktrees remain
+ordinary external resources, but are not silently rebound to new actors.
+Same-incarnation collection replay must not be mistaken for restart recovery.
 
 This does not preclude a later program-image or model-context persistence
 scheme; it prevents that speculative work from contaminating the first API.
@@ -967,7 +956,7 @@ external-resource cleanup. The planned watchdog is twelve hours, configurable
 per deployment; it is a leak backstop rather than an interactive timeout.
 
 The shutdown hook retains the actor's ordinary Haskell row, but the interpreter
-enters a closing phase that refuses `deliberate`, actor creation, and other
+enters a closing phase that refuses new agent sessions, actor creation, and other
 non-cleanup operations. Shutdown is not an implicit route to a final model
 session or a second lifecycle monad.
 
@@ -988,9 +977,8 @@ ultimate owner of every external resource.
 ## 10. Required invariants
 
 1. One actor has at most one active resident turn of any kind: authored
-   Haskell, fenced-Haskell evaluation, hosted-tool execution, provider
-   inference owned by Tidepool, or mailbox handling. An interactive backend
-   independently guarantees one native conversation turn; every callback into
+   Haskell, workbench evaluation, hosted-tool execution, or mailbox handling.
+   Codex independently guarantees one native conversation turn; every callback into
    Tidepool remains serialized by actor admission.
 2. Every Haskell fragment runs with an explicit execution principal.
 3. A copied closure never grants authority merely because it captured an
@@ -1006,7 +994,7 @@ ultimate owner of every external resource.
 9. Actor scheduling never creates a second machine-session ownership
    mechanism or bypasses checkout fencing.
 10. JSON serialization is never required for same-machine actor communication.
-11. Fork points pair one immutable provider prefix, Haskell snapshot, and
+11. Fork points pair one immutable conversation prefix, Haskell snapshot, and
     cloned control continuation.
 12. Resident Haskell external actions are reachable only through interpreted
     effects and checked capabilities; its model-facing environment exposes no

@@ -14,7 +14,6 @@ fn named_profile_compile_failures() {
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
-        tidepool_mcp::deliberate_decl(),
         tidepool_mcp::fs_read_decl(),
         tidepool_mcp::fs_write_decl(),
     ];
@@ -22,7 +21,7 @@ fn named_profile_compile_failures() {
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let mut preamble = tidepool_mcp::build_preamble(&decls, false);
-    preamble.push_str("type ActorEffects = '[Actor, Deliberate, FsRead, FsWrite]\n");
+    preamble.push_str("type ActorEffects = '[Actor, FsRead, FsWrite]\n");
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().expect("compile-failure root");

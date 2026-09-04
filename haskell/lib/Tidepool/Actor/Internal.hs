@@ -25,14 +25,24 @@ module Tidepool.Actor.Internal
   , onShutdown
   , actorLaunchWorktrees
   , withLaunchWorktree
+  , tryCallUnit
   ) where
 
-import Control.Monad.Freer (Eff)
+import Control.Monad.Freer (Eff, Member, send)
 import Data.Kind (Type)
 import Data.Text (Text)
 import Prelude
 
-import Tidepool.Effects.Core (Actor, ActorLocal, AgentSession, AgentTools, Deliberate, FsRead, FsWrite, Worktree)
+import Tidepool.Effects.Core
+  ( Actor (..)
+  , ActorCallStatus (..)
+  , ActorLocal
+  , AgentSession
+  , AgentTools
+  , FsRead
+  , FsWrite
+  , Worktree
+  )
 import Tidepool.Internal.ActorRef (ActorRef (..))
 
 -- | Experimental named profiles for resident Haskell effect rows. The witness
@@ -48,7 +58,6 @@ type ReadOnlyEffects protocol =
    , AgentTools
    , AgentSession
    , Actor
-   , Deliberate
    , FsRead
    , Worktree
    ]
@@ -114,3 +123,16 @@ withLaunchWorktree treeId
   (ActorDefinitionInternal l p initialize install shutdown worktrees) =
     ActorDefinitionInternal
       l p initialize install shutdown (worktrees <> [treeId])
+
+-- | Internal unit-call boundary for protocols that can turn target lifecycle
+-- failure into their own typed control flow.
+tryCallUnit
+  :: Member Actor effs
+  => ActorRef protocol exit
+  -> protocol ()
+  -> Eff effs (Either Text ())
+tryCallUnit (ActorRef actorId incarnation _) request = do
+  status <- send (ActorTryCallWith (actorId, incarnation) request)
+  pure $ case status of
+    ActorCallSucceeded -> Right ()
+    ActorCallFailed summary -> Left summary

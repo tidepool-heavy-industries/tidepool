@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tidepool_actor::ActorRef;
 use tidepool_agent::{
-    persist_interactive_binding, read_interactive_binding, BackendThreadId,
+    copy_interactive_binding, read_interactive_binding, BackendThreadId,
     InteractiveAgentInstallation, InteractiveLaunchMode, ReasoningEffort,
 };
 use tidepool_node::{TmuxLaunch, TmuxSession};
@@ -25,7 +25,7 @@ use tracing_subscriber::Layer;
 
 use crate::actor_host::ACTOR_PROJECT_ROOT;
 
-const STATUS_VERSION: u32 = 2;
+const STATUS_VERSION: u32 = 3;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 const SHOAL_EXCLUDE: &str = "/.shoal/";
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
@@ -161,7 +161,7 @@ pub struct RunStatus {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum RunPhase {
     Starting,
-    AwaitingInput {
+    AwaitingBinding {
         root_actor: ActorRef,
     },
     Ready {
@@ -314,8 +314,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         }
     };
     match &interactive.phase {
-        RunPhase::AwaitingInput { root_actor } => println!(
-            "Shoal ready in tmux session {session_name:?}: actor {root_actor:?} is idle; its conversation will bind on the first real input"
+        RunPhase::AwaitingBinding { root_actor } => println!(
+            "Shoal launched in tmux session {session_name:?}: actor {root_actor:?} is waiting for its queue-ready session handshake"
         ),
         RunPhase::Ready {
             root_actor,
@@ -593,34 +593,30 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
     loop {
         tokio::select! {
             readiness = readiness_rx.recv() => match readiness {
-                Some(crate::actor_host::ActorHostReadiness::AwaitingInput { root }) => {
+                Some(crate::actor_host::ActorHostReadiness::AwaitingBinding { root }) => {
                     let status = RunStatus::new(
                         &options.run_id,
                         &options.workspace,
                         &options.session,
-                        RunPhase::AwaitingInput { root_actor: root },
+                        RunPhase::AwaitingBinding { root_actor: root },
                     );
                     write_status(&options.status_path, &status)?;
                     tracing::info!(
                         run_id = %options.run_id,
                         actor = ?root,
-                        "Shoal host ready; root actor is awaiting input"
+                        "Shoal root application launched; queue-ready session handshake pending"
                     );
                 }
                 Some(crate::actor_host::ActorHostReadiness::Ready { root, thread }) => {
-                    let thread_id = thread.0.clone();
-                    persist_interactive_binding(
-                        &options.root_binding_path,
-                        thread.clone(),
-                    )
-                    .await?;
+                    let thread_id = thread.id().0.clone();
+                    copy_interactive_binding(&options.root_binding_path, &thread).await?;
                     let status = RunStatus::new(
                         &options.run_id,
                         &options.workspace,
                         &options.session,
                         RunPhase::Ready {
                             root_actor: root,
-                            root_thread: thread,
+                            root_thread: thread.id().clone(),
                         },
                     );
                     write_status(&options.status_path, &status)?;
@@ -647,7 +643,7 @@ async fn resolve_root_launch_mode(
     }
     read_interactive_binding(binding_path)
         .await
-        .map(InteractiveLaunchMode::Resume)
+        .map(|thread| InteractiveLaunchMode::Resume(thread.id().clone()))
         .map_err(|error| {
             runtime_error(format!(
                 "cannot resume the requested root conversation from {}: {error}",
@@ -763,10 +759,10 @@ async fn wait_until_interactive(
     tokio::time::timeout(INTERACTIVE_START_TIMEOUT, async {
         loop {
             if let Ok(bytes) = tokio::fs::read(status_path).await {
-                let status: RunStatus = serde_json::from_slice(&bytes)?;
+                let status = decode_run_status(&bytes)?;
                 if status.run_id == run_id {
                     match &status.phase {
-                        RunPhase::AwaitingInput { .. } | RunPhase::Ready { .. } => {
+                        RunPhase::AwaitingBinding { .. } | RunPhase::Ready { .. } => {
                             return Ok(status)
                         }
                         RunPhase::Failed { error } => {
@@ -795,6 +791,21 @@ async fn wait_until_interactive(
             "Shoal did not become interactive within {INTERACTIVE_START_TIMEOUT:?}"
         ))
     })?
+}
+
+fn decode_run_status(bytes: &[u8]) -> Result<RunStatus, Box<dyn std::error::Error>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| runtime_error("Shoal run status has no valid version"))?;
+    if version != STATUS_VERSION {
+        return Err(runtime_error(format!(
+            "unsupported Shoal run status version {version} (expected {STATUS_VERSION})"
+        )));
+    }
+    Ok(serde_json::from_value(value)?)
 }
 
 impl RunStatus {
@@ -1129,7 +1140,7 @@ mod tests {
     fn run_status_round_trips_as_a_closed_sum() {
         let root_actor = ActorRef::first(tidepool_actor::ActorId(9));
         for phase in [
-            RunPhase::AwaitingInput { root_actor },
+            RunPhase::AwaitingBinding { root_actor },
             RunPhase::Ready {
                 root_actor,
                 root_thread: BackendThreadId("thread".into()),
@@ -1137,11 +1148,21 @@ mod tests {
         ] {
             let status = RunStatus::new("run-1", Path::new("/tmp/work"), "shoal-work", phase);
             let encoded = serde_json::to_vec(&status).unwrap();
-            assert_eq!(
-                serde_json::from_slice::<RunStatus>(&encoded).unwrap(),
-                status
-            );
+            assert_eq!(status.version, 3);
+            assert_eq!(decode_run_status(&encoded).unwrap(), status);
         }
+
+        let old = serde_json::json!({
+            "version": 2,
+            "run_id": "run-1",
+            "workspace": "/tmp/work",
+            "session": "shoal-work",
+            "phase": {"state": "awaiting_input", "root_actor": root_actor},
+        });
+        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported Shoal run status version 2"));
     }
 
     #[test]
@@ -1230,6 +1251,18 @@ mod tests {
             resolve_root_launch_mode(false, &missing).await.unwrap(),
             InteractiveLaunchMode::Fresh
         );
+
+        let legacy = root.path().join("v3-binding.json");
+        tokio::fs::write(
+            &legacy,
+            r#"{"version":3,"thread":"01a05a16-97f5-7722-aa8d-467e01e2e5b4"}"#,
+        )
+        .await
+        .unwrap();
+        let error = resolve_root_launch_mode(true, &legacy)
+            .await
+            .expect_err("v3 cannot certify queue readiness");
+        assert!(error.to_string().contains("start a fresh Shoal root"));
     }
 
     #[test]

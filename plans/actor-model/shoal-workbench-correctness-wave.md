@@ -1,10 +1,11 @@
 # Shoal workbench correctness wave
 
-Status: in progress. The resident-workbench feedback, action, prompt,
-observability, discovery, activation, and completion folds have landed through
-`c52a51fd`. The first construction spike exposed a wrong one-shot abstraction
-and is intentionally held. The next boundary is the persistent agent request
-model in the canonical actor-model documents and `SHOAL.md`.
+Status: superseded migration record. Its GHCi/workbench findings landed, but
+live use rejected its root-completion and interactive `AgentAction` direction.
+The replacement is
+[persistent applications, typed replies, and watches](persistent-applications-replies-and-watches.md).
+Examples below using `complete`, `nextTurn`, or `waitReply` are historical and
+must not be used as current API guidance.
 
 This is the large cleanup following the first live exercises of Shoal's raw
 Haskell hosted tool. It is intentionally one coherent boundary: make the
@@ -82,7 +83,7 @@ but it must not be indexed by one request or terminal result. `Reply result`
 retains the same-machine live settlement cell for one request. Neither handle
 is a string, JSON identity, or second Rust registry entry.
 
-### Persistent construction vertical
+### Persistent construction vertical (implemented)
 
 Before editing the facade, prove one minimal persistent actor end to end:
 
@@ -384,7 +385,7 @@ Acceptance examples must cover:
 - explicit lifecycle branching through the lower-level observation function
   when success-only `waitOn` is insufficient.
 
-## 7. Curate the Shoal module around Codex nodes
+## 7. Curate the Shoal module around Codex nodes (implemented)
 
 Replace the current wholesale module re-exports with an explicit export list.
 The facade is a product API and should not inherit every future export of a
@@ -787,6 +788,10 @@ candidate an independent review before integration even when focused tests are
 green.
 
 ### Wave 3: persistent requests, then expose and prove the product surface
+
+Implemented in the checkout. The scripted host vertical proves two different
+request/result types against one still-live actor, including a closure and a
+caller-defined ADT. Fresh-host Codex dogfood remains the release gate.
 
 This wave begins only after activation and completion are integrated. Persistent
 actor lifecycle and request custody are one serial prerequisite; facade,

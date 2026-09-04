@@ -1,6 +1,6 @@
 //! Canonical sequential Ractor wrapper for Tidepool actor behavior.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -175,6 +175,13 @@ impl KernelContext {
 /// owns Haskell/provider/tool execution and returns domain results without
 /// gaining access to Ractor's scheduler internals.
 pub trait KernelBehavior: Send + 'static {
+    /// Whether the installed behavior is currently parked on its authored
+    /// mailbox receiver. The wrapper retains cast/call custody while an
+    /// external interaction temporarily occupies that continuation.
+    fn accepts_mailbox(&self) -> bool {
+        true
+    }
+
     fn start<'a>(
         &'a mut self,
         context: &'a KernelContext,
@@ -259,6 +266,8 @@ pub struct LocalActorState<B> {
     context: KernelContext,
     behavior: B,
     terminal: RetainedActorExit,
+    deferred_mailbox: VecDeque<KernelMessage>,
+    mailbox_drain_scheduled: bool,
 }
 
 impl<B> Actor for LocalActor<B>
@@ -285,6 +294,8 @@ where
             context,
             behavior: arguments.behavior,
             terminal: arguments.terminal,
+            deferred_mailbox: VecDeque::new(),
+            mailbox_drain_scheduled: false,
         };
         state.context.directory.insert(LocalActorRef::new(
             state.context.myself.clone(),
@@ -313,6 +324,26 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        let message = match message {
+            message @ (KernelMessage::Cast { .. } | KernelMessage::Call { .. })
+                if !state.deferred_mailbox.is_empty() || !state.behavior.accepts_mailbox() =>
+            {
+                state.deferred_mailbox.push_back(message);
+                schedule_deferred_mailbox(&myself, state)?;
+                return Ok(());
+            }
+            KernelMessage::DrainMailbox => {
+                state.mailbox_drain_scheduled = false;
+                if !state.behavior.accepts_mailbox() {
+                    return Ok(());
+                }
+                let Some(message) = state.deferred_mailbox.pop_front() else {
+                    return Ok(());
+                };
+                message
+            }
+            message => message,
+        };
         match message {
             KernelMessage::Cast { sender, request } => {
                 match state.behavior.cast(&state.context, sender, request).await {
@@ -378,6 +409,9 @@ where
                     }
                 }
             }
+            KernelMessage::DrainMailbox => {
+                unreachable!("mailbox drain messages are normalized before dispatch")
+            }
             KernelMessage::Resume => match state.behavior.resume(&state.context).await {
                 Ok(step) => finish_after_step(&myself, state, step).await,
                 Err(error) => {
@@ -405,6 +439,7 @@ where
                 let _ = reply.send(terminal);
             }
         }
+        schedule_deferred_mailbox(&myself, state)?;
         Ok(())
     }
 
@@ -450,6 +485,26 @@ where
             .await;
         Ok(())
     }
+}
+
+fn schedule_deferred_mailbox<B>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+) -> Result<(), ActorProcessingErr>
+where
+    B: KernelBehavior,
+{
+    if state.terminal.get().is_none()
+        && state.behavior.accepts_mailbox()
+        && !state.deferred_mailbox.is_empty()
+        && !state.mailbox_drain_scheduled
+    {
+        state.mailbox_drain_scheduled = true;
+        myself
+            .send_message(KernelMessage::DrainMailbox)
+            .map_err(|error| Box::new(error) as ActorProcessingErr)?;
+    }
+    Ok(())
 }
 
 /// Spawn one root through the same actor implementation used for children.
@@ -612,11 +667,16 @@ mod tests {
         calls: Arc<Mutex<Vec<&'static str>>>,
         release_first: Arc<Notify>,
         fail_cast: bool,
+        mailbox_ready: bool,
         spawned_child: Arc<Mutex<Option<LocalActorRef>>>,
         child_exits: Arc<Mutex<Vec<ActorTerminal>>>,
     }
 
     impl KernelBehavior for ProbeBehavior {
+        fn accepts_mailbox(&self) -> bool {
+            self.mailbox_ready
+        }
+
         fn start(
             &mut self,
             _context: &KernelContext,
@@ -649,6 +709,7 @@ mod tests {
             _ancestry: crate::CallAncestry,
             request: MailboxValue,
         ) -> BoxFuture<'_, Result<KernelStep<MailboxValue>, KernelBehaviorError>> {
+            self.calls.lock().push("call");
             Box::pin(async move { Ok(KernelStep::Continue(request)) })
         }
 
@@ -683,6 +744,12 @@ mod tests {
                 } else if name == "defer" {
                     self.calls.lock().push("reply-ready");
                     return Ok(KernelStep::ContinueLater(serde_json::Value::String(name)));
+                } else if name == "park-mailbox" {
+                    self.calls.lock().push("park-mailbox");
+                    self.mailbox_ready = false;
+                } else if name == "unpark-mailbox" {
+                    self.calls.lock().push("unpark-mailbox");
+                    self.mailbox_ready = true;
                 } else {
                     self.calls.lock().push("second");
                 }
@@ -855,6 +922,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 release_first: Arc::clone(&release),
                 fail_cast,
+                mailbox_ready: true,
                 spawned_child: Arc::clone(&spawned_child),
                 child_exits: Arc::clone(&child_exits),
             },
@@ -913,6 +981,118 @@ mod tests {
         assert_eq!(shutdown_rx.await.expect("shutdown reply"), terminal);
         task.await.expect("actor task");
         assert_eq!(actor.terminal().wait().await, terminal);
+    }
+
+    #[tokio::test]
+    async fn mailbox_calls_retain_fifo_custody_until_behavior_is_ready() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        let parked = actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("park-mailbox"),
+                    reply,
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect("park transport")
+            .expect("park reply")
+            .expect("park succeeds");
+        assert_eq!(parked, "park-mailbox");
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (call_tx, mut call_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Call {
+                caller: ActorRef::first(crate::ActorId(99)),
+                ancestry: crate::CallAncestry::begin(ActorRef::first(crate::ActorId(99))),
+                request: MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+                reply: call_tx.into(),
+            })
+            .expect("queue call");
+        tokio::task::yield_now().await;
+        assert!(call_rx.try_recv().is_err());
+        assert_eq!(&*fixture.calls.lock(), &["park-mailbox"]);
+
+        let unparked = actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("unpark-mailbox"),
+                    reply,
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect("unpark transport")
+            .expect("unpark reply")
+            .expect("unpark succeeds");
+        assert_eq!(unparked, "unpark-mailbox");
+        let reply = call_rx
+            .await
+            .expect("retained call reply")
+            .expect("call succeeds");
+        drop(reply);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &["park-mailbox", "unpark-mailbox", "call"]
+        );
+
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Completed,
+            summary: "done".into(),
+        };
+        actor.shutdown(terminal).await.expect("shutdown");
+        task.await.expect("actor task");
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_mailbox_custody_deferred_behind_external_work() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior)
+            .await
+            .expect("spawn");
+        actor
+            .address()
+            .call(
+                |reply| KernelMessage::Tool {
+                    invocation: tool_invocation("park-mailbox"),
+                    reply,
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect("park transport")
+            .expect("park reply")
+            .expect("park succeeds");
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (call_tx, call_rx) = oneshot::channel();
+        actor
+            .address()
+            .send_message(KernelMessage::Call {
+                caller: ActorRef::first(crate::ActorId(99)),
+                ancestry: crate::CallAncestry::begin(ActorRef::first(crate::ActorId(99))),
+                request: MailboxValue::probe(SessionId(1), Arc::clone(&dropped)),
+                reply: call_tx.into(),
+            })
+            .expect("queue call");
+        tokio::task::yield_now().await;
+
+        let terminal = ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "cancel parked actor".into(),
+        };
+        actor.shutdown(terminal).await.expect("shutdown");
+        task.await.expect("actor task");
+        assert!(call_rx.await.is_err(), "deferred caller must be released");
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

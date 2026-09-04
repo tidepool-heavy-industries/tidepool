@@ -2706,13 +2706,7 @@ enum EvalThreadOutcome<T> {
 /// own `with_signal_protection` — a genuine bug, not a language-level error) to
 /// a run error carrying the payload string.
 fn panic_to_run_error(payload: Box<dyn std::any::Any + Send>) -> ResidentError {
-    let detail = if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic payload".to_string()
-    };
+    let detail = crate::panic_payload_message(payload);
     ResidentError::Run(RuntimeError::Jit(JitError::Effect(EffectError::Handler(
         format!("resident turn panicked: {detail}"),
     ))))
