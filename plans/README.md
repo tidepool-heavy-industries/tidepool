@@ -21,6 +21,10 @@ charter / glossary and the plan file is deleted (git is the archive).
   resident-root UX, fault containment, observability, resource stability, and
   honest recovery are in
   [live context-unfold dogfood follow-ups](actor-model/live-context-unfold-dogfood-followups.md).
+  The prompt and LLM-efficacy direction is
+  [context trees and an emergent resident Haskell surface](actor-model/context-tree-emergent-haskell-ux.md):
+  a shared scaffold/unfold/fold/refine practice with task-specific Haskell
+  discovered during use, retained specialists, and effort-aware context reuse.
 - [DevSwarm Haskell DSL](devswarm-haskell-dsl.md): clean-slate successor to
   `harness-dogfooding/dev-tree`; dynamic recursive owner sessions plus a typed
   candidate/review/revision interpreter. The current runnable slice uses a

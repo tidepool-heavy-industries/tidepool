@@ -63,13 +63,6 @@ pub struct ActorWorkbenchSource {
     base_include: Arc<[PathBuf]>,
     default_browse_module: Option<Arc<str>>,
     workbench_imports: SourceImports,
-    conditional_imports: Arc<[ConditionalWorkbenchImport]>,
-}
-
-#[derive(Clone)]
-struct ConditionalWorkbenchImport {
-    triggers: Arc<[Arc<str>]>,
-    import: Arc<str>,
 }
 
 impl ActorWorkbenchSource {
@@ -80,7 +73,6 @@ impl ActorWorkbenchSource {
             base_include: base_include.into(),
             default_browse_module: None,
             workbench_imports: SourceImports::new(),
-            conditional_imports: Arc::new([]),
         }
     }
 
@@ -97,28 +89,9 @@ impl ActorWorkbenchSource {
     /// does not inspect input text or depend on an MCP-specific parser.
     #[must_use]
     pub fn with_default_quasiquoters(mut self) -> Self {
-        self.conditional_imports = Arc::new([ConditionalWorkbenchImport {
-            triggers: ["[fmt|", "[j|", "[patch|", "[uri|"]
-                .into_iter()
-                .map(Arc::from)
-                .collect(),
-            import: Arc::from("Tidepool.QQ (fmt, j, patch, uri)"),
-        }]);
+        self.workbench_imports
+            .extend_text("Tidepool.QQ (fmt, j, patch, uri)");
         self
-    }
-
-    fn imports_for(&self, input: &str) -> SourceImports {
-        let mut imports = SourceImports::new();
-        for conditional in self.conditional_imports.iter() {
-            if conditional
-                .triggers
-                .iter()
-                .any(|trigger| input.contains(trigger.as_ref()))
-            {
-                imports.extend_text(conditional.import.as_ref());
-            }
-        }
-        imports
     }
 }
 
@@ -3263,8 +3236,7 @@ where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let compile_view = actor_compile_view(session, context, source, type_modules)?
-        .with_workbench_imports(&source.imports_for(&block.source));
+    let compile_view = actor_compile_view(session, context, source, type_modules)?;
     let templates =
         resident_workbench_templates(&source.preamble, effect_stack, &compile_view.turn_imports());
     let include = compile_view.include_paths(&source.base_include);

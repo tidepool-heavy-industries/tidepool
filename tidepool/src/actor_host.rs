@@ -3299,6 +3299,10 @@ mod tests {
         assert_eq!(ergonomics["items"][4]["status"], "committed");
         assert_eq!(ergonomics["items"][5]["output"], "7");
         assert_eq!(ergonomics["items"][6]["output"], "value=7");
+        for index in 7..=8 {
+            let item = &ergonomics["items"][index];
+            assert_eq!(item["status"], "committed", "{item:?}");
+        }
 
         let setup_policy = Arc::clone(&root_installation.policy);
         let submitted = tokio::spawn(async move {

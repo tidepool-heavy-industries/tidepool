@@ -113,10 +113,33 @@ per-run CLI overrides, requires the resolved pair at the private host boundary,
 and records it in run status. No fresh acceptance evidence is attributed to
 canary 6.
 
-Remaining release work: verify those two fixes, repeat the fresh provider canary,
-and record the results. Reconcile each acceptance item below
-against tests/live evidence and the explicitly gated successor prerequisites;
-do not treat the smaller two-child spot check alone as full acceptance.
+Canary 7 (`shoal-hardened-canary-sol-low-7`, run
+`c6e13866-5c3a-4539-9c4d-4489f78d528f`) launched without CLI model overrides.
+Project configuration, status v4, host arguments, and provider arguments all
+selected `gpt-5.6-sol` / `low`. It completed an applicative research/coding fork,
+typed watch/fold, retained coding follow-up, and successful typed cleanup. Both
+children shared provider parent `01a06f18-f4dc-7662-b610-e3baa077c54c` and reported
+`CacheForkedPrefix`. Cached/uncached tokens were 48,512/556 for research,
+51,712/531 for initial coding, and 55,424/388 for the retained follow-up; each
+sample describes its latest provider response, not cumulative campaign usage.
+Cleanup forgot two watches and three responses, stopped and forgot both
+children, and retired group 2. Worktrees and candidate commit
+`b4d1ee698dc132cd559ef7b20728e6cfcfa30e74` remained intact. The root's untracked
+`docs/TIDEPOOL_HASKELL_EXERCISE.md` was preserved and the candidate was not merged.
+The coding actor manually overrode `CARGO_TARGET_DIR`, so its successful test
+does not establish the default private build-directory behavior; that remains
+covered by the deterministic bubblewrap check above.
+
+The live run also exposed a workbench import inconsistency: ordinary units
+had a text-triggered `[fmt|...|]` import, but `:type` did not receive that
+import and `:info fmt` failed. The correction removes conditional imports and
+mounts the promised quasiquoter vocabulary through the shared workbench import
+path. Verification must cover discovery and execution together.
+
+Remaining release review: resolve the confirmed inspected-cleanup scope,
+deadline bounded-wait, exact campaign membership, and executable-help findings
+from the context-tree UX review. Reconcile acceptance against focused and live
+evidence; this successful two-child canary alone is not full acceptance.
 
 ### Gated successor work
 
@@ -132,7 +155,7 @@ do not treat the smaller two-child spot check alone as full acceptance.
 - [ ] Add handle-filtered `:trace`/campaign renderers only when another live
   campaign shows that the existing typed `observeCampaign`, `:lineage`,
   `:status!`, and `:trace` views are insufficient; no renderer may own state.
-- [ ] Complete the fresh low-effort provider canary and record its spot-check
+- [x] Complete the fresh low-effort provider canary and record its spot-check
   evidence below.
 
 These are explicit architecture gates, not hidden incomplete behavior in the
