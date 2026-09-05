@@ -1526,7 +1526,7 @@ existing code-mode cell broker must retain both identities; workbench receipt
 identity must continue using the individual nested execution ID.
 
 Explicit `contextCallId` transport provenance, separate from `callId`, is
-implemented in both working trees. Direct Haskell exposure and wrapped-call
+committed in both repositories. Direct Haskell exposure and wrapped-call
 behavior have independent acceptance tests and live evidence below.
 
 
@@ -1555,7 +1555,7 @@ inherited cache key across siblings and grandchildren, with isolated execution.
 Legacy and paginated fork/resume tests also cover cache affinity, including
 children resumed before their first inference.
 
-This did **not** resolve the real-provider miss: run
+The intermediate prompt-key-only implementation did **not** resolve the real-provider miss: run
 `28c31e3a-0041-4caa-86a6-91d3344d8259`, root
 `01a06ffa-4cc7-7de1-a1b7-8a0a4ac632e2`, child
 `01a06ffb-74f5-75a2-a489-41536e08eee1`, recorded first-child reuse of

@@ -128,6 +128,52 @@ retaining worktrees and Git history. Their roots remain idle and retained.
 
 ## Acceptance boundary
 
+### Packaging handoff (2026-09-05)
+
+Implementation is committed as Codex
+`118e1cfcd1d7dd120460ff0685e976f0d17327dc` and Tidepool
+`117134e6182cfd6d71e447a6370f0bccdfb8b69c`. Tidepool's flake lock pins that
+Codex revision. The fresh real-provider canary above used the source-built CLI;
+it is not evidence that the Nix package has passed its checks.
+
+The parallel Nix release build was killed by the kernel for memory exhaustion.
+The serialized retry is still running at this handoff, with the CLI crate
+actively compiling. Its command is:
+
+```sh
+nix build .#checks.x86_64-linux.codex-host-tools-contract \
+  --cores 1 --max-jobs 1 \
+  --out-link /home/inanna/.cache/tidepool/codex-affinity-check
+```
+
+Build output is in `/tmp/tidepool-codex-affinity-nix-serial.log`. Do not restart
+the active build just because that log is buffered. After success, protect the
+package output with its own GC root and run both namespace smokes from the
+Codex checkout against the packaged binary:
+
+```sh
+python3 scripts/test-destination-fork.py /absolute/path/to/packaged/codex
+python3 scripts/test-destination-fork.py /absolute/path/to/packaged/codex --code-mode
+```
+
+These packaging checks remain outstanding. Keep the previous Nix output link,
+retained roots, diagnostic traces, and worktrees until their owners deliberately
+retire them. Successful canary children have already completed typed cleanup.
+
+### Review and next campaign
+
+The closing review checked transport versus execution identity, durable cache
+affinity selection, and direct tool exposure. No additional blocker was found
+in those reviewed paths; this is not an exhaustive concurrency audit. The
+failed-admission recovery gap below remains a concrete follow-up.
+
+After packaging, use a small real coding task to exercise a medium-effort root,
+low-effort child, retained follow-up, and Git integration. Keep campaign types
+and helpers authored in the session. Do not turn the diagnostic scripts into a
+new permanent DSL before that experience establishes a useful common surface.
+
+### Semantic acceptance
+
 Verify the final implementation with no diagnostic switch, a fresh Astra medium
 root and low child, and first-inference usage. Regression tests must cover equal
 routing identity in HTTP headers, WebSocket handshake headers, and request
