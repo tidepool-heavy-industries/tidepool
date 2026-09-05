@@ -1,21 +1,40 @@
 # Codex requirement: exact-context fork with selected effort
 
-Status: initial effort support reported at local commit
-`286843b664b30103b3560d747b9cf2756ccaf551` (not pushed). Tidepool integration is
-in progress; the revision is not yet pinned here. The implemented RPC is
-`thread/fork` with `excludeTurns: true` and
-`config.model_reasoning_effort`. Omission inherits selected effort. The returned
-`reasoningEffort` is selection, not inference confirmation. Fork retries can
-create extra children; do not automatically retry ambiguous submissions.
+## Current integration handoff
 
-The companion contract is in `codex-rs/app-server/README.md`, "Effort-only
-context forks". Stable Lite prefix behavior requires a parent that inferred
-with this revision. Actual provider cache reuse remains unverified. Shoal must
-preserve isolated native-tool execution. The stronger unresolved-call and
-destination-runtime contract below is still being implemented by the companion
-Codex session; the initial tests completed the hosted call before forking and
-do not establish this contract.
-General live adjustment on retained actors is deferred.
+The companion supplied source revision
+`1f89980a03d8afdcb484469fb667446158aaff9f` for integration. Its final Nix build
+is still pending. Launch within the prepared child namespace:
+
+```bash
+codex fork PARENT_UUID --destination-local --through-call CALL_ID \
+  --host-dynamic-tools-socket /absolute/child.sock -C /child/worktree \
+  -c 'model_reasoning_effort="low"'
+```
+
+The parent thread UUID and actual hosted invocation call ID are the reusable
+boundary. The full invocation is included; its future result is excluded. A
+neutral child-only protocol closure follows the preserved prefix. Shared Codex
+storage remains required. Tool declarations must match exactly across parent
+and child, including order, descriptions, and grammars.
+
+The v2 `/session` callback posts the child UUID; HTTP 204 releases the internal
+readiness gate. It has a five-second timeout, so namespace, worktree, policy,
+and socket setup precede launch. It must not wait for inference. Shoal's
+permanent interactive actors already advertise identical Haskell declarations,
+and its callback persists the UUID and returns 204 independently of inference.
+
+Queue delivery remains unchanged and may take a watcher interval. Ambiguous
+fork launches must not be retried automatically: each launch can create a new
+persisted child. Ordinary CLI resume of a gated child is not yet established.
+The companion reports fork/readiness, protocol/schema and CLI tests plus
+scoped CLI lint passing. Its namespace smoke passed on an earlier development
+build; additional goal/TUI checks were interrupted by disk exhaustion. These
+are supplied evidence, not Shoal integration results. Run the namespace smoke
+against the final Nix binary before the complete Shoal workflow. That smoke
+uses a local mock provider and real Linux namespaces. Real-provider
+cache reuse remains unverified. The companion reference is
+`scripts/test-destination-fork.py` in the Codex checkout.
 
 ## Outcome
 
