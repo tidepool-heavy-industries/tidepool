@@ -22,19 +22,20 @@ impl std::fmt::Display for DeadlineUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestDeadline {
-    pub value: u64,
-    pub unit: DeadlineUnit,
-    pub milliseconds: u64,
+    value: u64,
+    unit: DeadlineUnit,
+    milliseconds: u64,
 }
 
 impl RequestDeadline {
-    pub(crate) fn checked(
-        value: i64,
-        unit: DeadlineUnit,
-        milliseconds_per_unit: u64,
-    ) -> Result<Self, String> {
+    pub(crate) fn checked(value: i64, unit: DeadlineUnit) -> Result<Self, String> {
+        let milliseconds_per_unit = match unit {
+            DeadlineUnit::Milliseconds => 1,
+            DeadlineUnit::Seconds => 1_000,
+            DeadlineUnit::Minutes => 60_000,
+        };
         let value = u64::try_from(value)
             .map_err(|_| format!("request deadline must be non-negative {unit}"))?;
         let milliseconds = value
@@ -1285,8 +1286,7 @@ mod tests {
         let owner = actor(1);
         let target = actor(2);
         let request = registry.reserve(owner, target);
-        let deadline =
-            RequestDeadline::checked(600, DeadlineUnit::Seconds, 1_000).expect("deadline");
+        let deadline = RequestDeadline::checked(600, DeadlineUnit::Seconds).expect("deadline");
         registry
             .mark_queued_with_deadline(
                 owner,

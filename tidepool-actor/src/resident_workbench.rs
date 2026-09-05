@@ -1904,7 +1904,7 @@ where
                                     custody,
                                 ),
                                 deadline: deadline
-                                    .map(crate::request_effect::RequestDeadlineWire::checked)
+                                    .map(crate::request_effect::RequestDuration::checked)
                                     .transpose()
                                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
                             },
@@ -3560,6 +3560,40 @@ fn projected_binding_receipt(
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    #[test]
+    fn matched_request_with_invalid_deadline_is_not_skipped_by_dispatch() {
+        use tidepool_repr::{DataCon, DataConId};
+        let mut table = tidepool_testing::gen::datacon_table::standard_datacon_table();
+        let submit = DataConId(100);
+        table.insert(DataCon {
+            id: submit,
+            name: "SubmitRequestWith".into(),
+            tag: 1,
+            rep_arity: 4,
+            field_bangs: Vec::new(),
+            qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
+            type_name: "Replies".into(),
+        });
+        let request = Value::Con(
+            submit,
+            vec![
+                1_i64.to_value(&table).unwrap(),
+                Value::Con(DataConId(999), vec![]),
+                (2_i64, 1_i64).to_value(&table).unwrap(),
+                Some(Value::Con(DataConId(998), vec![]))
+                    .to_value(&table)
+                    .unwrap(),
+            ],
+        );
+        assert!(matches!(
+            ResidentRequest::decode(&request, &table),
+            Err(ResidentActorWorkbenchError::RequestDecode {
+                source: BridgeError::FieldDecode { field: 4, .. },
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn bare_browse_resolves_the_actor_incarnations_configured_api_module() {

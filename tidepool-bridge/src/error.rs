@@ -4,7 +4,7 @@ use tidepool_repr::DataConId;
 /// Errors that can occur when bridging between Rust types and Core Values.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
-    /// The `DataConId` was not found in the `DataConTable`.
+    /// The outer constructor is unknown or does not belong to the decoded type.
     #[error("Unknown DataConId: {0:?}")]
     UnknownDataCon(DataConId),
     /// The `DataConId` was found, but it has an unexpected name.
@@ -61,6 +61,21 @@ pub enum BridgeError {
         expected: usize,
         /// The actual number of fields received.
         got: usize,
+    },
+    /// A constructor matched, but one of its fields could not be decoded.
+    /// Keeping the outer match distinct prevents composed decoders from
+    /// mistaking a nested unknown constructor for an unrelated outer variant.
+    #[error("could not decode field {field} of {constructor} (observed {observed}): {source}")]
+    FieldDecode {
+        /// Module-qualified constructor identity when the derive declared it.
+        constructor: String,
+        /// One-based source field position.
+        field: usize,
+        /// Constructor identity or value shape actually present in the field.
+        observed: String,
+        /// The nested bridge failure.
+        #[source]
+        source: Box<BridgeError>,
     },
     /// The value has an unexpected type (e.g., expected a Literal, got a Con).
     #[error("Type mismatch: expected {expected}, got {got}")]

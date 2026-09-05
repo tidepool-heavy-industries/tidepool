@@ -14,31 +14,22 @@ use crate::{
     reason = "variant names are the stable Haskell Duration constructors"
 )]
 pub(crate) enum RequestDuration {
+    #[core(module = "Tidepool.Duration")]
     DurationMilliseconds(i64),
+    #[core(module = "Tidepool.Duration")]
     DurationSeconds(i64),
+    #[core(module = "Tidepool.Duration")]
     DurationMinutes(i64),
 }
 
 impl RequestDuration {
     pub(crate) fn checked(self) -> Result<crate::RequestDeadline, String> {
-        let (value, unit, milliseconds_per_unit) = match self {
-            Self::DurationMilliseconds(value) => (value, crate::DeadlineUnit::Milliseconds, 1_u64),
-            Self::DurationSeconds(value) => (value, crate::DeadlineUnit::Seconds, 1_000_u64),
-            Self::DurationMinutes(value) => (value, crate::DeadlineUnit::Minutes, 60_000_u64),
+        let (value, unit) = match self {
+            Self::DurationMilliseconds(value) => (value, crate::DeadlineUnit::Milliseconds),
+            Self::DurationSeconds(value) => (value, crate::DeadlineUnit::Seconds),
+            Self::DurationMinutes(value) => (value, crate::DeadlineUnit::Minutes),
         };
-        crate::RequestDeadline::checked(value, unit, milliseconds_per_unit)
-    }
-}
-
-#[derive(Debug, Clone, Copy, tidepool_bridge_derive::FromCore)]
-pub(crate) enum RequestDeadlineWire {
-    RequestDeadline(RequestDuration),
-}
-
-impl RequestDeadlineWire {
-    pub(crate) fn checked(self) -> Result<crate::RequestDeadline, String> {
-        let Self::RequestDeadline(duration) = self;
-        duration.checked()
+        crate::RequestDeadline::checked(value, unit)
     }
 }
 
@@ -48,7 +39,8 @@ pub(crate) enum RepliesReq {
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     ReserveRequestWith(String, (i64, i64)),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
-    SubmitRequestWith(i64, Value, (i64, i64), Option<RequestDeadlineWire>),
+    // GHC erases the RequestDeadline newtype; its Core representation is Duration.
+    SubmitRequestWith(i64, Value, (i64, i64), Option<RequestDuration>),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
     AttemptReplyWith(i64, Value),
     #[core(module = "Tidepool.Agent.Reply.Internal")]
@@ -417,21 +409,18 @@ fn constructor(
 #[cfg(test)]
 mod tests {
     use super::RequestDuration;
-    use crate::DeadlineUnit;
 
     #[test]
     fn request_duration_preserves_authored_units_and_checks_conversion() {
         let seconds = RequestDuration::DurationSeconds(600)
             .checked()
             .expect("ten minute deadline");
-        assert_eq!(seconds.value, 600);
-        assert_eq!(seconds.unit, DeadlineUnit::Seconds);
-        assert_eq!(seconds.milliseconds, 600_000);
+        assert_eq!(seconds.duration().as_millis(), 600_000);
 
         let immediate = RequestDuration::DurationMilliseconds(0)
             .checked()
             .expect("explicit immediate deadline");
-        assert_eq!(immediate.milliseconds, 0);
+        assert_eq!(immediate.duration().as_millis(), 0);
         assert!(RequestDuration::DurationMinutes(-1).checked().is_err());
         assert!(RequestDuration::DurationMinutes(i64::MAX)
             .checked()

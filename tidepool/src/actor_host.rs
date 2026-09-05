@@ -3362,6 +3362,7 @@ mod tests {
             pending_status.contains("watches:") && pending_status.contains("\"both-ready\""),
             "{pending_status}"
         );
+        assert!(pending_status.contains("after=5min"), "{pending_status}");
         assert!(
             pending_status.contains("actors:\n")
                 && pending_status.contains("role=Research")

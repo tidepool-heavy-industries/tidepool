@@ -182,6 +182,29 @@ fn test_unknown_variant() {
     ));
 }
 
+#[test]
+fn nested_unknown_constructor_keeps_the_matched_outer_context() {
+    let table = test_table();
+    let outer = table
+        .get_by_name_arity("Just", 1)
+        .expect("Just constructor");
+    let unknown = DataConId(100);
+    let value = Value::Con(outer, vec![Value::Con(unknown, vec![])]);
+
+    let error = MyMaybe::<MyBool>::from_value(&value, &table).unwrap_err();
+    assert!(matches!(
+        error,
+        BridgeError::FieldDecode {
+            constructor,
+            field: 1,
+            observed,
+            source,
+        } if constructor == "Just"
+            && observed == "Con(DataConId(100))"
+            && matches!(*source, BridgeError::UnknownDataCon(id) if id == unknown)
+    ));
+}
+
 #[derive(Debug, PartialEq, Eq, FromCore, ToCore)]
 
 enum UnusedParam<T> {
@@ -281,6 +304,21 @@ fn test_struct_wrong_con() {
     let value = Value::Con(pair_id, vec![Value::Lit(tidepool_repr::Literal::LitInt(1))]);
     let res = GetBranchRequest::from_value(&value, &table);
     assert!(matches!(res, Err(BridgeError::UnknownDataCon(_))));
+}
+
+#[test]
+fn nested_struct_failure_preserves_the_matched_field() {
+    let table = test_table();
+    let pair = table.get_by_name_arity("Pair", 2).unwrap();
+    let unknown = DataConId(100);
+    let value = Value::Con(
+        pair,
+        vec![true.to_value(&table).unwrap(), Value::Con(unknown, vec![])],
+    );
+    let error = GenericStruct::<bool, MyBool>::from_value(&value, &table).unwrap_err();
+    assert!(matches!(error, BridgeError::FieldDecode {
+        constructor, field: 2, source, ..
+    } if constructor == "Pair" && matches!(*source, BridgeError::UnknownDataCon(id) if id == unknown)));
 }
 
 #[test]

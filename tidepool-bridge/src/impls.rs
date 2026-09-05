@@ -45,7 +45,14 @@ pub fn get_resilient(table: &DataConTable, name: &str, arity: u32) -> Option<Dat
 /// get" wording can't drift between the two.
 #[must_use]
 pub fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
-    let got_str = match got {
+    BridgeError::TypeMismatch {
+        expected: expected.to_string(),
+        got: value_shape(got),
+    }
+}
+
+fn value_shape(value: &Value) -> String {
+    match value {
         Value::Lit(l) => format!("Lit({:?})", l),
         Value::Con(id, _) => format!("Con({:?})", id),
         Value::Closure { .. } => "Closure".to_string(),
@@ -56,10 +63,38 @@ pub fn type_mismatch(expected: &str, got: &Value) -> BridgeError {
             Ok(b) => format!("ByteArray(len={})", b.len()),
             Err(_) => "ByteArray(poisoned)".to_string(),
         },
+    }
+}
+
+/// Preserve the matched outer field and the actual nested value identity when
+/// a derived decoder fails below that field. The nested [`BridgeError`] still
+/// carries the machine-readable cause; this context makes constructor-table
+/// mismatches diagnosable without reproducing the live heap.
+#[must_use]
+pub fn field_decode_error(
+    constructor: &str,
+    field: usize,
+    value: &Value,
+    table: &DataConTable,
+    source: BridgeError,
+) -> BridgeError {
+    let observed = match value {
+        Value::Con(id, _) => table
+            .get(*id)
+            .map(|data_con| {
+                data_con
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| data_con.name.clone())
+            })
+            .unwrap_or_else(|| format!("Con({id:?})")),
+        _ => value_shape(value),
     };
-    BridgeError::TypeMismatch {
-        expected: expected.to_string(),
-        got: got_str,
+    BridgeError::FieldDecode {
+        constructor: constructor.to_string(),
+        field,
+        observed,
+        source: Box::new(source),
     }
 }
 
@@ -397,7 +432,9 @@ impl<T: FromCore> FromCore for Option<T> {
                     }
                 } else if just_id == Some(*id) {
                     if fields.len() == 1 {
-                        Ok(Some(T::from_value(&fields[0], table)?))
+                        Ok(Some(T::from_value(&fields[0], table).map_err(
+                            |source| field_decode_error("Just", 1, &fields[0], table, source),
+                        )?))
                     } else {
                         Err(BridgeError::ArityMismatch {
                             con: *id,

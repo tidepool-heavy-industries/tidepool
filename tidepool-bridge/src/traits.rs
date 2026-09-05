@@ -19,8 +19,10 @@ pub trait FromCore: Sized + sealed::FromCoreSealed {
     /// # Errors
     ///
     /// Returns `BridgeError::TypeMismatch` if the value's variant doesn't match the expected type.
-    /// Returns `BridgeError::UnknownDataCon` or `BridgeError::UnknownDataConName` if a required
-    /// constructor is missing from the table.
+    /// Returns `BridgeError::UnknownDataCon` when the outer constructor does not
+    /// match this type, or `BridgeError::UnknownDataConName` when required metadata
+    /// is missing. Once a constructor matches, derived decoders wrap nested failures
+    /// in `BridgeError::FieldDecode` so dispatch cannot mistake them for outer misses.
     /// Returns `BridgeError::ArityMismatch` if a constructor has the wrong number of fields.
     fn from_value(value: &Value, table: &DataConTable) -> Result<Self, BridgeError>;
 }

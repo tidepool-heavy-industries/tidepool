@@ -159,6 +159,18 @@ fn add_trait_bounds(
     }
 }
 
+/// A field failure belongs to an already-matched constructor. Keep it distinct
+/// from a top-level miss used by effect dispatch to try another request type.
+fn emit_field_decode(ty: &Type, index: usize, constructor: &str) -> TokenStream {
+    let field = index + 1;
+    quote! {
+        <#ty as tidepool_bridge::FromCore>::from_value(&fields[#index], table)
+            .map_err(|source| tidepool_bridge::field_decode_error(
+                #constructor, #field, &fields[#index], table, source,
+            ))?
+    }
+}
+
 pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
     let name = &info.name;
     let trait_path: syn::Path = parse_quote!(tidepool_bridge::FromCore);
@@ -180,6 +192,9 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
         let rust_name = &variant.rust_name;
         let core_name = &variant.core_name;
         let core_module = variant.core_module.as_ref();
+        let constructor_identity = core_module
+            .map(|module| format!("{module}.{core_name}"))
+            .unwrap_or_else(|| core_name.clone());
         let fields = variant.shape.types();
         let rust_arity = fields.len();
 
@@ -197,9 +212,7 @@ pub fn generate_from_core(info: &EnumInfo) -> TokenStream {
             } else {
                 let i = core_ix;
                 core_ix += 1;
-                field_exprs.push(quote! {
-                    <#ty as tidepool_bridge::FromCore>::from_value(&fields[#i], table)?
-                });
+                field_exprs.push(emit_field_decode(ty, i, &constructor_identity));
             }
         }
 
@@ -347,6 +360,9 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
     let name = &info.name;
     let core_name = &info.core_name;
     let core_module = info.core_module.as_ref();
+    let constructor_identity = core_module
+        .map(|module| format!("{module}.{core_name}"))
+        .unwrap_or_else(|| core_name.clone());
     let trait_path: syn::Path = parse_quote!(tidepool_bridge::FromCore);
     let mut generics = info.generics.clone();
 
@@ -375,8 +391,9 @@ pub fn generate_struct_from_core(info: &StructInfo) -> TokenStream {
             } else {
                 let i = core_ix;
                 core_ix += 1;
+                let decode = emit_field_decode(field_ty, i, &constructor_identity);
                 quote! {
-                    #field_name: <#field_ty as tidepool_bridge::FromCore>::from_value(&fields[#i], table)?
+                    #field_name: #decode
                 }
             }
         })
