@@ -312,28 +312,37 @@ impl<M, H: Clone + PartialEq + std::fmt::Debug> SessionRegistry<M, H> {
         request: CheckoutRequest<'_, H>,
         max_wait: std::time::Duration,
     ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
-        let availability = self.availability_for(id);
-        let wait = async {
-            let _position = availability.queue.lock().await;
-            loop {
-                let changed = availability.changed.notified();
-                let checkout = match request {
-                    CheckoutRequest::Run => self.checkout_run(id),
-                    CheckoutRequest::Resume(hole) => self.checkout_resume(id, hole),
-                    CheckoutRequest::Child => self.checkout_child(id),
-                };
-                match checkout {
-                    Err(CheckoutError::Running(_)) => changed.await,
-                    result => return result,
-                }
-            }
-        };
-        match tokio::time::timeout(max_wait, wait).await {
+        match tokio::time::timeout(max_wait, self.checkout_queued(id, request)).await {
             Ok(result) => result,
             Err(_) => Err(CheckoutError::WaitTimeout {
                 session: id,
                 waited: max_wait,
             }),
+        }
+    }
+
+    /// Queue for exclusive machine access without imposing an execution deadline
+    /// on another owner. Dropping the future cancels admission; terminal or removed
+    /// sessions fail immediately. Callers with an explicit shutdown/deadline policy
+    /// can use [`Self::checkout_wait`] over this same FIFO queue.
+    pub async fn checkout_queued(
+        &self,
+        id: SessionId,
+        request: CheckoutRequest<'_, H>,
+    ) -> Result<Checkout<'_, M, H>, CheckoutError<H>> {
+        let availability = self.availability_for(id);
+        let _position = availability.queue.lock().await;
+        loop {
+            let changed = availability.changed.notified();
+            let checkout = match request {
+                CheckoutRequest::Run => self.checkout_run(id),
+                CheckoutRequest::Resume(hole) => self.checkout_resume(id, hole),
+                CheckoutRequest::Child => self.checkout_child(id),
+            };
+            match checkout {
+                Err(CheckoutError::Running(_)) => changed.await,
+                result => return result,
+            }
         }
     }
 
@@ -1179,6 +1188,42 @@ mod tests {
             }
         );
         running.restore_suspended(Vec::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_checkout_survives_long_ownership_and_cancelled_waiters() {
+        let reg = std::sync::Arc::new(SessionRegistry::<FakeMachine, Hole>::new());
+        let id = SessionId(36);
+        reg.insert_idle(id, FakeMachine { turns: 0 });
+        let running = reg.checkout_run(id).unwrap();
+        let first_registry = std::sync::Arc::clone(&reg);
+        let first = tokio::spawn(async move {
+            let checkout = first_registry
+                .checkout_queued(id, CheckoutRequest::Run)
+                .await
+                .unwrap();
+            checkout.restore_suspended(Vec::new());
+        });
+        tokio::task::yield_now().await;
+        let second_registry = std::sync::Arc::clone(&reg);
+        let second = tokio::spawn(async move {
+            let checkout = second_registry
+                .checkout_queued(id, CheckoutRequest::Run)
+                .await
+                .unwrap();
+            checkout.restore_suspended(Vec::new());
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(120)).await;
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        running.restore_suspended(Vec::new());
+        tokio::time::timeout(std::time::Duration::from_secs(1), second)
+            .await
+            .expect("cancelled queue head must not strand its successor")
+            .expect("queued checkout succeeds after settlement");
     }
 
     #[test]

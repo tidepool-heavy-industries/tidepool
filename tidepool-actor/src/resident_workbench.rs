@@ -32,8 +32,6 @@ use crate::request_effect::{
 };
 use crate::{ActorCompileViewError, ResponseExpectation};
 
-const MACHINE_WAIT: Duration = Duration::from_secs(30);
-
 impl ResponseExpectation {
     fn request_preamble(
         &self,
@@ -1027,14 +1025,13 @@ where
     where
         ResultValue: Send + 'static,
     {
-        self.with_machine_wait(context, MACHINE_WAIT, operation)
-            .await
+        self.with_machine_wait(context, None, operation).await
     }
 
     async fn with_machine_wait<ResultValue>(
         &self,
         context: crate::ActorSessionContext,
-        max_wait: Duration,
+        max_wait: Option<Duration>,
         operation: impl FnOnce(
                 &mut ResidentSession<H, O>,
                 &crate::ActorSessionContext,
@@ -1046,15 +1043,21 @@ where
     where
         ResultValue: Send + 'static,
     {
-        let checkout = self
-            .machines
-            .checkout_wait(
-                context.placement.session,
-                tidepool_runtime::session::registry::CheckoutRequest::Run,
-                max_wait,
-            )
-            .await
-            .map_err(ResidentActorWorkbenchError::Checkout)?;
+        let session_id = context.placement.session;
+        let request = tidepool_runtime::session::registry::CheckoutRequest::Run;
+        let admission_started = std::time::Instant::now();
+        let checkout = match max_wait {
+            Some(limit) => {
+                self.machines
+                    .checkout_wait(session_id, request, limit)
+                    .await
+            }
+            None => self.machines.checkout_queued(session_id, request).await,
+        }
+        .map_err(ResidentActorWorkbenchError::Checkout)?;
+        tracing::debug!(actor = ?context.actor, session = ?session_id,
+            waited_ms = admission_started.elapsed().as_millis(),
+            "resident machine checkout admitted");
         let (mut session, receipt) = checkout.into_parts();
         let source = self.source.clone();
         let machines = Arc::clone(&self.machines);
@@ -1255,11 +1258,20 @@ where
             tidepool_runtime::session::workbench_input_binding(self.json_input.as_ref())
         )
         .into();
-        self.access
+        let snapshot_source = turn_source.clone();
+        let compile_view = self
+            .access
             .with_machine(context, move |session, context, _| {
-                inspect_actor_batch(session, context, &turn_source, &type_modules, &queries)
+                actor_compile_view(session, context, &snapshot_source, &type_modules)
             })
-            .await
+            .await?;
+        // Inspection consumes immutable compiler inputs and never touches live
+        // Haskell values. Other actors may use the machine while GHC answers.
+        tokio::task::spawn_blocking(move || {
+            inspect_compile_view(&compile_view, &turn_source, &queries)
+        })
+        .await
+        .map_err(ResidentActorWorkbenchError::Join)?
     }
 
     /// Settle a resumed fragment outcome. Nominal suspensions retain
@@ -2146,7 +2158,7 @@ where
         self.access
             .with_machine_wait(
                 context,
-                admission_timeout,
+                Some(admission_timeout),
                 move |session, _context, _| match session
                     .run_rooted_entry("actor_shutdown", hook, argument, realm, None)
                     .map_err(ResidentActorWorkbenchError::Resident)?
@@ -3505,6 +3517,14 @@ where
     O: OutputSink + Sync,
 {
     let compile_view = actor_compile_view(session, context, source, type_modules)?;
+    inspect_compile_view(&compile_view, source, queries)
+}
+
+fn inspect_compile_view(
+    compile_view: &crate::ActorCompileView,
+    source: &ActorWorkbenchSource,
+    queries: &[InspectionQuery],
+) -> Result<Vec<Result<String, String>>, ResidentActorWorkbenchError> {
     let includes = compile_view.include_paths(&source.base_include);
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let injected = compile_view.injected_module_names();
