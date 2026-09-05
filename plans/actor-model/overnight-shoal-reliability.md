@@ -75,15 +75,15 @@ ownership failures. Keep the prepared checkout for later; do not launch it now.
   Responses Lite, while Codex used Lite as the configuration-update gate.
   External Codex patch narrows producer/request projection to Astra. Rust 1.95
   is required (the ambient Tidepool Nix shell supplies 1.93). Two selected
-  mocked core tests passed; an added durable-rollout assertion is rerunning.
-  External changes are uncommitted until that check passes. No live canary ran.
+  mocked core tests and the added durable-rollout assertion passed. No live
+  canary ran.
 
 ## Integration evidence
 
 - External Codex fix committed as `702639b55a`. The request-construction unit
   check and mocked Sol/Astra session check passed; the strengthened session
   check also proved zero durable configuration updates for Lite Sol and one
-  for Astra. Patched executable build is in progress, without launching a model.
+  for Astra. Patched executable build passed without launching a model.
 - Usage worker also hit native collaboration failure and was retired via
   `StoppedNow`; no further messages will be sent. Its staged candidate was
   preserved as f8f8a900 and integrated as 2a2b9e3f4 for root review. Root added
@@ -97,3 +97,20 @@ ownership failures. Keep the prepared checkout for later; do not launch it now.
   sessions were not changed. Worktrees and commits remain available.
 - Live canary remains deferred at the user's request. The current running
   host keeps its old snapshot; a future launch must use rebuilt binaries.
+
+## Ready artifacts and remaining boundary
+
+- Tidepool head through 10c0b378 was built with
+  `CARGO_TARGET_DIR=/tmp/tidepool-actor-workspace/target nix develop --command cargo build -p tidepool --bin shoal`.
+  Executable: `/tmp/tidepool-actor-workspace/target/debug/shoal`.
+- Codex 702639b55a was built with Rust 1.95, the existing `dev-small` profile,
+  and `cargo build --profile dev-small -p codex-cli --bin codex`.
+  Executable: `/home/inanna/dev/codex/codex-rs/target/dev-small/codex`.
+  Its `features list` with child-launch flags reports goals, multi_agent and
+  multi_agent_v2 false. The rebuilt Shoal help invocation succeeded.
+- Final Rust formatting and Git whitespace checks passed. No model-backed
+  canary, restart, global installation replacement, or user-file cleanup was
+  performed. The unrelated pre-existing Codex result symlink is untouched.
+- For a later launch, select the patched Codex explicitly with
+  `TIDEPOOL_INTERACTIVE_CODEX_BIN=/home/inanna/dev/codex/codex-rs/target/dev-small/codex`.
+  Do not use the older PATH executable for current hosted rollout delivery.
