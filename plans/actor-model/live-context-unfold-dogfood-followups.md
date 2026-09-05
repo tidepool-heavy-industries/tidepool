@@ -68,8 +68,42 @@ Its root is actor `0@1`, provider thread
 cancelled children and was stopped to release the repository's single-owner
 binding registry; its logs and worktrees were preserved.
 
-Remaining release work: finish the final-code recursive regression and the fresh
-low-effort provider campaign with recorded evidence. Reconcile each acceptance item below
+The final-code recursive regression passed (426.974 seconds, nextest run
+`754c3a1d-bb39-4e2b-8272-68b9a3cf637c`). Canary 5 then exposed two additional
+live concurrency/environment defects, so release acceptance remains open:
+
+- Read-only inspection batches held the shared Haskell machine while GHC ran.
+  The root's normal `watch` operation failed the implicit 30-second checkout
+  deadline while children were inspecting. Fix at the owners: capture the
+  immutable `ActorCompileView` under checkout, run inspections after settlement,
+  and use the registry's cancellation-safe FIFO queue for ordinary admission.
+  Explicit shutdown admission deadlines remain bounded. No replacement timer
+  or polling/retry loop is introduced.
+- The coding child inherited the host Cargo configuration's `sccache` wrapper.
+  Its daemon resolved `/tmp/tidepool-actor-workspace` outside the child's mount
+  namespace and failed writing dependency files. The actor launch environment
+  now overrides both Cargo compiler-wrapper variables to empty whenever it
+  assigns private build output. A future cache daemon must be owned inside the
+  actor's mount namespace; inherited host daemons are not workspace-safe.
+
+Canary 5 did prove deadline submission, role/worktree separation, custom type and
+`fmt` inheritance, and provider forking. Both child histories reference the root
+with exclusive ordinal 89; the actual fork call is parent ordinal 87. This proves
+the inherited prefix includes the complete call, beyond merely trusting a pane
+label. Research/coding observed cached/uncached input counts were respectively
+30,592/2,265 and 30,336/373. Watch/fold/follow-up/cleanup acceptance is still missing.
+
+The admission/inspection fix is committed as `54c156a1`; the compiler namespace
+fix is `82ae06b5`. Focused evidence: all 17 registry tests passed, including
+120 seconds of simulated ownership with a cancelled queue predecessor; a real
+offline Cargo compile inside bubblewrap passed with unusable Cargo-config
+wrappers, writing output only into its private overlay. `just verify` passed
+again (2,422 tests, 217 fixtures, strict lint/format and manifest checks).
+The old canary root successfully resumed diagnostic inspection and polled both
+retained responses after contention ended; its live state was not lost.
+
+Remaining release work: verify those two fixes, repeat the fresh provider canary,
+and record the results. Reconcile each acceptance item below
 against tests/live evidence and the explicitly gated successor prerequisites;
 do not treat the smaller two-child spot check alone as full acceptance.
 
