@@ -36,4 +36,13 @@ use focused checks and one integrated disposable Sol/low live canary.
 ## Progress
 
 - Starting head: aca17be5 (pattern diagnostic and basic prompt changes landed).
-- Implementation pending. No acceptance claims yet.
+- Three isolated implementation owners are running with independent typed
+  watches: toolchain, usage, and Sol configuration.
+- Compact fold example committed in 94769e9f; its report/view declarations and
+  pending/unavailable projections compiled and evaluated in the live workbench.
+- Disposable console clone prepared at
+  `/tmp/shoal-overnight-canary.EhanZs/console`, starting from console commit
+  `57e57ffe3e5956174c6c718e57a45fe08bb1a877`. The adjacent `canary-task.md`
+  specifies live acceptance and report requirements. Host launch awaits the
+  integrated implementation and Sol configuration verification.
+- Full acceptance remains pending.
