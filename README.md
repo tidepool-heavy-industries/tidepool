@@ -124,6 +124,20 @@ available, start Shoal's generic typed actor workbench from any project:
 shoal init
 ```
 
+The first `shoal new` or `shoal init` creates explicit project defaults at
+`.shoal/config.toml`:
+
+```toml
+[defaults]
+model = "gpt-5.6-sol"
+effort = "low"
+```
+
+Shoal never inherits the interactive client's globally last-used model.
+`--model` and `--effort` override the project defaults for one run; the
+resolved pair is recorded in the run status and printed at launch. The config
+is runtime-local and covered by Shoal's `.git/info/exclude` entry.
+
 The reproducible path is `nix run github:inanna-malick/tidepool#shoal -- init`
 once consuming a published Tidepool revision, or `nix develop .#shoal` while
 working in this checkout. The Shoal wrapper retains the pinned Codex closure at

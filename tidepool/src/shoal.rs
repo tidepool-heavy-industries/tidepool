@@ -25,9 +25,14 @@ use tracing_subscriber::Layer;
 
 use crate::actor_host::ACTOR_PROJECT_ROOT;
 
-const STATUS_VERSION: u32 = 3;
+const STATUS_VERSION: u32 = 4;
 const INTERACTIVE_START_TIMEOUT: Duration = Duration::from_secs(120);
 const SHOAL_EXCLUDE: &str = "/.shoal/";
+const SHOAL_CONFIG: &str = ".shoal/config.toml";
+const DEFAULT_CONFIG: &str = r#"[defaults]
+model = "gpt-5.6-sol"
+effort = "low"
+"#;
 const ENV_PACKAGED_CODEX_CLOSURE: &str = "TIDEPOOL_SHOAL_CODEX_CLOSURE";
 const ENV_NIX_STORE_BIN: &str = "TIDEPOOL_SHOAL_NIX_STORE_BIN";
 const GC_ROOT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,7 +52,7 @@ pub struct InitOptions {
     pub recreate: bool,
     pub no_attach: bool,
     pub model: Option<String>,
-    pub effort: Option<ReasoningEffort>,
+    pub effort: Option<ShoalEffort>,
 }
 
 pub struct HostOptions {
@@ -59,8 +64,58 @@ pub struct HostOptions {
     pub root_binding_path: PathBuf,
     pub interactive_agent: InteractiveAgentInstallation,
     pub resume_root: bool,
-    pub model: Option<String>,
-    pub effort: Option<ReasoningEffort>,
+    pub agent: ShoalAgentDefaults,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShoalAgentDefaults {
+    pub model: String,
+    pub effort: ShoalEffort,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShoalEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<ReasoningEffort> for ShoalEffort {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+        }
+    }
+}
+
+impl From<ShoalEffort> for ReasoningEffort {
+    fn from(value: ShoalEffort) -> Self {
+        match value {
+            ShoalEffort::Low => Self::Low,
+            ShoalEffort::Medium => Self::Medium,
+            ShoalEffort::High => Self::High,
+        }
+    }
+}
+
+impl std::fmt::Display for ShoalEffort {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShoalConfig {
+    defaults: ShoalAgentDefaults,
 }
 
 /// Initialize the smallest repository that can host a Shoal ensemble.
@@ -89,6 +144,7 @@ pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> 
     let state = workspace.join(".shoal");
     std::fs::create_dir_all(state.join("logs"))?;
     std::fs::create_dir_all(state.join("sessions"))?;
+    ensure_project_config(&workspace)?;
     install_local_exclude(&workspace)?;
 
     run_git(
@@ -112,7 +168,64 @@ pub async fn new(options: NewOptions) -> Result<(), Box<dyn std::error::Error>> 
         "Initialized empty Shoal workspace at {}",
         workspace.display()
     );
+    println!("agent defaults: {}", workspace.join(SHOAL_CONFIG).display());
     Ok(())
+}
+
+fn ensure_project_config(
+    workspace: &Path,
+) -> Result<ShoalAgentDefaults, Box<dyn std::error::Error>> {
+    let path = workspace.join(SHOAL_CONFIG);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            tidepool_atomic_write::write_best_effort(&path, DEFAULT_CONFIG.as_bytes())?;
+            DEFAULT_CONFIG.to_owned()
+        }
+        Err(error) => {
+            return Err(runtime_error(format!(
+                "cannot read Shoal configuration {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let config: ShoalConfig = toml::from_str(&text).map_err(|error| {
+        runtime_error(format!(
+            "invalid Shoal configuration {}: {error}",
+            path.display()
+        ))
+    })?;
+    validate_agent_defaults(
+        config.defaults,
+        &format!("Shoal configuration {}", path.display()),
+    )
+}
+
+fn validate_agent_defaults(
+    mut defaults: ShoalAgentDefaults,
+    source: &str,
+) -> Result<ShoalAgentDefaults, Box<dyn std::error::Error>> {
+    let model = defaults.model.trim();
+    if model.is_empty() {
+        return Err(runtime_error(format!("{source} selects an empty model")));
+    }
+    defaults.model = model.to_owned();
+    Ok(defaults)
+}
+
+fn resolve_agent_defaults(
+    configured: ShoalAgentDefaults,
+    model: Option<String>,
+    effort: Option<ShoalEffort>,
+) -> Result<ShoalAgentDefaults, Box<dyn std::error::Error>> {
+    let resolved = ShoalAgentDefaults {
+        model: model.unwrap_or(configured.model),
+        effort: effort.unwrap_or(configured.effort),
+    };
+    validate_agent_defaults(resolved, "resolved Shoal agent defaults")
 }
 
 fn install_local_exclude(workspace: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -154,6 +267,7 @@ pub struct RunStatus {
     pub run_id: String,
     pub workspace: PathBuf,
     pub session: String,
+    pub agent: ShoalAgentDefaults,
     pub phase: RunPhase,
 }
 
@@ -184,6 +298,11 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     };
     let workspace = std::fs::canonicalize(workspace)?;
     install_local_exclude(&workspace)?;
+    let agent = resolve_agent_defaults(
+        ensure_project_config(&workspace)?,
+        options.model,
+        options.effort,
+    )?;
     retain_packaged_interactive_agent(&workspace).await?;
     let session_name = options
         .session
@@ -222,7 +341,13 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     let status_path = run_root.join("status.json");
     write_status(
         &status_path,
-        &RunStatus::new(&run_id, &workspace, &session_name, RunPhase::Starting),
+        &RunStatus::new(
+            &run_id,
+            &workspace,
+            &session_name,
+            agent.clone(),
+            RunPhase::Starting,
+        ),
     )?;
 
     let executable = current_executable()?;
@@ -242,7 +367,14 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         ))
         .await;
     if let Err(error) = daemon_launch {
-        write_startup_failure(&status_path, &run_id, &workspace, &session_name, &error)?;
+        write_startup_failure(
+            &status_path,
+            &run_id,
+            &workspace,
+            &session_name,
+            &agent,
+            &error,
+        )?;
         return Err(error.into());
     }
     if let Err(error) = wait_until_compiler_daemon(&tmux, &compiler_socket).await {
@@ -251,6 +383,7 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
             &run_id,
             &workspace,
             &session_name,
+            &agent,
             error.as_ref(),
         )?;
         let _ = tmux.kill().await;
@@ -279,12 +412,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
     if options.recreate {
         args.push("--resume-root".into());
     }
-    if let Some(model) = options.model {
-        args.extend(["--model".into(), model]);
-    }
-    if let Some(effort) = options.effort {
-        args.extend(["--effort".into(), effort_name(effort).into()]);
-    }
+    args.extend(["--model".into(), agent.model.clone()]);
+    args.extend(["--effort".into(), agent.effort.to_string()]);
     let launch = tmux
         .spawn_window(&TmuxLaunch {
             window_name: "Host".into(),
@@ -296,7 +425,14 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         })
         .await;
     if let Err(error) = launch {
-        write_startup_failure(&status_path, &run_id, &workspace, &session_name, &error)?;
+        write_startup_failure(
+            &status_path,
+            &run_id,
+            &workspace,
+            &session_name,
+            &agent,
+            &error,
+        )?;
         let _ = tmux.kill().await;
         return Err(error.into());
     }
@@ -329,6 +465,8 @@ pub async fn init(options: InitOptions) -> Result<(), Box<dyn std::error::Error>
         }
     }
     println!("status: {}", status_path.display());
+    println!("agent:  model={} effort={}", agent.model, agent.effort);
+    println!("config: {}", workspace.join(SHOAL_CONFIG).display());
     if options.no_attach {
         println!("attach: tmux attach -t {session_name}");
         println!("stop:   tmux kill-session -t {session_name}");
@@ -380,6 +518,7 @@ fn write_startup_failure(
     run_id: &str,
     workspace: &Path,
     session_name: &str,
+    agent: &ShoalAgentDefaults,
     error: &dyn std::fmt::Display,
 ) -> Result<(), Box<dyn std::error::Error>> {
     write_status(
@@ -388,6 +527,7 @@ fn write_startup_failure(
             run_id,
             workspace,
             session_name,
+            agent.clone(),
             RunPhase::Failed {
                 error: error.to_string(),
             },
@@ -542,6 +682,8 @@ pub async fn host(options: HostOptions) -> Result<(), Box<dyn std::error::Error>
         workspace = %options.workspace.display(),
         interactive_agent = %options.interactive_agent.executable().display(),
         interactive_agent_version = options.interactive_agent.version(),
+        model = %options.agent.model,
+        effort = %options.agent.effort,
         detailed_log = %log_path.display(),
         "starting Shoal actor host"
     );
@@ -577,8 +719,8 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
             root_binding_path: options.run_root.join("root-binding.json"),
             interactive_agent: options.interactive_agent.clone(),
             tmux_session: options.session.clone(),
-            model: options.model.clone(),
-            effort: options.effort,
+            model: options.agent.model.clone(),
+            effort: options.agent.effort.into(),
             root_launch_mode,
             pane_environment: pane_environment(),
         },
@@ -598,6 +740,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         &options.run_id,
                         &options.workspace,
                         &options.session,
+                        options.agent.clone(),
                         RunPhase::AwaitingBinding { root_actor: root },
                     );
                     write_status(&options.status_path, &status)?;
@@ -614,6 +757,7 @@ async fn run_host(options: &HostOptions) -> Result<(), Box<dyn std::error::Error
                         &options.run_id,
                         &options.workspace,
                         &options.session,
+                        options.agent.clone(),
                         RunPhase::Ready {
                             root_actor: root,
                             root_thread: thread.id().clone(),
@@ -673,7 +817,13 @@ fn settle_host_result(
             error: failure.to_string(),
         },
     };
-    let status = RunStatus::new(&options.run_id, &options.workspace, &options.session, phase);
+    let status = RunStatus::new(
+        &options.run_id,
+        &options.workspace,
+        &options.session,
+        options.agent.clone(),
+        phase,
+    );
     match (result, write_status(&options.status_path, &status)) {
         (result, Ok(())) => result,
         (Ok(()), Err(status_error)) => Err(status_error),
@@ -809,12 +959,19 @@ fn decode_run_status(bytes: &[u8]) -> Result<RunStatus, Box<dyn std::error::Erro
 }
 
 impl RunStatus {
-    fn new(run_id: &str, workspace: &Path, session: &str, phase: RunPhase) -> Self {
+    fn new(
+        run_id: &str,
+        workspace: &Path,
+        session: &str,
+        agent: ShoalAgentDefaults,
+        phase: RunPhase,
+    ) -> Self {
         Self {
             version: STATUS_VERSION,
             run_id: run_id.into(),
             workspace: workspace.into(),
             session: session.into(),
+            agent,
             phase,
         }
     }
@@ -926,14 +1083,6 @@ fn current_executable() -> Result<String, Box<dyn std::error::Error>> {
         .ok_or_else(|| runtime_error("Shoal executable path is not UTF-8"))
 }
 
-fn effort_name(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-    }
-}
-
 /// Variables whose current values must override a possibly older tmux server
 /// environment. Tmux supplies fresh `TMUX`/`TMUX_PANE` identities itself.
 fn pane_environment() -> std::collections::BTreeMap<String, String> {
@@ -984,6 +1133,13 @@ fn runtime_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 mod tests {
     use super::*;
 
+    fn test_agent_defaults() -> ShoalAgentDefaults {
+        ShoalAgentDefaults {
+            model: "test-model".into(),
+            effort: ShoalEffort::Medium,
+        }
+    }
+
     async fn git_stdout(workspace: &Path, arguments: &[&str]) -> String {
         let output = tokio::process::Command::new("git")
             .args(arguments)
@@ -1013,6 +1169,13 @@ mod tests {
 
         assert!(workspace.join(".shoal/logs").is_dir());
         assert!(workspace.join(".shoal/sessions").is_dir());
+        assert_eq!(
+            ensure_project_config(&workspace).unwrap(),
+            ShoalAgentDefaults {
+                model: "gpt-5.6-sol".into(),
+                effort: ShoalEffort::Low,
+            }
+        );
         assert!(std::fs::read_to_string(workspace.join(".git/info/exclude"))
             .unwrap()
             .lines()
@@ -1059,6 +1222,48 @@ mod tests {
             default_session_name(Path::new("/tmp/🐟")),
             "shoal-workspace"
         );
+    }
+
+    #[test]
+    fn project_agent_defaults_are_explicit_and_cli_overrides_are_per_field() {
+        let workspace = tempfile::tempdir().unwrap();
+        let configured = ensure_project_config(workspace.path()).unwrap();
+        assert!(workspace.path().join(SHOAL_CONFIG).is_file());
+
+        assert_eq!(
+            resolve_agent_defaults(configured.clone(), None, None).unwrap(),
+            configured
+        );
+        assert_eq!(
+            resolve_agent_defaults(
+                configured,
+                Some("  override-model  ".into()),
+                Some(ShoalEffort::High),
+            )
+            .unwrap(),
+            ShoalAgentDefaults {
+                model: "override-model".into(),
+                effort: ShoalEffort::High,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_project_agent_defaults_fail_at_the_configuration_boundary() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(SHOAL_CONFIG);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[defaults]\nmodel = \"\"\neffort = \"low\"\n").unwrap();
+        let error = ensure_project_config(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("selects an empty model"));
+
+        std::fs::write(
+            &path,
+            "[defaults]\nmodel = \"test-model\"\neffort = \"furious\"\n",
+        )
+        .unwrap();
+        let error = ensure_project_config(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("invalid Shoal configuration"));
     }
 
     #[test]
@@ -1146,14 +1351,20 @@ mod tests {
                 root_thread: BackendThreadId("thread".into()),
             },
         ] {
-            let status = RunStatus::new("run-1", Path::new("/tmp/work"), "shoal-work", phase);
+            let status = RunStatus::new(
+                "run-1",
+                Path::new("/tmp/work"),
+                "shoal-work",
+                test_agent_defaults(),
+                phase,
+            );
             let encoded = serde_json::to_vec(&status).unwrap();
-            assert_eq!(status.version, 3);
+            assert_eq!(status.version, STATUS_VERSION);
             assert_eq!(decode_run_status(&encoded).unwrap(), status);
         }
 
         let old = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "run_id": "run-1",
             "workspace": "/tmp/work",
             "session": "shoal-work",
@@ -1162,7 +1373,7 @@ mod tests {
         assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
             .unwrap_err()
             .to_string()
-            .contains("unsupported Shoal run status version 2"));
+            .contains("unsupported Shoal run status version 3"));
     }
 
     #[test]
@@ -1222,8 +1433,7 @@ mod tests {
             )
             .unwrap(),
             resume_root: false,
-            model: None,
-            effort: None,
+            agent: test_agent_defaults(),
         };
         let result = settle_host_result(Err(runtime_error("compile exploded")), &options);
         assert!(result.is_err());

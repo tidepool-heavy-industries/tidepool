@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tidepool_agent::ReasoningEffort;
+use tidepool::shoal::{ShoalAgentDefaults, ShoalEffort};
 
 #[derive(Debug, Parser)]
 #[command(name = "shoal", about = "Run typed Tidepool actor ensembles")]
@@ -28,8 +28,10 @@ enum Command {
         recreate: bool,
         #[arg(long)]
         no_attach: bool,
+        /// Override `.shoal/config.toml` for this run.
         #[arg(long)]
         model: Option<String>,
+        /// Override `.shoal/config.toml` for this run.
         #[arg(long, value_enum)]
         effort: Option<Effort>,
     },
@@ -53,10 +55,10 @@ enum Command {
         interactive_agent_version: String,
         #[arg(long)]
         resume_root: bool,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long, value_enum)]
-        effort: Option<Effort>,
+        #[arg(long, hide = true)]
+        model: String,
+        #[arg(long, value_enum, hide = true)]
+        effort: Effort,
     },
 }
 
@@ -67,7 +69,7 @@ enum Effort {
     High,
 }
 
-impl From<Effort> for ReasoningEffort {
+impl From<Effort> for ShoalEffort {
     fn from(value: Effort) -> Self {
         match value {
             Effort::Low => Self::Low,
@@ -126,8 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 root_binding_path,
                 interactive_agent,
                 resume_root,
-                model,
-                effort: effort.map(Into::into),
+                agent: ShoalAgentDefaults {
+                    model,
+                    effort: effort.into(),
+                },
             })
             .await
         }

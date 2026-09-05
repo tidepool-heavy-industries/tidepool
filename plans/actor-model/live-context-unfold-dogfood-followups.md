@@ -101,6 +101,17 @@ wrappers, writing output only into its private overlay. `just verify` passed
 again (2,422 tests, 217 fixtures, strict lint/format and manifest checks).
 The old canary root successfully resumed diagnostic inspection and polled both
 retained responses after contention ended; its live state was not lost.
+It then completed typed cleanup (`cleanupReceiptComplete = True`), stopped and
+forgot both children, retired group 1, and evaluated `actorContext` afterward.
+The source, worktrees, and Git history remained intact. That completed test
+session was stopped. A replacement named `shoal-hardened-canary-low-6` exposed
+another composition-root defect before useful testing: omitting `--model`
+inherited the interactive client's globally last-used `gpt-6-astra`. The
+expensive canary was killed immediately. Shoal now materializes explicit
+project-local model/effort defaults in `.shoal/config.toml`, permits deliberate
+per-run CLI overrides, requires the resolved pair at the private host boundary,
+and records it in run status. No fresh acceptance evidence is attributed to
+canary 6.
 
 Remaining release work: verify those two fixes, repeat the fresh provider canary,
 and record the results. Reconcile each acceptance item below

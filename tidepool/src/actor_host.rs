@@ -145,8 +145,8 @@ pub struct ActorHostConfig {
     pub root_binding_path: PathBuf,
     pub interactive_agent: InteractiveAgentInstallation,
     pub tmux_session: String,
-    pub model: Option<String>,
-    pub effort: Option<ReasoningEffort>,
+    pub model: String,
+    pub effort: ReasoningEffort,
     pub root_launch_mode: InteractiveLaunchMode,
     pub pane_environment: std::collections::BTreeMap<String, String>,
 }
@@ -1803,8 +1803,8 @@ async fn launch_prepared_interactive_application(
     );
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
-        model: config.model.clone(),
-        effort: config.effort,
+        model: Some(config.model.clone()),
+        effort: Some(config.effort),
         developer_instructions,
         initial_prompt: installation.initial_user_message.clone(),
         native_sandbox: InteractiveNativeSandbox::HostMountBoundary,
@@ -3242,8 +3242,8 @@ mod tests {
             )
             .unwrap(),
             tmux_session: "unused-in-reply-watch-test".into(),
-            model: None,
-            effort: None,
+            model: "test-model".into(),
+            effort: ReasoningEffort::Low,
             root_launch_mode: InteractiveLaunchMode::Fresh,
             pane_environment: std::collections::BTreeMap::new(),
         };
