@@ -1996,6 +1996,11 @@ fn actor_launch_environment(
             "CARGO_TARGET_DIR".into(),
             build_output.to_string_lossy().into_owned(),
         );
+        // A host compiler-cache daemon resolves the shared visible pathname in
+        // its own mount namespace. Empty overrides also disable Cargo config
+        // wrappers, keeping compiler execution inside this actor's workspace.
+        inherited.insert("RUSTC_WRAPPER".into(), String::new());
+        inherited.insert("RUSTC_WORKSPACE_WRAPPER".into(), String::new());
     }
     let unset = workspace_local_toolchain_pins(is_root);
     inherited.retain(|name, _| !unset.contains(name));
@@ -2834,6 +2839,8 @@ mod tests {
         let launch = actor_launch_environment(
             BTreeMap::from([
                 ("PATH".into(), "/bin".into()),
+                ("RUSTC_WRAPPER".into(), "/host/sccache".into()),
+                ("RUSTC_WORKSPACE_WRAPPER".into(), "/host/wrapper".into()),
                 ("TIDEPOOL_EXTRACT".into(), "/source/tidepool-extract".into()),
                 (
                     "TIDEPOOL_EXTRACT_WORKER".into(),
@@ -2860,6 +2867,17 @@ mod tests {
             Some("/tmp/tidepool-actor-workspace/.shoal/build/cargo")
         );
         assert_eq!(launch.set.get("PATH").map(String::as_str), Some("/bin"));
+        assert_eq!(
+            launch.set.get("RUSTC_WRAPPER").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            launch
+                .set
+                .get("RUSTC_WORKSPACE_WRAPPER")
+                .map(String::as_str),
+            Some("")
+        );
         assert!(launch
             .unset
             .iter()
@@ -2878,6 +2896,65 @@ mod tests {
             launch.set.get("TIDEPOOL_EXTRACT").map(String::as_str),
             Some("/source/extract")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actor_build_environment_overrides_cargo_config_wrappers_inside_mount() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let visible = root.path().join("visible");
+        let resource = root.path().join("build-resource");
+        let relative_target = Path::new(".shoal/build/cargo");
+        for path in [
+            workspace.join("src"),
+            workspace.join(".cargo"),
+            workspace.join(relative_target),
+            visible.join(relative_target),
+            resource.clone(),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"actor-mount-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join(".cargo/config.toml"),
+            "[build]\nrustc-wrapper = \"/host-only/compiler-wrapper\"\nrustc-workspace-wrapper = \"/host-only/workspace-wrapper\"\n").unwrap();
+        let boundary =
+            ProcessMountBoundary::new(&workspace, [workspace.clone()], [workspace.clone()])
+                .unwrap()
+                .with_project_root(&visible)
+                .unwrap()
+                .with_writable_overlay(&resource, visible.join(relative_target))
+                .unwrap();
+        let invocation = boundary.wrap(
+            "bwrap",
+            ProcessInvocation {
+                program: "cargo".into(),
+                args: vec!["check".into(), "--offline".into(), "--quiet".into()],
+            },
+        );
+        let environment = actor_launch_environment(BTreeMap::new(), false, Some(relative_target));
+        let mut command = std::process::Command::new(invocation.program);
+        command.args(invocation.args).envs(environment.set);
+        for name in environment.unset {
+            command.env_remove(name);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(resource.join("debug/deps").is_dir());
+        assert!(!workspace.join(relative_target).join("debug").exists());
     }
 
     struct ScriptedPush {
