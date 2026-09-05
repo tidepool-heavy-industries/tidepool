@@ -4022,23 +4022,41 @@ mod tests {
 
     #[test]
     fn rejected_workbench_response_marks_the_unexecuted_suffix() {
+        let committed = WorkbenchItemReceipt {
+            index: 0,
+            status: WorkbenchItemStatus::Committed,
+            output: "[bound prior]".into(),
+            warnings: Vec::new(),
+            installed_bindings: vec!["prior".into()],
+            operations: Vec::new(),
+            terminal_transfer: None,
+        };
         let response = workbench_response(
             WorkbenchRunStatus::Rejected,
-            vec![WorkbenchItemReceipt {
-                index: 0,
-                status: WorkbenchItemStatus::Rejected,
-                output: "bad effect".into(),
-                warnings: Vec::new(),
-                installed_bindings: Vec::new(),
-                operations: Vec::new(),
-                terminal_transfer: None,
-            }],
-            0,
-            3,
+            vec![
+                committed.clone(),
+                WorkbenchItemReceipt {
+                    index: 1,
+                    status: WorkbenchItemStatus::Rejected,
+                    output: "<input unit 2>: runtime error: pattern match failure: Just x".into(),
+                    warnings: Vec::new(),
+                    installed_bindings: Vec::new(),
+                    operations: Vec::new(),
+                    terminal_transfer: None,
+                },
+            ],
+            1,
+            4,
         );
-        assert_eq!(response.items.len(), 3);
-        assert_eq!(response.items[1].status, WorkbenchItemStatus::NotRun);
+        assert_eq!(response.items.len(), 4);
+        assert_eq!(response.items[0], committed);
+        assert_eq!(response.items[1].status, WorkbenchItemStatus::Rejected);
+        assert!(response.items[1].installed_bindings.is_empty());
         assert_eq!(response.items[2].status, WorkbenchItemStatus::NotRun);
+        assert_eq!(response.items[3].status, WorkbenchItemStatus::NotRun);
+        assert!(response.items[2..]
+            .iter()
+            .all(|item| item.installed_bindings.is_empty()));
     }
 
     #[test]

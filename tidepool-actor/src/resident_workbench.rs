@@ -1419,7 +1419,7 @@ where
             } else {
                 WorkbenchDisplay::Binding(names)
             };
-            start_fragment_settlement(session, context, display, warnings, outcome)
+            start_fragment_settlement(session, context, block.ordinal, display, warnings, outcome)
         }
         TurnResult::Expr {
             variant, compiled, ..
@@ -1436,7 +1436,7 @@ where
             } else {
                 WorkbenchDisplay::Opaque
             };
-            start_fragment_settlement(session, context, display, warnings, outcome)
+            start_fragment_settlement(session, context, block.ordinal, display, warnings, outcome)
         }
     }
 }
@@ -1444,6 +1444,7 @@ where
 fn start_fragment_settlement<H, O>(
     session: &mut ResidentSession<H, O>,
     context: &crate::ActorSessionContext,
+    input_ordinal: usize,
     display: WorkbenchDisplay,
     warnings: Vec<String>,
     outcome: Result<ResidentOutcome, ResidentError>,
@@ -1463,9 +1464,25 @@ where
             },
             outcome,
         ),
-        Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(error.to_string())),
+        Err(ResidentError::Run(error)) => Ok(ResidentWorkbenchStep::Rejected(
+            render_runtime_rejection(input_ordinal, &error),
+        )),
         Err(error) => Err(ResidentActorWorkbenchError::Resident(error)),
     }
+}
+
+fn render_runtime_rejection(
+    input_ordinal: usize,
+    error: &tidepool_runtime::RuntimeError,
+) -> String {
+    use tidepool_codegen::{jit_machine::JitError, yield_type::YieldError};
+    let detail = match error {
+        tidepool_runtime::RuntimeError::Jit(JitError::Yield(YieldError::Runtime(cause))) => {
+            cause.to_string()
+        }
+        _ => error.to_string(),
+    };
+    format!("<input unit {input_ordinal}>: runtime error: {detail}")
 }
 
 fn settle_fragment<H, O>(
@@ -3616,6 +3633,26 @@ fn projected_binding_receipt(
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    #[test]
+    fn runtime_rejection_identifies_input_and_preserves_pattern_cause() {
+        use tidepool_codegen::{
+            host_fns::RuntimeError, jit_machine::JitError, yield_type::YieldError,
+        };
+        let error = tidepool_runtime::RuntimeError::Jit(JitError::Yield(YieldError::Runtime(
+            RuntimeError::PatternMatchFailure("Expr.hs:35:7-55|Just x".into()),
+        )));
+        assert_eq!(
+            render_runtime_rejection(4, &error),
+            "<input unit 4>: runtime error: pattern match failure: Expr.hs:35:7-55|Just x"
+        );
+        let error =
+            tidepool_runtime::RuntimeError::Jit(JitError::InvalidSuspensionState("missing"));
+        assert_eq!(
+            render_runtime_rejection(2, &error),
+            "<input unit 2>: runtime error: invalid suspension state: missing"
+        );
+    }
 
     #[test]
     fn matched_request_with_invalid_deadline_is_not_skipped_by_dispatch() {
