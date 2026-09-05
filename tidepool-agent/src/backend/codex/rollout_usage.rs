@@ -92,7 +92,11 @@ pub(super) fn read(
             }
             Some("task_complete" | "turn_complete") => {
                 if let Some(turn) = payload.get("turn_id").and_then(Value::as_str) {
-                    turns.entry(turn.into()).or_default().completed = Some(index);
+                    let state = turns.entry(turn.into()).or_default();
+                    state.completed = Some(index);
+                    // A failed provider call can lack a usage record. Earlier
+                    // successful responses cannot prove that missing usage was zero.
+                    state.incomplete |= payload.get("error").is_some_and(|error| !error.is_null());
                 } else {
                     incomplete = true;
                 }
@@ -396,6 +400,24 @@ mod tests {
         );
         assert_eq!(snapshot.first.id, "child:0");
         assert_eq!(snapshot.latest.id, "child:79");
+    }
+
+    #[test]
+    fn provider_error_keeps_prior_usage_partial_after_turn_completion() {
+        let mut failed = event("task_complete", "one");
+        failed["payload"]["error"] = json!({"message":"unsupported configuration_update"});
+        let snapshot = read_values(&[
+            own(),
+            event("task_started", "one"),
+            record("child", "one", "earlier"),
+            failed,
+        ]);
+        for summary in [snapshot.thread_summary, snapshot.latest_turn_summary] {
+            let summary = summary.unwrap();
+            assert_eq!(summary.observations, 1);
+            assert_eq!(summary.usage.input_tokens, 100);
+            assert_eq!(summary.completeness, ProviderUsageCompleteness::Partial);
+        }
     }
 
     #[test]

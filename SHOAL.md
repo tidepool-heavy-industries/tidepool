@@ -152,6 +152,13 @@ only reading the accepted binding creates the queue-ready handle used by native
 delivery. Older bindings are rejected on resume with guidance to start a fresh
 root because a thread ID alone cannot establish queue readiness.
 
+Shoal owns the actor tree and reply routing. Hosted Codex processes disable
+native collaboration tools; their `/root` names belong to a different tree.
+Child processes also disable autonomous goals, so a context fork cannot inherit
+the root's goal and continue spending model turns after settling its assignment.
+The root retains its configured goal behavior. Replies leave children available
+for follow-up requests; explicitly retire finished workers with `stopAgent`.
+
 The target activation carries the task as an ordinary User message. Its
 request scope mounts visibly distinct input and output authority:
 
@@ -439,6 +446,17 @@ provider turn-idleness, and eager teardown would weaken inexpensive follow-up
 and multi-wave orchestration. Process hibernation is an optional future
 backend optimization once a durable provider idle/usage event can make it
 race-free; it is not part of actor semantics.
+
+`contextUsageSummary` and `rosterUsageSummary` expose totals over uniquely
+identified durable provider response records, with scope, completeness, response
+count, and cached/uncached input tokens. `contextLatestTurnUsage` and
+`rosterLatestTurnUsage` expose the latest provider turn. A provider turn is not
+an actor request: no request attribution is inferred from polling time.
+Repeated polls replace totals rather than adding samples. `UsageComplete`
+covers the observed scope through a successful durable completion boundary;
+late, conflicting, missing, or failed-response evidence keeps it partial.
+Providers exposing only legacy token-count notifications have first/latest
+observations but no aggregate. Preserve `Nothing` when displaying these fields.
 
 ## Next live canary
 

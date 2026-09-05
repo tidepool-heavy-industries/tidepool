@@ -77,3 +77,23 @@ ownership failures. Keep the prepared checkout for later; do not launch it now.
   is required (the ambient Tidepool Nix shell supplies 1.93). Two selected
   mocked core tests passed; an added durable-rollout assertion is rerunning.
   External changes are uncommitted until that check passes. No live canary ran.
+
+## Integration evidence
+
+- External Codex fix committed as `702639b55a`. The request-construction unit
+  check and mocked Sol/Astra session check passed; the strengthened session
+  check also proved zero durable configuration updates for Lite Sol and one
+  for Astra. Patched executable build is in progress, without launching a model.
+- Usage worker also hit native collaboration failure and was retired via
+  `StoppedNow`; no further messages will be sent. Its staged candidate was
+  preserved as f8f8a900 and integrated as 2a2b9e3f4 for root review. Root added
+  provider-error completeness handling and its regression.
+- Fourteen selected usage/parser/runtime/schema tests passed. The generated
+  Haskell public-surface test passed with explicit summary-field projections.
+  The protocol generator check reports all files current. `just fixtures-check`
+  passed all 217 semantic fixtures and the source fingerprint.
+- All five workers in this thread are stopped. Current tmux session
+  `shoal-tidepool-test` contains only Compiler, Host and actor-0-1. Other
+  sessions were not changed. Worktrees and commits remain available.
+- Live canary remains deferred at the user's request. The current running
+  host keeps its old snapshot; a future launch must use rebuilt binaries.

@@ -216,5 +216,19 @@ narrowResearch group leaf =
         leaf
         ()
 
+usageTotals :: ActorContextInfo -> Maybe (ProviderUsageScope, ProviderUsageCompleteness, Int, Int, Int)
+usageTotals context = fmap project (contextUsageSummary context)
+  where
+    project summary =
+      ( usageSummaryScope summary
+      , usageSummaryCompleteness summary
+      , usageSummaryObservations summary
+      , usageSummaryCachedInputTokens summary
+      , usageSummaryUncachedInputTokens summary
+      )
+
+latestWorkerTurn :: AgentRosterEntry -> Maybe ProviderUsageSummary
+latestWorkerTurn = rosterLatestTurnUsage
+
 result :: Int
 result = 42
