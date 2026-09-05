@@ -71,3 +71,9 @@ ownership failures. Keep the prepared checkout for later; do not launch it now.
   running host's executable is
   `/nix/store/ffk5ngbpcrs6y320aabibgrw0zchrajy-codex-rs-0.0.0-dev+118e1cf/bin/codex`.
   Queueing the usage-worker steering through that exact executable succeeded.
+- Found the independent Sol control bug: local catalog marks gpt-5.6-sol as
+  Responses Lite, while Codex used Lite as the configuration-update gate.
+  External Codex patch narrows producer/request projection to Astra. Rust 1.95
+  is required (the ambient Tidepool Nix shell supplies 1.93). Two selected
+  mocked core tests passed; an added durable-rollout assertion is rerunning.
+  External changes are uncommitted until that check passes. No live canary ran.
