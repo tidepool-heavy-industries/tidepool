@@ -137,8 +137,8 @@ Codex revision. The fresh real-provider canary above used the source-built CLI;
 it is not evidence that the Nix package has passed its checks.
 
 The parallel Nix release build was killed by the kernel for memory exhaustion.
-The serialized retry is still running at this handoff, with the CLI crate
-actively compiling. Its command is:
+The serialized retry completed successfully, including the host-tools contract
+check. Its command was:
 
 ```sh
 nix build .#checks.x86_64-linux.codex-host-tools-contract \
@@ -146,17 +146,19 @@ nix build .#checks.x86_64-linux.codex-host-tools-contract \
   --out-link /home/inanna/.cache/tidepool/codex-affinity-check
 ```
 
-Build output is in `/tmp/tidepool-codex-affinity-nix-serial.log`. Do not restart
-the active build just because that log is buffered. After success, protect the
-package output with its own GC root and run both namespace smokes from the
-Codex checkout against the packaged binary:
+Build output is in `/tmp/tidepool-codex-affinity-nix-serial.log`. The package has
+its own GC root at `/home/inanna/.cache/tidepool/codex-context-cache-affinity`.
+Both namespace smokes passed against that package from the Codex checkout:
 
 ```sh
-python3 scripts/test-destination-fork.py /absolute/path/to/packaged/codex
-python3 scripts/test-destination-fork.py /absolute/path/to/packaged/codex --code-mode
+python3 scripts/test-destination-fork.py /home/inanna/.cache/tidepool/codex-context-cache-affinity/bin/codex
+python3 scripts/test-destination-fork.py /home/inanna/.cache/tidepool/codex-context-cache-affinity/bin/codex --code-mode
 ```
 
-These packaging checks remain outstanding. Keep the previous Nix output link,
+Logs are `/tmp/codex-nix-affinity-smoke.log` and
+`/tmp/codex-nix-affinity-wrapped-smoke.log`. This closes packaging validation;
+the real-provider cache measurement remains from the source-built canary.
+Keep the previous Nix output link,
 retained roots, diagnostic traces, and worktrees until their owners deliberately
 retire them. Successful canary children have already completed typed cleanup.
 
