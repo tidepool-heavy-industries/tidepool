@@ -68,6 +68,19 @@ pub struct InteractiveSessionRequest {
     pub output_modules: Vec<String>,
 }
 
+impl InteractiveSessionRequest {
+    /// Both sides of a retained request can introduce types after the target
+    /// was forked. Mount their compiler dependencies without changing the
+    /// target's inherited declaration generations.
+    pub(crate) fn type_modules(&self) -> Vec<String> {
+        let mut modules = self.input_modules.clone();
+        modules.extend(self.output_modules.iter().cloned());
+        modules.sort();
+        modules.dedup();
+        modules
+    }
+}
+
 pub struct ResidentInteractiveSession {
     pub(crate) request: InteractiveSessionRequest,
     pub(crate) hole: ResidentHole,

@@ -4,7 +4,7 @@ Each nonblank line is one unit; `:{` / `:}` encloses one multiline unit. Use
 results. Failed diagnostics do not block later diagnostics. A rejected
 Haskell/effect unit stops the suffix without undoing successful work.
 
-Start with `:browse`; use `:type`, `:info`, `:browse!`, `:bindings`, `:status`,
+Start with `:doc topics`; use `:browse`, use `:type`, `:info`, `:browse!`, `:bindings`, `:status`,
 `:recovery`, and `:doc topics`. Receipts name installed bindings, effect
 operation dispositions, and terminal transfers. Exact transport retries return
 the retained receipt; source in a new call is new intent. Roots have no reply

@@ -1,9 +1,83 @@
 # Context trees and an emergent resident Haskell surface
 
-Status: proposed delivery plan; the product direction below was agreed in the
-2026-09-04 design discussion. This document records recommendations and
-acceptance criteria. It does not claim that the proposed prompt, UX, or provider
-changes have landed.
+Status: implementation active on the verified hardening baseline `b248fe5f`.
+The execution ledger below supersedes aspirational scope elsewhere in this
+review. Runtime truth and verification must be recorded before checking items.
+
+## Execution ledger
+
+Settled scope: recurring tree practice and emergent Haskell; writable interior
+nodes; bounded waiting on deadlines; inspected-scope cleanup; exact group
+observation; language evolution and useful orientation. Effort is limited to
+low/medium/high with inherited defaults and explicit fork-time overrides.
+General live effort adjustment, source extraction/export, and host-restart
+reconstruction are deferred. Final efficacy acceptance is human-run in the
+user's TUI repository, not an automated provider campaign.
+
+- [x] Shared prompt and role deltas, mounted help, composed fingerprint checks.
+- [ ] Execute authored help through the real parser/workbench.
+- [x] Verify late request types, inherited closures, shadowing, opaque projection.
+- [x] Exact fork-group observation replacing label-prefix campaign lookup.
+- [ ] Actionable status, stale notices, failed-prefix recovery guidance.
+- [x] Deadline terminality independent of target cancellation acknowledgement.
+- [ ] Inspected-scope cleanup with typed stale-plan refusal and safe partial retry.
+- [ ] Fork-time effort modifier, policy and observations; Codex support gated.
+- [x] Copyable [Codex requirements](codex-live-effort-control-requirements.md).
+- [ ] Focused checks and final integration verification recorded.
+- [x] [Human acceptance guide](context-tree-human-acceptance.md) delivered; actual user campaign remains human-run.
+
+### Current implementation evidence
+
+- Baseline committed as `b248fe5f` at the user's request; prior canary/test
+  results are recorded in the hardening ledger, not rerun for that checkpoint.
+- Shared tree practice is composed for every role and included in prompt
+  fingerprinting (catalog v4). Added mounted `tree`/`workbench` help; root and
+  inspection guidance no longer contradict context inheritance or leaf grants.
+- Deadline expiry now terminalizes owner observation and reevaluates watches
+  before cancellation acknowledgement. Target custody remains live; accepted
+  reply settlement wins the serialized race. Ordinary status retains failure
+  causes rather than hiding them behind terminal counts.
+- `just test tidepool-actor 'test(request::tests) | test(prompt_catalog)'`:
+  20 passed, nextest `4688f7da-6b02-4837-a990-ba3d220a5fee`.
+- Prompt composition/catalog checks: 3 passed, nextest
+  `b6a81b5c-7cda-4af8-95c1-1c23d27e96f1`.
+- The real recursive integration test now executes the authored workbench help.
+  Its first run passed in 668.879 seconds (nextest
+  `ce2361b4-6d83-4e00-bf02-44ccc581ab14`).
+  The late-refinement fixture then passed with function-valued input and
+  captured-versus-shadowed bindings (707.855 seconds; three tests including
+  public surface checks, nextest `bfb011ef-f4fd-4e2a-96a2-9169c507f337`).
+  Separate input/result declaration generations, both sets of type dependencies,
+  exact group observation, stale cleanup refusal after a retained follow-up,
+  recursive cleanup, and idempotent cleanup retry subsequently passed in
+  784.195 seconds (three tests, nextest
+  `e5315657-d490-4859-94ff-317d15f02b65`).
+- Request/lineage admission and cleanup checks: 30 passed, nextest
+  `23e8206a-7c7b-4400-a66c-50c5b6b626d7`. Generated protocol freshness/schema
+  checks: 8 passed; focused cleanup/inspection ABI pins: 2 passed.
+- Public Haskell surface: 2 passed with cleanup planning/group observation
+  requiring only `AgentInspection` and execution requiring only `AgentControl`
+  (nextest `8ea0883f-dd7b-4b5f-9ea7-e05bfe396814`). Duplicate/stale activation
+  rejection passed (nextest `208b41ed-70a7-4d4f-9461-4be167aee5ab`); failed-unit
+  operation containment and prompt catalog passed (2 tests, nextest
+  `776d9e05-b93b-440c-88b7-168e2ae60022`).
+- `just fixtures-check`: 217 passed; fixture fingerprint and semantic suite
+  current (nextest `b1272ba4-5757-4af5-889e-88a06df9e3c4`).
+- `cargo clippy -p tidepool-actor -p tidepool-protocol --all-targets -- -D warnings`
+  passed in the Nix environment. Formatting uses workspace Cargo configuration.
+- The integration run executing refinement and cleanup help directly and
+  checking the revised status/lineage display passed: 3 tests, 889.297 seconds,
+  nextest `6d24f460-2ea9-4d39-a555-3bd4ea26764c`. Strict host-crate lint also
+  passed (`cargo clippy -p tidepool --all-targets -- -D warnings` in Nix).
+  Fork effort, remaining authored examples, and final integration review remain
+  unfinished. Prefer minimal deterministic scenarios for subsequent targeted
+  changes and a minimal live canary for the provider boundary; do not introduce
+  additional test checkpoint/receipt infrastructure in this wave.
+
+After the implementation wave, deliver a short report on other useful Tidepool
+applications, including resident Haskell editing helpers that emerge during a
+campaign. This is an ideas deliverable only; no editing DSL implementation is
+authorized in this wave.
 
 ## 1. Read this first
 

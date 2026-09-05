@@ -50,6 +50,7 @@ pub fn agent_control() -> Effect {
                     field("cleanupActorIncarnation", HsType::Int),
                     field("cleanupActorLabel", HsType::Text),
                     field("cleanupActorState", HsType::Named("CleanupActorState")),
+                    field("cleanupActorRevision", HsType::Int),
                 ],
                 &[],
             ),
@@ -92,6 +93,7 @@ pub fn agent_control() -> Effect {
                     ),
                     variant("CleanupGroupRetired", vec![HsType::Int]),
                     variant("CleanupBlocked", vec![HsType::Text]),
+                    variant("CleanupStalePlan", vec![]),
                 ],
                 &[],
             ),
@@ -125,26 +127,24 @@ pub fn agent_control() -> Effect {
                 extract: None,
             },
             Verb {
-                ctor: "AgentControlPlanCleanupWith",
-                method: "agent_control_plan_cleanup_with",
-                args: vec![Arg {
-                    name: "group",
-                    ty: HsType::Int,
-                    rust: RustBinding::Path("i64"),
-                }],
-                ret: HsType::Named("CleanupPlan"),
-                errors: None,
-                handling: HandlingClass::Actor,
-                extract: None,
-            },
-            Verb {
                 ctor: "AgentControlExecuteCleanupWith",
                 method: "agent_control_execute_cleanup_with",
-                args: vec![Arg {
-                    name: "group",
-                    ty: HsType::Int,
-                    rust: RustBinding::Path("i64"),
-                }],
+                args: vec![
+                    Arg {
+                        name: "group",
+                        ty: HsType::Int,
+                        rust: RustBinding::Path("i64"),
+                    },
+                    Arg {
+                        name: "inspected",
+                        ty: HsType::list(HsType::Tuple(vec![
+                            HsType::Int,
+                            HsType::Int,
+                            HsType::Int,
+                        ])),
+                        rust: RustBinding::Path("Vec<(i64, i64, i64)>"),
+                    },
+                ],
                 ret: HsType::Named("CleanupReceipt"),
                 errors: None,
                 handling: HandlingClass::Actor,

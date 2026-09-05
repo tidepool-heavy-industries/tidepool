@@ -2461,6 +2461,8 @@ fn developer_instructions(
 
 fn append_effective_role(mut instructions: String, role: &tidepool_actor::EffectiveRole) -> String {
     let descendants = role.descendants();
+    instructions.push_str("\n\n");
+    instructions.push_str(PromptId::TreePractice.body());
     instructions.push_str(&format!(
         "\n\nRuntime policy ({}): role={:?}; effects={}; native_tools={:?}; workspace={:?}; descendant_depth={}; active_children={}. These are the effective runtime facts; effect membership alone is not authority.\n",
         role.prompt_profile(),
@@ -2679,6 +2681,8 @@ mod tests {
             &InteractiveLaunchMode::Resume(BackendThreadId("retained-thread".into())),
         );
         assert!(fresh.starts_with(PromptId::ShoalRoot.body()));
+        assert_eq!(fresh.matches(PromptId::TreePractice.body()).count(), 1);
+        assert_eq!(resumed.matches(PromptId::TreePractice.body()).count(), 1);
         assert!(!fresh.contains(PromptId::RecreatedRoot.body()));
         assert!(resumed.starts_with(PromptId::ShoalRoot.body()));
         assert_eq!(resumed.matches(PromptId::RecreatedRoot.body()).count(), 1);
@@ -3304,6 +3308,21 @@ mod tests {
             assert_eq!(item["status"], "committed", "{item:?}");
         }
 
+        // Execute the mounted documentation itself, including its real
+        // multiline delimiters, rather than a separately maintained example.
+        let workbench_doc = include_str!("../../prompts/shoal/docs/workbench.md");
+        let (_, example) = workbench_doc.split_once("```haskell\n").unwrap();
+        let (example, _) = example.split_once("```").unwrap();
+        let documented = dispatch_haskell_script(root_installation.policy.as_ref(), example).await;
+        assert_eq!(documented["status"], "committed", "{documented:?}");
+        let items = documented["items"].as_array().unwrap();
+        assert!(
+            items.iter().all(|item| item["status"] == "committed"),
+            "{documented:?}"
+        );
+        assert_eq!(items[items.len() - 2]["output"], "True");
+        assert_eq!(items[items.len() - 1]["output"], "score=7");
+
         let setup_policy = Arc::clone(&root_installation.policy);
         let submitted = tokio::spawn(async move {
             dispatch_haskell(
@@ -3451,6 +3470,21 @@ mod tests {
                 && pending_status.contains("bound_worktree=Some("),
             "{pending_status}"
         );
+        let lineage = dispatch_haskell_script(root_installation.policy.as_ref(), ":lineage").await;
+        let lineage = lineage["items"][0]["output"]
+            .as_str()
+            .expect("lineage output");
+        for field in [
+            "context_parent=",
+            "haskell_scope=",
+            "provider_thread=",
+            "provider_parent_thread=",
+            "cache_boundary=",
+            "cached_input=",
+            "uncached_input=",
+        ] {
+            assert!(lineage.contains(field), "missing {field}: {lineage}");
+        }
         let launch_receipt = dispatch_haskell_script(
             root_installation.policy.as_ref(),
             "(forkedLaunch (first3 workers), forkedLaunch (second3 workers), forkedLaunch (third3 workers))",
@@ -3589,6 +3623,17 @@ mod tests {
             "{observed:?}"
         );
 
+        let group_observation = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "fmap (length . groupRoster) <$> observeForkGroup (forkGroupHandle (first3 workers))",
+        )
+        .await;
+        assert_eq!(
+            group_observation["status"], "committed",
+            "{group_observation:?}"
+        );
+        assert_eq!(group_observation["items"][0]["output"], "Just 3");
+
         let ready_status =
             dispatch_haskell_script(root_installation.policy.as_ref(), ":status").await;
         let ready_status = ready_status["items"][0]["output"]
@@ -3599,12 +3644,34 @@ mod tests {
         assert!(ready_status.contains("\"witness\""), "{ready_status}");
         assert!(ready_status.contains("\"both-ready\""), "{ready_status}");
 
+        let cleanup_preview = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "staleCleanup <- planCleanup (forkGroupHandle (first3 workers))",
+        )
+        .await;
+        assert_eq!(
+            cleanup_preview["status"], "committed",
+            "{cleanup_preview:?}"
+        );
+
         let followup = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "followup <- request @ReplyReport (forkedActor (first3 workers)) (case requestLabel \"revision\" of { Right value -> value; Left _ -> error \"fixture request\" }) (99 :: Int)",
+            include_str!("actor_host_fixtures/generic_actor/late_refinement.hs"),
         )
         .await;
         assert_eq!(followup["status"], "committed", "{followup:?}");
+        let refinement_doc = include_str!("../../prompts/shoal/docs/refinement.md");
+        let (_, example) = refinement_doc.split_once("```haskell\n").unwrap();
+        let (example, _) = example.split_once("```").unwrap();
+        let refinement = dispatch_haskell_script(root_installation.policy.as_ref(), example).await;
+        assert_eq!(refinement["status"], "committed", "{refinement:?}");
+        let followup_binding =
+            dispatch_haskell_script(root_installation.policy.as_ref(), "let followup = revision")
+                .await;
+        assert_eq!(
+            followup_binding["status"], "committed",
+            "{followup_binding:?}"
+        );
         let followup_watch = dispatch_haskell_script(
             root_installation.policy.as_ref(),
             "followupReadiness <- watch (case watchLabel \"revision-ready\" of { Right value -> value; Left _ -> error \"fixture watch\" }) (awaitResponse followup)",
@@ -3629,10 +3696,10 @@ mod tests {
         })
         .await
         .expect("follow-up activation timeout");
-        assert_eq!(followup_activation.input_type, "Int");
+        assert!(followup_activation.input_type.ends_with("LateRefinement"));
         let followup_reply = dispatch_haskell_script(
             worker_installation.policy.as_ref(),
-            "respond (ReplyReport (sessionInput + sharedDelta))",
+            "respond (LateReport (refinementTransform sessionInput (refinementValue sessionInput) + sharedDelta))",
         )
         .await;
         assert_eq!(followup_reply["status"], "replied", "{followup_reply:?}");
@@ -3665,8 +3732,22 @@ mod tests {
         assert!(
             followup_result["items"][0]["output"]
                 .as_str()
-                .is_some_and(|output| output.contains("responseValue = ReplyReport 100")),
+                .is_some_and(|output| output.contains("responseValue = LateReport 101")),
             "{followup_result:?}"
+        );
+
+        let stale_cleanup = dispatch_haskell_script(
+            root_installation.policy.as_ref(),
+            "executeCleanup staleCleanup",
+        )
+        .await;
+        assert_eq!(stale_cleanup["status"], "committed", "{stale_cleanup:?}");
+        let refusal = stale_cleanup["items"][0]["output"].as_str().unwrap();
+        assert!(refusal.contains("CleanupStalePlan"), "{refusal}");
+        assert!(!refusal.contains("CleanupStoppedActor"), "{refusal}");
+        assert!(
+            refusal.contains("cleanupReceiptComplete = False"),
+            "{refusal}"
         );
 
         let scaffold_policy = Arc::clone(&scaffold_installation.policy);
@@ -3900,14 +3981,20 @@ mod tests {
                 output.contains("ReplyAvailable") && output.contains("ScaffoldReport \"folded\"")
             }));
 
+        let cleanup_doc = include_str!("../../prompts/shoal/docs/cleanup.md");
+        let cleanup_examples = cleanup_doc
+            .split("```haskell\n")
+            .skip(1)
+            .map(|section| section.split_once("```").unwrap().0)
+            .collect::<Vec<_>>();
         let cleanup_plan = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "campaignCleanupPlan <- planCleanup (forkGroupHandle (first3 workers))\ncampaignCleanupPlan",
+            &format!("let oneWorker = first3 workers\n{}", cleanup_examples[0]),
         )
         .await;
         assert_eq!(cleanup_plan["status"], "committed", "{cleanup_plan:?}");
         assert!(
-            cleanup_plan["items"][1]["output"]
+            cleanup_plan["items"][2]["output"]
                 .as_str()
                 .is_some_and(|output| output.contains("cleanupPlanRefusal = Nothing")),
             "{cleanup_plan:?}"
@@ -3915,7 +4002,7 @@ mod tests {
 
         let cleanup = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "campaignCleanupReceipt <- executeCleanup campaignCleanupPlan\ncampaignCleanupReceipt",
+            &format!("{}\ncleanupReceipt", cleanup_examples[1]),
         )
         .await;
         assert_eq!(cleanup["status"], "committed", "{cleanup:?}");
@@ -3931,7 +4018,7 @@ mod tests {
 
         let cleanup_retry = dispatch_haskell_script(
             root_installation.policy.as_ref(),
-            "executeCleanup campaignCleanupPlan",
+            "executeCleanup cleanupPlan",
         )
         .await;
         assert_eq!(cleanup_retry["status"], "committed", "{cleanup_retry:?}");

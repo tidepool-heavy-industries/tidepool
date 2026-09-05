@@ -58,10 +58,8 @@ module Tidepool.Actors.Unfold
   , forkGroupGitBranchPrefix
   , ForkObservation (..)
   , observeFork
-  , CampaignSnapshot (..)
-  , observeCampaign
-  , ForkGroupCleanupOutcome (..)
-  , cleanupForkGroup
+  , ForkGroupSnapshot (..)
+  , observeForkGroup
   , CleanupPlan (..)
   , CleanupActorPlan (..)
   , CleanupActorState (..)
@@ -91,7 +89,6 @@ import Tidepool.Actors.Internal.Agent
   ( AgentRef
   , RequestDeadline
   , agentIdentity
-  , listAgents
   , lookupAgent
   , requestOptions
   , requestWithSited
@@ -124,8 +121,7 @@ import Tidepool.Effects.Core
   , WorktreeReceipt
   , WorktreeSource (..)
   , Forks (..)
-  , ForkGroupCleanupOutcome (..)
-  , AgentInspection
+  , AgentInspection (..)
   , WorktreeSpec (..)
   )
 import Tidepool.Worktree (worktreeId)
@@ -353,25 +349,21 @@ observeFork worker = do
     , observedActor = actor
     }
 
-data CampaignSnapshot = CampaignSnapshot
-  { campaignRoot :: ActorPath
-  , campaignRoster :: [AgentRosterEntry]
+data ForkGroupSnapshot = ForkGroupSnapshot
+  { observedGroup :: ForkGroupHandle
+  , groupRoster :: [AgentRosterEntry]
   }
   deriving (Show, Eq)
 
-observeCampaign
+-- | Inspect exact admitted ancestry. Nothing means that the group or its
+-- retained roster is unavailable to this actor; labels never select members.
+observeForkGroup
   :: Member AgentInspection effs
   => ForkGroupHandle
-  -> Eff effs CampaignSnapshot
-observeCampaign (ForkGroupHandle _ root@(ActorPath path)) = do
-  roster <- listAgents
-  let descendant entry =
-        rosterLabel entry == path
-          || (path <> "/") `Text.isPrefixOf` rosterLabel entry
-  pure CampaignSnapshot
-    { campaignRoot = root
-    , campaignRoster = filter descendant roster
-    }
+  -> Eff effs (Maybe ForkGroupSnapshot)
+observeForkGroup group@(ForkGroupHandle groupId _) = do
+  roster <- send (AgentGroupListWith groupId)
+  pure (ForkGroupSnapshot group <$> roster)
 
 forkGroupHandle :: Forked result -> ForkGroupHandle
 forkGroupHandle worker =
@@ -382,23 +374,21 @@ forkGroupGitBranchPrefix :: ForkGroupHandle -> GitBranchPrefix
 forkGroupGitBranchPrefix (ForkGroupHandle _ (ActorPath path)) =
   GitBranchPrefix ("shoal/" <> path <> "/")
 
-cleanupForkGroup
-  :: Member Forks effs
-  => ForkGroupHandle
-  -> Eff effs ForkGroupCleanupOutcome
-cleanupForkGroup (ForkGroupHandle groupId _) = send (ForksCleanupWith groupId)
-
 planCleanup
-  :: Member AgentControl effs
+  :: Member AgentInspection effs
   => ForkGroupHandle
   -> Eff effs CleanupPlan
-planCleanup (ForkGroupHandle groupId _) = send (AgentControlPlanCleanupWith groupId)
+planCleanup (ForkGroupHandle groupId _) = send (AgentInspectCleanupWith groupId)
 
 executeCleanup
   :: Member AgentControl effs
   => CleanupPlan
   -> Eff effs CleanupReceipt
-executeCleanup plan = send (AgentControlExecuteCleanupWith (cleanupPlanGroup plan))
+executeCleanup plan = send (AgentControlExecuteCleanupWith
+  (cleanupPlanGroup plan)
+  [ (cleanupActorId actor, cleanupActorIncarnation actor, cleanupActorRevision actor)
+  | actor <- cleanupPlanActors plan
+  ])
 
 data Unfold (parent :: [Type -> Type]) result where
   PureU :: result -> Unfold parent result

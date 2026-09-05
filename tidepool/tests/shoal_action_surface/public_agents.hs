@@ -71,10 +71,10 @@ inspectFork
   -> Eff ActorEffects (ForkObservation result)
 inspectFork = observeFork
 
-inspectCampaign
+inspectForkGroup
   :: Forked result
-  -> Eff ActorEffects CampaignSnapshot
-inspectCampaign = observeCampaign . forkGroupHandle
+  -> Eff '[AgentInspection] (Maybe ForkGroupSnapshot)
+inspectForkGroup = observeForkGroup . forkGroupHandle
 
 cacheFacts
   :: AgentRosterEntry
@@ -112,13 +112,10 @@ retainedAgentDependencies outcome =
     AgentForgetRunning -> ([], [])
     AgentForgetUnavailable -> ([], [])
 
-releaseForkGroup :: Forked result -> Eff ActorEffects ForkGroupCleanupOutcome
-releaseForkGroup = cleanupForkGroup . forkGroupHandle
-
-inspectCleanup :: Forked result -> Eff ActorEffects CleanupPlan
+inspectCleanup :: Forked result -> Eff '[AgentInspection] CleanupPlan
 inspectCleanup = planCleanup . forkGroupHandle
 
-runCleanup :: CleanupPlan -> Eff ActorEffects CleanupReceipt
+runCleanup :: CleanupPlan -> Eff '[AgentControl] CleanupReceipt
 runCleanup = executeCleanup
 
 cleanupBlocked :: CleanupPlan -> Bool

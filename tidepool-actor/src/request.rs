@@ -293,6 +293,8 @@ struct RequestStateTable {
     next_request: u64,
     next_watch: u64,
     next_event_by_actor: HashMap<ActorRef, u64>,
+    cleanup_revision: HashMap<ActorRef, u64>,
+    cleaning: std::collections::HashSet<ActorRef>,
     requests: HashMap<RequestId, RequestRecord>,
     watches: HashMap<WatchId, WatchRecord>,
 }
@@ -323,45 +325,113 @@ pub(crate) struct CleanupMetadataOutcome {
     pub pending_watches: Vec<WatchId>,
 }
 
+fn cleanup_blockers(
+    state: &RequestStateTable,
+    owners: &std::collections::HashSet<ActorRef>,
+    targets: &std::collections::HashSet<ActorRef>,
+) -> (Vec<RequestId>, Vec<WatchId>) {
+    let scoped = state
+        .requests
+        .iter()
+        .filter_map(|(request, record)| {
+            (targets.contains(&record.owner) || targets.contains(&record.target))
+                .then_some((*request, record))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut requests = scoped
+        .iter()
+        .filter_map(|(request, record)| {
+            (record.owner_state == OwnerState::Observing
+                || record.target_state != TargetState::Closed)
+                .then_some(*request)
+        })
+        .collect::<Vec<_>>();
+    let mut watches = state
+        .watches
+        .iter()
+        .filter_map(|(watch, record)| {
+            (owners.contains(&record.owner)
+                && record.state == WatchState::Pending
+                && (targets.contains(&record.owner)
+                    || record
+                        .dependencies
+                        .iter()
+                        .any(|dependency| scoped.contains_key(&dependency.request))))
+            .then_some(*watch)
+        })
+        .collect::<Vec<_>>();
+    requests.sort_unstable();
+    watches.sort_unstable();
+    (requests, watches)
+}
+
+pub(crate) enum CleanupAdmissionError {
+    Stale,
+    Busy,
+    Pending,
+}
+
+pub(crate) struct RequestCleanupGuard {
+    registry: std::sync::Arc<RequestRegistry>,
+    targets: std::collections::HashSet<ActorRef>,
+}
+
+impl Drop for RequestCleanupGuard {
+    fn drop(&mut self) {
+        let mut state = self.registry.state.lock();
+        for actor in &self.targets {
+            state.cleaning.remove(actor);
+        }
+    }
+}
+
 impl RequestRegistry {
     pub(crate) fn campaign_cleanup_blockers(
         &self,
         owners: &std::collections::HashSet<ActorRef>,
         targets: &std::collections::HashSet<ActorRef>,
     ) -> (Vec<RequestId>, Vec<WatchId>) {
-        let state = self.state.lock();
-        let scoped = state
-            .requests
+        cleanup_blockers(&self.state.lock(), owners, targets)
+    }
+
+    pub(crate) fn cleanup_revision(&self, actor: ActorRef) -> u64 {
+        self.state
+            .lock()
+            .cleanup_revision
+            .get(&actor)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn begin_cleanup(
+        self: &std::sync::Arc<Self>,
+        owner: ActorRef,
+        expected: &[(ActorRef, u64)],
+    ) -> Result<RequestCleanupGuard, CleanupAdmissionError> {
+        let mut state = self.state.lock();
+        let targets = expected
             .iter()
-            .filter_map(|(request, record)| {
-                (owners.contains(&record.owner) && targets.contains(&record.target))
-                    .then_some((*request, record))
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        let mut requests = scoped
-            .iter()
-            .filter_map(|(request, record)| {
-                (record.owner_state == OwnerState::Observing
-                    || record.target_state != TargetState::Closed)
-                    .then_some(*request)
-            })
-            .collect::<Vec<_>>();
-        let mut watches = state
-            .watches
-            .iter()
-            .filter_map(|(watch, record)| {
-                (owners.contains(&record.owner)
-                    && record.state == WatchState::Pending
-                    && record
-                        .dependencies
-                        .iter()
-                        .any(|dependency| scoped.contains_key(&dependency.request)))
-                .then_some(*watch)
-            })
-            .collect::<Vec<_>>();
-        requests.sort_unstable();
-        watches.sort_unstable();
-        (requests, watches)
+            .map(|(actor, _)| *actor)
+            .collect::<std::collections::HashSet<_>>();
+        if targets.iter().any(|actor| state.cleaning.contains(actor)) {
+            return Err(CleanupAdmissionError::Busy);
+        }
+        if expected.iter().any(|(actor, revision)| {
+            state.cleanup_revision.get(actor).copied().unwrap_or(0) != *revision
+        }) {
+            return Err(CleanupAdmissionError::Stale);
+        }
+        let mut owners = targets.clone();
+        owners.insert(owner);
+        let (responses, watches) = cleanup_blockers(&state, &owners, &targets);
+        if !responses.is_empty() || !watches.is_empty() {
+            return Err(CleanupAdmissionError::Pending);
+        }
+        state.cleaning.extend(targets.iter().copied());
+        Ok(RequestCleanupGuard {
+            registry: std::sync::Arc::clone(self),
+            targets,
+        })
     }
 
     /// Release terminal request/watch metadata owned by `owner` and wholly
@@ -378,7 +448,9 @@ impl RequestRegistry {
             .requests
             .iter()
             .filter_map(|(request, record)| {
-                (record.owner == owner && targets.contains(&record.target)).then_some(*request)
+                (record.owner == owner
+                    && (targets.contains(&owner) || targets.contains(&record.target)))
+                .then_some(*request)
             })
             .collect::<std::collections::HashSet<_>>();
         let scoped_watches = state
@@ -386,11 +458,12 @@ impl RequestRegistry {
             .iter()
             .filter_map(|(watch, record)| {
                 (record.owner == owner
-                    && !record.dependencies.is_empty()
-                    && record
-                        .dependencies
-                        .iter()
-                        .all(|dependency| scoped_requests.contains(&dependency.request)))
+                    && (targets.contains(&owner)
+                        || (!record.dependencies.is_empty()
+                            && record
+                                .dependencies
+                                .iter()
+                                .all(|dependency| scoped_requests.contains(&dependency.request)))))
                 .then_some(*watch)
             })
             .collect::<Vec<_>>();
@@ -604,6 +677,9 @@ impl RequestRegistry {
         deadline: Option<ActiveRequestDeadline>,
     ) -> Result<(), ReplyError> {
         let mut state = self.state.lock();
+        if state.cleaning.contains(&owner) || state.cleaning.contains(&target) {
+            return Err(ReplyError::CancellationRequested);
+        }
         let record = state.requests.get_mut(&request).ok_or(ReplyError::Stale)?;
         authorize_owner(record, owner)?;
         if record.target != target {
@@ -613,6 +689,8 @@ impl RequestRegistry {
             TargetState::Reserved => {
                 record.target_state = TargetState::Queued;
                 record.deadline = deadline;
+                *state.cleanup_revision.entry(target).or_default() += 1;
+                *state.cleanup_revision.entry(owner).or_default() += 1;
                 Ok(())
             }
             _ => Err(ReplyError::AlreadySettled),
@@ -981,9 +1059,20 @@ impl RequestRegistry {
         dependencies: Vec<(RequestId, bool)>,
     ) -> Result<(WatchId, Vec<WatchNotification>), ReplyError> {
         let mut state = self.state.lock();
+        if state.cleaning.contains(&owner) {
+            return Err(ReplyError::CancellationRequested);
+        }
+        let mut touched = std::collections::HashSet::from([owner]);
         for (request, _) in &dependencies {
             let record = state.requests.get(request).ok_or(ReplyError::Stale)?;
             authorize_owner(record, owner)?;
+            if state.cleaning.contains(&record.target) {
+                return Err(ReplyError::CancellationRequested);
+            }
+            touched.insert(record.target);
+        }
+        for actor in touched {
+            *state.cleanup_revision.entry(actor).or_default() += 1;
         }
         state.next_watch = state.next_watch.saturating_add(1);
         let id = WatchId(state.next_watch);
@@ -1274,6 +1363,95 @@ mod tests {
 
     fn actor(id: u64) -> ActorRef {
         ActorRef::first(ActorId(id))
+    }
+
+    #[test]
+    fn cleanup_rejects_new_work_even_if_it_already_finished() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let inspected = [(target, registry.cleanup_revision(target))];
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+        assert!(matches!(
+            registry.begin_cleanup(owner, &inspected),
+            Err(CleanupAdmissionError::Stale)
+        ));
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Ok(ResponseObservation::Ready)
+        );
+    }
+
+    #[test]
+    fn cleanup_allows_observed_completion_and_freezes_new_admission_until_drop() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let target = actor(2);
+        let request = registry.reserve(owner, target);
+        registry.mark_queued(owner, target, request).unwrap();
+        registry.present(target, request).unwrap();
+        let inspected = [(target, registry.cleanup_revision(target))];
+        assert!(matches!(
+            registry.begin_cleanup(owner, &inspected),
+            Err(CleanupAdmissionError::Pending)
+        ));
+        registry.begin_reply(target, request).unwrap();
+        registry.finish_reply(request);
+        // Unrelated root work and inspection do not invalidate this decision.
+        let outside = registry.reserve(owner, actor(3));
+        registry.mark_queued(owner, actor(3), outside).unwrap();
+        registry.observe_response(owner, request).unwrap();
+        let guard = registry.begin_cleanup(owner, &inspected).ok().unwrap();
+        let next = registry.reserve(owner, target);
+        assert_eq!(
+            registry.mark_queued(owner, target, next),
+            Err(ReplyError::CancellationRequested)
+        );
+        assert!(matches!(
+            registry.register_watch(owner, vec![request]),
+            Err(ReplyError::CancellationRequested)
+        ));
+        let outbound = registry.reserve(target, actor(3));
+        assert_eq!(
+            registry.mark_queued(target, actor(3), outbound),
+            Err(ReplyError::CancellationRequested)
+        );
+        drop(guard);
+        registry.mark_queued(owner, target, next).unwrap();
+    }
+
+    #[test]
+    fn cleanup_tracks_new_watches_and_member_owned_outbound_work() {
+        let registry = std::sync::Arc::new(RequestRegistry::default());
+        let owner = actor(1);
+        let member = actor(2);
+        let outside = actor(3);
+        let request = registry.reserve(member, outside);
+        registry.mark_queued(member, outside, request).unwrap();
+        registry.present(outside, request).unwrap();
+        let inspected = [(member, registry.cleanup_revision(member))];
+        assert!(matches!(
+            registry.begin_cleanup(owner, &inspected),
+            Err(CleanupAdmissionError::Pending)
+        ));
+        registry.begin_reply(outside, request).unwrap();
+        registry.finish_reply(request);
+        let (_, _) = registry.register_watch(member, vec![request]).unwrap();
+        assert!(matches!(
+            registry.begin_cleanup(owner, &inspected),
+            Err(CleanupAdmissionError::Stale)
+        ));
+        let inspected = [(member, registry.cleanup_revision(member))];
+        let _guard = registry.begin_cleanup(owner, &inspected).ok().unwrap();
+        let released =
+            registry.cleanup_campaign_metadata(member, &std::collections::HashSet::from([member]));
+        assert_eq!(released.forgotten_responses, vec![request]);
+        assert_eq!(released.forgotten_watches.len(), 1);
+        assert!(registry.active_for_target(outside).is_empty());
     }
 
     #[test]

@@ -9,15 +9,14 @@ pub fn agent_control_decl() -> crate::EffectDecl {
         prompt_card: None,
         constructors: &[
             "AgentControlStopWith :: (Int, Int) -> AgentControl AgentStopControlOutcome",
-            "AgentControlPlanCleanupWith :: Int -> AgentControl CleanupPlan",
-            "AgentControlExecuteCleanupWith :: Int -> AgentControl CleanupReceipt",
+            "AgentControlExecuteCleanupWith :: Int -> [(Int, Int, Int)] -> AgentControl CleanupReceipt",
         ],
         type_defs: &[
             "data AgentStopControlOutcome = AgentStoppedNow | AgentStopAlreadyStopped | AgentStopUnavailable | AgentStopUnauthorized | AgentStopFailed Text deriving (Show, Eq)",
             "data CleanupActorState = CleanupActorRunning | CleanupActorTerminal deriving (Show, Eq)",
-            "data CleanupActorPlan = CleanupActorPlan { cleanupActorId :: Int, cleanupActorIncarnation :: Int, cleanupActorLabel :: Text, cleanupActorState :: CleanupActorState } deriving (Show, Eq)",
+            "data CleanupActorPlan = CleanupActorPlan { cleanupActorId :: Int, cleanupActorIncarnation :: Int, cleanupActorLabel :: Text, cleanupActorState :: CleanupActorState, cleanupActorRevision :: Int } deriving (Show, Eq)",
             "data CleanupPlan = CleanupPlan { cleanupPlanGroup :: Int, cleanupPlanActors :: [CleanupActorPlan], cleanupPlanPendingResponses :: [Int], cleanupPlanPendingWatches :: [Int], cleanupPlanRefusal :: Maybe Text } deriving (Show, Eq)",
-            "data CleanupStepReceipt = CleanupForgotResponses [Int] | CleanupForgotWatches [Int] | CleanupStoppedActor Int Int AgentStopControlOutcome | CleanupForgotActor Int Int | CleanupActorRetained Int Int [Int] [Int] | CleanupGroupRetired Int | CleanupBlocked Text deriving (Show, Eq)",
+            "data CleanupStepReceipt = CleanupForgotResponses [Int] | CleanupForgotWatches [Int] | CleanupStoppedActor Int Int AgentStopControlOutcome | CleanupForgotActor Int Int | CleanupActorRetained Int Int [Int] [Int] | CleanupGroupRetired Int | CleanupBlocked Text | CleanupStalePlan deriving (Show, Eq)",
             "data CleanupReceipt = CleanupReceipt { cleanupReceiptPlan :: CleanupPlan, cleanupReceiptSteps :: [CleanupStepReceipt], cleanupReceiptComplete :: Bool } deriving (Show, Eq)",
         ],
         extra_imports: &[],

@@ -176,6 +176,19 @@ pub fn agent_inspection() -> Effect {
         errors: None,
         verbs: vec![
             Verb {
+                ctor: "AgentInspectCleanupWith",
+                method: "agent_inspect_cleanup_with",
+                args: vec![Arg {
+                    name: "group",
+                    ty: HsType::Int,
+                    rust: RustBinding::Path("i64"),
+                }],
+                ret: HsType::Named("CleanupPlan"),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
                 ctor: "AgentInspectWith",
                 method: "agent_inspect_with",
                 args: vec![Arg {
@@ -193,6 +206,19 @@ pub fn agent_inspection() -> Effect {
                 method: "agent_list_with",
                 args: vec![],
                 ret: HsType::List(Box::new(HsType::Named("AgentRosterEntry"))),
+                errors: None,
+                handling: HandlingClass::Actor,
+                extract: None,
+            },
+            Verb {
+                ctor: "AgentGroupListWith",
+                method: "agent_group_list_with",
+                args: vec![Arg {
+                    name: "group",
+                    ty: HsType::Int,
+                    rust: RustBinding::Path("i64"),
+                }],
+                ret: HsType::maybe(HsType::list(HsType::Named("AgentRosterEntry"))),
                 errors: None,
                 handling: HandlingClass::Actor,
                 extract: None,

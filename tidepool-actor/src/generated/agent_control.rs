@@ -14,6 +14,5 @@ use tidepool_bridge_derive::FromCore;
 #[allow(dead_code, clippy::enum_variant_names)]
 pub enum AgentControlReq {
     AgentControlStopWith((i64, i64)),
-    AgentControlPlanCleanupWith(i64),
-    AgentControlExecuteCleanupWith(i64),
+    AgentControlExecuteCleanupWith(i64, Vec<(i64, i64, i64)>),
 }

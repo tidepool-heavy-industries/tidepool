@@ -257,6 +257,7 @@ pub(crate) struct CleanupActorProjection {
     pub actor: crate::ActorRef,
     pub label: String,
     pub terminal: bool,
+    pub revision: u64,
 }
 
 #[derive(Clone)]
@@ -280,6 +281,7 @@ pub(crate) enum CleanupStepProjection {
     },
     GroupRetired(crate::ForkGroupId),
     Blocked(String),
+    StalePlan,
 }
 
 pub(crate) struct CleanupReceiptProjection {
@@ -484,6 +486,7 @@ fn cleanup_plan_value(
                     actor_int(actor.actor.incarnation.0)?.to_value(table)?,
                     actor.label.clone().to_value(table)?,
                     state,
+                    actor_int(actor.revision)?.to_value(table)?,
                 ],
             )?)
         })
@@ -570,6 +573,7 @@ fn cleanup_step_value(
             vec![actor_int(group.0)?.to_value(table)?],
         ),
         CleanupStepProjection::Blocked(detail) => ("CleanupBlocked", vec![detail.to_value(table)?]),
+        CleanupStepProjection::StalePlan => ("CleanupStalePlan", Vec::new()),
     };
     Ok(actor_context_constructor(table, name, fields)?)
 }
@@ -596,6 +600,10 @@ pub(crate) enum ResidentActorBoundary {
     AgentAttachment(ResidentAgentAttachment),
     AgentInspect(AgentInspectionBoundary),
     AgentList(ResidentHole),
+    AgentGroupList {
+        continuation: ResidentHole,
+        group: crate::ForkGroupId,
+    },
     AgentForget(AgentInspectionBoundary),
     AgentStop(AgentInspectionBoundary),
     CleanupPlan {
@@ -605,6 +613,7 @@ pub(crate) enum ResidentActorBoundary {
     CleanupExecute {
         continuation: ResidentHole,
         group: crate::ForkGroupId,
+        inspected: Vec<(crate::ActorRef, u64)>,
     },
     RequestReservation(RequestReservation),
     RequestSubmission(RequestSubmission),
@@ -682,6 +691,7 @@ impl ResidentActorBoundary {
             Self::AgentAttachment(_) => "agent attachment",
             Self::AgentInspect(_) => "observeAgent",
             Self::AgentList(_) => "listAgents",
+            Self::AgentGroupList { .. } => "observeForkGroup",
             Self::AgentForget(_) => "forgetAgent",
             Self::AgentStop(_) => "stopAgent",
             Self::CleanupPlan { .. } => "planCleanup",
@@ -790,8 +800,8 @@ impl ResidentRequest {
             Self::AgentControl(
                 crate::generated::agent_control::AgentControlReq::AgentControlStopWith(..),
             ) => "stopAgent",
-            Self::AgentControl(
-                crate::generated::agent_control::AgentControlReq::AgentControlPlanCleanupWith(..),
+            Self::AgentInspection(
+                crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(..),
             ) => "planCleanup",
             Self::AgentControl(
                 crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
@@ -804,6 +814,9 @@ impl ResidentRequest {
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
             ) => "listAgents",
+            Self::AgentInspection(
+                crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(..),
+            ) => "observeForkGroup",
             Self::AgentInspection(
                 crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(..),
             ) => "forgetAgent",
@@ -1662,6 +1675,14 @@ where
                         crate::generated::agent_inspection::AgentInspectionReq::AgentListWith,
                     ) => Ok(ResidentActorBoundary::AgentList(hole)),
                     ResidentRequest::AgentInspection(
+                        crate::generated::agent_inspection::AgentInspectionReq::AgentGroupListWith(group),
+                    ) => Ok(ResidentActorBoundary::AgentGroupList {
+                        continuation: hole,
+                        group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!("invalid fork group id {group}"))
+                        })?),
+                    }),
+                    ResidentRequest::AgentInspection(
                         crate::generated::agent_inspection::AgentInspectionReq::AgentForgetWith(
                             target,
                         ),
@@ -1679,8 +1700,8 @@ where
                         target: crate::wait::decode_address(target.0, target.1)?,
                         continuation: hole,
                     })),
-                    ResidentRequest::AgentControl(
-                        crate::generated::agent_control::AgentControlReq::AgentControlPlanCleanupWith(
+                    ResidentRequest::AgentInspection(
+                        crate::generated::agent_inspection::AgentInspectionReq::AgentInspectCleanupWith(
                             group,
                         ),
                     ) => Ok(ResidentActorBoundary::CleanupPlan {
@@ -1693,10 +1714,15 @@ where
                     }),
                     ResidentRequest::AgentControl(
                         crate::generated::agent_control::AgentControlReq::AgentControlExecuteCleanupWith(
-                            group,
+                            group, inspected,
                         ),
                     ) => Ok(ResidentActorBoundary::CleanupExecute {
                         continuation: hole,
+                        inspected: inspected.into_iter().map(|(id, incarnation, revision)| {
+                            Ok((crate::wait::decode_address(id, incarnation)?, u64::try_from(revision).map_err(|_| {
+                                ResidentActorWorkbenchError::ActorProtocol("invalid cleanup revision".into())
+                            })?))
+                        }).collect::<Result<_, ResidentActorWorkbenchError>>()?,
                         group: crate::ForkGroupId(u64::try_from(group).map_err(|_| {
                             ResidentActorWorkbenchError::ActorProtocol(format!(
                                 "invalid cleanup group id {group}"
@@ -2476,6 +2502,32 @@ where
                     entries.push(agent_roster_value(table, entry)?);
                 }
                 let answer = core_list(table, entries)?;
+                session
+                    .resume(hole, answer)
+                    .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .await
+    }
+
+    pub(crate) async fn resume_group_roster(
+        &self,
+        context: crate::ActorSessionContext,
+        hole: ResidentHole,
+        roster: Option<Vec<AgentRosterProjection>>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.access
+            .with_machine(context, move |session, _, _| {
+                let table = session.data_con_table();
+                let answer = roster
+                    .map(|roster| {
+                        let entries = roster
+                            .into_iter()
+                            .map(|entry| agent_roster_value(table, entry))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok::<_, ResidentActorWorkbenchError>(core_list(table, entries)?)
+                    })
+                    .transpose()?
+                    .to_value(table)?;
                 session
                     .resume(hole, answer)
                     .map_err(ResidentActorWorkbenchError::Resident)

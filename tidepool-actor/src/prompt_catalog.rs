@@ -59,6 +59,8 @@ pub(crate) struct PromptArtifact {
 
 pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
     match topic {
+        "tree" => Ok(include_str!("../../prompts/shoal/docs/tree.md")),
+        "workbench" => Ok(include_str!("../../prompts/shoal/docs/workbench.md")),
         "request" | "requests" => Ok(include_str!("../../prompts/shoal/docs/request.md")),
         "unfold" | "fork" | "forks" => Ok(include_str!("../../prompts/shoal/docs/unfold.md")),
         "watch" | "watches" | "poll" => Ok(include_str!("../../prompts/shoal/docs/watch.md")),
@@ -69,13 +71,11 @@ pub(crate) fn workbench_doc(topic: &str) -> Result<&'static str, String> {
         "refinement" | "refine" | "followup" => {
             Ok(include_str!("../../prompts/shoal/docs/refinement.md"))
         }
-        "lineage" | "status" | "trace" => {
-            Ok(include_str!("../../prompts/shoal/docs/lineage.md"))
-        }
+        "lineage" | "status" | "trace" => Ok(include_str!("../../prompts/shoal/docs/lineage.md")),
         "recovery" | "recover" => Ok(include_str!("../../prompts/shoal/docs/recovery.md")),
-        "help" | "topics" => {
-            Ok("Shoal topics: request, unfold, watch, deadline, refinement, lineage, cleanup, recovery. Use `:doc <topic>`.")
-        }
+        "help" | "topics" => Ok(
+            "Shoal topics: tree, workbench, request, unfold, watch, deadline, refinement, lineage, cleanup, recovery. Use `:doc <topic>`.",
+        ),
         other => Err(format!(
             "unknown Shoal documentation topic `{other}`; use `:doc topics`"
         )),

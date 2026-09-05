@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PromptId {
+    TreePractice,
     ShoalRoot,
     RecreatedRoot,
     WorktreeAgent,
@@ -9,10 +10,11 @@ pub(super) enum PromptId {
 }
 
 impl PromptId {
-    pub(super) const CATALOG_VERSION: u32 = 3;
+    pub(super) const CATALOG_VERSION: u32 = 4;
 
     #[cfg(test)]
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 7] = [
+        Self::TreePractice,
         Self::ShoalRoot,
         Self::RecreatedRoot,
         Self::WorktreeAgent,
@@ -23,6 +25,7 @@ impl PromptId {
 
     pub(super) fn artifact(self) -> PromptArtifact {
         let body = match self {
+            Self::TreePractice => include_str!("../../../prompts/shoal/tree-practice.md"),
             Self::ShoalRoot => include_str!("../../../prompts/shoal/root.md"),
             Self::RecreatedRoot => include_str!("../../../prompts/shoal/recreated-root.md"),
             Self::WorktreeAgent => include_str!("../../../prompts/shoal/worktree-agent.md"),

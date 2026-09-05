@@ -39,7 +39,7 @@ settling one reply.
 | scope / scope tree (lexical sense) | **lexical scope** / **scope tree** (fine — standard) |
 | hole card / opening card | **typed request prompt** |
 | custody / custody receipt / token | **owned handle** or **lease**, per actual behavior |
-| wave / fan (prose senses) | **concurrent child batch** (`fanout` survives in established API names) |
+| wave | A local scaffold/unfold/fold cycle; not a global barrier or runtime identity. |
 | ledger / receipt log | **journal** |
 | branch position (model-facing) | show the type: `Either InvocationExit T` |
 | effect row (model-facing) | **available effects** / the effect list itself (row is fine internally) |
@@ -76,7 +76,7 @@ merge of model contexts.
 ## Model-facing prompt rules
 
 1. Never address a model with "window", "residency", "plane", "realm",
-   "branch position", "lane", or "wave".
+   "branch position", or "lane". Use "wave" only for a local work cycle.
 2. State mechanics directly: "you may use up to N model rounds", "top-level
    declarations persist beyond this session", "child sessions inherit
    ancestor declarations, never a sibling's".

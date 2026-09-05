@@ -85,10 +85,8 @@ module Tidepool.Actors.Shoal
   , forkGroupGitBranchPrefix
   , ForkObservation (..)
   , observeFork
-  , CampaignSnapshot (..)
-  , observeCampaign
-  , ForkGroupCleanupOutcome (..)
-  , cleanupForkGroup
+  , ForkGroupSnapshot (..)
+  , observeForkGroup
   , CleanupPlan (..)
   , CleanupActorPlan (..)
   , CleanupActorState (..)

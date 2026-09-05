@@ -506,14 +506,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let requests = self.environment.requests.status_for(actor);
         let records = self.environment.actors.lock();
-        let terminal_actors = records
+        let hidden_terminal_actors = records
             .iter()
             .filter(|(identity, record)| {
-                record.terminal.is_some()
-                    || kernel
-                        .resolve(**identity)
-                        .and_then(|actor| actor.terminal().get())
-                        .is_some()
+                record
+                    .terminal
+                    .clone()
+                    .or_else(|| {
+                        kernel
+                            .resolve(**identity)
+                            .and_then(|actor| actor.terminal().get())
+                    })
+                    .is_some_and(|terminal| terminal.kind != ActorExitKind::Failed)
             })
             .count();
         let mut roster = records
@@ -524,17 +528,40 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                         .resolve(*identity)
                         .and_then(|actor| actor.terminal().get())
                 });
-                if terminal.is_some() && view == StatusView::Concise {
+                if terminal.as_ref().is_some_and(|terminal| terminal.kind != ActorExitKind::Failed)
+                    && view == StatusView::Concise {
                     return None;
                 }
                 let active = self.environment.requests.active_for_target(*identity);
                 let state = match terminal {
-                    Some(ref terminal) => format!("terminal:{:?}", terminal.kind),
+                    Some(ref terminal) => format!("terminal:{:?} {:?}", terminal.kind, terminal.summary),
                     None if !active.is_empty() => format!("handling:{active:?}"),
                     None => "running".into(),
                 };
                 let runtime = record.runtime_observation.snapshot();
                 let usage = runtime.latest_provider_usage();
+                if view == StatusView::Concise {
+                    return Some(format!(
+                        "  - {:?} ({}@{}) role={:?} bound_worktree={:?} state={state}",
+                        record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        record.descriptor.effective_role().role(),
+                        record.bound_worktree,
+                    ));
+                }
+                if view == StatusView::Lineage {
+                    return Some(format!(
+                        "  - {:?} ({}@{}) supervisor={:?} context_parent={:?} fork_group={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} cache_scope={:?} activation={:?} bound_worktree={:?}",
+                        record.descriptor.label(), identity.id.0, identity.incarnation.0,
+                        record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
+                        record.descriptor.fork_group(), record.descriptor.placement().lexical_scope.0,
+                        runtime.provider_thread, runtime.provider_parent_thread,
+                        usage.map(|sample| sample.cache_boundary),
+                        usage.map(|sample| sample.cached_input_tokens),
+                        usage.map(|sample| sample.uncached_input_tokens),
+                        usage.map(|sample| sample.scope),
+                        usage.and_then(|sample| sample.activation_sequence), record.bound_worktree,
+                    ));
+                }
                 Some(format!(
                     "  - {}@{} label={:?} supervisor={:?} context_parent={:?} fork_group={:?} role={:?} bound_worktree={:?} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} activation={:?} workbench={:?} state={}",
                     identity.id.0,
@@ -562,10 +589,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let usage = runtime.latest_provider_usage();
         let unavailable_responses = format!("{:?}", requests.unavailable_responses);
         let unavailable_watches = format!("{:?}", requests.unavailable_watches);
-        let roster_summary = if view != StatusView::Concise || terminal_actors == 0 {
+        let roster_summary = if view != StatusView::Concise || hidden_terminal_actors == 0 {
             String::new()
         } else {
-            format!("\n  terminal actors hidden={terminal_actors} (use :status!)")
+            format!("\n  completed/stopped actors hidden={hidden_terminal_actors} (use :status!)")
         };
         let sample_history = if view == StatusView::Trace {
             format!("\n  provider_usage_history={:?}", runtime.provider_usage)
@@ -580,7 +607,18 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         } else {
             String::new()
         };
-        let current = format!(
+        let current = if view == StatusView::Concise {
+            format!(
+                "actor {:?} ({}@{})\n  activation={:?} application={} program={standing} current_request={current_request:?}\n  responses: ready={:?} unavailable={} pending={:?}\n  watches: ready={:?} unavailable={} pending={:?}\n  role={:?} workspace={:?} bound_worktree={:?} workbench={:?}{}",
+                self.descriptor.label(), actor.id.0, actor.incarnation.0,
+                runtime.activation_kind, if self.policy_installed { "attached" } else { "detached" }, requests.ready_responses, unavailable_responses,
+                requests.pending_responses, requests.ready_watches, unavailable_watches,
+                requests.pending_watches, self.descriptor.effective_role().role(),
+                self.descriptor.effective_role().workspace(), self.launch_worktrees.first(),
+                runtime.workbench_posture, roster_summary,
+            )
+        } else {
+            format!(
             "actor {}@{} label={:?}\n  lineage: supervisor={:?} context_parent={:?} fork_group={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_scope={:?} cache_boundary={:?} activation={:?}\n  activation: kind={:?} event_watermark={}\n  authority: role={:?} effects={} native_tools={:?} workspace={:?} descendants={:?} prompt_profile={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}{}{}",
             actor.id.0,
             actor.incarnation.0,
@@ -623,7 +661,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             unavailable_watches,
             roster_summary,
             sample_history,
-        );
+        )
+        };
         let status = format!(
             "{current}\n  deadlines: [{}]\nactors:\n{}",
             requests
@@ -635,15 +674,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             roster.join("\n")
         );
         if view == StatusView::Lineage {
-            let lineage = roster
-                .iter()
-                .map(|entry| {
-                    entry
-                        .split_once(" role=")
-                        .map_or(entry.as_str(), |(identity, _)| identity)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let lineage = roster.join("\n");
             format!(
                 "actor {}@{} lineage\n  supervisor={:?}\n  context_parent={:?}\n  fork_group={:?}\nactors:\n{lineage}",
                 actor.id.0,
@@ -663,7 +694,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         owner: ActorRef,
         group: crate::ForkGroupId,
     ) -> crate::resident_workbench::CleanupPlanProjection {
-        let members = match self.environment.fork_groups.cleanup_members(group, owner) {
+        let members = match self.environment.fork_groups.members(group, owner) {
             Ok(members) => members,
             Err(error) => {
                 return crate::resident_workbench::CleanupPlanProjection {
@@ -682,6 +713,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 let record = records.get(actor);
                 crate::resident_workbench::CleanupActorProjection {
                     actor: *actor,
+                    revision: self.environment.requests.cleanup_revision(*actor),
                     label: record
                         .map(|record| record.descriptor.label().to_owned())
                         .unwrap_or_else(|| "<unavailable>".into()),
@@ -1165,6 +1197,43 @@ where
                     .resume_agent_roster(context.clone(), continuation, roster)
                     .await
             }
+            ResidentActorBoundary::AgentGroupList {
+                continuation,
+                group,
+            } => {
+                // Membership comes from exact admission ancestry, never a
+                // display label or Git branch prefix. Unavailable/unauthorized
+                // groups follow the existing optional inspection convention.
+                let members = self
+                    .environment
+                    .fork_groups
+                    .members(group, context.actor)
+                    .ok();
+                let records = self.environment.actors.lock().clone();
+                let roster = members.and_then(|members| {
+                    members
+                        .into_iter()
+                        .map(|actor| {
+                            let record = records.get(&actor)?;
+                            Some(crate::resident_workbench::AgentRosterProjection {
+                                actor,
+                                descriptor: record.descriptor.clone(),
+                                bound_worktree: record.bound_worktree.clone(),
+                                terminal: record.terminal.clone().or_else(|| {
+                                    kernel
+                                        .resolve(actor)
+                                        .and_then(|actor| actor.terminal().get())
+                                }),
+                                runtime: record.runtime_observation.snapshot(),
+                            })
+                        })
+                        .collect()
+                });
+                self.environment
+                    .runner
+                    .resume_group_roster(context.clone(), continuation, roster)
+                    .await
+            }
             ResidentActorBoundary::AgentForget(forget) => {
                 let authorized_terminal = {
                     let records = self.environment.actors.lock();
@@ -1275,47 +1344,71 @@ where
             ResidentActorBoundary::CleanupExecute {
                 continuation,
                 group,
+                inspected,
             } => {
                 use crate::resident_workbench::{
                     AgentStopProjection, CleanupReceiptProjection, CleanupStepProjection,
                 };
 
+                let admission = (|| {
+                    let actors = inspected
+                        .iter()
+                        .map(|(actor, _)| *actor)
+                        .collect::<Vec<_>>();
+                    let fork_guard = self
+                        .environment
+                        .fork_groups
+                        .begin_cleanup(group, context.actor, &actors)
+                        .map_err(|error| match error {
+                            crate::ForkGroupError::CleanupScopeChanged(_) => {
+                                CleanupStepProjection::StalePlan
+                            }
+                            other => CleanupStepProjection::Blocked(other.to_string()),
+                        })?;
+                    let revisions = inspected
+                        .iter()
+                        .filter(|(actor, _)| fork_guard.contains(actor))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let request_guard = self
+                        .environment
+                        .requests
+                        .begin_cleanup(context.actor, &revisions)
+                        .map_err(|error| match error {
+                            crate::request::CleanupAdmissionError::Stale => {
+                                CleanupStepProjection::StalePlan
+                            }
+                            crate::request::CleanupAdmissionError::Busy => {
+                                CleanupStepProjection::Blocked("cleanup already in progress".into())
+                            }
+                            crate::request::CleanupAdmissionError::Pending => {
+                                CleanupStepProjection::Blocked(
+                                    "subtree still has pending requests or watches".into(),
+                                )
+                            }
+                        })?;
+                    Ok::<_, CleanupStepProjection>((fork_guard, request_guard))
+                })();
                 let plan = self.cleanup_plan(kernel, context.actor, group);
+                let (_fork_guard, _request_guard) = match admission {
+                    Ok(guards) => guards,
+                    Err(refusal) => {
+                        return self
+                            .environment
+                            .runner
+                            .resume_cleanup_receipt(
+                                context.clone(),
+                                continuation,
+                                CleanupReceiptProjection {
+                                    plan,
+                                    steps: vec![refusal],
+                                    complete: false,
+                                },
+                            )
+                            .await;
+                    }
+                };
                 let mut steps = Vec::new();
-                if let Some(ref refusal) = plan.refusal {
-                    steps.push(CleanupStepProjection::Blocked(refusal.clone()));
-                    return self
-                        .environment
-                        .runner
-                        .resume_cleanup_receipt(
-                            context.clone(),
-                            continuation,
-                            CleanupReceiptProjection {
-                                plan,
-                                steps,
-                                complete: false,
-                            },
-                        )
-                        .await;
-                }
-                if !plan.pending_responses.is_empty() || !plan.pending_watches.is_empty() {
-                    steps.push(CleanupStepProjection::Blocked(
-                        "campaign still has pending responses or watches".into(),
-                    ));
-                    return self
-                        .environment
-                        .runner
-                        .resume_cleanup_receipt(
-                            context.clone(),
-                            continuation,
-                            CleanupReceiptProjection {
-                                plan,
-                                steps,
-                                complete: false,
-                            },
-                        )
-                        .await;
-                }
 
                 let group_order = match self
                     .environment
@@ -2018,7 +2111,7 @@ where
         let workbench = self.environment.runner.workbench(
             request.response.clone(),
             request.request,
-            request.output_modules.clone(),
+            request.type_modules(),
         );
         workbench
             .mount_named_input(
@@ -2694,7 +2787,7 @@ where
             ResidentStanding::Interactive(awaiting) => self.environment.runner.workbench(
                 awaiting.request.response.clone(),
                 awaiting.request.request,
-                awaiting.request.output_modules.clone(),
+                awaiting.request.type_modules(),
             ),
             ResidentStanding::Receiving(_) if self.policy_installed => {
                 self.environment.runner.application_workbench()

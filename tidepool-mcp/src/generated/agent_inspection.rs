@@ -8,8 +8,10 @@ pub fn agent_inspection_decl() -> crate::EffectDecl {
         description: "Private exact-incarnation lifecycle inspection substrate.",
         prompt_card: None,
         constructors: &[
+            "AgentInspectCleanupWith :: Int -> AgentInspection CleanupPlan",
             "AgentInspectWith :: (Int, Int) -> AgentInspection (Maybe AgentRosterEntry)",
             "AgentListWith :: AgentInspection [AgentRosterEntry]",
+            "AgentGroupListWith :: Int -> AgentInspection (Maybe [AgentRosterEntry])",
             "AgentForgetWith :: (Int, Int) -> AgentInspection AgentForgetOutcome",
         ],
         type_defs: &[

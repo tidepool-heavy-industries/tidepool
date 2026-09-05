@@ -176,6 +176,12 @@ pub enum ForkGroupError {
     AlreadyCommitted(u64),
     #[error("fork group {0} is not committed")]
     NotCommitted(u64),
+    #[error("fork group {0} has members outside the inspected cleanup scope")]
+    CleanupScopeChanged(u64),
+    #[error("actor {0:?} is being cleaned up")]
+    Cleaning(ActorRef),
+    #[error("fork group {0} has unfinished descendant admission")]
+    CleanupAdmissionPending(u64),
     #[error(
         "fork group would exceed the lineage's active descendant ceiling ({requested} requested, {active} already active or reserved, maximum {maximum})"
     )]
@@ -237,6 +243,7 @@ struct ForkGroupsState {
     cleaned: HashSet<ForkGroupId>,
     parents: HashMap<ActorRef, ActorRef>,
     active: HashSet<ActorRef>,
+    cleaning: HashSet<ActorRef>,
 }
 
 /// Admission ledger for one applicative context-unfold layer.
@@ -252,6 +259,63 @@ pub enum ForkGroupCleanupOutcome {
     Active(Vec<ActorRef>),
 }
 
+fn group_members(
+    state: &ForkGroupsState,
+    id: ForkGroupId,
+    owner: ActorRef,
+) -> Result<Vec<ActorRef>, ForkGroupError> {
+    if state.cleaned.contains(&id) {
+        return Ok(Vec::new());
+    }
+    let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
+    if group.owner != owner {
+        return Err(ForkGroupError::WrongOwner {
+            group: id.0,
+            actual: owner,
+        });
+    }
+    if *group.phase.borrow() != ForkGroupPhase::Committed {
+        return Err(ForkGroupError::NotCommitted(id.0));
+    }
+    let mut members = state
+        .parents
+        .keys()
+        .copied()
+        .filter_map(|candidate| {
+            group
+                .children
+                .iter()
+                .copied()
+                .find_map(|root| descendant_depth(&state.parents, candidate, root))
+                .map(|depth| (depth, candidate))
+        })
+        .collect::<Vec<_>>();
+    members.sort_unstable_by_key(|(depth, actor)| {
+        (std::cmp::Reverse(*depth), actor.id, actor.incarnation)
+    });
+    Ok(members.into_iter().map(|(_, actor)| actor).collect())
+}
+
+pub(crate) struct ForkCleanupGuard {
+    registry: ForkGroupRegistry,
+    actors: HashSet<ActorRef>,
+}
+
+impl ForkCleanupGuard {
+    pub(crate) fn contains(&self, actor: &ActorRef) -> bool {
+        self.actors.contains(actor)
+    }
+}
+
+impl Drop for ForkCleanupGuard {
+    fn drop(&mut self) {
+        let mut state = self.registry.state.lock();
+        for actor in &self.actors {
+            state.cleaning.remove(actor);
+        }
+    }
+}
+
 impl ForkGroupRegistry {
     #[must_use]
     pub fn new(lineage: ActorLineageRegistry) -> Self {
@@ -263,6 +327,7 @@ impl ForkGroupRegistry {
                 cleaned: HashSet::new(),
                 parents: HashMap::new(),
                 active: HashSet::new(),
+                cleaning: HashSet::new(),
             })),
         }
     }
@@ -275,6 +340,9 @@ impl ForkGroupRegistry {
         maximum_active_descendants: usize,
     ) -> Result<(ForkGroupId, Vec<ActorPathReservation>), ForkGroupError> {
         let mut state = self.state.lock();
+        if state.cleaning.contains(&owner) {
+            return Err(ForkGroupError::Cleaning(owner));
+        }
         let root = lineage_root(&state.parents, owner);
         let active = reserved_descendants(&state, root);
         if active.saturating_add(children.len()) > maximum_active_descendants {
@@ -638,42 +706,44 @@ impl ForkGroupRegistry {
 
     /// Exact direct and recursive members of one owned committed group,
     /// ordered deepest-first for supervisor cleanup.
-    pub fn cleanup_members(
+    pub fn members(
         &self,
         id: ForkGroupId,
         owner: ActorRef,
     ) -> Result<Vec<ActorRef>, ForkGroupError> {
-        let state = self.state.lock();
-        if state.cleaned.contains(&id) {
-            return Ok(Vec::new());
+        group_members(&self.state.lock(), id, owner)
+    }
+
+    pub(crate) fn begin_cleanup(
+        &self,
+        id: ForkGroupId,
+        owner: ActorRef,
+        inspected: &[ActorRef],
+    ) -> Result<ForkCleanupGuard, ForkGroupError> {
+        let mut state = self.state.lock();
+        let current = group_members(&state, id, owner)?;
+        let actors = inspected.iter().copied().collect::<HashSet<_>>();
+        // A successful cleanup prefix can already have removed members.
+        // New members must never silently enter the inspected scope.
+        if current.iter().any(|actor| !actors.contains(actor)) {
+            return Err(ForkGroupError::CleanupScopeChanged(id.0));
         }
-        let group = state.groups.get(&id).ok_or(ForkGroupError::Unknown(id.0))?;
-        if group.owner != owner {
-            return Err(ForkGroupError::WrongOwner {
-                group: id.0,
-                actual: owner,
-            });
+        // Only current authorized members may be frozen. Extra identities in
+        // an authored plan never grant authority over unrelated actors.
+        let actors = current.into_iter().collect::<HashSet<_>>();
+        if let Some(actor) = actors.iter().find(|actor| state.cleaning.contains(actor)) {
+            return Err(ForkGroupError::Cleaning(*actor));
         }
-        if *group.phase.borrow() != ForkGroupPhase::Committed {
-            return Err(ForkGroupError::NotCommitted(id.0));
+        if state.groups.values().any(|group| {
+            actors.contains(&group.owner) && *group.phase.borrow() != ForkGroupPhase::Committed
+        }) {
+            return Err(ForkGroupError::CleanupAdmissionPending(id.0));
         }
-        let mut members = state
-            .parents
-            .keys()
-            .copied()
-            .filter_map(|candidate| {
-                group
-                    .children
-                    .iter()
-                    .copied()
-                    .find_map(|root| descendant_depth(&state.parents, candidate, root))
-                    .map(|depth| (depth, candidate))
-            })
-            .collect::<Vec<_>>();
-        members.sort_unstable_by_key(|(depth, actor)| {
-            (std::cmp::Reverse(*depth), actor.id, actor.incarnation)
-        });
-        Ok(members.into_iter().map(|(_, actor)| actor).collect())
+        state.cleaning.extend(actors.iter().copied());
+        Ok(ForkCleanupGuard {
+            registry: self.clone(),
+            actors,
+        })
     }
 
     /// Committed nested groups owned by members of `id`, followed by `id`
@@ -1027,6 +1097,63 @@ mod tests {
     }
 
     #[test]
+    fn inspected_cleanup_freezes_exact_members_and_releases_admission_on_drop() {
+        let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
+        let root = ActorRef::first(ActorId(1));
+        let child = ActorRef::first(ActorId(2));
+        let unrelated = ActorRef::first(ActorId(3));
+        let (group, reservations) = groups
+            .begin(
+                root,
+                ActorPath::parse("campaign/wave").unwrap(),
+                vec![segment("child")],
+                5,
+            )
+            .unwrap();
+        groups
+            .claim(group, root, &reservations[0].allocated)
+            .unwrap();
+        groups.attach_child(group, root, child).unwrap();
+        let _phase = groups.request_commit(group, root).unwrap();
+        groups.gate(group, child).unwrap().mark_ready().unwrap();
+        groups.publish_ready(root).unwrap();
+        assert!(matches!(
+            groups.begin_cleanup(group, root, &[]),
+            Err(ForkGroupError::CleanupScopeChanged(_))
+        ));
+        let guard = groups
+            .begin_cleanup(group, root, &[child, unrelated])
+            .unwrap();
+        assert!(guard.contains(&child));
+        assert!(!guard.contains(&unrelated));
+        assert!(
+            matches!(groups.begin(child, ActorPath::parse("campaign/next").unwrap(), vec![segment("leaf")], 5), Err(ForkGroupError::Cleaning(actor)) if actor == child)
+        );
+        // A forged extra plan entry cannot freeze an unrelated principal.
+        groups
+            .begin(
+                unrelated,
+                ActorPath::parse("other/wave").unwrap(),
+                vec![],
+                5,
+            )
+            .unwrap();
+        drop(guard);
+        groups
+            .begin(
+                child,
+                ActorPath::parse("campaign/next").unwrap(),
+                vec![segment("leaf")],
+                5,
+            )
+            .unwrap();
+        assert!(matches!(
+            groups.begin_cleanup(group, root, &[child]),
+            Err(ForkGroupError::CleanupAdmissionPending(_))
+        ));
+    }
+
+    #[test]
     fn parent_group_cleanup_waits_for_active_grandchildren() {
         let groups = ForkGroupRegistry::new(ActorLineageRegistry::default());
         let root = ActorRef::first(ActorId(1));
@@ -1065,8 +1192,28 @@ mod tests {
         groups.gate(inner, leaf).unwrap().mark_ready().unwrap();
         groups.publish_ready(scaffold).unwrap();
 
+        // A separate admission can have a misleadingly nested display path.
+        // Exact group inspection and cleanup must still exclude it.
+        let unrelated = ActorRef::first(ActorId(4));
+        let (other, reservations) = groups
+            .begin(
+                root,
+                ActorPath::parse("campaign/outer/scaffold/looks-nested").unwrap(),
+                vec![segment("outsider")],
+                4,
+            )
+            .unwrap();
+        groups
+            .claim(other, root, &reservations[0].allocated)
+            .unwrap();
+        groups.attach_child(other, root, unrelated).unwrap();
+        let _other_phase = groups.request_commit(other, root).unwrap();
+        groups.gate(other, unrelated).unwrap().mark_ready().unwrap();
+        groups.publish_ready(root).unwrap();
+        assert!(groups.members(outer, scaffold).is_err());
+
         assert_eq!(
-            groups.cleanup_members(outer, root).unwrap(),
+            groups.members(outer, root).unwrap(),
             vec![leaf, scaffold],
             "cleanup walks recursive descendants deepest-first"
         );
