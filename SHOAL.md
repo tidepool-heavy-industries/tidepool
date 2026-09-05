@@ -225,6 +225,80 @@ budgets remain the concurrency/fan-out boundary; `awaitFork` versus
 
 ## Replies, watches, and model turns
 
+For independent submissions, register one watch per branch so each finished
+commit can be reviewed without waiting for its sibling. Define a compact view
+before printing results; retain the original typed state for failure and Git
+evidence inspection. Define the report and view before dispatch:
+
+```haskell
+:{
+data ChangeReport = ChangeReport
+  { changeCommit :: Text, changeSummary :: Text, changeChecks :: [Text] }
+data ChangeView
+  = ChangePending
+  | ChangeReady Text Text [Text]
+  | ChangeFailed ResponseFailure
+  | ChangeWatchFailed WatchFailure
+  deriving Show
+changeView state = case state of
+  WatchPending -> ChangePending
+  WatchUnavailable failure -> ChangeWatchFailed failure
+  WatchReady (ReplyUnavailable failure) -> ChangeFailed failure
+  WatchReady (ReplyAvailable result) ->
+    let report = responseValue result
+    in ChangeReady (changeCommit report) (changeSummary report) (changeChecks report)
+:}
+```
+
+For example, assign two independent review tasks against a clean source head.
+Each child receives its task as `sessionInput` and replies with `ChangeReport`;
+for a review without changes, `changeCommit` identifies the reviewed head.
+Put this complete unfold in the final input unit of its call:
+
+```haskell
+let Right reviewCampaign = campaignLabel "review"
+let Right reviewWave = forkGroupLabel "owners"
+let Right domainReview = branchLabel "domain"
+let Right uiReview = branchLabel "ui"
+let domainTask = "Review domain invariants. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
+let uiTask = "Review presentation behavior. Return ChangeReport with the exact reviewed head, findings and checks." :: Text
+:{
+forks <- unfold (batch reviewCampaign reviewWave) $
+  (,) <$> child (coding @ChangeReport domainReview projectHead domainTask)
+      <*> child (coding @ChangeReport uiReview projectHead uiTask)
+:}
+```
+
+In the next call, register the independent watches:
+
+```haskell
+let Right domainReadyLabel = watchLabel "domain-ready"
+let Right uiReadyLabel = watchLabel "ui-ready"
+domainReady <- watch domainReadyLabel (awaitSettledFork (fst forks))
+uiReady <- watch uiReadyLabel (awaitSettledFork (snd forks))
+```
+
+End the response normally. On each wake, poll the corresponding retained
+handle, then print its view:
+
+```haskell
+domainState <- pollWatch domainReady
+changeView domainState
+```
+
+Inspect the original `domainState` through further projections when needed;
+`responseWorktree` carries runtime submission evidence, while `changeChecks`
+is the worker's authored claim. Verify the exact submitted head and checks
+before integrating. Retain the actor for a focused follow-up via
+`forkedActor (fst forks)`. A combined watch is useful when a decision actually
+depends on both results:
+
+```haskell
+let Right pairReadyLabel = watchLabel "pair-ready"
+pairReady <- watch pairReadyLabel $
+  (,) <$> awaitSettledFork (fst forks) <*> awaitSettledFork (snd forks)
+```
+
 The detailed architecture and verification record are retained in
 [the persistent applications, typed replies, and watches plan](plans/actor-model/persistent-applications-replies-and-watches.md).
 
