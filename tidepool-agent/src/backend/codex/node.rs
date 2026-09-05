@@ -491,6 +491,9 @@ fn command_for(
     for feature in ["multi_agent", "multi_agent_v2"] {
         command.arg("--disable").arg(feature);
     }
+    if spec.goal_policy == crate::InteractiveGoalPolicy::Disabled {
+        command.arg("--disable").arg("goals");
+    }
     if let Some(model) = &spec.model {
         command.arg("--model").arg(model);
     }
@@ -797,6 +800,7 @@ mod tests {
     fn spec(mode: InteractiveLaunchMode) -> InteractiveAgentSpec {
         InteractiveAgentSpec {
             mode,
+            goal_policy: crate::InteractiveGoalPolicy::Configured,
             model: Some("gpt-test".to_string()),
             effort: Some(ReasoningEffort::Medium),
             developer_instructions: "actor charter".to_string(),
@@ -979,6 +983,34 @@ mod tests {
                 .args
                 .iter()
                 .any(|arg| arg == "model_reasoning_effort=\"low\""));
+        }
+    }
+
+    #[test]
+    fn host_directed_children_disable_goals_without_changing_root_configuration() {
+        for mode in [
+            InteractiveLaunchMode::Fresh,
+            InteractiveLaunchMode::Resume(BackendThreadId(THREAD.into())),
+            InteractiveLaunchMode::Fork {
+                parent: BackendThreadId(THREAD.into()),
+                through_call: "hosted-call-17".into(),
+            },
+        ] {
+            for policy in [
+                crate::InteractiveGoalPolicy::Configured,
+                crate::InteractiveGoalPolicy::Disabled,
+            ] {
+                let mut requested = spec(mode.clone());
+                requested.goal_policy = policy;
+                let command = command_for(&installation(), &requested).unwrap();
+                assert_eq!(
+                    command
+                        .args
+                        .windows(2)
+                        .any(|args| args == ["--disable", "goals"]),
+                    policy == crate::InteractiveGoalPolicy::Disabled,
+                );
+            }
         }
     }
 

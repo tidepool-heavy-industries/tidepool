@@ -1842,6 +1842,11 @@ async fn launch_prepared_interactive_application(
         (!matches!(launch_mode, InteractiveLaunchMode::Fork { .. })).then(|| config.model.clone());
     let spec = InteractiveAgentSpec {
         mode: launch_mode,
+        goal_policy: if actor_identity == root {
+            tidepool_agent::InteractiveGoalPolicy::Configured
+        } else {
+            tidepool_agent::InteractiveGoalPolicy::Disabled
+        },
         model,
         effort,
         developer_instructions,

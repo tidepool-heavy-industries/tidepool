@@ -24,8 +24,9 @@ pub use backend::codex::trust_interactive_project;
 pub use backend::{AgentBackend, AgentBackendFactory, BackendCanceller};
 pub use interactive::{
     InteractiveAgentBackend, InteractiveAgentCommand, InteractiveAgentInstallation,
-    InteractiveAgentSpec, InteractiveFuture, InteractiveLaunchMode, InteractiveNativeSandbox,
-    InteractiveNativeToolPolicy, InteractivePolicyMount, QueueReadyThread,
+    InteractiveAgentSpec, InteractiveFuture, InteractiveGoalPolicy, InteractiveLaunchMode,
+    InteractiveNativeSandbox, InteractiveNativeToolPolicy, InteractivePolicyMount,
+    QueueReadyThread,
 };
 pub use seam::{
     AgentBackendError, AgentId, BackendThreadId, CycleOutcome, CycleResultPayload, CycleSpec,

@@ -117,10 +117,20 @@ pub struct InteractiveAgentCommand {
     pub args: Vec<String>,
 }
 
+/// Whether autonomous goals belong to this interactive process or its host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractiveGoalPolicy {
+    /// Preserve the operator's configured autonomous goal behavior.
+    Configured,
+    /// The host owns assignments and continuation; do not inherit or run goals.
+    Disabled,
+}
+
 /// Backend-neutral configuration frozen when an interactive process starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractiveAgentSpec {
     pub mode: InteractiveLaunchMode,
+    pub goal_policy: InteractiveGoalPolicy,
     pub model: Option<String>,
     pub effort: Option<ReasoningEffort>,
     pub developer_instructions: String,

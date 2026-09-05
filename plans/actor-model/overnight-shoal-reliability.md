@@ -3,6 +3,9 @@
 Acceptance scaffold for the approved overnight sequence. Complete all tranches;
 use focused checks and one integrated disposable Sol/low live canary.
 
+Current steering: defer the live canary and prioritize the observed orchestration
+ownership failures. Keep the prepared checkout for later; do not launch it now.
+
 ## Tranches
 
 1. Shared extractor resolution honors Cargo artifact locations and validates the
@@ -54,3 +57,17 @@ use focused checks and one integrated disposable Sol/low live canary.
 - Root launch fix disables native `multi_agent` and `multi_agent_v2` for hosted
   agents, keeping actor routing in Shoal. Focused fresh/resume/fork Sol/low
   argument regression passed; integrated live verification remains pending.
+- Toolchain candidate 310e74cf integrated as d54b2098. Root reran
+  `just test-toolchain-scripts` (11 passed) and the exact focused extractor test
+  with all extractor overrides unset (1 passed, 41 excluded). The custom Cargo
+  target resolved correctly; a real matched daemon started and was reaped.
+- Settled toolchain worker received inherited goal continuations. Root retired
+  it with `StoppedNow`. Codex destination-local forks use deferred inheritance,
+  not absent inheritance. Child launch policy now disables the existing goals
+  feature; root preserves configured goals. All 13 Codex node unit tests passed
+  without a live model call; `cargo check -p tidepool --lib` through Nix passed
+  for the owning composition root and its dependencies.
+- Native PATH Codex is 0.153.4 and cannot read the current fork rollout. The
+  running host's executable is
+  `/nix/store/ffk5ngbpcrs6y320aabibgrw0zchrajy-codex-rs-0.0.0-dev+118e1cf/bin/codex`.
+  Queueing the usage-worker steering through that exact executable succeeded.
