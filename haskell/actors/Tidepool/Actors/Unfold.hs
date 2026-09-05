@@ -316,7 +316,7 @@ data BranchReceipt = BranchReceipt
   , launchedSupervisor :: Maybe (Int, Int)
   , launchedContextParent :: Maybe (Int, Int)
   , launchedProviderParent :: Maybe Text
-  , launchedHaskellSnapshot :: Maybe Int
+  , launchedHaskellScope :: Maybe Int
   }
   deriving (Show, Eq)
 
@@ -610,7 +610,7 @@ requestBranch site groupId (ForkGroupPath _ group) (Branch (BranchLabel leaf) ro
         , launchedContextParent = observed >>= \entry ->
             pair (rosterContextParentId entry) (rosterContextParentIncarnation entry)
         , launchedProviderParent = observed >>= rosterProviderParentThread
-        , launchedHaskellSnapshot = rosterHaskellSnapshot <$> observed
+        , launchedHaskellScope = rosterHaskellScope <$> observed
         }
     }
 

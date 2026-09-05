@@ -136,7 +136,7 @@ fn type_defs() -> Vec<TypeDef> {
                     ),
                     field("contextBoundWorktree", HsType::maybe(HsType::Text)),
                     field("contextForkGroup", HsType::maybe(HsType::Int)),
-                    field("contextHaskellSnapshot", HsType::Int),
+                    field("contextHaskellScope", HsType::Int),
                     field("contextActivationKind", HsType::Named("ActivationKind")),
                     field("contextEventWatermark", HsType::Int),
                     field("contextProviderThread", HsType::maybe(HsType::Text)),

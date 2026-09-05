@@ -122,7 +122,7 @@ pub fn agent_inspection() -> Effect {
                         field("rosterRole", HsType::Named("ActorContextRole")),
                         field("rosterBoundWorktree", HsType::maybe(HsType::Text)),
                         field("rosterForkGroup", HsType::maybe(HsType::Int)),
-                        field("rosterHaskellSnapshot", HsType::Int),
+                        field("rosterHaskellScope", HsType::Int),
                         field("rosterProviderThread", HsType::maybe(HsType::Text)),
                         field("rosterProviderParentThread", HsType::maybe(HsType::Text)),
                         field("rosterCachedInputTokens", HsType::maybe(HsType::Int)),
