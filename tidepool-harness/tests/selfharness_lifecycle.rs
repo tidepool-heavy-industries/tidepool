@@ -15,7 +15,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-mod support;
+use crate::support;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;

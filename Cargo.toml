@@ -115,12 +115,12 @@ ureq = "2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
-# debug = 1: line tables only (no full DWARF). RUST_BACKTRACE=full still
-# resolves file:line per frame this way; full DWARF costs real disk per
-# binary given this workspace statically links Cranelift plus the full
-# effect/runtime/harness stack. Same rationale for [profile.test] below.
+# Keep routine builds small: backtraces retain symbol names, but not file/line
+# information. Opt into DWARF when debugging with CARGO_PROFILE_DEV_DEBUG=2
+# (or CARGO_PROFILE_TEST_DEBUG=2) and CARGO_PROFILE_*_STRIP=none.
 [profile.dev]
-debug = 1
+debug = 0
+strip = "debuginfo"
 
 # Dependencies (Cranelift, regalloc2, …) build at opt-level 2 even in
 # dev/test — unoptimized deps make the JIT differential suites (hundreds of
@@ -169,4 +169,5 @@ opt-level = 3
 opt-level = 3
 
 [profile.test]
-debug = 1
+debug = 0
+strip = "debuginfo"

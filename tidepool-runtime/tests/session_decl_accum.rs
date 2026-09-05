@@ -15,7 +15,7 @@
 //! ```text
 //! cd haskell && cabal build tidepool-extract-bin
 //! TIDEPOOL_EXTRACT=$(cabal list-bin tidepool-extract-bin) \
-//!   nix develop ..#default -c cargo test -p tidepool-runtime --test session_decl_accum
+//!   nix develop ..#default -c cargo test -p tidepool-runtime --test session session_decl_accum::
 //! ```
 
 use std::path::{Path, PathBuf};

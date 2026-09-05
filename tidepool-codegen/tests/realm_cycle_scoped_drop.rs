@@ -20,14 +20,14 @@
 //!
 //! ```text
 //! cargo nextest run -p tidepool-codegen \
-//!   -E 'binary(realm_cycle_scoped_drop)' --no-capture
+//!   --test resident -E 'test(realm_cycle_scoped_drop::)' --no-capture
 //! ```
 //!
 //! A sibling lane ('lifetime') is measuring the JITModule question
 //! independently. If its numbers disagree with these, that disagreement is a
 //! finding, not something to reconcile away.
 
-mod support;
+use crate::support;
 use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
@@ -45,12 +45,9 @@ use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 
 use serial_test::serial;
 
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-#[path = "support/session_scaffold_expect.rs"]
-mod session_scaffold_expect;
-#[path = "support/session_scaffold_value.rs"]
-mod session_scaffold_value;
+use crate::session_scaffold;
+use crate::session_scaffold_expect;
+use crate::session_scaffold_value;
 use session_scaffold::C1;
 use session_scaffold_value::build_value_fragment;
 

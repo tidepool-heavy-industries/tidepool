@@ -3,7 +3,7 @@
 //! A bare expression classified as `Expr` must compile only the expression
 //! target; it must not also probe the declaration target.
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::os::unix::fs::PermissionsExt;

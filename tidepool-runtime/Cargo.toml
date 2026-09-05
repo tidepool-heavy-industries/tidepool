@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-runtime"
 version.workspace = true
 edition.workspace = true
@@ -49,3 +50,59 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "test
 serial_test.workspace = true
 filetime = "0.2"
 glob.workspace = true
+
+[[test]]
+name = "properties"
+path = "tests/suites/properties.rs"
+
+[[test]]
+name = "evaluation"
+path = "tests/suites/evaluation.rs"
+
+[[test]]
+name = "generics"
+path = "tests/suites/generics.rs"
+
+[[test]]
+name = "jit"
+path = "tests/suites/jit.rs"
+
+[[test]]
+name = "session"
+path = "tests/suites/session.rs"
+
+[[test]]
+name = "stdlib"
+path = "tests/suites/stdlib.rs"
+
+[[test]]
+name = "compile_fail"
+path = "tests/compile_fail.rs"
+
+[[test]]
+name = "boundaries"
+path = "tests/suites/boundaries.rs"
+
+[[test]]
+name = "cancel"
+path = "tests/cancel/main.rs"
+
+[[test]]
+name = "effect_stack"
+path = "tests/effect_stack/main.rs"
+
+[[test]]
+name = "misc"
+path = "tests/misc/main.rs"
+
+[[test]]
+name = "render"
+path = "tests/render/main.rs"
+
+[[test]]
+name = "repro"
+path = "tests/repro/main.rs"
+
+[[test]]
+name = "verbs"
+path = "tests/verbs/main.rs"

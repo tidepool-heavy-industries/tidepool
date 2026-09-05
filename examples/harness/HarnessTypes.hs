@@ -116,7 +116,7 @@ render st =
       Nothing -> "No decision made yet." :: Text
       Just d ->
         "Last decision: " <> action d
-          <> " (confidence: " <> show (confidence d) <> ")"
+          <> " (confidence: " <> T.pack (show (confidence d)) <> ")"
     notesBlock
       | null (notes st) = "No notes carried forward yet."
       | otherwise =

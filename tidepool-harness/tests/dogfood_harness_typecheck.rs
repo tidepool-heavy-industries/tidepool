@@ -24,7 +24,7 @@
 //! declares them; they do not drive a model, spawn an agent, or touch a
 //! repository.
 
-mod support;
+use crate::support;
 
 use std::path::PathBuf;
 use tidepool_harness::engine::compile_turn;

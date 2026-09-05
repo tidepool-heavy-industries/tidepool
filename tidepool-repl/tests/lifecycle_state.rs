@@ -14,7 +14,7 @@
 //!
 //! Requires `TIDEPOOL_EXTRACT` (see project CLAUDE.md); panics loudly otherwise.
 
-mod common;
+use crate::common;
 use common::*;
 
 use serde_json::json;

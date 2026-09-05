@@ -23,14 +23,10 @@ use tidepool_repr::datacon::DataCon;
 use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, DataConTable, TreeBuilder};
 
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-#[path = "support/session_scaffold_expect.rs"]
-mod session_scaffold_expect;
-#[path = "support/session_scaffold_gc_forcing.rs"]
-mod session_scaffold_gc_forcing;
-#[path = "support/session_scaffold_value.rs"]
-mod session_scaffold_value;
+use crate::session_scaffold;
+use crate::session_scaffold_expect;
+use crate::session_scaffold_gc_forcing;
+use crate::session_scaffold_value;
 use session_scaffold::C1;
 use session_scaffold_expect::expect_int;
 use session_scaffold_gc_forcing::build_gc_forcing_fragment;
@@ -694,7 +690,8 @@ fn tenured_array_write_g1_reproduces_without_barrier() {
 #[serial]
 fn heap_verify_catches_unrecorded_store_at_the_stranding_collection() {
     const CHILD_ENV: &str = "TIDEPOOL_TEST_VERIFIER_ABORT_CHILD";
-    const CHILD_TEST: &str = "heap_verify_catches_unrecorded_store_at_the_stranding_collection";
+    const CHILD_TEST: &str =
+        "gc_write_barrier::heap_verify_catches_unrecorded_store_at_the_stranding_collection";
 
     if std::env::var(CHILD_ENV).is_ok() {
         // ── child role: provoke the abort ────────────────────────────────

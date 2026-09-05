@@ -117,7 +117,7 @@
 
 use std::sync::Arc;
 
-mod support;
+use crate::support;
 
 use tidepool_handlers::ConsoleHandler;
 use tidepool_harness::engine::EngineConfig;

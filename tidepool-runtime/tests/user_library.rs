@@ -1,5 +1,5 @@
 //! Tests for .tidepool/lib/Library.hs user library combinators.
-//! Run with: cargo test -p tidepool-runtime --test user_library
+//! Run with: cargo test -p tidepool-runtime --test session user_library::
 
 use std::path::Path;
 use tidepool_testing::eval_harness::EvalHarness;

@@ -8,7 +8,7 @@
 //! instead of a partial dump. Each test guards on `require_extract()` and
 //! panics loudly otherwise.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// CASE 1 — a bare final expression binds `it`; usable next turn

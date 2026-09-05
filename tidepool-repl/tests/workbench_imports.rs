@@ -1,6 +1,6 @@
 //! Persistent import discovery and rejection recovery through the real REPL.
 
-mod common;
+use crate::common;
 
 use common::*;
 

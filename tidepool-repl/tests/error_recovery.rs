@@ -12,7 +12,7 @@
 //! with-packages GHC libdir); panics loudly otherwise. stderr noise like
 //! `Could not find module …Val.G…` is expected and ignored.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// Case 1 — Undefined variable reference.

@@ -33,7 +33,7 @@
 //! An ordinary DATA value still finalizes + terminates correctly
 //! (`finalize_hands_up_a_plain_data_value`).
 
-mod support;
+use crate::support;
 
 use std::sync::Arc;
 

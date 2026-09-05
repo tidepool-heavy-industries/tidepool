@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-mod support;
+use crate::support;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::log::LogHeader;

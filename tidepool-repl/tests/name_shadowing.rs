@@ -12,7 +12,7 @@
 //!
 //! Requires `TIDEPOOL_EXTRACT`; panics loudly otherwise.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// `let lookup = …` binds a value whose name collides with `Prelude.lookup`.

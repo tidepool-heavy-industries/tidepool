@@ -6,7 +6,7 @@
 //! (4) Mutual recursion across modules: Exercises LetRec phase ordering and join point analysis.
 //! (5) Typeclass dictionary dispatch: Verifies derived Show/Eq dictionaries survive translation.
 
-mod cross_mode_harness;
+use crate::cross_mode_harness;
 
 use cross_mode_harness::{
     assert_cross_mode_pure_equivalent, assert_cross_mode_runtime_equivalent,

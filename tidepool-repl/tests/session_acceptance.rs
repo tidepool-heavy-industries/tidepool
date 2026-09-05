@@ -10,7 +10,7 @@
 //! Requires `tidepool-extract` (the GHC→Core extractor) on `$PATH` or via
 //! `TIDEPOOL_EXTRACT`; panics loudly otherwise.
 
-mod common;
+use crate::common;
 
 use common::{build_server_with_nursery, require_extract, text_of};
 

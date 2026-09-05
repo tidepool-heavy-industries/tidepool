@@ -14,7 +14,7 @@
 //!
 //! A failure here is a GC/bridge/tenure bug, never user error.
 
-mod common;
+use crate::common;
 use common::*;
 
 use tidepool_handlers::{build_base_stack, HandlerConfig};

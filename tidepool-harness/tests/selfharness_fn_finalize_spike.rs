@@ -48,7 +48,7 @@
 //! closures included), and `resume_handle` delivers the closure on the
 //! shared heap that produced it.
 
-mod support;
+use crate::support;
 
 use std::sync::Arc;
 

@@ -12,7 +12,7 @@
 //! need a real turn, so they gate on `extract_available`. All drive the real
 //! `dispatch_tool` entry point.
 
-mod common;
+use crate::common;
 
 use common::*;
 use serde_json::json;

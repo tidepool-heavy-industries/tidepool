@@ -24,8 +24,7 @@ use tidepool_repr::types::{Alt, AltCon, DataConId, Literal, PrimOpKind, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
 use tidepool_testing::proptest::build_table_for_expr;
 
-#[path = "support/gc_scaffold.rs"]
-mod gc_scaffold;
+use crate::gc_scaffold;
 use gc_scaffold::{fixup_root, fresh_var, push_pairtree, push_pairtree_sum, push_spine, reset_ctr};
 use gc_scaffold::{CONS, I_HASH, NIL, PAIR};
 

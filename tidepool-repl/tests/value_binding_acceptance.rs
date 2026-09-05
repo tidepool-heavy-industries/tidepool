@@ -13,7 +13,7 @@
 //! Requires a session-aware `tidepool-extract` (set `TIDEPOOL_EXTRACT`, with the
 //! with-packages GHC on `PATH` + `TIDEPOOL_GHC_LIBDIR`); panics loudly otherwise.
 
-mod common;
+use crate::common;
 use common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

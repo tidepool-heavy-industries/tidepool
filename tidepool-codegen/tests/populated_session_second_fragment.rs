@@ -57,10 +57,10 @@
 //! the primop id bundles remain open — this file does not give them the same
 //! direct treatment.
 
+use crate::support;
+use support::LinearMachine;
 use tidepool_codegen::datacon_env::wrap_with_datacon_env;
 use tidepool_codegen::effect_machine::ConTags;
-mod support;
-use support::LinearMachine;
 
 use tidepool_codegen::emit::ExternalEnv;
 use tidepool_codegen::jit_machine::JitEffectMachine;

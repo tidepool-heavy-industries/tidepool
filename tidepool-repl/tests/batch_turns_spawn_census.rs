@@ -10,10 +10,10 @@
 //! threads in this same binary never race the counter either.
 //!
 //! Run: `scripts/battery-shard.sh tidepool-repl` (whole crate), or targeted:
-//! `scripts/battery.sh -p tidepool-repl -E 'binary(batch_turns_spawn_census)'`
+//! `scripts/battery.sh -p tidepool-repl --test spawn_census -E 'test(batch_turns_spawn_census::)'`
 //! (needs `$TIDEPOOL_EXTRACT` — see the repo `CLAUDE.md`).
 
-mod common;
+use crate::common;
 
 use common::{build_full_server, require_extract, text_of};
 use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};

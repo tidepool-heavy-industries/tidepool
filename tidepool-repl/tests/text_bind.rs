@@ -23,7 +23,7 @@
 //! Eff-reference repros now pass with full value correctness (length / unpack /
 //! toUpper / append), doubling as the acceptance gate.
 
-mod common;
+use crate::common;
 use common::*;
 
 // ───────────────────────── PASSING CONTROLS / GUARDS ─────────────────────────

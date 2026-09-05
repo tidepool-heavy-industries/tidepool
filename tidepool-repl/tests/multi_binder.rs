@@ -15,7 +15,7 @@
 //!
 //! Each test guards on `require_extract()` and panics loudly otherwise.
 
-mod common;
+use crate::common;
 use common::*;
 use serde_json::json;
 

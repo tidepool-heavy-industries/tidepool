@@ -42,7 +42,7 @@
 //! `perform_gc`'s doubling cannot satisfy the request; or a distinct failure
 //! upstream of response materialization presenting with the same signature.
 
-mod support;
+use crate::support;
 use support::LinearMachine;
 
 use tidepool_codegen::emit::ExternalEnv;

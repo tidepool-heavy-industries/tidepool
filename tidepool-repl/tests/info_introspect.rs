@@ -1,6 +1,6 @@
 //! GHC-authoritative `:info` over the exact environment used by a REPL turn.
 
-mod common;
+use crate::common;
 use common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

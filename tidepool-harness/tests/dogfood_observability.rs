@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-mod support;
+use crate::support;
 
 use serde_json::Value as Json;
 use tidepool_harness::engine::EngineConfig;

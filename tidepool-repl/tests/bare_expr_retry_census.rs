@@ -7,7 +7,7 @@
 //! inside that one spawn, preserving never-skip-an-effect ordering without a
 //! discarded first diagnostic or a second process.
 
-mod common;
+use crate::common;
 
 use common::{build_full_server, require_extract, run_single};
 use tidepool_extract_cmd::{extract_spawn_count, reset_extract_spawn_count};

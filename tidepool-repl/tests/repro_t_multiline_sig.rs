@@ -2,7 +2,7 @@
 //! renderings exercise the inspection receipt; the later cases exercise stable
 //! effect rows and values across turn-module boundaries.
 
-mod common;
+use crate::common;
 use common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

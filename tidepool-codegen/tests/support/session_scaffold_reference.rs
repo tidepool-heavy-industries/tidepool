@@ -1,6 +1,4 @@
-//! `build_reference_fragment`, layered on `session_scaffold.rs`'s `C1`. A
-//! consumer of this module must also `#[path] mod session_scaffold;` — this
-//! file resolves `C1` through `crate::session_scaffold::C1`.
+//! Reference expressions using the shared session constructor identity.
 
 use tidepool_repr::types::{Alt, AltCon, VarId};
 use tidepool_repr::{CoreExpr, CoreFrame, TreeBuilder};
@@ -15,7 +13,7 @@ pub fn build_reference_fragment(x: VarId) -> CoreExpr {
         scrutinee: scrut,
         binder: VarId(10),
         alts: vec![Alt {
-            con: AltCon::DataAlt(crate::session_scaffold::C1),
+            con: AltCon::DataAlt(super::session_scaffold::C1),
             binders: vec![VarId(11)],
             body,
         }],

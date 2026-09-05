@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-repl"
 version.workspace = true
 edition.workspace = true
@@ -45,3 +46,31 @@ tempfile.workspace = true
 tidepool-testing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 tidepool-extract-cmd.workspace = true
+
+[[test]]
+name = "declarations"
+path = "tests/suites/declarations.rs"
+
+[[test]]
+name = "turns"
+path = "tests/suites/turns.rs"
+
+[[test]]
+name = "spawn_census"
+path = "tests/suites/spawn_census.rs"
+
+[[test]]
+name = "recovery"
+path = "tests/suites/recovery.rs"
+
+[[test]]
+name = "lifecycle"
+path = "tests/suites/lifecycle.rs"
+
+[[test]]
+name = "values"
+path = "tests/suites/values.rs"
+
+[[test]]
+name = "workbench"
+path = "tests/suites/workbench.rs"

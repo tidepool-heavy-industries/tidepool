@@ -70,7 +70,7 @@
 //! collection must walk), not what stays ALLOCATED. Same bound recorded in
 //! `tidepool-codegen/CLAUDE.md`.
 
-mod support;
+use crate::support;
 
 use std::path::PathBuf;
 use std::sync::Arc;

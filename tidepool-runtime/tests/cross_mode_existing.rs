@@ -3,7 +3,7 @@
 //! identically in both modes.
 
 #[allow(dead_code)]
-mod cross_mode_harness;
+use crate::cross_mode_harness;
 
 use cross_mode_harness::{
     assert_cross_mode_pure_equivalent, compile_cross_mode, structural_eq, CrossModeFixture,

@@ -10,25 +10,21 @@ fi
 
 crate="$1"
 mode="${2:-run}"
-manifest="dev/test-suites.json"
-
-if ! jq -e --arg crate "$crate" 'has($crate)' "$manifest" >/dev/null; then
+scripts/test-suite-check.sh
+mapfile -t targets < <(cargo metadata --no-deps --format-version 1 | jq -r --arg crate "$crate" \
+  '.packages[] | select(.name == $crate) | .targets[] | select(.kind == ["test"]) | .name')
+if [[ "${#targets[@]}" -eq 0 ]]; then
   if [[ "$mode" == "--list" ]]; then
-    echo "$crate: one whole-crate shard (no partition manifest)"
+    echo "$crate: whole-crate tests (no integration targets)"
     exit 0
   fi
-  echo "==> no multi-shard manifest for $crate; running it as one crate shard"
   exec scripts/battery-shard.sh "$crate"
 fi
 
-scripts/test-suite-check.sh
-
-mapfile -t groups < <(jq -c --arg crate "$crate" '.[$crate][]' "$manifest")
-total="${#groups[@]}"
+total="${#targets[@]}"
 if [[ "$mode" == "--list" ]]; then
-  for index in "${!groups[@]}"; do
-    names="$(jq -r 'join(", ")' <<<"${groups[$index]}")"
-    echo "$((index + 1))/$total: $names"
+  for index in "${!targets[@]}"; do
+    echo "$((index + 1))/$total: ${targets[$index]}"
   done
   exit 0
 fi
@@ -38,8 +34,7 @@ resolve_tidepool_extract
 trap teardown_battery_daemon EXIT INT TERM
 start_battery_daemon
 
-for index in "${!groups[@]}"; do
-  filter="$(jq -r 'map("binary(" + . + ")") | join(" or ")' <<<"${groups[$index]}")"
+for index in "${!targets[@]}"; do
   echo "==> suite $crate: shard $((index + 1))/$total"
-  scripts/battery-shard.sh "$crate" -E "$filter"
+  scripts/battery-shard.sh "$crate" --test "${targets[$index]}"
 done

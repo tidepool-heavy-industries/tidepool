@@ -18,7 +18,7 @@
 //! libdir); panics loudly otherwise. stderr noise like `Could not find module
 //! …Val.G…` is expected and ignored.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// Parse a meta turn's text body as JSON. `:bindings` / `:reset` emit pure JSON

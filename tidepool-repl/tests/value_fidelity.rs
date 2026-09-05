@@ -15,7 +15,7 @@
 //! Each test panics loudly when the session-aware extract is unavailable, and
 //! The session auto-opens on the first `session_run`; teardown is implicit.
 
-mod common;
+use crate::common;
 use common::*;
 use serde_json::json;
 

@@ -81,8 +81,7 @@ use tidepool_testing::differential::{
 };
 use tidepool_testing::proptest::{build_table_for_expr, values_equal};
 
-#[path = "support/gc_scaffold.rs"]
-mod gc_scaffold;
+use crate::gc_scaffold;
 use gc_scaffold::{fixup_root, fresh_var, push_pairtree, push_pairtree_sum, push_spine};
 use gc_scaffold::{reset_ctr as reset_ctrs, CONS, I_HASH, NIL, PAIR};
 
@@ -734,7 +733,7 @@ macro_rules! gc_property {
     ($name:ident, $label:literal, $strat:expr, $build:expr) => {
         #[ignore = "GC fuzz, ~2min wall for the whole lane at 400 cases (measured 106-154s across \
                     runs, 2026-08-08); kept out of the inner loop, not out of reach: cargo nextest \
-                    run -p tidepool-codegen -E 'binary(proptest_gc_recursion)' --run-ignored all"]
+                    run -p tidepool-codegen --test properties -E 'test(proptest_gc_recursion::)' --run-ignored all"]
         #[test]
         #[serial]
         fn $name() {

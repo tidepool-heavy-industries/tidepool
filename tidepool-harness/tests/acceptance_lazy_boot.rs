@@ -36,7 +36,7 @@ use tidepool_harness::{
     SelfHarnessState, TurnOutcome,
 };
 
-mod support;
+use crate::support;
 
 /// `node`'s live heap/GC snapshot, straight off its resident machine —
 /// `None` when `node` has no live session (never forced, terminal) or during

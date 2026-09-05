@@ -8,7 +8,7 @@
 //!
 //! Each test panics loudly when the session-aware extract is unavailable.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// CASE 1 — Rebind a value name; newest must win at the reference.

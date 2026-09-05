@@ -98,8 +98,8 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 // It is `#[ignore]`d (mutates checked-in fixtures) and is the documented
 // migration path for any future captured-fixture schema drift. Re-run with:
 //
-//     cargo test -p tidepool-runtime --test captured_real_core \
-//         -- --ignored --exact regen::regenerate_meta_fixture
+//     cargo test -p tidepool-runtime --test evaluation \
+//         -- --ignored --exact captured_real_core::regen::regenerate_meta_fixture
 #[cfg(test)]
 mod regen {
     use ciborium::value::Value as Cbor;

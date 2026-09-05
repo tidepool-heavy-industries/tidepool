@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-mod support;
+use crate::support;
 
 use tidepool_harness::engine::{EngineConfig, SYSTEM_FRAMING};
 use tidepool_harness::log::LogHeader;

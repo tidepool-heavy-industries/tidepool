@@ -12,7 +12,7 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH
 //! (`--ignore-default-filter -p tidepool-harness` to run).
 
-mod support;
+use crate::support;
 
 use std::sync::Arc;
 

@@ -1,6 +1,6 @@
 //! Sanity tests for the cross-mode test harness.
 
-mod cross_mode_harness;
+use crate::cross_mode_harness;
 
 use cross_mode_harness::{
     assert_cross_mode_pure_equivalent, assert_cross_mode_runtime_equivalent,

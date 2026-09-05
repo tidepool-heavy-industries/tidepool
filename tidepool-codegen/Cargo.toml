@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-codegen"
 version.workspace = true
 edition.workspace = true
@@ -54,3 +55,19 @@ serial_test.workspace = true
 tidepool-testing.workspace = true
 # real_core_corpus.rs: parsing the GHC oracle sidecar (haskell/test/corpus_cbor/oracle.json).
 serde_json.workspace = true
+
+[[test]]
+name = "properties"
+path = "tests/suites/properties.rs"
+
+[[test]]
+name = "gc"
+path = "tests/suites/gc.rs"
+
+[[test]]
+name = "resident"
+path = "tests/suites/resident.rs"
+
+[[test]]
+name = "codegen"
+path = "tests/suites/codegen.rs"

@@ -52,8 +52,7 @@ use tidepool_testing::proptest::build_table_for_expr;
 // tags/builders (used by its other consumers, `heap_verify_lane.rs` and
 // `proptest_gc_recursion.rs`) are unused here.
 #[allow(dead_code)]
-#[path = "support/gc_scaffold.rs"]
-mod gc_scaffold;
+use crate::gc_scaffold;
 use gc_scaffold::{fixup_root, fresh_var, push_spine, reset_ctr, CONS, NIL};
 
 const NURSERY_SIZE: usize = 2 * 1024;

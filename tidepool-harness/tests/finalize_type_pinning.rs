@@ -32,7 +32,7 @@
 //! GHC on PATH (`--ignore-default-filter` to run; see `haskell/CLAUDE.md`'s
 //! "Local iteration" section for the env recipe).
 
-mod support;
+use crate::support;
 
 use tidepool_harness::engine::{
     self, finalize_typed_request_prompt, template_turn_for, CompiledTurn, EngineConfig,

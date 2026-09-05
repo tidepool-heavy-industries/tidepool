@@ -8,7 +8,7 @@
 //! now happens Rust-side (`truncate.rs`), stashing the subtrees on the session
 //! where `:stub <n> [page]` retrieves them in full.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// Extract the item-result JSON out of a `Turn` (the harness already unwraps

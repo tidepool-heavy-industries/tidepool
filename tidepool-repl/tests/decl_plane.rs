@@ -18,7 +18,7 @@
 //!
 //! Each test panics loudly when the session-aware extract is unavailable.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// CASE 1 — Multiple defs accumulate and INTERACT.

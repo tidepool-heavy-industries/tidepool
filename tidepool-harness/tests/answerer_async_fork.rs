@@ -28,7 +28,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-mod support;
+use crate::support;
 
 use serde_json::json;
 use tidepool_harness::engine::EngineConfig;

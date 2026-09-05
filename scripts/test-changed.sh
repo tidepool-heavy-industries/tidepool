@@ -72,9 +72,7 @@ heavy=' tidepool-runtime tidepool-repl tidepool-mcp tidepool-handlers tidepool-h
 for crate in "${!crates[@]}"; do
   if [[ "$heavy" == *" $crate "* ]]; then
     scripts/battery.sh -p "$crate" --lib
-    if jq -e --arg crate "$crate" 'has($crate)' dev/test-suites.json >/dev/null; then
-      echo "note: broader coverage is available with: just suite $crate"
-    fi
+    echo "note: broader coverage is available with: just suite $crate"
   else
     cargo nextest run -p "$crate" --status-level fail --final-status-level fail
   fi
@@ -83,7 +81,8 @@ done
 if [[ "$haskell_changed" -eq 1 ]]; then
   scripts/fixtures.sh check
   scripts/battery.sh -p tidepool-runtime \
-    -E 'binary(jit_surface) or binary(user_library) or binary(cross_mode_targeted)'
+    --test jit --test session --test evaluation \
+    -E 'test(jit_surface::) or test(user_library::) or test(cross_mode_targeted::)'
 fi
 
 if [[ "$code_changed" -eq 0 && "$haskell_changed" -eq 0 ]]; then

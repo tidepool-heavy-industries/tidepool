@@ -23,7 +23,7 @@
 //! most repl tests, since the whole point is exercising the real project
 //! Library facade.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

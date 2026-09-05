@@ -19,7 +19,7 @@
 //! GHC-heavy: needs `TIDEPOOL_EXTRACT` + the with-packages GHC on PATH
 //! (`--ignore-default-filter` to run).
 
-mod support;
+use crate::support;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};

@@ -24,7 +24,23 @@ test crate filter="":
     fi
     {{ nix }} scripts/battery.sh "${args[@]}"
 
-# Run every declared shard for a large GHC-heavy crate, sequentially.
+# Build and run only one integration suite (test files remain separate modules).
+[positional-arguments]
+test-target crate target filter="":
+    #!/usr/bin/env bash
+    args=(-p "$1" --test "$2")
+    if [[ -n "$3" ]]; then args+=(-E "$3"); fi
+    {{ nix }} scripts/battery.sh "${args[@]}"
+
+# Build and run only a crate's unit-test target.
+[positional-arguments]
+test-lib crate filter="":
+    #!/usr/bin/env bash
+    args=(-p "$1" --lib)
+    if [[ -n "$2" ]]; then args+=(-E "$2"); fi
+    {{ nix }} scripts/battery.sh "${args[@]}"
+
+# Run a crate's Cargo integration suites sequentially.
 [positional-arguments]
 suite crate:
     {{ nix }} scripts/test-suite.sh "$1"
@@ -34,7 +50,7 @@ suite crate:
 suite-plan crate:
     {{ nix }} scripts/test-suite.sh "$1" --list
 
-# Validate that the suite manifest names every integration-test binary once.
+# Check that Cargo suites register every integration test file exactly once.
 suite-check:
     {{ nix }} scripts/test-suite-check.sh
 
@@ -69,5 +85,5 @@ shoal-console *args:
     test -d "$HOME/dev/shoal-console/.git" || { echo "missing $HOME/dev/shoal-console; initialize it first" >&2; exit 1; }
     {{ shoal_nix }} scripts/shoal-init.sh "$@" --workspace "$HOME/dev/shoal-console"
 
-# Pre-review gate: checks, suite-manifest validation, and fixture freshness.
+# Pre-review gate: checks, suite registration checks, and fixture freshness.
 verify: check suite-check fixtures-check

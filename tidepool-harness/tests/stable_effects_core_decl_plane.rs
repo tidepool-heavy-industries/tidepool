@@ -5,7 +5,7 @@
 //! Needs `TIDEPOOL_EXTRACT` and the with-packages GHC on PATH — run inside
 //! `nix develop` (see `haskell/CLAUDE.md`).
 
-mod support;
+use crate::support;
 
 use tidepool_harness::engine::EngineConfig;
 use tidepool_harness::typed_request_agent_decls;

@@ -134,7 +134,7 @@ echo run >> '{count}'
 TIDEPOOL_FAKE_EXTRACT_REQUEST_FILE="$request" \
 TIDEPOOL_FAKE_EXTRACT_EXPR='{fx}/a.cbor' \
 TIDEPOOL_FAKE_EXTRACT_META='{fx}/meta.cbor' \
-'{test_binary}' --exact fake_extract_worker --nocapture >/dev/null 2>/dev/null || exit $?
+'{test_binary}' --exact proptest_cache_layer::fake_extract_worker --nocapture >/dev/null 2>/dev/null || exit $?
 report='{{"version":2,"outcome":"success","diagnostics":[]}}'
 printf '\000\000\000\000\062\000\000\000%s\000\000\000\000' "$report"
 "#,

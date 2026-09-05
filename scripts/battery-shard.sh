@@ -1,33 +1,10 @@
 #!/usr/bin/env bash
-# Run ONE GHC-heavy crate's tests, as a survivable shard of the full battery.
-#
-# `scripts/battery.sh` runs the ENTIRE workspace (`--ignore-default-filter`)
-# in one process, which is hours-long here and gets hard-killed by this
-# environment's ~380s background-process cap long before it finishes.
-# Splitting by crate makes full coverage achievable as a sequence of shards,
-# each of which fits under that cap (modulo the TIDEPOOL_EXPENSIVE_TESTS=1
-# suites — see below).
-#
+# Run one crate or selected integration targets through nextest.
 # Usage: scripts/battery-shard.sh <crate> [extra nextest args...]
-#   scripts/battery-shard.sh tidepool-runtime
-#   scripts/battery-shard.sh tidepool-codegen -E 'binary(proptest_ghc_idioms)'
-#
-# This does NOT set TIDEPOOL_EXPENSIVE_TESTS — the expensive suites
-# (corpus_report, haskell_suite_differential, tidepool-testing::haskell_verified)
-# stay skipped unless you export TIDEPOOL_EXPENSIVE_TESTS=1 yourself. Run
-# those deliberately, one at a time, with their own budget — they are NOT
-# what this script's ~380s-per-shard promise covers; haskell_verified in
-# particular runs for multiple hundreds of seconds.
-# `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d, so
-# reaching them additionally needs `--run-ignored all` scoped with `-E` (a
-# bare `--run-ignored all` also un-ignores tidepool-codegen's deliberately-off
-# known-bug repros and heavy fuzz lanes — see scripts/battery.sh), e.g.:
-#   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery-shard.sh tidepool-codegen \
-#     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
-#
-# Large crates are partitioned by the checked `dev/test-suites.json` manifest.
-# Run every partition sequentially, with one shared compile daemon, via
-# `just suite <crate>`.
+#   scripts/battery-shard.sh tidepool-codegen --test properties \
+#     -E 'test(proptest_ghc_idioms::)'
+# `just suite <crate>` runs the Cargo integration targets sequentially.
+# Expensive/ignored tests require the same explicit opt-ins as battery.sh.
 #
 # Resident compile daemon: same
 # per-run daemon scripts/battery.sh can start — see its header for the full

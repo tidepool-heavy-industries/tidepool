@@ -18,7 +18,7 @@
 //!
 //! Run with the worktree extract binary, e.g.:
 //!   TIDEPOOL_EXTRACT=<worktree>/haskell/dist-newstyle/.../tidepool-extract-bin \
-//!   cargo test -p tidepool-runtime --test run_llm_turn_sidecar
+//!   cargo test -p tidepool-runtime --test session run_llm_turn_sidecar::
 use std::path::PathBuf;
 use std::process::Command;
 

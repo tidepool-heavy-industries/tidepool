@@ -23,7 +23,7 @@
 //! Each test panics loudly when the session-aware extract is
 //! unavailable, so the file still COMPILES without `TIDEPOOL_EXTRACT`.
 
-mod common;
+use crate::common;
 use common::*;
 
 use rmcp::model::RawContent;

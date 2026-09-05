@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-mod support;
+use crate::support;
 
 use tidepool_harness::engine;
 use tidepool_harness::engine::EngineConfig;

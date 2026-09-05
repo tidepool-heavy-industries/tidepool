@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-mod support;
+use crate::support;
 
 use tidepool_bridge_effects::{EvRepositoryEvent, WtWorktreeId};
 use tidepool_handlers::{

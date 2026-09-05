@@ -23,16 +23,11 @@ use tidepool_repr::datacon::DataCon;
 use tidepool_repr::types::VarId;
 use tidepool_repr::{BindingName, DataConTable, Generation, SessionModule, SessionVarId};
 
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-#[path = "support/session_scaffold_expect.rs"]
-mod session_scaffold_expect;
-#[path = "support/session_scaffold_gc_forcing.rs"]
-mod session_scaffold_gc_forcing;
-#[path = "support/session_scaffold_reference.rs"]
-mod session_scaffold_reference;
-#[path = "support/session_scaffold_value.rs"]
-mod session_scaffold_value;
+use crate::session_scaffold;
+use crate::session_scaffold_expect;
+use crate::session_scaffold_gc_forcing;
+use crate::session_scaffold_reference;
+use crate::session_scaffold_value;
 use session_scaffold::C1;
 use session_scaffold_expect::expect_int;
 use session_scaffold_gc_forcing::build_gc_forcing_fragment;

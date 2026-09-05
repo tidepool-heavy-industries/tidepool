@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "tidepool-harness"
 description = "Typed-yield session tree over the tidepool eval substrate: forcing, event log, provider-driven turns"
 version.workspace = true
@@ -67,3 +68,39 @@ tracing-subscriber = { workspace = true, features = ["registry"] }
 # backed SubagentHandler + a TestRepo the curator spawns against.
 tidepool-agent.workspace = true
 tidepool-worktree.workspace = true
+
+[[test]]
+name = "acceptance"
+path = "tests/suites/acceptance.rs"
+
+[[test]]
+name = "selfharness"
+path = "tests/suites/selfharness.rs"
+
+[[test]]
+name = "persistence"
+path = "tests/suites/persistence.rs"
+
+[[test]]
+name = "forks"
+path = "tests/suites/forks.rs"
+
+[[test]]
+name = "provider_behavior"
+path = "tests/provider_behavior.rs"
+
+[[test]]
+name = "orchestration"
+path = "tests/suites/orchestration.rs"
+
+[[test]]
+name = "compile_fail"
+path = "tests/compile_fail.rs"
+
+[[test]]
+name = "delegation"
+path = "tests/suites/delegation.rs"
+
+[[test]]
+name = "resident"
+path = "tests/suites/resident.rs"

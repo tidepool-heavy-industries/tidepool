@@ -24,7 +24,7 @@
 //! — so neither resume can coincidentally "coast" on being the most recent
 //! `add_function` call.
 
-mod support;
+use crate::support;
 use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
@@ -43,10 +43,8 @@ use tidepool_repr::{CoreExpr, Literal, TreeBuilder};
 
 use serial_test::serial;
 
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-#[path = "support/session_scaffold_expect.rs"]
-mod session_scaffold_expect;
+use crate::session_scaffold;
+use crate::session_scaffold_expect;
 use session_scaffold::C1;
 use session_scaffold_expect::expect_int;
 

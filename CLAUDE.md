@@ -77,11 +77,25 @@ Small support crates have short local charters describing their exact scope.
 ```bash
 just quick
 just check
-just test tidepool-runtime 'test(<name>)'
+just test-target tidepool-runtime session 'test(<name>)'
+just test-lib tidepool-runtime 'test(<name>)'
 just suite tidepool-runtime
 just changed
 just verify
 ```
+
+Large integration suites use small entry points in `tests/suites/` that import
+separate test files as modules. Cargo's `autotests = false` prevents linking a
+runtime copy for every file; `just suite-check` checks suite registration and
+coverage of every top-level test file. Add new tests to the appropriate
+suite entry point. Nextest still runs each test in its own process.
+
+Use `just test-target CRATE SUITE 'test(module::name)'` to restrict compilation
+as well as execution. `just test CRATE FILTER` selects tests across all targets
+and may compile more than needed. `just suite CRATE` builds each declared suite
+as it reaches it. Routine dev/test builds omit debug information while retaining
+symbols and GC-required frame pointers. To opt into debugger information, set
+`CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_DEV_STRIP=none` (use `TEST` for tests).
 
 The Justfile is the development entry point and enters the Nix shell itself.
 `just --list` describes every supported workflow. `just quick` runs workspace
@@ -90,8 +104,7 @@ strict clippy, and nextest's broader default-filter tier; macro expansion may
 still invoke the extractor on a fresh build.
 
 `just test` accepts an ordinary nextest filter expression. `just suite` runs
-the checked partitions in `dev/test-suites.json` sequentially with one shared
-compile daemon. `just changed` is a conservative inner-loop selection, not the
+Cargo integration targets sequentially with one shared compile daemon. `just changed` is a conservative inner-loop selection, not the
 pre-review gate; `just verify` is the gate.
 
 Do not add a separate extractor compile when an existing family bundle can

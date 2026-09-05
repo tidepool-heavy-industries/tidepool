@@ -19,7 +19,7 @@
 //!
 //! A failure here is a GC/tenure bug, never user error.
 
-mod common;
+use crate::common;
 use common::*;
 
 /// The field sequence: helper decl → big Text substrate bind (tenure) →

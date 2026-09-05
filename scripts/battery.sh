@@ -1,35 +1,11 @@
 #!/usr/bin/env bash
-# The full workspace test battery, via cargo-nextest.
-#
-# nextest runs every test in its OWN process (never two tests sharing one),
-# which structurally de-races the JIT's process-global-ish state (signal
-# handlers, GC, fork-safety harnesses). See .config/nextest.toml for
-# the hazard-audit note and repo-root CLAUDE.md's Build & Test section.
-#
-# WARNING: this runs the ENTIRE workspace in one process and is HOURS long
-# here (every GHC-heavy crate's test forks a real GHC extract, capped at 4
-# concurrent per run via .config/nextest.toml's ghc-heavy test group) — this
-# environment hard-kills background processes at ~380s,
-# well short of that. Do not invoke this bare and walk away expecting it to
-# finish. Prefer:
-#   - a single crate/test slice: `scripts/battery.sh -p <crate> -E 'test(<name>)'`
-#   - a full crate as a survivable shard: `scripts/battery-shard.sh <crate>`
-# The named expensive suites (corpus_report, haskell_suite_differential,
-# tidepool-testing::haskell_verified) are additionally gated behind
-# TIDEPOOL_EXPENSIVE_TESTS=1 and stay skipped even here unless you set it.
-# Only the last of the three is actually multi-hundred-second (measured:
-# corpus_report ~8s, haskell_suite_differential ~27s, haskell_verified's
-# individual proptest cases alone run 100s+).
-# `corpus_report` and `haskell_suite_differential` are ALSO `#[ignore]`d (a
-# default nextest run must report them as ignored, not silently "passed" via
-# early return) — reaching them needs BOTH TIDEPOOL_EXPENSIVE_TESTS=1 AND
-# `--run-ignored all`. Do not pass `--run-ignored all` bare to this script:
-# tidepool-codegen also carries `#[ignore]`d known-bug repros and heavy fuzz
-# lanes (proptest_gc_recursion/host_arrays/ghc_idioms/jit_dispatch/
-# boundary_roundtrip) that are deliberately off by default and will FAIL or
-# run for ~68min if un-ignored. Scope with `-E`, e.g.:
-#   TIDEPOOL_EXPENSIVE_TESTS=1 scripts/battery.sh -p tidepool-codegen \
-#     --run-ignored all -E 'test(haskell_suite_differential) or test(corpus_report)'
+# Run selected tests through nextest, with one process per test and a shared
+# extractor daemon. Prefer explicit Cargo targets to avoid compiling unused
+# integration suites:
+#   scripts/battery.sh -p tidepool-runtime --test session -E 'test(user_library::)'
+# Without package/target arguments this builds and runs the whole workspace.
+# Expensive and known-bug ignored tests remain opt-in: use narrowly scoped
+# --run-ignored all and TIDEPOOL_EXPENSIVE_TESTS=1 when required by the test.
 #
 # Resident compile daemon: this
 # script can start (or, if $TIDEPOOL_EXTRACT_DAEMON_SOCKET is already set and

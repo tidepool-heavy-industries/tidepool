@@ -10,7 +10,7 @@
 //! FINAL executed item (otherwise the block didn't end in an expression, so
 //! the top-level `value` is null and nothing is stripped).
 
-mod common;
+use crate::common;
 use common::*;
 
 /// Parse the full slim block envelope (not just `items[0]`, unlike

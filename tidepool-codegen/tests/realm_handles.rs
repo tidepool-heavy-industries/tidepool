@@ -22,7 +22,7 @@
 //! Same scaffolding as `realm_multi_continuation.rs` (poison + verify armed,
 //! tiny nursery, deep result verification).
 
-mod support;
+use crate::support;
 use support::SuspensionTestExt;
 
 use tidepool_codegen::emit::ExternalEnv;
@@ -43,12 +43,9 @@ use tidepool_heap::layout as heap_layout;
 
 use serial_test::serial;
 
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-#[path = "support/session_scaffold_expect.rs"]
-mod session_scaffold_expect;
-#[path = "support/session_scaffold_gc_forcing.rs"]
-mod session_scaffold_gc_forcing;
+use crate::session_scaffold;
+use crate::session_scaffold_expect;
+use crate::session_scaffold_gc_forcing;
 use session_scaffold::C1;
 use session_scaffold_expect::expect_int;
 use session_scaffold_gc_forcing::build_gc_forcing_fragment;

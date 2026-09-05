@@ -11,8 +11,7 @@ use tidepool_repr::{
     TreeBuilder,
 };
 
-#[path = "support/session_scaffold_expect.rs"]
-mod session_scaffold_expect;
+use crate::session_scaffold_expect;
 use session_scaffold_expect::expect_int;
 
 const I_HASH: DataConId = DataConId(7);

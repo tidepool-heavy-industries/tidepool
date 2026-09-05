@@ -8,7 +8,7 @@
 //! Skips cleanly when the extract isn't available. (Llm needs API creds, so
 //! that is smoke-tested live, not here.)
 
-mod common;
+use crate::common;
 
 use common::{build_full_server, require_extract, run_single, text_of};
 use tidepool_repl::TidepoolReplServer;

@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-mod support;
+use crate::support;
 
 use tidepool_handlers::{
     compose_journal_seq, load_journal, ConsoleHandler, JournalEntry, JournalLoadError,

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-mod support;
+use crate::support;
 
 use serde_json::json;
 use tidepool_agent::backend::mock::MockBackend;

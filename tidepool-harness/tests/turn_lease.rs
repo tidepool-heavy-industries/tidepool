@@ -4,7 +4,7 @@
 //! drives real compiles through the real Harness, zero live model calls via
 //! scripted providers).
 
-mod support;
+use crate::support;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;

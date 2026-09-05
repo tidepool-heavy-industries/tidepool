@@ -35,10 +35,8 @@ use tidepool_repr::DataConTable;
 
 use serial_test::serial;
 
-#[path = "support/session_scaffold.rs"]
-mod session_scaffold;
-#[path = "support/session_scaffold_value.rs"]
-mod session_scaffold_value;
+use crate::session_scaffold;
+use crate::session_scaffold_value;
 use session_scaffold::C1;
 use session_scaffold_value::build_value_fragment;
 
