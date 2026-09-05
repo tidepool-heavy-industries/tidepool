@@ -32,6 +32,47 @@ alive. A composition-root journal cannot honestly close the crash gap between
 an owner commit and an observer append, so this wave did not add one and does
 not claim pre/post-host-death exactly-once behavior.
 
+### Final boundary review (2026-09-04)
+
+- Deadline decoding must follow erased Core representation: Haskell's
+  `newtype RequestDeadline = RequestDeadline Duration` has no runtime wrapper.
+  The Rust request decoder consumes `Maybe Duration`. The real reply/watch
+  fixture now submits `after (minutes 5)` and checks the authored unit in status;
+  synthetic values cannot establish the extractor/bridge representation contract.
+- A matched constructor with an invalid nested field must produce `FieldDecode`,
+  retaining the nested cause. It must not escape as a top-level constructor miss
+  that effect dispatch can skip. Derived decoders enforce this at field entry.
+- Rust deadline construction owns unit conversion and range validation. Its
+  fields are private and the live runtime type has no unchecked deserializer.
+- Observable Haskell lexical scope IDs are named scopes. Forked actors have
+  distinct scopes; inherited declarations/bindings plus context/provider lineage
+  establish inheritance. Scope-ID equality is not a cache-reuse requirement.
+- The earlier second-`Just`/duplicate-constructor explanation was unproven.
+  The speculative `Maybe` lookup workaround has been removed; verification must
+  demonstrate the deadline correction using the existing lookup implementation.
+
+The boundary corrections are committed as `1e51bf4a`; scope naming is
+`48956e0b`; obsolete full-protocol snapshots were removed in `3471d602`.
+`just verify` passed: 2,421 default-tier tests, strict workspace/all-target
+Clippy and formatting, suite-manifest validation, and 217/217 Haskell fixtures.
+Focused checks also passed for actor request dispatch, bridge enum/record
+failure propagation, and the nine retained protocol compatibility checks.
+The first real recursive reply/watch/follow-up/cleanup run passed in 556 seconds;
+a daemon-backed run checks the final code after removing the speculative
+`Maybe` lookup change and adding the authored-deadline status assertion.
+
+The fresh provider canary is `shoal-hardened-canary-low-5`, run
+`559fead3-45f5-44b4-9a4c-a436b67d83f4`, using `gpt-5.6-sol` at low effort.
+Its root is actor `0@1`, provider thread
+`01a06ef8-e202-7f71-99ac-395a21b7b84e`. The previous failed canary was idle with
+cancelled children and was stopped to release the repository's single-owner
+binding registry; its logs and worktrees were preserved.
+
+Remaining release work: finish the final-code recursive regression and the fresh
+low-effort provider campaign with recorded evidence. Reconcile each acceptance item below
+against tests/live evidence and the explicitly gated successor prerequisites;
+do not treat the smaller two-child spot check alone as full acceptance.
+
 ### Gated successor work
 
 - [ ] Reattach a failed external child application to the same still-live
